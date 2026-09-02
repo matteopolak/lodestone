@@ -1,388 +1,55 @@
 # Backlog
 
-Open work, ordered by how much it changes the screen per unit of effort. Traps are
-attached to each item because they are the expensive part — the code is usually easy
-once you know what already exists and what will silently mislead you.
+## What it is
 
-**Companion docs:** [`../CLAUDE.md`](../CLAUDE.md) for the durable rules,
-[`../HANDOFF.md`](../HANDOFF.md) for the long-form record of beliefs that were
-confidently held and turned out false, and [`README.md`](./README.md) for the
-per-subsystem index.
+The tier definitions that order open work, and a pointer to where that work actually lives. **Open
+issues are in [GitHub](https://github.com/matteopolak/lodestone/issues)**, organised as seven tier
+epics with sub-issues; this file explains what each tier means, not what is in it.
 
-Session task lists do not survive a restart.
-
-**What is open now lives in [GitHub issues](https://github.com/matteopolak/lodestone/issues)**, as seven
-Tier epics with sub-issues:
 [Tier 1](https://github.com/matteopolak/lodestone/issues/1) ·
 [Tier 1½](https://github.com/matteopolak/lodestone/issues/2) ·
 [Tier 2](https://github.com/matteopolak/lodestone/issues/3) ·
 [Tier 3](https://github.com/matteopolak/lodestone/issues/4) ·
 [Tier 4](https://github.com/matteopolak/lodestone/issues/5) ·
 [Infrastructure](https://github.com/matteopolak/lodestone/issues/6) ·
-[Architecture](https://github.com/matteopolak/lodestone/issues/7).
+[Architecture](https://github.com/matteopolak/lodestone/issues/7)
 
-**This file remains the record of the *traps*** — the tier definitions below, and the per-item
-"what already exists and what will silently mislead you" notes, which are the expensive part and do
-not belong in an issue title. Treat the tracker as the answer to *what is open* and this file as the
-answer to *what will go wrong when you start*. When they disagree, the tracker is newer; fix this
-file rather than working around it.
+## The tiers
 
-The `island`, `stale-record` and `vacuous-test` labels exist because those are this repo's three
-recurring defect classes, not because they are generically useful — see
-[`../CLAUDE.md`](../CLAUDE.md).
+Ordered by how much each item changes what is on screen per unit of effort.
 
----
+- **Tier 1 — needed before "a stranger could play survival for an hour."** The things whose absence
+  is obvious within minutes of joining a world.
+- **Tier 1½ — smaller, player-requested.** Polish an owner has actually asked for: HUD animation,
+  feedback on a hit, the small motions that make the game feel alive rather than correct.
+- **Tier 2 — expected by any real player.** Mostly the container screens: the furnace family, anvil,
+  enchanting table, brewing, loom, smithing, stonecutter, grindstone, cartography, beacon, villager
+  trading, horse inventory. Each is a `MenuKind` with its own slot layout, and a constant offset
+  draws a plausible but transposed inventory that reads as an art bug rather than a wrong number.
+- **Tier 3 — completeness.** Secure chat signing, online-mode auth end to end, server-provided
+  resource packs, and the rest of the protocol surface a public server expects.
+- **Tier 4 — the game simulation.** Being a *server* rather than a client: redstone, mob AI and
+  pathfinding, villager economics, farming and breeding, spawning rules, block ticks, fluid flow,
+  explosions, Anvil-format persistence, command execution. Plausibly larger than Tiers 1–3 combined
+  and on a different axis entirely.
+- **Infrastructure** — build, CI, tooling and the scanners.
+- **Architecture** — decomposition and throughput work. Landing it ahead of the next feature batch
+  is wanted rather than a detour: a handful of wiring files serialise nearly all parallel work, so
+  decomposing them raises the ceiling on everything else.
 
-## In flight (as of 2026-07-28)
+## How to use it
 
-| item | state |
-|---|---|
-| `minecraft:tool` component + `block_type_name` bug | oracle, fixtures, generated tables present; one holder-id fix outstanding |
-| crafting interaction | click machine written; live gate deliberately cut |
-| vanilla font | metrics gates green; wiring outstanding, pixel gate cut |
-| main menu + unfocused frame pacing | `FramePacer` written with vanilla's real cap |
-| grass light-response gate + sprite-item drops | one red test file to resolve, then thin-slab extrusion |
-| mob lighting re-diagnosis | previous fix shipped broken; cause unknown |
-| smooth lighting / AO + Nether `SkyDefault` | new |
+**The tracker lags the tree.** Before starting an issue, `git log --oneline --grep '#<N>'` and read
+the code it names — issues have been dispatched after the fix already landed. "Nothing exists for X"
+is the least trustworthy claim you will find; grep for the capability rather than the name you
+expected it to have.
 
----
+**A player report outranks the tier order.** It is the only source of evidence no gate in this repo
+can produce.
 
-## Known-broken, player-observed
+Three labels exist because they are this repo's recurring defect classes rather than because they
+are generically useful: `island` (built, tested, and called by nothing), `stale-record` (a claim
+that was true when written), and `vacuous-test` (a gate whose input cannot exercise the property).
 
-- **Nothing darkens for night — and this was the *whole* reason mobs looked full-bright.**
-  Diagnosed live: at `clock=6000` and `clock=18000` the sampled byte is identically
-  `0xF0` and `light_term` is `1.000` both times. **The server's sky-light array records
-  how much sky *reaches* a block, not how bright the sky is**, so no sampling or plumbing
-  fix could ever have darkened a mob at night. The entity sampler (`53850ce`/`52f109f`)
-  was fine all along; `entity_light_pixels` already proved the shader reads location 8
-  (ratio 0.203).
-
-  `sky_darken_for_time_of_day` now ports `getSkyDarken` + `LightTexture`'s `*0.95+0.05`
-  lift — 1.0 at noon, 0.24 at midnight, applied to the **sky half only** so torchlit
-  interiors do not black out. Entity side pixel-verified 88.4 → 34.6, ratio 0.391 vs a
-  predicted 0.392.
-
-  **Two things remain, and they must land together.** `set_sky_darken_source` has zero
-  production callers (needs ~4 lines in `app.rs`, via `net.shared_handle()` →
-  `ClientHandle::world_time()` — note `world_time` is **not** on `NetClient`). And
-  `model_pipeline.rs` plus the fluid shader still render at permanent noon, so wiring
-  only entities makes mobs *darker than the blocks around them* at night — a new bug,
-  not a partial fix.
-- **~~Nether/End render full-bright.~~ Fixed** — `shell/mesher.rs` now reads the
-  connected dimension off the shared handle's player snapshot and passes
-  `SkyDefault::None` outside the overworld. **But it matches on the dimension
-  *name*** (`minecraft:overworld`), where vanilla reads `hasSkyLight` off the
-  **dimension type**. So a datapack dimension that does have sky light would be
-  meshed dark. Correct for vanilla's three dimensions; worth replacing with the real
-  `hasSkyLight` flag if the client ever models the dimension-type registry.
-- **A pickaxe makes nothing faster.** `minecraft:tool` is unmodeled, so `tool_speed`
-  stays at bare-hand defaults and obsidian is ~4m10s of unbroken holding.
-- ~~**Flat sprite items draw nothing as drops.**~~ **Fixed** in `9980a96` /
-  `a9f263f`, and this entry's wording is the single most expensive stale note this
-  repo has produced. `collect_item_model_parts` (now `collect_item_variants`) collects `IconPart::Sprite` too
-  (`block_models.rs`), `extruded_sprite_geometry` bakes it into vanilla's thin
-  slab, and the result goes into **the same `BlockModels::items` map** as the 3-D
-  models. `sprite_drop_pixels` proves the pixels.
-
-  The stale sentence — "`collect_item_model_parts` keeps only `IconPart::Model`, so
-  an `item/generated` icon never enters `BlockModels::items()`" — was copied
-  verbatim into **four** issues (#33, #50, #54, #56) as their shared root cause, and
-  #54 and #56 each said "#33 is a prerequisite, not a coincidence". It was a
-  prerequisite for neither, because it was already done. Three of the four had
-  entirely unrelated causes:
-
-  | issue | real cause |
-  |---|---|
-  | #33 drops | already fixed |
-  | #50 container block items | `container/renderer.rs::ContainerRenderer::render_scaled` hardcodes `models: None` — an island; see [`container-screen.md`](./container-screen.md) |
-  | #54 first-person hand | nothing told `RenderState` what the player was holding; see [`first-person-held-item.md`](./first-person-held-item.md) |
-  | #56 projectiles | no projectile renderer existed at all; see [`thrown-projectiles.md`](./thrown-projectiles.md) |
-
-  The lesson is the one `CLAUDE.md` rule 2 already states, with a number attached:
-  **one stale note cost four misdirected diagnoses.** Grep for the producer across
-  the whole tree before believing a note about a consumer.
-
----
-
-## Tier 1 — needed before "a stranger could play survival for an hour"
-
-1. ~~**Smooth lighting / AO on the model path.**~~ Landed. `1b8e46b` ported the
-   four-corner blend, the occlusion count and `smoothBlend` into `quad_corner_sample`
-   (`lodestone-render/src/models.rs`); `3fd10ea` added the `ambientocclusion` model-flag
-   gate and the live shell override that took it off the island. AO rides the `ao` vertex
-   slot into `model.wgsl`'s existing gamma round-trip, so `4e8f058`'s rule holds without a
-   shader change. `model_ao_corner_gate` measures a single-occluder corner against a
-   **predicted** byte of `round(255 * 0.8) = 204`, through `mesh_models` — with a
-   no-occluder control and a flag-off control that both must go full-bright. See
-   [`docs/model-smooth-lighting.md`](./model-smooth-lighting.md).
-
-   **This entry stayed stale after the work landed and re-dispatched it once** — it still
-   claimed the model path was "flat per-block light plus directional shade today" and
-   pointed at `render/mesh.rs`'s `face_corner_lighting` as the only implementation. Rule 2,
-   eighth instance.
-
-   Still open, in descending order of visibility — details and vanilla citations in the doc:
-   - ~~**The AO occluder predicate diverges.**~~ **Fixed.** `ModelSectionView::ao_occludes_at`
-     now answers vanilla's `getShadeBrightness == 0.2F` from
-     `lodestone_data::shade_brightness`, a per-state bitset dumped from the real 26.2 server
-     (`ShadeBrightnessOracle.java`); the light half keeps `occludes_at`, because vanilla keys
-     `smoothBlend` on view-blocking/light-dampening instead. Canopies darken.
-
-     **Three details in the note this replaces were wrong**, and all three came from reading a
-     `grep -l` of override *files* as if it told you what they return. **Ice diverged too** —
-     `IceBlock extends HalfTransparentBlock`, and only `TransparentBlock` overrides, so
-     "agree on glass and ice by coincidence" was half false. **Honey and the copper grates
-     never diverged** — honey's collision box is inset, and the grates are
-     `WaterloggedTransparentBlock`. And `Mud`/`SoulSand` override to a flat **`0.2`**, not
-     `1.0`, with `SnowLayer` per-state (`LAYERS == 8`). Measured from the dump: the seven
-     overrides move **39 states across 30 blocks** against the collision shape alone, in
-     **both** directions, which is exactly why the `collision_shapes` derivation this bullet
-     recommended would have been wrong. See
-     [`model-smooth-lighting.md`](./model-smooth-lighting.md#the-occluder-predicate).
-   - Vanilla's AO neighbourhood is centred on the neighbour cell only when the face is
-     *cubic*; for a partial quad it centres on the block's own cell. Ours always uses the
-     neighbour, so stair/slab interior faces sample one cell off.
-   - `smoothBlend`'s sky-inherit branch and vanilla's sub-nibble (0..240) smooth-light
-     precision are not ported; `getLightEmission() == 0` still has no data source; the
-     Nether `CardinalLighting` shade table is still Overworld's.
-2. **Block entity renderers.** Chest has landed end to end; skull (skeleton, wither skeleton,
-   zombie, creeper, player) is built and tested but not yet wired into `gpu.rs` — see
-   `docs/block-entity-renderers.md`. **"Beds", "item frames" and "end crystals" were never real
-   items for this issue**: a bed is a plain block model (no `BedRenderer` exists), and item frames /
-   end crystals are entities (`EntityRenderer`), not block entities — checked against the real
-   `BlockEntityRenderers.java` registration list, which is the authority here, not this bullet's
-   memory of one. Still absent, in descending rough player-visibility order: banners (layered
-   patterns, tracked with the shield item as #174), shulkers, bells (animated — a `BLOCK_EVENT`
-   shake, different `b0` than chest's), enchanting-table book (a full client-tick animation state
-   machine, not a static model), mob spawner (a miniature spinning entity inside the cage), decorated
-   pots (needs up to four independently-textured sides per instance from NBT — the current
-   `(model, texture)`-per-instance batch key cannot express that as one instance), conduits, piston
-   head, campfire, brushable block, trial spawner, vault, and two 26.x additions (copper golem
-   statue, shelf).
-
-   **This entry used to say "start with chest and sign — the two a player notices first", and
-   the sign half was wrong.** In 26.2 signs *are* real block models — `oak_sign_rot_0..3` carry
-   genuine geometry — and `StandingSignRenderer` declares **no** geometry of its own, only text
-   transforms. The board already meshes through the ordinary block path, so porting "sign
-   geometry" would draw a second board inside the real one. Sign is a **text pass**, a different
-   subsystem sharing the `gpu/nametag.rs` substrate, and it does not belong beside chest.
-
-   **The NBT-reaches-us question is now settled, on the wire, not just from reading the decode
-   path.** A throwaway probe joined the creative oracle, placed a real `oak_sign` with text over
-   RCON, and read the resulting record straight out of a live `World`: it arrives as a full
-   `front_text`/`back_text`/`is_waxed` compound, decoded generically by the same `BlockEntity.nbt`
-   path chest already uses. So the remaining sign work is exactly what it looked like from the code
-   alone — a typed parse plus the render pass — never a missing wire decode.
-
-   Chest was the right first pick for a reason worth keeping: `block/chest.json` in the real jar
-   is `{"textures":{"particle":"block/oak_planks"}}` — **zero elements** — so a chest was not a
-   slightly-wrong box, it was a hole in the world, and `sections_drawn`/`total_quads` were
-   byte-identical with and without it drawing.
-3. ~~**Sun, moon, stars, clouds.**~~ Landed — the sky is a real dome, not a flat
-   colour: `crates/lodestone-render/src/{sky,sky_pipeline}.rs` plus
-   [`sky-and-air-bubbles.md`](./sky-and-air-bubbles.md), proved by
-   `crates/lodestone-shell/tests/sky_pixels.rs`. What remains is tracked on #96 —
-   the sunrise/sunset horizon band, void fog, gradient banding quality and per-biome
-   sky tint — and on #49, whose finding is that 26.2 deleted `getSkyDarken` in favour
-   of an `EnvironmentAttribute` timeline, so our dusk/dawn ramp is still 1.21's.
-4. **Weather.** No rain/snow/thunder state or rendering. Camera-relative angled quads,
-   density from `rainLevel`, rain-vs-snow from biome temperature per column, sky and
-   light darkened by `thunderLevel`, looping ambient audio, lightning flashes. Server
-   sends state via `GAME_EVENT` — check those ids reach a consumer first.
-5. **First-person hand: the special-cased item poses.** The arm, the swing and the
-   **generic held item** all landed (`1ffbdee`, `22dc0ee`, and
-   [`first-person-held-item.md`](./first-person-held-item.md)); `display.firstperson_righthand`
-   *is* reachable — `ItemGeometry::display` carries all nine slots, and the claim
-   that "`icon.rs` keeps only the `gui` slot" was stale for two sessions before
-   being deleted from here. `RenderState::set_main_hand_source` is **now wired** —
-   `app.rs` installs it every frame, and the shell draws the held item rather than
-   the bare arm, with `first_person_item_drawn`/`first_person_arm_drawn` asserted
-   mutually exclusive by real pixel gates. (This bullet claimed it was unwired for
-   two sessions; that is the second stale claim in this one entry, which is why the
-   first is preserved above rather than deleted.) What remains is the special-cased
-   poses: bow/crossbow-while-drawing, shield, spyglass, map,
-   trident, and the eating/drinking and brush animations. The off hand is not drawn
-   either, though every function supports `Arm::Left`.
-
-   **Third stale claim in this one entry, now corrected: "each needing use-item state
-   the shell does not track" is no longer true.** Issue #57 decoded
-   `LivingEntity`'s using-item bit and folded it through to a `ItemUse` component;
-   mobs and remote players draw the bow and crossbow-charge arm poses from it
-   ([`item-use-arm-poses.md`](./item-use-arm-poses.md)). Two things remain for the
-   *first-person* pass specifically, and neither is the wire state: a session-scoped
-   fold to reach the local player (which has no `EntityKind`, so `entity_view()`
-   cannot carry it — the `Vitals::on_fire` shape, `7822a60`), and
-   `ItemInHandRenderer`'s own item-pose transforms, which are distinct from the
-   humanoid arm poses. Separately, `ArmPose::CrossbowHold` is blocked on decoding
-   `minecraft:charged_projectiles`, not on render work.
-6. **Full inventory interaction verbs.** Audit `click.rs` against
-   `AbstractContainerMenu.doClick`: drag-split (left even / right one-each / middle fill
-   in creative), double-click gather, number-key swap, offhand swap, creative variants.
-   Each is a distinct wire `ClickType`. **Drop and drop-stack are done** (`Q`/`Ctrl+Q`,
-   see `docs/keybindings.md`'s "One action, two mechanisms: `key.drop`" — closes #16/#27):
-   `Click::drop_one`/`drop_stack`/`do_throw` and `ClientAction::DropSelectedItem`/
-   `DropSelectedItemStack` were each built and tested with zero producers; `MenuInput::
-   key_pressed`'s `Drop` arm (`crates/lodestone-shell/src/container.rs`, landed in
-   `3ccbbb1` concurrently with this item being scoped) already existed too — the actual
-   gap closed here was purely the `app.rs` dispatch, on both sides of the container-open
-   boundary.
-7. **Combat feel.** Stale as originally written — re-verified against the jar rather
-   than assumed (see `docs/combat.md`): the attack-strength cooldown bar and the hurt
-   tint both already shipped (#121, #98), and "camera shake" was never a real vanilla
-   mechanic at all (grepped `client-src` clean for `[Ss]hake`; the only hit is an
-   unrelated item-wobble in `ItemInHandRenderer.java`). What was actually still
-   missing, found by that same pass and now fixed: `ClientAction::ReleaseUseItem` was
-   a serverbound island (encoded by all four protocol adapters, zero producers), and
-   `use_item_live` returned without sending anything whenever the crosshair was over
-   any entity or nothing at all — together making the **shield and the bow
-   functionally dead in combat**, since aiming at a mob is the common case.
-   `EntityDamaged`/`EntityHurtAnimation` decode has consumers (`HurtTime`).
-
-   **Update, this pass (#12 remainder):** cooldown-scaled damage stays server-side,
-   N/A. **Crit particles are done** — local-only prediction in `Sim::attack_entity`
-   (`maybe_spawn_crit_particles`), matching vanilla's own client-side
-   `player.attack(entity)` call in `MultiPlayerGameMode.attack`; see `docs/combat.md`.
-   **The sweep-arc particle is confirmed *not* working, and the scoping note above
-   calling it "may already partly work" was wrong** — verified by reading the actual
-   dispatch, not by a live-oracle guess: `Particles::spawn_one`
-   (`crates/lodestone-shell/src/particles.rs`) has no `"sweep_attack"` arm and falls
-   into its `other => debug!` catch-all, and `lodestone-particle`'s `emit` module has
-   no sweep emitter and `Sheet` has no `SweepAttack` variant at all — the whole
-   rendering path is unbuilt, not merely unwired. Out of this pass's file scope
-   (`lodestone-particle` and `particles.rs` are neither owned by nor brokered to the
-   combat work); flagged as its own follow-up. **`bobHurt` camera roll stays blocked**
-   on `Camera` gaining a roll DOF — re-confirmed against `camera_rig.rs`'s own
-   `bobbed_camera` doc, which is not stale: the view-matrix decomposition it uses
-   structurally cannot carry a roll component today (`Camera` has `position`/`yaw`/
-   `pitch`, no third rotation axis), and fixing it touches ~48 `Camera { .. }`
-   literals across `lodestone-render`, `gpu.rs`/`gpu/*.rs` and `entity.rs` — three
-   other agents' territory at once, not a same-pass fix.
-8. **Riding.** The island was real when this was written and is closed —
-   [`riding.md`](./riding.md). Mount (a right-click on an entity, which
-   `use_item_live` never even looked for), the 26.2 attachment seat, camera on the
-   vehicle, the passenger `on_ground` override, and dismount all land; the wire half
-   was worse than this bullet says, with **six** riding items stranded, three of them
-   serverbound with zero producers.
-
-   **The one thing that remained — the vehicle not moving — is also closed.** Every
-   vehicle is client-authoritative while a player rides it (`Entity.isClientAuthoritative`
-   delegates to the controlling passenger and `Player`'s is `true`, so the server takes
-   `travelRidden`'s `setDeltaMovement(Vec3.ZERO)` branch and waits for
-   `ServerboundMoveVehiclePacket`), **including horses** — the intuitive "a horse steers
-   for free off the `PlayerInput` bitfield we already send" was and is wrong. So the
-   physics is now ported in `lodestone_physics::vehicle` and driven by
-   `lodestone_ecs::vehicle`: boat float/steer/paddles, land-mount ridden travel, the
-   horse jump charge and impulse, rider yaw clamping, `ClientAction::{MoveVehicle,
-   PaddleBoat}` once per tick, `PlayerCommand::StartRidingJump` on the release edge, and
-   `ClientEvent::VehicleMoved` folded as the server's rejection snap.
-
-   **Two things the earlier version of this entry got wrong, both worth carrying.**
-   `AbstractHorse`'s ridden rule is **not** universal: `Pig` and `Strider` override
-   `getRiddenInput` to a constant `(0, 0, 1)` — unsteerable by keys — and scale speed by
-   `0.225` / `0.55`, so "the ridden-travel path" is three rules, not one. And
-   `PlayerCommand::StopRidingJump` is not a missing producer waiting on input: the vanilla
-   client has no sender for it at all, so zero is the correct count forever.
-
-   What is still open is smaller and each item is blocked on its own thing, not on
-   authority: the jump **bar** (needs a `HudFrame` line in `app.rs` plus sprites that
-   exist nowhere in the tree), the horse inventory screen
-   (`ClientEvent::MountScreenOpened` + `PlayerCommand::OpenInventory`), the minecart
-   camera lerp fix-up (`Camera.alignWithEntity`'s new-behaviour-minecart branch, which
-   needs per-vehicle interpolation state), the jar-generated attachment table, and a
-   handful of unmodelled vanilla clauses (`refuseToMove`, `isSuffocating`, `boostFactor`,
-   `isStanding`, the saddle gate) — all enumerated in `riding.md`. **Minecarts are
-   deliberately left to the server**: rail-following motion arrives as
-   `ClientboundMoveMinecartPacket`, so `VehicleFamily::for_type_path` declines them.
-9. **The remaining ~32 clientbound packets.** **Use `cargo xtask connectedness`, never a
-   hand count** — the hand-derived figure has been wrong four times in four different
-   ways, and do not trust the numbers written here either: run it.
-
-   **`CHUNK_BATCH_START` was never a defect, and this entry carried it as one.** It was
-   listed as "1 decoded-but-stranded". It is decoded on purpose and correctly emits no
-   `ClientEvent`: it is an empty marker that starts the batch rate timer
-   (`begin_chunk_batch`), and the client's reply goes out from `CHUNK_BATCH_FINISHED` as
-   `CHUNK_BATCH_RECEIVED` carrying the measured rate. That handshake is load-bearing —
-   `PlayerChunkSender.MAX_UNACKNOWLEDGED_BATCHES` is 10 and `sendNextChunks` stops
-   entirely above it, so a client that never acknowledged would lose chunk delivery
-   after ten batches — and it is complete. There is simply nothing observable at the
-   *start* edge.
-
-   The tool now reports it under **protocol-internal**, with that reason printed, and
-   `decoded-but-stranded` reads `0`. The exemption is an allowlist carrying a reason per
-   entry rather than a silent subtraction, because a false positive in an island
-   detector costs real work and a hidden exemption is where a real island would go to
-   die. Adding an entry needs the same standard as any other claim here: say what
-   consumes the packet and why no event is correct.
-
-## Tier 1½ — smaller, player-requested
-
-- **HUD animations**: hearts jump and flash on heal/damage, hunger shakes when
-  depleting, XP bar flashes on level-up, hotbar selector pop.
-- **Air-supply bubbles** underwater. The submerged flag exists (`69f66c2`).
-- ~~**Item pickup fly-to-player.**~~ Landed, issue #365 — see
-  [item-pickup-animation.md](./item-pickup-animation.md). The diagnosis here was right
-  (`TakeItemEntity` decoded, `PickupFeed` folded with tests, nothing called it) and the
-  consumer was one arm in `net.rs`'s `forward` plus a resource and two systems in
-  `entities.rs`. One correction to the description this entry inherited from #29: vanilla
-  does **not** retarget the item entity — it removes it immediately and animates a frozen
-  copy of its render state (`ItemPickupParticle`).
-- **Mob equipment.** `SET_EQUIPMENT → EntityEquipmentUpdated → EntityView.equipment →
-  nothing`. Unblocked now that item geometry exists; needs `EntityDraw` widened and
-  `display.thirdperson_righthand` plumbed.
-- **Stack count on drops.** Vanilla draws up to five jittered copies as a stack passes
-  1/16/32/48; we draw one. Decoded and dropped at the `EntitySnapshot` boundary for
-  model-freedom — restoring it needs one `u32`, no model dependency.
-- **`CollisionView::fluid_at`.** Unimplemented by both shell adapters, so a fluid cell is
-  treated as full height rather than `amount/9.0`. Matters for surface bobbing and push.
-- **Vanilla settings menu**, at minimum GUI scale. `GuiScaling` already models it.
-- **Dimension travel.** Test portals before building — mostly server-authoritative. See
-  the known-broken list for what is wrong on arrival.
-
-## Tier 2 — expected by any real player
-
-Container screens: furnace family (burn + progress arrows), anvil, enchanting table,
-brewing, loom, smithing, stonecutter, grindstone, cartography, beacon, villager trading,
-horse inventory. Each is a `MenuKind` with its own slot layout — **a constant offset
-draws a plausible but transposed inventory that reads as an art bug**.
-
-Also: advancements, statistics, recipe-book UI, maps, elytra, swimming, sleeping, sound
-event breadth and subtitles, music, enchantment glint (plumbed but hardcoded `false`),
-animated item textures (frame 0 only), Nether and End dimension rendering.
-
-## Tier 3 — completeness
-
-Secure chat signing (26.2 requires it; `chat_ack.rs` exists — audit what is missing).
-Online-mode auth end to end — the crypto is **verified** (the server accepted our
-RSA-wrapped secret and its AES-128-CFB8 reply round-tripped; only the session-server
-ownership lookup failed, needing a real Microsoft account). Server-provided resource
-packs. Options persistence, keybind rebinding, language switching, accessibility.
-Realms. **Singleplayer as a real integrated server** — the shell calls the generator
-directly today; the faithful destination is generate → loopback → client-consumes,
-sharing the multiplayer path, and the generator itself does not have to change.
-
-## Tier 4 — the game simulation (being a *server*, not a client)
-
-Plausibly larger than Tiers 1–3 combined, and a different axis entirely: redstone, mob
-AI and pathfinding, villager trading logic, farming and breeding, mob spawning rules,
-block ticks, fluid flow, explosions, world persistence in Anvil format, command
-execution.
-
-Foundations that already exist and are bit-exact against JVM oracles: worldgen (noise
-router, density, carvers, surface, aquifer, ore features), collision shapes (32,366
-states), hardness, entity dimensions, and a generated `path_types.rs` dumped from
-`WalkNodeEvaluator` — real groundwork for pathfinding. `lodestone-server` exists with
-its tokio target-split done.
-
----
-
-## Infrastructure
-
-- **Split `HANDOFF.md`.** ~1800 lines and growing; several claims have gone stale mid-session.
-  `CLAUDE.md` now carries the durable rules — the rest should become per-subsystem docs
-  with `HANDOFF.md` reduced to a short "what is open" index pointing here.
-- **`cargo fmt` is unsafe repo-wide.** `lodestone-v770` (~13 files including generated
-  tables) and `lodestone-render` are already dirty against `--check` at HEAD.
-- **Window-scoped screenshots do not work** in the agent environment: `osascript` lacks
-  assistive access and there is no `Quartz` module. A full-screen grab catches the
-  desktop and every population reads `R=G=B`. A `--screenshot` flag in the client would
-  be more reliable than fighting the OS.
+See [`../CLAUDE.md`](../CLAUDE.md) for the working rules and [`meta/handoff.md`](./meta/handoff.md)
+if you are dispatching work rather than writing it.
