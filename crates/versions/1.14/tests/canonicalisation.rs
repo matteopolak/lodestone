@@ -1,48 +1,68 @@
-//! Generator + drift guard for the 1.16.5 (protocol 754) flat block-state id
-//! -> canonical 26.2 block-state id table (`src/generated/canonical.rs`),
+//! Generator + drift guard for this era's three flat block-state id ->
+//! canonical 26.2 block-state id tables (`src/generated/canonical{,_498,_578}.rs`),
 //! plus hermetic, hardcoded-value tests that run on every `cargo test`.
 //! Modelled directly on `crates/lodestone-data/tests/block_states.rs` and
 //! `crates/lodestone-canonical/tests/flattening.rs`'s generate-or-assert
 //! pattern.
 //!
+//! # Why three tables and not one
+//!
+//! Each release inserts blocks into vanilla's global palette, so the same
+//! numeric flat state id names a different block in each of the era's three
+//! protocols: the dumps below carry 11,271 states at 498, 11,337 at 578 and
+//! 17,112 at 754. A shared table would be the silent wrong-terrain defect
+//! `src/canonical.rs` exists to prevent, one protocol removed.
+//!
 //! # Data provenance
 //!
-//! `tests/support/blocks_1_16_5_jar.json` is **not** a community dataset —
-//! it is the unmodified output of Mojang's own data generator, run in its
-//! `--reports` mode against the real `.cache/mc/1.16.5/server.jar`, the same
-//! tool and report shape
+//! `tests/support/blocks_1_{14_4,15_2,16_5}_jar.json` are **not** a community
+//! dataset — each is the unmodified output of Mojang's own data generator, run
+//! in its `--reports` mode against the real `.cache/mc/<version>/server.jar`,
+//! the same tool and report shape
 //! `crates/lodestone-data/tests/block_states.rs` reads for the 26.2 side
 //! (`.cache/mc/26.2/generated/reports/blocks.json`). Every state lists its
 //! own `id` and `properties` explicitly, so no combinatorial re-derivation
 //! of vanilla's state-id numbering is needed on either side.
 //!
-//! The bridge from a 1.16.5 `(name, properties)` pair to a 26.2 state id
+//! The bridge from a source `(name, properties)` pair to a 26.2 state id
 //! reuses exactly the technique `lodestone_canonical::canonical` already
 //! uses for the pre-Flattening families: build a `(name, properties) ->
 //! 26.2 id` reverse index from `lodestone_data::block_states` (itself
 //! jar-derived, not this crate's own encoder/decoder), try a direct match,
 //! then a small hand-verified rename table, then a generic fallback that
-//! appends a boolean property 1.16.5 does not yet have. Every rule below was
-//! checked against the full 17,112-state corpus: after applying them, zero
-//! states are left unmapped (see `committed_table_matches_dump`'s assertion).
+//! appends a boolean property the source version does not yet have. Every
+//! rule below was checked against all three corpora: after applying them,
+//! zero states are left unmapped in any of them (see
+//! `committed_tables_match_dumps`'s assertion).
 //!
-//! Unlike the pre-Flattening bridge, this is baked into a flat generated
+//! Two rules the pre-1.16 protocols need and 754 does not — walls' four side
+//! properties turning from booleans into a three-valued enum, and the jigsaw
+//! block's `facing` becoming `orientation` — are not read off any table.
+//! They are what vanilla itself produced when a real 1.15.2 world carrying
+//! those exact states was booted under the real 26.2 server jar and read
+//! back over RCON; the probes, the procedure and the answers are committed
+//! verbatim in `tests/support/state_upgrade_1_15_2_to_26_2.txt`. Without
+//! them 902 of each pre-1.16 dump's states have no mapping at all.
+//!
+//! Unlike the pre-Flattening bridge, each is baked into a flat generated
 //! `[u32; SOURCE_STATE_COUNT]` array **at regeneration time** rather than
-//! resolved lazily at runtime: 1.16.5 has no ambiguous "requires additional
-//! context" cases (that was a pre-Flattening `id:meta` problem — a flat
-//! 1.16.5 state id already carries full block identity), so there is nothing
-//! left for the runtime path to compute. `src/canonical.rs` is therefore
-//! just an `O(1)` index into this table plus the wire-corruption fallback
-//! (a state id past `SOURCE_STATE_COUNT`, which no real 1.16.5 server sends).
+//! resolved lazily at runtime: no protocol in this era has ambiguous
+//! "requires additional context" cases (that was a pre-Flattening `id:meta`
+//! problem — a flat state id already carries full block identity), so there
+//! is nothing left for the runtime path to compute. `src/canonical.rs` is
+//! therefore just an `O(1)` index into the negotiated protocol's table plus
+//! the wire-corruption fallback (a state id past that table's
+//! `SOURCE_STATE_COUNT`, which no real server of that version sends).
 //!
-//! # Refreshing after the source jar changes
+//! # Refreshing after a source jar changes
 //!
-//! 1. Re-run the data generator against the (possibly updated) 1.16.5
-//!    server jar under Apple `container` (see `docs/oracle-runtimes.md`):
+//! 1. Re-run the data generator against the (possibly updated) server jar
+//!    for the version in question under Apple `container` (see
+//!    `docs/oracles-and-benchmarks.md`):
 //!
 //! ```text
 //! container run --rm --memory 3g \
-//!     -v "$PWD/.cache/mc/1.16.5/server.jar:/server.jar:ro" \
+//!     -v "$PWD/.cache/mc/<version>/server.jar:/server.jar:ro" \
 //!     -v "$PWD/out:/out" \
 //!     eclipse-temurin:8-jdk \
 //!     java -cp /server.jar <vanilla data-generator entry point> --reports --output /out
@@ -51,18 +71,18 @@
 //! (the entry point is documented in Mojang's own server-jar usage notes,
 //! not reproduced here)
 //!
-//!    then copy `out/reports/blocks.json` over
-//!    `tests/support/blocks_1_16_5_jar.json`.
+//!    then copy `out/reports/blocks.json` over that version's
+//!    `tests/support/blocks_*_jar.json`.
 //!
-//! 2. Regenerate the committed table:
+//! 2. Regenerate the committed tables:
 //!
 //! ```text
 //! LODESTONE_REGEN=1 cargo test -p lodestone-v1-14 --test canonicalisation \
-//!     committed_table_matches_dump -- --ignored --nocapture
+//!     committed_tables_match_dumps -- --ignored --nocapture
 //! ```
 //!
 //! If the 26.2 registry itself changed (`lodestone-data` regenerated), rerun
-//! step 2 alone — the 1.16.5-side dump does not need to change.
+//! step 2 alone — no source-side dump needs to change.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -74,25 +94,59 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
-fn committed_path() -> PathBuf {
-    manifest_dir().join("src/generated/canonical.rs")
+/// One protocol's source of truth: the committed jar-generated report — an
+/// external anchor, not gitignored, exactly like `lodestone-canonical`'s
+/// `flattening_1_13_2_jvm.txt` — and where its table is committed.
+struct Source {
+    /// Minecraft version the dump came from, for messages and headers.
+    minecraft: &'static str,
+    /// Protocol this table serves.
+    protocol: i32,
+    /// The unmodified `--reports` `blocks.json` for that jar.
+    dump: &'static str,
+    /// That dump's own filename under `tests/support/`, for the generated
+    /// header's provenance line.
+    dump_file: &'static str,
+    /// Path under `src/generated/` the rendered table is committed at.
+    committed: &'static str,
 }
 
-/// The committed jar-generated report — an external anchor, not gitignored,
-/// exactly like `lodestone-canonical`'s `flattening_1_13_2_jvm.txt`.
-const DUMP: &str = include_str!("support/blocks_1_16_5_jar.json");
+const SOURCES: &[Source] = &[
+    Source {
+        minecraft: "1.14.4",
+        protocol: 498,
+        dump: include_str!("support/blocks_1_14_4_jar.json"),
+        dump_file: "blocks_1_14_4_jar.json",
+        committed: "src/generated/canonical_498.rs",
+    },
+    Source {
+        minecraft: "1.15.2",
+        protocol: 578,
+        dump: include_str!("support/blocks_1_15_2_jar.json"),
+        dump_file: "blocks_1_15_2_jar.json",
+        committed: "src/generated/canonical_578.rs",
+    },
+    Source {
+        minecraft: "1.16.5",
+        protocol: 754,
+        dump: include_str!("support/blocks_1_16_5_jar.json"),
+        dump_file: "blocks_1_16_5_jar.json",
+        committed: "src/generated/canonical.rs",
+    },
+];
 
-/// One 1.16.5 state: its flat wire id and sorted `(key, value)` properties.
+/// One source-version state: its flat wire id and sorted `(key, value)`
+/// properties.
 struct SourceState {
     id: u32,
     name: String,
     properties: Vec<(String, String)>,
 }
 
-/// Parses `tests/support/blocks_1_16_5_jar.json` into one entry per state id,
+/// Parses one `tests/support/blocks_*_jar.json` into one entry per state id,
 /// indexed `0..SOURCE_STATE_COUNT` (the report's own per-state `id` field is
 /// authoritative; this asserts density rather than assuming it).
-fn parse_dump(doc: &str) -> Vec<SourceState> {
+fn parse_dump(minecraft: &str, doc: &str) -> Vec<SourceState> {
     let value: serde_json::Value = serde_json::from_str(doc).expect("dump is valid JSON");
     let object = value.as_object().expect("blocks.json is a JSON object");
 
@@ -127,7 +181,7 @@ fn parse_dump(doc: &str) -> Vec<SourceState> {
                     properties,
                 },
             );
-            assert!(previous.is_none(), "duplicate 1.16.5 state id {id}");
+            assert!(previous.is_none(), "duplicate {minecraft} state id {id}");
         }
     }
 
@@ -135,7 +189,7 @@ fn parse_dump(doc: &str) -> Vec<SourceState> {
     assert_eq!(
         max_id as usize + 1,
         count,
-        "1.16.5 state ids are not dense: max id {max_id}, count {count}"
+        "{minecraft} state ids are not dense: max id {max_id}, count {count}"
     );
 
     let mut states: Vec<SourceState> = by_id.into_values().collect();
@@ -215,8 +269,53 @@ fn resolve(
         };
     }
 
+    // The jigsaw block's single `facing` (6 values) became `orientation`
+    // (12) in 1.16, so a pre-1.16 state has no direct match at all. The
+    // mapping is not read off a table: it is what vanilla itself produced
+    // when a 1.15.2 world carrying all six `facing` values was upgraded by
+    // the real 26.2 server jar (`tests/support/state_upgrade_1_15_2_to_26_2.txt`).
+    // Guarded on `facing` being present, so 1.16.5 — which already carries
+    // `orientation` — never enters this arm.
+    if name == "minecraft:jigsaw"
+        && let Some((_, facing)) = properties.iter().find(|(key, _)| key == "facing")
+    {
+        let orientation = match facing.as_str() {
+            "north" => "north_up",
+            "south" => "south_up",
+            "east" => "east_up",
+            "west" => "west_up",
+            "up" => "up_north",
+            "down" => "down_south",
+            other => panic!("jigsaw facing {other:?} is outside the six the oracle covers"),
+        };
+        return reverse
+            .get(&(
+                "minecraft:jigsaw".to_owned(),
+                vec![("orientation".to_owned(), orientation.to_owned())],
+            ))
+            .copied();
+    }
+
     let bridged_name = bridge_name(name).to_owned();
-    let props = properties.to_vec();
+    let mut props = properties.to_vec();
+
+    // A wall's four side properties were booleans before 1.16 and a
+    // three-valued `none`/`low`/`tall` from 1.16 on. Same oracle as the
+    // jigsaw arm above, and the same guard: 1.16.5's values are already
+    // `none`/`low`/`tall`, which `wall_side` leaves alone, so 754's rendered
+    // table is byte-for-byte what it was before this arm existed. `tall` is
+    // a state the pre-1.16 wire cannot express and vanilla never produces
+    // from one.
+    if bridged_name.ends_with("_wall") {
+        for (key, value) in &mut props {
+            if matches!(key.as_str(), "east" | "north" | "south" | "west")
+                && let Some(mapped) = wall_side(value)
+            {
+                *value = mapped.to_owned();
+            }
+        }
+    }
+    let props = props;
 
     if let Some(&id) = reverse.get(&(bridged_name.clone(), props.clone())) {
         return Some(id);
@@ -247,6 +346,20 @@ fn resolve(
     reverse.get(&(bridged_name, with_powered)).copied()
 }
 
+/// Maps one pre-1.16 boolean wall-side value to its 1.16+ enum value, or
+/// [`None`] for a value that is already an enum member (every 1.16.5 state,
+/// which is what keeps this a no-op there).
+///
+/// Both answers come from the committed world-upgrade oracle, not from a
+/// reading of any table: see this module's provenance section.
+fn wall_side(value: &str) -> Option<&'static str> {
+    match value {
+        "true" => Some("low"),
+        "false" => Some("none"),
+        _ => None,
+    }
+}
+
 /// Inserts `(key, value)` into `properties`, kept sorted by key.
 fn insert_sorted(properties: &mut Vec<(String, String)>, key: &str, value: &str) {
     let position = properties
@@ -256,14 +369,27 @@ fn insert_sorted(properties: &mut Vec<(String, String)>, key: &str, value: &str)
     properties.insert(position, (key.to_owned(), value.to_owned()));
 }
 
-/// Renders the committed `src/generated/canonical.rs` source from the parsed
-/// dump. Panics naming the offending 1.16.5 state if [`resolve`] cannot
-/// bridge it — this pass found zero such states across the full corpus (see
-/// module docs), so a future occurrence means a jar update introduced a case
-/// this generator's bridging does not cover yet, and that must be loud, not
+/// Renders one protocol's committed `src/generated/canonical*.rs` source from
+/// its parsed dump, given the 26.2 reverse index (supplied by the caller so
+/// rendering all three tables in one run builds that 32,366-entry index once
+/// rather than three times).
+///
+/// Panics naming the offending source state if [`resolve`] cannot bridge it —
+/// this pass found zero such states across all three corpora (see module
+/// docs), so a future occurrence means a jar update introduced a case this
+/// generator's bridging does not cover yet, and that must be loud, not
 /// silently defaulted to air at generation time.
-fn generate(states: &[SourceState]) -> String {
-    let reverse = canonical_reverse_index();
+fn generate_with(
+    source: &Source,
+    states: &[SourceState],
+    reverse: &HashMap<(String, Vec<(String, String)>), u32>,
+) -> String {
+    let Source {
+        minecraft,
+        protocol,
+        dump_file,
+        ..
+    } = *source;
 
     let air_id = *reverse
         .get(&("minecraft:air".to_owned(), Vec::new()))
@@ -271,9 +397,9 @@ fn generate(states: &[SourceState]) -> String {
 
     let mut mapped = Vec::with_capacity(states.len());
     for state in states {
-        let Some(id) = resolve(&state.name, &state.properties, &reverse) else {
+        let Some(id) = resolve(&state.name, &state.properties, reverse) else {
             panic!(
-                "1.16.5 state {} ({}, {:?}) has no canonical 26.2 mapping",
+                "{minecraft} state {} ({}, {:?}) has no canonical 26.2 mapping",
                 state.id, state.name, state.properties
             );
         };
@@ -282,21 +408,27 @@ fn generate(states: &[SourceState]) -> String {
 
     let mut out = String::new();
     out.push_str(
-        "// @generated by `cargo test -p lodestone-v1-14 --test canonicalisation -- --ignored`\n\
-         // from tests/support/blocks_1_16_5_jar.json (protocol 754 / Minecraft 1.16.5) against\n\
-         // the 26.2 block-state registry (`lodestone_data::block_states`).\n\
-         // DO NOT EDIT BY HAND. Regenerate with LODESTONE_REGEN=1 (see the test module docs).\n",
+        "// @generated by `cargo test -p lodestone-v1-14 --test canonicalisation -- --ignored`\n",
+    );
+    let _ = writeln!(
+        out,
+        "// from tests/support/{dump_file} (protocol {protocol} / Minecraft {minecraft}) against"
     );
     out.push_str(
-        "//! Generated 1.16.5 (protocol 754) -> canonical 26.2 block-state id table.\n//!\n\
+        "// the 26.2 block-state registry (`lodestone_data::block_states`).\n\
+         // DO NOT EDIT BY HAND. Regenerate with LODESTONE_REGEN=1 (see the test module docs).\n",
+    );
+    let _ = writeln!(
+        out,
+        "//! Generated {minecraft} (protocol {protocol}) -> canonical 26.2 block-state id table.\n//!\n\
          //! `STATE_TO_CANONICAL[wire_state_id]` is the 26.2\n\
-         //! `lodestone_data::block_states` id that 1.16.5 wire state carries. Pure\n\
-         //! rodata, zero heap; see `src/canonical.rs` for the lookup wrapper.\n\n",
+         //! `lodestone_data::block_states` id that {minecraft} wire state carries. Pure\n\
+         //! rodata, zero heap; see `src/canonical.rs` for the lookup wrapper.\n"
     );
 
     let _ = writeln!(
         out,
-        "/// Number of block states in 1.16.5's own global palette (source ids are\n\
+        "/// Number of block states in {minecraft}'s own global palette (source ids are\n\
          /// `0..SOURCE_STATE_COUNT`)."
     );
     let _ = writeln!(out, "pub const SOURCE_STATE_COUNT: u32 = {};\n", mapped.len());
@@ -312,7 +444,7 @@ fn generate(states: &[SourceState]) -> String {
 
     let _ = writeln!(
         out,
-        "/// `STATE_TO_CANONICAL[s]` is the canonical 26.2 state id for 1.16.5 flat\n\
+        "/// `STATE_TO_CANONICAL[s]` is the canonical 26.2 state id for {minecraft} flat\n\
          /// wire state `s`."
     );
     let _ = writeln!(
@@ -332,22 +464,78 @@ fn generate(states: &[SourceState]) -> String {
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "regenerates/verifies the committed table; run explicitly"]
-fn committed_table_matches_dump() {
-    let states = parse_dump(DUMP);
-    let generated = generate(&states);
+#[ignore = "regenerates/verifies the committed tables; run explicitly"]
+fn committed_tables_match_dumps() {
+    let reverse = canonical_reverse_index();
+    let regen = std::env::var_os("LODESTONE_REGEN").is_some();
 
-    if std::env::var_os("LODESTONE_REGEN").is_some() {
-        std::fs::write(committed_path(), &generated).expect("write committed table");
-        eprintln!("regenerated {}", committed_path().display());
-        return;
+    for source in SOURCES {
+        let states = parse_dump(source.minecraft, source.dump);
+        let generated = generate_with(source, &states, &reverse);
+        let path = manifest_dir().join(source.committed);
+
+        if regen {
+            std::fs::write(&path, &generated).expect("write committed table");
+            eprintln!("regenerated {} ({} states)", path.display(), states.len());
+            continue;
+        }
+
+        let committed = std::fs::read_to_string(&path).expect("committed table present");
+        assert_eq!(
+            generated,
+            committed,
+            "{} is stale vs tests/support/{} or the 26.2 registry; regenerate with \
+             LODESTONE_REGEN=1 (see the test module docs)",
+            source.committed,
+            source.dump_file
+        );
     }
+}
 
-    let committed = std::fs::read_to_string(committed_path()).expect("committed table present");
+/// The three tables are genuinely different mappings, not three copies.
+///
+/// Each protocol's dump has its own state count, and a state id that exists
+/// in all three names three *different* 26.2 blocks — which is the whole
+/// reason there are three tables. Asserted over the committed tables alone,
+/// so it runs on every `cargo test`.
+#[test]
+fn the_three_eras_disagree_about_what_a_state_id_means() {
+    use lodestone_v1_14::canonical;
+
+    // Measured from the three jar dumps: each era's own palette size.
+    assert_eq!(canonical::table_for(498).state_count(), 11271);
+    assert_eq!(canonical::table_for(578).state_count(), 11337);
+    assert_eq!(canonical::table_for(754).state_count(), 17112);
+
+    // One wire id, three eras, three different canonical blocks — and a
+    // fourth block again if it is left unmapped. The id is chosen for exactly
+    // that: all four answers are distinct, so no pair of them can coincide
+    // and make the test pass for the wrong reason.
+    const PROBE: u32 = 11214;
+    let names: Vec<&str> = [498, 578, 754]
+        .into_iter()
+        .map(|protocol| {
+            let id = canonical::table_for(protocol)
+                .resolve(PROBE)
+                .expect("probe is inside every era's palette");
+            block_states::block_name(id).expect("canonical id is a real 26.2 state")
+        })
+        .collect();
     assert_eq!(
-        generated, committed,
-        "src/generated/canonical.rs is stale vs tests/support/blocks_1_16_5_jar.json or the \
-         26.2 registry; regenerate with LODESTONE_REGEN=1 (see the test module docs)"
+        names,
+        vec![
+            "minecraft:lantern",
+            "minecraft:bell",
+            "minecraft:prismarine_wall",
+        ],
+        "wire state {PROBE} must canonicalise per era"
+    );
+    // Negative control for the same probe: the *unmapped* path (storing the
+    // wire id straight into the canonical space) names a fourth block again.
+    assert_eq!(
+        block_states::block_name(PROBE),
+        Some("minecraft:trapped_chest"),
+        "the unmapped direct-index path must name a block distinct from all three"
     );
 }
 
@@ -355,25 +543,30 @@ fn committed_table_matches_dump() {
 // Hermetic tests (always run: no dump parsing, no reverse-index build)
 // ---------------------------------------------------------------------------
 
-/// Sanity checks over the *committed* table alone, cheap enough to run on
+/// Sanity checks over the *committed* tables alone, cheap enough to run on
 /// every `cargo test`: every entry is a valid 26.2 state id, and the baked
 /// air id really is `minecraft:air`.
 #[test]
-fn committed_table_is_internally_consistent() {
-    assert_eq!(
-        lodestone_v1_14::generated_canonical::STATE_TO_CANONICAL.len(),
-        lodestone_v1_14::generated_canonical::SOURCE_STATE_COUNT as usize
-    );
-    for &id in lodestone_v1_14::generated_canonical::STATE_TO_CANONICAL.iter() {
-        assert!(
-            id < block_states::STATE_COUNT,
-            "canonical id {id} is not a valid 26.2 state (STATE_COUNT = {})",
-            block_states::STATE_COUNT
-        );
+fn committed_tables_are_internally_consistent() {
+    use lodestone_v1_14::canonical;
+
+    for source in SOURCES {
+        let table = canonical::table_for(source.protocol);
+        for wire in 0..table.state_count() {
+            let id = table.resolve(wire).expect("wire < state_count resolves");
+            assert!(
+                id < block_states::STATE_COUNT,
+                "protocol {}: canonical id {id} is not a valid 26.2 state (STATE_COUNT = {})",
+                source.protocol,
+                block_states::STATE_COUNT
+            );
+        }
+        assert_eq!(table.resolve(table.state_count()), None);
+
+        let air = table.air_state_id();
+        assert_eq!(block_states::block_name(air), Some("minecraft:air"));
+        assert_eq!(block_states::properties(air), Some(&[][..]));
     }
-    let air = lodestone_v1_14::generated_canonical::AIR_STATE_ID;
-    assert_eq!(block_states::block_name(air), Some("minecraft:air"));
-    assert_eq!(block_states::properties(air), Some(&[][..]));
 }
 
 /// Discriminating states: each pair's 1.16.5 wire id and 26.2 id are
@@ -408,9 +601,10 @@ fn discriminating_states_resolve_to_their_26_2_ids_not_their_wire_ids() {
         ("oak_leaves distance=3 persistent=true", 149, 261, "minecraft:acacia_log"),
     ];
 
+    let table = lodestone_v1_14::canonical::table_for(754);
     let mut tally = lodestone_v1_14::canonical::FallbackTally::default();
     for &(label, wire_id, expected_26_2_id, wrong_name) in cases {
-        let resolved = lodestone_v1_14::canonical::resolve_or_air(wire_id, &mut tally);
+        let resolved = table.resolve_or_air(wire_id, &mut tally);
         assert_eq!(
             resolved, expected_26_2_id,
             "{label}: 1.16.5 state {wire_id} should canonicalise to 26.2 state \

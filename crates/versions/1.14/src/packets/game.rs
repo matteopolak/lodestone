@@ -1,11 +1,19 @@
-//! Play-state packets for protocol 754 (Minecraft 1.16.5).
+//! Play-state packets for this era (protocols 498, 578, 754).
 
 use lodestone_macros::{Decode, Encode, Packet};
 use uuid::Uuid;
 
 use crate::packets::position::Position;
 
-/// Clientbound `login` (game-join) packet for 1.16.5.
+/// Clientbound `login` (game-join) packet for 1.16.5 (protocol 754) only.
+///
+/// [`JoinGameLegacy`] is the 498/578 form. The two share the leading entity
+/// id and nothing else: at 498 the second field is a game-mode byte and at
+/// 754 it is a hardcore boolean, and the dimension is a plain `i32` there
+/// against two inline NBT blobs here. Nothing about that is expressible as
+/// a `since`/`until` predicate, and getting it wrong would not error --
+/// `is_hardcore` would read the game-mode byte's low bit and every later
+/// field would be shifted.
 ///
 /// # Architectural notes
 ///
@@ -25,7 +33,7 @@ use crate::packets::position::Position;
 /// The inline NBT blobs are captured as raw named-NBT byte spans; the client
 /// currently only needs to carry/validate them, not interpret their contents.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:login", state = Play, bound = Client)]
+#[mc(name = "minecraft:login", state = Play, bound = Client, protocols = "754..=754")]
 pub struct JoinGame {
     /// Local player entity id.
     pub entity_id: i32,
@@ -63,6 +71,49 @@ pub struct JoinGame {
     pub is_flat: bool,
 }
 
+/// Clientbound `login` (game-join) packet for 1.14.4 and 1.15.2 (protocols
+/// 498 and 578).
+///
+/// Pre-1.16 join is the shape 1.13 left behind: a signed numeric dimension
+/// (`-1` nether, `0` overworld, `1` end) rather than a namespaced world name,
+/// a `level_type` string rather than a dimension codec, and hardcore folded
+/// into the `0x8` bit of the game-mode byte.
+///
+/// 1.15 added exactly two fields, both **appended to an existing prefix
+/// rather than retyping anything**, which is what makes one struct with two
+/// predicates correct here where [`JoinGame`] needed its own: a seed hash
+/// after the dimension, and a respawn-screen flag at the end.
+///
+/// Wire layout: i32 entity id, u8 game mode, i32 dimension, [i64 hashed seed
+/// — 578 only], u8 max players, string level type, varint view distance, bool
+/// reduced debug info, [bool enable respawn screen — 578 only].
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:login", state = Play, bound = Client, protocols = "498..=578")]
+pub struct JoinGameLegacy {
+    /// Local player entity id.
+    pub entity_id: i32,
+    /// Game mode; the `0x8` bit flags hardcore, unlike 1.16's separate field.
+    pub game_mode: u8,
+    /// Numeric dimension: `-1` nether, `0` overworld, `1` end.
+    pub dimension: i32,
+    /// Hashed world seed (for client-side biome noise). Added in 1.15.
+    #[mc(since = 578)]
+    pub hashed_seed: i64,
+    /// Legacy max-players hint.
+    pub max_players: u8,
+    /// World generator name, such as `default` or `flat`.
+    #[mc(max = 16)]
+    pub level_type: String,
+    /// Server view distance in chunks.
+    #[mc(varint)]
+    pub view_distance: i32,
+    /// Whether reduced debug info is in effect.
+    pub reduced_debug_info: bool,
+    /// Whether the respawn screen is shown on death. Added in 1.15.
+    #[mc(since = 578)]
+    pub enable_respawn_screen: bool,
+}
+
 /// Clientbound `chat` packet.
 ///
 /// # Architectural note
@@ -73,7 +124,9 @@ pub struct JoinGame {
 /// `sender` UUID (the source player, or the nil UUID for system messages).
 ///
 /// Wire layout: string message (JSON), signed byte position (`0` chat, `1`
-/// system, `2` action bar / game info), 128-bit sender uuid.
+/// system, `2` action bar / game info), then — from 1.16 only — a 128-bit
+/// sender uuid. 498 and 578 end after the position byte; the field is
+/// appended, never retyped, so a `since` predicate carries it.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:chat", state = Play, bound = Client)]
 pub struct ClientboundChat {
@@ -81,7 +134,9 @@ pub struct ClientboundChat {
     pub message: String,
     /// Chat slot: `0` chat, `1` system, `2` action bar.
     pub position: i8,
-    /// UUID of the sending player (nil for system/server messages).
+    /// UUID of the sending player (nil for system/server messages). Added in
+    /// 1.16; the nil UUID below 754, where the wire carries no such field.
+    #[mc(since = 754)]
     pub sender: Uuid,
 }
 
@@ -162,17 +217,19 @@ pub struct UpdateHealth {
     pub food_saturation: f32,
 }
 
-/// Clientbound `respawn` packet for 1.16.5.
+/// Clientbound `respawn` packet for 1.16.5 (protocol 754) only.
 ///
 /// Like [`JoinGame`], 1.16 replaced the numeric dimension with a namespaced
 /// `world_name` string plus an inline raw named-NBT dimension type. It is not on
 /// the join-and-stay critical path (respawn fires only on death / dimension
-/// change), but the shape is derived for correctness.
+/// change), but the shape is derived for correctness. [`RespawnLegacy`] is
+/// the 498/578 form; the very first field is `i32` there and NBT here, so
+/// the split is a second struct, not a predicate.
 ///
 /// Wire layout: nbt dimension, string world name, i64 hashed seed, u8 game mode,
 /// u8 previous game mode, bool is-debug, bool is-flat, bool copy-metadata.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:respawn", state = Play, bound = Client)]
+#[mc(name = "minecraft:respawn", state = Play, bound = Client, protocols = "754..=754")]
 pub struct Respawn {
     /// Raw named-NBT dimension type.
     #[mc(nbt)]
@@ -191,6 +248,29 @@ pub struct Respawn {
     pub is_flat: bool,
     /// Whether to keep entity metadata / attributes across the respawn.
     pub copy_metadata: bool,
+}
+
+/// Clientbound `respawn` packet for 1.14.4 and 1.15.2 (protocols 498, 578).
+///
+/// The pre-1.16 shape: a numeric dimension and a generator-name string, with
+/// 1.15's seed hash **inserted between** the dimension and the game mode —
+/// an appearing field, so one `since` predicate carries it.
+///
+/// Wire layout: i32 dimension, [i64 hashed seed — 578 only], u8 game mode,
+/// string level type.
+#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:respawn", state = Play, bound = Client, protocols = "498..=578")]
+pub struct RespawnLegacy {
+    /// Numeric dimension: `-1` nether, `0` overworld, `1` end.
+    pub dimension: i32,
+    /// Hashed world seed. Added in 1.15.
+    #[mc(since = 578)]
+    pub hashed_seed: i64,
+    /// Game mode after respawn; the `0x8` bit flags hardcore.
+    pub game_mode: u8,
+    /// World generator name, such as `default` or `flat`.
+    #[mc(max = 16)]
+    pub level_type: String,
 }
 
 /// Clientbound `kick_disconnect` packet sent during play.
@@ -339,7 +419,9 @@ pub struct UseEntity {
     /// Interaction kind (always `1`).
     #[mc(varint)]
     pub mouse: i32,
-    /// Whether the player was sneaking (added 1.16).
+    /// Whether the player was sneaking. Added in 1.16 and appended, so 498
+    /// and 578 send nothing here.
+    #[mc(since = 754)]
     pub sneaking: bool,
 }
 
@@ -364,7 +446,9 @@ pub struct UseEntityInteract {
     /// Hand used (`0` main, `1` off).
     #[mc(varint)]
     pub hand: i32,
-    /// Whether the player was sneaking (added 1.16).
+    /// Whether the player was sneaking. Added in 1.16 and appended, so 498
+    /// and 578 send nothing here.
+    #[mc(since = 754)]
     pub sneaking: bool,
 }
 
@@ -391,7 +475,9 @@ pub struct UseEntityAt {
     /// Hand used (`0` main, `1` off).
     #[mc(varint)]
     pub hand: i32,
-    /// Whether the player was sneaking (added 1.16).
+    /// Whether the player was sneaking. Added in 1.16 and appended, so 498
+    /// and 578 send nothing here.
+    #[mc(since = 754)]
     pub sneaking: bool,
 }
 
@@ -520,14 +606,19 @@ pub struct EntityEffect {
 pub use lodestone_protocol_common::packets::entity::RemoveEntityEffect;
 
 /// Serverbound `recipe_book` packet — toggle a recipe book's open/filtering
-/// state.
+/// state, in its 1.16 (protocol 754) form.
+///
+/// [`CraftingBookData`] is the 498/578 equivalent. 1.16 split the older
+/// packet's two actions into two packets, so the two are not the same wire
+/// message with a field added: the old one leads with an action selector and
+/// carries **all four** books at once.
 ///
 /// Wire layout: varint book id (`RecipeBookType` ordinal: `0` crafting, `1`
 /// furnace, `2` blast furnace, `3` smoker — all four exist by 1.16, unlike
 /// 1.12.2 which has only the crafting book), then the open flag and filter
 /// flag. Per minecraft-data's 1.16.2 `protocol.json` (`packet_recipe_book`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:recipe_book", state = Play, bound = Server)]
+#[mc(name = "minecraft:recipe_book", state = Play, bound = Server, protocols = "754..=754")]
 pub struct RecipeBook {
     /// `RecipeBookType` ordinal.
     #[mc(varint)]
@@ -536,4 +627,45 @@ pub struct RecipeBook {
     pub book_open: bool,
     /// Whether the "only craftable" filter is active.
     pub filter_active: bool,
+}
+
+/// Serverbound `crafting_book_data` packet for 1.14.4 and 1.15.2 (protocols
+/// 498, 578) — the pane state of **every** recipe book at once.
+///
+/// The pre-1.16 packet leads with an action selector, and this crate only
+/// ever sends action `1` (the pane state); action `0` announces a displayed
+/// recipe and became its own packet in 1.16, which this crate does not send
+/// in either era.
+///
+/// Sending all four pairs is not a limitation of this port, it is the shape:
+/// the client owns the whole recipe-book state and re-states it on every
+/// change, so the adapter keeps that state and fills in the three panes the
+/// caller did not name rather than defaulting them shut.
+///
+/// Wire layout: varint action (`1`), then eight bools — crafting open/filter,
+/// smelting open/filter, blasting open/filter, smoking open/filter, in that
+/// order, which is the `RecipeBookType` ordinal order [`RecipeBook`]'s
+/// `book_id` also uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+#[mc(name = "minecraft:crafting_book_data", state = Play, bound = Server, protocols = "498..=578")]
+pub struct CraftingBookData {
+    /// Action selector; `1` for the pane state this crate sends.
+    #[mc(varint)]
+    pub action: i32,
+    /// Whether the crafting book is open.
+    pub crafting_open: bool,
+    /// Whether the crafting book's "only craftable" filter is active.
+    pub crafting_filter: bool,
+    /// Whether the furnace book is open.
+    pub smelting_open: bool,
+    /// Whether the furnace book's filter is active.
+    pub smelting_filter: bool,
+    /// Whether the blast-furnace book is open.
+    pub blasting_open: bool,
+    /// Whether the blast-furnace book's filter is active.
+    pub blasting_filter: bool,
+    /// Whether the smoker book is open.
+    pub smoking_open: bool,
+    /// Whether the smoker book's filter is active.
+    pub smoking_filter: bool,
 }

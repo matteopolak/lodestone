@@ -117,7 +117,7 @@ fn decodes_full_chunk_zero_trailing_bytes() {
     let body = build_map_chunk(3, -5, &section, 1, 0);
 
     let mut r = Reader::new(&body);
-    let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld()).expect("decode");
+    let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld(lodestone_v1_14::PROTOCOL)).expect("decode");
     r.ensure_empty()
         .expect("decode consumes the whole packet (zero trailing bytes)");
 
@@ -140,7 +140,7 @@ fn flattening_and_non_straddling_land_flat_ids_at_known_y() {
     let body = build_map_chunk(0, 0, &section, 1, 0);
 
     let mut r = Reader::new(&body);
-    let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld()).expect("decode");
+    let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld(lodestone_v1_14::PROTOCOL)).expect("decode");
     r.ensure_empty().expect("aligned");
 
     let col = &chunk.column;
@@ -161,7 +161,7 @@ fn three_dimensional_biomes_decode() {
     let body = build_map_chunk(0, 0, &section, 4, 0);
 
     let mut r = Reader::new(&body);
-    let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld()).expect("decode");
+    let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld(lodestone_v1_14::PROTOCOL)).expect("decode");
     r.ensure_empty().expect("aligned");
 
     // Biome cells are 4×4×4 per section; x/z in 0..4, y in the section's range.
@@ -186,7 +186,7 @@ fn partial_update_carries_no_biomes() {
     let body = w.into_vec();
 
     let mut r = Reader::new(&body);
-    let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld()).expect("decode");
+    let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld(lodestone_v1_14::PROTOCOL)).expect("decode");
     r.ensure_empty()
         .expect("partial-update geometry consumes the whole packet");
 
@@ -218,7 +218,7 @@ fn build_update_light(x: i32, z: i32) -> Vec<u8> {
 fn update_light_decodes_masks_and_arrays() {
     let body = build_update_light(3, -5);
     let mut r = Reader::new(&body);
-    let update = UpdateLight::decode(&mut r).expect("decode");
+    let update = UpdateLight::decode(&mut r, lodestone_v1_14::PROTOCOL).expect("decode");
     r.ensure_empty().expect("update_light fully consumed");
 
     assert_eq!(update.x, 3);
@@ -248,7 +248,7 @@ fn truncated_blob_errors_cleanly() {
     let body = w.into_vec();
 
     let mut r = Reader::new(&body);
-    let result = MapChunk::decode(&mut r, &ChunkShape::overworld());
+    let result = MapChunk::decode(&mut r, &ChunkShape::overworld(lodestone_v1_14::PROTOCOL));
     assert!(result.is_err(), "truncated blob must error, not panic");
 }
 
@@ -276,7 +276,7 @@ fn extra_trailing_bytes_rejected() {
     let body = w.into_vec();
 
     let mut r = Reader::new(&body);
-    let result = MapChunk::decode(&mut r, &ChunkShape::overworld());
+    let result = MapChunk::decode(&mut r, &ChunkShape::overworld(lodestone_v1_14::PROTOCOL));
     assert!(result.is_err(), "extra blob bytes must be rejected");
 }
 
@@ -296,6 +296,6 @@ fn update_light_wrong_array_length_rejected() {
     let body = w.into_vec();
 
     let mut r = Reader::new(&body);
-    let result = UpdateLight::decode(&mut r);
+    let result = UpdateLight::decode(&mut r, lodestone_v1_14::PROTOCOL);
     assert!(result.is_err(), "wrong light-array length must be rejected");
 }

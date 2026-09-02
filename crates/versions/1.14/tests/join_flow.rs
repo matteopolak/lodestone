@@ -406,13 +406,31 @@ fn server() -> ServerAddress {
 }
 
 #[test]
-fn supports_only_protocol_754() {
+fn supports_the_three_era_protocols_and_nothing_else() {
     let adapter = V735Adapter::new();
+    assert!(adapter.supports(498));
+    assert!(adapter.supports(578));
     assert!(adapter.supports(754));
     assert!(!adapter.supports(776));
     assert!(!adapter.supports(47));
+    assert!(!adapter.supports(340));
+    // 1.13.2's protocol sits between 340 and 498 and is deliberately *not*
+    // in this era: it carries light inside the chunk packet.
+    assert!(!adapter.supports(404));
     assert_eq!(adapter.protocol_version(), 754);
-    assert_eq!(adapter.minecraft_versions(), &["1.16.5"]);
+    assert_eq!(
+        adapter.minecraft_versions(),
+        &["1.14.4", "1.15.2", "1.16.5"]
+    );
+
+    // A zero-argument adapter speaks the newest release; an adapter built for
+    // a protocol reports that one.
+    for protocol in [498, 578, 754] {
+        assert_eq!(
+            lodestone_v1_14::adapter_for(protocol).protocol_version(),
+            protocol
+        );
+    }
 }
 
 #[test]
