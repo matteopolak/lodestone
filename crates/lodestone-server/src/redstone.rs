@@ -1022,7 +1022,7 @@ mod tests {
 
     /// The strong-power path: a lit torch sitting directly below `pos`
     /// gives the (conductor) block at `pos` a direct signal of 15 — cited
-    /// from `RedstoneTorchBlock.getDirectSignal`, `direction == DOWN`.
+    /// from vanilla's own torch-block direct-signal getter, `direction == DOWN`.
     #[test]
     fn a_lit_torch_gives_direct_signal_to_the_block_directly_above_it() {
         let torch = "minecraft:redstone_torch[lit=true]";
@@ -1120,12 +1120,12 @@ mod tests {
 
     /// `alternate_signal` reads the clockwise/counterclockwise neighbours of
     /// a diode facing `East` — clockwise(East) = South, counterclockwise(East)
-    /// = North (vanilla's own `Direction.getClockWise`). Uses a
+    /// = North (vanilla's own clockwise-direction getter). Uses a
     /// WIRE as the side source rather than a torch: `control_input_signal`'s
     /// `!only_diodes` branch reads a wire's `POWER` directly regardless of
     /// direction, whereas a torch only ever contributes through
-    /// `getDirectSignal`, which (per `RedstoneTorchBlock.getDirectSignal`,
-    /// `:99-101`) is nonzero **only** when `direction == DOWN` — a torch
+    /// `getDirectSignal`, which (per vanilla's own torch-block direct-signal
+    /// getter) is nonzero **only** when `direction == DOWN` — a torch
     /// sitting to the *side* of a diode can never supply a side input at
     /// all, direct or otherwise. An earlier version of this test placed a
     /// torch here and asserted `15`; it was wrong, not the code — caught by
@@ -1192,8 +1192,8 @@ mod tests {
 
     /// `control_input_signal`'s `!only_diodes` branch reaches
     /// `direct_signal`, and a torch's own `getDirectSignal` is nonzero only
-    /// for `direction == Down` (`RedstoneTorchBlock.getDirectSignal`,
-    /// `:99-101` — see `alternate_signal_reads_the_clockwise_and_counterclockwise_neighbours`
+    /// for `direction == Down` (vanilla's own torch-block direct-signal getter
+    /// — see `alternate_signal_reads_the_clockwise_and_counterclockwise_neighbours`
     /// above for the same fact stated for the side-input case).
     /// `dir = Down` here is what actually exercises the accepting branch;
     /// an earlier version of this test used `East` and got `0` where it
@@ -1447,7 +1447,7 @@ mod tests {
     /// at all**, in any direction, while still emitting weakly.
     ///
     /// None of the three overrides `getDirectSignal`, so each keeps
-    /// `BlockBehaviour.getDirectSignal`'s `return 0`. This is the row that would
+    /// vanilla's own base block-behaviour direct-signal getter's `return 0`. This is the row that would
     /// be got wrong by assuming "a source with signal 15 must strongly power
     /// something", and getting it wrong is invisible until a specific
     /// through-a-conductor contraption fails.
@@ -1683,7 +1683,7 @@ mod tests {
             Direction::South
         );
         // No `face` at all falls back to the wall reading, matching
-        // `AttachFace.WALL` being the registered default.
+        // vanilla's own wall attach-face being the registered default.
         assert_eq!(
             attached_connected_direction("minecraft:lever[facing=west]"),
             Direction::West
