@@ -28,6 +28,34 @@ network call, and critically the refresh token is not even read, since redemptio
 before falling back to redeeming the stored refresh token, and only a dead refresh token
 (`invalid_grant`) triggers an interactive device-code sign-in.
 
+**The browser build signs in with the same device-code flow, over the same Xbox Live -> XSTS
+-> Minecraft-services -> profile chain, on the same `reqwest::Client` type** — `lodestone-auth`'s
+`flow` module is not native-only; only `flow::PendingLogin::wait` (which blocks on
+`tokio::time::sleep`) is, because that traps on wasm32 rather than merely failing to compile.
+A wasm32 caller drives `PendingLogin::poll_once` from its own timer instead
+(`lodestone-shell/src/menu/accounts.rs::run_device_code_login_wasm`, spawned via
+`wasm_bindgen_futures::spawn_local` rather than an OS thread, sleeping via
+`crate::platform::relay::sleep`'s `setTimeout` future rather than `tokio::time::sleep`). What
+*is* still native-only is `browser_login` — the **loopback** flow, which binds a `127.0.0.1`
+listener and launches an OS browser process, neither of which is meaningful from inside a
+browser tab. Device code needs neither: it shows a short code and a link, which is exactly the
+UI the account screen already drew for the (previously unreachable) `SignIn::Waiting` state.
+
+The browser has no OS keychain, so `store::LocalStorageStore` stands in for
+`store::KeychainStore` there (`AccountSecrets::open()` picks between them per target) — a real
+`SecretStore`, not a stub, but **not equivalent protection**: `localStorage` is plaintext,
+readable by any script on the same origin, and is cleared by "clear site data" rather than an
+OS-level credential store. `StorageMode::BrowserLocalStorage` is a distinct enum variant from
+`StorageMode::Keychain` for exactly that reason — a UI must not report the two the same way.
+`AccountsMetadata`'s own `load_from`/`save_to` similarly gained a `localStorage`-backed wasm32
+arm: `std::fs` always returns `Err(Unsupported)` there, which the native code already treated
+as "no file yet" — so before this, the browser roster was silently empty on every single
+launch, and a signed-in account could never survive a reload. One gap remains: a browser
+account's skin is not fetched (`lodestone_auth::texture::fetch_texture`'s host-allowlist check
+has not been ported), so it plays with the default skin rig until that lands — everything else
+about a signed-in browser account (joining online-mode servers, the ownership gate, singleplayer)
+works identically to native.
+
 The join path itself resolves an **intent**, not a resolved session, on the net thread (the
 only place that can `await`): `RemoteAuth::SelectedAccount` (the production multiplayer path)
 resolves the switcher's selection through the keychain and Microsoft; `RemoteAuth::Offline`
@@ -101,10 +129,11 @@ is none. A third diagnostic mode added later has to obtain one too, or it does n
 `Mode::Window` deliberately does *not* go through that check: it has a UI, so showing the gate
 and letting the player add an account is a better answer than exiting.
 
-**The browser build cannot currently pass the gate**, because it has no Microsoft sign-in: the
-flow needs an OS keychain for the refresh token and a blocking HTTP client, neither of which
-exists on `wasm32`. The Add Account button there reports that in a sentence rather than doing
-nothing. Implementing a browser sign-in is what unblocks the web build.
+**The browser build can pass the gate**: Add Account there drives the device-code flow (see
+above), which needs neither an OS keychain nor a blocking HTTP client — the two things that
+used to make this structurally impossible. Before that flow existed, `AccountsMetadata`'s
+`localStorage` arm didn't either, so even a signed-in account (had one been reachable) would
+not have survived past the roster read on the very next launch; both gaps closed together.
 
 ### The offline fallback identity
 

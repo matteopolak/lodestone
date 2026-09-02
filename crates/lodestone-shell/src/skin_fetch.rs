@@ -265,12 +265,16 @@ fn write_cache(id: uuid::Uuid, model: PlayerModelType, png: &[u8]) {
 /// declares no skin" (the common case for an account that has never set one)
 /// just as much as for a failure, and both are logged; no caller has anything
 /// different to do about them.
-/// Native-only. Both parameter types are `cfg(not(wasm32))` at their own crates:
-/// `reqwest` is not a browser dependency of this crate, and
-/// `lodestone_auth::Profile` lives in the `flow` module gated with the rest of the
-/// Microsoft sign-in. Its only callers are in `menu::accounts`' sign-in workers,
-/// which are gated for the same reason — so there is no browser call site to
-/// satisfy, and no stub is needed.
+/// Native-only — but **not** because either parameter type is: `reqwest::Client`
+/// and `lodestone_auth::Profile` both compile and work on wasm32 now (`flow`,
+/// the module `Profile` lives in, is no longer native-only — see that
+/// module's doc). What stays native-only is the allow-list check this
+/// function goes through, [`lodestone_auth::texture::fetch_texture`], which
+/// has not been ported. `menu::accounts::finish_ms_token` — this function's
+/// one caller, shared by both sign-in flows on both targets — skips this
+/// call on wasm32 rather than gating itself, so a browser account still
+/// signs in and joins; it just keeps the default skin rig until this is
+/// ported.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn fetch_own_skin(
     client: &reqwest::Client,

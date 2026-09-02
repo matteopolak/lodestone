@@ -49,20 +49,45 @@ pub use hash::server_hash;
 /// browser, with no code to type. The other front end onto the same
 /// [`flow`]-shaped token; see that module's docs for why loopback rather than an
 /// embedded webview.
+///
+/// Native-only, unlike [`flow`] below: it binds a `127.0.0.1` listener and
+/// launches the platform's browser, neither of which a wasm32 build can do
+/// (it *is* the browser). [`flow`]'s device-code flow is the wasm32 front end
+/// onto the identical downstream token chain.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod browser_login;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod cache;
 /// Secure chat: fetching the Mojang-issued RSA chat-session key pair and
-/// signing outgoing messages with it. Native-only for the same reason
-/// [`flow`] is — it makes an HTTPS call to `api.minecraftservices.com` — see
-/// that module's doc comment for the full citation of what was and was not
-/// possible to verify against an outside source.
+/// signing outgoing messages with it. Native-only — it makes an HTTPS call to
+/// `api.minecraftservices.com` with the native-only `rsa`/`sha2` chain (see
+/// this crate's `Cargo.toml`) — see that module's doc comment for the full
+/// citation of what was and was not possible to verify against an outside
+/// source.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod chat_session;
-#[cfg(not(target_arch = "wasm32"))]
+/// The Microsoft device-code OAuth flow and the Xbox Live -> XSTS ->
+/// Minecraft-services token chain.
+///
+/// **Not gated**, unlike this crate's other network modules. The device-code
+/// flow needs no listener and no OS keychain — it shows a short code and
+/// polls — so it is the one sign-in front end that ports to a browser: see
+/// `crate::browser_login`'s doc for why the *loopback* flow specifically
+/// cannot. Everything from [`flow::MsToken`] onward (Xbox Live, XSTS, the
+/// Minecraft-services login and profile fetch) is the same code path on both
+/// targets, over the same `reqwest::Client` — see this crate's `Cargo.toml`
+/// for why `reqwest` itself is not native-only either. Only
+/// [`flow::PendingLogin::wait`] (which blocks the calling task on
+/// `tokio::time::sleep`, `Instant`-only) stays native; a wasm32 caller drives
+/// [`flow::PendingLogin::poll_once`] from its own browser-clock timer instead
+/// — `crates/lodestone-shell/src/menu/accounts.rs` is that caller.
 pub mod flow;
-#[cfg(not(target_arch = "wasm32"))]
+/// Composing [`flow`] + [`store`] + [`metadata`] into an actual login.
+///
+/// Not gated, for [`flow`]'s own reason: every piece it composes now has a
+/// wasm32 arm (`store::LocalStorageStore` in place of the OS keychain), so
+/// the composition itself needs no fork — a browser sign-in and a native one
+/// call the exact same [`finish_interactive`]/[`try_cached_session`].
 pub mod login;
 /// The ownership proof every play path in the shell must be handed: a token
 /// that can only be produced from a roster holding a real account.
@@ -75,15 +100,21 @@ pub mod entitlement;
 /// names, and which one is selected.
 ///
 /// **Not `cfg`-gated, unlike its neighbours here.** It is `serde` + `uuid` +
-/// `std::path` with no HTTP client, no keychain and no runtime — it was gated only
-/// because the whole native block was written as one unit. `lodestone-shell`'s
+/// `std::path` with no HTTP client and no runtime — it was gated only because
+/// the whole native block was written as one unit. `lodestone-shell`'s
 /// account-switcher screen names [`AccountProfile`] and [`AccountsMetadata`]
 /// throughout its UI *state*, so gating the types (rather than the sign-in flow
 /// that needs a network) forced the browser build of that screen to fail with 27
-/// errors for want of two plain structs. Its `std::fs` load/save degrade to
-/// `Err(Unsupported)` on wasm32 — measured, not assumed — which surfaces as an
-/// empty roster: the correct browser answer, since there is no Microsoft sign-in
-/// there to populate one.
+/// errors for want of two plain structs.
+///
+/// **`std::fs::read_to_string`/`std::fs::write` always fail on wasm32**
+/// (`Err(Unsupported)`, measured, not assumed) — so `load_from`/`save_to`'s
+/// native bodies alone left the browser roster permanently empty on every
+/// launch: an account could sign in but a reload could never see it again,
+/// which is a real regression, not the "correct browser answer" an earlier
+/// version of this doc claimed. Both functions now carry a `wasm32` arm that
+/// reaches `localStorage` instead, keyed by the same [`std::path::Path`] the
+/// native arm would open — see [`metadata::AccountsMetadata::load_from`].
 pub mod metadata;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod migrate;
@@ -93,10 +124,20 @@ pub mod migrate;
 /// `std::env::var_os`, which on wasm32 simply yields `None` for every variable and
 /// falls through to the same default it would on a machine with no `HOME`.
 pub mod paths;
-#[cfg(not(target_arch = "wasm32"))]
+/// Where the Microsoft refresh token, and the session derived from it,
+/// actually live.
+///
+/// **Not gated.** [`store::SecretStore`], [`store::CachedSession`] and
+/// [`store::MemoryStore`] have no keychain dependency and never did; only
+/// [`store::KeychainStore`] (the real OS-keychain backend) is native-only, and
+/// [`store::LocalStorageStore`] is its wasm32 sibling — see that module's docs
+/// for why a browser's `localStorage` is a strictly weaker protection than an
+/// OS keychain, not a drop-in equivalent of one.
 pub mod store;
 /// Fetching a skin/cape texture under authlib's own `TextureUrlChecker` host
-/// restriction (issue #62). Native-only, as [`flow`] is and for the same reason.
+/// restriction (issue #62). Native-only — unlike [`flow`], nothing here has a
+/// wasm32 caller yet (`lodestone-shell`'s own skin fetch is a separate,
+/// unrelated module).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod texture;
 /// The process-default rustls crypto provider (issue #446). Native-only, for the
@@ -119,21 +160,26 @@ pub use chat_session::{
 
 pub use entitlement::Entitlement;
 pub use error::XstsErrorKind;
-#[cfg(not(target_arch = "wasm32"))]
+// `authenticate_with_device_code` is omitted here deliberately: it drives
+// `PendingLogin::wait`, which is native-only (see `flow`'s module doc). Every
+// other name compiles and is meaningful on both targets.
 pub use flow::{
     DeviceCodePrompt, HasJoinedProfile, HasJoinedProperty, MOJANG_CLIENT_ID, MsToken,
-    PendingLogin, Profile, ProfileSkin, Session, SkinVariant, authenticate_with_device_code,
-    has_joined, join_server, poll_token, refresh_token, request_device_code,
-    session_from_ms_token,
+    PendingLogin, Profile, ProfileSkin, Session, SkinVariant, has_joined, join_server, poll_token,
+    refresh_token, request_device_code, session_from_ms_token,
 };
 #[cfg(not(target_arch = "wasm32"))]
+pub use flow::authenticate_with_device_code;
 pub use login::{
     CachedSessionOutcome, SelectedAccount, finish_interactive, resolve_client_id,
     resolve_selected_account, resolve_selected_account_with, try_cached_session,
 };
 pub use metadata::{AccountProfile, AccountsMetadata};
 #[cfg(not(target_arch = "wasm32"))]
-pub use store::{AccountSecrets, KeychainStore, MemoryStore, SecretStore, StorageMode};
+pub use store::KeychainStore;
+#[cfg(target_arch = "wasm32")]
+pub use store::LocalStorageStore;
+pub use store::{AccountSecrets, MemoryStore, SecretStore, StorageMode};
 #[cfg(not(target_arch = "wasm32"))]
 pub use texture::{
     ALLOWED_TEXTURE_DOMAIN, ALLOWED_TEXTURE_SCHEMES, MAX_TEXTURE_BYTES, fetch_texture,

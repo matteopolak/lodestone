@@ -59,8 +59,29 @@ impl AccountsMetadata {
 
     /// As [`Self::load`], from an explicit path (for tests, so nothing
     /// touches a developer's real metadata file).
+    ///
+    /// **wasm32**: `std::fs::read_to_string` always returns
+    /// `Err(Unsupported)` on this target (measured; `CLAUDE.md`), which this
+    /// function's own `map_or_else` was already built to treat as "missing
+    /// file" rather than a hard error — so the browser build used to load the
+    /// empty default on *every* launch, roster included, with no way to ever
+    /// round-trip a saved account. The wasm32 arm below reaches
+    /// `localStorage` instead, keyed by `path` exactly like
+    /// [`Self::save_to`]'s wasm32 arm writes it, so the pair actually
+    /// round-trips there.
     #[must_use]
     pub fn load_from(path: &Path) -> Self {
+        #[cfg(target_arch = "wasm32")]
+        {
+            let Some(storage) = local_storage() else {
+                return Self::default();
+            };
+            let Ok(Some(text)) = storage.get_item(&storage_key(path)) else {
+                return Self::default();
+            };
+            return Self::from_json(&text);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
         std::fs::read_to_string(path).map_or_else(|_| Self::default(), |t| Self::from_json(&t))
     }
 
@@ -150,15 +171,44 @@ impl AccountsMetadata {
     ///
     /// # Errors
     /// Returns the underlying I/O error if the directory cannot be created or
-    /// the file cannot be written.
+    /// the file cannot be written (native), or if `localStorage` cannot be
+    /// reached at all (wasm32) — see [`Self::load_from`]'s doc.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let text =
             serde_json::to_string_pretty(&self.to_json()).unwrap_or_else(|_| "{}".to_owned());
-        std::fs::write(path, text)
+        #[cfg(target_arch = "wasm32")]
+        {
+            let storage = local_storage()
+                .ok_or_else(|| std::io::Error::other("no `localStorage` available in this browser"))?;
+            return storage
+                .set_item(&storage_key(path), &text)
+                .map_err(|e| std::io::Error::other(format!("{e:?}")));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(path, text)
+        }
     }
+}
+
+/// The live `localStorage` handle, or `None` if this page has none — no
+/// global `window` (a non-browser wasm host), or storage disabled/blocked by
+/// the user's browser settings. wasm32-only; see [`AccountsMetadata::load_from`].
+#[cfg(target_arch = "wasm32")]
+fn local_storage() -> Option<web_sys::Storage> {
+    web_sys::window()?.local_storage().ok()?
+}
+
+/// The `localStorage` key [`AccountsMetadata::load_from`]/[`AccountsMetadata::save_to`]
+/// use for `path` — the same [`Path`] the native arm would open, so a test
+/// (or a caller) that points both at a distinct temp path on either target
+/// cannot collide with a developer's real roster.
+#[cfg(target_arch = "wasm32")]
+fn storage_key(path: &Path) -> String {
+    format!("lodestone:{}", path.to_string_lossy())
 }
 
 fn profile_from_json(value: &serde_json::Value) -> Option<AccountProfile> {

@@ -78,9 +78,23 @@ impl XstsErrorKind {
 #[non_exhaustive]
 pub enum AuthError {
     /// A network-level or HTTP transport error from the underlying client.
-    #[cfg(not(target_arch = "wasm32"))]
+    ///
+    /// **Not gated**, unlike most of this enum: `reqwest::Error` exists on
+    /// both targets (`crate::flow` now compiles for wasm32 too — see that
+    /// module's doc), so every `?` on a `reqwest` call needs this arm on
+    /// wasm32 exactly as it does natively.
     #[error("http request failed: {0}")]
     Http(#[from] reqwest::Error),
+
+    /// A `crate::store::LocalStorageStore` operation failed: no global
+    /// `window` in this wasm host, or the browser's `localStorage` itself is
+    /// unavailable (disabled, or blocked by the user's settings). The wasm32
+    /// counterpart to [`AuthError::Keychain`] — never a silent fallback to a
+    /// weaker store than [`crate::store::AccountSecrets::open`] already
+    /// decided on.
+    #[cfg(target_arch = "wasm32")]
+    #[error("browser storage error: {0}")]
+    Storage(String),
 
     /// A response could not be parsed as the expected JSON shape.
     #[error("failed to parse response json: {0}")]
