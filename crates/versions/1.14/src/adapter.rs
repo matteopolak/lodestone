@@ -2911,7 +2911,11 @@ impl VersionAdapter for V735Adapter {
                         )));
                     }
                 };
-                let body = ResourcePackReceive { result };
+                let body = ResourcePackReceive {
+                    // Protocol 110 only; `until = 110` drops it here.
+                    hash: String::new(),
+                    result,
+                };
                 Ok(Some((
                     play::serverbound::RESOURCE_PACK_RECEIVE,
                     encode_body(&body)?,

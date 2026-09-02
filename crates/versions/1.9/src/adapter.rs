@@ -2873,7 +2873,13 @@ impl VersionAdapter for V340Adapter {
                         )));
                     }
                 };
-                let body = ResourcePackReceive { result };
+                let body = ResourcePackReceive {
+                    // Protocol 110 echoes the pushed pack's hash back; every
+                    // later protocol in this era dropped it, and `until = 110`
+                    // keeps it off the wire here.
+                    hash: String::new(),
+                    result,
+                };
                 Ok(Some((
                     play::serverbound::RESOURCE_PACK_RECEIVE,
                     encode_body(&body)?,
