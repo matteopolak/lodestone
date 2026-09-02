@@ -1,8 +1,8 @@
 //! `java.util.Random`, reproduced exactly.
 //!
 //! Vanilla particles draw every one of their constants — lifetime, initial
-//! velocity, colour jitter, sprite choice — from `RandomSource.create()`, which
-//! is a `LegacyRandomSource` wrapping the same 48-bit LCG as
+//! velocity, colour jitter, sprite choice — from vanilla's own random-source
+//! factory, which wraps the same 48-bit LCG as
 //! `java.util.Random`. Reproducing it means a seeded engine replays a byte-exact
 //! particle burst, which is what makes the parity tests in this crate able to
 //! assert concrete numbers instead of ranges.
@@ -17,7 +17,7 @@
 //! directly (`next_f32`/`next_f64`/`next_i32_bound`/`next_bool`, in place of
 //! this module's old `next_float`/`next_double`/`next_int_bound`/`next_bool`
 //! names). See that crate's docs for why `lodestone-worldgen-core`'s
-//! `LegacyRandomSource` is the one deliberate holdout from the consolidation.
+//! legacy random-source implementation is the one deliberate holdout from the consolidation.
 //!
 //! # Parity is *not* required here, and that is worth stating
 //!
