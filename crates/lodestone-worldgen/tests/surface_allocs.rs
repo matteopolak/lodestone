@@ -1,4 +1,4 @@
-//! U21's acceptance criterion (issue #501): a chunk's worth of surface rules
+//! U21's acceptance criterion: a chunk's worth of surface rules
 //! allocates a **bounded** amount that does not scale with the number of
 //! pre-surface probes.
 //!
@@ -422,7 +422,7 @@ fn nothing_is_interned_during_a_surface_scan() {
             "[{label}] a surface scan interned {} new state(s) over {} probes. \
              Every state this engine can emit is resolved once in \
              `SurfaceSystem::new`; anything interned here is a string being \
-             resolved inside the scan, which is the cost issue #501 removed.",
+             resolved inside the scan, which is the cost up-front resolution removed.",
             scene.interner.len() - before,
             run.probes
         );

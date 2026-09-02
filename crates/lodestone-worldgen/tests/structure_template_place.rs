@@ -1,4 +1,4 @@
-//! Template-driven structures reach **blocks** (issue #514's S2).
+//! Template-driven structures reach **blocks**.
 //!
 //! The one thing about this unit that playing the game cannot spot-check: that a
 //! served chunk at a known structure start really differs from the same chunk

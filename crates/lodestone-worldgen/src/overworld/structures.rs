@@ -481,7 +481,7 @@ impl OverworldGenerator {
         narrowed.packed_by_structure()
     }
 
-    /// Stage 4b (issue #514's S2): writes every template-driven piece that
+    /// Stage 4b: writes every template-driven piece that
     /// touches this chunk into `world`.
     ///
     /// # Where this sits, and why
@@ -573,7 +573,7 @@ impl OverworldGenerator {
         world
     }
 
-    /// Stage 0c (issue #514's S3): this chunk's beard term.
+    /// Stage 0c: this chunk's beard term.
     ///
     /// Cheap in the case that matters. A generator with no structure data returns
     /// [`Beardifier::empty`] without touching the store; a generator *with*

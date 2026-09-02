@@ -1,4 +1,4 @@
-//! The plugin-facing chunk generation seam (issue #132's decision).
+//! The plugin-facing chunk generation seam.
 //!
 //! # The decision
 //!

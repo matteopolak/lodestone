@@ -299,7 +299,7 @@ fn where_the_ore_stages_allocations_come_from() {
     }
     println!("  rng_draws[Ore]            : {}", snap.rng_draws[Stage::Ore as usize]);
 
-    // U21 (issue #501) added this table. `rng_draws[Ore]` alone is the right
+    // U21 added this table. `rng_draws[Ore]` alone is the right
     // control for a change to the ore engine and the wrong one for a change to
     // any other stage — and "RNG order is the world", so every unit that edits
     // a stage needs its own stage's draw count and entry count, digit-identical

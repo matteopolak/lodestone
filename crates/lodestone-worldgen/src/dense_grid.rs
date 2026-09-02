@@ -1,6 +1,6 @@
 //! A dense, palette-indexed block field over a fixed axis-aligned box — O(1)
 //! array access instead of a `HashMap<(i32,i32,i32), String>` keyed by world
-//! coordinates (issue #295's Job 2).
+//! coordinates.
 //!
 //! # Why this exists
 //!
@@ -12,7 +12,7 @@
 //! ~68s in debug. Every carve read/write and every `materialize_world`/
 //! `intern_from_world` cell pays a hash of a 3-tuple key plus, for a write,
 //! a fresh heap-allocated `String` clone — for a `16×384×16` chunk that is
-//! ~98,304 cells, and issue #295's ore composition (which runs the
+//! ~98,304 cells, and ore composition (which runs the
 //! pre-ore pipeline, carve included, for all 9 chunks in its 3×3
 //! neighbourhood) multiplies that by 9 again.
 //!
