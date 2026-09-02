@@ -55,11 +55,11 @@
 //!   compiled `final_density` carried **708** of these slots, reached ~68,900
 //!   times per column, so 20 workers fought over 708 cache lines and IPC fell
 //!   from **5.46 to 1.32**. Deleting the memo is value-invariant on real data by
-//!   two independent arguments — vanilla's unwrapped `Marker.compute` does not
+//!   two independent arguments — vanilla's own unwrapped marker-compute does not
 //!   memoise at all, and every `cache_2d` in 26.2's shipped data wraps an
 //!   xz-only subtree — and the 45-column/5-seed dump is byte-identical across the
 //!   change.
-//! * **`flat_cache`** (vanilla's own `NoiseChunk.FlatCache` inner class)
+//! * **`flat_cache`** (vanilla's own noise-chunk-sampler's flat-cache inner class)
 //!   marks the *same kind* of `(x, z)`-only boundary as `cache_2d` — vanilla's
 //!   `overworld/continents.json` / `overworld/erosion.json` /
 //!   `overworld/ridges.json` are each literally `flat_cache(shifted_noise(...,
@@ -246,8 +246,8 @@ pub trait Resolver {
     /// Every `worldgen/structure_set/*.json` id this resolver can serve, e.g.
     /// `["minecraft:villages", "minecraft:shipwrecks", …]`.
     ///
-    /// This is the *entry point* to the whole structure engine: vanilla's
-    /// `ChunkGeneratorStructureState.createForNormal` iterates the structure-set
+    /// This is the *entry point* to the whole structure engine: vanilla's own
+    /// chunk-generator structure-state "create for normal" iterates the structure-set
     /// registry, so a resolver that returns nothing here places no structures at
     /// all — the same "no data supplied" convention as
     /// [`biome_parameters`](Self::biome_parameters), and the reason
@@ -1159,8 +1159,9 @@ impl<'a> Builder<'a> {
         NormalNoise::create(&mut src, params.first_octave, &params.amplitudes)
     }
 
-    /// Instantiates a `NormalNoise` by id, seeded exactly as vanilla's
-    /// `RandomState.getOrCreateNoise` (`master.fromHashOf(id)`). Used by the
+    /// Instantiates a `NormalNoise` by id, seeded exactly as vanilla's own
+    /// per-world random-state holder's get-or-create-noise (its own positional
+    /// factory forked from a hash of `id`). Used by the
     /// surface system for its `surface`/`surface_secondary` and
     /// `noise_threshold` noises.
     #[must_use]
@@ -1324,7 +1325,9 @@ impl<'a> Builder<'a> {
                     functions,
                 }
             }
-            // `MapCodec.unit(new EndIslandDensityFunction(0L))` — the document
+            // Vanilla's own codec for this density-function type is a unit
+            // codec wrapping a fresh end-islands density function built with
+            // seed 0 — the document
             // carries no arguments at all and always deserialises with seed 0;
             // vanilla's own random-state class substitutes the raw world seed afterwards,
             // which is `self.seed` and *not* a positional fork.

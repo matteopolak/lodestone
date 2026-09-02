@@ -10,7 +10,7 @@ use crate::rng::{PositionalRandomFactory, RandomSource};
 
 const ROUND_OFF: f64 = 3.355_443_2e7;
 
-/// `PerlinNoise.wrap(x)` — folds large coordinates back toward the origin.
+/// Vanilla's own Perlin-noise wrap at `(x)` — folds large coordinates back toward the origin.
 #[must_use]
 pub fn wrap(x: f64) -> f64 {
     x - (lfloor(x / ROUND_OFF + 0.5) as f64) * ROUND_OFF
@@ -192,7 +192,7 @@ impl PerlinNoise {
     }
 }
 
-/// `PerlinNoise.makeAmplitudes` — turns a sorted octave set into a
+/// Vanilla's own Perlin-noise make-amplitudes — turns a sorted octave set into a
 /// `(first_octave, amplitudes)` pair.
 fn make_amplitudes(octave_set: &[i32]) -> (i32, Vec<f64>) {
     assert!(!octave_set.is_empty(), "Need some octaves!");

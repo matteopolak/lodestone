@@ -22,13 +22,13 @@
 //! 4. **`cache_2d` / `cache_once` scoping** — transparent *here*; `cache_2d` is
 //!    a real memo only in the point interpreter.
 //! 5. **`cache_all_in_cell`** — transparent as a value, but it is what selects
-//!    `Mth.lerp3` (X-inner) over the incremental chain (Y-inner) for the
+//!    vanilla's own math-helper trilinear lerp (X-inner) over the incremental chain (Y-inner) for the
 //!    interpolation. See [`Field::interpolate`].
 //!
 //! # Float order
 //!
 //! Every operation here is IEEE-exact: `+`, `-`, `*`, `/`, `min`, `max`, `abs`,
-//! `clamp`, and the `Mth.lerp*` family built from them. No `mul_add`, no FMA, no
+//! `clamp`, and vanilla's own math-helper lerp family built from them. No `mul_add`, no FMA, no
 //! reassociation, and no transcendental — so unlike the noise-init constants
 //! (`crate::math::exp2_exact`) there is no 1-ulp question in the field walk at
 //! all.
@@ -37,7 +37,7 @@ use super::graph::{Graph, NodeId, OpKind};
 use super::scratch::Scratch;
 use crate::density::Context;
 
-/// Cell geometry: `NoiseSettings.getCellWidth()/getCellHeight()` — 4 and 8 for
+/// Cell geometry: vanilla's own noise-settings cell-width/cell-height accessors — 4 and 8 for
 /// the overworld.
 #[derive(Clone, Copy, Debug)]
 pub struct Geom {
@@ -283,13 +283,13 @@ impl<'a> Field<'a> {
     /// [`Self::slot_get`], because adjacent cells *share* corners and the true
     /// number of distinct corner evaluations is `5 × 49 × 5 = 1_225` — dropping
     /// that second layer would multiply the expensive half of the work by five.
-    /// This is vanilla's `CacheAllInCell` hoist, holding the eight corners
+    /// This is vanilla's own cache-all-in-cell hoist, holding the eight corners
     /// rather than the 128 interpolated values, which costs the same arithmetic
     /// and a 128th of the memory.
     ///
     /// # Semantic 5: which interpolation order
     ///
-    /// `Mth.lerp3` — **X inner**, then Y, then Z. Vanilla's `NoiseInterpolator`
+    /// Vanilla's own math-helper trilinear lerp — **X inner**, then Y, then Z. Vanilla's own noise-interpolator
     /// computes the same eight corners two ways and they are different IEEE 754
     /// expressions; the incremental Y-then-X-then-Z update chain is Y-inner and
     /// is **not** what `final_density` reads, because vanilla's own per-chunk

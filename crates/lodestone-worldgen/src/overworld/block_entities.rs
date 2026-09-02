@@ -75,15 +75,15 @@ impl GeneratedBlockEntity {
     }
 }
 
-/// `BeehiveBlockEntity.Occupant`, minus the `entity_data` every generated bee
+/// Vanilla's own beehive-block-entity occupant, minus the `entity_data` every generated bee
 /// shares. See [`GeneratedBlockEntity::Beehive`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BeeOccupant {
-    /// `Occupant.create(random.nextInt(599))`'s argument.
+    /// Vanilla's own bee-occupant constructor's `random.nextInt(599)` argument.
     pub ticks_in_hive: i32,
-    /// Always 600 for a generated bee — `Occupant.create`'s constant. Carried
+    /// Always 600 for a generated bee — vanilla's own bee-occupant constructor's constant. Carried
     /// explicitly rather than implied, because the *other* constructor
-    /// (`Occupant.of`) uses 2400 for a bee with nectar and a future producer may
+    /// (its own "of nectar" constructor) uses 2400 for a bee with nectar and a future producer may
     /// need it.
     pub min_ticks_in_hive: i32,
 }
