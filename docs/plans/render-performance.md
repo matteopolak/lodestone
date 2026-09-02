@@ -237,11 +237,9 @@ Corrections). Vanilla does not render the streamed square: section membership is
 vanilla's own in-view-distance check, whose real expression lives in a separate helper on the
 same type —
 
-```java
-long dx = Math.max(0, Math.abs(chunkX - centerX) - 1);
-long dz = Math.max(0, Math.abs(chunkZ - centerZ) - 1);
-return dx*dx + dz*dz < viewDistance * viewDistance;
-```
+On each horizontal axis, take the chunk distance from the centre, subtract one, and clamp the
+result at zero. A column is in range when the sum of those two values squared is strictly less
+than the view distance squared.
 
 — a **rounded circle with a 1-chunk buffer**, applied by vanilla's own section-occlusion graph
 so out-of-circle sections are never drawn. Porting the
