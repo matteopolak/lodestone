@@ -1,0 +1,226 @@
+//! The guard on "zero cost when no Java plugin is loaded".
+//!
+//! # What this measures, and the trap it exists to avoid
+//!
+//! The issue's packaging constraint is that a user who loads no Java plugin
+//! pays nothing: no `libjvm` linkage, no JVM startup, no code reached. Two
+//! things must hold, and they are checked separately because they fail
+//! separately:
+//!
+//! 1. **Nothing in the workspace depends on this crate.** Checked by scanning
+//!    every manifest — the edge a future change actually adds is a crate
+//!    *naming* this one, and that is a line in a `Cargo.toml`.
+//! 2. **This crate names no JVM linkage of its own**, and if it ever does, it
+//!    does so behind an optional dependency rather than an unconditional one.
+//!
+//! ## Why this is a manifest scan and not a `Cargo.lock` grep
+//!
+//! Because a lockfile grep would report a violation that does not exist.
+//! **`jni` 0.22.4 is already in this workspace's `Cargo.lock`** — pulled in by
+//! `android-activity`, `cpal`, `hickory-*` and `rustls-platform-verifier`, all
+//! of which reach it only on targets we do not build. Measured:
+//! `cargo tree -p lodestone-shell -e normal -i jni` prints *"nothing to
+//! print"* for the host. So a lockfile grep answers a different question than
+//! the one being asked, and answers it wrongly — the same class of mistake as
+//! grepping for a field name and finding every struct that has one.
+//!
+//! ## Why not shell out to `cargo tree`
+//!
+//! `lodestone-app`'s `renderer_free_graph.rs` settled this for the identical
+//! problem and the reasoning is borrowed wholesale: a nested cargo invocation
+//! inside a test contends on the package-cache lock in a shared checkout where
+//! other builds run concurrently, and a test that can hang for an unrelated
+//! reason is worse than one with a narrower subject. `cargo tree` is the
+//! *measurement*, recorded in `docs/java-plugin-bridge.md`; this is the guard.
+//!
+//! # The control
+//!
+//! [`the_detector_finds_a_dependent_where_one_really_exists`] runs the same
+//! parser and the same predicate looking for a crate that **is** widely
+//! depended upon, and must find it. Without that, a parser that silently
+//! returned no dependencies would certify this crate as unreferenced forever —
+//! which is exactly the shape of "an audit that prints nothing is a failure to
+//! run, never a pass".
+
+use std::path::{Path, PathBuf};
+
+/// This crate. Nothing may name it.
+const SELF_NAME: &str = "lodestone-jvm-bridge";
+
+/// Crate names that imply JVM linkage. Substrings are not used — an exact
+/// dependency-key match is what is wanted, since `jni` must not match
+/// `jni-sys` transitively through a name comparison that was too loose.
+const JVM_LINKING_CRATES: &[&str] = &["jni", "jni-sys", "j4rs", "jvm-rs", "robusta_jni"];
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(3)
+        .expect("the crate has three ancestors up to the workspace root")
+        .to_path_buf()
+}
+
+/// Every `Cargo.toml` under `crates/` and `xtask/`.
+fn all_manifests(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.join("crates"), root.join("xtask")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                // `target/` inside a nested workspace member is build output,
+                // not source, and can be enormous.
+                if path.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                stack.push(path);
+            } else if path.file_name().is_some_and(|n| n == "Cargo.toml") {
+                out.push(path);
+            }
+        }
+    }
+    out.push(root.join("Cargo.toml"));
+    out
+}
+
+/// Dependency-table keys from a manifest, from every `[dependencies]`,
+/// `[dev-dependencies]`, `[build-dependencies]` and
+/// `[target.'cfg(...)'.dependencies]` table.
+///
+/// Hand-parsed, following `lodestone-app`'s `renderer_free_graph.rs`: one file,
+/// `key = ...` lines under `[...dependencies]` headers, and a guard crate
+/// growing a TOML dependency would be its own small irony.
+fn dependency_names(manifest: &Path) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(manifest) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    let mut in_deps = false;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_deps = trimmed.ends_with("dependencies]");
+            continue;
+        }
+        if !in_deps || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some((key, _)) = trimmed.split_once('=') {
+            let key = key.trim().trim_matches('"');
+            if !key.is_empty() && !key.contains(' ') {
+                names.push(key.to_owned());
+            }
+        }
+    }
+    names
+}
+
+/// The load-bearing assertion: no crate in this workspace names the bridge, so
+/// it is absent from every default build's graph by construction.
+///
+/// When the bridge does get wired up, it must be behind an **optional
+/// dependency plus a feature that is off by default** — at which point this
+/// test should be updated to assert exactly that, rather than deleted.
+#[test]
+fn nothing_in_the_workspace_depends_on_the_bridge() {
+    let root = workspace_root();
+    let manifests = all_manifests(&root);
+
+    assert!(
+        manifests.len() > 20,
+        "premise failed: found only {} manifests, so the scan is not reaching \
+         the workspace. A pass below would mean nothing.",
+        manifests.len()
+    );
+
+    let mut dependents = Vec::new();
+    for manifest in &manifests {
+        // The crate's own manifest names itself in `[package]`, not in a
+        // dependency table, so it is not a special case — but skip it anyway
+        // so a future dev-dependency on itself reads clearly.
+        if manifest.parent().is_some_and(|p| {
+            p.file_name().is_some_and(|n| n == SELF_NAME)
+        }) {
+            continue;
+        }
+        if dependency_names(manifest)
+            .iter()
+            .any(|name| name == SELF_NAME)
+        {
+            dependents.push(manifest.display().to_string());
+        }
+    }
+
+    assert!(
+        dependents.is_empty(),
+        "{SELF_NAME} is now a dependency of {dependents:?}. The bridge must not \
+         be reachable from a default build — a user who loads no Java plugin \
+         pays no libjvm linkage, no JVM startup and no per-tick cost. If this \
+         edge is deliberate, it belongs behind an OPTIONAL dependency and a \
+         default-off feature, and this test should be changed to assert that \
+         rather than removed. See docs/java-plugin-bridge.md."
+    );
+}
+
+/// The control. The same parser and the same predicate, looking for a crate
+/// that is genuinely depended upon all over the workspace — it must find it.
+///
+/// Without this, a parser that returned an empty list for every manifest would
+/// report the bridge as unreferenced forever, and the pass above would be a
+/// measurement of nothing.
+#[test]
+fn the_detector_finds_a_dependent_where_one_really_exists() {
+    let root = workspace_root();
+    let mut dependents = 0;
+    for manifest in all_manifests(&root) {
+        if dependency_names(&manifest)
+            .iter()
+            .any(|name| name == "lodestone-ecs")
+        {
+            dependents += 1;
+        }
+    }
+    assert!(
+        dependents >= 3,
+        "control failed: the scan found only {dependents} crates naming \
+         lodestone-ecs, which is depended upon widely. The parser is not \
+         reading dependency tables, so a clean result for the bridge proves \
+         nothing."
+    );
+}
+
+/// This crate must not link a JVM. Checked against its own manifest, and
+/// permitting an *optional* dependency only — that is the shape the JNI layer
+/// will land in, and an unconditional one is what must never appear.
+#[test]
+fn the_bridge_names_no_unconditional_jvm_linkage() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).expect("read own manifest");
+    let names = dependency_names(&manifest);
+
+    assert!(
+        !names.is_empty(),
+        "premise failed: this crate's own dependency table did not parse"
+    );
+
+    for candidate in JVM_LINKING_CRATES {
+        if !names.iter().any(|name| name == candidate) {
+            continue;
+        }
+        // Present — permitted only if it is optional.
+        let declared = text
+            .lines()
+            .find(|line| line.trim_start().starts_with(candidate))
+            .unwrap_or("");
+        assert!(
+            declared.contains("optional = true"),
+            "{candidate} is an unconditional dependency of {SELF_NAME}. A JVM \
+             bridge cannot be WASM-sandboxed and must never be linked into a \
+             build that did not ask for it: declare it `optional = true` behind \
+             a default-off feature. Line was: {declared:?}"
+        );
+    }
+}
