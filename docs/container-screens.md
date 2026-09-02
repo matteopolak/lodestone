@@ -65,7 +65,7 @@ row count.
 ### Click handling
 
 `crates/lodestone-game/src/click.rs` and `menu.rs` are a version-free reimplementation of vanilla's
-`AbstractContainerMenu.doClick`, run locally the instant the player clicks so the screen updates before
+own container-click handler, run locally the instant the player clicks so the screen updates before
 the server confirms. It is deliberately faithful to vanilla's quirks rather than "corrected" — a
 corrected implementation would predict a different outcome than the server computes and desync the
 display for a round trip. The server holds its own independent port of the same function as the
@@ -99,7 +99,7 @@ The screen's own input protocol (press/drag/release/keyPress, `MenuInput` in `co
 separate layer from the click predictor above and has its own defect class: the machine can be
 perfectly correct while no input path ever calls it. The number keys 1–9 while a container is open are
 `SWAP` against the hovered slot, not hotbar-selection — that binding is swallowed entirely while any
-screen is open, matching vanilla's `Minecraft.handleKeybinds` gating on no active screen. `Q` (drop)
+screen is open, matching vanilla's own keybind-handling gate on no active screen. `Q` (drop)
 inside a container screen and `Q` during ordinary gameplay are two structurally different mechanisms —
 one is a container click that gets a server round-trip correction on mismatch, the other
 (`DropSelectedItem`/`DropSelectedItemStack`) gets no confirmation packet at all and must predict

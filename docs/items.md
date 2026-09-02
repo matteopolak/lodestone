@@ -159,7 +159,7 @@ into a *fatal* error on world join).
 
 ### Goat horns
 
-`Goat.finalizeSpawn`'s pre-broken-horn roll (10% chance, then a coin flip)
+Vanilla's own post-spawn-finalization pre-broken-horn roll (10% chance, then a coin flip)
 happens once at spawn (`goat_horn_spawn_roll`, `MobSim::spawn_species`),
 carried on `SimMob::has_left_horn`/`has_right_horn` and pushed unconditionally
 into `MetadataField::GoatHorns`, encoded as two booleans at wire indices
