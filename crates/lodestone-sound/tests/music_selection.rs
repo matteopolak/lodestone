@@ -541,8 +541,9 @@ fn a_replacing_track_does_not_replace_itself() {
 /// The tick's load-bearing ordering (vanilla's own tick routine's replacing
 /// branch): on a replacing
 /// selection vanilla stops the old track and sets
-/// `nextSongDelay = nextInt(0, min_delay/2)`, then — in the *same* tick, because
-/// `currentMusic` was not cleared — sees an inactive track and `min`s the delay
+/// its own next-song-delay field to a random value in `[0, min_delay/2)`,
+/// then — in the *same* tick, because
+/// its own current-music field was not cleared — sees an inactive track and `min`s the delay
 /// again with its own next-song-delay computation. Two draws are consumed and the smaller wins.
 #[test]
 fn a_replacing_selection_takes_the_min_of_two_draws() {

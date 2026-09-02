@@ -67,8 +67,8 @@ pub struct AudioEngine {
     /// than leaking it.
     stream_producers: Mutex<HashMap<PlayHandle, Arc<AtomicBool>>>,
     /// The one music voice [`start_music`](Self::start_music) may have live
-    /// at a time — vanilla's `MusicManager` only ever tracks a single
-    /// `currentMusic`, so [`stop_music`](Self::stop_music)/
+    /// at a time — vanilla's own music manager only ever tracks a single
+    /// current-music field, so [`stop_music`](Self::stop_music)/
     /// [`is_music_active`](Self::is_music_active) need no handle argument.
     current_music: Mutex<Option<PlayHandle>>,
 }
@@ -190,7 +190,7 @@ impl AudioEngine {
     /// [`lodestone_audio::StreamVoice`]'s doc for the exact contract.
     ///
     /// Only one music voice may be live at a time (matching vanilla's single
-    /// `currentMusic`): starting a new one first stops whatever this engine
+    /// current-music field): starting a new one first stops whatever this engine
     /// was previously tracking, so a caller that forgets to call
     /// [`stop_music`](Self::stop_music) between tracks cannot leak a producer
     /// thread.
