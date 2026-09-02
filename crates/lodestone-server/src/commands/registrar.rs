@@ -141,37 +141,35 @@ pub type ModifierEntry = Arc<
 >;
 type Modifier = ModifierEntry;
 
-/// `/execute store`'s own piece of `CommandSourceStack.withCallback` —
-/// vanilla attaches a `ResultConsumer` to the source itself, invoked once the
-/// chain's own terminal outcome is known. This crate's [`Dispatcher::dispatch`]
-/// has no per-stage `ContextChain`, only one flat walk to one terminal
-/// executor per (possibly forked) source, so a sink is simpler: a `store`
-/// modifier resolves its target eagerly (the holder names, the storage id and
-/// path — exactly when vanilla's own `storeValue`/`storeData` resolve theirs,
-/// via `c.getSource()` at redirect time, not at apply time) and appends one of
-/// these to [`Ctx::store_sinks`]. [`Dispatcher::dispatch`] calls every
-/// accumulated sink exactly once, with the terminal *executor's* own outcome
-/// (`success = true` and its returned count, or `success = false, result = 0`
-/// on the executor's own failure) — matching vanilla's `BuildContexts.execute`
-/// (`net.minecraft.commands.execution.tasks`), which only ever chains a
-/// `store`-wrapped source's callback onto the *executed* command
-/// (`returningSource.withCallback(...)`, reached only once `currentSources` is
-/// non-empty). A branch that never reaches a terminal at all — a fork
-/// resolving to zero sources, or an earlier modifier throwing mid-chain —
-/// never gets there either in vanilla (the callback is attached to a source
-/// that is simply never executed) or here (the sink is dropped along with the
-/// branch, never called): a store target is genuinely left **unwritten**, not
-/// zeroed, when e.g. `execute store … if entity <nomatch> run …`'s condition
-/// fails. Only a *bare* `execute store … if entity <nomatch>` (nothing after —
-/// `if`'s own terminal executor runs instead of its fork) reliably reports
-/// `0`.
+/// `/execute store`'s own piece of the real per-source result-callback
+/// mechanism — the real rule attaches a result consumer to the source
+/// itself, invoked once the chain's own terminal outcome is known. This
+/// crate's [`Dispatcher::dispatch`] has no per-stage context chain, only one
+/// flat walk to one terminal executor per (possibly forked) source, so a
+/// sink is simpler: a `store` modifier resolves its target eagerly (the
+/// holder names, the storage id and path — exactly when the real store-value/
+/// store-data rules resolve theirs, at redirect time, not at apply time) and
+/// appends one of these to [`Ctx::store_sinks`]. [`Dispatcher::dispatch`]
+/// calls every accumulated sink exactly once, with the terminal *executor's*
+/// own outcome (`success = true` and its returned count, or `success =
+/// false, result = 0` on the executor's own failure) — matching the real
+/// command-execution task chain, which only ever chains a `store`-wrapped
+/// source's callback onto the *executed* command, reached only once there
+/// is at least one current source. A branch that never reaches a terminal at
+/// all — a fork resolving to zero sources, or an earlier modifier throwing
+/// mid-chain — never gets there either in the real rule (the callback is
+/// attached to a source that is simply never executed) or here (the sink is
+/// dropped along with the branch, never called): a store target is
+/// genuinely left **unwritten**, not zeroed, when e.g. `execute store … if
+/// entity <nomatch> run …`'s condition fails. Only a *bare* `execute store …
+/// if entity <nomatch>` (nothing after — `if`'s own terminal executor runs
+/// instead of its fork) reliably reports `0`.
 ///
 /// `Fn(&CommandWorld<'_>, bool, i32)` rather than a `Result`-returning
-/// signature: vanilla's own `storeData` swallows a write failure
-/// (`catch (CommandSyntaxException) {}`) rather than letting a store's own
-/// failure change the wrapped command's reported outcome, and every sink
-/// built in `crate::commands::execute` does the same (`let _ =` on the
-/// underlying store call).
+/// signature: the real store-data rule swallows a write failure rather than
+/// letting a store's own failure change the wrapped command's reported
+/// outcome, and every sink built in `crate::commands::execute` does the same
+/// (`let _ =` on the underlying store call).
 pub type StoreSink = Arc<dyn Fn(&CommandWorld<'_>, bool, i32) + Send + Sync>;
 
 /// One argument node's transmitted identity.
@@ -191,7 +189,7 @@ pub struct WireDescriptor {
 /// `lodestone-ecs` nor the client vocabulary, and the browser bundle is the
 /// measured loser if it did.
 pub struct CommandWorld<'a> {
-    /// The world's shared game rules (issue #327), behind [`RuleStore`].
+    /// The world's shared game rules, behind [`RuleStore`].
     ///
     /// `dyn RuleStore + Sync` because a `CommandWorld` is held across an `await`
     /// inside `serve_play`'s connection task, which `tokio::spawn` requires to be
@@ -226,7 +224,7 @@ pub struct CommandWorld<'a> {
     /// connection's `ChatCommand` arm always has the real handle in scope and
     /// passes `Some`.
     pub mobs: Option<&'a crate::mobs::MobHandle>,
-    /// `/worldborder`'s read/write surface (issue #580) — the same
+    /// `/worldborder`'s read/write surface — the same
     /// [`crate::border::BorderFeed`] `crate::tick::run_tick_loop_with_weather`
     /// now ticks and every production connection reads for its join
     /// broadcast and enforcement. `Option` for the same reason [`Self::mobs`]
@@ -618,13 +616,12 @@ impl Registrar {
         self.tree.root()
     }
 
-    /// A literal child — `Commands.literal(name)`.
+    /// A literal child.
     pub fn literal(&mut self, parent: NodeId, name: &str) -> NodeId {
         self.tree.add_literal(parent, name)
     }
 
-    /// An argument child, with its wire identity recorded in the same call —
-    /// `Commands.argument(name, type)`.
+    /// An argument child, with its wire identity recorded in the same call.
     ///
     /// Returns the node (to hang children off) and the typed key (to read the
     /// value in an executor). Both, rather than one, because both are needed and
@@ -642,10 +639,10 @@ impl Registrar {
         (node, ArgKey { node, tree: self.tree_id, _marker: PhantomData })
     }
 
-    /// Attach an executor and mark the node executable — Brigadier's
-    /// `.executes(…)`, whose two halves are one call here because a node marked
-    /// executable with nothing behind it is a registration bug the tree cannot
-    /// see.
+    /// Attach an executor and mark the node executable — the standard
+    /// "attach an execution handler" operation, whose two halves are one call
+    /// here because a node marked executable with nothing behind it is a
+    /// registration bug the tree cannot see.
     pub fn exec(
         &mut self,
         node: NodeId,
@@ -655,7 +652,8 @@ impl Registrar {
         self.executors.insert(node, Arc::new(executor));
     }
 
-    /// Attach a source-set modifier — Brigadier's `.fork(…)`/`.redirect(…, mod)`.
+    /// Attach a source-set modifier — the standard fork/redirect-with-modifier
+    /// operation.
     ///
     /// `forks` is `true` for the many-out case (`execute as @a`), which changes
     /// error handling: a failure in one branch is swallowed so the others run.
@@ -674,13 +672,13 @@ impl Registrar {
         }
     }
 
-    /// Continue parsing from `target`'s children — Brigadier's `redirect`.
+    /// Continue parsing from `target`'s children — the standard redirect
+    /// operation.
     pub fn redirect(&mut self, node: NodeId, target: NodeId) {
         self.tree.set_redirect(node, target);
     }
 
-    /// Gate `node` and its whole subtree on permission level `level` —
-    /// `Commands.hasPermission(LEVEL_GAMEMASTERS)`.
+    /// Gate `node` and its whole subtree on permission level `level`.
     pub fn require_level(&mut self, node: NodeId, level: u8) {
         self.tree.require_permission(node, level_permission(level));
     }

@@ -1,10 +1,10 @@
-//! The scoreboard store (issue #48's remainder) — objectives and per-holder
+//! The scoreboard store — objectives and per-holder
 //! scores, behind [`ScoreboardHandle`].
 //!
 //! # What it is
 //!
-//! A vanilla scoreboard is `Scoreboard` (objectives, one score table keyed
-//! `(holder, objective)`, display slots and teams). This is the subset a
+//! The real scoreboard record carries objectives, one score table keyed
+//! `(holder, objective)`, display slots and teams. This is the subset a
 //! command layer needs: objectives and scores. No criteria are *simulated* —
 //! a `dummy` objective and a `minecraft.custom:minecraft.deaths` objective
 //! behave identically here, because nothing in this server increments a
@@ -13,7 +13,7 @@
 //! asked for it to. **Teams are a separate store** —
 //! `crate::commands::team_store`, reached through the identical
 //! `WorldStateHandle`-sibling shape this module uses, not folded in here,
-//! matching vanilla's own `Scoreboard` keeping objectives/scores and teams as
+//! matching the real scoreboard record keeping objectives/scores and teams as
 //! two tables. Display slots (`/scoreboard objectives setdisplay`) are still
 //! not modelled at all: nothing in this crate renders a sidebar, so a stored
 //! display slot would be write-only.
@@ -68,9 +68,9 @@ pub struct Objective {
 
 #[derive(Debug, Default)]
 struct ScoreboardState {
-    /// Insertion order, matching vanilla's own iteration order for
-    /// `Scoreboard.getObjectives()` closely enough for `objectives list` to
-    /// read the same way every time it is called.
+    /// Insertion order, matching the real objective-registry's own iteration
+    /// order closely enough for `objectives list` to read the same way every
+    /// time it is called.
     objectives: Vec<Objective>,
     /// `(holder, objective) -> score`. A `HashMap<String, HashMap<String,
     /// i32>>` rather than one map keyed by a tuple: `/scoreboard players
@@ -93,7 +93,7 @@ impl ScoreboardState {
 pub struct ScoreboardHandle(Arc<Mutex<ScoreboardState>>);
 
 /// Why a scoreboard operation could not run — every variant is a player-
-/// facing message, matching vanilla's own `CommandSyntaxException` text
+/// facing message, matching the real command's own error text
 /// closely enough to be recognisable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScoreboardError {
@@ -121,8 +121,8 @@ impl ScoreboardHandle {
         f(&mut self.0.lock().expect("scoreboard lock poisoned"))
     }
 
-    /// `Scoreboard.addObjective` — refuses a duplicate name, vanilla's own
-    /// `ERROR_OBJECTIVE_ALREADY_EXISTS`.
+    /// The real add-objective rule — refuses a duplicate name, the real
+    /// "already exists" error.
     pub fn add_objective(
         &self,
         name: &str,
@@ -142,9 +142,9 @@ impl ScoreboardHandle {
         })
     }
 
-    /// `Scoreboard.removeObjective` — also purges every score recorded under
-    /// it, matching vanilla's own cleanup (`Scoreboard.getPlayerScores`'s
-    /// removal loop in `removeObjective`).
+    /// The real remove-objective rule — also purges every score recorded under
+    /// it, matching the real cleanup (a removal loop over every holder's
+    /// scores in the same rule).
     pub fn remove_objective(&self, name: &str) -> Result<(), ScoreboardError> {
         self.with(|state| {
             let before = state.objectives.len();
@@ -260,8 +260,8 @@ impl ScoreboardHandle {
     }
 
     /// Every holder with at least one recorded score — `*`'s resolution for
-    /// `/scoreboard players list`/`reset`/`operation`, and vanilla's own
-    /// `Scoreboard.getTrackedPlayers()`.
+    /// `/scoreboard players list`/`reset`/`operation`, and the real
+    /// tracked-players query.
     #[must_use]
     pub fn tracked_holders(&self) -> Vec<String> {
         self.with(|state| {
@@ -271,9 +271,9 @@ impl ScoreboardHandle {
         })
     }
 
-    /// `/scoreboard players operation` — `ScoreboardOperations.apply`'s nine
+    /// `/scoreboard players operation` — the real score-operation rule's nine
     /// cases. Both scores are created (defaulting to `0`) if absent, matching
-    /// vanilla's own `getOrCreatePlayerScore`. Returns the target's new
+    /// the real get-or-create-score rule. Returns the target's new
     /// score.
     #[allow(clippy::too_many_lines)]
     pub fn operation(

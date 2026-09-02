@@ -1,5 +1,5 @@
-//! The server's **own** Brigadier command tree, and the execution model
-//! `lodestone-command` deliberately left undefined (issue #48).
+//! The server's **own** Brigadier-shaped command tree, and the execution model
+//! `lodestone-command` deliberately left undefined.
 //!
 //! # What it is
 //!
@@ -45,9 +45,9 @@
 //! [`ServerCommands::wire_tree_for`] with the connection's resolved permission
 //! level and hands the result to
 //! [`ServerProtocol::encode_commands`](crate::ServerProtocol::encode_commands),
-//! at vanilla's own position in the sequence — `PlayerList.placeNewPlayer` sends
-//! it from `sendPlayerPermissionLevel`, after the abilities packet and before
-//! `sendLevelInfo`. A protocol family with no `encode_commands` override sends
+//! at the real join sequence's own position — sent from the permission-level
+//! step, after the abilities packet and before the level-info packet. A
+//! protocol family with no `encode_commands` override sends
 //! nothing, so the legacy families degrade silently rather than breaking.
 //!
 //! # The execution model
@@ -132,8 +132,8 @@ pub mod effect;
 mod effect_command;
 mod execute;
 mod experience;
-/// `/function` and `/reload` (issue #48's remainder — datapack functions and
-/// function tags). See [`function_store`] for the loader itself.
+/// `/function` and `/reload` (datapack functions and function tags). See
+/// [`function_store`] for the loader itself.
 mod function;
 pub mod function_store;
 mod gamemode;
@@ -348,9 +348,8 @@ impl ServerCommands {
     /// `raw` is the **whole typed line, including the leading `/`** — the wire
     /// format `ServerBound::CommandSuggestion`'s own doc describes — and
     /// exactly one leading `/` is stripped here before consulting
-    /// [`Self::suggest`], mirroring vanilla's
-    /// `ServerGamePacketListenerImpl.handleCustomCommandSuggestions`, which
-    /// skips exactly one leading `/` off its `StringReader` before parsing.
+    /// [`Self::suggest`], mirroring the real command-suggestion handler,
+    /// which skips exactly one leading `/` off its input before parsing.
     ///
     /// `start`/`length` name the byte range of `raw` the suggestions replace —
     /// the token currently being typed, i.e. everything after the last space
