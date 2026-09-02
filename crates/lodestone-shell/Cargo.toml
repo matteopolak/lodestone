@@ -76,9 +76,9 @@ lodestone-particle = { workspace = true }
 # The wasm-safe controller core, shared with the browser client so movement has
 # one implementation. The shell adds only the winit key/mouse mapping on top.
 lodestone-controller = { path = "../lodestone-controller" }
-# The workspace's one RFC 1321 MD5, for `offline_identity::offline_uuid` —
-# Java's `UUID.nameUUIDFromBytes("OfflinePlayer:" + name)`, the derivation an
-# offline-mode server keys player data under. Already in this crate's graph
+# The workspace's one RFC 1321 MD5, for `offline_identity::offline_uuid` — the
+# name-based UUID an offline-mode server keys player data under: MD5 over the
+# UTF-8 bytes of "OfflinePlayer:" plus the name, version nibble 3. Already in this crate's graph
 # transitively (`lodestone-server` → `lodestone-worldgen` → here), so this edge
 # adds no compilation, and it is version-free, so `--no-default-features` is
 # unaffected. The alternative was a second MD5 in this crate or a new external

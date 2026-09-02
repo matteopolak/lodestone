@@ -84,10 +84,24 @@ BACKTICKED = re.compile(r"`([A-Za-z][A-Za-z0-9]{3,})`")
 IDENT = re.compile(r"\b([A-Za-z][A-Za-z0-9]{3,})\b")
 
 
+# Scanned surface. `.py`/`.sh`/`.toml`/`Justfile` were added after a 41-citation
+# Python fixture generator was found by accident -- an `.rs`-only net had never
+# opened it. Deliberately NOT scanned, because for these a vanilla name is
+# functional rather than a citation and the owner has ruled they stay:
+#   *.java  -- our own `oracle-java/` harnesses, which must import real classes
+#              to drive the real jar
+#   *.txt   -- those harnesses' dump OUTPUT, where the names are the data
+SCANNED = ("*.rs", "*.wgsl", "*.md", "*.py", "*.sh", "*.toml", "Justfile")
+
+# This script necessarily contains every pattern it searches for.
+SELF = "scripts/clean-room-census.py"
+
+
 def tracked(roots):
     out = subprocess.run(
-        ["git", "ls-files", "*.rs", "*.wgsl", "*.md"], capture_output=True, text=True
+        ["git", "ls-files", *SCANNED], capture_output=True, text=True
     ).stdout.split()
+    out = [f for f in out if f != SELF]
     if not roots:
         return out
     return [f for f in out if any(f.startswith(r.rstrip("/")) for r in roots)]
