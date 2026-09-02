@@ -143,10 +143,10 @@ impl Goal for BrainGoal {
     /// ([`Brain::has_schedule`]), [`Brain::update_activity_from_schedule`] runs
     /// **after**, but only when `candidates` did not just select
     /// [`Activity::PANIC`]. This mirrors vanilla's own split rather than
-    /// inventing one: `VillagerGoalPackages` registers
-    /// `Pair.of(99, UpdateActivityFromSchedule.create())` inside every
+    /// inventing one: vanilla's own villager behaviour-package registration
+    /// wires its schedule-check behaviour into every
     /// *other* activity's own behaviour package (`WORK`, `MEET`, `REST`,
-    /// `IDLE`, `PLAY`) but not inside `getPanicPackage` — so vanilla's own
+    /// `IDLE`, `PLAY`) but not into its panic package — so vanilla's own
     /// schedule-check behaviour simply never runs while `PANIC` is active,
     /// and resumes the moment control returns to any other activity. Without
     /// this guard, a schedule-driven activity would be re-picked over `PANIC`

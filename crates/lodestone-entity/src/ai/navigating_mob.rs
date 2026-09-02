@@ -81,22 +81,21 @@ pub const PANIC_DAMAGE_TICKS: i32 = 40;
 /// Vanilla's base `FOLLOW_RANGE` attribute value, in blocks — the range at
 /// which a mob acquires an attack target.
 ///
-/// `Mob::createMobAttributes` sets it to `16.0` for **every** mob
-/// (`LivingEntity.createLivingAttributes().add(Attributes.FOLLOW_RANGE, 16.0)`).
+/// Vanilla's own generic mob attribute-builder sets it to `16.0` for **every** mob.
 /// Note the *registry* default on the attribute itself is `32.0`
-/// (`Attributes::FOLLOW_RANGE`) and is the wrong number to copy: no
+/// and is the wrong number to copy: no
 /// living entity ever uses it, because the mob supplier always overrides it.
-/// Species that raise it do so in their own `createAttributes` — zombie and
-/// its subclasses `35.0` (`Zombie::createAttributes`), blaze `48.0`
-/// (`Blaze::createAttributes`), enderman `64.0` (`EnderMan::createAttributes`) —
+/// Species that raise it do so in their own attribute-builder — zombie and
+/// its subclasses `35.0`, blaze `48.0`,
+/// enderman `64.0` —
 /// which is why this is only the *default* and a host is expected to feed the
 /// real per-species value with [`set_follow_range`](NavigatingMob::set_follow_range).
 pub const DEFAULT_FOLLOW_RANGE: f64 = 16.0;
 
 /// The floor vanilla puts under the target-acquisition range, in blocks:
-/// `TargetingConditions::test` compares against
-/// `Math.max(this.range * modifier, 2.0)`, whose `2.0` is that class's
-/// `MIN_VISIBILITY_DISTANCE_FOR_INVISIBLE_TARGET`. It exists so an invisible
+/// its own targeting-conditions test compares against
+/// `Math.max(this.range * modifier, 2.0)`, whose `2.0` is vanilla's own
+/// minimum-visibility-distance-for-invisible-target constant. It exists so an invisible
 /// target is still attackable at point-blank range; the floor applies
 /// unconditionally, so a mob whose `FOLLOW_RANGE` is *below* `2.0` still
 /// acquires at `2.0`.
@@ -468,8 +467,8 @@ pub struct NavigatingMob<'w> {
     /// player list** — see [`tame`](Self::tame) for why those are two different
     /// states.
     owner: Option<Vec3>,
-    /// Host injection point: vanilla `TamableAnimal.isTame()` (the `0x04` bit of
-    /// `TamableAnimal.DATA_FLAGS_ID`). Drives [`MobController::is_tame`].
+    /// Host injection point: vanilla's own tameness flag (the `0x04` bit of
+    /// vanilla's own tamed-animal data-flags field). Drives [`MobController::is_tame`].
     ///
     /// Separate from [`owner`](Self::owner) rather than derived from it: a tamed
     /// pet whose owner has logged out still *is* tame, so deriving tameness from
@@ -581,7 +580,7 @@ impl<'w> NavigatingMob<'w> {
     /// network id (`id as u64`) — so two mobs of the same species do not act
     /// in lockstep. The seed is deterministic by design: the same world and
     /// seed replayed produces byte-identical mob behaviour. Vanilla seeds
-    /// `Entity.random` from `RandomSource.create()` per-entity; this is our
+    /// its own per-entity random source the same way; this is our
     /// equivalent, minus the non-determinism.
     #[must_use]
     pub fn new(
@@ -1233,16 +1232,16 @@ impl<'w> NavigatingMob<'w> {
         self.patrol_target
     }
 
-    /// Whether this mob is currently patrolling — vanilla
-    /// `PatrollingMonster.isPatrolling()`, exposed for a host census (e.g.
+    /// Whether this mob is currently patrolling — vanilla's own
+    /// patrolling-monster query, exposed for a host census (e.g.
     /// "which nearby mobs are patrol leaders").
     #[must_use]
     pub fn is_patrolling(&self) -> bool {
         self.patrolling
     }
 
-    /// Whether this mob leads its patrol — vanilla
-    /// `PatrollingMonster.isPatrolLeader()`, exposed for the same census
+    /// Whether this mob leads its patrol — vanilla's own
+    /// patrol-leader query, exposed for the same census
     /// reason as [`is_patrolling`](Self::is_patrolling).
     #[must_use]
     pub fn is_patrol_leader(&self) -> bool {
@@ -1520,8 +1519,8 @@ impl<'w> NavigatingMob<'w> {
             // return meant almost no mob ever fell: one spawned above the
             // terrain, or standing on a block a player mined out from under
             // it, simply hung in the air forever. Vanilla's
-            // `LivingEntity.travel` integrates gravity unconditionally every
-            // tick regardless of whether `Mob.getNavigation()` is currently
+            // own per-tick travel step integrates gravity unconditionally every
+            // tick regardless of whether the mob's own navigation is currently
             // moving anything; this mirrors that by falling toward the
             // ground directly beneath the mob using the same
             // [`step_vertical`] integrator a waypoint-driven fall already
