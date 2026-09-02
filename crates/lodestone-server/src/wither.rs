@@ -1,8 +1,5 @@
-//! The wither boss fight — a port of `WitherBoss`/`WitherSkull`/
-//! `WitherSkullBlock`'s summon detection and combat rules
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/boss/wither/WitherBoss.java`,
-//! `.../world/entity/projectile/hurtingprojectile/WitherSkull.java`,
-//! `.../world/level/block/WitherSkullBlock.java`).
+//! The wither boss fight — a port of vanilla's own wither-boss entity,
+//! wither-skull projectile and wither-skull-block's summon detection and combat rules.
 //!
 //! # What it is
 //!
@@ -32,7 +29,7 @@
 //! entities" issue #278 names: a single radius-based `MOB`-interaction
 //! explosion at the moment invulnerability ends, not a recurring aura —
 //! there is no separate periodic entity-damage pulse anywhere in
-//! `WitherBoss.java` (its only other periodic effect,
+//! Vanilla's own wither-boss entity (its only other periodic effect,
 //! `destroyBlocksTick`, breaks **blocks**, not entities, and is not ported
 //! here — see "What this does not attempt" below).
 //!

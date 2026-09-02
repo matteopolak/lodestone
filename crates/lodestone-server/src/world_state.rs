@@ -48,7 +48,7 @@
 //! ## Gotchas
 //!
 //! * **`GameRules` in `level.dat` is a compound of *string* values**, even for an
-//!   integer rule (`GameRules.java`'s `serialize`/`deserialize` go through
+//!   integer rule (vanilla's own game-rules table's `serialize`/`deserialize` go through
 //!   `String`). Writing `Nbt::Int` there produces a file vanilla silently drops
 //!   every rule from.
 //! * **A locked difficulty refuses a change** ([`set_difficulty`](WorldStateHandle::set_difficulty)

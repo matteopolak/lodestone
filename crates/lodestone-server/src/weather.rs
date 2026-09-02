@@ -3,7 +3,7 @@
 //!
 //! Vanilla keeps two independent booleans — `raining` and `thundering` — in
 //! the world-global `WeatherData` SavedData (`minecraft:weather`,
-//! `world/level/saveddata/WeatherData.java`), each driven by its own
+//! vanilla's own saved-data type), each driven by its own
 //! countdown timer, plus two *interpolated* intensity levels (`rainLevel` /
 //! `thunderLevel`) on `ServerLevel` itself that the client renders. A weather
 //! cycle is a long clear spell, a rain spell, and — at an independent,
@@ -185,7 +185,7 @@ impl Default for WeatherState {
 
 impl WeatherState {
     /// A fresh world's weather — the all-zero initial state `WeatherData`
-    /// itself starts from (`WeatherData.java`): clear, levels at rest, and
+    /// itself starts from (vanilla's own saved-data type): clear, levels at rest, and
     /// both timers at 0 so the *first* cycle samples a fresh delay. A new
     /// world therefore stays clear for roughly `RAIN_DELAY`'s 12k-180k ticks
     /// before rain can even begin.
@@ -303,7 +303,7 @@ impl WeatherState {
 }
 
 /// Inclusive uniform draw over `[min, max]` — `UniformInt.sample`'s
-/// `Mth.randomBetweenInclusive` (`net/minecraft/util/random/UniformInt.java`),
+/// `Mth.randomBetweenInclusive` (vanilla's own `UniformInt`),
 /// which samples the inclusive range via `RandomSource.nextIntInclusive`.
 /// `LegacyRandomSource` is `java.util.Random`-exact, so a seeded draw is
 /// reproducible by hand (that is what the transition-tick test does).
