@@ -1,28 +1,29 @@
-//! Villager merchant-offer purchase mechanics and restock cadence — issue
-//! #245's "refresh" half.
+//! Villager merchant-offer purchase mechanics and restock cadence — the
+//! "refresh" half.
 //!
 //! # What it is
 //!
-//! `lodestone_data::villager_trades` (issue #243/#245's data half) is a
+//! `lodestone_data::villager_trades` (the data half) is a
 //! static table: which trades a profession/level *can* offer. This module is
 //! the missing dynamic half — how many uses a specific villager's specific
 //! offer has left, how its price moves with demand, and when a villager's
-//! stock resets — a faithful port of vanilla's `MerchantOffer`'s mutable
-//! state and `Villager`'s restock cadence
-//! (`shouldRestock`/`allowedToRestock`/`needsToRestock`/`restock`).
+//! stock resets — a faithful port of vanilla's own merchant-offer mutable
+//! state and its own restock cadence
+//! (should-restock / allowed-to-restock / needs-to-restock / restock).
 //!
 //! # Wire order, not constructor order
 //!
-//! `MerchantOffer.writeToStream` emits, in order: cost A, **result**, cost B,
-//! `isOutOfStock` (bool), uses, max uses, xp, special-price diff, price
-//! multiplier, demand — not the constructor's parameter order (`buy, buyB,
-//! result, uses, maxUses, ...`). This module doesn't encode a packet itself
+//! Vanilla's real write-to-stream rule emits, in order: cost A, **result**, cost B,
+//! is-out-of-stock (bool), uses, max uses, xp, special-price diff, price
+//! multiplier, demand — not the constructor's parameter order. This module doesn't
+//! encode a packet itself
 //! (`crate::protocol::MerchantOfferOut`/`encode_merchant_offers` already do,
 //! from `crate::mobs::villager::trades`'s output), but every mutable-field
-//! method below is named and grouped to match `writeToStream`'s own order,
+//! method below is named and grouped to match that real write-to-stream rule's
+//! own order,
 //! per this repo's own port-from-`write` rule, so a future encoder built
 //! against [`OfferState`] cannot silently transpose two same-typed `i32`
-//! fields the way `writeToStream`'s own layout does not.
+//! fields the way that layout does not.
 //!
 //! # What this module does not do
 //!
@@ -39,16 +40,16 @@
 //! comments for the up-to-date wiring, and `crate::server::open_merchant_screen`
 //! for the display half.
 //!
-//! # The hook for gossip (#244) and reputation (#246)
+//! # The hook for gossip and reputation
 //!
 //! [`OfferState::special_price_diff`] and
 //! [`OfferState::add_special_price_diff`]/[`OfferState::reset_special_price_diff`]
 //! are vanilla's own mechanism for both systems: a player under
 //! `Hero of the Village` gets a temporary trade discount by a call to
-//! `addToSpecialPriceDiff` with a negative delta scaled by the effect's
-//! amplifier (`Villager.updateSpecialPrices`), and ordinary reputation reads
+//! vanilla's own add-special-price-diff rule with a negative delta scaled by the
+//! effect's amplifier, and ordinary reputation reads
 //! the gossip-derived score through the same call. Neither this module nor
-//! any caller here computes that score — #244/#246's job — but the field and
+//! any caller here computes that score, but the field and
 //! the two mutators they need already exist and are already tested (see
 //! [`tests::a_special_price_diff_reduces_the_next_purchases_cost`]).
 //! `OfferState::modified_cost_a_count`'s own demand term
@@ -62,9 +63,9 @@ use lodestone_data::villager_trades::{TradeRecord, pool_for};
 
 use crate::mobs::villager::Profession;
 
-/// One villager's live state for one offer — vanilla's `MerchantOffer`'s
-/// mutable/derived fields (`uses`, `demand`, `specialPriceDiff`) layered over
-/// the static [`TradeRecord`] issue #243/#245's data table already carries.
+/// One villager's live state for one offer — vanilla's own merchant-offer
+/// mutable/derived fields (uses, demand, special-price-diff) layered over
+/// the static [`TradeRecord`] data table already carries.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OfferState {
     pub record: TradeRecord,
@@ -101,7 +102,7 @@ impl OfferState {
         }
     }
 
-    /// `MerchantOffer.getModifiedCostCount`, applied to the primary cost:
+    /// The real get-modified-cost-count rule, applied to the primary cost:
     /// `basePrice + max(0, floor(basePrice * demand * priceMultiplier)) +
     /// specialPriceDiff`, clamped to `1..=` the cost item's own max stack
     /// size (vanilla's `cost.itemStack().getMaxStackSize()`; `64` when this
@@ -127,7 +128,7 @@ impl OfferState {
         self.uses = self.record.max_uses;
     }
 
-    /// `MerchantOffer.needsRestock` — any use at all means restocking would
+    /// The real needs-restock rule — any use at all means restocking would
     /// do something, not just "is this offer exhausted".
     #[must_use]
     pub fn needs_restock(&self) -> bool {
@@ -142,8 +143,8 @@ impl OfferState {
         self.uses += 1;
     }
 
-    /// `MerchantOffer.updateDemand`. Must run on the *pre-reset* uses count
-    /// — `Villager.restock` calls this before `resetUses`, not after; doing
+    /// The real update-demand rule. Must run on the *pre-reset* uses count
+    /// — the real restock rule calls this before resetting uses, not after; doing
     /// it the other way would always compute `demand - maxUses`, never
     /// reflecting how much was actually bought since the last restock.
     pub fn update_demand(&mut self) {
@@ -158,7 +159,7 @@ impl OfferState {
         self.special_price_diff = 0;
     }
 
-    /// `MerchantOffer.satisfiedBy`: does `offered_a`/`offered_b` cover this
+    /// The real satisfied-by rule: does `offered_a`/`offered_b` cover this
     /// offer's live cost? `offered_b` is compared against `0` when the
     /// record has no second cost — vanilla's `buyB.isEmpty()` — so a caller
     /// holding an unrelated item in the "B" slot must pass `0`, not that
@@ -174,7 +175,7 @@ impl OfferState {
         }
     }
 
-    /// `MerchantOffer.take`, fused with `increaseUses`: validates via
+    /// The real take rule, fused with its own increase-uses step: validates via
     /// [`satisfied_by`](Self::satisfied_by), and on success returns exactly
     /// what to remove/grant and increments `uses`. Returns `None` without
     /// mutating anything on an unsatisfied offer or one already out of
@@ -215,9 +216,9 @@ fn modified_cost_count(
 }
 
 /// A villager's own restock cadence — vanilla's three private `Villager`
-/// fields (`lastRestockGameTime`, `numberOfRestocksToday`,
-/// `lastRestockCheckDay`) plus the two gates that read them
-/// (`allowedToRestock`/`shouldRestock`).
+/// fields (`last_restock_game_time`, `number_of_restocks_today`,
+/// `last_restock_check_day`) plus the two real gates that read them
+/// (allowed-to-restock / should-restock).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RestockState {
     pub last_restock_game_time: i64,
@@ -226,19 +227,19 @@ pub struct RestockState {
 }
 
 /// Vanilla's own gap between restocks: `2400` ticks (two minutes), the
-/// `allowedToRestock` cooldown between a villager's first and second restock
+/// The real allowed-to-restock cooldown between a villager's first and second restock
 /// of the same day.
 const RESTOCK_COOLDOWN_TICKS: i64 = 2400;
 /// A restock is also allowed once a half day (`12000` ticks) has passed with
-/// no restock at all, independent of the daily counter — `shouldRestock`'s
-/// own `halfDayPassedTime` gate.
+/// no restock at all, independent of the daily counter — the real should-restock
+/// rule's own half-day-passed gate.
 const HALF_DAY_TICKS: i64 = 12000;
-/// At most two restocks credited per real day before `allowedToRestock`
+/// At most two restocks credited per real day before the real allowed-to-restock rule
 /// requires waiting for the next day rollover.
 const MAX_RESTOCKS_PER_DAY: i32 = 2;
 
 impl RestockState {
-    /// `Villager.allowedToRestock`: the first restock of a day is always
+    /// The real allowed-to-restock rule: the first restock of a day is always
     /// allowed; the second needs the cooldown to have elapsed; a third (or
     /// later) is refused until `should_restock` sees a new day and resets
     /// the counter.
@@ -249,13 +250,13 @@ impl RestockState {
                 && game_time > self.last_restock_game_time + RESTOCK_COOLDOWN_TICKS)
     }
 
-    /// `Villager.shouldRestock`: rolls the daily counter over on a day
+    /// The real should-restock rule: rolls the daily counter over on a day
     /// change (either a half-day of real elapsed time with no restock, or
     /// the world's own day counter advancing), then answers
     /// `allowed_to_restock(...) && any_offer_needs_restock`.
     ///
     /// `current_day` is the world's day-period count (vanilla reads it
-    /// through `Timelines.OVERWORLD_DAY`; the caller's equivalent — this
+    /// through vanilla's own overworld-day length; the caller's equivalent — this
     /// crate's own day-time source — is `crate::world_state`, not consulted
     /// here since this module has no world handle at all).
     pub fn should_restock(
@@ -275,8 +276,8 @@ impl RestockState {
         self.allowed_to_restock(game_time) && any_offer_needs_restock
     }
 
-    /// `Villager.restock`'s own cadence bookkeeping (`lastRestockGameTime`/
-    /// `numberOfRestocksToday`) — the per-offer `updateDemand`/`resetUses`
+    /// The real restock rule's own cadence bookkeeping (`last_restock_game_time`/
+    /// `number_of_restocks_today`) — the per-offer update-demand/reset-uses
     /// loop lives on the caller ([`VillagerTrades::maybe_restock`]), since
     /// this struct alone has no offer list to iterate.
     pub fn mark_restocked(&mut self, game_time: i64) {
@@ -336,7 +337,7 @@ impl VillagerTrades {
         {
             return false;
         }
-        // `Villager.restock`'s own order: demand is updated from the
+        // The real restock rule's own order: demand is updated from the
         // *pre-reset* uses, then uses reset — see `update_demand`'s doc for
         // why the order is load-bearing.
         for offer in &mut self.offers {
@@ -460,7 +461,7 @@ mod tests {
         );
     }
 
-    /// The inverse: heavy use (near `maxUses`) raises demand and therefore
+    /// The inverse: heavy use (near `max_uses`) raises demand and therefore
     /// the price, by the exact predicted amount — not merely "some
     /// increase". `armorer/1/emerald_iron_leggings` (`price_multiplier`
     /// `0.2`, base cost `7`, `max_uses` `12`) chosen because its multiplier
