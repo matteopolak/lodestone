@@ -141,12 +141,12 @@ pub enum SessionOutcome {
     LocalClose,
 
     /// The server asked the client to reconnect elsewhere
-    /// ([`lodestone_model::ClientEvent::TransferRequested`], issue #291).
+    /// ([`lodestone_model::ClientEvent::TransferRequested`]).
     ///
-    /// Vanilla's own client (`ClientPacketListener.handleTransfer`) tears down
+    /// Vanilla's own client tears down
     /// the connection and immediately opens a new one to `host:port`,
-    /// carrying its in-memory cookie store across the boundary via
-    /// `TransferState` so a `cookie_request` on the far side can still be
+    /// carrying its in-memory cookie store across the boundary
+    /// so a `cookie_request` on the far side can still be
     /// answered. The driver cannot open that new connection itself — a
     /// native TCP socket and a `wasm32` `ws-web`/in-memory transport are
     /// different [`crate::builder::ClientBuilder::connect`] /

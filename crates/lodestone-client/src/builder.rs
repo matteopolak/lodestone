@@ -200,9 +200,9 @@ impl ClientBuilder {
     /// rather than silently becoming an offline join.
     ///
     /// **This must not stop the connection.** An offline-mode server never
-    /// sends an encryption request at all (vanilla gates it on
-    /// `usesAuthentication() && !isMemoryConnection()` in
-    /// `ServerLoginPacketListenerImpl.handleHello`), so a dead refresh token
+    /// sends an encryption request at all (vanilla's own login handler gates
+    /// it on the server running in authenticating mode and not being an
+    /// in-memory/LAN connection), so a dead refresh token
     /// has no bearing on joining one — refusing to dial would break joins that
     /// work today. The reason is therefore *carried* and only spent if the
     /// server turns out to demand online mode.

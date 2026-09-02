@@ -1,5 +1,5 @@
 //! Hermetic proof that the driver actually drives the online-mode encryption
-//! handshake a `Directive::BeginEncryption` describes (issue #65) — before
+//! handshake a `Directive::BeginEncryption` describes — before
 //! this crate's `driver.rs` grew a `BeginEncryption` arm, this directive fell
 //! into the "ignoring unknown directive variant" catch-all and the crypto
 //! never ran at all. `crates/protocol/v770/tests/join_flow.rs` already proved

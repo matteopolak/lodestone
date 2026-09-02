@@ -11,7 +11,7 @@
 //! Three confirmed silent-kill counters motivate it (all read out of vanilla's
 //! source, none hypothetical):
 //!   1. Chunk delivery halts after 10 unacknowledged batches
-//!      (`PlayerChunkSender.MAX_UNACKNOWLEDGED_BATCHES`) unless the client sends
+//!      (vanilla's own max-unacknowledged-batches constant) unless the client sends
 //!      `chunk_batch_received`. The v770 adapter now acks batches, so healthy
 //!      streaming continues past that cliff — this gate proves it does, and the
 //!      `suppressing_chunk_ack_starves_streaming` negative control proves the

@@ -396,13 +396,14 @@ async fn read_model_folds_window_zero_inventory_into_player_menu() {
     );
 }
 
-/// Issue #436: `ClientHandle::drop_selected` must change the count
+/// `ClientHandle::drop_selected` must change the count
 /// [`ClientHandle::player_menu`] reports — the read every UI in the tree makes.
 ///
 /// # Why this is a separate test from the model's own
 ///
 /// `lodestone-game/tests/drop_selected_prediction.rs` proves
-/// `Menus::drop_selected` is a faithful port of `Inventory.removeFromSelected`.
+/// `Menus::drop_selected` is a faithful port of vanilla's own
+/// inventory drop-selected routine.
 /// This proves the *plumbing*: that the mutation lands in the one authoritative
 /// `SessionMenus` component and is therefore visible through the accessor
 /// `Sim::player_menu` reads. A prediction applied to a clone would satisfy the
@@ -448,7 +449,8 @@ async fn drop_selected_predicts_into_the_menu_the_ui_reads() {
     assert!(
         handle.drop_selected(0, false),
         "a non-empty slot reports that something was dropped — vanilla's \
-         `LocalPlayer.drop` returns `!prediction.isEmpty()` and the arm swing depends on it"
+         own drop routine returns whether the dropped prediction was non-empty, \
+         and the arm swing depends on it"
     );
 
     assert_eq!(
@@ -460,7 +462,7 @@ async fn drop_selected_predicts_into_the_menu_the_ui_reads() {
         "the prediction must be visible through `player_menu` — the accessor the HUD \
          hotbar and the inventory screen both read. This is the whole bug: the server \
          sends no slot update back for DROP_ITEM \
-         (`ServerGamePacketListenerImpl.java:1303-1314`), so nothing else will ever fix it"
+         (vanilla's own drop handler), so nothing else will ever fix it"
     );
 
     // Ctrl+Q takes the rest, and the slot must read empty rather than count 0.
@@ -1994,7 +1996,7 @@ async fn respawning_into_another_dimension_updates_the_read_model() {
 ///
 /// `player.air == MAX_AIR` is the *hidden-row* condition, not a separate claim:
 /// `HudFrame::air` is built from this snapshot and vanilla's visibility rule is
-/// `isUnderWater || air < maxAir` (`Hud.java:910`). Dry plus full air is both
+/// "underwater, or air below its maximum". Dry plus full air is both
 /// disjuncts false.
 ///
 /// The pre-respawn assertions are the controls, and the metadata event is the

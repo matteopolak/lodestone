@@ -97,7 +97,7 @@ pub(crate) struct Driver<T: Transport> {
     /// its connection pool/TLS config for no reason).
     #[cfg(not(target_arch = "wasm32"))]
     http: reqwest::Client,
-    /// Whether an opening `Directive::BundleDelimiter` (issue #299) has been
+    /// Whether an opening `Directive::BundleDelimiter` has been
     /// seen with no closing one yet. While `true`, directives decoded from
     /// further packets are diverted into `bundle_buffer` instead of running
     /// immediately, so the shell never observes a bundle half-applied.
@@ -107,11 +107,11 @@ pub(crate) struct Driver<T: Transport> {
     /// [`Driver::absorb_bundle`].
     bundle_buffer: Vec<Directive>,
     /// Cookies this connection has been asked to persist, keyed by
-    /// [`lodestone_model::ClientEvent::CookieStored`]'s `key` (issue #291).
+    /// [`lodestone_model::ClientEvent::CookieStored`]'s `key`.
     /// Consulted, never the network, on a matching
     /// [`lodestone_model::ClientEvent::CookieRequested`] — see
     /// [`Driver::execute`]'s `Directive::Emit` arm, which mirrors vanilla's
-    /// own `ClientCommonPacketListenerImpl.serverCookies`: an in-memory map
+    /// own server-cookie store: an in-memory map
     /// with no persistence and no UI, answered immediately with whatever is
     /// on hand (or nothing).
     cookies: HashMap<ResourceKey, Vec<u8>>,
@@ -193,7 +193,7 @@ fn random_chat_salt() -> i64 {
 ///
 /// **Never a stale or cached chain**: `generate_and_apply_update` both reads
 /// the window *and* marks its entries no-longer-pending, matching vanilla's
-/// own `LocalPlayer.sendChat`. A signature built from a reordered or stale
+/// own chat-send routine. A signature built from a reordered or stale
 /// window looks fine locally and is exactly what a real server rejects
 /// (`docs/secure-chat.md`) — the reason this reads the tracker itself rather
 /// than taking a pre-computed window from its caller.
@@ -254,7 +254,7 @@ fn sign_chat_action(
 }
 
 /// Verifies one incoming signed chat message's signature against its
-/// sender's announced public key (issue #283's remaining half) —
+/// sender's announced public key —
 /// [`lodestone_auth::verify_signature`]'s one production call site.
 ///
 /// `false` on any malformed input (a signature or last-seen entry that is
@@ -350,7 +350,7 @@ impl<T: Transport> Driver<T> {
         #[cfg(not(target_arch = "wasm32"))]
         authentication_intent: crate::builder::AuthenticationIntent,
     ) -> Self {
-        // reqwest is built with `rustls-no-provider` (issue #446), which leaves
+        // reqwest is built with `rustls-no-provider`, which leaves
         // the rustls crypto provider for the application to choose. The
         // `reqwest::Client::new()` below PANICS if none is installed, and that is
         // a *runtime* panic no `cargo check` can see — so the install sits
@@ -572,10 +572,10 @@ impl<T: Transport> Driver<T> {
     }
 
     /// Splits a packet's decoded directives around `Directive::BundleDelimiter`
-    /// boundaries (issue #299), returning only the directives that should run
+    /// boundaries, returning only the directives that should run
     /// now.
     ///
-    /// Vanilla's own client pipeline (`BundlerInfo.java`) collects every
+    /// Vanilla's own client pipeline collects every
     /// packet between an opening and closing `minecraft:bundle_delimiter`
     /// into one `BundlePacket` and applies it as a single atomic step, most
     /// commonly around a batch of entity add/move/remove packets on chunk
@@ -844,7 +844,7 @@ impl<T: Transport> Driver<T> {
     }
 
     /// Drives the online-mode encryption handshake a `Directive::BeginEncryption`
-    /// carries (issue #65): generate the shared secret, and — only if the
+    /// carries: generate the shared secret, and — only if the
     /// server asked for it — prove ownership to the session server via
     /// [`lodestone_auth::join_server`] *first*. Only once that succeeds (or
     /// was not required) does it RSA-wrap the secret and verify token, hand
@@ -855,11 +855,11 @@ impl<T: Transport> Driver<T> {
     ///
     /// * The session-server join must complete *before* the
     ///   `EncryptionResponse` packet reaches the wire, matching
-    ///   `ClientHandshakePacketListenerImpl.handleHello` (`authenticateServer`
-    ///   runs to completion before `setEncryption` ever sends the
-    ///   `ServerboundKeyPacket`). A hosting server's own
-    ///   `ServerLoginPacketListenerImpl.handleKey` starts its
-    ///   `hasJoinedServer` check the instant it receives that packet, with no
+    ///   vanilla's own encryption-handshake handler (its session-server
+    ///   authentication step runs to completion before its cipher-enable
+    ///   step ever sends the encryption-response packet). A hosting
+    ///   server's own login-key handler starts its
+    ///   session-join check the instant it receives that packet, with no
     ///   wait for the client — sending it first races our own join against
     ///   the server's check of it, and losing that race reads as a genuine
     ///   unverified session on the far side (Velocity's own online-mode gate
@@ -913,10 +913,11 @@ impl<T: Transport> Driver<T> {
 
         // Prove ownership to the session server *before* the
         // `EncryptionResponse` ever reaches the wire — matching
-        // `ClientHandshakePacketListenerImpl.handleHello`, which runs
-        // `authenticateServer` (our `join_server`) to completion and only
-        // then calls `setEncryption`, which is what actually sends the
-        // `ServerboundKeyPacket`. That ordering is load-bearing, not
+        // vanilla's own encryption-handshake handler, which runs
+        // its session-server authentication step (our `join_server`) to
+        // completion and only
+        // then enables its cipher, which is what actually sends the
+        // encryption-response packet. That ordering is load-bearing, not
         // stylistic: a hosting server's own `ServerLoginPacketListenerImpl
         // .handleKey` starts its `hasJoinedServer` check the instant it
         // receives that packet, on its own thread, with no wait for the
@@ -1080,11 +1081,10 @@ impl<T: Transport> Driver<T> {
             }
             // Vanilla answers a server-initiated ping challenge with a `pong`
             // unconditionally, with no user-facing policy to suppress it —
-            // `ClientCommonPacketListenerImpl.handlePing` just calls
-            // `this.send(new ServerboundPongPacket(packet.getId()))`
-            // (`ClientCommonPacketListenerImpl.java:149-152`), unlike
-            // `handleKeepAlive` a few lines above it, which goes through
-            // `sendWhen` gated on `!RenderSystem.isFrozenAtPollEvents()`. That is
+            // vanilla's own ping handler just echoes the challenge id
+            // straight back, unlike its keep-alive handler a few lines above
+            // it, which is gated on whether rendering is currently frozen at
+            // a poll-events boundary. That is
             // why this arm is unconditional where `KeepAlive` above is gated on
             // `self.keep_alive`. Before this arm existed, the packet decoded
             // cleanly into `ClientEvent::Ping` and reached no consumer and no
@@ -1099,9 +1099,9 @@ impl<T: Transport> Driver<T> {
             // rather than from the shell.
             //
             // In the **configuration** phase,
-            // `ServerConfigurationPacketListenerImpl.handleResourcePackResponse`
-            // only calls `finishCurrentTask` once the response's
-            // `Action.isTerminal()` — so an unanswered push means configuration
+            // vanilla's own resource-pack-response handler
+            // only advances the configuration task once the response's
+            // action is terminal — so an unanswered push means configuration
             // never completes and the connection simply stalls. The shell's event
             // loop does not start until after login, so it structurally cannot
             // answer in time; a shell-side producer would be correct-looking and
@@ -1109,8 +1109,9 @@ impl<T: Transport> Driver<T> {
             //
             // `FailedDownload` is the honest answer for a client that applies no
             // packs, and it is deliberately not `Declined`. Two clauses decide
-            // that, both read off the vanilla listeners rather than guessed:
-            // `Action.isTerminal()` is `this != ACCEPTED && this != DOWNLOADED`,
+            // that, both read off vanilla's own resource-pack handling rather
+            // than guessed:
+            // an action is terminal unless it is `ACCEPTED` or `DOWNLOADED`,
             // so `FAILED_DOWNLOAD` terminates the task; and the *play*-phase
             // handler disconnects only on `DECLINED` when the pack is `required`.
             // So this reply both completes configuration and keeps us connected,
@@ -1294,23 +1295,22 @@ impl<T: Transport> Driver<T> {
             // decoder reports the packet, not a judgement about it.
             //
             // Both peers count the same messages or the window desyncs, and
-            // both count *signed* ones only: the server calls
-            // `LastSeenMessagesValidator.addPending` under
-            // `if (signature != null)` in `ServerGamePacketListenerImpl`, and
+            // both count *signed* ones only: the server's own last-seen
+            // tracker only records a pending message when the wire's
+            // signature was present, and
             // vanilla's own client mirrors it with the same null check around
-            // `ClientPacketListener.markMessageAsProcessed` in
-            // `ChatListener.handlePlayerChatMessage`. Counting an unsigned
+            // its own message-processed marker. Counting an unsigned
             // `PLAYER_CHAT` here — a message from a player with no chat
             // session, or this client's own message echoed back while it sends
             // unsigned — advances our offset past a server count that never
-            // moved. The server then throws `ValidationException` ("Advanced
+            // moved. The server then throws a validation error ("Advanced
             // last seen window by N messages, but expected at most M") from
-            // `applyOffset` and disconnects with
+            // its own offset-application step and disconnects with
             // `multiplayer.disconnect.chat_validation_failed`.
             ClientEvent::Chat {
                 ack: Some(info), ..
             } if !info.signature.is_empty() => {
-                // Burst valve (vanilla's `markMessageAsProcessed`): record the
+                // Burst valve (matching vanilla's own message-processed marker): record the
                 // signed message and, if more than 64 are now pending, flush
                 // immediately rather than waiting for the next tick. A filtered
                 // message (`was_shown == false`) still advances the window and
@@ -1321,9 +1321,8 @@ impl<T: Transport> Driver<T> {
                     auto_actions.push(ClientAction::ChatAck { offset });
                 }
             }
-            // Issue #291: vanilla's own client answers a cookie request
-            // immediately from its local `serverCookies` map
-            // (`ClientCommonPacketListenerImpl.handleRequestCookie`), with no
+            // Vanilla's own client answers a cookie request
+            // immediately from its local server-cookie store, with no
             // UI and no player input — `None` when nothing was ever stored
             // for this `key`, which the wire carries as a nullable payload
             // rather than an error. Unconditional, like `Ping`/`Pong` above,
@@ -1338,14 +1337,14 @@ impl<T: Transport> Driver<T> {
             }
             // The write side of the same map: `store_cookie` populates it, a
             // later `cookie_request` reads it back. No action to send here —
-            // vanilla's `handleStoreCookie` is a plain map insert.
+            // vanilla's own store-cookie handler is a plain map insert.
             ClientEvent::CookieStored { key, payload } => {
                 self.cookies.insert(key.clone(), payload.clone());
             }
-            // Issue #291: this used to reach no consumer at all. Vanilla
-            // (`ClientPacketListener.handleTransfer`) tears the connection
+            // This used to reach no consumer at all. Vanilla's own transfer
+            // handler tears the connection
             // down and opens a new one to `host:port`, carrying its cookie
-            // store across (`TransferState`). The driver has no generic way
+            // store across. The driver has no generic way
             // to open a new transport from inside itself — see
             // `SessionOutcome::Transferred`'s own doc for why — so this ends
             // the session with everything the caller needs to reconnect: the
@@ -1368,8 +1367,9 @@ impl<T: Transport> Driver<T> {
                 });
             }
             ClientEvent::ChatMessageDeleted { signature } => {
-                // Withdraw a still-pending entry (vanilla's `ChatScreen` calling
-                // `lastSeenMessages.ignorePendingSignature` when a `delete_chat`
+                // Withdraw a still-pending entry (matching vanilla's own chat
+                // screen, which drops a pending signature from its last-seen
+                // tracker when a `delete_chat`
                 // arrives), so the next acknowledgement neither reports nor
                 // acknowledges a message the server has withdrawn. The adapter
                 // resolves cache references to full signatures before emitting,
@@ -1403,7 +1403,7 @@ impl<T: Transport> Driver<T> {
             }
         }
 
-        // Incoming signed-chat verification (issue #283's remaining half).
+        // Incoming signed-chat verification.
         // Placed after every `PlayerListUpdate` this session has already
         // folded (`self.read_model` below) so a sender's `INITIALIZE_CHAT`
         // announced on an earlier packet is visible here — the ordering the
@@ -1499,7 +1499,7 @@ impl<T: Transport> Driver<T> {
                 // exists to catch, and logging it identically is what made a
                 // routine per-tick no-op read as a live correctness bug: v770's
                 // `Move` arm delegates to `select_move_packet`, which mirrors
-                // vanilla's `LocalPlayer.sendPosition()` dirty tracking (see
+                // vanilla's own position-send dirty tracking (see
                 // `crates/protocol/v770/src/adapter/mod.rs`) and legitimately
                 // returns `None` on the large majority of ticks — any tick
                 // where position/rotation/on-ground/collision are all

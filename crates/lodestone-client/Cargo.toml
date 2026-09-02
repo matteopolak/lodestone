@@ -54,7 +54,7 @@ lodestone-registry = { workspace = true }
 # one and its behaviour, API and performance are unchanged.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 tokio = { workspace = true }
-# The identity half of online-mode login (issue #65): `Session`/`server_hash`/
+# The identity half of online-mode login: `Session`/`server_hash`/
 # `join_server`. `lodestone-net` already carries the crypto half
 # (`generate_shared_secret`/`rsa_encrypt`/`Connection::enable_encryption`);
 # this is the missing piece that turns a `Directive::BeginEncryption` into an

@@ -1,4 +1,4 @@
-//! Plugin-channel (`custom_payload`) dispatch registry (issue #301).
+//! Plugin-channel (`custom_payload`) dispatch registry.
 //!
 //! Before this existed, a decoded `custom_payload` reached exactly one place:
 //! the generic [`ClientEvent::CustomPayload`] event, with `channel`/`data`

@@ -79,7 +79,7 @@ async fn joins_real_server_and_receives_keep_alive() {
     drop(handle);
 }
 
-/// End-to-end gate for issue #288: the server's `minecraft:dimension_type`
+/// End-to-end gate: the server's `minecraft:dimension_type`
 /// registry must reach the **read model**, not merely decode.
 ///
 /// This is the island check. Everything between the wire and here can be

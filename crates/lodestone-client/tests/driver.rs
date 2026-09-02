@@ -677,8 +677,8 @@ async fn keep_alive_manual_surfaces_but_writes_nothing() {
 
 /// A server `Ping` challenge (distinct from `KeepAlive`) is answered with
 /// `ClientAction::PongResponse` echoing the same id, unconditionally — vanilla's
-/// `ClientCommonPacketListenerImpl.handlePing` has no policy gate, unlike
-/// `handleKeepAlive`'s `sendWhen`. Before the driver had this arm, the event
+/// own ping handler has no policy gate, unlike
+/// its keep-alive handler's send-when gate. Before the driver had this arm, the event
 /// decoded and surfaced but nothing ever answered it: an outbound island of the
 /// same shape as `ClientAction::SetFlying`.
 #[tokio::test]
@@ -1953,11 +1953,10 @@ async fn a_mid_session_failure_reaches_the_event_stream_and_a_clean_close_does_n
 /// that got the repo owner disconnected once this client started transmitting
 /// a real acknowledgement offset.
 ///
-/// Both peers must count the same messages. The server calls
-/// `LastSeenMessagesValidator.addPending` under `if (signature != null)`
-/// (`ServerGamePacketListenerImpl`), and vanilla's own client mirrors that null
-/// check around `ClientPacketListener.markMessageAsProcessed`
-/// (`ChatListener.handlePlayerChatMessage`). Counting an unsigned `PLAYER_CHAT`
+/// Both peers must count the same messages. The server's own last-seen
+/// tracker only records a pending message when the wire's signature was
+/// present, and vanilla's own client mirrors that null
+/// check around its own message-processed marker. Counting an unsigned `PLAYER_CHAT`
 /// advances our offset past a server count that never moved.
 ///
 /// **The expected value comes from outside this repo.** Measured against the
@@ -1978,7 +1977,8 @@ async fn a_mid_session_failure_reaches_the_event_stream_and_a_clean_close_does_n
 /// **Measured under the neuter** (guard removed): this reports **6**, not
 /// `SIGNED + UNSIGNED = 8`, because every unsigned message carries the *same*
 /// empty signature and the tracker's consecutive-duplicate collapse
-/// (`LastSeenMessagesTracker.addPending`'s `lastTrackedMessage` check) folds
+/// (vanilla's own last-seen tracker checks the last-tracked message before
+/// adding a new one) folds
 /// the trailing run into one. 6 is the honest wrong-hypothesis value here; the
 /// assertion below does not name it, because it depends on the interleaving
 /// pattern rather than on the counts alone.
