@@ -61,7 +61,7 @@ pub const ENCHANTMENTS_COMPONENT: &str = "minecraft:enchantments";
 pub const EQUIPPABLE_COMPONENT: &str = "minecraft:equippable";
 /// Well-known component identifier for `minecraft:dyed_color`.
 ///
-/// Added by issue #143. Before it, this crate defined no key for the component
+/// Before this component key existed, this crate defined none for it
 /// and [`ItemStack`]'s `From<&lodestone_model::ItemStack>` had no branch for it,
 /// so **the dye was silently dropped at the crate boundary**: armour rendered
 /// dyed (that path reads the *model* stack off `Equipment`) while the same
@@ -96,7 +96,7 @@ pub const POTION_EFFECT_COMPONENT: &str = "lodestone:potion_effect";
 /// [`ENCHANTMENTS_COMPONENT`].
 pub const AUTHORED_ENCHANTMENT_COMPONENT: &str = "lodestone:authored_enchantment";
 /// Well-known component identifier for `minecraft:writable_book_content` —
-/// an unsigned book-and-quill's draft pages (issue #613's `EditBook`
+/// an unsigned book-and-quill's draft pages (the `EditBook`
 /// remainder; see `docs/book-editing.md`). Carried as
 /// [`ComponentValue::WritableBook`].
 pub const WRITABLE_BOOK_CONTENT_COMPONENT: &str = "minecraft:writable_book_content";
@@ -122,12 +122,12 @@ pub const POT_DECORATIONS_COMPONENT: &str = "minecraft:pot_decorations";
 pub const PROFILE_COMPONENT: &str = "minecraft:profile";
 /// Well-known component identifier for `minecraft:bundle_contents`.
 ///
-/// A bundle's nested items — closes issue #616's `BUNDLE_ITEM_SELECTED` and
-/// #613's `SelectBundleItem` remainder together, since both exist only to
+/// A bundle's nested items — closes the `BUNDLE_ITEM_SELECTED` and
+/// `SelectBundleItem` remainders together, since both exist only to
 /// mutate this one component's selected-item highlight. Modelled as the full
-/// mutable nested-item container vanilla's `BundleContents`/`BundleItem` are
-/// (`tryTransfer`/`removeOne`), not a display-only summary — the biggest of
-/// #616's six, per that issue's own note, and the reason it was deferred five
+/// mutable nested-item container vanilla's own bundle-contents/bundle-item
+/// types are, not a display-only summary — the biggest of
+/// the group, and the reason it was deferred five
 /// times before this. Carried as [`ComponentValue::Bundle`].
 pub const BUNDLE_CONTENTS_COMPONENT: &str = "minecraft:bundle_contents";
 /// Well-known component identifier for `minecraft:banner_patterns`.
@@ -161,7 +161,7 @@ pub const CUSTOM_MODEL_DATA_COMPONENT: &str = "minecraft:custom_model_data";
 /// `minecraft:diamond_sword` for gameplay while its visuals come from the
 /// resource-pack definition named here.
 pub const ITEM_MODEL_COMPONENT: &str = "minecraft:item_model";
-/// The component a plugin's *own* item identity lives under (issue #147).
+/// The component a plugin's *own* item identity lives under.
 ///
 /// **Deliberately in the `lodestone:` namespace, not `minecraft:`.** It is not a
 /// vanilla component and must never be mistaken for one: a real server would
@@ -173,7 +173,7 @@ pub const ITEM_MODEL_COMPONENT: &str = "minecraft:item_model";
 /// Bukkit/Paper custom-item plugin attaches to a vanilla item id, and it exists
 /// for the same reason theirs does: the wire has a **fixed item-id space**, so a
 /// genuinely novel item id is not representable, exactly as a novel entity type
-/// is not (#140). A custom item is a vanilla item plus this tag, and nothing else.
+/// is not. A custom item is a vanilla item plus this tag, and nothing else.
 pub const PLUGIN_ITEM_ID_COMPONENT: &str = "lodestone:item_id";
 
 /// Whether `item` is one of vanilla's 17 bundle variants (`minecraft:bundle`
@@ -548,7 +548,7 @@ impl ItemStack {
         a.item == b.item && a.components == b.components
     }
 
-    // -- Typed component read/write for plugins (issue #143) -----------
+    // -- Typed component read/write for plugins -----------
     //
     // `components_mut` has been public for a long time and had **zero
     // production callers** — every call site was a test. That is because the
@@ -558,7 +558,7 @@ impl ItemStack {
     // for `minecraft:tool`. Getting any of the three wrong produces a component
     // that reads back as absent, silently.
     //
-    // These accessors are the typed surface issue #143 asks for — "a typed API,
+    // These accessors are the typed surface the plugin API asks for — "a typed API,
     // not raw NBT bytes". They are deliberately *not* a second storage: every
     // one reads and writes the same `ItemComponents` map, so a plugin writing
     // through them and a decoder writing through the `From` impl are
@@ -915,7 +915,7 @@ impl ItemStack {
         );
     }
 
-    /// The stack's `minecraft:custom_model_data` selector, if any (issue #147).
+    /// The stack's `minecraft:custom_model_data` selector, if any.
     #[must_use]
     pub fn custom_model_data(&self) -> Option<i32> {
         self.components
@@ -950,7 +950,7 @@ impl ItemStack {
     }
 
     /// The plugin-defined item identity this stack carries, if any — the
-    /// `lodestone:item_id` tag (issue #147).
+    /// `lodestone:item_id` tag.
     ///
     /// `None` for every vanilla stack, which is what makes this a usable
     /// discriminator: a plugin asking "is this one of mine?" gets a definite no
@@ -1082,7 +1082,7 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Tool(stack.components.tool.clone()));
         }
 
-        // Issue #143. Without this branch the dye was dropped at the crate
+        // Without this branch the dye was dropped at the crate
         // boundary: `entities.rs` reads `stack.components.dyed_color` off the
         // *model* stack for the armour layer, so dyed leather armour rendered
         // correctly on a body while the identical item's GUI icon did not,
@@ -1166,7 +1166,7 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Int(i64::from(max)));
         }
 
-        // Issue #613's `EditBook` remainder: without these two branches a
+        // The `EditBook` remainder: without these two branches a
         // writable/written book's content is dropped at the crate boundary
         // the same way the dye and trim above used to be, and the book
         // editor has nothing to seed its pages from.
@@ -1199,7 +1199,7 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
             components.insert(key, ComponentValue::Profile(profile));
         }
 
-        // Issue #616's `BUNDLE_ITEM_SELECTED` / #613's `SelectBundleItem`:
+        // `BUNDLE_ITEM_SELECTED` / `SelectBundleItem`:
         // without this branch a bundle's contents never reach this crate's
         // shape, the same crate-boundary loss the dye/trim/pot comments above
         // already document. Each nested model stack is lifted through this
@@ -1253,7 +1253,7 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
 
 impl From<&ItemStack> for lodestone_model::ItemStack {
     /// Lowers a canonical stack back into the model's wire-shaped stack — the
-    /// direction that did not exist before issue #143.
+    /// direction that did not exist before this component's read/write seam.
     ///
     /// # Why its absence mattered
     ///
@@ -1306,7 +1306,7 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             map_id: stack.map_id(),
             pot_decorations: stack.pot_decorations(),
             profile: stack.profile(),
-            // Issue #616 / #613's `SelectBundleItem`: each contained stack
+            // `BUNDLE_ITEM_SELECTED` / `SelectBundleItem`: each contained stack
             // lowers back through this same `From` impl recursively, the
             // mirror of the forward conversion above.
             bundle_contents: stack
@@ -1332,15 +1332,15 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             // `crate::container::equippable_slot` — that returns this crate's own
             // `container::EquipmentSlot`, a **different type** from
             // `lodestone_model::EquipmentSlot` with the same name and the same
-            // variants. (Yet another instance of the duplication class issue #143
-            // is about; the compiler caught this one.)
+            // variants. (Yet another instance of the same duplication class
+            // this component's read/write seam deals with; the compiler caught this one.)
             equippable: match stack.components.get_str(EQUIPPABLE_COMPONENT) {
                 Some(ComponentValue::Str(name)) => {
                     lodestone_model::EquipmentSlot::from_name(name)
                 }
                 _ => None,
             },
-            // Issue #613's `EditBook` remainder: this crate's component map
+            // The `EditBook` remainder: this crate's component map
             // now carries both book components (`writable_book_content`),
             // `written_book_content`), so both round-trip rather than being
             // silently dropped converting a game-crate stack back to the
@@ -1401,21 +1401,14 @@ pub fn normalize(stack: ItemStack) -> Option<ItemStack> {
 
 /// `stack`'s hover name, `§`-coded and forced **italic** when it carries a
 /// custom name — the exact text/style the held-item name highlight
-/// ([`crate::player_state::HeldItemHighlight`], issue #126) draws, and, once
+/// ([`crate::player_state::HeldItemHighlight`]) draws, and, once
 /// an item tooltip lands, what its title line would reuse.
 ///
-/// Mirrors `Hud.extractSelectedItemName`
-/// (`Hud.java:625-648` in the 26.2 client):
+/// Mirrors vanilla's own selected-item-name extraction step in the 26.2
+/// client: build the hover name, style it with the item's rarity colour,
+/// then force italic when the item carries a custom name.
 ///
-/// ```java
-/// MutableComponent str = Component.empty().append(this.lastToolHighlight.getHoverName())
-///     .withStyle(this.lastToolHighlight.getRarity().color());
-/// if (this.lastToolHighlight.has(DataComponents.CUSTOM_NAME)) {
-///     str.withStyle(ChatFormatting.ITALIC);
-/// }
-/// ```
-///
-/// Two narrower gaps than #117's, both because the data does not exist in
+/// Two narrower gaps, both because the data does not exist in
 /// this build yet rather than because the draw side drops it:
 ///
 /// * **No rarity colour.** `ItemStack` here carries no rarity data (no
@@ -1426,11 +1419,11 @@ pub fn normalize(stack: ItemStack) -> Option<ItemStack> {
 ///   wrong.
 /// * **No `item.minecraft.*` translation table wired to this call.** There is
 ///   no existing "resolve an item's display name" path anywhere in this tree
-///   (checked before writing this — the issue's claim that one exists to
+///   (checked before writing this — an earlier claim that one exists to
 ///   reuse was stale). [`base_display_name`] does the best available
 ///   approximation: try `item.minecraft.<path>`, then `block.minecraft.<path>`
-///   (vanilla's own two `descriptionId` families — `Item.java:634-645`, a
-///   plain `Item` defaults to the former, a `BlockItem` to the latter, and
+///   (vanilla's own two description-id families — a
+///   plain item defaults to the former, a block item to the latter, and
 ///   this build has no per-item classification of which is which), then a
 ///   humanised fallback so an unresolvable id still reads as words rather
 ///   than a raw snake_case key.
@@ -1457,17 +1450,17 @@ pub fn styled_hover_name_spans(stack: &ItemStack, translate: &dyn Fn(&str) -> Op
 
 /// The **plain** sibling of [`styled_hover_name`]: identical construction,
 /// flattened through [`Text::to_plain_string_with`] instead of
-/// [`Text::to_legacy_string`] — vanilla's `ItemStack.getHoverName().getString()`,
+/// [`Text::to_legacy_string`] — vanilla's own plain-string hover-name getter,
 /// which strips styling entirely rather than encoding it as `§` codes.
 ///
 /// This is the accessor an anvil's rename box should seed from
-/// (`AnvilScreen`'s own `onNameChanged` compares against exactly this), not
+/// (vanilla's own anvil-screen name-changed handler compares against exactly this), not
 /// [`styled_hover_name`]: seeding an *editable* text field from a
 /// legacy-coded string means a custom name carrying real `§` characters (or,
 /// worse, one whose colour survived as a code) shows those codes as literal
 /// text the moment the box gains focus, and compares unequal to the item's
-/// own name even when nothing was actually changed. Issue #656's own report
-/// named this as a real, separate divergence from `styled_hover_name`'s
+/// own name even when nothing was actually changed. This was reported as
+/// a real, separate divergence from `styled_hover_name`'s
 /// hex-colour bug — not fixed by routing to spans, since an edit box has
 /// nowhere to put colour either way.
 #[must_use]
@@ -1487,14 +1480,15 @@ fn styled_hover_text(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<Strin
     };
     // A signed book's own title stands in for the display name, so a written
     // book reads as its title and not as "Written Book". This is vanilla's
-    // `ItemStack.getCustomName()`, which checks `DataComponents.CUSTOM_NAME`
+    // own custom-name getter, which checks the custom-name component
     // and then falls back to `written_book_content`'s `title().raw()` when
     // that title is non-blank.
     //
     // **Deliberately not folded into the `custom.is_some()` italic test
     // below**, which is a separate question with a separate vanilla answer:
-    // `getStyledHoverName` italicises on `has(DataComponents.CUSTOM_NAME)`,
-    // the *component*, not on whatever `getCustomName()` returned. A written
+    // vanilla's own styled-hover-name step italicises on the custom-name
+    // component's *presence*,
+    // not on whatever the custom-name getter returned. A written
     // book carries no custom name, so its title is upright — an anvil-renamed
     // one is italic, because then the component really is present.
     let book_title = stack
@@ -1844,7 +1838,7 @@ mod tests {
         );
     }
 
-    // -- Issue #143: the component read/write seam ---------------------
+    // -- The component read/write seam ---------------------
 
     /// The bug the `dyed_color` branch fixes, pinned. Before it, a dyed model
     /// stack converted to a game stack with **no** dye component at all, so the
@@ -1937,7 +1931,7 @@ mod tests {
                         signature: Some("sig".to_string()),
                     }],
                 }),
-                // Issue #613's `EditBook` remainder: both book components now
+                // The `EditBook` remainder: both book components now
                 // round-trip through this crate's component map, so this
                 // test exercises real values rather than `None` either way.
                 writable_book_content: Some(vec!["Once upon a time".to_string()]),
@@ -1948,7 +1942,7 @@ mod tests {
                     pages: vec![Text::literal("The end.")],
                     resolved: true,
                 }),
-                // Issue #616 / #613's `SelectBundleItem`: a real nested stack,
+                // `BUNDLE_ITEM_SELECTED` / `SelectBundleItem`: a real nested stack,
                 // not `vec![]` either way, so this exercises the recursive
                 // conversion rather than the empty-list short-circuit both
                 // directions take.
@@ -2077,7 +2071,7 @@ mod tests {
 
     /// A plugin's typed writes land in the same component map the decoder writes,
     /// so they are indistinguishable downstream — the property that makes the
-    /// write half of #143 real rather than a parallel store.
+    /// write half of the component seam real rather than a parallel store.
     #[test]
     fn a_plugin_write_is_indistinguishable_from_a_decoded_component() {
         let decoded = ItemStack::from(&lodestone_model::ItemStack {
