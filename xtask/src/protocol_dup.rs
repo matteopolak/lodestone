@@ -606,7 +606,61 @@ fn handle_play_arms(protocol_root: &Path, family: &str) -> Result<BTreeMap<Strin
             normalized: arm.2,
         });
     }
+    if arms.is_empty() {
+        arms = dispatch_table_arms(&file);
+    }
     Ok(arms)
+}
+
+/// The per-packet handler functions a family's `dispatch::Table` points at,
+/// used when `handle_play` has no `if packet_id ==` arms left to find.
+///
+/// The legacy families replaced their if-chains with data-driven tables, which
+/// is what the terminal `_ =>` island factory deserved — but it left this
+/// measurement counting zero arms for every converted family, and a duplication
+/// report that silently measures nothing is worse than one that is merely
+/// wrong. The handler *bodies* are the same code the arms used to hold, so
+/// they are the honest successor unit.
+///
+/// Keyed by the packet name recovered from the handler's own identifier, since
+/// the families differ in prefix (`play_map_chunk` versus
+/// `handle_play_map_chunk`) and the shared suffix is what makes two families'
+/// handlers comparable.
+fn dispatch_table_arms(file: &syn::File) -> BTreeMap<String, DispatchArm> {
+    let mut visitor = HandlerFnVisitor::default();
+    visitor.visit_file(file);
+    let mut arms = BTreeMap::new();
+    for (name, line_count, normalized) in visitor.handlers {
+        arms.entry(name).or_insert(DispatchArm {
+            line_count,
+            normalized,
+        });
+    }
+    arms
+}
+
+#[derive(Default)]
+struct HandlerFnVisitor {
+    handlers: Vec<(String, usize, String)>,
+}
+
+impl<'ast> Visit<'ast> for HandlerFnVisitor {
+    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
+        let ident = node.sig.ident.to_string();
+        let packet = ident
+            .strip_prefix("handle_play_")
+            .or_else(|| ident.strip_prefix("play_"));
+        if let Some(packet) = packet {
+            let span = node.block.span();
+            let line_count = span.end().line.saturating_sub(span.start().line) + 1;
+            self.handlers.push((
+                packet.to_ascii_uppercase(),
+                line_count,
+                node.block.to_token_stream().to_string(),
+            ));
+        }
+        syn::visit::visit_impl_item_fn(self, node);
+    }
 }
 
 #[derive(Default)]

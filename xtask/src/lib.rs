@@ -3471,8 +3471,21 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
         }
         let mut arms: BTreeMap<String, ClientboundArm> = BTreeMap::new();
         for (rel_path, content) in &adapter_sources {
-            let file_arms = classify_clientbound_dispatch(content, &functions, rel_path, depth_cap)
-                .with_context(|| format!("classify {rel_path}"))?;
+            let mut file_arms =
+                classify_clientbound_dispatch(content, &functions, rel_path, depth_cap)
+                    .with_context(|| format!("classify {rel_path}"))?;
+            // Families using a data-driven `dispatch::Table` carry no
+            // `if packet_id ==` arms at all, so both shapes are scanned and
+            // merged. A family is expected to use one or the other; scanning
+            // both means a half-converted family still reports every arm
+            // rather than silently losing the converted half.
+            file_arms.extend(classify_clientbound_dispatch_table(
+                content,
+                &functions,
+                rel_path,
+                depth_cap,
+                &play_ids.clientbound,
+            ));
             for (packet, arm) in file_arms {
                 if let Some(previous) = arms.insert(packet.clone(), arm) {
                     bail!(
@@ -3702,6 +3715,114 @@ fn classify_clientbound_dispatch(
         search_from = close + 1;
     }
     Ok(arms)
+}
+
+/// Scans one adapter source file for **data-driven dispatch tables**, and
+/// classifies each handler exactly as [`classify_clientbound_dispatch`]
+/// classifies an `if packet_id == ...` arm.
+///
+/// The legacy families moved from an if-chain to a
+/// `lodestone_core::dispatch::Table` built from a `static` slice of
+/// `(resource name, Handler::new(range, Type::fn))` pairs. That was a real
+/// improvement — a terminal `_ =>` arm silently swallows an unhandled packet
+/// forever, whereas the table makes every unhandled id an enumerated entry —
+/// but it left this scanner blind, reporting **0 arms** for all three
+/// converted families because it searched for the if-chain's literal text.
+/// The code was fine and the instrument was not, which is the more dangerous
+/// way round.
+///
+/// Anchors on `Handler::new(` rather than the enclosing `static`'s header,
+/// because the families spell the table differently — one names it
+/// `PLAY_CLIENTBOUND_HANDLERS` and two name it `CLIENTBOUND`; one puts an
+/// entry on a single line and two wrap it across four. The anchor is the one
+/// thing all three share.
+///
+/// `entries` maps a resource name back to its `const` name so a table keyed on
+/// `"minecraft:login"` reports against the same `LOGIN` key the if-chain
+/// scanner used, letting the two be merged.
+fn classify_clientbound_dispatch_table(
+    adapter_source: &str,
+    functions: &BTreeMap<String, FunctionBody<'_>>,
+    file: &str,
+    depth_cap: usize,
+    entries: &[PlayPacketEntry],
+) -> BTreeMap<String, ClientboundArm> {
+    let by_resource: BTreeMap<&str, &str> = entries
+        .iter()
+        .map(|e| (e.resource_name.as_str(), e.const_name.as_str()))
+        .collect();
+    let needle = "Handler::new(";
+    let mut arms = BTreeMap::new();
+    let mut search_from = 0;
+    while let Some(relative) = adapter_source[search_from..].find(needle) {
+        let start = search_from + relative;
+        search_from = start + needle.len();
+
+        // The resource name is the nearest string literal *before* the call,
+        // searched in a bounded window so a stray `Handler::new` elsewhere
+        // cannot reach back across the file and claim an unrelated literal.
+        let window_start = start.saturating_sub(400);
+        let window = &adapter_source[window_start..start];
+        let Some(close_quote) = window.rfind('"') else {
+            continue;
+        };
+        let Some(open_quote) = window[..close_quote].rfind('"') else {
+            continue;
+        };
+        let Some(const_name) = by_resource.get(&window[open_quote + 1..close_quote]) else {
+            continue;
+        };
+
+        // The handler is the final argument of `new(range, path)`. Parenthesis
+        // matching rather than a comma split, since the range argument may
+        // itself be a call.
+        let open = start + needle.len() - 1;
+        let Some(close) = matching_delim(adapter_source, open, b'(', b')') else {
+            continue;
+        };
+        // The last *non-empty* comma-separated argument: a multi-line entry
+        // carries a trailing comma, so a plain `rsplit(',').next()` yields the
+        // whitespace after it and silently loses the whole family. Then strip
+        // an `as <FnType>` cast, which two of the three families write and one
+        // does not.
+        let handler = adapter_source[open + 1..close]
+            .rsplit(',')
+            .map(str::trim)
+            .find(|arg| !arg.is_empty())
+            .unwrap_or("")
+            .split(" as ")
+            .next()
+            .unwrap_or("")
+            .trim()
+            .rsplit("::")
+            .next()
+            .unwrap_or("")
+            .trim();
+        if handler.is_empty() {
+            continue;
+        }
+
+        let verdict = match functions.get(handler) {
+            Some(body) => classify_body(body.body, functions, depth_cap, None),
+            // Reported, never silently dropped: a scanner that quietly skips
+            // its own subject is precisely the failure this function exists
+            // to correct.
+            None => ClientboundVerdict::Unclassified {
+                reason: format!("dispatch-table handler `{handler}` not found in adapter sources"),
+                depth_limited: false,
+            },
+        };
+        arms.insert(
+            (*const_name).to_owned(),
+            ClientboundArm {
+                packet: (*const_name).to_owned(),
+                file: file.to_owned(),
+                line: line_number(adapter_source, start),
+                verdict,
+            },
+        );
+    }
+    arms
 }
 
 /// Resolves a protocol family's adapter source to a list of `(path relative
@@ -3987,8 +4108,18 @@ fn extract_named_block<'a>(source: &'a str, marker: &str) -> Option<&'a str> {
 }
 
 fn matching_brace(source: &str, open: usize) -> Option<usize> {
+    matching_delim(source, open, b'{', b'}')
+}
+
+/// Matching-delimiter scan that skips comments, string literals and Rust
+/// lifetimes. Generalised from the brace-only version so the dispatch-table
+/// scanner can match parentheses with the same care: a hand-rolled scanner
+/// that treats every `'` as opening a char literal gets stuck the first time
+/// it meets a lifetime, which has bitten three separate scanners in this
+/// workspace.
+fn matching_delim(source: &str, open: usize, open_byte: u8, close_byte: u8) -> Option<usize> {
     let bytes = source.as_bytes();
-    if bytes.get(open) != Some(&b'{') {
+    if bytes.get(open) != Some(&open_byte) {
         return None;
     }
     let mut depth = 0usize;
@@ -4050,9 +4181,9 @@ fn matching_brace(source: &str, open: usize) -> Option<usize> {
             i = char_literal_span(bytes, i).unwrap_or(i + 1);
             continue;
         }
-        if b == b'{' {
+        if b == open_byte {
             depth += 1;
-        } else if b == b'}' {
+        } else if b == close_byte {
             depth = depth.checked_sub(1)?;
             if depth == 0 {
                 return Some(i);
