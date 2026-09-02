@@ -319,14 +319,14 @@ pub struct FluidSprites {
     /// The `*_flow` sprite (flowing surfaces, side faces).
     pub flow: SpriteUv,
     /// The `block/water_overlay` sprite, for side faces against a
-    /// `HalfTransparentBlock`/`LeavesBlock` neighbour. `None` for lava, which
-    /// has no overlay material in vanilla (`FluidStateModelSet.LAVA_MODEL`
+    /// half-transparent-family/leaves-family neighbour. `None` for lava, which
+    /// has no overlay material in vanilla (its lava fluid-state model
     /// passes `null`).
     pub overlay: Option<SpriteUv>,
 }
 
-/// Maps a fluid block's `level` property to its [`FluidState`], matching vanilla
-/// `LiquidBlock.getFluidState`: `level 0` is a full source (`amount 8`), `1..=7`
+/// Maps a fluid block's `level` property to its [`FluidState`], matching vanilla's
+/// fluid-block state accessor: `level 0` is a full source (`amount 8`), `1..=7`
 /// are flowing (`amount = 8 - level`, taller near the source), and `>= 8` are
 /// falling (`amount 8`).
 fn fluid_state_from_level(level: u8) -> FluidState {
@@ -343,13 +343,13 @@ fn fluid_state_from_level(level: u8) -> FluidState {
 /// no `waterlogged` property to key off.
 ///
 /// Extracted from the decompiled 26.2 server by scanning every
-/// `getFluidState` override under `net/minecraft/world/level/block/` whose body
+/// fluid-state override across the block registry whose body
 /// returns `Fluids.WATER` without consulting `WATERLOGGED`. That scan yields
-/// exactly these five classes and no others:
+/// exactly these five block registrations and no others:
 ///
-/// * `KelpBlock` / `KelpPlantBlock` → `Fluids.WATER.getSource(false)`
-/// * `SeagrassBlock` / `TallSeagrassBlock` → `Fluids.WATER.getSource(false)`
-/// * `BubbleColumnBlock` → `Fluids.WATER.getSource(false)`
+/// * kelp / kelp plant → `Fluids.WATER.getSource(false)`
+/// * seagrass / tall seagrass → `Fluids.WATER.getSource(false)`
+/// * bubble column → `Fluids.WATER.getSource(false)`
 ///
 /// A name list in a version-free crate is only acceptable because it is derived
 /// from the jar rather than guessed, and because the alternative — inferring
@@ -399,30 +399,29 @@ fn classify_fluid(block_path: &str, props: &BTreeMap<String, String>) -> Option<
     }
 }
 
-/// Blocks whose class extends vanilla `HalfTransparentBlock` in 26.2 (glass,
+/// Blocks whose class extends vanilla's half-transparent block family in 26.2 (glass,
 /// stained glass, tinted glass, ice, blue ice, frosted ice, honey, slime), plus
-/// every `LeavesBlock`. `FluidRenderer.tesselate` checks
-/// `relativeBlock instanceof HalfTransparentBlock || relativeBlock instanceof
-/// LeavesBlock` to decide whether a fluid side face touching this neighbour
+/// every member of the leaves-block family. Vanilla's fluid-face tesselation function checks
+/// whether the neighbour block is an instance of either family
+/// to decide whether a fluid side face touching this neighbour
 /// uses the `water_overlay` material instead of `*_flow`, and to suppress the
 /// side face's back copy (`addBackFace = !isOverlay`).
 ///
 /// Neither the render layer nor the baked geometry can stand in for this: a
 /// `slime_block`/`honey_block` sprite is fully opaque (they'd land on the
 /// `Solid` layer, indistinguishable from any ordinary block by alpha), and
-/// `LeavesBlock` renders `Cutout`, not `Translucent`, so no alpha-derived rule
-/// separates "is this class" from "is this some other cutout/translucent
+/// the leaves-block family renders `Cutout`, not `Translucent`, so no alpha-derived rule
+/// separates "is this family" from "is this some other cutout/translucent
 /// block". This is the same situation `UNCONDITIONAL_WATER_BLOCKS` already
 /// documents — the fact lives in a class hierarchy Java expresses and no data
 /// report carries — so it is a name list scanned from the decompiled 26.2
-/// `Blocks.java` (`TransparentBlock::new`, `StainedGlassBlock::new` × 16
-/// `DyeColor`s, `HalfTransparentBlock::new`, `IceBlock::new`,
-/// `FrostedIceBlock::new`, `HoneyBlock::new`, `SlimeBlock::new`,
-/// `TintedGlassBlock::new`), not guessed.
+/// block-registration table (the transparent, stained-glass ×16 dye colours,
+/// half-transparent, ice, frosted-ice, honey, slime and tinted-glass
+/// registrations), not guessed.
 ///
 /// Deliberately **excludes** `copper_grate` and its weathering/waxed variants,
-/// which also construct a `HalfTransparentBlock` subclass
-/// (`WaterloggedTransparentBlock`) — a niche waterlogged block where getting
+/// which also construct a half-transparent-family subclass
+/// (a waterlogged-transparent block) — a niche waterlogged block where getting
 /// the overlay wrong is low-stakes, scoped out to keep this list to blocks
 /// actually named in `docs/fluid-rendering.md`'s gap report plus their obvious
 /// siblings (every glass colour, both ice variants).
@@ -452,9 +451,10 @@ const FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS: &[&str] = &[
     "black_stained_glass",
 ];
 
-/// Every `LeavesBlock` in 26.2, scanned the same way — `Blocks.java`'s eleven
+/// Every member of the leaves-block family in 26.2, scanned the same way — vanilla's
+/// block-registration table's eleven
 /// `register(..., p -> new {Tinted,Untinted}ParticleLeavesBlock(...), ...)` /
-/// `MangroveLeavesBlock` calls.
+/// mangrove-leaves registrations.
 const FLUID_OVERLAY_LEAVES_BLOCKS: &[&str] = &[
     "oak_leaves",
     "spruce_leaves",
@@ -508,7 +508,7 @@ pub const ITEM_FRAME_SLOTS: usize = 4;
 /// Which of [`ITEM_FRAME_SLOTS`] a `(glow, map)` pair names.
 ///
 /// Vanilla has no *block* called `item_frame`, so there is no state id to key
-/// this on: `BlockStateDefinitions.getItemFrameFakeState` builds a throwaway
+/// this on: vanilla's fake-item-frame-state builder function builds a throwaway
 /// `StateDefinition` carrying only `BlockStateProperties.MAP`, and picks the
 /// plain or glowing definition by entity type. The jar nonetheless ships real
 /// `blockstates/item_frame.json` and `blockstates/glow_item_frame.json` files
@@ -606,15 +606,16 @@ pub struct StateModel {
     pub particle_tint: Option<[f32; 3]>,
     /// Whether the mesher should compute per-corner smooth ambient occlusion
     /// for this state's quads, or fall back to flat per-face light — vanilla's
-    /// `ModelBlockRenderer.tesselateBlock` choosing `tesselateAmbientOcclusion`
-    /// vs `tesselateFlat`. Sourced from
+    /// block-model tesselation function choosing its smooth-ambient-occlusion
+    /// path
+    /// vs its flat path. Sourced from
     /// [`BakedModel::ambient_occlusion`](lodestone_assets::bake::BakedModel::ambient_occlusion),
     /// which carries only the model-JSON half of vanilla's gate
     /// (`this.parts.getFirst().useAmbientOcclusion()`); the
     /// `blockState.getLightEmission() == 0` half has no data source in this
     /// crate yet and is not applied — see that field's doc for what is missing.
     pub ambient_occlusion: bool,
-    /// Whether this state is one of vanilla's eleven `LeavesBlock`s (the same
+    /// Whether this state is one of vanilla's eleven leaves-family blocks (the same
     /// real, vanilla-sourced list [`FLUID_OVERLAY_LEAVES_BLOCKS`] already
     /// carries for the water-overlay decal), i.e. the population
     /// `options.cutoutLeaves` gates.
@@ -627,13 +628,14 @@ pub struct StateModel {
     /// `mesher::SnapshotModelView::force_opaque_at` through
     /// [`BlockModels::is_leaves`].
     pub is_leaves: bool,
-    /// This state's exact vanilla `HalfTransparentBlock` identity (its
+    /// This state's exact vanilla half-transparent-family identity (its
     /// `block_path`), or `None` if it is not one of them — the same real,
     /// vanilla-sourced class list [`FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS`]
     /// already carries. Two states with the **same** `Some` value are the same
     /// `Block` in vanilla terms (both `ice`, or both `white_stained_glass`);
     /// different `Some` values (ice vs. glass) or one `None` are different
-    /// blocks. This is exactly `HalfTransparentBlock.skipRendering`'s
+    /// blocks. This is exactly vanilla's half-transparent-family self-occlusion
+    /// override's
     /// `neighborState.is(this)` test, keyed on identity rather than a boolean,
     /// because that test compares the *exact* `Block` instance, not "is
     /// translucent" — see [`BlockModels::skips_rendering_against`].
@@ -820,9 +822,10 @@ pub struct SpecialItemForm {
     /// Every `"transformation"` on the item definition's path down to this
     /// `special` node, outermost first (translation plus a `left_rotation`/
     /// `right_rotation` quaternion pair each), composed by vanilla *underneath*
-    /// the display-context transform above — `Transformation.compose(parent,
-    /// this.transformation)`, threaded through `bake` by every node type and
-    /// not just `SpecialModelWrapper.Unbaked`. Empty when nothing on the path
+    /// the display-context transform above — vanilla's transformation-record
+    /// compose function (`Transformation.compose(parent,
+    /// this.transformation)`), threaded through `bake` by every node type and
+    /// not just the unbaked special-model-wrapper node. Empty when nothing on the path
     /// carries one. A caller folds it as `existing_outer_placement * m[0] *
     /// m[1] * …` — [`crate::compose_special_node_transform`] is that fold; see
     /// [`lodestone_assets::ItemNodeTransform`]'s doc for the derivation.
@@ -1152,7 +1155,7 @@ fn collect_item_variants(manager: &ResourceManager) -> ItemVariantParts {
                     gui_light,
                     node_transformation,
                 }),
-                // Every layer is kept — vanilla's `ItemModelGenerator.bake` walks
+                // Every layer is kept — vanilla's item-model-generator bake function walks
                 // `layer0..layer4` and concatenates each layer's extrusion into
                 // one quad collection, so a two-layer item (a dyed leather boot,
                 // an enchanted book glint base) is two stacked slabs, not one.
@@ -1216,11 +1219,11 @@ fn gui_variant_of(
 }
 
 // ---------------------------------------------------------------------------
-// Flat sprite items: vanilla's `ItemModelGenerator`
+// Flat sprite items: vanilla's item-model-generator class
 // ---------------------------------------------------------------------------
 //
 // A `builtin/generated` item model carries **no elements**. Vanilla synthesises
-// them in `net.minecraft.client.resources.model.cuboid.ItemModelGenerator`
+// them in its item-model-generator class
 // (26.2), and the numbers below are that class read directly rather than
 // approximated:
 //
@@ -1235,21 +1238,21 @@ fn gui_variant_of(
 //   opaque interior rather than the transparent texel next door.
 // * `guiLight() == FRONT`.
 
-/// Vanilla `ItemModelGenerator.MIN_Z`: the slab's near face, in model units.
+/// Vanilla's item-model-generator's `MIN_Z`: the slab's near face, in model units.
 const SPRITE_MIN_Z: f32 = 7.5;
-/// Vanilla `ItemModelGenerator.MAX_Z`: the slab's far face, in model units.
+/// Vanilla's item-model-generator's `MAX_Z`: the slab's far face, in model units.
 const SPRITE_MAX_Z: f32 = 8.5;
-/// Vanilla `ItemModelGenerator.UV_SHRINK`: the per-edge UV inset, in **sprite
+/// Vanilla's item-model-generator's `UV_SHRINK`: the per-edge UV inset, in **sprite
 /// texels** (not model units — it is applied before the `xScale`/`yScale`).
 const SPRITE_UV_SHRINK: f32 = 0.1;
-/// Vanilla `ItemModelGenerator.SOUTH_FACE_UVS`.
+/// Vanilla's item-model-generator's `SOUTH_FACE_UVS`.
 const SPRITE_SOUTH_UVS: [f32; 4] = [0.0, 0.0, 16.0, 16.0];
-/// Vanilla `ItemModelGenerator.NORTH_FACE_UVS` — note the reversed `u`.
+/// Vanilla's item-model-generator's `NORTH_FACE_UVS` — note the reversed `u`.
 const SPRITE_NORTH_UVS: [f32; 4] = [16.0, 0.0, 0.0, 16.0];
 /// The texture variable the synthesised elements reference.
 const SPRITE_TEXTURE_VAR: &str = "layer";
 
-/// Vanilla `ItemModelGenerator.SideDirection`: which way an outline texel's edge
+/// Vanilla's item-model-generator's own side-direction enum: which way an outline texel's edge
 /// quad faces, and which neighbour texel's transparency creates it.
 ///
 /// The `Direction` mapping is **deliberately counter-intuitive and is vanilla's**:
@@ -1268,7 +1271,7 @@ enum SideDirection {
 impl SideDirection {
     const ALL: [Self; 4] = [Self::Up, Self::Down, Self::Left, Self::Right];
 
-    /// Vanilla `SideDirection.direction`.
+    /// Vanilla's side-direction enum's `direction` accessor.
     fn direction(self) -> Direction {
         match self {
             Self::Up => Direction::Up,
@@ -1278,7 +1281,7 @@ impl SideDirection {
         }
     }
 
-    /// Vanilla `SideDirection.isHorizontal` — which controls whether the edge
+    /// Vanilla's side-direction enum's `isHorizontal` accessor — which controls whether the edge
     /// quad's `v` range runs up or down, not whether the quad itself is
     /// horizontal.
     fn is_horizontal(self) -> bool {
@@ -1304,7 +1307,7 @@ impl SideDirection {
 /// Whether texel `(x, y)` of physical frame `frame` is fully transparent, reading
 /// the sprite's pixels back out of the **stitched atlas**.
 ///
-/// Vanilla's `SpriteContents.isTransparent` is `ARGB.alpha(pixel) == 0` — strictly
+/// Vanilla's sprite-contents transparency check is `ARGB.alpha(pixel) == 0` — strictly
 /// zero, not a cutout threshold — and out-of-bounds counts as transparent, which
 /// is what closes the outline at the sprite border.
 fn sprite_texel_transparent(atlas: &Atlas, sprite: &AtlasSprite, frame: u32, x: i32, y: i32) -> bool {
@@ -1320,7 +1323,7 @@ fn sprite_texel_transparent(atlas: &Atlas, sprite: &AtlasSprite, frame: u32, x: 
     atlas.rgba.get(i + 3).copied().unwrap_or(0) == 0
 }
 
-/// Vanilla `ItemModelGenerator.getSideFaces`: every `(facing, x, y)` at which an
+/// Vanilla's item-model-generator's side-faces function: every `(facing, x, y)` at which an
 /// opaque texel borders a transparent one.
 ///
 /// Vanilla collects these into a `HashSet` and therefore emits them in an
@@ -1374,7 +1377,7 @@ fn sprite_element(from: [f32; 3], to: [f32; 3], faces: HashMap<Direction, Face>)
         to,
         rotation: None,
         faces,
-        // Vanilla passes `shade = true` in `ItemLayerKey.compute`. It is inert for
+        // Vanilla passes `shade = true` in its item-layer-key compute function. It is inert for
         // the GUI and drop paths (both pose with `GuiLight::Front`, which flattens
         // the per-face constants) but is the honest value to record.
         shade: Some(true),
@@ -1383,7 +1386,8 @@ fn sprite_element(from: [f32; 3], to: [f32; 3], faces: HashMap<Direction, Face>)
     }
 }
 
-/// Vanilla `ItemModelGenerator.bakeExtrudedSprite` + `bakeSideFaces`: the
+/// Vanilla's item-model-generator's extruded-sprite bake function plus its
+/// side-faces bake function: the
 /// synthesised elements for **one** sprite layer.
 fn sprite_layer_elements(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<Element> {
     let mut elements = Vec::new();
@@ -1403,7 +1407,7 @@ fn sprite_layer_elements(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<Element> {
     // The edges. `x_scale`/`y_scale` map the sprite's own resolution onto the
     // 0..16 model grid, so a 32x32 pack texture extrudes at the same physical
     // size as a 16x16 one. Note `frame_height`, not `height`: vanilla's
-    // `SpriteContents.height()` is one *frame*, and using the whole animation
+    // sprite-contents height accessor is one *frame*, and using the whole animation
     // strip would squash every edge quad toward the sprite's bottom.
     if sprite.width == 0 || sprite.frame_height == 0 {
         return elements;
@@ -1448,7 +1452,7 @@ fn sprite_layer_elements(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<Element> {
         // axis (`Left`/`Right` always, because the flip above reverses the pair).
         // That is not a bug to normalise away: `bake_face` derives the true facing
         // from the resulting vertices and re-winds, exactly as
-        // `FaceBakery.bakeQuad` does, so the reversed box is what produces the
+        // vanilla's face-bakery quad-baking function does, so the reversed box is what produces the
         // correct outward normal. Clamping to min/max here would invert every
         // vertical edge quad.
         let (from, to) = match facing {
@@ -1492,7 +1496,7 @@ fn sprite_layer_elements(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<Element> {
 ///
 /// Vanilla stamps `tintIndex = layerIndex` on these quads and resolves the
 /// colour from the item's `TintSource` list at draw time
-/// (`CuboidItemModelWrapper.java:85-92`). We cannot write the layer index into
+/// (vanilla's cuboid-item-model wrapper). We cannot write the layer index into
 /// `BakedQuad::tint_index`, because that field indexes
 /// `BlockModels::tint_palette` and layer `0` would collide with whatever
 /// constant happens to be interned at slot 0. So the resolution happens *here*,
@@ -1564,7 +1568,7 @@ fn extruded_sprite_geometry(
 ///
 /// The join that makes item tints work at all: `layers[i].tint` is the
 /// `TintSource` the item definition put on layer `i`
-/// (`CuboidItemModelWrapper.java:132` parses the list, `:89` evaluates it
+/// (vanilla's cuboid-item-model wrapper parses the list, then evaluates it
 /// per-layer), and this resolves each one through
 /// [`lodestone_assets::item_tint::resolve`] and interns the result.
 ///
@@ -1749,8 +1753,8 @@ pub struct BlockModels {
     /// Per-state fluid classification (`None` for non-fluids). Parallel to
     /// `models`; a state can be *both* a model (a waterlogged stair) and a fluid.
     fluids: Vec<Option<FluidCell>>,
-    /// Per-state: whether this block is a vanilla `HalfTransparentBlock` or
-    /// `LeavesBlock` — the class `FluidRenderer.tesselate` checks on a fluid's
+    /// Per-state: whether this block is a member of vanilla's half-transparent family or
+    /// leaves family — the family vanilla's fluid-face tesselation function checks on a fluid's
     /// horizontal neighbour to swap in the `water_overlay` material and drop
     /// the side face's back copy. Parallel to `models`. See
     /// [`is_fluid_overlay_neighbor`].
@@ -1758,8 +1762,8 @@ pub struct BlockModels {
     /// Every atlas sprite's own render layer, indexed exactly as
     /// [`Atlas::sprites`] is — which is the index a baked quad's
     /// [`BakedQuad::sprite`](lodestone_assets::bake::BakedQuad::sprite) field
-    /// carries. This is the table vanilla's per-quad `ChunkSectionLayer`
-    /// bucketing needs; see [`Self::sprite_layer`]. Kept rather than dropped
+    /// carries. This is the table vanilla's per-quad transparency-bucketing
+    /// needs; see [`Self::sprite_layer`]. Kept rather than dropped
     /// after the per-state roll-up because the mesher asks the same question
     /// once per quad per section rebuild.
     sprite_layers: Vec<RenderLayer>,
@@ -1838,7 +1842,7 @@ impl BlockModels {
     /// cube pipeline uses — so a `mipmapLevels` setting that only reaches
     /// `BlockAtlas::build_with_mip_levels` moves nothing on screen. The depth
     /// also sets the stitcher's gutter (`1 << levels`, vanilla's
-    /// `Stitcher.padding` with no anisotropic filtering), so it changes the
+    /// texture-atlas stitcher's padding with no anisotropic filtering), so it changes the
     /// packing and every baked UV with it, which is why it has to be chosen
     /// here rather than adjusted afterwards.
     ///
@@ -2064,7 +2068,7 @@ impl BlockModels {
                     // `fixed`. Notably **no** `gui`, which is why `transform`
                     // above is the identity and not read from here.
                     display: part.display,
-                    // Vanilla `ItemModelGenerator.guiLight() == FRONT`, matching
+                    // Vanilla's item-model-generator's `guiLight() == FRONT`, matching
                     // `item/generated`'s own `"gui_light": "front"`. This is also
                     // what routes the drop pass to `GENERATED_ITEM_GROUND`
                     // (translation [0, 2, 0], scale 0.5) instead of the block
@@ -2131,10 +2135,11 @@ impl BlockModels {
         }
 
         // The item-frame bodies. Baked here, beside the states, because the
-        // frame is a *block model* with no block: `ItemFrameRenderer.submit`
+        // frame is a *block model* with no block: vanilla's item-frame renderer
+        // submit function
         // poses `state.frameModel` — a `BlockStateModel` resolved through
-        // `BlockModelResolver.updateForItemFrame` — exactly the way
-        // `FallingBlockRenderer` poses a real block's, so it wants this atlas,
+        // vanilla's block-model-resolver item-frame update function — exactly the way
+        // vanilla's falling-block renderer poses a real block's, so it wants this atlas,
         // this palette and these UVs rather than an entity sheet. There is no
         // state id to reach it by (see `item_frame_slot`), so it is a fixed
         // four-entry table instead of a row in `models`.
@@ -2203,7 +2208,7 @@ impl BlockModels {
     }
 
     /// One item-frame body's baked quads, in block-local `0.0..=1.0` space —
-    /// the geometry `ItemFrameRenderer.submit` draws around the item.
+    /// the geometry vanilla's item-frame renderer submit function draws around the item.
     ///
     /// `glow` picks `glow_item_frame` over `item_frame` (a different `#back`
     /// sprite, nothing else), and `map` picks the wider `item_frame_map`
@@ -2402,37 +2407,38 @@ impl BlockModels {
         self.state(state_id).ambient_occlusion
     }
 
-    /// Whether this state is one of vanilla's `LeavesBlock`s — see
+    /// Whether this state is one of vanilla's leaves-family blocks — see
     /// [`StateModel::is_leaves`].
     #[must_use]
     pub fn is_leaves(&self, state_id: u32) -> bool {
         self.state(state_id).is_leaves
     }
 
-    /// Vanilla's `HalfTransparentBlock.skipRendering`: whether a face between
+    /// Vanilla's half-transparent-family self-occlusion override: whether a face between
     /// `state_id` and `neighbour_id` is never drawn because they are the
     /// **same** `Block` (both ice, both `white_stained_glass`, …) — see
     /// [`StateModel::half_transparent_class`].
     ///
     /// This is independent of [`Self::occludes`], which is (correctly) `false`
-    /// for every member of this class — vanilla's `noOcclusion()` flag, which
+    /// for every member of this family — vanilla's `noOcclusion()` flag, which
     /// is exactly why the interior faces of a wall of glass or ice are not
-    /// culled by the ordinary occlusion test and need this second, class-keyed
-    /// one instead (`Block.shouldRenderFace`'s two independent early-outs:
+    /// culled by the ordinary occlusion test and need this second, family-keyed
+    /// one instead (vanilla's face-render test's two independent early-outs:
     /// `neighborState.getFaceOcclusionShape(..) == Shapes.block()`, then
     /// `state.skipRendering(neighborState, direction)`).
     ///
     /// Ice, blue ice and frosted ice are three different `Some` values
-    /// (`"ice"`, `"blue_ice"`, `"frosted_ice"`, per real `FrostedIceBlock`
-    /// extending `IceBlock` extending `HalfTransparentBlock` rather than
+    /// (`"ice"`, `"blue_ice"`, `"frosted_ice"`, per vanilla's frosted-ice
+    /// registration extending its ice registration extending the
+    /// half-transparent family rather than
     /// sharing one class instance) and correctly do **not** skip against each
     /// other, matching vanilla: only literally identical blocks cull their
     /// shared face, not "any ice-like neighbour".
     ///
     /// A state outside [`FLUID_OVERLAY_HALF_TRANSPARENT_BLOCKS`] — including
     /// `copper_grate`, deliberately excluded from that list — never skips.
-    /// `LeavesBlock`'s own same-neighbour clause
-    /// (`!cutoutLeaves && neighborState.getBlock() instanceof LeavesBlock`) is
+    /// The leaves family's own same-neighbour clause
+    /// (`!cutoutLeaves && neighborState.getBlock()` is an instance of that family) is
     /// a **different** vanilla rule this does not implement.
     #[must_use]
     pub fn skips_rendering_against(&self, state_id: u32, neighbour_id: u32) -> bool {
@@ -2454,7 +2460,7 @@ impl BlockModels {
     ///
     /// # Why the bounding rect and not one quad's UVs
     ///
-    /// Vanilla resolves this through `ItemStackRenderState.pickParticleMaterial`,
+    /// Vanilla resolves this through its item-stack render-state's pick-particle-material function,
     /// which picks a **random** one of the render state's layers' particle
     /// materials. Every consumable in 26.2 is a single-layer `item/generated`
     /// sprite, so there is exactly one material to pick and the choice is not
@@ -2529,8 +2535,8 @@ impl BlockModels {
     /// [`BakedQuad::sprite`](lodestone_assets::bake::BakedQuad::sprite) field.
     ///
     /// This is the **per-quad** layer, and it is what decides which pass a quad
-    /// draws in. Vanilla's `SectionCompiler` buckets each quad on
-    /// `quad.materialInfo().layer()`, which `ChunkSectionLayer.byTransparency`
+    /// draws in. Vanilla's section-compiler class buckets each quad on
+    /// `quad.materialInfo().layer()`, which its transparency-bucketing function
     /// derives from the transparency of that quad's *own* sprite — not from a
     /// per-block-state roll-up. The two disagree on any model that mixes an
     /// opaque sprite with a cutout or translucent one in a single state:
@@ -2546,7 +2552,7 @@ impl BlockModels {
     /// # Remaining divergence
     ///
     /// Vanilla scopes the scan to the quad's own UV window inside the sprite
-    /// (`SpriteContents.computeTransparency(u0, v0, u1, v1)`), short-circuiting
+    /// (its sprite-contents transparency-computation function), short-circuiting
     /// to the whole-sprite answer when the sprite is opaque or the window
     /// covers it entirely — which is the overwhelming majority of quads. This
     /// answers the whole-sprite question only, so a quad sampling an opaque
@@ -2603,7 +2609,7 @@ impl BlockModels {
         }
     }
 
-    /// Whether `state_id` is a vanilla `HalfTransparentBlock`/`LeavesBlock` — a
+    /// Whether `state_id` is a member of vanilla's half-transparent or leaves family — a
     /// fluid neighbour that should use the `water_overlay` material. See
     /// [`is_fluid_overlay_neighbor`].
     #[must_use]
@@ -2616,7 +2622,7 @@ impl BlockModels {
 }
 
 /// The `block/water_overlay` texture location — vanilla's
-/// `FluidStateModelSet.WATER_MODEL`'s third `Material`. No blockstate or item
+/// vanilla's water fluid-state model's third `Material`. No blockstate or item
 /// model references it, so it needs the same explicit atlas seeding as the
 /// still/flow textures (see `build_complete_atlas`).
 fn water_overlay_location() -> ResourceLocation {
@@ -2739,7 +2745,7 @@ fn build_complete_atlas(
         }
     }
     // `water_overlay` likewise: referenced by no blockstate or item model (it's
-    // wired up in Java as `FluidStateModelSet.WATER_MODEL`'s third `Material`).
+    // wired up in Java as vanilla's water fluid-state model's third `Material`).
     let _ = builder.load(manager, &water_overlay_location());
     // Crack-overlay stages are likewise referenced by no block model; add them
     // so the mining crack pass can sample them from this same atlas.
@@ -2798,8 +2804,8 @@ fn block_layer(sprite_layers: &[RenderLayer], quads: &[BakedQuad]) -> RenderLaye
 /// * `block_layer` takes the *most transparent* sprite over all quads, so the
 ///   decal dragged the whole block to `Cutout` → `layer != Solid`.
 ///
-/// Vanilla does not derive occlusion from textures at all: `BlockBehaviour`'s
-/// `initCache` sets `occlusionShape = canOcclude ? getOcclusionShape(...) :
+/// Vanilla does not derive occlusion from textures at all: its base block-behaviour
+/// cache-init function sets `occlusionShape = canOcclude ? getOcclusionShape(...) :
 /// Shapes.empty()`, and `canOcclude` is a `Properties` flag cleared only by
 /// `noOcclusion()`/`noCollision()`. `GRASS_BLOCK`'s properties call neither, so
 /// vanilla occludes; leaves, glass, ice, slime, honey, spawners, grates and
@@ -3046,8 +3052,8 @@ mod tests {
     fn underwater_plants_carry_water_without_a_waterlogged_property() {
         // Kelp, seagrass and bubble columns have **no** `waterlogged` property:
         // vanilla hardcodes `getFluidState -> Fluids.WATER.getSource(false)` in
-        // `KelpBlock`/`KelpPlantBlock`/`SeagrassBlock`/`TallSeagrassBlock`/
-        // `BubbleColumnBlock`. Classifying them off `waterlogged` alone leaves an
+        // its kelp/kelp-plant/seagrass/tall-seagrass/bubble-column block
+        // registrations. Classifying them off `waterlogged` alone leaves an
         // air pocket around every plant in the ocean.
         for (path, p) in [
             ("kelp", vec![("age", "4")]),

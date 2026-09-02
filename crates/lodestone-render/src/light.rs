@@ -3,14 +3,14 @@
 //!
 //! # What it is
 //!
-//! Vanilla builds a 16×16 `RGBA8_UNORM` texture (`Lightmap`) indexed by
+//! Vanilla builds a 16×16 `RGBA8_UNORM` texture (its lightmap) indexed by
 //! `(block_level, sky_level)` and multiplies each terrain/entity/particle vertex
-//! colour by the texel it samples (`block.vsh`: `vertexColor = Color *
+//! colour by the texel it samples (its terrain vertex shader: `vertexColor = Color *
 //! sample_lightmap(Sampler2, UV2)`). [`light_term`] is that texel, as a scalar.
 //!
 //! # How it works
 //!
-//! Straight from `assets/minecraft/shaders/core/lightmap.fsh` in the real 26.2
+//! Straight from vanilla's own lightmap fragment shader in the real 26.2
 //! `client.jar` — three stages, in this order:
 //!
 //! ```text
@@ -25,13 +25,14 @@
 //! color  = mix(color, notGamma(color), BrightnessFactor);
 //! ```
 //!
-//! * [`brightness`] is `get_brightness` — and `Lightmap.getBrightness` is the
+//! * [`brightness`] is `get_brightness` — and vanilla's own lightmap
+//!   brightness function is the
 //!   same expression with the dimension's `ambientLight` lerped in, which is
 //!   `0.0` in the overworld.
 //! * **The curve is applied to the raw level, and `SkyFactor` multiplies the
 //!   result.** That order matters and it is the opposite of what issue #386's
 //!   table assumed — see the divergence note at the bottom of this doc.
-//!   `SkyFactor` is `EnvironmentAttributes.SKY_LIGHT_FACTOR`, i.e. exactly
+//!   `SkyFactor` is vanilla's own per-dimension sky-light-factor attribute, i.e. exactly
 //!   [`crate::entity::sky_darken_for_time_of_day`] (JVM-gated tick by tick in
 //!   `tests/sky_light_factor_timeline.rs`).
 //! * [`not_gamma`] is `notGamma`, mixed in at [`BRIGHTNESS_FACTOR`]. This is not
@@ -67,8 +68,8 @@
 //!
 //! # Configuration
 //!
-//! [`BRIGHTNESS_FACTOR`] is vanilla's `Options.gamma` **default** (`0.5`,
-//! `Options.java:900`), hardcoded because there is no brightness setting in this
+//! [`BRIGHTNESS_FACTOR`] is vanilla's `Options.gamma` **default** (`0.5`),
+//! hardcoded because there is no brightness setting in this
 //! client yet. Wiring one means threading it into the three shaders' uniforms;
 //! `0.0` reproduces vanilla's "Moody" and `1.0` its "Bright".
 //!
@@ -104,7 +105,7 @@
 //!   course of fixing an overshoot the other way. Now modelled; see
 //!   [`AMBIENT_LIGHT`].
 //! * **`SKY_LIGHT_COLOR` is not constant white.** It is a *timeline* attribute
-//!   (`Timelines.java:72`) keyframed `-1` (white) at ticks 730 and 11270 and
+//!   (vanilla's timeline registration) keyframed `-1` (white) at ticks 730 and 11270 and
 //!   `NIGHT_SKY_LIGHT_COLOR` at 13140 and 22860 — and that constant is
 //!   `colorFromFloat(1.0, 0.48, 0.48, 1.0)`, i.e. **blue**: red and green fall to
 //!   48% while blue holds at 100%. So vanilla's night light is not merely dimmer
@@ -113,14 +114,14 @@
 //!   the light term has to become a `vec3`, alongside the warm
 //!   `BLOCK_LIGHT_TINT` of `(1.000, 0.847, 0.549)`.
 
-/// Vanilla's `Options.gamma` default, which `lightmap.fsh` consumes as
+/// Vanilla's `Options.gamma` default, which its lightmap fragment shader consumes as
 /// `BrightnessFactor` to mix [`not_gamma`] in. See this module's "Configuration".
 pub const BRIGHTNESS_FACTOR: f32 = 0.5;
 
-/// The overworld's `EnvironmentAttributes.AMBIENT_LIGHT_COLOR`, as a grey scalar.
+/// The overworld's ambient-light-colour dimension attribute, as a grey scalar.
 ///
-/// `DimensionTypes.java:36` sets it to `-16119286`, which is `0xFF0A0A0A` — grey
-/// `10/255`, **not** black. `lightmap.fsh` seeds its accumulator with
+/// Vanilla's dimension-type defaults set it to `-16119286`, which is `0xFF0A0A0A` — grey
+/// `10/255`, **not** black. Its lightmap fragment shader seeds its accumulator with
 /// `max(AmbientColor, nightVisionColor)` before adding either light half, so a
 /// fully unlit surface in vanilla is not pure black: it reads `0.0935` once
 /// [`not_gamma`] is mixed in. Dropping this term is what made caves render
@@ -151,7 +152,7 @@ pub const OVERWORLD_AMBIENT_LIGHT: [f32; 3] = [AMBIENT_LIGHT, AMBIENT_LIGHT, AMB
 
 /// Unpacks a `0xRRGGBB` colour — as decoded off the wire by
 /// `DimensionType::ambient_light_color` — into per-channel `0.0..=1.0` floats.
-/// Vanilla's `ARGB.vector3fFromRGB24`: a bare `byte / 255`, no linearisation
+/// Vanilla's packed-24-bit-to-vector unpack: a bare `byte / 255`, no linearisation
 /// (this module's whole convention — see `srgb_to_linear`'s doc elsewhere in
 /// this crate for why vanilla's lightmap constants are never gamma-corrected
 /// on the way in).
@@ -167,8 +168,8 @@ pub fn rgb24_to_channels(packed: u32) -> [f32; 3] {
 /// Vanilla's `get_brightness`: one lightmap axis' response to a `0.0..=1.0` light
 /// level (the wire nibble over 15).
 ///
-/// `lightmap.fsh`'s `level / (4.0 - 3.0 * level)`, equal to
-/// `Lightmap.getBrightness` with the overworld's `ambientLight` of `0.0`. `0.0`
+/// Its lightmap fragment shader's `level / (4.0 - 3.0 * level)`, equal to
+/// vanilla's own lightmap brightness function with the overworld's `ambientLight` of `0.0`. `0.0`
 /// maps to `0.0` and `1.0` to `1.0`; in between it is strongly concave — half
 /// light is a fifth of the brightness, which is the whole reason a linear ramp
 /// looked so wrong in the middle of the range.
@@ -179,7 +180,7 @@ pub fn brightness(level: f32) -> f32 {
 
 /// Vanilla's `notGamma`, specialised to a grey value.
 ///
-/// `lightmap.fsh` scales an RGB triple by `maxScaled / maxComponent` where
+/// Its lightmap fragment shader scales an RGB triple by `maxScaled / maxComponent` where
 /// `maxScaled = 1 - (1 - maxComponent)^4`. When all three components are equal
 /// that whole expression collapses to `1 - (1 - c)^4` with no division — which
 /// also removes vanilla's `0.0 / 0.0` at the darkest texel. Grey is the right
@@ -192,7 +193,8 @@ pub fn not_gamma(c: f32) -> f32 {
     1.0 - inverted * inverted * inverted * inverted
 }
 
-/// The lightmap value for a *combined* brightness, i.e. `lightmap.fsh`'s final
+/// The lightmap value for a *combined* brightness, i.e. vanilla's lightmap
+/// fragment shader's final
 /// two lines: clamp, then mix [`not_gamma`] in at [`BRIGHTNESS_FACTOR`].
 ///
 /// Exactly `1.0` at `1.0` and exactly `0.0` at `0.0`, so every full-bright path
@@ -205,7 +207,7 @@ pub fn apply_brightness_option(combined: f32) -> f32 {
 }
 
 /// The full lightmap sample for a packed `sky << 4 | block` byte under a
-/// `sky_darken` of `EnvironmentAttributes.SKY_LIGHT_FACTOR`.
+/// `sky_darken` of vanilla's own per-dimension sky-light-factor attribute.
 ///
 /// `sky_darken` scales only the sky half — block light is a torch and does not
 /// dim at dusk. Pass `1.0` for full daylight; the shaders additionally treat
@@ -242,14 +244,15 @@ pub fn light_term_from_levels(sky_level: f32, block_level: f32, sky_darken: f32)
 // not. `light_color_from_levels` below is the real, faithful vec3 port.
 // ---------------------------------------------------------------------------
 
-/// Vanilla's warm torch tint, `EnvironmentAttributes.BLOCK_LIGHT_TINT`
-/// (`DimensionDefaults.java:5`, `0xFFFFD88C`), as linear-space-agnostic sRGB
+/// Vanilla's warm torch tint, its own per-dimension block-light-tint attribute
+/// (`0xFFFFD88C`), as linear-space-agnostic sRGB
 /// bytes over 255 — the same "no linearisation" convention every other
-/// lightmap constant in this module uses (`ARGB.vector3fFromRGB24` is a bare
+/// lightmap constant in this module uses (vanilla's packed-24-bit-to-vector
+/// unpack is a bare
 /// `byte / 255`).
 pub const BLOCK_LIGHT_TINT: [f32; 3] = [1.0, 216.0 / 255.0, 140.0 / 255.0];
 
-/// Vanilla's `LightmapRenderStateExtractor.extract`: `blockFactor =
+/// Vanilla's lightmap render-state extraction function: `blockFactor =
 /// blockLightFlicker + 1.4F`. The flicker term is not modelled here (see this
 /// module's "How to change it" — a visible torch shimmer, tracked as a
 /// follow-up); `1.4` alone is what keeps every hermetic gate deterministic.
@@ -277,11 +280,11 @@ pub fn not_gamma_vec3(c: [f32; 3]) -> [f32; 3] {
     [c[0] * ratio, c[1] * ratio, c[2] * ratio]
 }
 
-/// Vanilla's `EnvironmentAttributes.SKY_LIGHT_COLOR` timeline track, recovered
+/// Vanilla's own per-dimension `SKY_LIGHT_COLOR` timeline track, recovered
 /// from `sky_darken` (`SKY_LIGHT_FACTOR`) instead of the raw tick.
 ///
 /// `SKY_LIGHT_COLOR` and `SKY_LIGHT_FACTOR` share identical keyframe ticks —
-/// `730 / 11270 / 13140 / 22860` (`Timelines.java:71-80`) — and neither track
+/// `730 / 11270 / 13140 / 22860` (vanilla's timeline registration) — and neither track
 /// calls `.setEasing(...)`, so both interpolate linearly on the same
 /// parameter. `SKY_LIGHT_FACTOR` runs `1.0` (day, ticks `≤ 730` and the
 /// `11270..13140` plateau) down to `0.24` (night, `≥ 13140`), so
@@ -292,15 +295,16 @@ pub fn not_gamma_vec3(c: [f32; 3]) -> [f32; 3] {
 ///
 /// is the same interpolation parameter `SKY_LIGHT_COLOR` uses, and
 /// `srgbLerp(t, white, NIGHT_SKY_LIGHT_COLOR)` (`NIGHT_SKY_LIGHT_COLOR =
-/// colorFromFloat(1.0, 0.48, 0.48, 1.0)` = `0xFF7A7AFF`, `Timelines.java:30`)
+/// colorFromFloat(1.0, 0.48, 0.48, 1.0)` = `0xFF7A7AFF`, vanilla's timeline
+/// registration)
 /// recovers the colour — **verified byte-exact** against the JVM oracle
 /// `tests/support/sky_light_timeline_jvm.txt` at ticks 0, 12000, 13000, 13140
 /// (see this function's tests), including `Mth.lerpInt`'s `floor` (a `round`
 /// here is off by one byte on roughly half of all ticks).
 ///
 /// **Two known exceptions, both momentary, and both safe under the `clamp`:**
-/// vanilla's sky-flash overrides (`ClientLevel.java:268`,
-/// `LightmapRenderStateExtractor.java:57-64`) push `SKY_LIGHT_FACTOR` to or
+/// vanilla's sky-flash overrides (its per-level tick,
+/// and its lightmap render-state extraction function) push `SKY_LIGHT_FACTOR` to or
 /// above `1.0` during a lightning flash without touching `SKY_LIGHT_COLOR`,
 /// so for a few ticks this derivation reads pure white (`t` clamped to `0.0`)
 /// where vanilla would still show a faint blue tint it never actually applies
@@ -345,7 +349,7 @@ fn parabolic_mix_factor(level: f32) -> f32 {
 /// color  = mix(color, notGamma(color), BrightnessFactor)
 /// ```
 ///
-/// `ambient` is `EnvironmentAttributes.AMBIENT_LIGHT_COLOR` for the *current*
+/// `ambient` is vanilla's own per-dimension ambient-light-colour attribute for the *current*
 /// dimension — [`rgb24_to_channels`] of `DimensionType::ambient_light_color`,
 /// or [`OVERWORLD_AMBIENT_LIGHT`] as the safe default when no per-dimension
 /// colour is known yet. It is added once, not per-channel `max`ed with
@@ -541,7 +545,7 @@ mod tests {
 
     /// The midnight number this whole change turns on, with issue #386's own
     /// table as the third hypothesis. All three are computed here from constants
-    /// that originate in `lightmap.fsh` and `Options.java`, not from the shader.
+    /// that originate in vanilla's lightmap fragment shader and gamma option, not from the shader.
     #[test]
     fn midnight_lands_on_vanillas_value_and_not_on_either_wrong_one() {
         let midnight = 0.24_f32;
@@ -862,7 +866,7 @@ mod tests {
     }
 
     /// [`rgb24_to_channels`] is a bare `byte / 255` per channel, no
-    /// linearisation — vanilla's `ARGB.vector3fFromRGB24`. Hand-derived, not
+    /// linearisation — vanilla's packed-24-bit-to-vector unpack. Hand-derived, not
     /// taken from the function.
     #[test]
     fn rgb24_to_channels_is_a_bare_byte_over_255_per_channel() {

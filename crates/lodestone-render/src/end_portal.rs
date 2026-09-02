@@ -1,5 +1,5 @@
 //! The end portal / end gateway star-field effect —
-//! `AbstractEndPortalRenderer`/`TheEndPortalRenderer`/`TheEndGatewayRenderer`,
+//! vanilla's base end-portal renderer and its portal/gateway subtypes,
 //! ported. The genuinely novel piece in this corpus: every other block-entity
 //! type in [`crate::block_entity`] is a cuboid rig or a procedural quad-strip
 //! (the beacon beam), sampling an ordinary diffuse texture. This one samples
@@ -20,27 +20,30 @@
 //!
 //! Two things per instance, both ported directly from the real jar:
 //!
-//! 1. **Which faces to draw.** `TheEndPortalBlockEntity.shouldRenderFace`
+//! 1. **Which faces to draw.** Vanilla's end-portal block-entity should-render-face
+//!    function
 //!    tests only the axis — `direction.getAxis() == Y` — with **no** neighbor
 //!    check at all, so an end portal always submits exactly its top and
 //!    bottom faces regardless of what is adjacent (there is no
 //!    [`end_portal_vertices`] parameter for this reason; it is not a choice
-//!    the caller makes). `TheEndGatewayBlockEntity.shouldRenderFace` instead
-//!    delegates to `Block.shouldRenderFace`, the ordinary neighbor-occlusion
+//!    the caller makes). Vanilla's end-gateway block-entity should-render-face
+//!    function instead
+//!    delegates to vanilla's ordinary face-render test, the ordinary neighbor-occlusion
 //!    test every terrain quad already uses — [`end_gateway_vertices`] takes
 //!    the resolved face list as a parameter because computing it needs a
 //!    live [`lodestone_world::World`] this crate cannot depend on; see
 //!    `lodestone_shell::block_entities::end_gateway_spawns` for the gather.
-//! 2. **The squash.** `TheEndPortalRenderer.TRANSFORMATION` — `translate(0,
+//! 2. **The squash.** Vanilla's end-portal renderer's transformation constant — `translate(0,
 //!    0.375, 0) · scale(1, 0.375, 1)` — flattens the portal's cube into a
 //!    thin slab spanning `y ∈ [0.375, 0.75]`, matching the real portal
-//!    frame's height. `TheEndGatewayRenderer.submit` applies **no**
+//!    frame's height. Vanilla's end-gateway renderer's submit function applies **no**
 //!    transform at all before `submitCube`, so a gateway's swirl fills the
 //!    *whole* block (`y ∈ [0, 1]`) — the one geometric difference between the
 //!    two types, both driven through the same [`push_face`].
 //!
 //! Vertex data is **position only** — no UV, no colour, no normal. That is
-//! not a simplification; it is what `AbstractEndPortalRenderer.FACES`
+//! not a simplification; it is what vanilla's base end-portal renderer's own
+//! per-face vertex table
 //! actually submits (`buffer.addVertex(pose, faceVertex)`, nothing else).
 //! The illusion comes entirely from the fragment shader
 //! (`gpu/end_portal.wgsl`), which derives its own texture coordinate from
@@ -53,8 +56,8 @@
 //!
 //! ## What is deliberately not ported
 //!
-//! * **The gateway beam** (`TheEndGatewayRenderer.submit`'s
-//!   `BeaconRenderer.submitBeaconBeam` call, shown while `isSpawning()`/
+//! * **The gateway beam** (vanilla's end-gateway renderer's submit function's
+//!   beacon-renderer beam-submit call, shown while `isSpawning()`/
 //!   `isCoolingDown()`). It needs a per-position client-simulated
 //!   `teleportCooldown` tracker fed by the gateway's own `BLOCK_EVENT`
 //!   (`b0 == 1`, the same collision [`crate::block_entity::BellShakeDirection`]'s
@@ -64,8 +67,8 @@
 //!   after placement and ~2 s after every teleport-through, a small fraction
 //!   of a gateway's total invisible lifetime, so the always-visible swirl
 //!   face was the priority. `beam_vertices`-shaped machinery already exists
-//!   in [`crate::beacon`] for whoever picks this up — `submitBeaconBeam`'s
-//!   general 9-parameter form is what `TheEndGatewayRenderer` calls, not the
+//!   in [`crate::beacon`] for whoever picks this up — the beacon-renderer's beam-submit
+//!   general 9-parameter form is what vanilla's end-gateway renderer calls, not the
 //!   beacon's own accumulated-sections wrapper.
 //! * **Face culling for the end portal itself.** Vanilla genuinely draws no
 //!   side faces (`getAxis() == Y` only) — this is not a gap, it is the real
@@ -79,7 +82,7 @@
 use lodestone_assets::Direction;
 use glam::Vec3;
 
-/// `AbstractEndPortalRenderer.FROM`/`TO` — the whole unit cube.
+/// Vanilla's base end-portal renderer's `FROM`/`TO` constants — the whole unit cube.
 const FROM: Vec3 = Vec3::ZERO;
 const TO: Vec3 = Vec3::ONE;
 
@@ -100,7 +103,8 @@ pub struct EndPortalSpawn {
 pub struct EndGatewaySpawn {
     /// The end-gateway block's own integer corner.
     pub pos: [i32; 3],
-    /// The resolved, unoccluded face list — `Block.shouldRenderFace` already
+    /// The resolved, unoccluded face list — vanilla's ordinary face-render test
+    /// already
     /// applied, so every direction here should draw.
     pub faces: Vec<Direction>,
 }
@@ -122,9 +126,11 @@ pub struct EndPortalVertex {
     pub is_gateway: bool,
 }
 
-/// `FaceInfo.fromFacing(direction)`'s four corners, in the real jar's own
-/// per-direction order (`AbstractEndPortalRenderer.FACES`, built from
-/// `FaceInfo.getVertexInfo(0..=3)`). Transcribed directly from `FaceInfo.java`
+/// Vanilla's per-direction face-info accessor's four corners, in the real jar's own
+/// per-direction order (vanilla's base end-portal renderer's own per-face vertex
+/// table, built from
+/// its per-vertex accessor). Transcribed directly from vanilla's own face-info
+/// source
 /// rather than derived, because each direction's winding is independent —
 /// there is no shared formula to generalise from.
 #[must_use]
@@ -201,7 +207,7 @@ fn push_face(
     push(corners[3]);
 }
 
-/// `TheEndPortalRenderer.submit` — always exactly {Up, Down}, squashed to
+/// Vanilla's end-portal renderer's submit function — always exactly {Up, Down}, squashed to
 /// `y ∈ [0.375, 0.75]` (`TRANSFORMATION`). No face-list parameter: unlike the
 /// gateway, `shouldRenderFace` here never consults a neighbor, so there is
 /// nothing for a caller to resolve.
@@ -213,7 +219,7 @@ pub fn end_portal_vertices(pos: [i32; 3]) -> Vec<EndPortalVertex> {
     out
 }
 
-/// `TheEndGatewayRenderer.submit`'s `submitCube(state.facesToShow, ...)` —
+/// Vanilla's end-gateway renderer's submit function's `submitCube(state.facesToShow, ...)` —
 /// the full unit cube (`y ∈ [0, 1]`, no squash), restricted to whichever
 /// faces the caller resolved as unoccluded. See the module doc for why that
 /// resolution lives in `lodestone_shell::block_entities::end_gateway_spawns`
@@ -231,7 +237,8 @@ pub fn end_gateway_vertices(pos: [i32; 3], faces: &[Direction]) -> Vec<EndPortal
 mod tests {
     use super::*;
 
-    /// `FaceInfo.UP`'s four corners, transcribed straight from `FaceInfo.java`
+    /// Vanilla's per-direction face-info's up-face corners, transcribed straight
+    /// from that source
     /// (`MIN_X,MAX_Y,MIN_Z` / `MIN_X,MAX_Y,MAX_Z` / `MAX_X,MAX_Y,MAX_Z` /
     /// `MAX_X,MAX_Y,MIN_Z`) — every corner sits at `y = 1` (`TO.y`), the only
     /// property worth a dedicated assertion since the four corners are
@@ -248,7 +255,7 @@ mod tests {
         assert_eq!(corners[3], Vec3::new(1.0, 1.0, 0.0));
     }
 
-    /// `FaceInfo.DOWN` sits at `y = 0` (`FROM.y`) — the sibling check, and the
+    /// Vanilla's per-direction face-info's down-face sits at `y = 0` (`FROM.y`) — the sibling check, and the
     /// pair together is a real regression test: swapping the UP/DOWN arms in
     /// `face_corners` would fail exactly one of these two.
     #[test]

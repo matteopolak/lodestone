@@ -12,10 +12,11 @@
 //!
 //! ## How it works
 //!
-//! A packed byte is `id << 2 | brightness` (`MapColor.getPackedId`). The high
+//! A packed byte is `id << 2 | brightness` (vanilla's map-color packed-id
+//! accessor). The high
 //! six bits index the 62-entry base table below; the low two pick one of four
 //! brightness modifiers, applied as an **integer** `channel * modifier / 255`
-//! (`ARGB.scaleRGB(int)`). Id `0` is `MapColor.NONE`, whose
+//! (vanilla's packed-RGB-scale helper). Id `0` is `MapColor.NONE`, whose
 //! `calculateARGBColor` short-circuits to `0` — fully *transparent*, not black,
 //! which is why an unexplored map shows the frame through it rather than a black
 //! square.
@@ -30,7 +31,7 @@
 //!
 //! ## How to change it
 //!
-//! The palette is transcribed from `MapColor.java` in the 26.2 jar, which is
+//! The palette is transcribed from vanilla's map-color base-colours table in the 26.2 jar, which is
 //! authoritative; do not "fix" a colour against a screenshot. `MAP_COLOR_BASE`
 //! is indexed by id, so a new vanilla entry appends and nothing shifts.
 //!
@@ -46,7 +47,8 @@ use crate::models::{ModelMesh, ModelVertex};
 /// [`lodestone_game::maps::MAP_SIZE`].
 pub const MAP_SIZE: u32 = 128;
 
-/// The four brightness modifiers, indexed by `MapColor.Brightness.id`
+/// The four brightness modifiers, indexed by vanilla's map-color brightness
+/// enum's id
 /// (`LOW`, `NORMAL`, `HIGH`, `LOWEST`).
 ///
 /// The order is **not** ascending: `LOWEST` is id `3`, so a table sorted by
@@ -58,7 +60,7 @@ pub const MAP_BRIGHTNESS: [u32; 4] = [180, 220, 255, 135];
 ///
 /// Id `0` is `NONE` and is special-cased to transparent by [`map_color_rgba`];
 /// its `0` entry here is never scaled. Transcribed verbatim from
-/// `world/level/material/MapColor.java` (62 entries, ids 0–61; the array vanilla
+/// vanilla's map-color base-colours table (62 entries, ids 0–61; the array vanilla
 /// allocates is 64 long and the tail is `null`, resolving to `NONE`).
 pub const MAP_COLOR_BASE: [u32; 62] = [
     0, 8_368_696, 16_247_203, 13_092_807, 16_711_680, 10_526_975, 10_987_431, 31_744, 16_777_215,
@@ -73,7 +75,7 @@ pub const MAP_COLOR_BASE: [u32; 62] = [
 
 /// Resolve one packed map colour byte to RGBA8.
 ///
-/// `MapColor.getColorFromPackedId`: `byte >> 2` is the base id, `byte & 3` the
+/// Vanilla's map-color packed-id-to-colour resolver: `byte >> 2` is the base id, `byte & 3` the
 /// brightness. An id past the table (vanilla's `null` tail) resolves to `NONE`
 /// exactly as `byIdUnsafe` does, so a malformed byte draws nothing rather than
 /// indexing out of range.
@@ -82,7 +84,7 @@ pub fn map_color_rgba(packed: u8) -> [u8; 4] {
     let id = usize::from(packed >> 2);
     let base = MAP_COLOR_BASE.get(id).copied().unwrap_or(0);
     if id == 0 || base == 0 {
-        // `NONE.calculateARGBColor` returns literally `0`: alpha zero, so the
+        // Vanilla's none-color-resolution function returns literally `0`: alpha zero, so the
         // unexplored part of a map is a hole and not a black square.
         return [0, 0, 0, 0];
     }
@@ -158,7 +160,7 @@ pub fn map_quad_mesh(pose: Mat4, light: u8) -> ModelMesh {
 mod tests {
     use super::*;
 
-    /// The palette against `MapColor.java` read as a record definition, at both
+    /// The palette against vanilla's map-color base-colours table read as a record definition, at both
     /// ends of the brightness range and on the entry a wrong brightness order
     /// would flip.
     ///
