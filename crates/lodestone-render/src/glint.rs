@@ -78,7 +78,7 @@ pub mod textures {
 pub const SPEED_MILLIS: f64 = 8.0;
 
 /// The default of vanilla's `glintSpeed` option (a
-/// `UnitDouble` in `0.0..=1.0`).
+/// value clamped to `0.0..=1.0`).
 ///
 /// The effective multiplier at defaults is therefore `8.0 * 0.5 = 4.0`, which
 /// makes the real-time wrap periods `110000 / 4 = 27500 ms` on `U` and
@@ -87,14 +87,14 @@ pub const SPEED_MILLIS: f64 = 8.0;
 pub const DEFAULT_SPEED: f64 = 0.5;
 
 /// The default of vanilla's `glintStrength` option,
-/// reaching the shader as the `GlintAlpha` global.
+/// reaching the shader as its own named glint-alpha global.
 ///
 /// At `0.75` this is a visible 25% reduction in the glint's RGB, so treating it
 /// as `1.0` is a *magnitude* error of exactly the kind that shipped a hurt
 /// overlay here at 70% red where vanilla renders 30%.
 pub const DEFAULT_STRENGTH: f32 = 0.75;
 
-/// Vanilla's `glintSpeed` `UnitDouble` domain as a clamp, with a non-finite input
+/// Vanilla's `glintSpeed` `0.0..=1.0` domain as a clamp, with a non-finite input
 /// degrading to [`DEFAULT_SPEED`].
 ///
 /// Lives here rather than at each call site because there are **three** glint
@@ -195,7 +195,8 @@ pub const ARMOUR_VIEW_OFFSET_SCALE: f32 = 1.0 - 1.0 / 4096.0;
 pub const ARMOUR_VIEW_OFFSET_Z_ORTHO: f32 = 1.0 / 512.0;
 
 /// The scaled-millisecond clock the two UV offsets are taken modulo:
-/// `(long)(Util.getMillis() * glintSpeed * 8.0)` (vanilla's glint-texture-matrix
+/// vanilla's own wall-clock-milliseconds accessor times `glintSpeed` times
+/// `8.0`, truncated to a `long` (vanilla's glint-texture-matrix
 /// setup function).
 ///
 /// The `(long)` cast is **truncation, and it is observable**: the offsets step in
@@ -224,7 +225,8 @@ pub fn glint_offsets(clock: i64) -> (f32, f32) {
     (u, v)
 }
 
-/// The edge, in texels, of the vanilla atlas every `setupGlintTexturing` scale
+/// The edge, in texels, of the vanilla atlas every one of vanilla's own
+/// glint-texturing setup function's scale terms
 /// was chosen against.
 ///
 /// Vanilla's glint samples the *atlas* UV (its glint shader's `UV0`, and
@@ -362,8 +364,8 @@ pub fn has_foil_for_stack(item: &str, components: &lodestone_model::item::ItemCo
 }
 
 /// Vanilla's item-stack "has foil" predicate's enchantments-only half (vanilla's item-stack and
-/// item-prototype foil predicates: default `Item.isFoil` is
-/// `!ENCHANTMENTS.isEmpty()`), over a borrowed enchantment list rather than a
+/// item-prototype foil predicates: the base item's own default is that the
+/// item is foiled exactly when its enchantments component is non-empty), over a borrowed enchantment list rather than a
 /// [`lodestone_model::item::ItemComponents`].
 ///
 /// This exists so the predicate has exactly **one** owner. The shell's stacks are
@@ -754,7 +756,7 @@ mod tests {
         assert_eq!(glint_clock(1000.0, 1.0), 8000);
     }
 
-    /// The two option clamps: vanilla's `UnitDouble` domain, and the non-finite
+    /// The two option clamps: vanilla's `0.0..=1.0` domain, and the non-finite
     /// degradation that keeps a corrupt `options.json` from looking like the
     /// slider works.
     ///
