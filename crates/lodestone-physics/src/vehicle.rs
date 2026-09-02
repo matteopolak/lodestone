@@ -392,7 +392,7 @@ fn boat_water_level_above(view: &dyn CollisionView, bb: Aabb, last_yd: f64) -> f
         'columns: for x in x0..x1 {
             for z in z0..z1 {
                 if let Some(height) = water_height(view, x, y, z) {
-                    // `Math.max(float, float)`; no `mth` helper exists for the
+                    // a plain float max; no `mth` helper exists for the
                     // f32 case and `f32::max` differs from Java only on NaN,
                     // which `water_height` cannot return.
                     block_height = block_height.max(height);

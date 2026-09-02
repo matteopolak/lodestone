@@ -3,7 +3,8 @@
 //!
 //! Generated once and checked in; DO NOT edit by hand. Regenerate with the
 //! documented procedure in `mth.rs`. Each entry is the raw IEEE-754 `f32` bit
-//! pattern of `(float)Math.sin(i / 10430.378350470453)`, matching vanilla's
+//! pattern of the double-precision sine of `i / 10430.378350470453`, truncated
+//! to `f32`, matching vanilla's
 //! own table construction exactly.
 //!
 //! Validated **element-wise against the real JVM** (`eclipse-temurin:25-jdk`,

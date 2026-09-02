@@ -109,9 +109,8 @@ pub fn generate_shared_secret() -> [u8; SHARED_SECRET_LEN] {
 }
 
 /// Length in bytes of the online-mode verify-token challenge a server sends
-/// alongside `EncryptionRequest`, matching vanilla's own framing
-/// (`Ints.toByteArray(RandomSource.create().nextInt())` —
-/// `ServerLoginPacketListenerImpl`'s constructor — a 4-byte big-endian `int`).
+/// alongside `EncryptionRequest`, matching vanilla's own framing: a random
+/// 32-bit int, big-endian-encoded — a 4-byte big-endian `int`.
 pub const VERIFY_TOKEN_LEN: usize = 4;
 
 /// Generates a fresh 4-byte verify-token challenge using the OS CSPRNG. The
@@ -150,9 +149,8 @@ pub fn rsa_encrypt(public_key_der: &[u8], data: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// The server half of the online-mode handshake: a 1024-bit RSA keypair, the
-/// same size vanilla ships (`MinecraftServer.keyPair`, generated via
-/// `KeyPairGenerator.getInstance("RSA")` seeded at 1024 in
-/// `Crypt.generateKeyPair`). Holds the private key for decrypting the
+/// same size vanilla ships (generated with the platform's own RSA keypair
+/// generator, seeded at a 1024-bit modulus). Holds the private key for decrypting the
 /// client's `EncryptionResponse` and the DER (SubjectPublicKeyInfo) form of
 /// the public half, which is what travels on the wire unmodified inside
 /// `EncryptionRequest`.

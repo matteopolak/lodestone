@@ -6,11 +6,11 @@
 //! rather than because they are related features:
 //!
 //! - [`paths`]/[`config`] — a per-plugin data directory and a minimal typed
-//!   config-loading helper, mirroring `JavaPlugin.getDataFolder()`/
-//!   `getConfig()`.
+//!   config-loading helper, matching the familiar per-plugin-data-directory
+//!   and config-loading conventions.
 //! - [`persistent_data`]'s non-persistent half — an in-memory, namespaced
-//!   key-value store attachable to an entity or a chunk, mirroring Bukkit's
-//!   `PersistentDataContainer`/`Metadatable.setMetadata`. The *persistent*
+//!   key-value store attachable to an entity or a chunk, matching the
+//!   familiar per-object metadata convention. The *persistent*
 //!   half (surviving a restart) is out of scope until world persistence
 //!   exists at all — see that module's doc for the hazard to avoid when
 //!   someone builds it.

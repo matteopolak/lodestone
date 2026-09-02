@@ -1,4 +1,4 @@
-//! `JavaPlugin.getDataFolder()`'s analogue — a per-plugin subdirectory of
+//! The familiar per-plugin-data-directory convention's analogue — a per-plugin subdirectory of
 //! Lodestone's own data directory, so two plugins with different names never
 //! collide and a plugin author never has to ask "where does this OS want app
 //! data" for itself.
@@ -7,8 +7,8 @@
 //! implementation this codebase already settled on (`lodestone-shell`'s own
 //! `data_dir()` delegates to the same function — see that crate's
 //! `menu/servers.rs`). This module does not reimplement per-OS directory
-//! discovery a third time; it only adds the `plugins/<name>` layer Bukkit's
-//! `getDataFolder()` gives for free.
+//! discovery a third time; it only adds the `plugins/<name>` layer a
+//! per-plugin data directory gives for free.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 ///
 /// Does **not** create the directory; see [`ensure_plugin_data_dir`] for a
 /// version that does. Two plugins named identically share a directory, the
-/// same way two Bukkit plugins with the same `name:` in `plugin.yml` would —
-/// this module does not attempt to detect that collision, since a native
+/// same way two identically-named plugins under an equivalent convention
+/// would — this module does not attempt to detect that collision, since a native
 /// plugin here is a compiled-in `Cargo.toml` dependency the *binary's* author
 /// chose, not something installed at runtime that could collide by accident.
 #[must_use]

@@ -1,6 +1,6 @@
 //! The persistent data container's non-persistent half: an in-memory, namespaced key-value store,
-//! attachable to an entity or a chunk — Bukkit's `PersistentDataContainer`/
-//! `Metadatable.setMetadata`, minus the "survives a restart" guarantee, which
+//! attachable to an entity or a chunk — the familiar plugin per-object metadata
+//! convention, minus the "survives a restart" guarantee, which
 //! the issue itself scopes out until world persistence (Anvil, Tier 4 of
 //! `docs/backlog.md`) exists at all.
 //!
@@ -53,8 +53,8 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-/// Builds the `"<plugin>:<key>"` form every store here uses, mirroring
-/// Bukkit's `NamespacedKey(plugin, key)` — two plugins that both choose
+/// Builds the `"<plugin>:<key>"` form every store here uses, the familiar
+/// namespaced-key convention — two plugins that both choose
 /// `"balance"` do not collide.
 #[must_use]
 pub fn namespaced_key(plugin: &str, key: &str) -> String {

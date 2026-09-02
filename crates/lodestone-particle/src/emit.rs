@@ -911,29 +911,26 @@ pub fn splash(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, xa: f64, ya: 
     engine.add(p);
 }
 
-/// One `nextFloat()` from the engine's RNG.
+/// One uniform random float in [0, 1) from the engine's RNG.
 fn rng_next(engine: &mut ParticleEngine) -> f32 {
     engine.rng().next_f32()
 }
 
-/// Vanilla's own attack-sweep particle — the arc thrown by a sweeping melee hit.
+/// The attack-sweep particle — the arc thrown by a sweeping melee hit.
 ///
-/// From vanilla's own attack-sweep particle constructor (26.2 decompile):
-/// no move step call at all (stationary for its whole life — see
+/// Behaviour: no movement step at all (stationary for its whole life — see
 /// [`crate::Particle::tick_sweep_attack`]), full-bright, 4-tick lifetime, a
-/// grey tint drawn once (`nextFloat() * 0.6F + 0.4F`), and
-/// `quadSize = 1.0F - (float) size * 0.5F`.
+/// grey tint drawn once from a uniform random float scaled to [0.4, 1.0), and
+/// a quad size of `1.0 - size * 0.5`.
 ///
-/// `size` is the constructor's own auxiliary-X parameter — but the one real
-/// vanilla call site (the player's own attack step, sending the sweep-attack
-/// particle with count `0` and max speed `0.0F`) means the client's own
-/// particle-event handler's `count == 0` branch computes the auxiliary value
-/// as `maxSpeed * xDist`, so the value that actually reaches this
-/// constructor in real play is always `0.0`, regardless of `dx` — i.e.
-/// `quadSize` is always `1.0` in practice. Taking `size` as a parameter
-/// anyway (rather than hardcoding that) keeps this a faithful transcription
-/// of the Java constructor for any future caller (a datapack or `/particle`
-/// invocation can still pass a nonzero auxiliary value).
+/// `size` is an auxiliary scale parameter on construction — but the one real
+/// call site that spawns this particle (a player's melee attack, with the
+/// spawn event's count and max-speed fields both zero) resolves that
+/// auxiliary value to `max_speed * x_distance`, which is always `0.0` for
+/// that event, regardless of the arc's true x-distance — i.e. the quad size
+/// is always `1.0` in practice. Taking `size` as a parameter anyway (rather
+/// than hardcoding that) keeps this general for any future caller (a
+/// datapack or `/particle` invocation can still pass a nonzero value).
 pub fn sweep_attack(engine: &mut ParticleEngine, x: f64, y: f64, z: f64, size: f32) {
     let rng = engine.rng();
     let mut p = Particle::new(
@@ -1339,7 +1336,7 @@ fn player_cloud(
     #[expect(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
-        reason = "mirrors `(int) Math.max(baseLifetime * 2.5F, 1.0F)` exactly"
+        reason = "mirrors the base lifetime scaled by 2.5 and clamped to a floor of 1.0, then truncated"
     )]
     {
         p.lifetime = (base as f32 * 2.5).max(1.0) as i32;
@@ -2275,8 +2272,8 @@ pub fn falling_leaves(
     p.friction = 1.0;
     p.yd = f64::from(-params.start_velocity);
     let particle_random = rng_next(engine);
-    // Java's own `Math.cos`/`Math.sin` on a `double` — the library trig, not
-    // vanilla's quantized table, because vanilla itself calls the library here.
+    // full-precision `f64` trig, not the quantized sine table used elsewhere in this
+    // file — this particular call site uses library trig on a double, not the table.
     let radians = f64::from(particle_random * 60.0).to_radians();
     let xa_flow_scale = radians.cos() * f64::from(params.side_acceleration);
     let za_flow_scale = radians.sin() * f64::from(params.side_acceleration);
@@ -3535,7 +3532,7 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert!(
             frames.len() >= 6,
-            "SpriteSet.get(random) should vary the plume, got frames {frames:?}"
+            "the random per-particle sprite-set pick should vary the plume, got frames {frames:?}"
         );
     }
 }
@@ -4402,8 +4399,8 @@ fn dust_particle(
     p.yd *= 0.1;
     p.zd *= 0.1;
     p.quad_size *= 0.75 * scale;
-    // `(int)(8.0 / (random.nextDouble() * 0.8 + 0.2))`, then
-    // `(int) Math.max(baseLifetime * scale, 1.0F)`.
+    // base lifetime is 8.0 divided by a uniform double in [0.2, 1.0), truncated to int;
+    // then scaled by `scale` and clamped to a floor of 1.0, truncated again.
     #[expect(clippy::cast_possible_truncation, reason = "Java's `(int)` cast; small")]
     let base_lifetime = (8.0 / engine.rng().next_f64().mul_add(0.8, 0.2)) as i32;
     #[expect(

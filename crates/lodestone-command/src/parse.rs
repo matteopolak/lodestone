@@ -143,10 +143,10 @@ impl CommandTree {
         }
 
         // No literal matched: try argument children in insertion order.
-        // Brigadier reports the *specific* argument error (e.g. "invalid
-        // integer") rather than a generic unknown-command/argument error
-        // whenever exactly one child was attempted and failed with an
-        // exception (`ParseResults.getExceptions().size() == 1`) — we
+        // The upstream command-parser library reports the *specific* argument
+        // error (e.g. "invalid integer") rather than a generic
+        // unknown-command/argument error whenever exactly one child was
+        // attempted and failed with exactly one recorded error — we
         // approximate that by remembering the last failure and surfacing it
         // if no child in this position succeeded.
         let mut last_error: Option<ParseError> = None;

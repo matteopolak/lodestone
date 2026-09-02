@@ -1,6 +1,6 @@
 //! The plugin config convention's real consumer: a toy plugin that loads its config in
-//! `Plugin::build` (mirroring `JavaPlugin.getConfig()`, called from
-//! `onEnable`), exposes what it loaded as a resource, and can save an update
+//! `Plugin::build` (matching the familiar plugin-config convention, loaded
+//! at plugin start-up), exposes what it loaded as a resource, and can save an update
 //! back out — driven through a real `bevy_ecs` `App`, not called as a bare
 //! function.
 //!
