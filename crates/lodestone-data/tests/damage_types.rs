@@ -187,7 +187,7 @@ fn tag_order(tags: &BTreeMap<String, Vec<String>>) -> Vec<String> {
 }
 
 /// Resolves one tag's membership to its transitive closure, inlining
-/// `#minecraft:other_tag` references exactly as vanilla's `TagLoader` does.
+/// `#minecraft:other_tag` references exactly as vanilla's own tag loader does.
 ///
 /// Cycle-safe via `seen`: vanilla rejects cyclic tags at load time, and this
 /// panics rather than looping if one ever appears.

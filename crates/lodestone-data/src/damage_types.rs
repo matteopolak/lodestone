@@ -105,7 +105,7 @@ impl DamageScaling {
 
 /// The hurt animation/sound family a type plays.
 ///
-/// `effects` is an optional codec field defaulting to `HURT` in
+/// `effects` is an optional codec field defaulting to the "hurt" effect in
 /// vanilla's own damage-type direct codec, so the 39 types with no `effects` key are
 /// [`DamageEffects::Hurt`] — a real value, not a missing one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -522,9 +522,9 @@ fn face_full_up_disagrees_with_a_unit_box_derivation() {
 /// **false** — so a snow layer does not survive on powder snow.
 ///
 /// That is not a limitation of this dump: vanilla's own snow-layer block's own
-/// "can survive" check reads
-/// `belowState.getCollisionShape(level, pos.below())`, the two-argument overload,
-/// which is `getCollisionShape(level, pos, CollisionContext.empty())`. The oracle
+/// "can survive" check reads the block-below's collision shape through the
+/// two-argument overload of its collision-shape accessor, which supplies an
+/// empty collision context. The oracle
 /// calls the same overload, so a context-dependent shape resolves the same way
 /// here as it does in the feature. The `N` census exists to make that a bounded,
 /// named set rather than an assumption — and it corrected two guesses on first

@@ -268,8 +268,8 @@ fn dimension_reference_closure_resolves_in_bundle() {
         closure.noises
     );
     // The two noises this phase added — the whole reason the closure gate
-    // exists. Both are Nether-biome noises, wired specially in vanilla's
-    // `RandomState` (see the engine gap report).
+    // exists. Both are Nether-biome noises, wired specially in vanilla's own
+    // noise-random-state object (see the engine gap report).
     for required in ["nether/temperature", "nether/vegetation"] {
         assert!(
             closure.noises.contains(required),
@@ -332,9 +332,9 @@ fn dimension_settings_carry_the_engine_relevant_scalars() {
         "end scalars moved"
     );
 
-    // Cell dimensions. Vanilla derives cell size as
-    // `QuartPos.toBlock(noiseSize*)` = `size * 4` (vanilla's own noise-settings
-    // cell-height/cell-width accessors),
+    // Cell dimensions. Vanilla derives cell size as its own quart-to-block
+    // conversion (`size * 4`) applied to the noise-settings cell-height/
+    // cell-width accessors,
     // so the Overworld's 4x8 cell is (size_horizontal 1, size_vertical 2) and
     // the End's is (2, 1) => an 8-wide, 4-tall cell. The engine's
     // `CELL_WIDTH`/`CELL_HEIGHT` are `const` 4/8, so the End needs these
@@ -537,9 +537,9 @@ fn nether_biome_parameters_are_degenerate_points_discriminated_by_offset() {
         }
     }
 
-    // Exactly two rows carry a nonzero offset. Vanilla's own "fitness" step adds
-    // `Mth.square(this.offset)` (standard squaring helper) as a flat penalty
-    // (vanilla's own climate parameter-point fitness step), so
+    // Exactly two rows carry a nonzero offset. Vanilla's own climate
+    // parameter-point "fitness" step adds the offset squared as a flat
+    // penalty, so
     // these two are the deliberately-rarer biomes. Our engine reaches the same
     // number via `params[6].distance(0)^2`, which equals `offset^2` for either
     // sign — equivalent, not a gap.

@@ -11,9 +11,9 @@
 //! # Data source: interrogate the real jar, not `minecraft-data`
 //!
 //! The table is generated from an authoritative dump produced by booting the
-//! real 26.2 server headlessly (`SharedConstants::tryDetectVersion` +
-//! `Bootstrap::bootStrap`) and walking every `BlockState`, dumping
-//! `getCollisionShape(...).toAabbs()` for all 32,366 states. That dump is
+//! real 26.2 server headlessly (through vanilla's own version-detection and
+//! bootstrap entry points) and walking every block state, dumping
+//! its own collision-shape accessor's AABB decomposition for all 32,366 states. That dump is
 //! version-exact and complete. The obvious third-party alternative,
 //! `vendor/minecraft-data/blockCollisionShapes.json`, is stale for 26.2 (newest
 //! pc entry 1.21.11): only ~92.3% of states reliably covered, ~7.7%

@@ -13,7 +13,7 @@
 //! vanilla's own item registry).
 //!
 //! These three components are **prototype** components: a clientbound
-//! `ItemStack` carries only the `DataComponentPatch` — the delta from the item's
+//! item stack carries only a component patch — the delta from the item's
 //! built-in component map — and vanilla keeps `minecraft:max_stack_size`,
 //! `minecraft:max_damage` and `minecraft:equippable` in that map. So they are
 //! never on the wire, and no packet capture at any level of effort can supply
@@ -397,8 +397,9 @@ fn armour_declares_its_slot() {
         // Not armour, but wearable on the head — and it stacks to 64, so a
         // slot's effective cap must be min(slot cap, item cap), not the item's.
         ("minecraft:carved_pumpkin", EquipmentSlot::Head),
-        // Chest slot, and the reason `Equippable` is not "armour": elytra are
-        // HUMANOID_ARMOR-typed and share the chestplate slot.
+        // Chest slot, and the reason the `minecraft:equippable` component is not
+        // "armour": elytra share vanilla's own humanoid-armor equipment-slot type
+        // and share the chestplate slot.
         ("minecraft:elytra", EquipmentSlot::Chest),
     ] {
         let def = item_prototypes::prototype(item).unwrap_or_else(|| panic!("{item} present"));
