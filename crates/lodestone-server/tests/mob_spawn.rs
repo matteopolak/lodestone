@@ -114,7 +114,7 @@ fn middle_band_mob_despawns_over_time_while_immune_mob_is_immortal() {
     // A real floor under every spawned mob's (x, 0, z). This test ages mobs
     // for hundreds of idle ticks via `tick_for`, and since
     // `NavigatingMob::advance` now applies gravity unconditionally (idle mobs
-    // fall too, matching vanilla `LivingEntity.travel`), a void world would
+    // fall too, matching vanilla's own entity movement routine), a void world would
     // let each mob fall to the world floor at y=-64 before the distance
     // checks below ever run -- turning a "distance from player" test into an
     // accidental "distance after a 64-block fall" test. Grounding them

@@ -47,7 +47,7 @@ fn flat_world() -> ChunkWorld {
 /// derivation rather than guessing an axis-aligned vector and hoping the
 /// geometry lines up.
 fn looking_at(sim: &MobSim<'_>, mob_id: i32, mob_pos: Vec3, player_pos: Vec3) -> Vec3 {
-    const PLAYER_EYE_HEIGHT: f64 = 1.62; // `Player.getStandingEyeHeight`
+    const PLAYER_EYE_HEIGHT: f64 = 1.62; // vanilla's own standing eye-height getter
     let mob_eye_height = f64::from(sim.get(mob_id).expect("spawned").shape().height) * 0.85;
     let mob_eye = Vec3::new(mob_pos.x, mob_pos.y + mob_eye_height, mob_pos.z);
     let player_eye = Vec3::new(player_pos.x, player_pos.y + PLAYER_EYE_HEIGHT, player_pos.z);
