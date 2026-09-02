@@ -669,7 +669,7 @@ fn parse_tint(value: &Value) -> TintSource {
 }
 
 /// Vanilla's own RGB-color codec:
-/// `Codec.withAlternative(Codec.INT, VECTOR3F, …)` — a signed int, or an
+/// a signed int, or an
 /// `[r, g, b]` float triple folded through
 /// vanilla's own ARGB "color from float" step `(1.0F, r, g, b)`.
 fn parse_rgb_color(value: &Value) -> Option<i32> {

@@ -299,7 +299,7 @@ impl GrassColorModifier {
     pub fn modify(self, base: Rgb, noise: f64) -> Rgb {
         match self {
             GrassColorModifier::None => base & 0xFFFFFF,
-            // ARGB.opaque((base & 0xFEFEFE) + 0x28340A >> 1).
+            // Vanilla's own opaque-color helper on `(base & 0xFEFEFE) + 0x28340A >> 1`.
             GrassColorModifier::DarkForest => {
                 (((base & 0x00FE_FEFE) + 0x0028_340A) >> 1) & 0xFFFFFF
             }
@@ -446,8 +446,8 @@ pub fn vanilla_particle_tint_kind(
 }
 
 /// The stem tint for `age` (0..=7), matching vanilla's own block-tint-sources
-/// stem provider:
-/// `ARGB.color(age*32, 255 - age*8, age*4)`.
+/// stem provider: an opaque colour packed from channels
+/// `(age*32, 255 - age*8, age*4)`.
 #[must_use]
 pub fn stem_color(age: u8) -> Rgb {
     let a = u32::from(age);

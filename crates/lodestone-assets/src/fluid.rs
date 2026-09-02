@@ -1,7 +1,7 @@
 //! Fluid geometry — water and lava.
 //!
 //! Vanilla does **not** render fluids through the block-model pipeline: their
-//! blockstate models are empty, and a dedicated `LiquidBlockRenderer` builds the
+//! blockstate models are empty, and a dedicated liquid-block renderer builds the
 //! surface at mesh time. So a fluid cell is invisible to [`crate::bake`] and must
 //! be handled here.
 //!
@@ -27,34 +27,36 @@
 //!   used to average the four [`corner_height`]s;
 //! - for the four edge neighbours: a [`FlowNeighbor`] (own height, whether the
 //!   block blocks motion, and the fluid height of the cell *below* it) so
-//!   [`flow_horizontal`] can reproduce vanilla's `FlowingFluid.getFlow`;
+//!   [`flow_horizontal`] can reproduce vanilla's own flowing-fluid flow computation;
 //! - per-face occlusion flags, from **two independent** questions: a face
 //!   touching a neighbouring full/opaque cell is culled
-//!   (`isFaceOccludedByNeighbor`), **and** a face is culled when the block in the
-//!   fluid's *own* cell already covers it (`isFaceOccludedBySelf` — see
+//!   (vanilla's own is-face-occluded-by-neighbor check), **and** a face is culled when the block in the
+//!   fluid's *own* cell already covers it (vanilla's own is-face-occluded-by-self check — see
 //!   [`SelfOcclusion`]). Waterlogged geometry lives entirely in the second one;
 //! - the biome water colour, resolved via the [`crate::tint`] seam (lava is
 //!   untinted).
 //!
 //! Everything below is verified against 26.2's server sources
-//! (`FlowingFluid`/`FluidState`): `getOwnHeight = amount / 9`, `getHeight =
-//! sameAbove ? 1 : ownHeight`, and the full `getFlow` distance/step summation.
+//! (vanilla's own flowing-fluid/fluid-state types): its own height is
+//! `amount / 9`, its render height is
+//! `1` when the same fluid occupies the cell above, else its own height,
+//! and the full flow-vector distance/step summation.
 //! The corner-height **averaging weights**, the still/flowing texture selection
-//! and the flowing-texture UV rotation are all verified against the client
-//! `FluidRenderer`/`FluidModel` sources, so this module is jar-verified end to
+//! and the flowing-texture UV rotation are all verified against the client's
+//! own fluid-renderer/fluid-model sources, so this module is jar-verified end to
 //! end. Fluid tint comes from the fluid model's tint source (water =
-//! `getAverageWaterColor`, lava untinted), resolved via the [`crate::tint`]
+//! vanilla's own average-water-color query, lava untinted), resolved via the [`crate::tint`]
 //! seam; per-face colour is left to the mesher/renderer.
 //!
 //! ## A family of bugs: self-cell questions answered from neighbours
 //!
-//! Two of the defects fixed here were the *same mistake* — a `FluidRenderer` test
+//! Two of the defects fixed here were the *same mistake* — a fluid-renderer test
 //! about the fluid's **own** cell that we were answering from its neighbours:
 //!
 //! | vanilla test | what we did instead | symptom |
 //! |---|---|---|
-//! | `tesselate`'s `if (heightSelf >= 1.0F)` corner short-circuit | averaged the neighbours ([`corner_heights`]) | a falling column with a repeating horizontal gap |
-//! | `isFaceOccludedBySelf` ([`SelfOcclusion`]) | only `isFaceOccludedByNeighbor` | waterlogged stairs z-fighting on their solid side |
+//! | the tesselation step's own-height-at-least-1.0 corner short-circuit | averaged the neighbours ([`corner_heights`]) | a falling column with a repeating horizontal gap |
+//! | is-face-occluded-by-self ([`SelfOcclusion`]) | only is-face-occluded-by-neighbor | waterlogged stairs z-fighting on their solid side |
 //!
 //! Both read as complete because the neighbour-facing sibling *exists* and is
 //! correct, so nothing looks missing. **When a fluid defect is local to one cell,
@@ -62,12 +64,12 @@
 //! before reaching for the neighbourhood** — expect a third instance.
 //!
 //! `bake_fluid` itself now owns vanilla's `~0.001` anti-z-fight insets, the
-//! optional back faces (`FluidRenderer.addFace`'s reversed copy) and the
+//! optional back faces (vanilla's own add-face step's reversed copy) and the
 //! `water_overlay` material substitution against glass/ice/leaves neighbours —
 //! the mesher only has to supply the neighbourhood facts
 //! ([`FluidGeometry::back_up_face`], [`FluidGeometry::side_overlay`]) that
-//! `FluidState.shouldRenderBackwardUpFace` and the `HalfTransparentBlock` /
-//! `LeavesBlock` check need.
+//! vanilla's own should-render-backward-up-face check and the half-transparent-block /
+//! leaves-block check need.
 
 use crate::bake::BakedQuad;
 use crate::model::Direction;
@@ -75,7 +77,7 @@ use crate::model::Direction;
 /// Height (in blocks) of a full source that has fluid above it: `8 / 9`.
 pub const SOURCE_OWN_HEIGHT: f32 = 8.0 / 9.0;
 
-/// The `0.8888889` constant from `FlowingFluid.getFlow`'s ledge case.
+/// The `0.8888889` constant from vanilla's own flow computation's ledge case.
 const LEDGE_CONST: f32 = 0.888_888_9;
 
 /// A fluid cell's dynamic state, mirroring vanilla's `LEVEL`/`FALLING` fluid
@@ -104,8 +106,8 @@ impl FluidState {
         Self { amount, falling }
     }
 
-    /// The fluid's own surface height, `amount / 9` (verified
-    /// `FlowingFluid.getOwnHeight`).
+    /// The fluid's own surface height, `amount / 9` (verified against
+    /// vanilla's own height query).
     #[must_use]
     pub fn own_height(&self) -> f32 {
         self.amount as f32 / 9.0
@@ -113,7 +115,7 @@ impl FluidState {
 
     /// The rendered surface height: `1.0` when the same fluid sits directly
     /// above (a continuous column), else [`own_height`](Self::own_height)
-    /// (verified `FlowingFluid.getHeight`).
+    /// (verified against vanilla's own render-height query).
     #[must_use]
     pub fn render_height(&self, same_fluid_above: bool) -> f32 {
         if same_fluid_above {
@@ -124,7 +126,7 @@ impl FluidState {
     }
 }
 
-/// Vanilla `FluidRenderer.getHeight` for a neighbour cell: the value fed to
+/// Vanilla's own fluid-renderer height query for a neighbour cell: the value fed to
 /// [`corner_height`].
 ///
 /// - `1.0` if the same fluid occupies this cell *and* the cell above it (a
@@ -154,7 +156,7 @@ pub fn neighbor_height(
 }
 
 /// Averages the four cells meeting at a top corner into a corner height,
-/// reproducing vanilla `FluidRenderer.calculateAverageHeight`/`addWeightedHeight`
+/// reproducing vanilla's own average-height/weighted-height computation
 /// exactly.
 ///
 /// `height_self` is the fluid being baked (its [`neighbor_height`]); `edge_a`
@@ -165,7 +167,7 @@ pub fn neighbor_height(
 /// Vanilla weights near-full cells (`>= 0.8`) ten times as heavily as shallow
 /// ones, snaps the corner to `1.0` if either edge (or, when sampled, the
 /// diagonal) is a full column, and only samples the diagonal when at least one
-/// edge carries fluid. Verified against the client `FluidRenderer` source.
+/// edge carries fluid. Verified against the client's own fluid-renderer source.
 #[must_use]
 pub fn corner_height(height_self: f32, edge_a: f32, edge_b: f32, diagonal: f32) -> f32 {
     if edge_a >= 1.0 || edge_b >= 1.0 {
@@ -196,28 +198,20 @@ fn add_weighted_height(sum: &mut f32, weight: &mut f32, height: f32) {
 }
 
 /// All four top-corner heights, in `[NW, NE, SE, SW]` order — the whole of
-/// vanilla `FluidRenderer.tesselate`'s corner branch, **including the
+/// vanilla's own tesselation step's corner branch, **including the
 /// short-circuit that [`corner_height`] alone does not carry**.
 ///
 /// # Why this exists rather than four `corner_height` calls
 ///
-/// `tesselate` does not average unconditionally. It first asks whether the
+/// The tesselation step does not average unconditionally. It first asks whether the
 /// fluid's *own* rendered height is already full, and if so sets every corner to
-/// `1.0` without consulting a single neighbour:
+/// `1.0` without consulting a single neighbour; otherwise it runs the
+/// average-height computation independently for each of the four corners.
 ///
-/// ```text
-/// float heightSelf = this.getHeight(level, type, pos, blockState, fluidState);
-/// if (heightSelf >= 1.0F) {
-///    heightNorthEast = heightNorthWest = heightSouthEast = heightSouthWest = 1.0F;
-/// } else {
-///    ... calculateAverageHeight for each corner ...
-/// }
-/// ```
-///
-/// `heightSelf` reaches `1.0` exactly when the same fluid sits directly above
-/// (`FlowingFluid.getHeight`'s `hasSameAbove` short-circuit) — never from its own
-/// amount, because `WaterFluid.Source.getAmount` is **8**, so even a source's
-/// `getOwnHeight` is `8/9`.
+/// The fluid's own rendered height reaches `1.0` exactly when the same fluid sits directly above
+/// (vanilla's own render-height query's same-fluid-above short-circuit) — never from its own
+/// amount, because a water source's own amount is **8**, so even a source's
+/// own-height query is `8/9`.
 ///
 /// # What averaging instead of short-circuiting looked like
 ///
@@ -280,7 +274,7 @@ pub struct FlowNeighbor {
     pub below_own_height: f32,
 }
 
-/// Reproduces vanilla `FlowingFluid.getFlow`'s horizontal component.
+/// Reproduces vanilla's own flow computation's horizontal component.
 ///
 /// Neighbours are given in Minecraft axis convention: north = `-Z`, south =
 /// `+Z`, east = `+X`, west = `-X`. Returns the normalised `[x, z]` flow vector,
@@ -373,7 +367,7 @@ pub fn flow_angle(flow: [f64; 2]) -> f32 {
 /// otherwise (air, multiple boxes, or a box that doesn't span the full
 /// footprint — stairs, fences, walls, panes).
 ///
-/// This is the scoped subset of vanilla's `Shapes.blockOccludes`,
+/// This is the scoped subset of vanilla's own generic shape-occlusion test,
 /// which the doc comment on
 /// [`crate`][crate]'s `FluidSectionView::partial_occluder_y_range_at`
 /// consumer explains the derivation for. `boxes` should come from the
@@ -401,13 +395,14 @@ pub fn full_footprint_y_range(boxes: &[lodestone_model::BlockAabb]) -> Option<(f
 /// Whether the union of `boxes` completely covers the unit square of the cell
 /// face pointing `face`.
 ///
-/// This is vanilla `Shapes.blockOccludes` specialised to the *one* call
-/// `FluidRenderer.isFaceOccludedBySelf` makes — and that specialisation is what
-/// makes an exact answer cheap. `isFaceOccludedBySelf(state, dir)` is
-/// `isFaceOccludedByState(dir.getOpposite(), 1.0F, state)`, so the tested shape
-/// is the **whole** unit cube (`Shapes.box(0,0,0, 1,1,1)`, height `1.0`, never
-/// the fluid's real surface height) and the occluder is
-/// `state.getFaceOcclusionShape(dir)`. With a full-cube probe, `blockOccludes`'s
+/// This is vanilla's own generic shape-occlusion test specialised to the *one*
+/// call the fluid renderer's own is-face-occluded-by-self check
+/// makes — and that specialisation is what
+/// makes an exact answer cheap. That check tests occlusion against the
+/// opposite direction using
+/// the **whole** unit cube (height `1.0`, never
+/// the fluid's real surface height) as the probe shape, against the block's
+/// own per-face occlusion shape as the occluder. With a full-cube probe, the generic test's
 /// slice comparison degenerates to "is the occluder's boundary layer the entire
 /// face" — a pure 2-D coverage question with no fluid height in it at all.
 ///
@@ -495,8 +490,8 @@ pub fn face_fully_covered(boxes: &[lodestone_model::BlockAabb], face: Direction)
 }
 
 /// Which of a fluid cell's faces the block **sharing that cell** already
-/// occludes — vanilla `FluidRenderer.isFaceOccludedBySelf`, the half of
-/// `shouldRenderFace` that is not about neighbours at all.
+/// occludes — vanilla's own is-face-occluded-by-self check, the half of
+/// its own should-render-face check that is not about neighbours at all.
 ///
 /// For a waterlogged stair the stair and the water occupy one cell, so the
 /// water's face on the stair's solid side lands **coplanar** with the stair's own
@@ -505,9 +500,9 @@ pub fn face_fully_covered(boxes: &[lodestone_model::BlockAabb], face: Direction)
 ///
 /// # There is no `up`, and that is vanilla, not an omission
 ///
-/// `FluidRenderer.tesselate` computes `renderUp` as bare
-/// `!isNeighborSameFluid(self, above)` — it is the only one of the six faces that
-/// does **not** go through `shouldRenderFace`, so the self test never reaches it.
+/// Vanilla's own tesselation step computes its up-face-render flag as bare
+/// "is the cell above a different fluid" — it is the only one of the six faces that
+/// does **not** go through its own should-render-face check, so the self test never reaches it.
 /// A waterlogged top slab therefore still draws its water surface *inside* the
 /// slab. Adding `up` here would be a divergence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -534,10 +529,11 @@ impl SelfOcclusion {
 }
 
 /// [`SelfOcclusion`] for a block whose outline shape is `boxes`, via
-/// [`face_fully_covered`] on the five faces vanilla's `shouldRenderFace` covers.
+/// [`face_fully_covered`] on the five faces vanilla's own should-render-face check covers.
 ///
-/// The caller is responsible for the `canOcclude` half of vanilla's
-/// `occlusionShape = canOcclude ? getOcclusionShape(state) : Shapes.empty()`:
+/// The caller is responsible for the can-occlude half of vanilla's own
+/// occlusion-shape resolution, which falls back to an empty shape when the
+/// block cannot occlude at all:
 /// pass an empty slice (or skip the call) for a block that does not occlude, or
 /// every waterlogged leaves block — full-cube outline, `noOcclusion()` in vanilla
 /// — would cull its own water away entirely.
@@ -615,9 +611,9 @@ impl Default for FaceSet {
 }
 
 /// Whether each side face should sample the `water_overlay` material instead
-/// of `*_flow`, matching vanilla's `relativeBlock instanceof HalfTransparentBlock
-/// || relativeBlock instanceof LeavesBlock` check in `FluidRenderer.tesselate`.
-/// An overlay side face also omits its back copy (`addBackFace = !isOverlay`).
+/// of `*_flow`, matching vanilla's own check for the neighbour block being
+/// half-transparent or a leaves block, in its own tesselation step.
+/// An overlay side face also omits its back copy.
 /// Ignored (treated as all-`false`) when [`bake_fluid`] isn't given an overlay
 /// sprite — lava has no overlay material in vanilla either.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -661,17 +657,18 @@ pub struct FluidGeometry {
     pub side_overlay: SideOverlay,
 }
 
-/// Vanilla's z-fight avoidance nudge (`FluidRenderer.tesselate`'s `offs` /
-/// `bottomOffs` / the `0.001F` side inset). Top corners are pulled down by this
+/// Vanilla's z-fight avoidance nudge (vanilla's own tesselation step's top-offset /
+/// bottom-offset / the `0.001F` side inset). Top corners are pulled down by this
 /// much when the top face is drawn, side faces are inset this far from their
 /// block boundary, and the bottom edge of a side face — and the bottom face
 /// itself — sit this far above `y = 0`, but **only** when the bottom face is
-/// also drawn (`bottomOffs = renderDown ? 0.001F : 0.0F`); a culled bottom face
+/// also drawn (the bottom offset is `0.001` only when the down face renders,
+/// else `0.0`); a culled bottom face
 /// leaves side faces flush with `y = 0`.
 const Z_FIGHT_INSET: f32 = 0.001;
 
 /// Bakes a fluid cell into renderer-ready quads, matching the vertex winding and
-/// UV mapping of the client `FluidRenderer.tesselate`.
+/// UV mapping of the client's own tesselation step.
 ///
 /// Emits the top surface (four corner heights), the requested side faces and the
 /// bottom face. The top uses the still texture when [`FluidGeometry::flow`] is
@@ -867,7 +864,7 @@ fn fluid_quad(
     }
 }
 
-/// The reversed-winding copy `FluidRenderer.addFace` emits for a double-sided
+/// The reversed-winding copy vanilla's own add-face step emits for a double-sided
 /// quad: vertex order `[0, 3, 2, 1]` instead of `[0, 1, 2, 3]`, so the face is
 /// visible from the opposite side too. `direction` is carried through unused —
 /// fluid quads are always `shade: false`, so [`crate::bake`]'s per-direction
@@ -898,8 +895,8 @@ fn back_face(front: &BakedQuad) -> BakedQuad {
 }
 
 /// The flowing top-face UVs: the sprite sampled at its centre and rotated by the
-/// flow angle. Verified against the client `FluidRenderer` (lines computing
-/// `u00..v11` from `s`/`c`).
+/// flow angle. Verified against the client's own fluid-renderer source (the
+/// lines computing the rotated UV corners from the flow angle's sine/cosine).
 fn top_flow_uvs(flow_uv: SpriteUv, flow: [f64; 2]) -> [[f32; 2]; 4] {
     let angle = flow_angle(flow);
     let sin = angle.sin() * 0.25;

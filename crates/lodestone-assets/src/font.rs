@@ -811,13 +811,13 @@ pub struct TtfGlyph {
     /// `round(size * oversample)` — the pixel size every rasterisation call
     /// for this glyph uses (`FT_Set_Pixel_Sizes`'s argument).
     pub pixels_per_em: f32,
-    /// This provider's oversample factor (`GlyphBitmap.getOversample()`).
+    /// This provider's oversample factor (vanilla's own glyph-bitmap oversample query).
     pub oversample: f32,
     /// Advance in logical pixels (`scaledAdvance / oversample`).
     pub advance: f32,
-    /// Left bearing in logical pixels — `GlyphBitmap.getBearingLeft()`.
+    /// Left bearing in logical pixels — vanilla's own glyph-bitmap left-bearing query.
     pub bearing_left: f32,
-    /// Top bearing in logical pixels — `GlyphBitmap.getBearingTop()`, the
+    /// Top bearing in logical pixels — vanilla's own glyph-bitmap top-bearing query, the
     /// quantity [`GlyphRaster::top`]'s `7.0 - bearingTop` formula consumes.
     pub bearing_top: f32,
     /// Rasterised bitmap width, in oversampled (source) pixels.
@@ -921,7 +921,7 @@ impl Font {
     }
 
     /// The advance of `codepoint`, adding its own [`Glyph::bold_offset`] when
-    /// `bold` (`GlyphInfo.getAdvance(boolean)`). That is +1 for a sheet glyph
+    /// `bold` (vanilla's own glyph-info bold-aware advance query). That is +1 for a sheet glyph
     /// and +0.5 for a unihex one — per glyph, not per font.
     pub fn advance_bold(&self, codepoint: u32, bold: bool) -> Option<f32> {
         self.glyphs.get(&codepoint).map(|g| {
@@ -1328,7 +1328,8 @@ impl<'a> FontLoader<'a> {
             })?;
 
         let skip_set: HashSet<u32> = skip.iter().copied().collect();
-        // `int pixelsPerEm = Math.round(size * oversample);` — an integral
+        // Vanilla's own pixels-per-em computation rounds `size * oversample`
+        // to an integral
         // pixel size, exactly what `FT_Set_Pixel_Sizes` takes.
         let pixels_per_em = (size * oversample).round();
 
@@ -1768,7 +1769,7 @@ impl GlyphRaster<'_> {
     }
 
     /// The glyph box's left edge relative to the pen position, in logical
-    /// pixels — `GlyphBitmap.getBearingLeft()`. Zero for a sheet or unihex
+    /// pixels — vanilla's own glyph-bitmap left-bearing query. Zero for a sheet or unihex
     /// glyph (neither overrides the interface default); a `ttf` glyph's own
     /// [`TtfGlyph::bearing_left`] otherwise, since a TrueType outline is not
     /// generally flush with its advance box the way a bitmap-sheet cell is.

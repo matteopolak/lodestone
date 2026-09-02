@@ -72,7 +72,7 @@ fn colormap_default_used_when_smaller_than_index() {
 
 #[test]
 fn dark_forest_modifier_matches_source() {
-    // ARGB.opaque((base & 0xFEFEFE) + 0x28340A >> 1).
+    // vanilla's own opaque-color helper on (base & 0xFEFEFE) + 0x28340A >> 1.
     let base: Rgb = 0x88AA44;
     let out = GrassColorModifier::DarkForest.modify(base, 0.0);
     let expected = (((base & 0xFEFEFE) + 0x28340A) >> 1) & 0xFFFFFF;
@@ -239,7 +239,7 @@ fn vanilla_classification_known_blocks() {
         TintKind::None
     );
 
-    // Verified corrections from client BlockColors.createDefault():
+    // Verified corrections from vanilla's own default block-tint registrations:
     // mangrove leaves use the foliage colormap, not a constant.
     assert_eq!(
         vanilla_tint_kind(&id("minecraft:mangrove_leaves"), 0, &props),
@@ -278,7 +278,7 @@ fn vanilla_classification_known_blocks() {
         TintKind::None
     );
 
-    // Growing stems fade with age: ARGB.color(age*32, 255-age*8, age*4).
+    // Growing stems fade with age: an opaque colour packed from (age*32, 255-age*8, age*4).
     let mut sprops = BTreeMap::new();
     sprops.insert("age".to_string(), "7".to_string());
     assert_eq!(

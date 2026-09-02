@@ -572,7 +572,8 @@ impl MusicManager {
             }
         }
 
-        // vanilla's own tick routine's `Math.min(nextSongDelay, music.maxDelay())`.
+        // vanilla's own tick routine takes the min of the next-song delay and the
+        // current music's own max-delay query.
         self.next_song_delay = self.next_song_delay.min(music.max_delay);
 
         // vanilla's own tick routine's trailing `if` — the decrement happens *only* when we

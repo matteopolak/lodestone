@@ -173,8 +173,7 @@ impl AtlasDefinition {
     /// `paletted_permutations` source — rather than replacing it outright.
     ///
     /// A layer that fails to parse is skipped rather than failing the whole
-    /// load, matching vanilla's own `catch (Exception e) { LOGGER.error(...);
-    /// }` per entry. Returns `None` only when [`ResourceManager::read_stack`]
+    /// load, matching vanilla's own catch-and-log-per-entry behaviour. Returns `None` only when [`ResourceManager::read_stack`]
     /// finds the path in **no** layer at all — the caller's existing
     /// "descriptor missing" error, unchanged from the single-winner form this
     /// replaces.

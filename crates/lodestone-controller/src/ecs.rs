@@ -59,11 +59,11 @@ pub struct RawInput(pub InputState);
 /// gate makes.
 ///
 /// `movement_intent_with_food` vetoes sprint while sneaking, which is right on
-/// land (`isMovingSlowly()`). Underwater it is wrong:
-/// `LocalPlayer.canStartSprinting` is
-/// `… && (!isMovingSlowly() || isUnderWater())` (`LocalPlayer.java`)
-/// and `shouldStopSwimSprinting` explicitly *keeps* a swim-sprint alive while
-/// shift is held (`LocalPlayer.java`). Shift is how you steer downward
+/// land (vanilla's own is-moving-slowly query). Underwater it is wrong:
+/// vanilla's own can-start-sprinting check ANDs in
+/// "not moving slowly, or underwater"
+/// and its own should-stop-swim-sprinting check explicitly *keeps* a swim-sprint alive while
+/// shift is held. Shift is how you steer downward
 /// while swimming (`goDownInWater`), so vetoing sprint on it means a submerged
 /// player cannot swim and descend at the same time — they stop dead.
 ///
@@ -178,7 +178,7 @@ pub fn tick_sprint_window(mut input: ResMut<RawInput>) {
 ///
 /// # This does not, and must not, mean one packet is sent every tick
 ///
-/// Vanilla's own `LocalPlayer.sendPosition()` is *evaluated* every client
+/// Vanilla's own client-side send-position step is *evaluated* every client
 /// tick but *sends* on only a fraction of them: it tracks the position/
 /// rotation last actually transmitted and emits `Pos`/`Rot`/`PosRot`/
 /// `StatusOnly` only when that state is dirty by more than `(2e-4)²`
@@ -456,9 +456,10 @@ mod tests {
     }
 
     /// The food gate is independent of the swim exception — vanilla ANDs
-    /// `hasEnoughFoodToDoExhaustiveManoeuvres()` into `isSprintingPossible`
-    /// regardless of the shallow-water/underwater branch it also gates
-    /// (`Player.java`), so "food says no" must win even in the one
+    /// its own has-enough-food-to-do-exhaustive-manoeuvres query into its own
+    /// is-sprinting-possible check
+    /// regardless of the shallow-water/underwater branch it also gates,
+    /// so "food says no" must win even in the one
     /// case (submerged + sneaking) that would otherwise grant a swim-sprint.
     #[test]
     fn the_food_gate_applies_even_to_a_swim_sprint() {
@@ -572,7 +573,7 @@ mod tests {
     }
 
     /// Vanilla's `mayfly` ability bypasses the food check entirely
-    /// (`Player.java`'s `||`), so creative/spectator sprint must
+    /// (its own is-sprinting-possible check ORs it in), so creative/spectator sprint must
     /// survive food exhaustion.
     #[test]
     fn may_fly_bypasses_the_food_gate() {

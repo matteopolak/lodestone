@@ -57,7 +57,7 @@ impl MessageSignature {
         &self.bytes
     }
 
-    /// The Java-`Arrays.hashCode(byte[])`-compatible checksum vanilla folds into
+    /// The standard byte-array-hash-compatible checksum vanilla folds into
     /// the last-seen update. The `31 * h + b` recurrence uses **signed** bytes
     /// (Java's `byte` is signed) and wrapping 32-bit arithmetic (Java `int`
     /// overflow wraps). Only the low byte is ever observed downstream, but we

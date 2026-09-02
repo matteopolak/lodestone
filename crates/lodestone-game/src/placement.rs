@@ -95,7 +95,7 @@ pub fn face_offset(face: BlockFace) -> (i32, i32, i32) {
     }
 }
 
-/// The block adjacent to `pos` across `face` (`BlockPos.relative(direction)`).
+/// The block adjacent to `pos` across `face` (vanilla's own relative-position offset).
 #[must_use]
 pub fn offset(pos: BlockPos, face: BlockFace) -> BlockPos {
     let (dx, dy, dz) = face_offset(face);

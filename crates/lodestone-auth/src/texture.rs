@@ -3,69 +3,60 @@
 //!
 //! A `textures` profile property is attacker-controlled: any server can put any
 //! URL in a `PlayerInfo` entry, and our own services profile is only marginally
-//! more trustworthy. Vanilla does not fetch whatever it is handed — authlib
-//! screens every URL through `TextureUrlChecker.isAllowedTextureDomain` at the
-//! point the payload is decoded (`YggdrasilMinecraftSessionService` calls it on
-//! each `MinecraftProfileTexture.getUrl()` and logs *"Textures payload url is
-//! invalid: {}"* for a rejection). [`is_allowed_texture_domain`] is that method,
+//! more trustworthy. Vanilla does not fetch whatever it is handed — the
+//! services library
+//! screens every URL through a domain-allowlist check at the
+//! point the payload is decoded, and logs *"Textures payload url is
+//! invalid: {}"* for a rejection. [`is_allowed_texture_domain`] is that check,
 //! transcribed.
 //!
-//! ## Where the record definition comes from
+//! ## Where the check's definition comes from
 //!
-//! Not from `client-src` — `TextureUrlChecker` is authlib's, so it is not in the
-//! game's decompiled source at all. It was read out of the real jar 26.2
+//! Not from `client-src` — the services library that defines this check ships
+//! separately from the game's own decompiled source. It was read out of the real jar 26.2
 //! resolves,
-//! `.cache/mc/26.2/libraries/com/mojang/authlib/9.0.75/authlib-9.0.75.jar`, by
-//! disassembling `com/mojang/authlib/yggdrasil/TextureUrlChecker.class`. Both
-//! the constant pool and the bytecode of `isAllowedTextureDomain` were read, and
-//! the bytecode matters: the constant pool alone shows a `String.equals` and a
-//! `Set.contains` without saying what either compares.
+//! by disassembling the services library's compiled domain-check class. Both
+//! the constant pool and the bytecode of the check were read, and
+//! the bytecode matters: the constant pool alone shows a string-equality
+//! comparison and a set-membership test without saying what either compares.
 //!
-//! ```text
-//! static {
-//!     ALLOWED_SCHEMES = Set.of("http", "https");
-//!     ALLOWED_DOMAINS = Set.of("textures.minecraft.net");
-//! }
-//!
-//! static boolean isAllowedTextureDomain(String url) {
-//!     URI uri;
-//!     try { uri = new URI(url).normalize(); }
-//!     catch (URISyntaxException ignored) { return false; }
-//!     String scheme = uri.getScheme();
-//!     if (scheme == null || !ALLOWED_SCHEMES.contains(scheme)) return false;
-//!     String domain = uri.getHost();
-//!     if (domain == null) return false;
-//!     String decodedDomain  = IDN.toUnicode(domain);
-//!     String lowerCaseDomain = decodedDomain.toLowerCase(Locale.ROOT);
-//!     if (!lowerCaseDomain.equals(decodedDomain)) return false;
-//!     return ALLOWED_DOMAINS.contains(decodedDomain);
-//! }
-//! ```
+//! The disassembled check, in prose: two static sets are built up front — an
+//! allowed-schemes set of `"http"`/`"https"`, and an allowed-domains set
+//! containing only `"textures.minecraft.net"`. The check itself: parse and
+//! normalize the URL (rejecting on a parse failure); reject if the scheme is
+//! absent or not in the allowed-schemes set; reject if the host is absent;
+//! run the host through a Unicode (punycode) decode; reject unless the
+//! decoded host is already exactly lower-case (comparing the lower-cased form
+//! against the undecoded-case form and rejecting on any difference); and
+//! finally test the decoded host for exact membership in the allowed-domains
+//! set.
 //!
 //! **The two clauses nobody would invent** are the last two, and both are
 //! rejections rather than normalisations:
 //!
-//! * the host must **already be lower-case** — `lowerCaseDomain.equals(decodedDomain)`
-//!   compares the lowered host against the *unlowered* one and returns `false`
-//!   when they differ, so `HTTPS://TEXTURES.MINECRAFT.NET/…` is refused rather
+//! * the host must **already be lower-case** — comparing the lowered host
+//!   against the *unlowered* one and rejecting when they differ, so
+//!   `HTTPS://TEXTURES.MINECRAFT.NET/…` is refused rather
 //!   than folded;
-//! * `java.net.URI.getScheme()` is likewise case-preserving, so `HTTP` is not
+//! * the scheme accessor is likewise case-preserving, so `HTTP` is not
 //!   `http` and is refused.
 //!
 //! Guessing at "a suffix of minecraft.net" would have been both laxer *and*
-//! wrong: `ALLOWED_DOMAINS` is exact-match set membership on the whole host, so
+//! wrong: the allowed-domains set is exact-match set membership on the whole host, so
 //! `sub.textures.minecraft.net` is not allowed either.
 //!
 //! ## Where this deliberately diverges, and in which direction
 //!
 //! Only ever **stricter**, never laxer:
 //!
-//! * **No punycode decode.** `IDN.toUnicode` is not implemented here; a host
+//! * **No punycode decode.** The Unicode (punycode) decode step is not
+//!   implemented here; a host
 //!   containing an `xn--` label, or any non-ASCII byte, is rejected outright.
 //!   For the one allowed domain this cannot lose a legitimate URL:
-//!   `textures.minecraft.net` is pure lower-case ASCII, so `IDN.toUnicode` is
+//!   `textures.minecraft.net` is pure lower-case ASCII, so a punycode decode is
 //!   the identity on it. It *does* reject the pathological
-//!   `xn--textures-.xn--minecraft-.xn--net-`, which Java would decode back to
+//!   `xn--textures-.xn--minecraft-.xn--net-`, which vanilla's services library
+//!   would decode back to
 //!   the allowed spelling and which no DNS resolver would ever answer.
 //! * **A response size cap** ([`MAX_TEXTURE_BYTES`]). Vanilla streams the body
 //!   into an image decoder with no explicit ceiling. A 64×64 skin sheet is a
@@ -81,13 +72,12 @@
 
 use crate::error::{AuthError, Result};
 
-/// The single host vanilla will fetch a texture from: authlib's
-/// `TextureUrlChecker.ALLOWED_DOMAINS`, which is a one-element
-/// `Set.of("textures.minecraft.net")`. Exact match on the **whole** host, not a
+/// The single host vanilla will fetch a texture from: the services library's
+/// own one-element allowed-domains set. Exact match on the **whole** host, not a
 /// suffix.
 pub const ALLOWED_TEXTURE_DOMAIN: &str = "textures.minecraft.net";
 
-/// authlib's `TextureUrlChecker.ALLOWED_SCHEMES`, compared **case-sensitively**
+/// The services library's own allowed-schemes set, compared **case-sensitively**
 /// — see this module's docs.
 pub const ALLOWED_TEXTURE_SCHEMES: [&str; 2] = ["http", "https"];
 
@@ -112,15 +102,15 @@ fn raw_scheme_and_host(url: &str) -> Option<(&str, &str)> {
     Some((scheme, host))
 }
 
-/// Whether `url` is one vanilla would fetch a texture from: authlib's
-/// `TextureUrlChecker.isAllowedTextureDomain`.
+/// Whether `url` is one vanilla would fetch a texture from: the services
+/// library's own domain-allowlist check.
 ///
 /// See the module docs for the transcription, the two non-obvious rejection
 /// clauses, and the two deliberate (stricter-only) divergences.
 #[must_use]
 pub fn is_allowed_texture_domain(url: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(url) else {
-        // vanilla's `catch (URISyntaxException) { return false; }`
+        // vanilla's own catch-and-reject on a URI parse failure.
         return false;
     };
     // The authoritative host, after `userinfo`/port/IPv6 handling.
@@ -130,11 +120,11 @@ pub fn is_allowed_texture_domain(url: &str) -> bool {
     let Some((raw_scheme, raw_host)) = raw_scheme_and_host(url) else {
         return false;
     };
-    // Case-**sensitive**, as `URI.getScheme()` + `Set.contains` are.
+    // Case-**sensitive**, as vanilla's own scheme accessor and set-membership test are.
     if !ALLOWED_TEXTURE_SCHEMES.contains(&raw_scheme) {
         return false;
     }
-    // `lowerCaseDomain.equals(decodedDomain)`: an unlowered host is refused, not
+    // Vanilla's own lower-case comparison: an unlowered host is refused, not
     // folded. Plus our stricter no-punycode/no-non-ASCII rule.
     raw_host.is_ascii()
         && !raw_host.chars().any(|c| c.is_ascii_uppercase())

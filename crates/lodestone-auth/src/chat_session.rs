@@ -4,19 +4,21 @@
 //!
 //! Two halves, mirroring 26.2's client-side split:
 //!
-//! * **Key acquisition** ([`fetch_key_pair`]) — `AccountProfileKeyPairManager`
+//! * **Key acquisition** ([`fetch_key_pair`]) — vanilla's own client-side
+//!   key-pair manager
 //!   in `.cache/mc/26.2/client-src`: a `POST` to
 //!   `https://api.minecraftservices.com/player/certificates` (confirmed from
-//!   `authlib-9.0.75.jar`'s `YggdrasilUserApiService.getKeyPair`/`routeKeyPair`
+//!   the services library jar's own key-pair-fetching route
 //!   constant pool — the route string `/player/certificates` and the response
 //!   record's field names, including the `publicKeySignatureV2`
-//!   `@SerializedName`, come from that jar directly since authlib itself is not
+//!   serialized-name annotation, come from that jar directly since the
+//!   services library itself is not
 //!   in the decompiled source tree). Mojang generates the RSA-2048 key pair
 //!   server-side and hands **both** halves to the authenticated client over
 //!   HTTPS — there is no local keygen here, matching vanilla.
-//! * **Per-message signing** ([`ChatSession`]) — `LocalChatSession` +
-//!   `SignedMessageChain.Encoder` + `PlayerChatMessage.updateSignature` +
-//!   `SignedMessageLink.updateSignature` + `SignedMessageBody.updateSignature`
+//! * **Per-message signing** ([`ChatSession`]) — vanilla's own local-chat-session
+//!   type, message-chain encoder, and per-message/per-link/per-body
+//!   signature-update steps
 //!   (the decompiled tree's chat package), hand-expanded clause
 //!   by clause into [`build_signature_payload`] since there is no captured
 //!   real signed-chat packet or published test vector for this scheme
@@ -67,13 +69,13 @@ pub const MOJANG_PUBLIC_KEY_REFRESH_MILLIS: i64 = 24 * 60 * 60 * 1_000;
 /// Vanilla's first service-key fetch retry delay (`BASE_FAILURE_INTERVAL_MINUTES`).
 pub const MOJANG_PUBLIC_KEY_FAILURE_BACKOFF_BASE_MILLIS: i64 = 5 * 60 * 1_000;
 
-/// `YggdrasilServicesKeyInfo.KEY_SIZE_BITS`: every service issuer key uses
+/// Vanilla's own services-key-size constant: every service issuer key uses
 /// 4096-bit RSA, unlike the player's 2048-bit message-signing key.
 pub const MOJANG_PUBLIC_KEY_BITS: usize = 4_096;
 
 /// The RSA signature length vanilla hard-codes
-/// (`MessageSignature.BYTES`/`Crypt.SIGNATURE_BYTES` = 256, i.e. a 2048-bit
-/// key) and asserts on with `Preconditions.checkState` on every decode.
+/// (its own signature-byte-length constant = 256, i.e. a 2048-bit
+/// key) and asserts on with its own precondition check on every decode.
 pub const SIGNATURE_BYTES: usize = 256;
 
 /// Maximum entries in a last-seen window (`LastSeenMessages.LAST_SEEN_MESSAGES_MAX_LENGTH`).
@@ -128,8 +130,8 @@ struct MojangPublicKeyResponse {
 
 // --- Mojang profile-key provenance ----------------------------------------
 
-/// The public data a client announces in `RemoteChatSession.Data` / vanilla's
-/// `ProfilePublicKey.Data`. Its signature is issued by Mojang, not by the
+/// The public data a client announces in its own remote chat session/profile
+/// public key data. Its signature is issued by Mojang, not by the
 /// player: use [`MojangPublicKeys::verify_profile_public_key`] before accepting
 /// it as the signing key for that connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,7 +139,7 @@ pub struct ProfilePublicKeyData {
     /// The online-authenticated Minecraft profile UUID. This exact identity,
     /// rather than a packet-supplied name, is part of Mojang's signed payload.
     pub profile_id: Uuid,
-    /// The certificate expiry (`Instant.toEpochMilli()`), carried verbatim on
+    /// The certificate expiry (milliseconds since the Unix epoch), carried verbatim on
     /// the wire. Provenance verification does not make an expired certificate
     /// usable; enforce [`profile_public_key_has_expired`] separately.
     pub expires_at_millis: i64,
@@ -364,9 +366,9 @@ impl ChatKeyPair {
     /// Mojang sent it.
     ///
     /// This is deliberately **not** re-derived from `private_key` at send
-    /// time: `PublicKey.getEncoded()` in Java for a key built from
-    /// `X509EncodedKeySpec` returns the identical bytes it was constructed
-    /// from, so `FriendlyByteBuf.writePublicKey`'s `writeByteArray(key.getEncoded())`
+    /// time: a Java public-key object built from its own DER encoding
+    /// returns the identical bytes it was constructed
+    /// from when re-encoded, so the wire-write of the public key
     /// is byte-for-byte the DER Mojang issued. Keeping the original bytes
     /// instead of re-encoding a parsed [`RsaPublicKey`] removes an entire
     /// class of "our encoder disagrees with Mojang's" bug.
@@ -384,16 +386,16 @@ impl ChatKeyPair {
     }
 
     /// Key expiry, epoch milliseconds — the exact wire representation
-    /// `chat_session_update` sends (`ProfilePublicKey.Data.expiresAt`, written
-    /// via `FriendlyByteBuf.writeInstant` = `writeLong(toEpochMilli())`).
+    /// `chat_session_update` sends (vanilla's own profile-public-key expiry
+    /// field, written as a plain 64-bit millisecond timestamp).
     #[must_use]
     pub fn expires_at_millis(&self) -> i64 {
         self.expires_at_millis
     }
 
     /// Whether this key pair should be refreshed, given the current time
-    /// (epoch milliseconds). Mirrors `ProfileKeyPair.dueRefresh`:
-    /// `refreshedAfter.isBefore(Instant.now())`.
+    /// (epoch milliseconds). Mirrors vanilla's own due-refresh check: whether
+    /// the refresh timestamp is before the current time.
     #[must_use]
     pub fn due_refresh(&self, now_millis: i64) -> bool {
         self.refreshed_after_millis < now_millis
@@ -517,9 +519,9 @@ fn parse_key_pair_response(resp: KeyPairResponse) -> Result<ChatKeyPair> {
 }
 
 /// Extracts and base64-decodes the DER payload from one of Mojang's PEM-ish
-/// strings, tolerant of the same things Java's `Base64.getMimeDecoder()` is:
+/// strings, tolerant of the same things Java's own MIME base64 decoder is:
 /// line breaks inside the block and characters outside the base64 alphabet
-/// (`Crypt.rsaStringToKey` locates `header`/`footer` by substring and hands
+/// (vanilla's own PEM-string-to-key helper locates `header`/`footer` by substring and hands
 /// the decoder whatever is between them without trimming precisely, relying
 /// on the MIME decoder's tolerance for stray non-alphabet bytes; filtering to
 /// the base64 alphabet here reproduces that tolerance directly rather than
@@ -527,7 +529,7 @@ fn parse_key_pair_response(resp: KeyPairResponse) -> Result<ChatKeyPair> {
 ///
 /// Falls back to treating the whole (whitespace-stripped) string as the
 /// base64 body when the header/footer markers are absent, matching
-/// `rsaStringToKey`'s `begin == -1` branch.
+/// vanilla's own "marker not found" branch.
 fn extract_pem_der(pem: &str, header: &str, footer: &str) -> Result<Vec<u8>> {
     let body = match (pem.find(header), pem.find(footer)) {
         (Some(start), Some(end)) if end > start => &pem[start + header.len()..end],
@@ -542,7 +544,7 @@ fn extract_pem_der(pem: &str, header: &str, footer: &str) -> Result<Vec<u8>> {
         .map_err(|e| AuthError::ChatSessionKeyMalformed(format!("invalid base64 in PEM block: {e}")))
 }
 
-/// Parses a Java `Instant.toString()`-shaped UTC timestamp
+/// Parses vanilla's own instant-to-string-shaped UTC timestamp
 /// (`yyyy-MM-ddTHH:mm:ss[.fraction]Z`, the shape `expiresAt`/`refreshedAfter`
 /// use) into epoch milliseconds, with no external date/time dependency.
 ///
@@ -612,8 +614,8 @@ pub struct SignedMessageLink {
     pub index: i32,
     /// The signing account's profile UUID.
     pub sender: Uuid,
-    /// This chat session's UUID (`LocalChatSession::create`'s
-    /// `UUID.randomUUID()`, client-generated once per session).
+    /// This chat session's UUID (vanilla's own local-chat-session creation step's
+    /// randomly-generated UUID, client-generated once per session).
     pub session_id: Uuid,
 }
 
@@ -643,8 +645,9 @@ impl SignedMessageLink {
         }
     }
 
-    /// Appends this link's signed bytes: `SignedMessageLink.updateSignature` —
-    /// sender UUID (16 bytes, `UUIDUtil.uuidToByteArray`: MSB then LSB,
+    /// Appends this link's signed bytes: vanilla's own signed-message-link
+    /// signature-update step —
+    /// sender UUID (16 bytes, vanilla's own UUID-to-byte-array helper: MSB then LSB,
     /// big-endian each — identical to [`Uuid::as_bytes`]'s layout), session
     /// UUID (16 bytes, same layout), then the index as a big-endian `i32`.
     fn write_signed_bytes(&self, out: &mut Vec<u8>) {
@@ -654,35 +657,35 @@ impl SignedMessageLink {
     }
 }
 
-/// Builds the exact byte payload `PlayerChatMessage.updateSignature` signs,
+/// Builds the exact byte payload vanilla's own player-chat-message
+/// signature-update step signs,
 /// clause by clause against the decompiled 26.2 source (no captured packet or
 /// published vector exists for this scheme — see this module's doc comment
 /// for the independent check that was possible instead):
 ///
-/// 1. `PlayerChatMessage.updateSignature`: a constant version tag,
-///    `Ints.toByteArray(1)` — big-endian `i32` `1`.
-/// 2. `SignedMessageLink.updateSignature`: sender UUID, session UUID, index —
+/// 1. A constant version tag: a big-endian `i32` `1`.
+/// 2. The signed-message-link fields: sender UUID, session UUID, index —
 ///    see [`SignedMessageLink::write_signed_bytes`].
-/// 3. `SignedMessageBody.updateSignature`, in order:
-///    - `Longs.toByteArray(salt)` — big-endian `i64`.
-///    - `Longs.toByteArray(timeStamp.getEpochSecond())` — big-endian `i64`,
+/// 3. The signed-message-body fields, in order:
+///    - the salt as a big-endian `i64`.
+///    - the timestamp as a big-endian `i64`,
 ///      **epoch seconds**, not the milliseconds the wire packet itself
-///      carries (`ChatMessage`/`ServerboundChatPacket` use
-///      `writeInstant`/`readInstant`, which is epoch *millis* —
-///      `updateSignature` is the one place seconds appear; conflating the two
+///      carries (the wire chat packet's own timestamp field is epoch
+///      *millis* —
+///      the signature-update step is the one place seconds appear; conflating the two
 ///      is exactly the kind of subtle-port mistake this repo's evidence
 ///      standard exists to catch, so it is called out here explicitly).
-///    - `Ints.toByteArray(contentBytes.length)` then `contentBytes` — a
+///    - the UTF-8 content byte length, then the content bytes — a
 ///      big-endian `i32` UTF-8 byte length prefix, then the UTF-8 bytes
-///      themselves (not a `writeUtf`-style VarInt-prefixed string: this is
+///      themselves (not a VarInt-prefixed-string wire encoding: this is
 ///      the *signature* payload, not the wire encoding).
-///    - `LastSeenMessages.updateSignature`: `Ints.toByteArray(entries.size())`
-///      (big-endian `i32`) then each entry's raw signature bytes
+///    - the last-seen-messages fields: the entry count as a big-endian `i32`,
+///      then each entry's raw signature bytes
 ///      concatenated in order.
 ///
 /// `last_seen` entries must each be exactly [`SIGNATURE_BYTES`] long — the
 /// same 256-byte RSA signatures this function itself produces for earlier
-/// messages, per `MessageSignature`'s own `Preconditions.checkState`.
+/// messages, per vanilla's own precondition check on the signature type.
 #[must_use]
 pub fn build_signature_payload(
     link: &SignedMessageLink,
@@ -708,8 +711,8 @@ pub fn build_signature_payload(
     out
 }
 
-/// Signs `payload` with `SHA256withRSA` (RSASSA-PKCS1-v1.5, `Crypt.SIGNING_ALGORITHM`)
-/// — `Signer.from(privateKey, "SHA256withRSA")`. Deterministic: PKCS#1 v1.5
+/// Signs `payload` with `SHA256withRSA` (RSASSA-PKCS1-v1.5, vanilla's own
+/// signing-algorithm constant). Deterministic: PKCS#1 v1.5
 /// signature padding needs no randomness (unlike PSS or OAEP), so this needs
 /// no RNG and no `getrandom` — see `Cargo.toml`'s comment on why `rsa` is
 /// native-only here for a different reason (the crate's own `rand_core`
@@ -729,10 +732,11 @@ fn sign_payload(private_key: &RsaPrivateKey, payload: &[u8]) -> Result<[u8; SIGN
 /// A live chat-signing session: the client-generated session UUID, the
 /// Mojang-issued key pair, and the chain-position cursor.
 ///
-/// Mirrors `LocalChatSession` (session id + key pair) fused with the encoder
-/// half of `SignedMessageChain` (the `nextLink` cursor) — 26.2 keeps these as
-/// two collaborating objects (`LocalChatSession::createMessageEncoder`
-/// constructs a fresh `SignedMessageChain` around the same key), but nothing
+/// Mirrors vanilla's own local-chat-session type (session id + key pair) fused
+/// with the encoder half of its own message-signing chain (the `nextLink`
+/// cursor) — 26.2 keeps these as
+/// two collaborating objects (vanilla's own message-encoder creation step
+/// constructs a fresh message-chain object around the same key), but nothing
 /// here needs that indirection since one client only ever encodes, never
 /// decodes, its own chain.
 pub struct ChatSession {
@@ -755,7 +759,8 @@ impl std::fmt::Debug for ChatSession {
 
 impl ChatSession {
     /// Starts a new session: a fresh random session UUID
-    /// (`LocalChatSession::create`'s `UUID.randomUUID()`) and the chain rooted
+    /// (vanilla's own local-chat-session creation step's randomly-generated
+    /// UUID) and the chain rooted
     /// at index 0 for `sender`.
     #[must_use]
     pub fn new(sender: Uuid, key_pair: ChatKeyPair) -> Self {
@@ -781,12 +786,12 @@ impl ChatSession {
     }
 
     /// Signs one outgoing message and advances the chain
-    /// (`SignedMessageChain.Encoder`'s closure: read `nextLink`, advance it,
+    /// (vanilla's own message-chain encoder: read the next-link cursor, advance it,
     /// sign against the *pre-advance* link). Returns `None` once the chain is
     /// exhausted (`SignedMessageLink::advance` hit `i32::MAX`) — vanilla's own
     /// signal that this session must be replaced with a new one, mirroring
-    /// `SignedMessageChain.Encoder.pack` returning `null` after
-    /// `this.nextLink = null`.
+    /// its own message-chain encoder's pack step returning nothing after
+    /// clearing its own next-link cursor.
     ///
     /// # Errors
     /// Propagates a signing failure from the underlying RSA operation.
@@ -808,15 +813,14 @@ impl ChatSession {
 }
 
 /// Verifies a received message's signature against a sender's announced
-/// public key (`RemoteChatSession.createMessageDecoder` +
-/// `SignedMessageChain.Decoder.unpack`'s `unpacked.verify(signatureValidator)`
-/// call, i.e. `PlayerChatMessage.verify` → `MessageSignature.verify` →
-/// `SignatureValidator.from(publicKey, "SHA256withRSA")`).
+/// public key (vanilla's own remote-chat-session message-decoder creation,
+/// which unpacks and verifies the message against a signature validator
+/// built from the sender's public key with `"SHA256withRSA"`).
 ///
 /// This is the decode-side primitive only: it does **not** track a per-sender
 /// chain, enforce link ordering/expiry, or feed a "verified" badge into any
-/// UI — those are the remainder of `SignedMessageChain.Decoder` and
-/// `RemoteChatSession`'s state machine, out of scope here (see this crate's
+/// UI — those are the remainder of vanilla's own message-chain decoder and
+/// its own remote-chat-session state machine, out of scope here (see this crate's
 /// report: rendering other players' messages as verified is explicitly a
 /// later concern per issue #283's own text).
 ///
@@ -900,7 +904,7 @@ mod tests {
         );
     }
 
-    /// Real `Instant.toString()` output carries fractional seconds (up to
+    /// Real vanilla instant-to-string output carries fractional seconds (up to
     /// nanosecond) with a variable digit count; this must normalise to
     /// milliseconds rather than mis-scale a short fraction.
     #[test]
@@ -989,8 +993,8 @@ mod tests {
         let payload = build_signature_payload(&link, "Hello, Lodestone!", 1_700_000_000, 1_234_567_890_123, &oracle_last_seen());
         let payload_hex = payload.iter().map(|b| format!("{b:02x}")).collect::<String>();
         // Produced independently in Python from the same clause-by-clause
-        // spec (`Ints.toByteArray(1) || link || salt || epoch-seconds ||
-        // len(content) || content || len(last_seen) || each entry`) — see
+        // spec (version tag (1) || link || salt || epoch-seconds ||
+        // len(content) || content || len(last_seen) || each entry) — see
         // this module's doc comment.
         assert_eq!(payload_hex, "0000000111223344556677889900aabbccddeeffaabbccdd112233445566778899001122000000070000011f71fb04cb000000006553f1000000001148656c6c6f2c204c6f646573746f6e652100000002000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7e8e9eaebecedeeeff0f1f2f3f4f5f6f7f8f9fafbfcfdfefffffefdfcfbfaf9f8f7f6f5f4f3f2f1f0efeeedecebeae9e8e7e6e5e4e3e2e1e0dfdedddcdbdad9d8d7d6d5d4d3d2d1d0cfcecdcccbcac9c8c7c6c5c4c3c2c1c0bfbebdbcbbbab9b8b7b6b5b4b3b2b1b0afaeadacabaaa9a8a7a6a5a4a3a2a1a09f9e9d9c9b9a999897969594939291908f8e8d8c8b8a898887868584838281807f7e7d7c7b7a797877767574737271706f6e6d6c6b6a696867666564636261605f5e5d5c5b5a595857565554535251504f4e4d4c4b4a494847464544434241403f3e3d3c3b3a393837363534333231302f2e2d2c2b2a292827262524232221201f1e1d1c1b1a191817161514131211100f0e0d0c0b0a09080706050403020100");
     }
