@@ -25,14 +25,20 @@
 //!   here even though [`EXPERIMENTS_ROW`] now exists (it lives on More,
 //!   below, matching vanilla's own always-present copy of the button).
 //! - **World** (`createWorld.tab.world.title`): [`SEED_FIELD`],
-//!   [`WORLD_TYPE_ROW`], [`STRUCTURES_ROW`], [`BONUS_CHEST_ROW`] — vanilla's
-//!   own World tab also has a "Customize Type" button this client has no
-//!   preset-editor screen for, left absent the same way. [`WORLD_TYPE_ROW`]
+//!   [`WORLD_TYPE_ROW`], [`CUSTOMIZE_ROW`], [`STRUCTURES_ROW`],
+//!   [`BONUS_CHEST_ROW`]. [`WORLD_TYPE_ROW`]
 //!   itself is real — cycles all seven bundled
 //!   presets and collects the choice — and
 //!   selecting `Normal`/`LargeBiomes`/`Amplified` reaches the served world;
 //!   the other four remain decorative. See [`WorldTypePreset`]'s own doc for
-//!   exactly which is which and why.
+//!   exactly which is which and why. [`CUSTOMIZE_ROW`] is vanilla's own
+//!   `selectWorld.customizeType` button — present on this tab always, like
+//!   vanilla's own copy, but only **active** while the selected world type is
+//!   [`WorldTypePreset::Flat`] or [`WorldTypePreset::SingleBiomeSurface`],
+//!   mirroring vanilla's own rule exactly (a preset editor exists for those
+//!   two and no others). See [`CustomizeEditor`]'s own doc for what it
+//!   collects and [`WorldCreationConfig::flat_layers`]/
+//!   [`WorldCreationConfig::single_biome`] for where the choice reaches disk.
 //! - **More** (`createWorld.tab.more.title`): vanilla's own More tab is three
 //!   buttons, in this order — Game Rules, Experiments, Data Packs. All three
 //!   now have real models
@@ -227,6 +233,9 @@ pub const DATA_PACKS_BUTTON_LABEL: &str = "Data Packs...";
 /// `selectWorld.experiments`, verbatim from `en_us.json` — vanilla's More tab
 /// button that opens `ExperimentsScreen`.
 pub const EXPERIMENTS_BUTTON_LABEL: &str = "Experiments...";
+/// `selectWorld.customizeType`, verbatim from `en_us.json` — vanilla's World
+/// tab button that opens the preset editor. See [`CustomizeEditor`].
+pub const CUSTOMIZE_LABEL: &str = "Customize";
 
 /// `createWorld.tab.game.title`/`.world.title`/`.more.title`, verbatim from
 /// `en_us.json` — this screen's own tab bar, built from the same
@@ -259,6 +268,7 @@ fn content_rows_for_tab(tab: usize) -> &'static [usize] {
         WORLD_TAB => &[
             SEED_FIELD,
             WORLD_TYPE_ROW,
+            CUSTOMIZE_ROW,
             STRUCTURES_ROW,
             BONUS_CHEST_ROW,
             ONLINE_MODE_ROW,
@@ -534,6 +544,33 @@ pub struct WorldCreationConfig {
     /// experiment turned on, matching vanilla's own default (empty) feature
     /// set, and writes nothing extra to `level.dat` in that case.
     pub experiments: Vec<String>,
+    /// The "Customize Type" screen's Flat half — a bundled quick preset,
+    /// collected from [`CreateWorldNav`]'s own [`CustomizeEditor`] when
+    /// Create is pressed, **only** while [`Self::world_type`] is
+    /// [`WorldTypePreset::Flat`] (`None` for every other world type,
+    /// including [`WorldTypePreset::SingleBiomeSurface`], whose own choice
+    /// lives on [`Self::single_biome`] instead — the two are mutually
+    /// exclusive by construction, matching vanilla's own one-editor-per-type
+    /// rule). Reaches disk for real: `crate::saves::create_world_in` writes
+    /// it into `world_gen_settings.dat`'s
+    /// `dimensions.minecraft:overworld.generator` compound through
+    /// [`lodestone_anvil::world_gen_settings::WorldGenSettings::with_overworld_flat_generator`]
+    /// — see that function's own doc for why this is a different file than
+    /// [`Self::experiments`]'s `level.dat`. **Not yet wired past the file**:
+    /// this client's own world-generation launch path (which is what makes
+    /// [`Self::world_type`]'s three noise-generator presets actually reach
+    /// the served world) does not read this back, so a freshly created flat
+    /// world from *this* client generates from the same fixed default it
+    /// always has — only a real vanilla server re-opening the same save
+    /// folder would see the customization. Real gameplay wiring across the
+    /// launch path and the generator itself, not a small follow-up.
+    pub flat_layers: Option<FlatLayerPreset>,
+    /// The "Customize Type" screen's Single Biome half — mirrors
+    /// [`Self::flat_layers`] exactly, one field short: a single biome id
+    /// rather than a layer stack, reaching disk through
+    /// [`lodestone_anvil::world_gen_settings::WorldGenSettings::with_overworld_fixed_biome_generator`].
+    /// Same not-yet-wired-past-the-file gap.
+    pub single_biome: Option<CustomizeBiome>,
 }
 
 impl Default for WorldCreationConfig {
@@ -554,6 +591,8 @@ impl Default for WorldCreationConfig {
             game_rules: Vec::new(),
             data_packs: Vec::new(),
             experiments: Vec::new(),
+            flat_layers: None,
+            single_biome: None,
         }
     }
 }
@@ -580,7 +619,13 @@ pub const DATA_PACKS_ROW: usize = 12;
 /// More tab's third row (Experiments half): opens the
 /// feature-flag toggle list — see [`CreateWorldMode::Experiments`].
 pub const EXPERIMENTS_ROW: usize = 13;
-const ROW_COUNT: usize = 14;
+/// World tab's "Customize Type" button — opens
+/// [`CreateWorldMode::Customize`]. Present on the World tab always (matching
+/// vanilla's own always-present copy), but only **active** for
+/// [`WorldTypePreset::Flat`]/[`WorldTypePreset::SingleBiomeSurface`] — see
+/// [`CustomizeEditor`]'s own doc.
+pub const CUSTOMIZE_ROW: usize = 14;
+const ROW_COUNT: usize = 15;
 
 const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 
@@ -606,10 +651,11 @@ pub fn row_slot(row: usize) -> Slot {
     // crossing the divider.
     const TOP: f32 = layout::TAB_BAR_HEIGHT + 16.0;
     const ROW_H: f32 = 24.0;
-    // World now has one more row than Game (five vs. four, since the
-    // world-type selector landed on World only), so the two tabs' local
-    // indices no longer line up 1:1 the way they did when every row paired
-    // with exactly one sibling. Named per-tab instead of paired, still one
+    // World now has two more rows than Game (six vs. four, since the
+    // world-type selector and its Customize Type button both landed on World
+    // only), so the two tabs' local indices no longer line up 1:1 the way
+    // they did when every row paired with exactly one sibling. Named
+    // per-tab instead of paired, still one
     // `match` arm per **local row position** so the two tabs' rows that do
     // share a `dy` (never shown at once, so sharing costs nothing) stay
     // visibly paired rather than restated at the same number twice.
@@ -626,28 +672,40 @@ pub fn row_slot(row: usize) -> Slot {
             w: FIELD_W,
             h: super::render::EDIT_BOX_H,
         },
-        // Local row 2: Difficulty / Structures / More's third row (Data Packs).
-        DIFFICULTY_ROW | STRUCTURES_ROW | DATA_PACKS_ROW => Slot {
+        // Local row 2: Difficulty / Customize Type / More's third row (Data
+        // Packs). World's own local row 2 moved here from Structures when
+        // Customize Type landed between World Type and Structures, matching
+        // vanilla's own row order.
+        DIFFICULTY_ROW | CUSTOMIZE_ROW | DATA_PACKS_ROW => Slot {
             origin: Origin::ScreenTop,
             dx: X,
             dy: TOP + ROW_H * 2.0,
             w: FIELD_W,
             h: super::render::EDIT_BOX_H,
         },
-        // Local row 3: Allow Cheats / Bonus Chest.
-        ALLOW_CHEATS_ROW | BONUS_CHEST_ROW => Slot {
+        // Local row 3: Allow Cheats / Structures. Structures moved down one
+        // row for the same reason as above.
+        ALLOW_CHEATS_ROW | STRUCTURES_ROW => Slot {
             origin: Origin::ScreenTop,
             dx: X,
             dy: TOP + ROW_H * 3.0,
             w: FIELD_W,
             h: super::render::EDIT_BOX_H,
         },
-        // Local row 4: World-only — Online Mode. Game's four rows end at
+        // Local row 4: World-only — Bonus Chest. Game's four rows end at
         // local row 3, so this has no Game-side sibling to pair with.
-        ONLINE_MODE_ROW => Slot {
+        BONUS_CHEST_ROW => Slot {
             origin: Origin::ScreenTop,
             dx: X,
             dy: TOP + ROW_H * 4.0,
+            w: FIELD_W,
+            h: super::render::EDIT_BOX_H,
+        },
+        // Local row 5: World-only — Online Mode.
+        ONLINE_MODE_ROW => Slot {
+            origin: Origin::ScreenTop,
+            dx: X,
+            dy: TOP + ROW_H * 5.0,
             w: FIELD_W,
             h: super::render::EDIT_BOX_H,
         },
@@ -695,6 +753,9 @@ pub struct CreateWorldWidgets {
     /// More tab's Experiments button — opens
     /// [`CreateWorldMode::Experiments`].
     pub experiments: Widget,
+    /// World tab's Customize Type button — opens
+    /// [`CreateWorldMode::Customize`]. See [`CUSTOMIZE_ROW`].
+    pub customize: Widget,
 }
 
 impl FocusChildren for CreateWorldWidgets {
@@ -714,6 +775,7 @@ impl FocusChildren for CreateWorldWidgets {
             GAME_RULES_ROW => &self.game_rules as &dyn FocusTarget,
             DATA_PACKS_ROW => &self.data_packs as &dyn FocusTarget,
             EXPERIMENTS_ROW => &self.experiments as &dyn FocusTarget,
+            CUSTOMIZE_ROW => &self.customize as &dyn FocusTarget,
             _ => return None,
         })
     }
@@ -734,6 +796,7 @@ impl FocusChildren for CreateWorldWidgets {
             GAME_RULES_ROW => &mut self.game_rules as &mut dyn FocusTarget,
             DATA_PACKS_ROW => &mut self.data_packs as &mut dyn FocusTarget,
             EXPERIMENTS_ROW => &mut self.experiments as &mut dyn FocusTarget,
+            CUSTOMIZE_ROW => &mut self.customize as &mut dyn FocusTarget,
             _ => return None,
         })
     }
@@ -799,6 +862,8 @@ pub struct CreateWorldNav {
     /// The feature-flag toggle list's own live state — see
     /// [`ExperimentsEditor`]'s doc.
     experiments: ExperimentsEditor,
+    /// The preset editor's own live state — see [`CustomizeEditor`]'s doc.
+    customize: CustomizeEditor,
 }
 
 /// See [`CreateWorldNav::mode`].
@@ -809,6 +874,7 @@ enum CreateWorldMode {
     GameRules,
     DataPacks,
     Experiments,
+    Customize,
 }
 
 fn button(row: usize, label: impl Into<String>) -> Widget {
@@ -848,6 +914,7 @@ impl CreateWorldNav {
             game_rules: button(GAME_RULES_ROW, GAME_RULES_BUTTON_LABEL),
             data_packs: button(DATA_PACKS_ROW, DATA_PACKS_BUTTON_LABEL),
             experiments: button(EXPERIMENTS_ROW, EXPERIMENTS_BUTTON_LABEL),
+            customize: button(CUSTOMIZE_ROW, CUSTOMIZE_LABEL),
         };
         let mut focus = FocusSet::new();
         for row in 0..ROW_COUNT {
@@ -864,14 +931,17 @@ impl CreateWorldNav {
             game_rules: GameRulesEditor::new(),
             data_packs: DataPacksEditor::new(),
             experiments: ExperimentsEditor::new(),
+            customize: CustomizeEditor::new(),
         };
-        // Game is active from the start, so this deactivates World's four
-        // fields (Seed/Structures/Bonus Chest/Online Mode) — matching what a
-        // fresh vanilla screen shows (only the current tab's controls can
-        // take focus) — and folds in the (inactive, at the default game mode)
-        // hardcore lock.
+        // Game is active from the start, so this deactivates World's fields
+        // (Seed/Customize Type/Structures/Bonus Chest/Online Mode) —
+        // matching what a fresh vanilla screen shows (only the current tab's
+        // controls can take focus) — and folds in the (inactive, at the
+        // default game mode) hardcore lock plus the (also inactive, at the
+        // default Normal world type) Customize Type availability.
         nav.sync_tab_visibility();
         nav.apply_hardcore_lock();
+        nav.apply_customize_availability();
         nav
     }
 
@@ -934,6 +1004,13 @@ impl CreateWorldNav {
         self.mode == CreateWorldMode::Experiments
     }
 
+    /// Whether the "Customize Type" sub-screen is open — mirrors
+    /// [`Self::experiments_open`].
+    #[must_use]
+    pub fn customize_open(&self) -> bool {
+        self.mode == CreateWorldMode::Customize
+    }
+
     /// How many rows the pack selector currently has (the always-present
     /// Vanilla row plus whatever [`DataPacksEditor::refresh`] most recently
     /// found) — `nav.rs`'s own [`super::widget::ListSpec`] needs this, unlike
@@ -990,6 +1067,20 @@ impl CreateWorldNav {
             cycle_label(DIFFICULTY_LABEL, difficulty_caption(self.config.difficulty));
     }
 
+    /// Customize Type is active only while the World tab is showing **and**
+    /// the selected world type has a preset editor — vanilla's own rule
+    /// (`!data.isDebug() && data.getPresetEditor() != null`, narrowed here to
+    /// naming the two presets directly since this client's preset list is
+    /// fixed rather than a registry lookup). Mirrors
+    /// [`Self::apply_hardcore_lock`]'s own shape: a second gate combined with
+    /// tab membership by `&&` rather than either one silently overriding the
+    /// other.
+    fn apply_customize_availability(&mut self) {
+        let has_editor =
+            matches!(self.config.world_type, WorldTypePreset::Flat | WorldTypePreset::SingleBiomeSurface);
+        self.widgets.customize.active = self.active_tab == WORLD_TAB && has_editor;
+    }
+
     fn refresh_labels(&mut self) {
         self.widgets.game_mode.message = cycle_label(GAME_MODE_LABEL, self.config.game_mode.caption());
         self.widgets.structures.message = toggle_label(STRUCTURES_LABEL, self.config.generate_structures);
@@ -998,6 +1089,7 @@ impl CreateWorldNav {
         self.widgets.online_mode.message = toggle_label(ONLINE_MODE_LABEL, self.config.online_mode);
         self.widgets.world_type.message = cycle_label(WORLD_TYPE_LABEL, self.config.world_type.caption());
         self.apply_hardcore_lock();
+        self.apply_customize_availability();
     }
 
     /// Switches [`Self::active_tab`] to `tab` — a no-op for the tab already
@@ -1017,6 +1109,7 @@ impl CreateWorldNav {
         self.hovered = None;
         self.sync_tab_visibility();
         self.apply_hardcore_lock();
+        self.apply_customize_availability();
         match content_rows_for_tab(tab).first() {
             Some(&first) => self.focus.set_initial_focus(&mut self.widgets, first),
             None => self.focus.clear_focus(&mut self.widgets),
@@ -1097,6 +1190,10 @@ impl CreateWorldNav {
             self.experiments.hover_row(row);
             return;
         }
+        if self.mode == CreateWorldMode::Customize {
+            self.customize.hover_row(row);
+            return;
+        }
         if row < TAB_LABELS.len() {
             return;
         }
@@ -1173,12 +1270,39 @@ impl CreateWorldNav {
                 self.mode = CreateWorldMode::Experiments;
                 CreateWorldOutcome::Handled
             }
+            CUSTOMIZE_ROW => {
+                self.mode = CreateWorldMode::Customize;
+                CreateWorldOutcome::Handled
+            }
             CREATE_ROW => {
                 self.config.name = self.widgets.name.value().to_string();
                 self.config.seed = self.widgets.seed.value().to_string();
                 self.config.game_rules = self.game_rules.changed_entries();
                 self.config.data_packs = self.data_packs.selected_ids();
                 self.config.experiments = self.experiments.enabled_ids();
+                // Mutually exclusive by construction — see
+                // `WorldCreationConfig::flat_layers`'s own doc — collected
+                // from whichever preset editor applies to the currently
+                // selected world type, using the editor's current value
+                // (vanilla's own default the first time it is opened, or
+                // whatever the player last cycled to) even if Customize was
+                // never actually clicked open: a Flat/Single Biome world
+                // always has *some* concrete generator, the same way vanilla
+                // never lets one exist with none.
+                match self.config.world_type {
+                    WorldTypePreset::Flat => {
+                        self.config.flat_layers = Some(self.customize.flat);
+                        self.config.single_biome = None;
+                    }
+                    WorldTypePreset::SingleBiomeSurface => {
+                        self.config.flat_layers = None;
+                        self.config.single_biome = Some(self.customize.biome);
+                    }
+                    _ => {
+                        self.config.flat_layers = None;
+                        self.config.single_biome = None;
+                    }
+                }
                 CreateWorldOutcome::Create(self.config.clone())
             }
             CANCEL_ROW => CreateWorldOutcome::Cancel,
@@ -1206,6 +1330,12 @@ impl CreateWorldNav {
         }
         if self.mode == CreateWorldMode::Experiments {
             if self.experiments.click_row(row) {
+                self.mode = CreateWorldMode::Tabs;
+            }
+            return CreateWorldOutcome::Handled;
+        }
+        if self.mode == CreateWorldMode::Customize {
+            if self.customize.click_row(row, self.config.world_type) {
                 self.mode = CreateWorldMode::Tabs;
             }
             return CreateWorldOutcome::Handled;
@@ -1260,6 +1390,12 @@ impl CreateWorldNav {
             return CreateWorldOutcome::Handled;
         }
         if self.mode == CreateWorldMode::Experiments {
+            if key == MenuKey::Escape {
+                self.mode = CreateWorldMode::Tabs;
+            }
+            return CreateWorldOutcome::Handled;
+        }
+        if self.mode == CreateWorldMode::Customize {
             if key == MenuKey::Escape {
                 self.mode = CreateWorldMode::Tabs;
             }
@@ -1325,6 +1461,9 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     if nav.mode == CreateWorldMode::Experiments {
         return experiments_frame(nav);
     }
+    if nav.mode == CreateWorldMode::Customize {
+        return customize_frame(nav);
+    }
     let focused = nav.focused();
     let widget_row = |w: &Widget, row: usize| MenuRow {
         label: w.message.clone(),
@@ -1372,6 +1511,7 @@ pub fn frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
             ALLOW_CHEATS_ROW => widget_row(&nav.widgets.allow_cheats, ALLOW_CHEATS_ROW),
             ONLINE_MODE_ROW => widget_row(&nav.widgets.online_mode, ONLINE_MODE_ROW),
             WORLD_TYPE_ROW => widget_row(&nav.widgets.world_type, WORLD_TYPE_ROW),
+            CUSTOMIZE_ROW => widget_row(&nav.widgets.customize, CUSTOMIZE_ROW),
             GAME_RULES_ROW => widget_row(&nav.widgets.game_rules, GAME_RULES_ROW),
             DATA_PACKS_ROW => widget_row(&nav.widgets.data_packs, DATA_PACKS_ROW),
             EXPERIMENTS_ROW => widget_row(&nav.widgets.experiments, EXPERIMENTS_ROW),
@@ -2401,6 +2541,342 @@ fn experiments_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
     }
 }
 
+/// Vanilla's own bundled quick-preset list for the Superflat layer stack —
+/// Mojang's own generator data
+/// (`data/minecraft/worldgen/flat_level_generator_preset/*.json`), narrowed
+/// to the nine presets its own `visible` tag lists (every preset that ships).
+/// Each variant's [`Self::layers`]/[`Self::biome`]/[`Self::features`]/
+/// [`Self::lakes`] are that preset's own `settings` object, read directly out
+/// of the JSON file rather than guessed or derived from a sibling preset.
+/// `structure_overrides` is not modelled here: this crate's flat generator
+/// has no structure placement to gate yet, matching
+/// [`lodestone_anvil::world_gen_settings::WorldGenSettings::with_overworld_flat_generator`]'s
+/// own scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlatLayerPreset {
+    ClassicFlat,
+    TunnelersDream,
+    WaterWorld,
+    Overworld,
+    SnowyKingdom,
+    BottomlessPit,
+    Desert,
+    RedstoneReady,
+    TheVoid,
+}
+
+impl FlatLayerPreset {
+    pub const ALL: [Self; 9] = [
+        Self::ClassicFlat,
+        Self::TunnelersDream,
+        Self::WaterWorld,
+        Self::Overworld,
+        Self::SnowyKingdom,
+        Self::BottomlessPit,
+        Self::Desert,
+        Self::RedstoneReady,
+        Self::TheVoid,
+    ];
+
+    /// A short display name, this screen's own — 26.2's real customize
+    /// screen shows these as an icon grid (each preset's own `display` item)
+    /// with no dedicated preset-name string of its own, so there is no
+    /// vanilla caption to borrow for a text-only cycle button; these names
+    /// are this client's own, derived from each preset's registry id.
+    #[must_use]
+    pub fn caption(self) -> &'static str {
+        match self {
+            Self::ClassicFlat => "Classic Flat",
+            Self::TunnelersDream => "Tunneler's Dream",
+            Self::WaterWorld => "Water World",
+            Self::Overworld => "Overworld",
+            Self::SnowyKingdom => "Snowy Kingdom",
+            Self::BottomlessPit => "Bottomless Pit",
+            Self::Desert => "Desert",
+            Self::RedstoneReady => "Redstone Ready",
+            Self::TheVoid => "The Void",
+        }
+    }
+
+    #[must_use]
+    pub fn next(self) -> Self {
+        let all = Self::ALL;
+        let index = all.iter().position(|&p| p == self).unwrap_or(0);
+        all[(index + 1) % all.len()]
+    }
+
+    /// This preset's own `settings.layers`, bottom to top, exactly as its
+    /// JSON file lists them.
+    #[must_use]
+    pub fn layers(self) -> &'static [(&'static str, i32)] {
+        match self {
+            Self::ClassicFlat => {
+                &[("minecraft:bedrock", 1), ("minecraft:dirt", 2), ("minecraft:grass_block", 1)]
+            }
+            Self::TunnelersDream => {
+                &[("minecraft:bedrock", 1), ("minecraft:stone", 230), ("minecraft:dirt", 5), ("minecraft:grass_block", 1)]
+            }
+            Self::WaterWorld => &[
+                ("minecraft:bedrock", 1),
+                ("minecraft:deepslate", 64),
+                ("minecraft:stone", 5),
+                ("minecraft:dirt", 5),
+                ("minecraft:gravel", 5),
+                ("minecraft:water", 90),
+            ],
+            Self::Overworld => {
+                &[("minecraft:bedrock", 1), ("minecraft:stone", 59), ("minecraft:dirt", 3), ("minecraft:grass_block", 1)]
+            }
+            Self::SnowyKingdom => &[
+                ("minecraft:bedrock", 1),
+                ("minecraft:stone", 59),
+                ("minecraft:dirt", 3),
+                ("minecraft:grass_block", 1),
+                ("minecraft:snow", 1),
+            ],
+            Self::BottomlessPit => {
+                &[("minecraft:cobblestone", 2), ("minecraft:dirt", 3), ("minecraft:grass_block", 1)]
+            }
+            Self::Desert => {
+                &[("minecraft:bedrock", 1), ("minecraft:stone", 3), ("minecraft:sandstone", 52), ("minecraft:sand", 8)]
+            }
+            Self::RedstoneReady => &[("minecraft:bedrock", 1), ("minecraft:stone", 3), ("minecraft:sandstone", 116)],
+            Self::TheVoid => &[("minecraft:air", 1)],
+        }
+    }
+
+    /// This preset's own `settings.biome`.
+    #[must_use]
+    pub fn biome(self) -> &'static str {
+        match self {
+            Self::ClassicFlat | Self::Overworld | Self::BottomlessPit => "minecraft:plains",
+            Self::TunnelersDream => "minecraft:windswept_hills",
+            Self::WaterWorld => "minecraft:deep_ocean",
+            Self::SnowyKingdom => "minecraft:snowy_plains",
+            Self::Desert | Self::RedstoneReady => "minecraft:desert",
+            Self::TheVoid => "minecraft:the_void",
+        }
+    }
+
+    /// This preset's own `settings.features`.
+    #[must_use]
+    pub fn features(self) -> bool {
+        matches!(self, Self::Desert | Self::Overworld | Self::TunnelersDream | Self::TheVoid)
+    }
+
+    /// This preset's own `settings.lakes`.
+    #[must_use]
+    pub fn lakes(self) -> bool {
+        matches!(self, Self::Overworld)
+    }
+}
+
+/// A curated fixed set of biome ids the Single Biome customize cycle offers —
+/// real registry ids, narrowed to a handful of common biomes rather than
+/// vanilla's own full searchable biome list: this client's shell has no
+/// biome-registry access to build a scanned list from (the same reason
+/// [`ExperimentFlag`] and [`FlatLayerPreset`] are both fixed sets rather than
+/// a scan). Not vanilla's own bundled default: that is
+/// [`lodestone_server::WorldType`]'s existing `single_biome_chunk_source`
+/// default (`minecraft:plains`, this enum's own [`Self::Plains`] and
+/// [`Self::default`]), unaffected by this screen until the launch path reads
+/// this back — see [`WorldCreationConfig::single_biome`]'s own doc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CustomizeBiome {
+    #[default]
+    Plains,
+    Desert,
+    Forest,
+    Taiga,
+    Jungle,
+    Swamp,
+    SnowyPlains,
+    Ocean,
+    Savanna,
+    Badlands,
+}
+
+impl CustomizeBiome {
+    pub const ALL: [Self; 10] = [
+        Self::Plains,
+        Self::Desert,
+        Self::Forest,
+        Self::Taiga,
+        Self::Jungle,
+        Self::Swamp,
+        Self::SnowyPlains,
+        Self::Ocean,
+        Self::Savanna,
+        Self::Badlands,
+    ];
+
+    #[must_use]
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Plains => "minecraft:plains",
+            Self::Desert => "minecraft:desert",
+            Self::Forest => "minecraft:forest",
+            Self::Taiga => "minecraft:taiga",
+            Self::Jungle => "minecraft:jungle",
+            Self::Swamp => "minecraft:swamp",
+            Self::SnowyPlains => "minecraft:snowy_plains",
+            Self::Ocean => "minecraft:ocean",
+            Self::Savanna => "minecraft:savanna",
+            Self::Badlands => "minecraft:badlands",
+        }
+    }
+
+    #[must_use]
+    pub fn caption(self) -> &'static str {
+        match self {
+            Self::Plains => "Plains",
+            Self::Desert => "Desert",
+            Self::Forest => "Forest",
+            Self::Taiga => "Taiga",
+            Self::Jungle => "Jungle",
+            Self::Swamp => "Swamp",
+            Self::SnowyPlains => "Snowy Plains",
+            Self::Ocean => "Ocean",
+            Self::Savanna => "Savanna",
+            Self::Badlands => "Badlands",
+        }
+    }
+
+    #[must_use]
+    pub fn next(self) -> Self {
+        let all = Self::ALL;
+        let index = all.iter().position(|&b| b == self).unwrap_or(0);
+        all[(index + 1) % all.len()]
+    }
+}
+
+/// The "Customize Type" sub-screen's own live state — one cycle row plus
+/// Done, the exact shape [`ExperimentsEditor`] uses for a fixed control list.
+/// Holds **both** a Flat cursor and a Single Biome cursor at once rather than
+/// one shared cursor, because switching [`WORLD_TYPE_ROW`] away and back must
+/// not lose whichever one the player was mid-customizing — vanilla's own
+/// `WorldCreationUiState` keeps the same "last editor's choice survives a
+/// preset switch" property by never destroying the editor screens it built.
+/// [`CreateWorldNav::click_row`] reads [`CreateWorldNav::config`]'s current
+/// [`WorldTypePreset`] to know which cursor a click on the one shared Cycle
+/// row should move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CustomizeEditor {
+    flat: FlatLayerPreset,
+    biome: CustomizeBiome,
+    cursor: usize,
+}
+
+impl CustomizeEditor {
+    fn new() -> Self {
+        Self { flat: FlatLayerPreset::ClassicFlat, biome: CustomizeBiome::default(), cursor: 0 }
+    }
+
+    fn hover_row(&mut self, row: usize) {
+        if row < ALL_CUSTOMIZE_CONTROLS.len() {
+            self.cursor = row;
+        }
+    }
+
+    /// A click on visible row `row`, given the world type currently
+    /// selected on the wider screen (which cursor Cycle advances — see this
+    /// struct's own doc). Returns `true` when Done was pressed.
+    fn click_row(&mut self, row: usize, world_type: WorldTypePreset) -> bool {
+        self.hover_row(row);
+        match ALL_CUSTOMIZE_CONTROLS.get(row) {
+            Some(CustomizeControl::Cycle) => {
+                match world_type {
+                    WorldTypePreset::Flat => self.flat = self.flat.next(),
+                    WorldTypePreset::SingleBiomeSurface => self.biome = self.biome.next(),
+                    // The row is present-but-inactive for every other world
+                    // type (see `apply_customize_availability`), so a click
+                    // cannot reach here through the real UI; a direct test
+                    // call is simply a no-op rather than a panic.
+                    _ => {}
+                }
+                false
+            }
+            Some(CustomizeControl::Done) => true,
+            None => false,
+        }
+    }
+}
+
+/// One control on the Customize Type sub-screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CustomizeControl {
+    /// Advance whichever preset cursor the current world type owns.
+    Cycle,
+    /// Leave the editor, keeping the current cursor position.
+    Done,
+}
+
+/// Mirrors [`ALL_EXPERIMENT_CONTROLS`]: fixed-length, since
+/// [`CustomizeEditor`] never scans anything.
+const ALL_CUSTOMIZE_CONTROLS: [CustomizeControl; 2] = [CustomizeControl::Cycle, CustomizeControl::Done];
+
+/// One control's `Slot` — mirrors [`experiment_control_slot`] exactly.
+#[must_use]
+fn customize_control_slot(index: usize) -> Slot {
+    const TOP: f32 = layout::TAB_BAR_HEIGHT + 32.0;
+    Slot {
+        origin: Origin::ScreenTop,
+        dx: -(EXPERIMENT_ROW_W / 2.0),
+        dy: TOP + EXPERIMENT_ROW_H * index as f32,
+        w: EXPERIMENT_ROW_W,
+        h: super::render::EDIT_BOX_H,
+    }
+}
+
+/// Builds the Customize Type sub-screen's whole frame — [`frame`]'s
+/// [`CreateWorldMode::Customize`] branch. Mirrors [`experiments_frame`],
+/// except which cursor the Cycle row's label reads depends on the world type
+/// selected on the wider screen (the same thing [`CustomizeEditor::click_row`]
+/// keys off).
+#[must_use]
+fn customize_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
+    let editor = &nav.customize;
+    let cycle_label_text = match nav.config.world_type {
+        WorldTypePreset::SingleBiomeSurface => cycle_label("Biome", editor.biome.caption()),
+        // `Flat` and every other (unreachable through the real UI, see
+        // `CustomizeEditor::click_row`) world type both show the Flat
+        // cursor, since that is this editor's own default.
+        _ => cycle_label("Preset", editor.flat.caption()),
+    };
+    let rows: Vec<MenuRow> = ALL_CUSTOMIZE_CONTROLS
+        .iter()
+        .enumerate()
+        .map(|(i, control)| MenuRow {
+            label: match control {
+                CustomizeControl::Cycle => cycle_label_text.clone(),
+                CustomizeControl::Done => "Done".to_string(),
+            },
+            enabled: true,
+            slot: Some(customize_control_slot(i)),
+            ..Default::default()
+        })
+        .collect();
+
+    MenuFrame {
+        title: "Customize",
+        rows,
+        selected: editor.cursor,
+        vanilla: true,
+        labels: vec![MenuLabel {
+            text: "Customize".to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: 12.0,
+            align: Align::Centre,
+            colour: super::widget::ACTIVE_LABEL,
+            scale: 1.0,
+        }],
+        // Deliberately not set here — mirrors `experiments_frame`'s own
+        // comment: `render::dispatch` stamps `f.list` on every frame.
+        ..Default::default()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3026,6 +3502,205 @@ mod tests {
             WORLD_TAB,
             "clicking World Type must switch to the tab that holds it"
         );
+    }
+
+    // -- Customize Type sub-screen (World tab) -----------------------
+
+    #[test]
+    fn customize_is_inactive_except_for_flat_and_single_biome() {
+        let mut nav = CreateWorldNav::new();
+        nav.click_focus(SEED_FIELD); // switches to the World tab
+        assert_eq!(nav.config().world_type, WorldTypePreset::Normal, "premise");
+        assert!(!nav.widgets.customize.active, "Normal has no preset editor");
+
+        let expect_active = [
+            (WorldTypePreset::LargeBiomes, false),
+            (WorldTypePreset::Amplified, false),
+            (WorldTypePreset::SingleBiomeSurface, true),
+            (WorldTypePreset::Flat, true),
+            (WorldTypePreset::FlatAllDimensions, false),
+            (WorldTypePreset::DebugAllBlockStates, false),
+            (WorldTypePreset::Normal, false), // wraps
+        ];
+        for (preset, active) in expect_active {
+            nav.click_focus(WORLD_TYPE_ROW);
+            assert_eq!(nav.config().world_type, preset, "premise");
+            assert_eq!(
+                nav.widgets.customize.active, active,
+                "Customize Type must be active exactly for Flat/Single Biome, got {preset:?}"
+            );
+        }
+    }
+
+    /// A click on a present-but-inactive row does nothing — the same rule
+    /// `selecting_hardcore_locks_difficulty_to_hard_and_disables_its_row`
+    /// already checks for Difficulty.
+    #[test]
+    fn clicking_customize_while_inactive_does_not_open_it() {
+        let mut nav = CreateWorldNav::new();
+        assert_eq!(nav.config().world_type, WorldTypePreset::Normal, "premise: no editor");
+        nav.click_focus(CUSTOMIZE_ROW);
+        assert!(!nav.customize_open(), "must not open while inactive");
+    }
+
+    #[test]
+    fn cycling_the_flat_preset_and_pressing_done_leaves_the_default_untouched_until_cycled() {
+        let mut nav = CreateWorldNav::new();
+        // Normal -> LargeBiomes -> Amplified -> SingleBiomeSurface -> Flat.
+        for _ in 0..4 {
+            nav.click_focus(WORLD_TYPE_ROW);
+        }
+        assert_eq!(nav.config().world_type, WorldTypePreset::Flat, "premise");
+
+        nav.click_focus(CUSTOMIZE_ROW);
+        assert!(nav.customize_open(), "Customize must open now that Flat is selected");
+        assert_eq!(nav.customize.flat, FlatLayerPreset::ClassicFlat, "vanilla's own default");
+
+        // Toggle(Cycle) is control 0, Done is control 1.
+        nav.click_row(0);
+        assert_eq!(nav.customize.flat, FlatLayerPreset::TunnelersDream, "one cycle step");
+        let done_row = ALL_CUSTOMIZE_CONTROLS.len() - 1;
+        assert_eq!(nav.click_row(done_row), CreateWorldOutcome::Handled);
+        assert!(!nav.customize_open(), "Done must leave the editor");
+        assert_eq!(nav.active_tab(), WORLD_TAB, "left on the tab it was opened from");
+    }
+
+    #[test]
+    fn create_after_cycling_the_flat_preset_carries_exactly_that_preset_and_no_biome() {
+        let mut nav = CreateWorldNav::new();
+        for _ in 0..4 {
+            nav.click_focus(WORLD_TYPE_ROW); // -> Flat
+        }
+        nav.click_focus(CUSTOMIZE_ROW);
+        nav.click_row(0); // ClassicFlat -> TunnelersDream
+        nav.click_row(ALL_CUSTOMIZE_CONTROLS.len() - 1); // Done — leave the editor
+
+        let outcome = nav.click_focus(CREATE_ROW);
+        let CreateWorldOutcome::Create(config) = outcome else {
+            panic!("expected Create, got {outcome:?}");
+        };
+        assert_eq!(config.flat_layers, Some(FlatLayerPreset::TunnelersDream));
+        assert_eq!(config.single_biome, None, "Flat and Single Biome are mutually exclusive");
+    }
+
+    /// The default preset still reaches `Create` even if the player never
+    /// opened Customize — a Flat world always has *some* concrete generator,
+    /// the same way vanilla never lets one exist with none. This is the
+    /// discriminating control against a resolver that only fires after the
+    /// editor was clicked open at least once.
+    #[test]
+    fn create_on_flat_without_ever_opening_customize_still_carries_the_default_preset() {
+        let mut nav = CreateWorldNav::new();
+        for _ in 0..4 {
+            nav.click_focus(WORLD_TYPE_ROW); // -> Flat
+        }
+        assert!(!nav.customize_open(), "premise: never opened");
+
+        let outcome = nav.click_focus(CREATE_ROW);
+        let CreateWorldOutcome::Create(config) = outcome else {
+            panic!("expected Create, got {outcome:?}");
+        };
+        assert_eq!(config.flat_layers, Some(FlatLayerPreset::ClassicFlat));
+    }
+
+    #[test]
+    fn create_after_cycling_the_single_biome_choice_carries_exactly_that_biome_and_no_layers() {
+        let mut nav = CreateWorldNav::new();
+        for _ in 0..3 {
+            nav.click_focus(WORLD_TYPE_ROW); // -> SingleBiomeSurface
+        }
+        assert_eq!(nav.config().world_type, WorldTypePreset::SingleBiomeSurface, "premise");
+        nav.click_focus(CUSTOMIZE_ROW);
+        assert_eq!(nav.customize.biome, CustomizeBiome::Plains, "vanilla's own default");
+        nav.click_row(0); // Plains -> Desert
+        nav.click_row(ALL_CUSTOMIZE_CONTROLS.len() - 1); // Done — leave the editor
+
+        let outcome = nav.click_focus(CREATE_ROW);
+        let CreateWorldOutcome::Create(config) = outcome else {
+            panic!("expected Create, got {outcome:?}");
+        };
+        assert_eq!(config.single_biome, Some(CustomizeBiome::Desert));
+        assert_eq!(config.flat_layers, None, "Flat and Single Biome are mutually exclusive");
+    }
+
+    /// Every other world type — the discriminating control for the two tests
+    /// above: neither field is ever populated when the selected type has no
+    /// preset editor at all.
+    #[test]
+    fn create_on_a_non_customizable_world_type_carries_neither_field() {
+        let mut nav = CreateWorldNav::new();
+        assert_eq!(nav.config().world_type, WorldTypePreset::Normal, "premise");
+        let outcome = nav.click_focus(CREATE_ROW);
+        let CreateWorldOutcome::Create(config) = outcome else {
+            panic!("expected Create, got {outcome:?}");
+        };
+        assert_eq!(config.flat_layers, None);
+        assert_eq!(config.single_biome, None);
+    }
+
+    #[test]
+    fn escape_from_the_customize_editor_returns_to_world_tab_not_a_full_cancel() {
+        let mut nav = CreateWorldNav::new();
+        for _ in 0..4 {
+            nav.click_focus(WORLD_TYPE_ROW); // -> Flat
+        }
+        nav.click_focus(CUSTOMIZE_ROW);
+        assert!(nav.customize_open(), "premise");
+        assert_eq!(
+            nav.handle_key(MenuKey::Escape),
+            CreateWorldOutcome::Handled,
+            "must not unwind the whole Create New World screen"
+        );
+        assert!(!nav.customize_open(), "escape must close only the editor, back to the tabs");
+        assert_eq!(nav.active_tab(), WORLD_TAB, "left on the tab it was opened from");
+    }
+
+    /// Switching world type away and back must not lose whichever preset the
+    /// player already cycled to — [`CustomizeEditor`]'s own doc on why it
+    /// keeps two cursors rather than one shared one.
+    #[test]
+    fn switching_world_type_away_and_back_preserves_the_customized_choice() {
+        let mut nav = CreateWorldNav::new();
+        for _ in 0..4 {
+            nav.click_focus(WORLD_TYPE_ROW); // -> Flat
+        }
+        nav.click_focus(CUSTOMIZE_ROW);
+        nav.click_row(0); // ClassicFlat -> TunnelersDream
+        let done_row = ALL_CUSTOMIZE_CONTROLS.len() - 1;
+        nav.click_row(done_row);
+
+        nav.click_focus(WORLD_TYPE_ROW); // Flat -> FlatAllDimensions (no editor)
+        assert!(!nav.widgets.customize.active);
+        // FlatAllDimensions -> DebugAllBlockStates -> Normal -> LargeBiomes ->
+        // Amplified -> SingleBiomeSurface -> Flat: six more steps, per
+        // `WorldTypePreset::next`'s own cycle order.
+        for _ in 0..6 {
+            nav.click_focus(WORLD_TYPE_ROW);
+        }
+        assert_eq!(nav.config().world_type, WorldTypePreset::Flat, "premise: back on Flat");
+        assert_eq!(
+            nav.customize.flat,
+            FlatLayerPreset::TunnelersDream,
+            "the earlier cycle must have survived the round trip"
+        );
+    }
+
+    #[test]
+    fn the_customize_frame_carries_a_cycle_row_plus_done() {
+        let mut nav = CreateWorldNav::new();
+        for _ in 0..4 {
+            nav.click_focus(WORLD_TYPE_ROW); // -> Flat
+        }
+        nav.click_focus(CUSTOMIZE_ROW);
+        let f = frame(&nav);
+        assert_eq!(f.rows.len(), 2, "one Cycle row plus Done");
+        assert_eq!(f.title, "Customize");
+        assert!(
+            f.rows[0].label.contains("Classic Flat"),
+            "the cycle row must show the current preset's caption: {:?}",
+            f.rows[0].label
+        );
+        assert_eq!(f.rows[1].label, "Done");
     }
 
     // -- Game Rules sub-screen (More tab) -----------------------

@@ -4649,11 +4649,33 @@ impl MenuNav {
                     );
                 }
                 #[cfg(not(target_arch = "wasm32"))]
+                {
+                // "Customize Type" (World tab) — mutually exclusive by
+                // construction (`WorldCreationConfig::flat_layers`'s own
+                // doc), collected into the shape
+                // `saves::create_world_in` writes into
+                // `world_gen_settings.dat` alongside a real, resolved seed.
+                // `None` for every world type besides Flat/Single Biome,
+                // which changes nothing about world creation, exactly as
+                // before this half of the screen existed.
+                let generator_override = match (&config.flat_layers, &config.single_biome) {
+                    (Some(preset), None) => Some(crate::saves::GeneratorOverride::Flat {
+                        layers: preset.layers().iter().map(|&(block, height)| (block.to_string(), height)).collect(),
+                        biome: preset.biome().to_string(),
+                        features: preset.features(),
+                        lakes: preset.lakes(),
+                    }),
+                    (None, Some(biome)) => {
+                        Some(crate::saves::GeneratorOverride::FixedBiome { biome: biome.id().to_string() })
+                    }
+                    _ => None,
+                };
                 match crate::saves::create_world_in(
                     &self.saves_root,
                     &config.name,
                     game_type,
                     &config.experiments,
+                    generator_override.as_ref().map(|g| (g, config.seed.as_str())),
                 ) {
                     Ok(world_dir) => MenuAction::Singleplayer(
                         auth,
@@ -4670,6 +4692,7 @@ impl MenuNav {
                             .set_error(format!("Could not create the world: {e}"));
                         MenuAction::None
                     }
+                }
                 }
             }
         }
@@ -9293,6 +9316,88 @@ mod tests {
             "the real level.dat on disk must carry vanilla's own enabled_features \
              shape for the flag the player actually toggled — read back with the \
              crate's real decoder, not asserted against the writer's own input"
+        );
+    }
+
+    /// **The "Customize Type" half, end to end at the nav layer**: the real
+    /// screen flow (World tab → cycle to Flat → Customize → cycle the preset
+    /// → Done → Create) reaches a decodable `world_gen_settings.dat` on disk,
+    /// carrying the cycled preset's own real layers — not the vanilla
+    /// default one more click back would have chosen, and not merely "some
+    /// file exists". Mirrors
+    /// `toggling_an_experiment_and_creating_writes_enabled_features_to_level_dat`'s
+    /// own shape and reasoning, one file over: `nav.click` end to end,
+    /// `world_gen_settings.dat` read back through the crate's real decoder.
+    #[test]
+    fn customizing_a_flat_world_and_creating_writes_the_layers_to_world_gen_settings_dat() {
+        use crate::menu::create_world::{CREATE_ROW, CUSTOMIZE_ROW, WORLD_TAB, WORLD_TYPE_ROW};
+        use crate::menu::world_select::WorldSelectButton as B;
+
+        let (mut nav, _) = self::nav("create-world-customize");
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::WorldSelect, "premise");
+        assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::CreateWorld, "premise: World Creation is open");
+
+        assert_eq!(nav.click(&mut ui, WORLD_TAB), MenuAction::None);
+        let world_type_row = nav
+            .create_world()
+            .frame_row_for_focus_id(WORLD_TYPE_ROW)
+            .expect("World Type is visible on the World tab");
+        // Normal -> LargeBiomes -> Amplified -> SingleBiomeSurface -> Flat.
+        for _ in 0..4 {
+            assert_eq!(nav.click(&mut ui, world_type_row), MenuAction::None);
+        }
+        assert_eq!(
+            nav.create_world().config().world_type,
+            crate::menu::create_world::WorldTypePreset::Flat,
+            "premise: reached Flat"
+        );
+
+        let customize_row = nav
+            .create_world()
+            .frame_row_for_focus_id(CUSTOMIZE_ROW)
+            .expect("Customize Type is visible on the World tab");
+        assert_eq!(nav.click(&mut ui, customize_row), MenuAction::None);
+        assert!(
+            nav.create_world().customize_open(),
+            "premise: the click opened the Customize sub-screen now that Flat is selected"
+        );
+        // Row 0 is the one Cycle control (`ALL_CUSTOMIZE_CONTROLS`, private to
+        // `create_world.rs`): ClassicFlat -> TunnelersDream.
+        assert_eq!(nav.click(&mut ui, 0), MenuAction::None);
+        // Row 1 is Done.
+        assert_eq!(nav.click(&mut ui, 1), MenuAction::None);
+        assert!(!nav.create_world().customize_open(), "Done must leave the sub-editor");
+
+        let create_row = nav
+            .create_world()
+            .frame_row_for_focus_id(CREATE_ROW)
+            .expect("Create is always visible, on every tab");
+        let action = nav.click(&mut ui, create_row);
+        let MenuAction::Singleplayer(_, SingleplayerLaunch::Created { world_dir, config }) = action
+        else {
+            panic!("expected MenuAction::Singleplayer(Created {{ .. }}), got {action:?}");
+        };
+        assert_eq!(
+            config.flat_layers,
+            Some(crate::menu::create_world::FlatLayerPreset::TunnelersDream),
+            "the action's own config must carry the cycled-to preset"
+        );
+
+        let settings = lodestone_anvil::world_gen_settings::read_from_file(
+            &lodestone_anvil::world_gen_settings::path_in(&world_dir),
+        )
+        .expect("apply_create_world must have written a decodable world_gen_settings.dat");
+        assert!(
+            settings.has_dimensions(),
+            "the customized generator must reach the real file on disk"
+        );
+        assert!(
+            settings.seed().is_ok(),
+            "the file must carry a real seed alongside the generator override — a \
+             dimensions compound with no seed would make the world's first open fail"
         );
     }
 

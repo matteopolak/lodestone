@@ -91,7 +91,7 @@
 //! [`lodestone_core`]'s NBT codec and `flate2`, exactly as [`crate::level_dat`].
 
 use crate::{Error, Result};
-use lodestone_core::Nbt;
+use lodestone_core::{Nbt, NbtTag};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -137,6 +137,23 @@ fn compound_field<'a>(nbt: &'a Nbt, name: &str) -> Option<&'a Nbt> {
             .map(|(_, value)| value),
         _ => None,
     }
+}
+
+fn compound_fields_mut(nbt: &mut Nbt) -> Option<&mut Vec<(String, Nbt)>> {
+    match nbt {
+        Nbt::Compound(fields) => Some(fields),
+        _ => None,
+    }
+}
+
+/// One layer of vanilla's own flat generator, bottom to top — `block` a
+/// namespaced block id, `height` the layer's block count. Field names match
+/// vanilla's own layer-info codec (`block`, `height`) verbatim; see
+/// [`WorldGenSettings::with_overworld_flat_generator`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlatLayer<'a> {
+    pub block: &'a str,
+    pub height: i32,
 }
 
 /// A parsed `world_gen_settings.dat`: the full root NBT tree, preserved as-is
@@ -231,6 +248,142 @@ impl WorldGenSettings {
             data_fields.push((SEED_FIELD.to_string(), Nbt::Long(seed)));
         }
         Ok(())
+    }
+
+    /// The `"data"` compound's field list, mutably, if the root has one —
+    /// mirrors [`crate::level_dat::LevelDat`]'s own `data_fields_mut`, one
+    /// field short of worth sharing across the two modules.
+    fn data_fields_mut(&mut self) -> Option<&mut Vec<(String, Nbt)>> {
+        compound_fields_mut(&mut self.root)?
+            .iter_mut()
+            .find(|(name, _)| name == DATA_FIELD)
+            .and_then(|(_, value)| compound_fields_mut(value))
+    }
+
+    /// The `"dimensions"` compound's `"minecraft:overworld"` entry, mutably —
+    /// created (with the `dimensions` compound around it, if that was
+    /// missing too) rather than requiring it to already exist, since
+    /// [`Self::from_seed`] emits no `dimensions` compound at all (this
+    /// module's own doc names that gap). Returns `None` only if there is no
+    /// `"data"` compound to build under, i.e. the root itself is malformed.
+    fn overworld_entry_mut(&mut self) -> Option<&mut Vec<(String, Nbt)>> {
+        let data_fields = self.data_fields_mut()?;
+        if !data_fields.iter().any(|(name, _)| name == "dimensions") {
+            data_fields.push(("dimensions".to_string(), Nbt::Compound(Vec::new())));
+        }
+        let dimensions = data_fields
+            .iter_mut()
+            .find(|(name, _)| name == "dimensions")
+            .and_then(|(_, value)| compound_fields_mut(value))?;
+        if !dimensions.iter().any(|(name, _)| name == "minecraft:overworld") {
+            dimensions.push((
+                "minecraft:overworld".to_string(),
+                Nbt::Compound(vec![(
+                    "type".to_string(),
+                    Nbt::String("minecraft:overworld".to_string()),
+                )]),
+            ));
+        }
+        dimensions
+            .iter_mut()
+            .find(|(name, _)| name == "minecraft:overworld")
+            .and_then(|(_, value)| compound_fields_mut(value))
+    }
+
+    /// Sets (or replaces) the overworld entry's `"generator"` field, leaving
+    /// its own `"type": "minecraft:overworld"` field (and any
+    /// `minecraft:the_nether`/`minecraft:the_end` sibling this settings value
+    /// already carries, e.g. from a real vanilla file round-tripped through
+    /// [`read`]) alone.
+    fn set_overworld_generator(&mut self, generator: Nbt) -> bool {
+        let Some(overworld) = self.overworld_entry_mut() else {
+            return false;
+        };
+        if let Some(entry) = overworld.iter_mut().find(|(name, _)| name == "generator") {
+            entry.1 = generator;
+        } else {
+            overworld.push(("generator".to_string(), generator));
+        }
+        true
+    }
+
+    /// Overrides the overworld dimension's generator with vanilla's own flat
+    /// ("Superflat") generator shape — the "Customize Type" screen's Flat
+    /// half. Field names and nesting match a real 26.2
+    /// `world_gen_settings.dat`'s own
+    /// `data.dimensions.minecraft:overworld.generator` compound exactly
+    /// (`type: "minecraft:flat"`, `settings: {layers, biome, features,
+    /// lakes}`, each layer `{block, height}`), hand-decoded byte-for-byte
+    /// from `.cache/mc/26.2/world`'s own file — the same discipline this
+    /// module's own doc uses for the seed field, independent of this crate's
+    /// own NBT reader. `structure_overrides` (a per-preset list of structure
+    /// sets to keep enabled) is not modelled: this crate's flat generator has
+    /// no structure placement to gate.
+    ///
+    /// A no-op (returns `self` unchanged) if `layers` is empty — mirrors
+    /// [`Self::with_enabled_features`]'s "nothing chosen writes nothing"
+    /// rule, though in practice every [`FlatLayer`] caller in this tree
+    /// always has vanilla's own bundled default (Classic Flat) to fall back
+    /// on, so this only fires for a hand-built, deliberately empty caller.
+    #[must_use]
+    pub fn with_overworld_flat_generator(
+        mut self,
+        layers: &[FlatLayer<'_>],
+        biome: &str,
+        features: bool,
+        lakes: bool,
+    ) -> Self {
+        if layers.is_empty() {
+            return self;
+        }
+        let layer_elements = layers
+            .iter()
+            .map(|layer| {
+                Nbt::Compound(vec![
+                    ("block".to_string(), Nbt::String(layer.block.to_string())),
+                    ("height".to_string(), Nbt::Int(layer.height)),
+                ])
+            })
+            .collect();
+        let settings = Nbt::Compound(vec![
+            ("features".to_string(), Nbt::Byte(i8::from(features))),
+            ("biome".to_string(), Nbt::String(biome.to_string())),
+            ("layers".to_string(), Nbt::List { element_type: NbtTag::Compound, elements: layer_elements }),
+            ("lakes".to_string(), Nbt::Byte(i8::from(lakes))),
+        ]);
+        let generator = Nbt::Compound(vec![
+            ("settings".to_string(), settings),
+            ("type".to_string(), Nbt::String("minecraft:flat".to_string())),
+        ]);
+        self.set_overworld_generator(generator);
+        self
+    }
+
+    /// Overrides the overworld dimension's generator with vanilla's own
+    /// fixed-biome noise generator — the "Customize Type" screen's Single
+    /// Biome half. `settings: "minecraft:overworld"` is a plain **string**
+    /// registry reference, not an inline compound — verified against the
+    /// same real file's `minecraft:the_nether`/`minecraft:the_end` entries,
+    /// which reference `minecraft:nether`/`minecraft:end` the identical way;
+    /// this crate has no noise-generator-settings model of its own to inline
+    /// even if the real format called for one. `biome_source.type:
+    /// "minecraft:fixed"` plus a single `biome` field is vanilla's own
+    /// registered shape for "one biome, everywhere".
+    #[must_use]
+    pub fn with_overworld_fixed_biome_generator(mut self, biome: &str) -> Self {
+        let generator = Nbt::Compound(vec![
+            ("settings".to_string(), Nbt::String("minecraft:overworld".to_string())),
+            (
+                "biome_source".to_string(),
+                Nbt::Compound(vec![
+                    ("type".to_string(), Nbt::String("minecraft:fixed".to_string())),
+                    ("biome".to_string(), Nbt::String(biome.to_string())),
+                ]),
+            ),
+            ("type".to_string(), Nbt::String("minecraft:noise".to_string())),
+        ]);
+        self.set_overworld_generator(generator);
+        self
     }
 
     /// `generate_structures`, or `None` if absent/mistyped.
@@ -474,5 +627,176 @@ mod tests {
             .cloned()
             .expect("dimensions survived the round trip");
         assert_eq!(dimensions_before, dimensions_after);
+    }
+
+    /// Walks straight to `data.dimensions.minecraft:overworld.generator`
+    /// without going through any accessor this crate defines — the same
+    /// "independent of our own reader" discipline the checked-in-fixture test
+    /// above uses, just applied to a value this process built instead of one
+    /// Mojang's server wrote.
+    fn overworld_generator(settings: &WorldGenSettings) -> &Nbt {
+        settings
+            .data()
+            .and_then(|data| compound_field(data, "dimensions"))
+            .and_then(|dims| compound_field(dims, "minecraft:overworld"))
+            .and_then(|overworld| compound_field(overworld, "generator"))
+            .expect("generator was written")
+    }
+
+    /// Vanilla's own real "Classic Flat" preset —
+    /// `data/minecraft/worldgen/flat_level_generator_preset/classic_flat.json`
+    /// in Mojang's own generator data, not derived from this crate: bedrock,
+    /// two dirt, one grass block, on plains, with lakes and features off.
+    #[test]
+    fn with_overworld_flat_generator_round_trips_classic_flats_real_layers() {
+        let layers =
+            [FlatLayer { block: "minecraft:bedrock", height: 1 }, FlatLayer { block: "minecraft:dirt", height: 2 }, FlatLayer {
+                block: "minecraft:grass_block",
+                height: 1,
+            }];
+        let settings =
+            WorldGenSettings::from_seed(1).with_overworld_flat_generator(&layers, "minecraft:plains", false, false);
+        let reloaded = read(&write(&settings).expect("encodes")).expect("decodes");
+
+        let generator = overworld_generator(&reloaded);
+        assert_eq!(compound_field(generator, "type"), Some(&Nbt::String("minecraft:flat".to_string())));
+        let settings_compound = compound_field(generator, "settings").expect("settings compound");
+        assert_eq!(compound_field(settings_compound, "biome"), Some(&Nbt::String("minecraft:plains".to_string())));
+        assert_eq!(compound_field(settings_compound, "features"), Some(&Nbt::Byte(0)));
+        assert_eq!(compound_field(settings_compound, "lakes"), Some(&Nbt::Byte(0)));
+        let Some(Nbt::List { elements, .. }) = compound_field(settings_compound, "layers") else {
+            panic!("layers must be a list");
+        };
+        assert_eq!(
+            elements,
+            &[
+                Nbt::Compound(vec![
+                    ("block".to_string(), Nbt::String("minecraft:bedrock".to_string())),
+                    ("height".to_string(), Nbt::Int(1)),
+                ]),
+                Nbt::Compound(vec![
+                    ("block".to_string(), Nbt::String("minecraft:dirt".to_string())),
+                    ("height".to_string(), Nbt::Int(2)),
+                ]),
+                Nbt::Compound(vec![
+                    ("block".to_string(), Nbt::String("minecraft:grass_block".to_string())),
+                    ("height".to_string(), Nbt::Int(1)),
+                ]),
+            ]
+        );
+    }
+
+    #[test]
+    fn with_overworld_flat_generator_is_a_no_op_for_an_empty_slice() {
+        let settings = WorldGenSettings::from_seed(1).with_overworld_flat_generator(&[], "minecraft:plains", false, false);
+        assert!(
+            !settings.has_dimensions(),
+            "an empty layer list must write nothing, matching with_enabled_features's own \
+             empty-input rule"
+        );
+    }
+
+    #[test]
+    fn with_overworld_fixed_biome_generator_round_trips_the_chosen_biome() {
+        let settings = WorldGenSettings::from_seed(1).with_overworld_fixed_biome_generator("minecraft:desert");
+        let reloaded = read(&write(&settings).expect("encodes")).expect("decodes");
+
+        let generator = overworld_generator(&reloaded);
+        assert_eq!(compound_field(generator, "type"), Some(&Nbt::String("minecraft:noise".to_string())));
+        // A plain string registry reference, not an inline compound — see
+        // this method's own doc for why, checked against the real
+        // `minecraft:the_nether`/`minecraft:the_end` entries in the checked-in
+        // vanilla fixture.
+        assert_eq!(compound_field(generator, "settings"), Some(&Nbt::String("minecraft:overworld".to_string())));
+        let biome_source = compound_field(generator, "biome_source").expect("biome_source compound");
+        assert_eq!(compound_field(biome_source, "type"), Some(&Nbt::String("minecraft:fixed".to_string())));
+        assert_eq!(compound_field(biome_source, "biome"), Some(&Nbt::String("minecraft:desert".to_string())));
+    }
+
+    /// **The proof that a different customization produces a different
+    /// file** — the standard of proof `docs/README.md`'s world-creation doc
+    /// cites for this feature: not that the builder methods exist, but that
+    /// two different player choices resolve to two different persisted
+    /// generators. Classic Flat's three real layers
+    /// (bedrock/dirt/grass) versus the Void preset's single real layer (one
+    /// block of air) — both taken from Mojang's own generator data, not from
+    /// each other.
+    #[test]
+    fn two_different_flat_presets_persist_different_generators() {
+        let classic = WorldGenSettings::from_seed(1).with_overworld_flat_generator(
+            &[FlatLayer { block: "minecraft:bedrock", height: 1 }, FlatLayer { block: "minecraft:dirt", height: 2 }, FlatLayer {
+                block: "minecraft:grass_block",
+                height: 1,
+            }],
+            "minecraft:plains",
+            false,
+            false,
+        );
+        let void = WorldGenSettings::from_seed(1).with_overworld_flat_generator(
+            &[FlatLayer { block: "minecraft:air", height: 1 }],
+            "minecraft:the_void",
+            true,
+            false,
+        );
+
+        let classic_bytes = write(&classic).expect("encodes");
+        let void_bytes = write(&void).expect("encodes");
+        assert_ne!(classic_bytes, void_bytes, "two different presets must persist different bytes");
+
+        let Some(Nbt::List { elements: classic_layers, .. }) =
+            compound_field(compound_field(overworld_generator(&classic), "settings").unwrap(), "layers")
+        else {
+            panic!("classic layers must be a list");
+        };
+        let Some(Nbt::List { elements: void_layers, .. }) =
+            compound_field(compound_field(overworld_generator(&void), "settings").unwrap(), "layers")
+        else {
+            panic!("void layers must be a list");
+        };
+        assert_eq!(classic_layers.len(), 3, "Classic Flat has three real layers");
+        assert_eq!(void_layers.len(), 1, "The Void has exactly one real layer");
+        assert_ne!(classic_layers, void_layers);
+    }
+
+    /// Applying a generator override to a **real vanilla file** must not
+    /// disturb the sibling dimensions it did not touch — mirrors
+    /// `rewriting_a_real_vanilla_files_seed_keeps_its_dimensions`'s own
+    /// reasoning, extended from the seed field to the overworld generator.
+    #[test]
+    fn overriding_the_overworld_generator_preserves_the_real_files_nether_and_end() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/support/world_gen_settings_26_2_vanilla.dat");
+        let settings = read_from_file(&path).expect("fixture decodes");
+        let dimensions_before = settings
+            .data()
+            .and_then(|data| compound_field(data, "dimensions"))
+            .and_then(|dims| match dims {
+                Nbt::Compound(fields) => Some(fields.clone()),
+                _ => None,
+            })
+            .expect("fixture has dimensions");
+        let nether_before = dimensions_before
+            .iter()
+            .find(|(name, _)| name == "minecraft:the_nether")
+            .cloned()
+            .expect("fixture has a nether entry");
+        let end_before =
+            dimensions_before.iter().find(|(name, _)| name == "minecraft:the_end").cloned().expect("fixture has an end entry");
+
+        let overridden = settings.with_overworld_fixed_biome_generator("minecraft:jungle");
+        let reloaded = read(&write(&overridden).expect("encodes")).expect("decodes");
+
+        let dimensions_after = reloaded
+            .data()
+            .and_then(|data| compound_field(data, "dimensions"))
+            .and_then(|dims| match dims {
+                Nbt::Compound(fields) => Some(fields.clone()),
+                _ => None,
+            })
+            .expect("dimensions survived");
+        assert!(dimensions_after.contains(&nether_before), "the nether entry must be untouched");
+        assert!(dimensions_after.contains(&end_before), "the end entry must be untouched");
+        let biome_source = compound_field(overworld_generator(&reloaded), "biome_source").expect("biome_source");
+        assert_eq!(compound_field(biome_source, "biome"), Some(&Nbt::String("minecraft:jungle".to_string())));
     }
 }
