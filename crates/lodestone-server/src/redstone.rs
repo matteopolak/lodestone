@@ -800,7 +800,7 @@ pub fn direct_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8
     }
 }
 
-/// Vanilla's own `SignalGetter.getDirectSignalTo`: the
+/// Vanilla's own signal-getter direct-signal-to routine: the
 /// strongest direct/strong signal touching any of `pos`'s six faces.
 /// `lookup` reads a block state at an absolute world position; see
 /// `crate::random_tick`'s call sites for why it returns air rather than
@@ -825,7 +825,7 @@ where
     best
 }
 
-/// `SignalGetter.getSignal` (`:65-69`): a redstone conductor additionally
+/// Vanilla's own signal-getter get-signal routine: a redstone conductor additionally
 /// carries the strongest signal touching *any* of its own six faces, not
 /// just the one facing the querier — see this module's own doc comment for
 /// why that is what lets a lever on the side of a block power a wire
@@ -844,7 +844,7 @@ where
     }
 }
 
-/// `SignalGetter.getBestNeighborSignal` (`:90-105`): the strongest signal
+/// Vanilla's own signal-getter best-neighbor-signal routine: the strongest signal
 /// any of `pos`'s six neighbours presents back at it.
 #[must_use]
 pub fn best_neighbor_signal<F>(lookup: &F, pos: BlockPos, ignore_wire: bool) -> u8
@@ -865,11 +865,11 @@ where
     best
 }
 
-/// `SignalGetter.getControlInputSignal` — a repeater/comparator's own
+/// Vanilla's own signal-getter control-input-signal routine — a repeater/comparator's own
 /// side-input read.
 ///
 /// **The `minecraft:redstone_block` arm is load-bearing and not a shortcut.**
-/// `PoweredBlock` overrides no `getDirectSignal`, so the generic
+/// The powered block overrides no `getDirectSignal`, so the generic
 /// `isSignalSource() ? getDirectSignal(...) : 0` tail below returns `0` for a
 /// block of redstone in every direction. Without vanilla's own explicit
 /// `is(Blocks.REDSTONE_BLOCK) -> 15` branch — placed *before* the wire check —
@@ -898,9 +898,9 @@ where
     }
 }
 
-/// `DiodeBlock.getAlternateSignal` (`:125-134`) — the stronger of a diode's
+/// Vanilla's own diode-block alternate-signal getter — the stronger of a diode's
 /// two side inputs (its `FACING`'s clockwise/counterclockwise neighbours).
-/// `side_input_diodes_only` is `DiodeBlock.sideInputDiodesOnly()`: `true` for
+/// `side_input_diodes_only` is vanilla's own side-input-diodes-only check: `true` for
 /// repeaters (only another diode's *output* can
 /// lock a repeater), `false` for comparators (any signal source counts as a
 /// side input).
@@ -915,9 +915,9 @@ where
         .max(control_input_signal(lookup, ccw.relative(pos), ccw, side_input_diodes_only))
 }
 
-/// `DiodeBlock.getInputSignal`, reduced: vanilla additionally
+/// Vanilla's own diode-block input-signal getter, reduced: vanilla additionally
 /// reads a two-away block's analog output signal (a hopper/chest's fill
-/// level via `BlockState.getAnalogOutputSignal`) and an item frame's
+/// level via its own get-analog-output-signal routine) and an item frame's
 /// rotation when the immediate target is a redstone conductor — this crate
 /// has no block-entity/analog-output query reachable from this module (see
 /// `crate::redstone_diode`'s own doc comment for the full citation of this
