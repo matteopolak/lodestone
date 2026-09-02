@@ -1,15 +1,14 @@
-//! Villager per-profession, per-level trade tables — issue #245's data half.
+//! Villager per-profession, per-level trade tables.
 //!
 //! Transcribed from the real 26.2 registry data under
 //! `data/minecraft/{villager_trade,trade_set,tags/villager_trade}` — Mojang's
-//! own generator output, not the old hardcoded `VillagerTrades.java`
-//! `ItemListing[]` factories (26.2 replaced them with plain JSON records;
+//! own generator output, not the old hardcoded vanilla trade-listing
+//! factories (26.2 replaced them with plain JSON records;
 //! following this crate's own data-source rule, that JSON is transcribed
 //! directly rather than routed through the decompiled Java, which only holds
 //! the *codec* for these records, not the table). Every profession with a
 //! real workstation (thirteen; `none`/`nitwit` have none) is covered across
-//! all five levels — not just the one profession a prior pass on this issue
-//! ported.
+//! all five levels.
 //!
 //! # What is ported, and what is not
 //!
@@ -77,14 +76,14 @@ pub struct TradeRecord {
     pub gives_count: i32,
     pub max_uses: i32,
     /// Codec default is `1`, not `0`, when the record's own JSON omits the
-    /// `xp` key (`NumberProviders.CODEC.lenientOptionalFieldOf("xp",
-    /// ConstantValue.exactly(1.0F))`) — already resolved at transcription
+    /// `xp` key (vanilla's own number-providers codec's lenient optional
+    /// field, defaulting to a constant `1.0F`) — already resolved at transcription
     /// time below, not deferred to a runtime default.
     pub xp: i32,
     /// The record's own `reputation_discount` — despite the name, this is
-    /// **not** gossip/reputation (issues #244/#246, neither built here); it
-    /// is `MerchantOffer`'s `priceMultiplier`, the coefficient
-    /// `getModifiedCostCount` scales *demand* by
+    /// **not** gossip/reputation (neither built here); it
+    /// is vanilla's own merchant-offer price-multiplier field, the coefficient
+    /// its own "get modified cost count" step scales *demand* by
     /// (`demandDiff = max(0, floor(basePrice * demand * priceMultiplier))`).
     /// Every record in this table sets it explicitly (`0.05` or `0.2`); the
     /// codec default when a record omits the key is `0.0`, which would make

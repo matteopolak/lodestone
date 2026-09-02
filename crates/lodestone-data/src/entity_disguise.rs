@@ -73,11 +73,12 @@
 //!   none. If a caller needs a default, that caller states it, in a place where a
 //!   reader can see the decision.
 //! * **Entity metadata indices are not hand-countable.** A disguise that also
-//!   wants to send metadata (an armour stand's `DATA_CLIENT_FLAGS`, a creeper's
+//!   wants to send metadata (an armour stand's own client-flags field, a creeper's
 //!   swell) must take its index from `EntityDataIndexOracle.java`'s dump, not from
-//!   counting. Index 15 is `Mob`'s flags **and** `ArmorStand.DATA_CLIENT_FLAGS`,
-//!   and index 8 is `LivingEntity.DATA_LIVING_ENTITY_FLAGS` **and**
-//!   `AbstractArrow.ID_FLAGS` — which guard separates the real claimants depends
+//!   counting. Index 15 is the mob class's flags **and** the armour stand's own
+//!   client-flags field,
+//!   and index 8 is the living-entity class's own flags field **and**
+//!   the arrow base class's own flags field — which guard separates the real claimants depends
 //!   on which classes collide, so the census column has to be chosen per
 //!   collision. `CLAUDE.md` records both instances.
 //! * The lookup is a `BTreeMap` keyed by the joined `namespace:path` string, to
@@ -224,7 +225,7 @@ impl EntityDisguises {
     /// resolution order as [`Self::resolve_wire_id`].
     ///
     /// For the **client** half of the disguise mapping: a client-only cosmetic entity needs
-    /// a vanilla key to pick a mesh, texture and `setupAnim` for, because every
+    /// a vanilla key to pick a mesh, texture and animation for, because every
     /// render-side lookup is keyed off the closed vanilla set.
     #[must_use]
     pub fn resolve_name<'a>(&'a self, name: &'a str) -> Option<&'a str> {
