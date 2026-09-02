@@ -6003,13 +6003,13 @@ impl<'w> MobSim<'w> {
         // and already unit-tested, but had zero production callers anywhere
         // — a creeper's own fuse reaching `MAX_SWELL`
         // (`NavigatingMob::take_detonated`, driven by `SwellGoal`/`ignite`)
-        // is the first one. Vanilla's `explodeCreeper`
-        // (`Creeper.java:230-239`) unconditionally discards the creeper
-        // alongside the blast (`this.dead = true; ...; this.discard();`), so
+        // is the first one. Vanilla's own "explode creeper" step
+        // unconditionally discards the creeper
+        // alongside the blast (marks it dead and removes it), so
         // the explicit retain below does not rely on the creeper taking
         // lethal self-damage from its own blast — a wall could shield it
         // from its own explosion exactly as it shields any other mob, and
-        // vanilla's `discard()` has no such exception.
+        // vanilla's own discard step has no such exception.
         for (id, pos) in detonations {
             self.explode(pos, CREEPER_EXPLOSION_RADIUS, DamageFlags::default());
             self.mobs.retain(|m| m.id != id);
@@ -6032,7 +6032,7 @@ impl<'w> MobSim<'w> {
         // closes the island, not a hermetic test calling `tick` on the
         // registry directly.
         // Issue #260: the impact pass runs **before** the motion tick, matching
-        // `AbstractArrow.tick`'s own order — it clips the segment it is about to
+        // vanilla's own base-arrow per-tick update's own order — it clips the segment it is about to
         // travel and only moves if nothing was hit. Resolving after the move would
         // put every impact a tick late and let an arrow settle on the far side of
         // a wall. Before this, `spawn_projectile`'s own doc comment said hit
@@ -6079,7 +6079,7 @@ impl<'w> MobSim<'w> {
         // and what survives being read on a loaded machine; see
         // `items_settled_probe_count`.
         self.item_probe_count = view.probe_count.get();
-        // `Entity.checkBelowWorld`'s discard, and not merely tidiness: an item
+        // Vanilla's own "check below world" discard, and not merely tidiness: an item
         // that escapes the world (a column the snapshot does not cover, so
         // `is_solid` is false everywhere) would otherwise keep being ticked and
         // streamed for its full 6000-tick life at ever-increasing depth.
@@ -6156,18 +6156,20 @@ impl<'w> MobSim<'w> {
         self.tick_count += 1;
     }
 
-    /// Shoves apart entities whose bodies overlap — vanilla `Entity::push`,
+    /// Shoves apart entities whose bodies overlap — vanilla's own generic
+    /// entity-push step,
     /// invoked once per tick for every pushable neighbour by
-    /// `LivingEntity::pushEntities` (`this.level().getPushableEntities(...)`
-    /// then `this.doPush(entity)` per neighbour), called near the end of
-    /// `LivingEntity::baseTick`, after that tick's own movement has already
+    /// vanilla's own generic living-entity "push entities" step (queries
+    /// pushable neighbours,
+    /// then pushes each in turn), called near the end of
+    /// vanilla's own generic living-entity per-tick base update, after that tick's own movement has already
     /// been applied — the same ordering `tick_with_terrain` gives this call,
     /// right after the per-mob loop that runs `m.mob.tick(...)`.
     ///
     /// # The formula lives in `lodestone-physics`, not here
     ///
     /// [`push_impulse`] delegates to [`lodestone_physics::pair_push_vector`],
-    /// which already carries the full citation of `Entity::push(Entity)` —
+    /// which already carries the full citation of vanilla's own generic entity-push step —
     /// see `docs/entity-push.md` for the derivation, including the
     /// genuinely-non-obvious `sqrt(max(|dx|,|dz|))` Chebyshev normaliser
     /// (not `sqrt(dx²+dz²)`) and the widened `0.01f`/`0.05f` literals. That
@@ -6183,14 +6185,14 @@ impl<'w> MobSim<'w> {
     ///
     /// * **Overlap is a horizontal-distance-under-combined-half-width test**,
     ///   not vanilla's real AABB intersection
-    ///   (`Level::getEntities`/`getPushableEntities`), which also accounts for
+    ///   (its own entity-query/pushable-neighbour helpers), which also accounts for
     ///   height overlap. Two mobs stacked exactly on top of one another with
     ///   no horizontal offset therefore push in this port and would not
     ///   collide in vanilla (their Y ranges might not overlap) — an edge case
     ///   this seam's `PathWorld`/`SimMob` do not carry enough geometry to
     ///   resolve exactly.
     /// * **Applied once per pair per tick**, not vanilla's twice (each side's
-    ///   own `pushEntities()` call invokes `doPush` against the other, so a
+    ///   own "push entities" step invokes a push against the other, so a
     ///   living pair receives the impulse from *both* directions every tick).
     ///   The formula itself is unchanged; this halves the net closing-speed
     ///   reduction relative to vanilla's double application, a scope cut
@@ -6204,10 +6206,10 @@ impl<'w> MobSim<'w> {
     ///   this crate. This pass pushes the **mob** away from an intersecting
     ///   player (the reported "I can't push pigs" symptom: the pig now moves
     ///   out of the way), but the player itself is not nudged.
-    /// * **`isPushable()`/vehicle/passenger exclusions are not modelled** —
+    /// * **"is pushable"/vehicle/passenger exclusions are not modelled** —
     ///   every [`SimMob`] is treated as pushable, matching vanilla's default
-    ///   for a plain `LivingEntity` with nothing riding it.
-    /// * **Mount cramming damage is not modelled** — vanilla's
+    ///   for a plain living entity with nothing riding it.
+    /// * **Mount cramming damage is not modelled** — vanilla's own
     ///   `maxEntityCramming` gamerule check in the same method.
     fn push_entities(&mut self) {
         let n = self.mobs.len();
@@ -6237,7 +6239,7 @@ impl<'w> MobSim<'w> {
 
         // Player-mob pairs: only the mob side is pushed — see this method's
         // own doc comment for why player recoil needs a different seam.
-        const PLAYER_WIDTH: f64 = 0.6; // `Player::createLivingAttributes` has no override; the default `Entity` bounding box is 0.6 wide.
+        const PLAYER_WIDTH: f64 = 0.6; // Vanilla's own player attribute builder has no override; the default entity bounding box is 0.6 wide.
         for i in 0..n {
             for p in &self.players {
                 let touch = (widths[i] + PLAYER_WIDTH) / 2.0;
@@ -6256,7 +6258,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// Advances every mob's burn counter one tick and applies the damage it
-    /// reports — the consumption half of `Entity.baseTick`'s fire section
+    /// reports — the consumption half of vanilla's own generic per-tick base update's fire section
     /// (see `crate::burning`'s own module doc for the full mechanic), scoped
     /// to what actually reaches a mob today.
     ///
@@ -6269,7 +6271,7 @@ impl<'w> MobSim<'w> {
     /// consumption half, not the block-contact ignition half).
     ///
     /// **What puts it out**: water contact only, read through
-    /// [`SimMob::in_water`] (`Entity.baseTick`'s water-block `clearFire()`).
+    /// [`SimMob::in_water`] (vanilla's own per-tick base update's water-block fire-clear call).
     /// Fire immunity ([`species::is_fire_immune`]) clears the counter outright
     /// rather than merely refusing damage, matching
     /// [`crate::burning::BurnState::tick`]'s own `fire_immune` handling.
@@ -6304,28 +6306,29 @@ impl<'w> MobSim<'w> {
     }
 
     /// Per-tick leash physics: pull leashed mobs toward their holder, and
-    /// snap (dropping a lead item) past [`LEASH_TOO_FAR_DIST`] — vanilla
-    /// `Leashable.tickLeash`.
+    /// snap (dropping a lead item) past [`LEASH_TOO_FAR_DIST`] — vanilla's
+    /// own leash per-tick update.
     ///
     /// **Simplified, and disclosed rather than silent.** Real vanilla
     /// computes a spring/torque interaction across up to four
     /// attachment-point pairs and applies angular momentum to yaw
-    /// (`Leashable.checkElasticInteractions`/`computeElasticInteraction`).
+    /// (its own elastic-interaction check/computation).
     /// This applies one straight-line impulse toward the holder's position
     /// instead, through [`SimMob::apply_knockback`] — the same "hand
     /// velocity application to the physics owner rather than growing a
     /// second model here" seam `explosion.rs`/`damage.rs` already use for
     /// combat knockback. Three things this does not carry:
     ///
-    /// - No yaw torque (vanilla's `angularMomentum`/`entity.setYRot`).
+    /// - No yaw torque (vanilla's own angular-momentum field and yaw setter).
     /// - **No per-entity bounding-box subtraction from the elastic
     ///   threshold** — vanilla's actual pull distance is
-    ///   `LEASH_ELASTIC_DIST - holder.getBbWidth() - entity.getBbWidth()`;
+    ///   the elastic distance minus both entities' own bounding-box widths;
     ///   this uses the flat [`LEASH_ELASTIC_DIST`] constant, so a very wide
     ///   mob starts pulling slightly later than vanilla would.
     /// - **A holder that cannot be resolved this tick silently drops the
-    ///   leash with no item spawned** — vanilla's `!canInteractWithLevel()`
-    ///   branch, narrowed to its `ENTITY_DROPS`-off arm (`removeLeash`)
+    ///   leash with no item spawned** — vanilla's own "cannot interact with
+    ///   level" check's
+    ///   branch, narrowed to its entity-drops-off arm (its own remove-leash path)
     ///   only. A disconnected player or a removed leash-holder mob loses the
     ///   leashed mob's attachment rather than the mob dropping a lead for a
     ///   holder that is not really gone (a reconnecting player, in
