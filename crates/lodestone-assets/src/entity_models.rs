@@ -1,8 +1,8 @@
 //! The hand-ported entity-model corpus for the 1.21.5–26.2 family.
 //!
 //! Entity geometry is **code, not data** in vanilla (see [`crate::entity`]), so
-//! each mesh here is transcribed by hand from the decompiled client under
-//! `net/minecraft/client/model/...`. This module holds only the *data* (the
+//! each mesh here is transcribed by hand from the decompiled client's own
+//! per-mob model classes. This module holds only the *data* (the
 //! per-mob [`EntityModelDef`]s and their default texture paths); the version-free
 //! baking primitive lives in [`crate::entity`]. In the project's ideal shape this
 //! data would live in a version crate the way `AssetProfile` is supplied per
@@ -77,13 +77,13 @@ fn cube(origin: [f32; 3], size: [f32; 3], tex: [f32; 2]) -> CubeDef {
     CubeDef::new(origin, size, tex)
 }
 
-/// The shared humanoid mesh (`HumanoidModel.createMesh(g, yOffset=0)`): head with
+/// The shared humanoid mesh (vanilla's own base humanoid-mesh construction, `g`, y-offset 0): head with
 /// a hat overlay, body, two arms and two legs, on the standard box layout. `g` is
 /// the uniform cube deformation (`0.0` for the base layer).
 ///
 /// Visible to the crate because [`crate::equipment`] builds the armour layers
 /// from the *same* function at `g = 0.5` / `g = 1.0`. Vanilla does exactly that
-/// — `HumanoidModel.createBaseArmorMesh` calls `createMesh(g, 0.0F)` — and
+/// — vanilla's own humanoid model's base-armor-mesh construction calls `createMesh(g, 0.0F)` — and
 /// sharing it is what keeps an armour piece's pivots identical to the wearer's,
 /// which is the precondition for posing a piece off the wearer's own part
 /// matrix.
@@ -130,7 +130,7 @@ pub(crate) fn humanoid_root(g: f32) -> PartDef {
         )
 }
 
-/// `ZombieModel` / standard humanoid body layer, sheet 64×64.
+/// Vanilla's own zombie model / standard humanoid body layer, sheet 64×64.
 pub fn zombie_model() -> EntityModelDef {
     EntityModelDef {
         texture_width: 64,
@@ -139,7 +139,7 @@ pub fn zombie_model() -> EntityModelDef {
     }
 }
 
-/// `SkeletonModel`: the humanoid mesh with thin (2×12×2) arms and legs, sheet
+/// Vanilla's own skeleton model: the humanoid mesh with thin (2×12×2) arms and legs, sheet
 /// 64×32. Arms keep the humanoid pose; legs move to `±2.0`.
 pub fn skeleton_model() -> EntityModelDef {
     let mut root = humanoid_root(0.0);
@@ -166,7 +166,7 @@ pub fn skeleton_model() -> EntityModelDef {
     }
 }
 
-/// `CreeperModel`, sheet 64×32. Head and body at `y=6`; four short legs.
+/// Vanilla's own creeper model, sheet 64×32. Head and body at `y=6`; four short legs.
 pub fn creeper_model() -> EntityModelDef {
     let leg = || cube([-2.0, 0.0, -2.0], [4.0, 6.0, 4.0], [0.0, 16.0]);
     let root = PartDef::new(PartPose::ZERO)
@@ -209,7 +209,7 @@ pub fn creeper_model() -> EntityModelDef {
     }
 }
 
-/// `SpiderModel`, sheet 64×32. Head, two body segments, eight 16-long legs posed
+/// Vanilla's own spider model, sheet 64×32. Head, two body segments, eight 16-long legs posed
 /// by `offsetAndRotation` (the rotations are the vanilla rest pose).
 pub fn spider_model() -> EntityModelDef {
     let right_leg = || cube([-15.0, -1.0, -1.0], [16.0, 2.0, 2.0], [18.0, 0.0]);
@@ -267,7 +267,7 @@ pub fn spider_model() -> EntityModelDef {
     }
 }
 
-/// The shared quadruped mesh (`QuadrupedModel.createBodyMesh`): head, rotated
+/// The shared quadruped mesh (vanilla's own quadruped-model body-mesh construction): head, rotated
 /// body, and four legs. `mirror_left`/`mirror_right` mirror the respective legs.
 fn quadruped_root(leg_size: f32, mirror_left: bool, mirror_right: bool) -> PartDef {
     let right = || {
@@ -317,7 +317,7 @@ fn quadruped_root(leg_size: f32, mirror_left: bool, mirror_right: bool) -> PartD
         )
 }
 
-/// `PigModel`: the quadruped base (leg 6, left legs mirrored) with a two-box head
+/// Vanilla's own pig model: the quadruped base (leg 6, left legs mirrored) with a two-box head
 /// (head + snout), sheet 64×64.
 pub fn pig_model() -> EntityModelDef {
     let mut root = quadruped_root(6.0, true, false);
@@ -335,7 +335,7 @@ pub fn pig_model() -> EntityModelDef {
     }
 }
 
-/// `CowModel` (`createBaseCowModel`): four-box head (head, snout, two horns),
+/// Vanilla's own cow model (its own base-cow-model construction): four-box head (head, snout, two horns),
 /// two-box body (body + udder), four full-length legs, sheet 64×64.
 pub fn cow_model() -> EntityModelDef {
     let right = || cube([-2.0, 0.0, -2.0], [4.0, 12.0, 4.0], [0.0, 16.0]);
@@ -381,7 +381,7 @@ pub fn cow_model() -> EntityModelDef {
     }
 }
 
-/// `SheepModel` base body (no wool layer): quadruped base (leg 12, right legs
+/// Vanilla's own sheep model base body (no wool layer): quadruped base (leg 12, right legs
 /// mirrored) with an overridden head and body, sheet 64×32.
 pub fn sheep_model() -> EntityModelDef {
     let mut root = quadruped_root(12.0, false, true);
@@ -400,7 +400,7 @@ pub fn sheep_model() -> EntityModelDef {
     }
 }
 
-/// `SheepFurModel.createFurLayer`: the wool overlay `SheepWoolLayer` draws over
+/// Vanilla's own sheep-fur-model fur-layer construction: the wool overlay vanilla's own sheep-wool layer draws over
 /// [`sheep_model`] whenever the sheep is not sheared. Not a second skeleton —
 /// see `docs/entity-rendering.md`'s wool section — its six parts share
 /// `sheep_model`'s part *names* and pivots exactly (`head`, `body`,
@@ -410,7 +410,7 @@ pub fn sheep_model() -> EntityModelDef {
 /// already-animated `part_transforms`, reading and never mutating.
 ///
 /// Three real deviations from the base body mesh, all read from
-/// `SheepFurModel.java` (`net/minecraft/client/model/animal/sheep/`) rather
+/// vanilla's own sheep-fur-model source rather
 /// than guessed:
 ///
 /// * **A different inflation per part**, not one uniform grow: `head` at
@@ -427,13 +427,14 @@ pub fn sheep_model() -> EntityModelDef {
 ///   sharing the same pivot, so wool covers only the upper half of each leg —
 ///   vanilla's "socks" look, not a wrong deformation.
 /// * **No mirroring anywhere.** `sheep_model` mirrors its right legs' UV
-///   (`quadruped_root`'s `mirror_right`, matching `QuadrupedModel.createLegs`),
-///   but `SheepFurModel.createFurLayer` builds one `CubeListBuilder` and reuses
+///   (`quadruped_root`'s `mirror_right`, matching vanilla's own quadruped-model
+///   leg construction),
+///   but vanilla's own sheep-fur-model fur-layer construction builds one `CubeListBuilder` and reuses
 ///   it for all four legs with no `.mirror()` call, so the wool sheet's leg
 ///   region is not flipped for the right side the way the body's is.
 ///
-/// Sheet 64×32 (`LayerDefinition.create(mesh, 64, 32)`), same as the body.
-/// Adult only: `BabySheepModel`/`textures/entity/sheep/sheep_wool_baby.png` is
+/// Sheet 64×32 (vanilla's own mesh definition declared at 64×32), same as the body.
+/// Adult only: vanilla's own baby-sheep model/`textures/entity/sheep/sheep_wool_baby.png` is
 /// a separate, smaller mesh this port does not build yet — see the gap note in
 /// `docs/entity-rendering.md`.
 #[must_use]
@@ -497,9 +498,9 @@ pub fn sheep_wool_model() -> EntityModelDef {
 #[must_use]
 pub fn sheep_wool_tint(ordinal: u8) -> [u8; 3] {
     const WHITE: [u8; 3] = [230, 230, 230];
-    // `DyeColor.textureDiffuseColor`, `DyeColor.id` order, with vanilla's fixed
+    // vanilla's own texture-diffuse-color table, in dye-color id order, with vanilla's fixed
     // 0.75 brightness already applied (`floor(channel * 0.75)`), transcribed
-    // from the literal constants in `DyeColor.java`.
+    // from the literal constants in the decompiled 26.2 client source.
     const TINTS: [[u8; 3]; 16] = [
         WHITE,           // 0  white (special-cased, see above)
         [186, 96, 21],   // 1  orange
@@ -521,7 +522,7 @@ pub fn sheep_wool_tint(ordinal: u8) -> [u8; 3] {
     TINTS.get(ordinal as usize).copied().unwrap_or(WHITE)
 }
 
-/// `AdultChickenModel` (`createBaseChickenModel`): head with beak and wattle
+/// Vanilla's own adult-chicken model (its own base-chicken-model construction): head with beak and wattle
 /// children, rotated body, two legs, two wings, sheet 64×32.
 pub fn chicken_model() -> EntityModelDef {
     let leg = || cube([-1.0, 0.0, -3.0], [3.0, 5.0, 3.0], [26.0, 0.0]);
@@ -588,7 +589,7 @@ pub fn chicken_model() -> EntityModelDef {
     }
 }
 
-/// `SlimeModel.createOuterBodyLayer`: the translucent outer shell, a single
+/// vanilla's own slime model's outer-body-layer construction: the translucent outer shell, a single
 /// 8×8×8 cube at `(-4,16,-4)` texOffs `(0,0)`, sheet 64×32. The inner core with
 /// eyes/mouth is a second render layer (translucent-over-opaque) and is left to
 /// the render pipeline; the outer cube is the recognisable silhouette.
@@ -607,7 +608,7 @@ pub fn slime_model() -> EntityModelDef {
     }
 }
 
-/// `MagmaCubeModel.createBodyLayer`: eight stacked 8×1×8 segments (`y = 16+i`)
+/// vanilla's own magma cube model's body-layer construction: eight stacked 8×1×8 segments (`y = 16+i`)
 /// whose texel offset steps per the vanilla `u,v` schedule, plus a 4×4×4 inside
 /// cube. Sheet 64×64. The loop is mirrored structurally, not unrolled.
 pub fn magma_cube_model() -> EntityModelDef {
@@ -644,9 +645,9 @@ pub fn magma_cube_model() -> EntityModelDef {
     }
 }
 
-/// `BlazeModel.createBodyLayer`: a head plus twelve rods placed on three rings
+/// Vanilla's own blaze-model body-layer construction: a head plus twelve rods placed on three rings
 /// (radii 9/7/5, offset angles `0`/`π/4`/`0.47123894`), sheet 64×32. Positions
-/// come from the exact vanilla trig loop; `Mth.cos`/`sin` are approximated by
+/// come from the exact vanilla trig loop; vanilla's own quantized cos/sin are approximated by
 /// `f32` trig (sub-pixel identical for placement).
 pub fn blaze_model() -> EntityModelDef {
     let mut root = PartDef::new(PartPose::ZERO).with_child(
@@ -704,7 +705,7 @@ pub fn blaze_model() -> EntityModelDef {
     }
 }
 
-/// `SquidModel.createBodyLayer`: a 12×16×12 body plus eight 2×18×2 tentacles
+/// vanilla's own squid model's body-layer construction: a 12×16×12 body plus eight 2×18×2 tentacles
 /// evenly placed on a radius-5 ring, each yaw-rotated to face outward. Sheet
 /// 64×32. Positions/rotations come from the exact vanilla loop.
 pub fn squid_model() -> EntityModelDef {
@@ -734,7 +735,7 @@ pub fn squid_model() -> EntityModelDef {
     }
 }
 
-/// `BatModel.createBodyLayer`: body, head with two flat ears, folded wings
+/// vanilla's own bat model's body-layer construction: body, head with two flat ears, folded wings
 /// (each a wing + wing-tip child on the body) and flat feet. Sheet **32×32** —
 /// the only small-sheet entry in the batch, which the real-PNG coverage test
 /// pins. Zero-thickness parts are intentional (vanilla flat quads).
@@ -802,7 +803,7 @@ pub fn bat_model() -> EntityModelDef {
     }
 }
 
-/// `EndermanModel.createBodyLayer`: starts from the humanoid mesh but replaces
+/// vanilla's own enderman model's body-layer construction: starts from the humanoid mesh but replaces
 /// every part, so it is authored directly — small head with a `-0.5` hat, a
 /// slim body, and the characteristic 2×30×2 arms and legs. Sheet 64×32.
 pub fn enderman_model() -> EntityModelDef {
@@ -858,12 +859,12 @@ pub fn enderman_model() -> EntityModelDef {
 
 // ===========================================================================
 // monster/* remainder (impl-assets lane). Everything below is transcribed from
-// `net/minecraft/client/model/...` for the 26.2 family. The sibling `animal/*`,
+// vanilla's own per-mob model classes for the 26.2 family. The sibling `animal/*`,
 // `npc/*` and `object/*` models are appended to `entity_models()` in their own
 // delimited block.
 // ===========================================================================
 
-/// `DrownedModel` (extends `ZombieModel`): the zombie humanoid mesh with the
+/// Vanilla's own drowned model (extends its own zombie model): the zombie humanoid mesh with the
 /// left arm and left leg re-textured (`texOffs (32,48)` / `(16,48)`) and no
 /// longer mirrored. Sheet 64×64.
 pub fn drowned_model() -> EntityModelDef {
@@ -883,7 +884,7 @@ pub fn drowned_model() -> EntityModelDef {
     }
 }
 
-/// `IronGolemModel`: head (+nose), a broad body (+belt), long arms and stocky
+/// Vanilla's own iron-golem model: head (+nose), a broad body (+belt), long arms and stocky
 /// legs. Sheet **128×128** — the largest in the corpus, pinned by the real-PNG
 /// coverage test.
 pub fn iron_golem_model() -> EntityModelDef {
@@ -932,7 +933,7 @@ pub fn iron_golem_model() -> EntityModelDef {
     }
 }
 
-/// `SnowGolemModel`: two stacked snow spheres, a head and two stick arms posed
+/// Vanilla's own snow-golem model: two stacked snow spheres, a head and two stick arms posed
 /// with a `zRot` of ±1 rad (the right arm additionally yawed by π). All cubes
 /// carry a `-0.5` deformation. Sheet 64×64.
 pub fn snow_golem_model() -> EntityModelDef {
@@ -973,7 +974,7 @@ pub fn snow_golem_model() -> EntityModelDef {
     }
 }
 
-/// `VexModel`: a small floating humanoid — head, two-box body, thin arms and two
+/// Vanilla's own vex model: a small floating humanoid — head, two-box body, thin arms and two
 /// flat wings, all under a `root` pivot offset by `-2.5`. Sheet 32×32.
 pub fn vex_model() -> EntityModelDef {
     let body = PartDef::new(PartPose::offset(0.0, 20.0, 0.0))
@@ -1019,7 +1020,7 @@ pub fn vex_model() -> EntityModelDef {
     }
 }
 
-/// The shared segment-worm builder for `SilverfishModel`/`EndermiteModel`: each
+/// The shared segment-worm builder for vanilla's own silverfish/endermite models: each
 /// segment is a box sized from `sizes[i]` at `texOffs texs[i]`, dropped to the
 /// floor (`y = 24 - height`) and chained along `z` by half the sum of adjacent
 /// depths starting at `-3.5`. Returns the root plus the per-segment `z` offsets
@@ -1046,7 +1047,7 @@ fn segment_worm(sizes: &[[i32; 3]], texs: &[[i32; 2]]) -> (PartDef, Vec<f32>) {
     (root, z_place)
 }
 
-/// `SilverfishModel`: a seven-segment worm plus three raised texture plates
+/// Vanilla's own silverfish model: a seven-segment worm plus three raised texture plates
 /// keyed off the segment `z` offsets. Sheet 64×32.
 pub fn silverfish_model() -> EntityModelDef {
     let sizes = [
@@ -1092,7 +1093,7 @@ pub fn silverfish_model() -> EntityModelDef {
     }
 }
 
-/// `EndermiteModel`: a four-segment worm on the same chaining rule. Sheet 64×32.
+/// Vanilla's own endermite model: a four-segment worm on the same chaining rule. Sheet 64×32.
 pub fn endermite_model() -> EntityModelDef {
     let sizes = [[4, 3, 2], [6, 4, 5], [3, 3, 1], [1, 2, 1]];
     let texs = [[0, 0], [0, 5], [0, 14], [0, 18]];
@@ -1104,8 +1105,8 @@ pub fn endermite_model() -> EntityModelDef {
     }
 }
 
-/// Applies a vanilla `MeshTransformer.scaling(factor)` to a whole model, exactly
-/// as `LayerDefinition.apply` bakes it into the mesh: the root pose is
+/// Applies a vanilla mesh-transformer scaling of `factor` to a whole model, exactly
+/// as vanilla's own mesh-definition apply step bakes it into the mesh: the root pose is
 /// `scaled(factor).translated(0, 24.016*(1-factor), 0)`, i.e. scale about the
 /// origin then shift so the model's feet stay planted. Used for the size-variant
 /// mobs whose geometry is otherwise identical to a base model.
@@ -1126,7 +1127,7 @@ fn scaled(mut model: EntityModelDef, factor: f32) -> EntityModelDef {
 }
 
 /// Husk: the zombie/humanoid mesh baked at `scaling(1.0625)`
-/// (`LayerDefinitions.java`).
+/// (vanilla's own layer-definitions table).
 pub fn husk_model() -> EntityModelDef {
     scaled(zombie_model(), 1.0625)
 }
@@ -1141,9 +1142,9 @@ pub fn cave_spider_model() -> EntityModelDef {
     scaled(spider_model(), 0.7)
 }
 
-/// Ghast (`GhastModel.createBodyLayer`): a 16³ body plus nine hanging tentacles
-/// whose lengths come from a seeded `SingleThreadedRandomSource(1660)` (vanilla's
-/// java.util.Random LCG). The whole mesh is baked at `scaling(4.5)`. The model's
+/// Ghast (vanilla's own ghast model's body-layer construction): a 16³ body plus nine hanging tentacles
+/// whose lengths come from a seeded single-threaded random source (1660) (vanilla's
+/// own Java-Random-compatible LCG). The whole mesh is baked at `scaling(4.5)`. The model's
 /// UV sheet is 64x32 even though the shipped texture is 128x64 (a 2x texture).
 pub fn ghast_model() -> EntityModelDef {
     // Vanilla java.util.Random, so the tentacle lengths are byte-identical to
@@ -1163,7 +1164,7 @@ pub fn ghast_model() -> EntityModelDef {
 
     let mut rng = lodestone_javarandom::JavaRandom::new(1660);
     for i in 0..9i32 {
-        // Transcribed verbatim from GhastModel: xo uses (i % 3) and (i / 3 % 2)
+        // Transcribed verbatim from vanilla's own ghast model: xo uses (i % 3) and (i / 3 % 2)
         // with integer division/modulo; yo uses (i / 3).
         let xo = (((i % 3) as f32 - (i / 3 % 2) as f32 * 0.5 + 0.25) / 2.0 * 2.0 - 1.0) * 5.0;
         let yo = ((i / 3) as f32 / 2.0 * 2.0 - 1.0) * 5.0;
@@ -1188,7 +1189,7 @@ pub fn ghast_model() -> EntityModelDef {
     )
 }
 
-/// Hoglin (`HoglinModel.createBodyLayer`, also used for zoglin): a boxy body
+/// Hoglin (vanilla's own hoglin model's body-layer construction, also used for zoglin): a boxy body
 /// with a flat mane plane, a tilted head with ears and horns, and four legs.
 /// Sheet 128x64.
 pub fn hoglin_model() -> EntityModelDef {
@@ -1288,7 +1289,7 @@ pub fn hoglin_model() -> EntityModelDef {
     }
 }
 
-/// Adult strider (`AdultStriderModel.createBodyLayer`): two tall legs, a cubic
+/// Adult strider (vanilla's own adult strider model's body-layer construction): two tall legs, a cubic
 /// body, and six flat mirrored bristle planes. Sheet 64x128.
 pub fn strider_model() -> EntityModelDef {
     // Each bristle is a flat (zero-height) plane; the three on the right are
@@ -1389,12 +1390,12 @@ pub fn strider_model() -> EntityModelDef {
     }
 }
 
-/// Guardian (`GuardianModel.createBodyLayer`): a five-box head, twelve spikes
+/// Guardian (vanilla's own guardian model's body-layer construction): a five-box head, twelve spikes
 /// placed on a cube's faces at their resting offsets, an eye, and a three-part
 /// tail. Sheet 64x64.
 pub fn guardian_model() -> EntityModelDef {
     // Per-spike face position (SPIKE_X/Y/Z) and rotation multiples of PI
-    // (SPIKE_*_ROT), transcribed from GuardianModel.
+    // (SPIKE_*_ROT), transcribed from vanilla's own guardian model.
     const SPIKE_X: [f32; 12] = [
         0.0, 0.0, 8.0, -8.0, -8.0, 8.0, 8.0, -8.0, 0.0, 0.0, 8.0, -8.0,
     ];
@@ -1469,7 +1470,7 @@ pub fn guardian_model() -> EntityModelDef {
     }
 }
 
-/// Adult piglin mesh (`AdultPiglinModel.createBodyLayer`): the vanilla player
+/// Adult piglin mesh (vanilla's own adult piglin model's body-layer construction): the vanilla player
 /// mesh with the body reduced to its base layer and the head replaced by the
 /// piglin head (snout, tusks, floppy ears). Shared by piglin, zombified_piglin
 /// and piglin_brute — only the texture differs.
@@ -1524,7 +1525,7 @@ pub fn piglin_model() -> EntityModelDef {
     model
 }
 
-/// `PhantomModel.createBodyLayer`: a body carrying a two-segment tail, two
+/// vanilla's own phantom model's body-layer construction: a body carrying a two-segment tail, two
 /// two-segment wings (right mirrored) and a head. Eight boxes, sheet 64x64.
 pub fn phantom_model() -> EntityModelDef {
     let tail_tip = PartDef::new(PartPose::offset(0.0, 0.5, 6.0)).with_cube(cube(
@@ -1571,7 +1572,7 @@ pub fn phantom_model() -> EntityModelDef {
     }
 }
 
-/// `WardenModel.createBodyLayer`: a rooted `bone` carrying the body (with two
+/// vanilla's own warden model's body-layer construction: a rooted `bone` carrying the body (with two
 /// flat ribcage planes, a head bearing two flat tendrils, and two long arms)
 /// plus two legs. Ten boxes, sheet 128x128.
 pub fn warden_model() -> EntityModelDef {
@@ -1639,7 +1640,7 @@ pub fn warden_model() -> EntityModelDef {
     }
 }
 
-/// `WitherBossModel.createBodyLayer` at the base deformation: shoulders, a
+/// vanilla's own wither boss model's body-layer construction at the base deformation: shoulders, a
 /// four-cube ribcage, a tail, and three heads. Nine boxes, sheet 64x64. The
 /// tail's rest pose is placed from `cos/sin(0.20420352)*10`, transcribed rather
 /// than pre-computed so it matches vanilla to the last bit.
@@ -1701,7 +1702,7 @@ pub fn wither_model() -> EntityModelDef {
     }
 }
 
-/// `EnderDragonModel.createBodyLayer`: head+jaw, five neck segments and twelve
+/// vanilla's own ender dragon model's body-layer construction: head+jaw, five neck segments and twelve
 /// tail segments (all sharing one two-cube "spine" mesh), a body, two wings
 /// (each a bone + a flat skin plane) and four three-segment legs. 65 boxes on a
 /// 256x256 sheet. The wings' `skin` planes use vanilla's negative `texOffs(-56,
@@ -1829,14 +1830,14 @@ pub fn ender_dragon_model() -> EntityModelDef {
     }
 }
 
-/// `WitchModel.createBodyLayer`: the villager body (body+jacket, three-cube
+/// vanilla's own witch model's body-layer construction: the villager body (body+jacket, three-cube
 /// arms, two legs) and a head bearing the pointy witch hat (four stacked,
 /// progressively-rotated segments over the inherited villager hat brim) plus a
 /// nose with its mole. Fifteen boxes on a 64x128 sheet, baked at the villager
 /// `scaling(0.9375)`. Witch has a single texture (`witch.png`), so unlike the
 /// villager itself it needs no profession/type variant seam.
 pub fn witch_model() -> EntityModelDef {
-    // Villager body/arms/legs (VillagerModel.createBodyModel), unchanged.
+    // Villager body/arms/legs (vanilla's own villager-model body-model construction), unchanged.
     let body = PartDef::new(PartPose::ZERO)
         .with_cube(cube([-4.0, 0.0, -3.0], [8.0, 12.0, 6.0], [16.0, 20.0]))
         .with_child(
@@ -1923,8 +1924,8 @@ pub fn witch_model() -> EntityModelDef {
     scaled(model, 0.9375)
 }
 
-/// `VillagerModel.createBodyModel` (`npc/VillagerModel.java`), sheet 64×64, wrapped
-/// in `villagerLikeScale` = `MeshTransformer.scaling(0.9375)`. Head carries a hat
+/// Vanilla's own villager-model body-model construction, sheet 64×64, wrapped
+/// in `villagerLikeScale` = a mesh-transformer scaling of `0.9375`. Head carries a hat
 /// (deform 0.51) with a flat brim rotated `-π/2`, plus the trademark nose; body
 /// carries a jacket overlay (deform 0.5); the arms are one part posed forward
 /// (`offsetAndRotation(0,3,-1, -0.75,0,0)`) holding both limb cubes and a
@@ -1991,7 +1992,7 @@ pub fn villager_model() -> EntityModelDef {
     scaled(model, 0.9375)
 }
 
-/// `ZombieVillagerModel.createBodyLayer` (`monster/zombie/ZombieVillagerModel.java`),
+/// Vanilla's own zombie-villager-model body-layer construction,
 /// sheet 64×64, **no** villager scale (unlike the live villager). Built on the
 /// humanoid layout but every part is re-specified: the head holds its own nose
 /// cube (tex 24,0) as a second box, a hat (deform 0.5) with a flat brim, a body
@@ -2058,7 +2059,7 @@ pub fn zombie_villager_model() -> EntityModelDef {
 // `equine_base_root`.
 // ============================================================================
 
-/// `EndCrystalModel.createBodyLayer`: `outer_glass` (8³) with a nested
+/// vanilla's own end crystal model's body-layer construction: `outer_glass` (8³) with a nested
 /// `inner_glass` (same box, `withScale(0.875)`) and a further-nested `cube`
 /// (`withScale(0.765625)` = `0.875²`, a literal in vanilla, not computed) plus
 /// a separate `base` box. Sheet 64×32.
@@ -2099,7 +2100,7 @@ pub fn end_crystal_model() -> EntityModelDef {
     }
 }
 
-/// `ArmorStandModel.createBodyLayer`: starts from `HumanoidModel.createMesh`
+/// vanilla's own armor stand model's body-layer construction: starts from vanilla's own humanoid model's mesh construction
 /// but overrides head/body/arms/legs entirely with armor-stand-specific boxes
 /// and adds `right_body_stick`/`left_body_stick`/`shoulder_stick`/`base_plate`.
 /// The inherited `hat` child from the base humanoid mesh survives the
@@ -2191,7 +2192,7 @@ pub fn armor_stand_model() -> EntityModelDef {
     }
 }
 
-/// The hull + paddles shared by `BoatModel.addCommonParts` (also reused,
+/// The hull + paddles shared by vanilla's own boat-model add-common-parts step (also reused,
 /// structurally, by the chest-boat variant which just appends chest boxes).
 /// Sheet 128×64 for the plain boat.
 fn boat_hull() -> PartDef {
@@ -2273,8 +2274,8 @@ fn boat_hull() -> PartDef {
         )
 }
 
-/// `BoatModel.createBoatModel`: hull + both paddles, no chest. Sheet 128×64.
-/// (`createWaterPatch`'s own invisible clip quad is [`boat_water_patch_model`],
+/// Vanilla's own boat-model boat-model construction: hull + both paddles, no chest. Sheet 128×64.
+/// (vanilla's own create-water-patch step's own invisible clip quad is [`boat_water_patch_model`],
 /// a separate corpus entry rather than a child of this part tree — see its
 /// own doc for why.)
 pub fn boat_model() -> EntityModelDef {
@@ -2285,7 +2286,7 @@ pub fn boat_model() -> EntityModelDef {
     }
 }
 
-/// `BoatModel.createWaterPatch`: an invisible depth-only mask shaped like a
+/// vanilla's own boat model's water-patch construction: an invisible depth-only mask shaped like a
 /// **mirror** of the hull's own `bottom` plank — same box, offset the other
 /// way (`y = -3.0` here against `bottom`'s `y = 3.0`) — that fills the boat's
 /// hollow interior. Owner report: "placing down a boat still shows water
@@ -2304,13 +2305,13 @@ pub fn boat_model() -> EntityModelDef {
 /// A **separate corpus entry**, not a child part of [`boat_model`]/
 /// [`chest_boat_model`]'s own tree: every part of one `PartDef` draws through
 /// the *same* pipeline in one batch (`prepare_entities`), and this needs a
-/// different one. `BoatRenderer`'s own constructor bakes one shared
-/// `ModelLayers.BOAT_WATER_PATCH` regardless of chest-or-not
-/// (`.cache/mc/26.2/client-src`'s `BoatRenderer.java`), so one entry serves
+/// different one. Vanilla's own boat-renderer constructor bakes one shared
+/// boat-water-patch model layer regardless of chest-or-not
+/// (in the decompiled 26.2 client source), so one entry serves
 /// both here too.
 ///
-/// **Rafts get none of this.** `RaftRenderer` does not override
-/// `AbstractBoatRenderer.submitTypeAdditions`, whose default body is empty —
+/// **Rafts get none of this.** Vanilla's own raft-renderer does not override
+/// the base boat-renderer's submit-type-additions step, whose default body is empty —
 /// so `"raft"`/`"chest_raft"` never resolve to this model, matching vanilla's
 /// real (if inconsistent) behaviour: a raft's water is not masked either.
 pub fn boat_water_patch_model() -> EntityModelDef {
@@ -2325,7 +2326,7 @@ pub fn boat_water_patch_model() -> EntityModelDef {
     }
 }
 
-/// `BoatModel.createChestBoatModel`: the same hull plus `chest_bottom`/
+/// Vanilla's own boat-model chest-boat-model construction: the same hull plus `chest_bottom`/
 /// `chest_lid`/`chest_lock`. Sheet promotes to 128×128 to fit the chest.
 pub fn chest_boat_model() -> EntityModelDef {
     let root = boat_hull()
@@ -2372,13 +2373,13 @@ pub fn chest_boat_model() -> EntityModelDef {
     }
 }
 
-/// The hull + paddles shared by `RaftModel.addCommonParts`. Same part names as
-/// `BoatModel` but a different hull shape (2 boxes, bamboo raft's flatter
+/// The hull + paddles shared by vanilla's own raft-model add-common-parts step. Same part names as
+/// vanilla's own boat model but a different hull shape (2 boxes, bamboo raft's flatter
 /// profile) and paddle texOffs. The `1.5708F` bottom x-rotation is transcribed
-/// verbatim (vanilla writes the literal, not `Math.PI / 2`).
+/// verbatim (vanilla writes the literal, not the true value of PI / 2).
 #[allow(
     clippy::approx_constant,
-    reason = "1.5708 is vanilla's own literal in RaftModel.java, not Math.PI/2 — transcribed verbatim, not the nearby true constant"
+    reason = "1.5708 is vanilla's own literal in its own raft-model source, not the true value of PI/2 — transcribed verbatim, not the nearby true constant"
 )]
 fn raft_hull() -> PartDef {
     PartDef::new(PartPose::ZERO)
@@ -2418,7 +2419,7 @@ fn raft_hull() -> PartDef {
         )
 }
 
-/// `RaftModel.createRaftModel`: sheet 128×64.
+/// Vanilla's own raft-model raft-model construction: sheet 128×64.
 pub fn raft_model() -> EntityModelDef {
     EntityModelDef {
         texture_width: 128,
@@ -2427,7 +2428,7 @@ pub fn raft_model() -> EntityModelDef {
     }
 }
 
-/// `RaftModel.createChestRaftModel`: same hull plus chest boxes at raft-specific
+/// Vanilla's own raft-model chest-raft-model construction: same hull plus chest boxes at raft-specific
 /// heights. Sheet 128×128.
 pub fn chest_raft_model() -> EntityModelDef {
     let root = raft_hull()
@@ -2474,7 +2475,7 @@ pub fn chest_raft_model() -> EntityModelDef {
     }
 }
 
-/// `MinecartModel.createBodyLayer`: bottom + 4 walls, flat root. Vanilla's
+/// vanilla's own minecart model's body-layer construction: bottom + 4 walls, flat root. Vanilla's
 /// chest/hopper/tnt/furnace/command-block/spawner minecarts all reuse this
 /// exact geometry class (they differ only by a separate block-overlay render
 /// layer), so a single `"minecart"` entry covers them —
@@ -2541,13 +2542,13 @@ pub fn minecart_model() -> EntityModelDef {
     }
 }
 
-/// `AdultRabbitModel.createBodyLayer`: body(+tail), head(+ears), and two
+/// vanilla's own adult rabbit model's body-layer construction: body(+tail), head(+ears), and two
 /// pivot-only leg-group nodes (`frontlegs`/`backlegs`/`right_hind_leg`/
 /// `left_hind_leg`) whose only cubes live on the leaf `*_leg`/`*_haunch`
 /// parts. Sheet 64×64.
 #[allow(
     clippy::approx_constant,
-    reason = "the 0.3927/-0.3927 rotations are vanilla's own literals in AdultRabbitModel.java, not Math.PI/8 — transcribed verbatim"
+    reason = "the 0.3927/-0.3927 rotations are vanilla's own literals in its own adult-rabbit-model source, not the true value of PI/8 — transcribed verbatim"
 )]
 pub fn rabbit_model() -> EntityModelDef {
     let body = PartDef::new(PartPose::offset_and_rotation(
@@ -2642,7 +2643,7 @@ pub fn rabbit_model() -> EntityModelDef {
     }
 }
 
-/// `AdultFoxModel.createBodyLayer`: head(+ears+nose), body(+tail), and 4 legs.
+/// vanilla's own adult fox model's body-layer construction: head(+ears+nose), body(+tail), and 4 legs.
 /// `leftLeg`/`rightLeg` are each a single vanilla `CubeListBuilder` reused
 /// across the hind and front leg *on the same side* (identical box, distinct
 /// per-side texOffs); the sides are not related by `mirror()` at all. Sheet
@@ -2724,7 +2725,7 @@ pub fn fox_model() -> EntityModelDef {
     }
 }
 
-/// `PandaModel.createBodyLayer` (`QuadrupedModel`): head(+nose+2 ears), body,
+/// Vanilla's own panda-model body-layer construction (a quadruped model): head(+nose+2 ears), body,
 /// and 4 legs sharing one vanilla `CubeListBuilder` (no mirroring, identical
 /// box on all four). Sheet 64×64.
 pub fn panda_model() -> EntityModelDef {
@@ -2773,7 +2774,7 @@ pub fn panda_model() -> EntityModelDef {
     }
 }
 
-/// `GoatModel.createBodyLayer` (`QuadrupedModel`): head builds 3 boxes on one
+/// Vanilla's own goat-model body-layer construction (a quadruped model): head builds 3 boxes on one
 /// `CubeListBuilder` — `right_ear` (no mirror), `left_ear` (`.mirror()`), then
 /// `goatee` — and vanilla's `mirror()` flag is sticky per-builder with no
 /// reset, so `goatee` inherits `mirror=true` too. It's a zero-width box so
@@ -2857,7 +2858,7 @@ pub fn goat_model() -> EntityModelDef {
     }
 }
 
-/// `AdultBeeModel.createBodyLayer`: `bone` > `body`(stinger, left/right
+/// vanilla's own adult bee model's body-layer construction: `bone` > `body`(stinger, left/right
 /// antenna) plus `bone` > wings/legs. Sheet 64×64.
 pub fn bee_model() -> EntityModelDef {
     let body = PartDef::new(PartPose::ZERO)
@@ -2939,7 +2940,7 @@ pub fn bee_model() -> EntityModelDef {
     }
 }
 
-/// `AdultTurtleModel.createBodyLayer`: head, body(shell+belly), egg_belly
+/// vanilla's own adult turtle model's body-layer construction: head, body(shell+belly), egg_belly
 /// (visibility-toggled at runtime by `hasEgg`, baked unconditionally here) and
 /// 4 legs. Sheet 128×64.
 pub fn turtle_model() -> EntityModelDef {
@@ -3016,7 +3017,7 @@ pub fn turtle_model() -> EntityModelDef {
     }
 }
 
-/// `AdultCamelModel.createBodyMesh`: body(+hump+tail), head (3 stacked boxes:
+/// vanilla's own adult camel model's body-mesh construction: body(+hump+tail), head (3 stacked boxes:
 /// muzzle/skull/snout + ears), 4 legs. Sheet 128×128.
 pub fn camel_model() -> EntityModelDef {
     let head = PartDef::new(PartPose::offset(0.0, -3.0, -19.5))
@@ -3099,7 +3100,7 @@ pub fn camel_model() -> EntityModelDef {
     }
 }
 
-/// `CodModel.createBodyLayer`: body, head, nose, 2 side fins, tail_fin, and a
+/// vanilla's own cod model's body-layer construction: body, head, nose, 2 side fins, tail_fin, and a
 /// `top_fin` at `texOffs(20, -6)` on a `0×1×6` box. The **negative Y offset is
 /// vanilla's own value**, not a transcription slip: `top_fin`'s real
 /// (non-degenerate) faces are the ones spanning the depth×height texel rect
@@ -3180,7 +3181,7 @@ pub fn cod_model() -> EntityModelDef {
     }
 }
 
-/// `SalmonModel.createBodyLayer`: body_front/body_back (each with a fin
+/// vanilla's own salmon model's body-layer construction: body_front/body_back (each with a fin
 /// child), head, and 2 side fins. `right_fin` is `texOffs(-4, 0)` on a
 /// `2×0×2` box — vanilla relying on `GL_REPEAT` texture wrap for this one
 /// real (non-degenerate, since height is the zero dimension here, not width)
@@ -3258,9 +3259,9 @@ pub fn salmon_model() -> EntityModelDef {
     }
 }
 
-/// `PufferfishBigModel.createBodyLayer`: body plus 3 mirrored fin pairs (blue,
+/// Vanilla's own big-pufferfish-model body-layer construction: body plus 3 mirrored fin pairs (blue,
 /// front/back, top/bottom×3). Chosen as the registered pufferfish variant
-/// specifically because — unlike `PufferfishSmallModel` (`back_fin` at
+/// specifically because — unlike vanilla's own small-pufferfish model (`back_fin` at
 /// `texOffs(-3, 0)`) — none of its offsets are negative, so it needs no UV
 /// exception. Sheet 32×32.
 pub fn pufferfish_model() -> EntityModelDef {
@@ -3408,8 +3409,8 @@ pub fn pufferfish_model() -> EntityModelDef {
     }
 }
 
-/// `TropicalFishLargeModel.createBodyLayer(CubeDeformation.NONE)` — the plain
-/// (unpatterned) large tropical fish, chosen over `TropicalFishSmallModel`
+/// Vanilla's own large-tropical-fish-model body-layer construction, no deformation — the plain
+/// (unpatterned) large tropical fish, chosen over vanilla's own small-tropical-fish model
 /// (which has negative-Y `texOffs` on `tail`/`top_fin`) so this entry needs no
 /// UV exception. Sheet 32×32.
 pub fn tropical_fish_model() -> EntityModelDef {
@@ -3477,7 +3478,7 @@ pub fn tropical_fish_model() -> EntityModelDef {
     }
 }
 
-/// `DolphinModel.createBodyLayer`: body(back_fin, mirrored left_fin,
+/// vanilla's own dolphin model's body-layer construction: body(back_fin, mirrored left_fin,
 /// right_fin, tail[tail_fin], head[nose]). Sheet 64×64.
 pub fn dolphin_model() -> EntityModelDef {
     let tail = PartDef::new(PartPose::offset_and_rotation(
@@ -3551,7 +3552,7 @@ pub fn dolphin_model() -> EntityModelDef {
     }
 }
 
-/// `AdultAxolotlModel.createBodyLayer`: body (main + a zero-width ridge box),
+/// vanilla's own adult axolotl model's body-layer construction: body (main + a zero-width ridge box),
 /// head (`grow=0.001` fudge, matching vanilla's flat-cube-z-fighting fix) with
 /// 3 gill children, 4 legs (2 vanilla builders reused across front/hind on
 /// each side, distinct origins — not `mirror()`-flagged), tail. Sheet 64×64.
@@ -3612,7 +3613,7 @@ pub fn axolotl_model() -> EntityModelDef {
     }
 }
 
-/// `FrogModel.createBodyLayer`: `root` (invisible pivot at y=24) > `body`(+
+/// vanilla's own frog model's body-layer construction: `root` (invisible pivot at y=24) > `body`(+
 /// `head`[+`eyes`> left/right_eye], `croaking_body`, `tongue`, `left_arm`
 /// [+`left_hand`], `right_arm`[+`right_hand`]), and `left_leg`/`right_leg`
 /// (each +foot) as siblings of `body` under the same pivot node. `eyes` and
@@ -3715,7 +3716,7 @@ pub fn frog_model() -> EntityModelDef {
     }
 }
 
-/// `TadpoleModel.createBodyLayer`: 2 flat boxes, no hierarchy. Sheet is
+/// vanilla's own tadpole model's body-layer construction: 2 flat boxes, no hierarchy. Sheet is
 /// **16×16** — the smallest sheet in the whole corpus, easy to fat-finger as
 /// 32×32.
 pub fn tadpole_model() -> EntityModelDef {
@@ -3743,7 +3744,7 @@ pub fn tadpole_model() -> EntityModelDef {
     }
 }
 
-/// `SnifferModel.createBodyLayer`: `bone` > `body`(3 boxes) + 6 legs, `body` >
+/// vanilla's own sniffer model's body-layer construction: `bone` > `body`(3 boxes) + 6 legs, `body` >
 /// `head`(2 boxes) > ears/nose/lower_beak. Sheet is **192×192** — by far the
 /// largest sheet in the corpus.
 pub fn sniffer_model() -> EntityModelDef {
@@ -3849,13 +3850,13 @@ pub fn sniffer_model() -> EntityModelDef {
     }
 }
 
-/// `AdultArmadilloModel.createBodyLayer`: body(+tail+head[+ears]), 4 legs, and
+/// vanilla's own adult armadillo model's body-layer construction: body(+tail+head[+ears]), 4 legs, and
 /// a separate root-level `cube` (the rolled-up ball form; vanilla toggles its
 /// visibility with the roll animation state, baked unconditionally here since
 /// this registry has no per-part runtime visibility). Sheet 64×64.
 #[allow(
     clippy::approx_constant,
-    reason = "-0.3927 is vanilla's own literal in AdultArmadilloModel.java, not Math.PI/8 — transcribed verbatim"
+    reason = "-0.3927 is vanilla's own literal in its own adult-armadillo-model source, not the true value of PI/8 — transcribed verbatim"
 )]
 pub fn armadillo_model() -> EntityModelDef {
     let head = PartDef::new(PartPose::offset(0.0, -2.0, -11.0))
@@ -3958,8 +3959,9 @@ pub fn armadillo_model() -> EntityModelDef {
 // shapes below were decided unilaterally from the decompiled source rather
 // than confirmed with them first, as the task asked. Flagging this explicitly
 // for review rather than presenting it as pre-agreed. One open design point:
-// horse markings (`Markings.java`) genuinely need a *second*, independently
-// selected texture layer composited over the base colour (`HorseMarkingLayer`
+// horse markings (vanilla's own markings enum) genuinely need a *second*, independently
+// selected texture layer composited over the base colour (vanilla's own
+// horse-marking layer
 // submits a second translucent pass using the same model) — `ByVariant`
 // resolves exactly one path per call, so it cannot express this. Rather than
 // invent a new `EntityTexture` case unilaterally (a real seam decision that
@@ -3969,7 +3971,7 @@ pub fn armadillo_model() -> EntityModelDef {
 // second render pass to call directly.
 // ============================================================================
 
-/// `AbstractEquineModel.createBodyMesh(CubeDeformation.NONE)`: the shared
+/// Vanilla's own abstract-equine-model body-mesh construction, no deformation: the shared
 /// horse/donkey/mule/skeleton_horse/zombie_horse body. Structural tree per
 /// vanilla: `body` (with a `tail` child) and `head_parts` (rotated `PI/6` down,
 /// with a `head` child that itself carries `left_ear`/`right_ear`, plus
@@ -4071,24 +4073,28 @@ fn equine_base_model() -> EntityModelDef {
     }
 }
 
-/// Skeleton horse: the base equine mesh, unscaled (`UndeadHorseRenderer` bakes
-/// `HorseModel` on `ModelLayers.SKELETON_HORSE`, which is
-/// `AbstractEquineModel.createBodyMesh(NONE)` with no `MeshTransformer`
-/// applied — `LayerDefinitions.java`'s `horseBodyLayer` reused as-is). Fixed
+/// Skeleton horse: the base equine mesh, unscaled (vanilla's own undead-horse
+/// renderer bakes
+/// its own horse model on its own skeleton-horse model layer, which is
+/// the abstract-equine-model body-mesh construction with no deformation and no
+/// mesh transformer
+/// applied — vanilla's own layer-definitions table reuses its horse body layer
+/// as-is). Fixed
 /// texture, no colour/markings variant.
 pub fn skeleton_horse_model() -> EntityModelDef {
     equine_base_model()
 }
 
 /// Zombie horse: identical to skeleton horse — same unscaled base equine mesh,
-/// same `horseBodyLayer` reuse in `LayerDefinitions.java`. Fixed texture.
+/// same horse-body-layer reuse in vanilla's own layer-definitions table. Fixed texture.
 pub fn zombie_horse_model() -> EntityModelDef {
     equine_base_model()
 }
 
 /// Horse: the base equine mesh baked at `scaling(1.1)`
-/// (`LayerDefinitions.java`: `horseBodyLayer.apply(MeshTransformer.scaling(1.1F))`).
-/// Colour is a real variant (`Horse.Variant`, 7 coats); markings
+/// (vanilla's own layer-definitions table applies a `1.1F` mesh-transformer
+/// scaling to the horse body layer).
+/// Colour is a real variant (vanilla's own horse variant field, 7 coats); markings
 /// (`Markings`, 5 patterns incl. "none") are an independent second texture
 /// layer — see the module-level note above `equine_base_root` and
 /// `horse_markings_texture` below.
@@ -4110,8 +4116,8 @@ fn horse_color_texture(v: EntityVariant) -> &'static str {
 }
 
 /// The horse markings overlay path, or `None` for no second pass
-/// (`Markings.NONE` maps to vanilla's invisible-texture sentinel in
-/// `HorseMarkingLayer.java`). Deliberately not an `EntityTexture`/
+/// (vanilla's own no-markings variant maps to vanilla's invisible-texture sentinel in
+/// its own horse-marking layer). Deliberately not an `EntityTexture`/
 /// `EntityVariant` selector — see the module note above `equine_base_root`.
 pub fn horse_markings_texture(markings: HorseMarkings) -> Option<&'static str> {
     match markings {
@@ -4123,7 +4129,7 @@ pub fn horse_markings_texture(markings: HorseMarkings) -> Option<&'static str> {
     }
 }
 
-/// `DonkeyModel.createBodyLayer`: the base equine mesh with vanilla's
+/// vanilla's own donkey model's body-layer construction: the base equine mesh with vanilla's
 /// `DONKEY_TRANSFORMER` applied — `left_ear`/`right_ear` under `head` replaced
 /// with larger, rotated donkey ears, and `left_chest`/`right_chest` boxes
 /// added under `body` (vanilla toggles their visibility per-instance via
@@ -4199,24 +4205,28 @@ fn donkey_body_root(scale: f32) -> EntityModelDef {
     )
 }
 
-/// Donkey: `DonkeyModel.createBodyLayer(DonkeyModel.DONKEY_SCALE = 0.87F)`.
+/// Donkey: vanilla's own donkey-model body-layer construction at its own
+/// donkey-scale constant of `0.87F`.
 pub fn donkey_model() -> EntityModelDef {
     donkey_body_root(0.87)
 }
 
-/// Mule: the same `DonkeyModel` mesh, baked at `DonkeyModel.MULE_SCALE = 0.92F`
-/// instead (`LayerDefinitions.java`: `DonkeyModel.createBodyLayer(0.92F)`).
+/// Mule: the same donkey-model mesh, baked at vanilla's own mule-scale constant
+/// of `0.92F`
+/// instead (vanilla's own layer-definitions table calls the donkey-model
+/// body-layer construction with `0.92F`).
 pub fn mule_model() -> EntityModelDef {
     donkey_body_root(0.92)
 }
 
-/// `LlamaModel.createBodyLayer`: head (with neck and two ears), body, two
+/// Vanilla's own llama-model body-layer construction: head (with neck and two ears), body, two
 /// chest boxes (vanilla toggles visibility via `state.hasChest`; baked in
 /// unconditionally, see the donkey chest note above), and four legs — all
 /// direct root children, no deeper nesting. Sheet 128×64 (llama is the only
 /// model in this corpus wider than 64px). `trader_llama` reuses this exact
-/// mesh (`LayerDefinitions.java` puts the same `llamaBodyLayer` under both
-/// `ModelLayers.LLAMA` and `ModelLayers.TRADER_LLAMA`).
+/// mesh (vanilla's own layer-definitions table puts the same llama body layer
+/// under both
+/// its own llama and trader-llama model-layer keys).
 pub fn llama_model() -> EntityModelDef {
     let head = PartDef::new(PartPose::offset(0.0, 7.0, -6.0))
         .with_cube(cube([-2.0, -14.0, -10.0], [4.0, 4.0, 9.0], [0.0, 0.0]))
@@ -4280,7 +4290,7 @@ pub fn llama_model() -> EntityModelDef {
 }
 
 /// Trader llama: byte-identical geometry to `llama_model` — vanilla reuses the
-/// same baked `LayerDefinition` for both (`LayerDefinitions.java`). Only the
+/// same baked mesh definition for both (vanilla's own layer-definitions table). Only the
 /// renderer differs (decor/carpet layer), which is out of scope for geometry.
 pub fn trader_llama_model() -> EntityModelDef {
     llama_model()
@@ -4296,7 +4306,7 @@ fn llama_color_texture(v: EntityVariant) -> &'static str {
     }
 }
 
-/// `AdultFelineModel.createBodyMesh`: the body mesh shared by cat and ocelot.
+/// vanilla's own adult feline model's body-mesh construction: the body mesh shared by cat and ocelot.
 /// `head` carries `main`/`nose`/`ear1`/`ear2` as *unnamed sibling boxes on one
 /// part* in vanilla (`CubeListBuilder` with four `addBox` calls, no child
 /// parts) — modelled here as four cubes on the same `head` part rather than
@@ -4357,15 +4367,15 @@ fn feline_base_model() -> EntityModelDef {
 /// Ocelot: the feline mesh unscaled. Fixed texture (`entity/cat/ocelot`) —
 /// unlike cat, ocelot has **no colour variant** in this version (colour
 /// variants moved to the separate `Cat` entity type in 1.14); confirmed via
-/// `OcelotRenderer.getTextureLocation`, which returns one hardcoded path.
+/// vanilla's own ocelot-renderer texture-location query, which returns one hardcoded path.
 pub fn ocelot_model() -> EntityModelDef {
     feline_base_model()
 }
 
-/// Cat: the feline mesh baked at `AdultCatModel.CAT_TRANSFORMER =
-/// scaling(0.8F)` (`LayerDefinitions.java`:
-/// `felineBodyLayer.apply(AdultCatModel.CAT_TRANSFORMER)`). Breed is a real
-/// variant (11 `CatVariant`s); the collar tint (`CatCollarLayer`) is a
+/// Cat: the feline mesh baked at vanilla's own adult-cat-model transformer constant of
+/// `scaling(0.8F)` (vanilla's own layer-definitions table applies that
+/// transformer to the feline body layer). Breed is a real
+/// variant (11 breeds); the collar tint (vanilla's own cat-collar layer) is a
 /// runtime dye-colour overlay, not a texture-file variant, so it's out of
 /// scope here.
 pub fn cat_model() -> EntityModelDef {
@@ -4389,14 +4399,14 @@ fn cat_coat_texture(v: EntityVariant) -> &'static str {
     }
 }
 
-/// `AdultWolfModel.createBodyLayer`: `head` (empty, pivot-only) holding a
+/// Vanilla's own adult-wolf-model body-layer construction: `head` (empty, pivot-only) holding a
 /// `real_head` child with four boxes (main head, two identically-textured
 /// ear boxes placed by origin sign rather than mirroring, and a snout); `body`
 /// and `upper_body` are independent, both rotated `PI/2`; four legs share two
 /// `CubeListBuilder`s (`leftLeg`/`rightLeg`, the latter `.mirror()`ed) reused
-/// across hind and front pairs, exactly like `BlazeModel`'s ring reuse; `tail`
+/// across hind and front pairs, exactly like vanilla's own blaze model's ring reuse; `tail`
 /// (empty, pivot-only) holds a `real_tail` child. Sheet 64×32, unscaled
-/// (`LayerDefinitions.java`'s `wolfBodyLayer` has no `MeshTransformer`).
+/// (vanilla's own layer-definitions table's wolf body layer has no mesh transformer).
 pub fn wolf_model() -> EntityModelDef {
     let real_head = PartDef::new(PartPose::ZERO)
         .with_cube(cube([-2.0, -3.0, -2.0], [6.0, 6.0, 4.0], [0.0, 0.0]))
@@ -4480,9 +4490,9 @@ fn wolf_coat_texture(v: EntityVariant) -> &'static str {
                 WolfCoat::Chestnut => "entity/wolf/wolf_chestnut",
                 WolfCoat::Striped => "entity/wolf/wolf_striped",
             };
-            // `Wolf.getTexture()` appends `_tame`/`_angry` to the breed's file
+            // vanilla's own wolf texture-resolution query appends `_tame`/`_angry` to the breed's file
             // stem for the other two states; `Pale`'s stem has no breed suffix
-            // (`WolfVariants.register(context, PALE, "wolf", ...)`), so its
+            // (vanilla's own wolf-variant registration for the pale/"wolf" entry), so its
             // tame/angry files are `wolf_tame`/`wolf_angry`, not
             // `wolf_pale_tame` — a per-breed string-concat quirk, not a
             // lookup table, transcribed by matching the same concat pattern.
@@ -4496,7 +4506,7 @@ fn wolf_coat_texture(v: EntityVariant) -> &'static str {
     }
 }
 
-/// Vanilla's `Wolf.getTexture()` does `Identifier.withDefaultNamespace` string
+/// Vanilla's own wolf texture-resolution query does its own with-default-namespace string
 /// concatenation at runtime; this corpus only has `&'static str`s to hand
 /// back, so the small, fixed concatenated set is enumerated instead of built
 /// with runtime string concatenation.
@@ -4524,7 +4534,7 @@ fn wolf_suffixed(base: &'static str, suffix: &'static str) -> &'static str {
     }
 }
 
-/// `ParrotModel.createBodyLayer`: body, tail, two wings (sharing one
+/// vanilla's own parrot model's body-layer construction: body, tail, two wings (sharing one
 /// texOffs), a head with four children (`head2`, `beak1`, `beak2`, and a
 /// zero-*width* `feather` box — another vanilla degenerate-box UV quirk, kept
 /// verbatim), and two legs. All parts are direct root children except the
@@ -4611,7 +4621,7 @@ fn parrot_color_texture(v: EntityVariant) -> &'static str {
         EntityVariant::Parrot(ParrotColor::Green) => "entity/parrot/parrot_green",
         EntityVariant::Parrot(ParrotColor::YellowBlue) => "entity/parrot/parrot_yellow_blue",
         // Vanilla's own filename is spelled "grey", not "gray" — kept verbatim
-        // even though the enum case (matching `Parrot.Variant.GRAY`) is not.
+        // even though the enum case (matching vanilla's own parrot-variant gray entry) is not.
         EntityVariant::Parrot(ParrotColor::Gray) => "entity/parrot/parrot_grey",
         _ => "entity/parrot/parrot_red_blue",
     }
@@ -4624,10 +4634,10 @@ fn parrot_color_texture(v: EntityVariant) -> &'static str {
 // ravager, allay, shulker.
 // ============================================================================
 
-/// `PolarBearModel.createBodyLayer` (`QuadrupedModel`): head (main box, mouth,
+/// Vanilla's own polar-bear-model body-layer construction (a quadruped model): head (main box, mouth,
 /// 2 ears — all direct siblings on one part, not nested), body, and 4
 /// unparented legs, baked at `scaling(1.2)`. Sheet 128×64. Fixed texture; the
-/// baby variant is a separate `ModelLayer`/renderer scale, out of scope like
+/// baby variant is a separate model-layer/renderer scale, out of scope like
 /// this port's other baby models.
 pub fn polar_bear_model() -> EntityModelDef {
     let head = PartDef::new(PartPose::offset(0.0, 10.0, -16.0))
@@ -4669,9 +4679,9 @@ pub fn polar_bear_model() -> EntityModelDef {
     )
 }
 
-/// `IllagerModel.createBodyLayer`: the shared mesh for pillager, vindicator,
-/// evoker and illusioner (`LayerDefinitions.java` puts the identical
-/// `illagerBodyLayer` under all four `ModelLayers` entries, unscaled). `head`
+/// Vanilla's own illager-model body-layer construction: the shared mesh for pillager, vindicator,
+/// evoker and illusioner (vanilla's own layer-definitions table puts the identical
+/// illager body layer under all four model-layer entries, unscaled). `head`
 /// carries a `hat` child (vanilla sets `hat.visible = false` permanently for
 /// this model — a runtime visibility toggle this port doesn't model, same as
 /// the always-shown player/zombie hat elsewhere in this corpus) and a `nose`.
@@ -4744,7 +4754,7 @@ pub fn vindicator_model() -> EntityModelDef {
     illager_base_model()
 }
 
-/// Evoker: the illager mesh, unscaled. Fixed texture. (`EvokerFangsModel` is a
+/// Evoker: the illager mesh, unscaled. Fixed texture. (vanilla's own evoker-fangs model is a
 /// separate summon-effect entity, out of scope here.)
 pub fn evoker_model() -> EntityModelDef {
     illager_base_model()
@@ -4755,7 +4765,7 @@ pub fn illusioner_model() -> EntityModelDef {
     illager_base_model()
 }
 
-/// `RavagerModel.createBodyLayer`: `neck` (1 box) holds `head` (2 boxes,
+/// vanilla's own ravager model's body-layer construction: `neck` (1 box) holds `head` (2 boxes,
 /// skull plus a small nested box), which itself holds `right_horn`,
 /// `left_horn` and `mouth`; `body` (2 boxes) and 4 unparented legs are
 /// direct root children. Sheet 128×128, unscaled.
@@ -4812,7 +4822,7 @@ pub fn ravager_model() -> EntityModelDef {
     }
 }
 
-/// `AllayModel.createBodyLayer`: the mesh's *own* root is empty and holds one
+/// vanilla's own allay model's body-layer construction: the mesh's *own* root is empty and holds one
 /// child, `"root"` (offset `(0, 23.5, 0)`), which vanilla's constructor then
 /// re-roots onto (`super(root.getChild("root"))`) — i.e. the part vanilla
 /// actually renders from is `"root"`, not the mesh's nominal top part. This
@@ -4857,10 +4867,10 @@ pub fn allay_model() -> EntityModelDef {
     }
 }
 
-/// `ShulkerModel.createBodyLayer`: `lid`, `base` and `head`, all direct root
+/// vanilla's own shulker model's body-layer construction: `lid`, `base` and `head`, all direct root
 /// children with no nesting. Sheet 64×64. Fixed to the default (purple)
 /// skin: vanilla's actual texture is a genuine `DyeColor` (16-way + a
-/// colourless default) variant (`ShulkerRenderer.getTextureLocation`), which
+/// colourless default) variant (vanilla's own shulker-renderer texture-location query), which
 /// this port does not model — `DyeColor` doesn't exist as a shared type in
 /// this crate yet, and adding a 17th ad-hoc variant enum for a single mob
 /// felt like more mechanism than the "keep geometry moving" priority
@@ -4895,38 +4905,40 @@ pub fn shulker_model() -> EntityModelDef {
 // entries rather than porting anything new.
 // ============================================================================
 
-/// `GlowSquidRenderer` reuses `SquidModel` verbatim; only the texture path
+/// Vanilla's own glow-squid renderer reuses its own squid model verbatim; only the texture path
 /// changes (`entity/squid/glow_squid`, not e.g. a tinted overlay — the glow
 /// itself is an emissive-texture/render-layer effect, not geometry).
 pub fn glow_squid_model() -> EntityModelDef {
     squid_model()
 }
 
-/// `WanderingTraderRenderer` reuses `VillagerModel` verbatim (bakes
-/// `ModelLayers.WANDERING_TRADER`, the same mesh shape as the plain
+/// Vanilla's own wandering-trader renderer reuses its own villager model verbatim (bakes
+/// its own wandering-trader model layer, the same mesh shape as the plain
 /// villager), swapping only the base skin
 /// (`entity/wandering_trader/wandering_trader`); profession-specific
-/// clothing layers are a separate `CustomHeadLayer`/item-layer concern this
+/// clothing layers are a separate custom-head-layer/item-layer concern this
 /// port doesn't model, same as for villager professions.
 pub fn wandering_trader_model() -> EntityModelDef {
     villager_model()
 }
 
-/// Mooshroom: the plain `CowModel`, unscaled — vanilla's mushroom growth is a
-/// render layer (`MushroomCowMushroomLayer`), not extra mesh geometry.
+/// Mooshroom: the plain cow model, unscaled — vanilla's mushroom growth is a
+/// render layer (its own mushroom-cow mushroom layer), not extra mesh geometry.
 pub fn mooshroom_model() -> EntityModelDef {
     cow_model()
 }
 
 // ============================================================================
-// Projectiles: rigs whose renderer is **not** a `LivingEntityRenderer`
+// Projectiles: rigs whose renderer is **not** vanilla's own living-entity renderer
 // ============================================================================
 //
-// Every other entry in this file is placed by `LivingEntityRenderer`'s pose
+// Every other entry in this file is placed by vanilla's own living-entity renderer's pose
 // stack, which flips Y (`scale(-1, -1, 1)`) and lifts by `1.501` blocks. The
-// two entries below are not: `ArrowRenderer` and `ThrownTridentRenderer` both
-// `extend EntityRenderer` directly, which applies **neither** — `EntityRenderer`
-// itself contains no `scale(` call at all, against `LivingEntityRenderer.render`,
+// two entries below are not: vanilla's own arrow renderer and thrown-trident renderer both
+// extend its own base entity-renderer directly, which applies **neither** — the base
+// entity renderer
+// itself contains no `scale(` call at all, against the living-entity renderer's
+// own render step,
 // which has both. So these meshes are
 // authored in the *world* orientation (+Y up), not the Y-down mob orientation,
 // and `lodestone_render::entity::projectile_model_matrix` places them.
@@ -4935,11 +4947,11 @@ pub fn mooshroom_model() -> EntityModelDef {
 // shaft runs along `+X` (the `cross` box spans `x ∈ [-12, +4]` texels, tip at
 // high X), which is why vanilla rotates pitch about `Axis.ZP` and not `XP`. A
 // trident's pole runs along `−Y` (spikes at negative Y below a pole spanning
-// `y ∈ [+2, +27]`), which is why `ThrownTridentRenderer` adds `+90°` to the
+// `y ∈ [+2, +27]`), which is why vanilla's own thrown-trident renderer adds `+90°` to the
 // pitch: that offset is what turns the pole's axis into the arrow's. Both end
 // up pointing along the entity's velocity; see `docs/projectile-renderers.md`.
 
-/// `ArrowModel.createBodyLayer()` — the rig `ArrowRenderer` bakes, shared by
+/// Vanilla's own arrow-model body-layer construction — the rig vanilla's own arrow renderer bakes, shared by
 /// `arrow`, `spectral_arrow` and the tipped-arrow variant. Sheet 32×32.
 ///
 /// Three boxes, **two of which are zero-extent planes**, which is the one thing
@@ -4954,23 +4966,23 @@ pub fn mooshroom_model() -> EntityModelDef {
 ///
 /// [`crate::entity::bake_entity`] emits all six faces of every box regardless, so
 /// this bakes 18 quads of which 6 are degenerate. That is deliberate and matches
-/// vanilla (`ModelPart.Cube` does the same); the degenerate ones rasterise no
+/// vanilla (its own model-part cube type does the same); the degenerate ones rasterise no
 /// fragments, and the corpus tests that walk UVs skip them explicitly via
 /// `quad_is_degenerate`.
 ///
 /// Two scale factors, both real and both easy to lose:
 ///
-/// * The **whole mesh** is `0.9×`. `LayerDefinition.create(mesh.transformed(pose
+/// * The **whole mesh** is `0.9×`. Vanilla's own mesh-definition construction (`mesh.transformed(pose
 ///   -> pose.scaled(0.9F)), 32, 32)` looks like it scales every part, but
-///   `PartDefinition.transformed` applies the function to *its own* pose and
+///   vanilla's own part-definition transformed step applies the function to *its own* pose and
 ///   copies its children untouched — so it is the
 ///   **root** pose that carries the 0.9, and children inherit it through the
 ///   transform chain. Modelled here as a root [`PartPose::scale`], which is
 ///   exactly that.
-/// * `back` is a further `0.8×` (`PartPose.withScale(0.8F)`), so the fletching
+/// * `back` is a further `0.8×` (vanilla's own with-scale step at `0.8F`), so the fletching
 ///   ends up at `0.72×`.
 ///
-/// `ArrowModel.setupAnim` also adds a `zRot` wobble from `state.shake` for the
+/// Vanilla's own arrow-model per-frame pose step also adds a `zRot` wobble from `state.shake` for the
 /// seven ticks after an arrow sticks in a block. Not modelled: `shakeTime` is not
 /// on this side of the wire (it is neither entity metadata nor a packet field —
 /// vanilla sets it client-side from the `IN_GROUND` metadata *transition*), so
@@ -5018,7 +5030,7 @@ pub fn arrow_model() -> EntityModelDef {
     }
 }
 
-/// `TridentModel.createLayer()` — the rig `ThrownTridentRenderer` bakes. Sheet
+/// Vanilla's own trident-model layer construction — the rig vanilla's own thrown-trident renderer bakes. Sheet
 /// 32×32, five solid boxes, no zero-extent planes and no mesh-wide scale.
 ///
 /// A `pole` spanning `y ∈ [+2, +27]` with four children hanging off it: the
@@ -5030,7 +5042,7 @@ pub fn arrow_model() -> EntityModelDef {
 /// winding — [`crate::entity::CubeDef::mirrored`] is that).
 ///
 /// Vanilla draws a second `entityGlint` pass over this mesh when
-/// `ThrownTrident.isFoil()`. Not modelled: enchantment glint needs its own render
+/// Vanilla's own thrown-trident is-foil query. Not modelled: enchantment glint needs its own render
 /// type (a scrolling additive layer), which nothing in this engine has, and
 /// `isFoil` is not decoded on this side of the wire either.
 pub fn trident_model() -> EntityModelDef {
@@ -5200,24 +5212,24 @@ pub fn llama_spit_model() -> EntityModelDef {
 }
 
 /// Wind charge / breeze wind charge: two boxes under one `bone` pivot, sheet
-/// 64×32 — transcribed from `WindChargeModel.createBodyLayer`.
+/// 64×32 — transcribed from vanilla's own wind-charge-model body-layer construction.
 ///
 /// `bone`'s two children are named `wind` (a flattened ring, two boxes tilted
 /// 45° about Y) and `wind_charge` (the plain 4×4×4 inner cube). Both entity
-/// types share this rig: `EntityRenderers.java` registers both
-/// `EntityTypes.WIND_CHARGE` and `EntityTypes.BREEZE_WIND_CHARGE` against the
-/// same `WindChargeRenderer`, so `breeze_wind_charge` is an alias in
+/// types share this rig: vanilla's own entity-renderers registration table registers both
+/// both the `wind_charge` and `breeze_wind_charge` entity types against the
+/// same wind-charge renderer, so `breeze_wind_charge` is an alias in
 /// [`canonical_model_name_for_type`](crate::entity::canonical_model_name_for_type)
 /// rather than a second corpus entry — the same shape as `Bogged` → `skeleton`.
 ///
 /// # What this rig does not carry
 ///
-/// `WindChargeModel.setupAnim` spins `wind_charge` and `wind` in opposite
+/// Vanilla's own wind-charge-model per-frame pose step spins `wind_charge` and `wind` in opposite
 /// directions at 16°/tick, driven by `ageInTicks`; there is no per-tick clock
 /// plumbed to a corpus rig's parts here (the same gap [`shulker_bullet_model`]
 /// documents for its own three-axis tumble), so both parts are baked at their
 /// rest pose. And unlike every other entry in this table,
-/// `WindChargeRenderer.submit` applies **neither** `scale(-1, -1, 1)` nor any
+/// Vanilla's own wind-charge-renderer submit step applies **neither** `scale(-1, -1, 1)` nor any
 /// `mulPose` rotation — it submits the model at the dispatcher's bare
 /// translate, so the vanilla box union does not turn to face the entity's
 /// direction of travel at all, only the (unported) internal spin moves it.
@@ -5756,7 +5768,7 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         },
         // Tier 2: common overworld/hostile expansion. Texture-only variants reuse
         // an existing builder because vanilla renders them with the same model
-        // class. Where vanilla applies a `MeshTransformer.scaling(..)` to the
+        // class. Where vanilla applies a mesh-transformer scaling to the
         // layer (baked into the mesh, not the renderer), we wrap the base builder
         // in `scaled(..)` so the geometry carries the same size.
         EntityModelEntry {
@@ -5919,7 +5931,7 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         // cat/wolf/ocelot and parrot are deferred pending the texture-variant
         // seam (see the module banner above `end_crystal_model`). item_frame
         // is intentionally absent: vanilla resolves it via a block-model JSON
-        // (`ItemFrameRenderer`/`BlockModelResolver`), not a `ModelPart`
+        // (vanilla's own item-frame renderer/block-model resolver), not a `ModelPart`
         // `LayerDefinition`, so it does not fit `CubeDef`'s single-tex_offset
         // box-unwrap primitive without extending it or routing through the
         // block-model pipeline instead. ---
@@ -6021,11 +6033,12 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         },
         EntityModelEntry {
             name: "tropical_fish",
-            // `TropicalFishRenderer` pairs `TropicalFishLargeModel` (this
-            // entry's geometry, chosen to avoid `TropicalFishSmallModel`'s
+            // vanilla's own tropical-fish renderer pairs its own large
+            // tropical-fish model (this
+            // entry's geometry, chosen to avoid the small model's
             // negative texOffs) with `tropical_b.png`, not `tropical_a.png`
             // (that's the small model's texture) — confirmed directly against
-            // `TropicalFishRenderer.getTextureLocation`.
+            // vanilla's own tropical-fish-renderer texture-location query.
             texture: EntityTexture::Fixed("entity/fish/tropical_b"),
             build: tropical_fish_model,
         },
@@ -6307,7 +6320,7 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         // `entity_model_matrix` (see the "Projectiles" section above) ----
         EntityModelEntry {
             name: "arrow",
-            // `TippableArrowRenderer.NORMAL_ARROW_LOCATION`. The tipped sheet
+            // Vanilla's own tippable-arrow-renderer normal-arrow-location constant. The tipped sheet
             // (`arrow_tipped`) is a second, potion-colour-driven texture chosen
             // by `state.isTipped`; that bit is not decoded here, so an
             // arrow-of-harming draws as a plain arrow rather than as a wrongly
@@ -6317,7 +6330,7 @@ pub fn entity_models() -> Vec<EntityModelEntry> {
         },
         EntityModelEntry {
             name: "spectral_arrow",
-            // `SpectralArrowRenderer.SPECTRAL_ARROW_LOCATION`. Same rig, own
+            // Vanilla's own spectral-arrow-renderer spectral-arrow-location constant. Same rig, own
             // sheet — a sibling of `arrow`, not a variant of it, because vanilla
             // picks it by *renderer class* rather than by entity state.
             texture: EntityTexture::Fixed("entity/projectiles/arrow_spectral"),
@@ -6348,7 +6361,7 @@ mod tests {
         assert_eq!((entry.build)(), boat_water_patch_model());
     }
 
-    /// **Both hypotheses, from the real vanilla source.** `BoatModel.createWaterPatch`
+    /// **Both hypotheses, from the real vanilla source.** vanilla's own boat model's water-patch construction
     /// (`.cache/mc/26.2/client-src`) builds the *same* box `boat_hull`'s own
     /// `"bottom"` child does — `addBox(-14, -9, -3, 28, 16, 3)` at `texOffs(0, 0)`
     /// — but at pose `offsetAndRotation(0, -3, 1, PI/2, 0, 0)`, where `"bottom"`
@@ -6398,7 +6411,7 @@ mod tests {
         assert!((patch.pose.z_rot - bottom.pose.z_rot).abs() < 1e-6, "z rotation must match");
 
         // The box itself: bit-identical origin/size/tex_offset to `"bottom"`'s,
-        // per `BoatModel.createWaterPatch`'s own `texOffs(0, 0).addBox(-14, -9,
+        // per vanilla's own boat model's water-patch construction's own `texOffs(0, 0).addBox(-14, -9,
         // -3, 28, 16, 3)` — the same literal `addBox` call `addCommonParts`
         // makes for `"bottom"`.
         assert_eq!(patch.cubes.len(), 1, "the patch is one box, not the whole hull");
@@ -6414,7 +6427,7 @@ mod tests {
     }
 
     /// The negative control this pair needs: `chest_boat_model` must **not**
-    /// carry its own water-patch child — vanilla's `BoatRenderer` submits the
+    /// carry its own water-patch child — vanilla's own boat renderer submits the
     /// mask as a second model entirely, not folded into either boat variant's
     /// own part tree (see `boat_water_patch_model`'s doc for why it is a
     /// separate corpus entry).
