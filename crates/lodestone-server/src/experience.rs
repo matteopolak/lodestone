@@ -2,12 +2,10 @@
 //!
 //! # What it is
 //!
-//! [`PlayerExperience`] is vanilla's `Player.experienceLevel` /
-//! `experienceProgress` / `totalExperience` triple with
-//! [`give_points`](PlayerExperience::give_points) transcribed from
-//! `Player.giveExperiencePoints`; [`orb_denominations`] is
-//! `ExperienceOrb.awardWithDirection`'s splitting loop; [`level_up_cost`] is
-//! `Player.getXpNeededForNextLevel`.
+//! [`PlayerExperience`] is vanilla's own level / progress / total-points triple, with
+//! [`give_points`](PlayerExperience::give_points) transcribed from the real
+//! give-experience-points rule; [`orb_denominations`] is the real orb-award
+//! splitting loop; [`level_up_cost`] is the real cost-of-next-level rule.
 //!
 //! Everything here is pure arithmetic over integers and one `f32`. There is no
 //! entity, no world and no RNG — see "What is not here" for why the orb *entity* is
@@ -17,15 +15,9 @@
 //!
 //! ## The level curve is three regimes, and the boundaries are the bug
 //!
-//! `getXpNeededForNextLevel`:
-//!
-//! ```java
-//! if (this.experienceLevel >= 30) {
-//!    return 112 + (this.experienceLevel - 30) * 9;
-//! } else {
-//!    return this.experienceLevel >= 15 ? 37 + (this.experienceLevel - 15) * 5 : 7 + this.experienceLevel * 2;
-//! }
-//! ```
+//! The real cost-of-next-level rule is a three-way branch on the *current* level:
+//! at or above 30 the cost is `112 + (level - 30) * 9`; otherwise, at or above 15,
+//! it is `37 + (level - 15) * 5`; otherwise it is `7 + level * 2`.
 //!
 //! | level | cost of the *next* level |
 //! |---|---|
@@ -44,17 +36,10 @@
 //!
 //! ## Orb denominations are a fixed ladder, not a division
 //!
-//! `ExperienceOrb.getExperienceValue` returns the largest entry of
-//! `[2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3, 1]` that is `<= maxValue`, and
-//! `awardWithDirection` loops, subtracting each denomination it takes:
-//!
-//! ```java
-//! while (amount > 0) {
-//!    int newCount = getExperienceValue(amount);
-//!    amount -= newCount;
-//!    …spawn an orb worth newCount…
-//! }
-//! ```
+//! The real largest-denomination rule returns the largest entry of
+//! `[2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3, 1]` that is `<= maxValue`, and the
+//! real orb-award rule loops, subtracting each denomination it takes, until nothing
+//! is left to spawn.
 //!
 //! So it is **greedy change-making over an irregular ladder**, not `amount / cap`.
 //! An award of 100 becomes `73 + 17 + 7 + 3` — four orbs, and the fourth is `3`
@@ -67,15 +52,10 @@
 //!
 //! ## `give_points` is two `while` loops, and the inner arithmetic is asymmetric
 //!
-//! ```java
-//! this.experienceProgress += (float)i / this.getXpNeededForNextLevel();
-//! this.totalExperience = Mth.clamp(this.totalExperience + i, 0, Integer.MAX_VALUE);
-//! while (this.experienceProgress >= 1.0F) {
-//!    this.experienceProgress = (this.experienceProgress - 1.0F) * this.getXpNeededForNextLevel();
-//!    this.giveExperienceLevels(1);
-//!    this.experienceProgress = this.experienceProgress / this.getXpNeededForNextLevel();
-//! }
-//! ```
+//! The real give-experience-points rule adds the points to progress as a fraction of
+//! the current level's cost, clamps total points into range, and then — while
+//! progress is `>= 1.0` — re-expresses the overflow in points at the *old* cost,
+//! increments the level, and divides back down by the *new* cost.
 //!
 //! The carry is **re-expressed in the new level's units**: the overflow fraction is
 //! multiplied back by the *old* cost to recover points, the level increments, and it
@@ -105,7 +85,7 @@
 //!
 //! * **A new XP source**: call [`PlayerExperience::give_points`] and send the result
 //!   with `ServerProtocol::encode_set_experience`. Do not add a second curve.
-//! * **Spending XP** (enchanting): vanilla's `onEnchantmentPerformed` subtracts
+//! * **Spending XP** (enchanting): the real enchantment-cost-spend rule subtracts
 //!   *levels* and zeroes everything on underflow — [`PlayerExperience::take_levels`].
 //! * **Persistence**: `XpP` / `XpLevel` / `XpTotal`, vanilla's own field names
 //!   ([`PlayerExperience::restored`]).
@@ -115,24 +95,23 @@
 //! None. Pure arithmetic, so it is usable from the tick thread, a connection task or
 //! a test with no setup.
 
-/// The `experienceLevel` at or above which the top regime applies
-/// (`getXpNeededForNextLevel`'s `>= 30`). **Inclusive** — level 30 is in the top
-/// regime, not the middle one.
+/// The level at or above which the top regime of the real cost-of-next-level rule
+/// applies. **Inclusive** — level 30 is in the top regime, not the middle one.
 pub const TOP_REGIME_LEVEL: i32 = 30;
 
-/// The `experienceLevel` at or above which the middle regime applies (`>= 15`).
-/// Inclusive, for the same reason.
+/// The level at or above which the middle regime applies (`>= 15`). Inclusive, for
+/// the same reason.
 pub const MIDDLE_REGIME_LEVEL: i32 = 15;
 
-/// The denomination ladder from `ExperienceOrb.getExperienceValue`, largest first —
+/// The denomination ladder from the real largest-denomination rule, largest first —
 /// the order [`orb_value`] scans it in.
 ///
 /// Transcribed, not generated: the ratios are irregular (`3 → 7` is ×2.33, `7 → 17`
 /// is ×2.43, `17 → 37` is ×2.18), so no formula produces it.
 pub const ORB_DENOMINATIONS: [i32; 11] = [2477, 1237, 617, 307, 149, 73, 37, 17, 7, 3, 1];
 
-/// The points needed to advance *from* `level` to `level + 1` —
-/// `Player.getXpNeededForNextLevel`.
+/// The points needed to advance *from* `level` to `level + 1` — the real
+/// cost-of-next-level rule.
 ///
 /// A negative level is treated as `0`, which is where
 /// [`PlayerExperience`]'s own clamping keeps it anyway; returning something for a
@@ -160,8 +139,8 @@ pub fn total_points_for_level(level: i32) -> i32 {
     (0..level.max(0)).map(level_up_cost).sum()
 }
 
-/// The largest denomination not exceeding `max_value` —
-/// `ExperienceOrb.getExperienceValue`.
+/// The largest denomination not exceeding `max_value` — the real
+/// largest-denomination rule.
 ///
 /// `0` for a non-positive input, which vanilla never asks for (its caller's `while
 /// (amount > 0)` guards it) but which a Rust caller can.
@@ -176,18 +155,18 @@ pub fn orb_value(max_value: i32) -> i32 {
         .unwrap_or(1)
 }
 
-/// The orb values `ExperienceOrb.awardWithDirection` would spawn for `amount`, in
-/// the order it spawns them (largest first).
+/// The orb values the real orb-award rule would spawn for `amount`, in the order it
+/// spawns them (largest first).
 ///
 /// Greedy over [`ORB_DENOMINATIONS`], **not** `amount / cap`: 100 becomes
 /// `[73, 17, 7, 3]`, four orbs, and the last is `3` because `3` is a denomination in
 /// its own right. Orb count is player-visible, so this is a behavioural difference
 /// rather than a representational one.
 ///
-/// Vanilla's loop also tries to merge into a nearby existing orb before spawning
-/// (`tryMergeToExisting`), which depends on entity ids and a `nextInt(40)` draw —
-/// see the module doc's "What is not here". This function is the pre-merge
-/// denomination list, which is what a spawner needs as input.
+/// Vanilla's loop also tries to merge into a nearby existing orb before spawning,
+/// which depends on entity ids and a `next_int(40)` draw — see the module doc's
+/// "What is not here". This function is the pre-merge denomination list, which is
+/// what a spawner needs as input.
 #[must_use]
 pub fn orb_denominations(amount: i32) -> Vec<i32> {
     let mut out = Vec::new();
@@ -201,31 +180,31 @@ pub fn orb_denominations(amount: i32) -> Vec<i32> {
 }
 
 /// The `[min, max]` points a broken block pops, or `None` for a block that pops none —
-/// vanilla's `DropExperienceBlock`'s `xpRange` field, plus the two classes that pass
-/// their own range at the call site.
+/// the real per-block XP-range registration, plus the two block kinds that pass their
+/// own range at the call site.
 ///
 /// # Where the numbers come from
 ///
-/// The `Blocks.java` registrations themselves, read as record definitions:
-/// `new DropExperienceBlock(UniformInt.of(3, 7), p)` for diamond ore and so on. The
-/// deepslate variant of every ore is registered with the same range as the stone one,
-/// which is why they appear in the same arms.
+/// The block registrations themselves, read as record definitions: a uniform
+/// `(3, 7)` range for diamond ore and so on. The deepslate variant of every ore is
+/// registered with the same range as the stone one, which is why they appear in the
+/// same arms.
 ///
 /// | range | blocks | registration |
 /// |---|---|---|
-/// | none | iron, gold, copper ore (and deepslate) | `ConstantInt.of(0)` |
-/// | `0..=1` | nether gold ore | `UniformInt.of(0, 1)` |
-/// | `0..=2` | coal ore, deepslate coal ore | `UniformInt.of(0, 2)` |
-/// | `1..=5` | redstone ore, deepslate redstone ore | `RedStoneOreBlock` passes `UniformInt.of(1, 5)` |
-/// | `2..=5` | lapis ore, nether quartz ore (and deepslate lapis) | `UniformInt.of(2, 5)` |
-/// | `3..=7` | diamond ore, emerald ore (and deepslate) | `UniformInt.of(3, 7)` |
-/// | `15..=43` | spawner | `SpawnerBlock` rolls `15 + nextInt(15) + nextInt(15)` |
+/// | none | iron, gold, copper ore (and deepslate) | constant `0` |
+/// | `0..=1` | nether gold ore | uniform `(0, 1)` |
+/// | `0..=2` | coal ore, deepslate coal ore | uniform `(0, 2)` |
+/// | `1..=5` | redstone ore, deepslate redstone ore | uniform `(1, 5)` |
+/// | `2..=5` | lapis ore, nether quartz ore (and deepslate lapis) | uniform `(2, 5)` |
+/// | `3..=7` | diamond ore, emerald ore (and deepslate) | uniform `(3, 7)` |
+/// | `15..=43` | spawner | two draws of `15 + next_int(15)` summed |
 ///
-/// **The zero-XP ores are the trap.** Iron, gold and copper ore *are*
-/// `DropExperienceBlock`s — they take the class and pass a constant `0`, because they
-/// drop raw ore rather than a finished resource. "It is a DropExperienceBlock, so it
-/// drops experience" is the wrong inference, and the number of blocks it is wrong for
-/// is six.
+/// **The zero-XP ores are the trap.** Iron, gold and copper ore *are* registered
+/// with the same XP-range mechanism as every paying ore — they just pass a constant
+/// `0`, because they drop raw ore rather than a finished resource. "It carries an
+/// XP-range registration, so it drops experience" is the wrong inference, and the
+/// number of blocks it is wrong for is six.
 ///
 /// The spawner is not a uniform range at all: two independent `nextInt(15)` draws sum
 /// to a **triangular** distribution over `15..=43`, so a single `next_int(29) + 15`
@@ -251,18 +230,18 @@ pub fn block_break_experience_range(block_name: &str) -> Option<(i32, i32)> {
     }
 }
 
-/// `SpawnerBlock.spawnAfterBreak`'s constant term.
+/// The real spawner-break XP rule's constant term.
 const SPAWNER_XP_BASE: i32 = 15;
 
-/// The bound of each of the spawner's **two** `nextInt` draws.
+/// The bound of each of the spawner's **two** bounded-random-int draws.
 const SPAWNER_XP_DRAW_BOUND: i32 = 15;
 
 /// One roll of a broken block's experience, in vanilla's own draw shape.
 ///
-/// `UniformInt.sample` is `min + nextInt(max - min + 1)`; dropping the `+ 1` makes the
-/// top of every range unreachable, which no "does mining an ore give XP" assertion could
-/// see. The spawner is the exception and takes two draws — see
-/// [`block_break_experience_range`].
+/// The real uniform-sample rule is `min + next_int(max - min + 1)`; dropping the
+/// `+ 1` makes the top of every range unreachable, which no "does mining an ore
+/// give XP" assertion could see. The spawner is the exception and takes two draws —
+/// see [`block_break_experience_range`].
 ///
 /// `next_int` is passed as a closure rather than an RNG type so this stays free of
 /// `crate::mob_spawn`, keeping this module's "pure arithmetic, no dependencies"
@@ -295,21 +274,19 @@ pub struct PlayerExperience {
 }
 
 impl PlayerExperience {
-    /// The player's level (`experienceLevel`).
+    /// The player's level.
     #[must_use]
     pub fn level(&self) -> i32 {
         self.level
     }
 
-    /// Progress towards the next level, `0.0..1.0` (`experienceProgress`) — what the
-    /// XP bar fills to.
+    /// Progress towards the next level, `0.0..1.0` — what the XP bar fills to.
     #[must_use]
     pub fn progress(&self) -> f32 {
         self.progress
     }
 
-    /// Lifetime points (`totalExperience`). See this type's own doc for why it is not
-    /// derived.
+    /// Lifetime points. See this type's own doc for why it is not derived.
     #[must_use]
     pub fn total(&self) -> i32 {
         self.total
@@ -322,8 +299,7 @@ impl PlayerExperience {
     }
 
     /// `/xp query <target> points`'s own reading — **not** [`total`](Self::total).
-    /// `ExperienceCommand.java`'s `Type.POINTS.query` is
-    /// `Mth.floor(p.experienceProgress * p.getXpNeededForNextLevel())`: points
+    /// The real points-query rule floors `progress * next_level_cost`: points
     /// *within the current level*, i.e. how far the bar has filled, converted
     /// back to an integer count. A player who has spent XP enchanting can have
     /// a `total` far below what their level implies, which is exactly why this
@@ -333,8 +309,8 @@ impl PlayerExperience {
         (self.progress * self.next_level_cost() as f32).floor() as i32
     }
 
-    /// Awards `points` — `Player.giveExperiencePoints`, transcribed including the
-    /// carry re-expression that makes a large single award level correctly.
+    /// Awards `points` — the real give-experience-points rule, transcribed including
+    /// the carry re-expression that makes a large single award level correctly.
     ///
     /// Returns the number of levels gained (`0` if the award only moved the bar), so
     /// a caller can decide whether to play the level-up sound without diffing the
@@ -353,8 +329,8 @@ impl PlayerExperience {
                 self.level -= 1;
                 self.progress = 1.0 + remaining / self.next_level_cost() as f32;
             } else {
-                // Vanilla's `giveExperienceLevels(-1)` clamps the level at 0 and
-                // zeroes progress *and* total, so a player cannot go into debt.
+                // Losing a level below 0 clamps the level at 0 and zeroes progress
+                // *and* total, so a player cannot go into debt.
                 self.level = 0;
                 self.progress = 0.0;
                 self.total = 0;
@@ -374,8 +350,8 @@ impl PlayerExperience {
         self.level - before
     }
 
-    /// Spends `levels` — `Player.onEnchantmentPerformed`, which zeroes progress and
-    /// total on underflow rather than clamping only the level.
+    /// Spends `levels` — the real enchantment-cost-spend rule, which zeroes progress
+    /// and total on underflow rather than clamping only the level.
     pub fn take_levels(&mut self, levels: i32) {
         self.level -= levels;
         if self.level < 0 {
@@ -585,7 +561,7 @@ mod tests {
     }
 
     /// Spending levels zeroes progress and total on underflow rather than clamping
-    /// only the level — vanilla's `onEnchantmentPerformed`, and the asymmetry a
+    /// only the level — the real enchantment-cost-spend rule, and the asymmetry a
     /// "clamp at zero" implementation gets wrong (it would leave a full bar at
     /// level 0).
     #[test]
@@ -627,12 +603,13 @@ mod tests {
         assert_eq!(broke.total(), 0);
     }
 
-    /// **The six ores that pop no experience**, which is the arm a "it is a
-    /// `DropExperienceBlock`, so it drops experience" reading gets wrong.
+    /// **The six ores that pop no experience**, which is the arm a "it carries an
+    /// XP-range registration, so it drops experience" reading gets wrong.
     ///
-    /// Iron, gold and copper ore — and all three deepslate variants — are registered as
-    /// `DropExperienceBlock` with `ConstantInt.of(0)`, because they drop raw ore rather
-    /// than a finished resource. Asserting only the ores that *do* pay would leave six
+    /// Iron, gold and copper ore — and all three deepslate variants — are registered
+    /// with the same XP-range mechanism as every paying ore, with a constant `0`,
+    /// because they drop raw ore rather than a finished resource. Asserting only the
+    /// ores that *do* pay would leave six
     /// blocks silently rewarding XP forever, and nothing about a coal-ore test would
     /// notice.
     #[test]
@@ -701,19 +678,21 @@ mod tests {
         );
     }
 
-    /// **The inclusive upper bound of a `UniformInt`, which is the off-by-one no
+    /// **The inclusive upper bound of a uniform-int range, which is the off-by-one no
     /// "mining gives XP" assertion can see.**
     ///
-    /// `UniformInt.sample` is `min + nextInt(max - min + 1)`. Dropping the `+ 1` makes
-    /// the top of every range unreachable — diamond ore would pay 3..=6 instead of
-    /// 3..=7, a difference nobody notices by eye. Both hypotheses are driven here from
-    /// outside constants: a stub `next_int` returning `bound - 1` (its largest legal
-    /// value) must produce **max**, and one returning `0` must produce **min**.
+    /// The real uniform-sample rule is `min + next_int(max - min + 1)`. Dropping the
+    /// `+ 1` makes the top of every range unreachable — diamond ore would pay 3..=6
+    /// instead of 3..=7, a difference nobody notices by eye. Both hypotheses are
+    /// driven here from outside constants: a stub `next_int` returning `bound - 1`
+    /// (its largest legal value) must produce **max**, and one returning `0` must
+    /// produce **min**.
     ///
-    /// The spawner is the same assertion against a **two-draw** roll: `15 + nextInt(15)
-    /// + nextInt(15)`, so the extremes are 15 and 43. A single `15 + next_int(29)` gives
-    /// those same two bounds with a uniform distribution instead of a triangular one,
-    /// which is why the draw *count* is asserted rather than just the range.
+    /// The spawner is the same assertion against a **two-draw** roll:
+    /// `15 + next_int(15) + next_int(15)`, so the extremes are 15 and 43. A single
+    /// `15 + next_int(29)` gives those same two bounds with a uniform distribution
+    /// instead of a triangular one, which is why the draw *count* is asserted rather
+    /// than just the range.
     #[test]
     fn a_uniform_roll_can_reach_both_ends_of_its_range() {
         let mut mismatches: Vec<String> = Vec::new();
