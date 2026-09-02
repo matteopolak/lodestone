@@ -636,7 +636,7 @@ impl Goal for GhastFireballGoal {
 
 // -- builders ----------------------------------------------------------------
 
-/// `RangedBowAttackGoal<>(this, 1.0, 20, 15.0F)`
+/// Vanilla's own bow-attack goal
 /// (vanilla's own bow-goal field), registered at priority 4 by
 /// vanilla's own weapon-reassessment step.
 ///
@@ -741,7 +741,7 @@ fn witch_potion(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// (`dist <= 2.0 ? 0.45F : 0.75F`).
 const WITCH_POTION_POWER: f64 = 0.75;
 
-/// `RangedCrossbowAttackGoal<>(this, 1.0, 8.0F)`
+/// Vanilla's own crossbow-attack goal
 /// (vanilla's own pillager registration), firing at `1.6F`
 /// (its own ranged-attack step, which calls a shared crossbow-attack helper at `1.6F`).
 ///
@@ -777,7 +777,7 @@ fn crossbow_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// pillager bolts hit twice as hard as vanilla's.
 const CROSSBOW_CHARGE_TICKS: i32 = 25;
 
-/// `PatrollingMonster.LongDistancePatrolGoal<>(this, 0.7, 0.595)`
+/// Vanilla's own long-distance-patrol goal, factors `(0.7, 0.595)`
 /// (vanilla's own patrolling-monster registration) — `(speedModifier, leaderSpeedModifier)`,
 /// the same kind of `MOVEMENT_SPEED` multiplier every other builder in this
 /// roster scales by `ctx.speed`. [`LongDistancePatrolGoal::new`]'s own doc
@@ -807,7 +807,7 @@ pub static BLAZE: &[Registration] = &[
 
 /// Vanilla's own snow-golem goal registration. No base-class call.
 pub static SNOW_GOLEM: &[Registration] = &[
-    // `NearestAttackableTargetGoal<>(this, Mob.class, 10, true, false, target -> target instanceof Enemy)`
+    // Vanilla's own snow-golem target-acquisition goal
     // (vanilla's own snow-golem registration) — a snow golem hunts *hostile mobs*, not players. Our
     // `NearestAttackableTargetGoal` resolves through
     // `MobController::find_nearest_target`, which the server answers with the

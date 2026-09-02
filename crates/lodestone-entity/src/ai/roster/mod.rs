@@ -281,14 +281,14 @@ pub fn random_look_around(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RandomLookAroundGoal::new())
 }
 
-/// Vanilla's default `LookAtPlayerGoal` probability: the three-argument
-/// constructor `LookAtPlayerGoal(mob, type, lookDistance)` forwards `0.02F`
-/// (its three-argument constructor delegating to the four-argument one), and
+/// Vanilla's default `LookAtPlayerGoal` probability: its own three-argument
+/// constructor forwards `0.02F`
+/// to its own four-argument constructor, and
 /// every registration in this roster uses that three-argument form.
 const LOOK_PROBABILITY: f32 = 0.02;
 
-/// `LookAtPlayerGoal(this, Player, 8.0F)` — every hostile registration in
-/// the roster uses `8.0F` (the creeper, spider, abstract skeleton and zombie
+/// The look distance `8.0` — every hostile registration in
+/// the roster uses it (the creeper, spider, abstract skeleton and zombie
 /// families all register it this way).
 ///
 /// There are two of these rather than one parameterised builder because a
@@ -299,14 +299,14 @@ pub fn look_at_player_8(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(LookAtPlayerGoal::new(8.0, LOOK_PROBABILITY))
 }
 
-/// `LookAtPlayerGoal(this, Player, 6.0F)` — every farm-animal registration
-/// uses `6.0F` (the cow, sheep, pig and chicken families all register it this
+/// The look distance `6.0` — every farm-animal registration
+/// uses it (the cow, sheep, pig and chicken families all register it this
 /// way).
 pub fn look_at_player_6(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(LookAtPlayerGoal::new(6.0, LOOK_PROBABILITY))
 }
 
-/// `WaterAvoidingRandomStrollGoal(this, 1.0)` — the most common registration in
+/// The stroll speed factor `1.0` — the most common registration in
 /// the roster (the zombie, abstract skeleton, cow, sheep, pig and chicken
 /// families all register it).
 ///
@@ -318,8 +318,8 @@ pub fn stroll(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RandomStrollGoal::new(ctx.speed))
 }
 
-/// `AvoidEntityGoal<>(this, X, 6.0F, 1.0, 1.2)` — every registration in the
-/// roster uses the same `6.0F` radius and `1.0` walk modifier
+/// The avoid radius `6.0` and walk-speed modifier `1.0` — every registration in the
+/// roster uses the same figures
 /// (the creeper, spider and abstract skeleton families all register it this
 /// way).
 ///
@@ -332,7 +332,7 @@ pub fn avoid_entity(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(AvoidEntityGoal::new(6.0, ctx.speed))
 }
 
-/// `MeleeAttackGoal(this, 1.0, false)` — the creeper's own registration, and
+/// The melee speed factor `1.0` — the creeper's own registration, and
 /// via subclasses the zombie's own attack-goal registration
 /// and the spider's own attack-goal registration (which passes `1.0` up to
 /// `MeleeAttackGoal`).
@@ -372,7 +372,7 @@ pub fn owner_hurt_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(OwnerHurtTargetGoal::new())
 }
 
-/// `NearestAttackableTargetGoal<>(this, Player, true)` — a target-selector
+/// Vanilla's own player-targeting target-selector
 /// goal.
 ///
 /// Ours is not generic over a target class: it asks
@@ -384,7 +384,7 @@ pub fn nearest_attackable_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(NearestAttackableTargetGoal::new())
 }
 
-/// `BreedGoal(this, 1.0)` — every farm animal registers it at exactly `1.0`
+/// The breed speed factor `1.0` — every farm animal registers it at exactly that value
 /// (the cow, sheep, pig and chicken families), only the priority
 /// differs.
 pub fn breed_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {

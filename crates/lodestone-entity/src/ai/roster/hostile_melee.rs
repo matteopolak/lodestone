@@ -185,7 +185,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 pub static CREEPER: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
     Registration::goal(2, "SwellGoal", swell),
-    // `AvoidEntityGoal<>(this, Ocelot.class, 6.0F, 1.0, 1.2)`. Vanilla's last two
+    // Vanilla's own creeper avoid-ocelot goal. Vanilla's last two
     // arguments are walk and *sprint* speed modifiers; our `AvoidEntityGoal` has
     // a single speed, so it takes the walk tier (1.0) and the panic-sprint tier
     // is not modelled.
@@ -209,11 +209,11 @@ pub static CREEPER: &[Registration] = &[
 /// Vanilla's own spider goal registration.
 pub static SPIDER: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
-    // `AvoidEntityGoal<>(this, Armadillo.class, 6.0F, 1.0, 1.2, e -> !e.isScared())`.
+    // Vanilla's own spider avoid-armadillo goal, radius `6.0`.
     // The `isScared` filter is not modelled — see `mobs.rs`'s `avoided_species`,
     // which discloses it can only make a spider flee slightly more often.
     Registration::goal(2, "AvoidEntityGoal(Armadillo)", avoid_entity),
-    // `LeapAtTargetGoal(this, 0.4F)` — no equivalent goal exists; a spider will
+    // Vanilla's own leap-at-target goal — no equivalent goal exists; a spider will
     // walk into melee range instead of pouncing.
     Registration::missing(Selector::Goal, 3, "LeapAtTargetGoal"),
     // Vanilla's own spider attack goal extends `MeleeAttackGoal`; its only
@@ -248,14 +248,14 @@ pub static ZOMBIE: &[Registration] = &[
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(8, "RandomLookAroundGoal", random_look_around),
-    // `SpearUseGoal<>(this, 1.0, 1.0, 10.0F, 2.0F)` — new in 26.2, and a ranged
+    // Vanilla's own spear-use goal — new in 26.2, and a ranged
     // goal, so it belongs to the ranged-attack roster (`super::ranged`) rather
     // than here.
     Registration::missing(Selector::Goal, 2, "SpearUseGoal"),
-    // `ZombieAttackGoal(this, 1.0, false)` extends `MeleeAttackGoal`, adding only
+    // Vanilla's own zombie melee goal extends `MeleeAttackGoal`, adding only
     // the raised-arms metadata flag while it runs.
     Registration::goal(3, "ZombieAttackGoal", melee_attack),
-    // `MoveThroughVillageGoal(this, 1.0, true, 4, this::canBreakDoors)` — needs
+    // Vanilla's own move-through-village goal — needs
     // village POI data that does not exist here.
     Registration::missing(Selector::Goal, 6, "MoveThroughVillageGoal"),
     Registration::goal(7, "WaterAvoidingRandomStrollGoal", stroll),
@@ -456,13 +456,13 @@ pub static WITHER_SKELETON: &[Registration] = &[
     Registration::missing(Selector::Target, 3, "NearestAttackableTargetGoal(Turtle)"),
 ];
 
-/// `WaterAvoidingRandomStrollGoal(this, 0.8)` — the creeper's own registration
+/// The stroll speed factor `0.8` — the creeper's own registration
 /// and the spider's own registration.
 fn stroll_0_8(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RandomStrollGoal::new(ctx.speed * 0.8))
 }
 
-/// `MeleeAttackGoal(this, 1.2, false)` — `AbstractSkeleton`'s `meleeGoal` field,
+/// The melee speed factor `1.2` — vanilla's own skeleton-family melee-goal field,
 /// faster than the 1.0 every other species in this family uses.
 ///
 /// Declared on `AbstractSkeleton` but reachable only by [`WITHER_SKELETON`]: the
