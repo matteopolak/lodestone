@@ -11622,7 +11622,7 @@ where
                         .is_some()
                 {
                     *inventory = next;
-                    // `Villager.notifyTrade`'s `onReputationEventFrom`: a
+                    // Vanilla's own villager notify-trade routine's on-reputation-event-from call: a
                     // completed trade is the one real production producer
                     // of `Trading` gossip, matching
                     // `MobSim::attack_from_player`'s villager-hit case.
@@ -11664,7 +11664,7 @@ where
                 }
             }
         }
-        // Issues #253-#255's last mile: `AnvilMenu.setItemName`. See
+        // Issues #253-#255's last mile: vanilla's own anvil-menu item-name setter. See
         // `apply_rename_item`'s own doc for the gate and what gets resent.
         ServerBound::RenameItem { name } => {
             let creative = *game_mode == GameMode::Creative;
@@ -11672,16 +11672,16 @@ where
                 apply(conn, state, directive).await?;
             }
         }
-        // Issue #48's remainder, wire-decode half. `ServerGamePacketListenerImpl
-        // .handleSetCommandBlock`: swap the block to the requested mode
+        // Issue #48's remainder, wire-decode half. Vanilla's own
+        // set-command-block handler: swap the block to the requested mode
         // (preserving `FACING`), write `conditional`, then update the entity's
         // command/track-output/"Always Active" fields. See
         // `crate::command_block`'s own module doc for what still needs a real
         // redstone signal instead of this packet, and for why "Always Active"
         // scheduling here (via `on_automatic_changed`) is faithful to vanilla's
-        // own `CommandBlockEntity.setAutomatic` rather than an addition.
+        // own command-block-entity set-automatic routine rather than an addition.
         ServerBound::SetCommandBlock { pos, command, mode, track_output, conditional, automatic } => {
-            // `Player.canUseGameMasterBlocks`: creative mode (`abilities
+            // Vanilla's own can-use-game-master-blocks check: creative mode (`abilities
             // .instabuild`, which `Abilities::for_mode` sets only for
             // `GameMode::Creative`) **and** `Permissions.COMMANDS_GAMEMASTER`
             // (level 2) — both, not either. This was a disclosed omission
@@ -11734,7 +11734,7 @@ where
                 }
             }
         }
-        // Issue #616's remainder. `ServerGamePacketListenerImpl.handleSignUpdate`:
+        // Issue #616's remainder. Vanilla's own sign-update handler:
         // strip legacy formatting codes from every line, then
         // `updateSignText`'s own gate (not waxed, `editor` matches) decides
         // whether the write actually lands. This crate grants `editor` only
@@ -11752,7 +11752,7 @@ where
         // Issue #616's remainder, `EDIT_BOOK`. See `apply_edit_book`'s own
         // doc for the gate; resent via `CONTAINER_SET_SLOT` on window `0`
         // (the player's own inventory screen, not whatever menu happens to
-        // be open — `handleEditBook` operates on `this.player.getInventory()`
+        // be open — vanilla's own edit-book handler operates on `this.player.getInventory()`
         // directly and never checks `containerMenu`), the same "window 0,
         // state id 0" pattern every other server-initiated inventory-slot
         // write in this function already uses.
@@ -11773,7 +11773,7 @@ where
         // against this slot is what actually reads it
         // (`selected_bundle_item`), mirroring vanilla's own two-step
         // select-then-extract (`ServerboundSelectBundleItemPacket` just
-        // updates `AbstractContainerMenu.selectedBundleItemIndex`; the
+        // updates vanilla's own container-menu selected-bundle-item-index; the
         // extraction happens on the following `PICKUP` click).
         ServerBound::SelectBundleItem { slot_id, selected_item_index } => {
             inventory.set_selected_bundle_item(slot_id, selected_item_index);
@@ -11788,7 +11788,7 @@ where
             }
         }
         // The enchanting table's "choose an offer" button
-        // (`EnchantmentMenu.clickMenuButton`) — issue #253's other last-mile
+        // (vanilla's own enchantment-menu click-menu-button routine) — issue #253's other last-mile
         // gap. See `apply_container_button_click`'s own doc for the pricing
         // and refusal rules.
         ServerBound::ContainerButtonClick { window_id, button_id } => {
@@ -11819,7 +11819,7 @@ where
             }
         }
         // A crafter's per-slot enable/disable toggle
-        // (`ServerGamePacketListenerImpl.handleContainerSlotStateChanged`).
+        // (vanilla's own container-slot-state-changed handler).
         // No directive to send back: `container_sync_tick`'s existing
         // `sync_open_container` diff already re-reads `data_properties()`
         // every 50ms and pushes whatever changed, the same path a furnace's
