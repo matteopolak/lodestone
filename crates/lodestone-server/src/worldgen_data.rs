@@ -1538,7 +1538,7 @@ mod tests {
         let mut total = std::time::Duration::ZERO;
         let mut wall = std::time::Duration::ZERO;
         for (cx, cz) in CHUNKS {
-            let start = web_time::Instant::now();
+            let start = lodestone_time::Instant::now();
             let (column, times) = generator.column_timed(cx, cz);
             wall += start.elapsed();
             assert!(column.non_air_count() > 0);

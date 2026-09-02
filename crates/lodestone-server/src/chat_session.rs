@@ -327,16 +327,13 @@ fn verify(
     false
 }
 
-/// Current wall-clock time in epoch milliseconds, via this crate's existing
-/// portable clock (`web_time`, already a dependency — see this crate's own
+/// Current wall-clock time in epoch milliseconds, via the workspace's portable
+/// clock seam (`lodestone_time::epoch_duration` — see that crate's own
 /// `Cargo.toml` comment on why `std::time::SystemTime::now()` is banned
 /// crate-wide: it compiles and then traps on `wasm32`).
 #[must_use]
 pub fn now_millis() -> i64 {
-    web_time::SystemTime::now()
-        .duration_since(web_time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+    lodestone_time::epoch_duration().as_millis() as i64
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]

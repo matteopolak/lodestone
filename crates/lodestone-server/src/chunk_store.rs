@@ -1764,7 +1764,7 @@ mod tests {
         // fixture-premise trap `touched_column`'s own doc describes, in a second
         // place.
         let column = touched_column(REAL_MIN_Y, REAL_HEIGHT);
-        let started = web_time::Instant::now();
+        let started = lodestone_time::Instant::now();
         const CLONES: u32 = 200;
         for _ in 0..CLONES {
             std::hint::black_box(column.clone());
@@ -2188,7 +2188,7 @@ mod tests {
         let mut total = std::time::Duration::ZERO;
         for i in 0..COLUMNS as i32 {
             let source = crate::overworld_chunk_source(42);
-            let started = web_time::Instant::now();
+            let started = lodestone_time::Instant::now();
             let column = source.column(i * 37, i * 53);
             let elapsed = started.elapsed();
             std::hint::black_box(&column);
@@ -2269,7 +2269,7 @@ mod tests {
         let store = ChunkStore::new(SleepySource { per_column });
         let coords: Vec<(i32, i32)> = (0..8).map(|i| (i, 0)).collect();
 
-        let started = web_time::Instant::now();
+        let started = lodestone_time::Instant::now();
         std::thread::scope(|scope| {
             for chunk in coords.chunks(8 / workers.min(8).max(1)) {
                 let store = &store;

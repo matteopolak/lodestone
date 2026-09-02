@@ -9284,6 +9284,23 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             banned: "tokio::time::Instant",
             allowlist: &["tick.rs"],
         },
+        // This crate's clock now goes through `lodestone_time::` rather than a
+        // direct `web_time::` dependency — `Cargo.toml` no longer lists
+        // `web-time` at all, so a reintroduced bare `web_time::` call would not
+        // even compile. That is not a reason to skip a rule for it: the whole
+        // point of a confinement guard, per the two rules above, is to catch a
+        // regression by name before anyone waits on a build to find it. Empty
+        // allowlist: every legitimate call site in this crate (including
+        // `browser_timer.rs`, migrated alongside the rest — its `BrowserInstant`
+        // alias is `lodestone_time::Instant`, the identical type on every
+        // target) reads `lodestone_time::`, which this qualified `web_time::`
+        // pattern does not match.
+        ConfinementRule {
+            label: "lodestone-server web-time-ban",
+            src_dir: "crates/lodestone-server/src",
+            banned: "web_time::",
+            allowlist: &[],
+        },
         ConfinementRule {
             label: "lodestone-worldgen instant-ban",
             src_dir: "crates/lodestone-worldgen/src",

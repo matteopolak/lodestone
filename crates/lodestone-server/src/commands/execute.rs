@@ -167,7 +167,7 @@
 //! <range>`) needed a new registry, [`crate::commands::stopwatch_store::StopwatchHandle`],
 //! a sibling store on [`crate::world_state::WorldStateHandle`] alongside
 //! `scoreboard`/`team`/`nbt_storage`. Uses
-//! [`crate::chat_session::now_millis`] (`web_time`-backed), never
+//! [`crate::chat_session::now_millis`] (`lodestone_time`-backed), never
 //! `std::time::SystemTime::now` — this crate links into the wasm32 bundle
 //! and that call traps at runtime there. **No persistence**: the real
 //! stopwatch registry is a piece of saved data written to

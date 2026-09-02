@@ -12,7 +12,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
-use web_time::Instant;
+use lodestone_time::Instant;
 
 /// The join path's `PERF INSTRUMENT` clock, which exists so those timers do not
 /// break the `wasm32` build.
