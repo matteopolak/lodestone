@@ -14031,12 +14031,12 @@ mod cat_gift_and_shoulder_tests {
             sim.mobs.iter().filter(|m| m.entity_type.path() == "parrot").count(),
             0,
             "a mounted parrot must be removed from the world, matching vanilla's own \
-             ShoulderRidingEntity.setEntityOnShoulder discard"
+             shoulder-mount setter's discard"
         );
         assert_eq!(sim.shoulder_riders.len(), 1, "the mount must be recorded for its owner");
 
         // The owner falls asleep. The dismount is gated on the 20-tick
-        // minimum ride (`ServerPlayer.timeEntitySatOnShoulder + 20`), so this
+        // minimum ride (vanilla's own per-player shoulder-mount timer plus 20), so this
         // must run well past that before asserting.
         let since = sim.tick_count;
         sim.set_sleeping_players(vec![(owner_entity_id, since)]);
@@ -14140,7 +14140,7 @@ mod cat_block_search_tests {
     }
 
     /// A bed's *foot* part must feed both seams: the sit goal accepts a bed
-    /// foot (`CatSitOnBlockGoal.isValidTarget`'s own third clause) and the
+    /// foot (vanilla's own valid-target check's own third clause) and the
     /// lie goal accepts any bed part.
     #[test]
     fn a_cat_finds_a_nearby_bed_foot_for_both_seams() {
@@ -14157,9 +14157,9 @@ mod cat_block_search_tests {
     }
 
     /// A bed's *head* part must be excluded from the sit seam
-    /// (`CatSitOnBlockGoal.isValidTarget`'s `v != BedPart.HEAD` clause) but
+    /// (vanilla's own valid-target check's "not the head part" clause) but
     /// still accepted by the lie seam, which makes no part distinction at
-    /// all (`CatLieOnBedGoal.isValidTarget`).
+    /// all (vanilla's own lie-goal valid-target check).
     #[test]
     fn a_beds_head_part_is_excluded_from_sitting_but_not_from_lying() {
         let mut world = flat_world();
@@ -14174,8 +14174,8 @@ mod cat_block_search_tests {
         assert!(cat.mob.cat_bed_target().is_some(), "a bed head is still a valid lie target");
     }
 
-    /// An unlit furnace is not a valid sit target — only `FurnaceBlock.LIT`
-    /// qualifies (`CatSitOnBlockGoal.isValidTarget`'s second clause).
+    /// An unlit furnace is not a valid sit target — only the lit furnace
+    /// state qualifies (vanilla's own valid-target check's second clause).
     #[test]
     fn an_unlit_furnace_is_not_a_sit_target_but_a_lit_one_is() {
         let mut world = flat_world();
@@ -14201,8 +14201,8 @@ mod cat_block_search_tests {
     }
 
     /// A chest with no headroom (a solid block directly above it) must be
-    /// rejected — `CatSitOnBlockGoal.isValidTarget`'s
-    /// `level.isEmptyBlock(pos.above())` clause.
+    /// rejected — vanilla's own valid-target check's
+    /// "is empty block one above" clause.
     #[test]
     fn a_chest_with_no_headroom_is_rejected() {
         let mut world = flat_world();
@@ -14498,8 +14498,8 @@ mod villager_schedule_tests {
 
     /// The schedule's own negative control: a villager with **no** claimed
     /// job site (nothing nearby to claim) never becomes `WORK`-eligible —
-    /// `Villager.java`'s own `ImmutableSet.of(Pair.of(JOB_SITE,
-    /// VALUE_PRESENT))` — so it stays wherever `IDLE`'s random stroll leaves
+    /// vanilla's own generic villager class's own "job site memory must be
+    /// present" activity requirement — so it stays wherever `IDLE`'s random stroll leaves
     /// it: never *reliably* walking toward a fixed faraway point regardless
     /// of the clock. Asserted as "never claims a workstation", the
     /// discriminating fact this control actually has available deterministically
@@ -14555,8 +14555,8 @@ mod vibration_substrate_tests {
     /// real `MobSim::spawn_species` entry point (not `species_shape` in
     /// isolation) and reads back the `MobShape` a `NavigatingMob` would
     /// actually path with. A vindicator opening a door is the headline case
-    /// from `Vindicator.finalizeSpawn`'s unconditional
-    /// `getNavigation().setCanOpenDoors(true)`, and `Villager`'s constructor
+    /// from vanilla's own vindicator spawn-finalization's unconditional
+    /// navigation "can open doors" setter, and vanilla's own villager constructor
     /// sets both `canOpenDoors` and `canFloat` unconditionally too.
     #[test]
     fn vindicator_and_villager_can_open_doors_and_float() {
@@ -14589,7 +14589,7 @@ mod vibration_substrate_tests {
         assert!(shape.can_float);
     }
 
-    /// `Bee.finalizeSpawn`'s malus table (`WATER` -1, `FENCE` -1) is the
+    /// Vanilla's own bee spawn-finalization's malus table (`WATER` -1, `FENCE` -1) is the
     /// path-malus half of the fix: before it, `malus_overrides` had zero
     /// `.insert` calls anywhere in the workspace, so every mob pathed as if
     /// nothing were dangerous. `PathType::malus`'s own default for `Water` is
@@ -14612,7 +14612,7 @@ mod vibration_substrate_tests {
         assert_eq!(shape.malus(PathType::Fence), -1.0);
     }
 
-    /// `Zombie.finalizeSpawn`'s door-breaking roll is a coin flip scaled by
+    /// Vanilla's own zombie spawn-finalization's door-breaking roll is a coin flip scaled by
     /// regional difficulty (`random.nextFloat() < difficultyModifier * 0.1F`),
     /// not a species constant — this is the control proving the roll is
     /// actually wired to `spawn_special_multiplier` rather than a fixed
@@ -14672,14 +14672,14 @@ mod vibration_substrate_tests {
         );
     }
 
-    /// `Zombie.hurtServer`'s reinforcement call (issue #223/#691): only the
+    /// Vanilla's own zombie hurt-handler's reinforcement call (issue #223/#691): only the
     /// *roll* is this sim's job — see `ReinforcementCall`'s own doc for the
     /// decide-here/place-there split. Hard difficulty, `spawn_mobs` enabled,
     /// and `reinforcement_chance` pinned to `1.0` (`next_f32() < 1.0` always
     /// holds in `[0.0, 1.0)`, so this is exact, not statistical) must queue
     /// exactly one call carrying the zombie's own type, position and — no AI
     /// target set on this mob — the attacking player's own entity id as the
-    /// fallback (`Zombie.hurtServer`'s own `target == null` clause).
+    /// fallback (vanilla's own hurt-handler's own "no live target" clause).
     #[test]
     fn a_hurt_zombie_calls_a_reinforcement_when_the_roll_passes() {
         let world = flat_world();
