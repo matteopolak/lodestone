@@ -190,7 +190,7 @@ fn ring_distance(centre: (i32, i32), coord: (i32, i32)) -> i32 {
 }
 
 /// This module's own generation priority, expressed as a `crate::ticket`
-/// **level** rather than as a bare ring index — issue #289's "priority is the
+/// **level** rather than as a bare ring index — "priority is the
 /// ticket level" unified with this module's pre-existing, independently-built
 /// distance/frustum queue.
 ///
@@ -812,8 +812,8 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         if self.remaining() == 0 {
             return None;
         }
-        // The first top-up is to 1, not to `window`: issue #453's
-        // time-to-first-chunk. See the module doc.
+        // The first top-up is to 1, not to `window`: this is the
+        // time-to-first-chunk fix. See the module doc.
         let target = if self.primed { self.window } else { 1 };
         while self.inflight.len() < target {
             let Some((cx, cz)) = self.queue.pop() else {

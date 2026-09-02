@@ -7,16 +7,13 @@
 //! # What it is
 //!
 //! Three pure, world-free modules ported from vanilla 26.2's decompiled
-//! source under
-//! `.cache/mc/26.2/src/net/minecraft/world/entity/boss/enderdragon/` and
-//! `.../world/level/dimension/end/`:
+//! source under `.cache/mc/26.2/src/` (the End boss and dimension classes):
 //!
-//! * [`phase`] — [`phase::PhaseManager`], the eleven-phase state machine
-//!   (`EnderDragonPhase`/`EnderDragonPhaseManager`).
-//! * [`crystal`] — the exact crystal-healing amount and interval
-//!   (`EnderDragon.checkCrystals`).
+//! * [`phase`] — [`phase::PhaseManager`], the eleven-phase state machine.
+//! * [`crystal`] — the exact crystal-healing amount and interval, from the
+//!   real crystal-check rule.
 //! * [`fight`] — [`fight::FightState`] and the free functions around it
-//!   (`EnderDragonFight`, `DragonRespawnStage`, `EndPodiumFeature`'s exit-
+//!   (the real dragon-fight state, respawn-stage sequence, and exit-
 //!   portal block geometry).
 //!
 //! # How it works

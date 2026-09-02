@@ -150,8 +150,8 @@ pub fn emission(state: &str) -> u8 {
 }
 
 /// The block-light **dampening** of one canonical block-state string, `0..=15` —
-/// vanilla's `BlockState.getLightDampening()`, raw, before the engine's
-/// `max(1, ·)`.
+/// the real per-state light-dampening rule, raw, before the engine's own
+/// `max(1, ·)` floor.
 ///
 /// The other half of what a light computation reads off a state, resolved the
 /// same way [`emission`] is. Air and glass are `0`; water, ice and leaves are
