@@ -259,7 +259,7 @@ pub type SharedLocalUuid = Arc<OnceLock<uuid::Uuid>>;
 /// # Why this is not a [`NetUpdate`]
 ///
 /// `GAME_EVENT`'s rain and thunder levels arrive **every tick** while the server
-/// ramps them (`ServerLevel.java` broadcasts on any change, and the
+/// ramps them (vanilla's own server-side level broadcasts on any change, and the
 /// change is ±0.01 per tick), and the consumer wants only the newest value. That
 /// is the same "latest wins, never queue" shape as [`SharedHandle`]: a channel
 /// would carry ~20 messages a second whose only purpose is to be superseded, and
@@ -291,7 +291,7 @@ pub struct WeatherSnapshot {
     /// The server's `RAIN_LEVEL_CHANGE`, or the level a `START_RAINING` /
     /// `STOP_RAINING` implied. **Not** clamped or composed here — hand it to
     /// [`lodestone_render::weather::WeatherState::apply_rain_level`], which does
-    /// both exactly as `Level.setRainLevel` does.
+    /// both exactly as vanilla's own set-rain-level does.
     pub rain_level: f32,
     /// The server's `THUNDER_LEVEL_CHANGE`, **raw**: not yet multiplied by the
     /// rain level. `WeatherState::thunder_level` is what composes them; reading
@@ -832,7 +832,7 @@ pub enum NetUpdate {
     ///
     /// Deliberately **uninterpreted here**. The two bytes mean completely
     /// different things per block type — `b0 == 1` on a chest is "viewer count in
-    /// `b1`" (`ChestBlockEntity.triggerEvent`), on a note block it is a pitch, on
+    /// `b1`" (vanilla's own chest block-event handling), on a note block it is a pitch, on
     /// a piston a direction — and the adapter already declines to interpret them
     /// for exactly that reason. `Sim::poll_net` forwards them to the one consumer
     /// that knows the rule.
@@ -899,8 +899,8 @@ pub enum NetUpdate {
     /// id it had **before** breaking.
     ///
     /// This is vanilla's `LevelEvent.PARTICLES_DESTROY_BLOCK` (2001), whose
-    /// payload is a block state id (`Block.stateById(data)` in
-    /// `LevelEventHandler`). It is the authoritative signal that a block broke:
+    /// payload is a block state id (its own state-by-id lookup in
+    /// its own level-event handler). It is the authoritative signal that a block broke:
     /// the client cannot derive it from `BLOCK_UPDATE`, because by the time that
     /// arrives the cell is already air and the texture the debris needs is gone.
     BlockDestroyed {
@@ -922,11 +922,11 @@ pub enum NetUpdate {
         /// Particle type, namespace stripped (e.g. `"flame"`, `"smoke"`).
         kind: String,
         /// Whether the particle renders past vanilla's 32-block distance
-        /// cutoff (`ClientLevel.doAddParticle`'s `overrideLimiter`, `1024.0`
+        /// cutoff (vanilla's own client-level add-particle override-limiter, `1024.0`
         /// being `32.0` squared).
         long_distance: bool,
         /// Whether the particle survives the **Minimal** particle setting --
-        /// `ClientLevel.calculateParticleLevel`'s one-in-ten reprieve, not an
+        /// vanilla's own client-level particle-level calculation's one-in-ten reprieve, not an
         /// exemption. Independent of `long_distance`, which is the *distance*
         /// gate; `false` on every legacy family because the field does not
         /// exist on their particle packets.
@@ -1550,12 +1550,12 @@ const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
 /// How long a connected client waits for the server to send **any** packet
 /// before declaring the connection dead.
 ///
-/// Vanilla arms the same bound at the socket with Netty's
-/// `ReadTimeoutHandler(30)` — `Connection.java` — a 30-second stall that
+/// Vanilla arms the same bound at the socket with Netty's own read-timeout
+/// handler set to 30 seconds — a 30-second stall that
 /// disconnects with `disconnect.timeout`. This mirrors it through the client
 /// library's `read_packet_timeout`, which is a **per-packet** window reset by
 /// every inbound packet. That is why 30 s is safely above the server's keep-alive
-/// cadence (15 s in `ServerCommonPacketListenerImpl.java`; our own
+/// cadence (15 s in vanilla's own server-side common-packet-listener handling; our own
 /// `lodestone-server` sends on the same `KEEP_ALIVE_INTERVAL` of 15000 ms): a
 /// healthy session re-arms the window twice over, and only a server that has
 /// stopped sending entirely trips it. When it fires the driver task ends, the
@@ -1569,8 +1569,8 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// **Not what the pause menu's Open to LAN asks for since issue #559.**
 /// `PauseButton::OpenToLan` now calls `NetClient::publish_to_lan(0)`, matching
-/// vanilla's own `MultiplayerOptionsScreen`, which defaults to
-/// `HttpUtil.getAvailablePort()` — an OS-assigned port, reported back through
+/// vanilla's own multiplayer-options screen, which defaults to
+/// asking the OS for any free port — an OS-assigned port, reported back through
 /// `NetUpdate::LanOpened` once bound — rather than this fixed one. This
 /// constant is kept for an explicit-port control (vanilla's `/publish <port>`)
 /// to default its text field to, once one exists; it names *a* well-known
@@ -2292,7 +2292,7 @@ impl NetClient {
     /// # This is half of a pair, and the other half is the caller's
     ///
     /// Call it immediately **before** `send_action(DropSelectedItem …)`, which is
-    /// vanilla's order (`LocalPlayer.java`: `removeFromSelected` then
+    /// vanilla's order (vanilla's own client-side remove-from-selected then
     /// `connection.send`). The send is deliberately *not* folded in here so the
     /// spectator gate stays in one place — `App::drop_selected_action` already
     /// returns `None` for a spectator, and calling this inside that `if let`
@@ -2301,8 +2301,8 @@ impl NetClient {
     /// # Why the count is wrong without it
     ///
     /// `DROP_ITEM`/`DROP_ALL_ITEMS` are the one inventory change a vanilla server
-    /// applies **silently**: `ServerGamePacketListenerImpl.java` calls
-    /// `player.drop(…)` and returns without any slot or content packet. So
+    /// applies **silently**: the server drops the item and returns without any
+    /// slot or content packet. So
     /// [`player_menu`](Self::player_menu) — which is what the HUD hotbar and the
     /// inventory screen both read — keeps reporting the pre-drop count forever
     /// unless this runs. Nothing is late here; without the prediction there is no
@@ -2768,16 +2768,16 @@ fn pending_authorised_pose() -> Option<AuthorisedPose> {
 /// # Why a rewrite rather than a drop
 ///
 /// This is the claim vanilla's client makes in the same instant. Its
-/// `ClientPacketListener.handleMovePlayer` applies the pose, sends
-/// `ServerboundAcceptTeleportationPacket`, and sends a
-/// `ServerboundMovePlayerPacket.PosRot` at the **new** pose — three statements
+/// own client-side move-player-packet handling applies the pose, sends
+/// its own accept-teleportation packet, and sends
+/// a position-and-rotation move packet at the **new** pose — three statements
 /// on one thread, so a claim built from the pre-teleport pose cannot exist. Here
 /// it can: the driver writes the confirmation the instant the packet decodes,
 /// while the pose only reaches `PhysicsState` a channel hop and a frame later,
 /// and the tick loop keeps queueing a `Move` from whatever pose it holds. A
 /// `Move` written after the confirmation but built before the adoption claims a
 /// position the server has already overruled — which is the one input
-/// `ServerGamePacketListenerImpl.handleMovePlayer` answers with a corrective
+/// vanilla's own server-side move-player-packet handling answers with a corrective
 /// teleport back. See `docs/transfer-tracing.md`.
 ///
 /// The flags follow vanilla's own post-teleport send, which passes `false` for
@@ -3234,8 +3234,8 @@ async fn run_async(
         // been sent, so the loading screen is up for the duration.
         //
         // **A failure here does not abort the join.** An offline-mode server
-        // never sends an encryption request at all — vanilla's
-        // `ServerLoginPacketListenerImpl.handleHello` gates it on
+        // never sends an encryption request at all — vanilla's own server-side
+        // login-hello handling gates it on
         // `usesAuthentication() && !isMemoryConnection()` — so a stale token has
         // no bearing on joining one, and refusing to dial would break joins that
         // work. The reason is handed to the builder instead and only spent if the
@@ -3767,7 +3767,7 @@ async fn run_async(
                         // `Route::NOWHERE` ("consumed nowhere") and `forward`
                         // below has no arm for it either — this crate does not
                         // yet open the reconnect leg vanilla's own client does
-                        // (`ClientPacketListener.handleTransfer`: tear the
+                        // (vanilla's own client-side transfer-packet handling: tear the
                         // connection down, open a new one to `host:port`,
                         // replaying the cookie store `SessionOutcome::Transferred`
                         // already carries for exactly this). Until that exists,
@@ -4192,13 +4192,13 @@ async fn open_lan_world(
 /// Vanilla's own text for the disconnect a player triggers by declining a
 /// **required** pack — `multiplayer.requiredTexturePrompt.disconnect`
 /// (`en_us.json`). Sent by this client itself
-/// (`ClientCommonPacketListenerImpl.PackConfirmScreen`'s callback
+/// (vanilla's own common-packet-listener pack-confirm-screen callback
 /// self-disconnects on `result == false && required`, rather than waiting
 /// for the server to notice a client that will never load the pack).
 const REQUIRED_PACK_DISCONNECT_REASON: &str = "This server requires a custom resource pack";
 
 /// Vanilla's own cap on a single downloaded pack
-/// (`PackDownloader.MAX_PACK_SIZE_BYTES`, `DownloadedPackSource.java`) — 250
+/// (vanilla's own pack-downloader max-pack-size-bytes constant) — 250
 /// MiB. A hostile or merely broken server cannot fill memory (or, once this
 /// machine's own history of hitting zero free disk is considered, anything
 /// downstream that persists it) past a bound this client did not invent —
@@ -4208,7 +4208,7 @@ const REQUIRED_PACK_DISCONNECT_REASON: &str = "This server requires a custom res
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_PACK_SIZE_BYTES: u64 = 262_144_000;
 
-/// `ClientCommonPacketListenerImpl.parseResourcePackUrl`: only `http`/`https`
+/// Vanilla's own common-packet-listener resource-pack-url parsing: only `http`/`https`
 /// is accepted; anything else — including a URL vanilla's own `new URL(..)`
 /// would fail to parse at all — is `ServerboundResourcePackPacket
 /// .Action.INVALID_URL`, before the server-pack policy is even consulted.
@@ -4290,7 +4290,7 @@ fn decide_resource_pack_push(
 
 /// Routes one `ClientboundResourcePackPushPacket`, replacing issue #613's
 /// original unconditional auto-decline. Vanilla's own decision
-/// (`ClientCommonPacketListenerImpl.handleResourcePackPush`), enumerated:
+/// (vanilla's own common-packet-listener resource-pack-push handling), enumerated:
 ///
 /// 1. **Invalid URL** → `INVALID_URL`, unconditionally, before the policy is
 ///    consulted at all — see [`resource_pack_url_is_valid`].
@@ -4466,7 +4466,7 @@ pub(crate) fn hold_pack_apply_for_test() -> impl Drop {
 }
 
 /// Accepts pack `id`: sends `ACCEPTED` immediately — matching vanilla's own
-/// `PackLoadFeedback.Update.ACCEPTED`, sent the instant the request is
+/// pack-load-feedback accepted update, sent the instant the request is
 /// registered and before any byte has moved — then starts the download.
 ///
 /// The in-flight guard is taken **here**, not inside the download thread, so the
@@ -4746,7 +4746,7 @@ fn forward(
         },
         // The general particle-effect packet. `long_distance` is named after
         // what the field actually controls downstream (see
-        // `ClientLevel.doAddParticle`'s distance cutoff) rather than the
+        // vanilla's own client-level add-particle distance cutoff) rather than the
         // wire/model field name `override_limiter` it is decoded from.
         ClientEvent::Particles {
             particle,
@@ -5103,7 +5103,7 @@ fn forward(
         //
         // This is a spawn-only approximation. Vanilla re-flashes `rand(3) + 1`
         // times per bolt by resetting the entity's `life`
-        // (`LightningBolt.java`, `:131-134`), which needs the bolt's own
+        // (vanilla's own lightning-bolt tick), which needs the bolt's own
         // per-tick state; see `lodestone_render::weather::LIGHTNING_FLASH_TICKS`.
         ClientEvent::EntitySpawned { ref entity_type, .. }
             if entity_type.path() == "lightning_bolt" =>
@@ -5917,16 +5917,15 @@ mod tests {
                      convention `sim/net_apply.rs`'s arm and `ShellAudio::play_sound` \
                      both assume"
                 );
-                assert_eq!(category, SoundCategory::Block, "SoundSource.BLOCKS");
+                assert_eq!(category, SoundCategory::Block, "vanilla's own blocks sound source");
                 assert_eq!(
                     volume, 4.0,
-                    "ClientPacketListener.handleExplosion's client-side constant \
-                     (`.cache/mc/26.2/client-src/.../ClientPacketListener.java`)"
+                    "vanilla's own client-side explosion-packet handling's client-side constant"
                 );
                 assert!(
                     (0.56..=0.84).contains(&pitch),
                     "pitch {pitch} outside vanilla's (1.0 +/- 0.2) * 0.7 band \
-                     (ClientPacketListener.java)"
+                     (vanilla's own client-side packet listener)"
                 );
             }
             other => panic!("expected NetUpdate::Sound, got {other:?}"),
@@ -6084,7 +6083,7 @@ mod tests {
 
         // The `START_RAINING` inversion reaches here intact (see
         // `lodestone_render::weather`'s module doc — this is vanilla's own
-        // polarity at ClientPacketListener.java, not a bug on this side).
+        // polarity at its own client-side packet listener, not a bug on this side).
         forward(
             &tx,
             &weather,
@@ -6315,7 +6314,7 @@ mod tests {
         // Vanilla's threshold, 0.15, applied at sea level (no height falloff
         // at y == sea_level, so `getHeightAdjustedTemperature` is a no-op —
         // this isolates the threshold itself from the height term).
-        const WARM_ENOUGH_TO_RAIN: f32 = 0.15; // Biome.java
+        const WARM_ENOUGH_TO_RAIN: f32 = 0.15; // vanilla's own warm-enough-to-rain constant
         assert!(
             frozen_peaks.temperature.unwrap() < WARM_ENOUGH_TO_RAIN,
             "frozen_peaks' real temperature ({:?}) must be below vanilla's \
@@ -6333,7 +6332,7 @@ mod tests {
             Some(false),
             "desert has no precipitation regardless of temperature — the \
              `has_precipitation` gate must short-circuit before the \
-             threshold is even consulted (Biome.java)"
+             threshold is even consulted (vanilla's own biome climate check)"
         );
     }
 
@@ -6653,10 +6652,10 @@ mod tests {
     /// The teleport travels a different route — driver, channel, `poll_net` —
     /// so the ordering "confirmation written, `Move` drained, teleport adopted"
     /// is reachable, and in that ordering the claim on the wire is a position
-    /// the server has already overruled. `ServerGamePacketListenerImpl.
-    /// handleMovePlayer` answers that with a corrective teleport back, which is
+    /// the server has already overruled. Vanilla's own server-side
+    /// move-player-packet handling answers that with a corrective teleport back, which is
     /// what a rubberband is; vanilla's own client cannot produce it, because
-    /// `ClientPacketListener.handleMovePlayer` applies the pose, confirms, and
+    /// its own client-side move-player-packet handling applies the pose, confirms, and
     /// sends a `PosRot` at the new pose on one thread.
     ///
     /// The two arms differ only in whether the teleport has been adopted, and
