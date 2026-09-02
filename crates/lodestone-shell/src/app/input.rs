@@ -1444,9 +1444,38 @@ mod menu_text_editing {
         nav.key(ui, key);
     }
 
+    /// A `MenuNav` on a fresh temp directory holding one account, so nothing
+    /// here reads the developer's real `profiles.json`.
+    ///
+    /// `MenuNav::default()` reads the real one, and that made these gates take
+    /// the person running them as an input: with the ownership gate in place,
+    /// a machine whose roster happens to be empty gets the gate intercepting
+    /// every keystroke, while the author's machine passes. The seeded account is
+    /// the premise every gate in this module wants — a player who can play.
+    fn nav_with_account(tag: &str) -> MenuNav {
+        let dir = std::env::temp_dir().join(format!(
+            "lodestone-input-{}-{tag}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir for the seeded roster");
+        let mut meta = lodestone_auth::AccountsMetadata::default();
+        let id = uuid::Uuid::new_v4();
+        meta.upsert(lodestone_auth::AccountProfile {
+            profile_id: id,
+            username: "OwnerAccount".to_owned(),
+            skin_url: None,
+            last_used: 1,
+        });
+        meta.selected = Some(id);
+        meta.save_to(&dir.join("profiles.json"))
+            .expect("the temp roster must be writable");
+        MenuNav::with_path(dir.join("servers.json"))
+    }
+
     /// A command-block screen open on `command`, with the caret at the end.
     fn command_block(command: &str) -> (UiState, MenuNav) {
-        let (mut ui, mut nav) = (UiState::default(), MenuNav::default());
+        let (mut ui, mut nav) = (UiState::default(), nav_with_account("command-block"));
         ui.enter_dev_world();
         nav.open_command_block(
             &mut ui,
@@ -1556,7 +1585,7 @@ mod menu_text_editing {
     /// (one of four lines). A caret key must reach the *active* line.
     #[test]
     fn the_caret_keys_reach_the_signs_active_line() {
-        let (mut ui, mut nav) = (UiState::default(), MenuNav::default());
+        let (mut ui, mut nav) = (UiState::default(), nav_with_account("sign-edit"));
         ui.enter_dev_world();
         nav.open_sign_edit(
             &mut ui,
@@ -1587,7 +1616,7 @@ mod menu_text_editing {
     /// can make it.
     #[test]
     fn the_caret_keys_reach_the_server_edit_form_through_the_focus_layer() {
-        let (mut ui, mut nav) = (UiState::default(), MenuNav::default());
+        let (mut ui, mut nav) = (UiState::default(), nav_with_account("server-edit"));
         ui.open_server_list();
         ui.open_server_edit();
         for ch in "abc".chars() {
