@@ -616,7 +616,8 @@ this track's real content is **splitting `LocalPlayerPlugin`** into `PlayerState
 `TickSet::Intent` + `TickSet::Animate`) and `PlayerPhysicsPlugin` (the physics chain).
 
 **And the split is not a clean cut.** `pin_passenger_to_vehicle` sits *in* the physics chain but is
-not physics — it is `Entity.positionRider`, and its own comment records that it must run last because
+not physics — it is vanilla's own rider-positioning step, and its own comment records that it must
+run last because
 it writes the transmitted `on_ground` for a passenger. A bot with physics omitted still needs pinning
 to a vehicle whose position arrives over the network. So `pin_passenger_to_vehicle` belongs in
 `PlayerStatePlugin`, ordered after `TickSet::Physics`, which is *empty* when the physics plugin is
