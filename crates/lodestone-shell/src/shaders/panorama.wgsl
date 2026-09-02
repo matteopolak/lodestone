@@ -1,14 +1,16 @@
 // The title screen's spinning cubemap panorama.
 //
-// A port of vanilla's `assets/minecraft/shaders/core/panorama.{vsh,fsh}`, which
-// together are eight lines: transform the cube corner by ProjMat * ModelViewMat,
-// pass the *object-space* position through, and sample a samplerCube with it. The
+// A port of vanilla's own core panorama shader pair, which
+// together are eight lines: transform the cube corner by the combined
+// projection/model-view matrix,
+// pass the *object-space* position through, and sample a cubemap with it. The
 // face is chosen by direction, which is why the cube carries no UVs at all
-// (`DefaultVertexFormat.POSITION`).
+// (vanilla's own position-only vertex format).
 //
-// The one addition is `dim`. Vanilla composites `textures/gui/menu_background.png`
+// The one addition is `dim`. Vanilla composites a flat dark overlay texture
 // over the panorama on every out-of-world screen except the title screen itself
-// (`Screen.extractBackground`, and `TitleScreen`'s empty override). That file was
+// (vanilla's own background-extraction routine, and the title screen's own empty
+// override). That texture was
 // decoded out of client.jar and is flat black at alpha 64/255 in every pixel, so
 // compositing it is exactly a multiply by `1 - 64/255` — one uniform here instead
 // of a second pipeline and a second full-screen quad. See `docs/menu-panorama.md`
