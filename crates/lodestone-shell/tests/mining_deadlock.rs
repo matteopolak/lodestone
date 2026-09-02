@@ -8,18 +8,40 @@
 //! it runs inside `run_schedule(GameTick)` — which the driver runs inside
 //! `lodestone_ecs::hold_write`, i.e. under `EcsHandle`'s `parking_lot` **write**
 //! guard. It read the held item through `ClientHandle::player_menu`, and that
-//! accessor takes `ecs.read()` on the *same* `Arc<RwLock<World>>`.
+//! accessor used to take a raw `ecs.read()` on the *same* `Arc<RwLock<World>>`.
 //! `parking_lot::RwLock` is not reentrant, so the first tick of a real dig
 //! wedged the render thread with no panic and no log line.
 //!
+//! Every production `self.ecs.read()`/`.write()` call in
+//! `lodestone_client::state::SharedState` — `player_menu` included — is now
+//! routed through `lodestone_ecs::hold_read`/[`hold_write`], so the same
+//! reentrant call no longer wedges: `handle.rs`'s rule-1 ledger now catches the
+//! second guard on the same thread and panics naming both call sites, before
+//! the raw lock is ever touched.
+//!
 //! # How it works
 //!
-//! Two tests, and the pairing is the point:
+//! Three tests:
 //!
-//! * [`the_world_lock_is_not_reentrant_through_client_handle`] is the **control**.
-//!   It performs the exact pre-fix call — `player_menu()` inside a `hold_write`
-//!   closure — on a watchdog thread and asserts it does *not* finish. Without it,
-//!   the gate below is satisfied by a system that never reached the menu at all.
+//! * [`the_world_lock_is_not_reentrant_through_client_handle`] is the **control**
+//!   for the *chunk* half. It runs `client.block_at` inside a `hold_write`
+//!   closure on a watchdog thread and asserts it still returns — the chunk
+//!   store is a different lock than the `World` guard, so this must not wedge.
+//! * [`player_menu_inside_a_world_write_guard_panics`] is the **control** for the
+//!   `World`-lock half. It performs the exact pre-fix call —
+//!   `player_menu()` inside a `hold_write` closure, on the *same* thread as the
+//!   outer guard — and is `#[should_panic]` rather than routed through the
+//!   watchdog: the rule-1 ledger panics immediately rather than hanging, so
+//!   there is nothing to time out, and libtest's own panic-catching around the
+//!   test function is what this repo's evidence record calls out as the
+//!   reliable way to assert a panic (a hand-rolled `catch_unwind` — which
+//!   `within_budget`'s cross-thread join effectively is — does not reliably
+//!   catch under this workspace's Cranelift debug backend: a bare
+//!   `std::thread::spawn(|| panic!())` joined from the spawning thread reliably
+//!   aborts the whole process here with "failed to initiate panic, error 5"
+//!   instead of returning `Err` from `join`, while the identical panic is caught
+//!   correctly by `#[should_panic]` under both backends). Without this test the
+//!   gate below is satisfied by a system that never reached the menu at all.
 //! * [`a_full_dig_tick_completes_under_the_world_write_guard`] is the **gate**. It
 //!   runs the real `drive_mining` in a real `GameTick` schedule, under a real
 //!   write guard, against a real `ClientHandle` that adopted the same `EcsHandle`,
@@ -27,9 +49,10 @@
 //!   `drive_mining` bypassed. It asserts the tick finishes *and* that it produced
 //!   the dig packets, so a fix that silently stopped digging would fail it.
 //!
-//! Every potentially-wedging call runs on a spawned thread joined through a
-//! bounded channel: a deadlocked thread is leaked, never awaited, so CI cannot
-//! hang on this file.
+//! Every potentially-*wedging* call still runs on a spawned thread joined
+//! through a bounded channel: a deadlocked thread is leaked, never awaited, so
+//! CI cannot hang on this file. A call that is expected to *panic* rather than
+//! wedge does not need that machinery and must not use it, for the reason above.
 //!
 //! # How to change it
 //!
@@ -348,44 +371,16 @@ fn within_budget<T: Send + 'static>(
     rx.recv_timeout(WEDGE_TIMEOUT)
 }
 
-/// Assert that `outcome` timed out rather than panicked — "still running", not
-/// "died on the way".
-fn assert_wedged<T: std::fmt::Debug>(outcome: &Result<T, RecvTimeoutError>, what: &str) {
-    match outcome {
-        Ok(value) => panic!(
-            "{what} completed ({value:?}), but it must not: parking_lot's RwLock is \
-             not reentrant. This control no longer detects the hazard, so every gate \
-             resting on it proves nothing."
-        ),
-        Err(RecvTimeoutError::Disconnected) => panic!(
-            "{what} panicked instead of wedging, so this control measured the wrong \
-             thing — libtest printed the panic above."
-        ),
-        Err(RecvTimeoutError::Timeout) => {}
-    }
-}
-
 // ---------------------------------------------------------------------------
-// The control
+// The controls
 // ---------------------------------------------------------------------------
 
-/// **The control.** Reaching a `World`-lock-backed `ClientHandle` accessor from
-/// inside a `hold_write` closure deadlocks, silently and permanently.
+/// **The control, chunk half.** A chunk-backed `ClientHandle` accessor reached
+/// from inside a `hold_write` closure must still return: `chunk_world` is a
+/// different lock than the `World` guard, so this is not what broke.
 ///
-/// This is the pre-fix call verbatim: `drive_mining` resolved the held item with
-/// `net.get().map(ClientHandle::player_menu)`, and `SharedState::player_menu`
-/// takes `self.ecs.read()` on the same handle `hold_write` is holding for the
-/// `GameTick` schedule.
-///
-/// Without this test the gate below is vacuous in the *world* sense: a
-/// `drive_mining` that returned early (no target, no census, no chunk) would
-/// complete just as fast, and nothing would show that the input actually
-/// contained the structure the fix exists to handle.
-///
-/// `chunk_world().read()` is asserted *not* to wedge in the same guard, which is
-/// what pins the distinction the §4.1(c) audit turned on: the chunk store is a
-/// different lock, so chunk-backed reads from a system were legal all along and
-/// are not what broke.
+/// This pins the distinction the §4.1(c) audit turned on: only the *World*-lock
+/// half (below) is the hazard.
 #[test]
 fn the_world_lock_is_not_reentrant_through_client_handle() {
     let harness = Harness::build();
@@ -407,14 +402,37 @@ fn the_world_lock_is_not_reentrant_through_client_handle() {
          the chunk lock, not this one. If this wedges, the §4.1(c) audit's \
          conclusion is wrong and every chunk read from a system is a deadlock too."
     );
+}
 
-    let ecs = Arc::clone(&harness.ecs);
-    let client = Arc::clone(&harness.client);
-    let menu_read = within_budget(move || hold_write(&ecs, |_| client.player_menu()));
-    assert_wedged(
-        &menu_read,
-        "ClientHandle::player_menu() inside a World write guard",
-    );
+/// **The control, `World`-lock half.** Reaching a `World`-lock-backed
+/// `ClientHandle` accessor from inside a `hold_write` closure on the *same*
+/// thread now panics — the rule-1 reentrancy ledger catching what used to be a
+/// silent, permanent deadlock.
+///
+/// This is the pre-fix call verbatim: `drive_mining` resolved the held item with
+/// `net.get().map(ClientHandle::player_menu)`, and `SharedState::player_menu`
+/// now takes `hold_read` on the same handle `hold_write` is holding for the
+/// `GameTick` schedule — the same handle, so the ledger's rule 1 fires.
+///
+/// Without this test the gate below is vacuous in the *world* sense: a
+/// `drive_mining` that returned early (no target, no census, no chunk) would
+/// complete just as fast, and nothing would show that the input actually
+/// contained the structure the fix exists to handle.
+///
+/// Runs directly on the test's own thread, deliberately **not** through
+/// [`within_budget`]: a panic here is immediate rather than a hang, so there is
+/// nothing to time out, and this repo's own evidence record says a hand-rolled
+/// cross-thread catch is unreliable under Cranelift — measured here too: a bare
+/// `std::thread::spawn(|| panic!())` joined back reliably aborted this whole
+/// process ("failed to initiate panic, error 5") instead of `join` returning
+/// `Err`, under this workspace's Cranelift debug backend. `#[should_panic]`
+/// uses libtest's own catch around the test function, which both backends
+/// honour.
+#[test]
+#[should_panic(expected = "reentrant World guard")]
+fn player_menu_inside_a_world_write_guard_panics() {
+    let harness = Harness::build();
+    hold_write(&harness.ecs, |_| harness.client.player_menu());
 }
 
 // ---------------------------------------------------------------------------
