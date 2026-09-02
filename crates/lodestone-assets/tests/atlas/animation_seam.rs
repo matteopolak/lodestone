@@ -1,6 +1,6 @@
 //! Tests for the draw-time animation seam on [`AtlasSprite`]: resolving an
 //! absolute tick to the current/next physical frame and an interpolation blend,
-//! faithfully mirroring vanilla's `SpriteContents.AnimationState`.
+//! faithfully mirroring vanilla's own sprite-contents animation-state class.
 
 use lodestone_assets::AnimationFrame;
 use lodestone_assets::{AtlasSprite, ResourceLocation};

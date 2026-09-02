@@ -336,9 +336,10 @@ fn load_stacked_returns_none_when_no_layer_has_the_path() {
 
 /// Companion fix in the same function: when two sources — whether two entries
 /// in one file or two stacked layers — name the *same* sprite id, vanilla's
-/// `Output.add` is a plain map `put`, so the **later** source wins. The old
+/// own output-add step is a plain map `put`, so the **later** source wins. The old
 /// `seen.insert` here kept the *first* writer, backwards from
-/// `SpriteSourceList.list`. Two sources producing the same id with
+/// vanilla's own sprite-source-list "list" step. Two sources producing the
+/// same id with
 /// *different* texture paths is the discriminating input; two sources naming
 /// the same texture cannot tell first-wins from last-wins apart.
 #[test]
@@ -362,7 +363,7 @@ fn resolve_lets_the_later_source_override_an_earlier_one_for_the_same_sprite_id(
         entries[0].texture_path,
         "assets/mypack/textures/entity/banner/creeper_override.png",
         "the later (higher-priority) source must win — first-wins is backwards \
-         from `SpriteSourceList.list`'s `Map.put`; got {:?}",
+         from vanilla's own sprite-source-list list step's map-put; got {:?}",
         entries[0].texture_path
     );
 }

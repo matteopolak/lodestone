@@ -1,5 +1,5 @@
 //! Tests for the GPU-free mipmap generator (faithful port of vanilla 26.2's
-//! `MipmapGenerator` + `TextureUtil.solidify`).
+//! own mipmap-generator and texture-util "solidify" step).
 
 use lodestone_assets::Image;
 use lodestone_assets::mipmap::{

@@ -306,7 +306,8 @@ fn creeper_body_north_uv_matches_hand_derived_vanilla_unwrap() {
 /// Vanilla composes part rotation as `Rz*Ry*Rx` (z outermost, x innermost),
 /// applied *after* the pivot translation (client 26.2). The order only matters
 /// when two or more axes rotate at
-/// once — which is exactly the shape of a spider leg (both `yRot` and `zRot`
+/// once — which is exactly the shape of a spider leg (both the Y and Z
+/// rotation fields
 /// nonzero on a single part). This test hand-derives two multi-axis
 /// results and asserts the bake matches, so a transposed multiply (`Rx*Ry*Rz`)
 /// cannot pass: it would land the probe at a *different, also-plausible* point.

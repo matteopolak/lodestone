@@ -161,7 +161,8 @@ fn height_override_scales_advance() {
 fn duplicate_codepoint_within_one_providers_grid_uses_the_last_cell() {
     // 'A' declared twice in the same grid: slot 0 (rightmost col 1 -> actual
     // 2 -> advance 3) and slot 1 (rightmost col 6 -> actual 7 -> advance 8).
-    // `BitmapProvider.Definition.load`'s `charMap.put` is a plain overwrite
+    // Vanilla's own bitmap-provider-definition load step's `charMap.put` is a
+    // plain overwrite
     // as it walks the grid, so the *last* declaration must win, not the
     // first.
     let png = sheet(8, &[Some(1), Some(6)]);
@@ -378,10 +379,11 @@ fn a_referenced_space_declared_before_a_local_bitmap_wins() {
 
 /// Two packs, both declaring `assets/minecraft/font/default.json`: the
 /// lower-priority one (stands in for the jar) covers 'A' and 'Z', the
-/// higher-priority one covers only 'A'. Vanilla's `FontManager` stacks every
+/// higher-priority one covers only 'A'. Vanilla's own font manager stacks every
 /// active pack's own copy of a font id's definition file rather than letting
-/// the top one win outright (`FontManager.prepare` reads via
-/// `listMatchingResourceStacks`, not a single-winner `getResource` -- the
+/// the top one win outright (its own "prepare" step reads via
+/// its own "list matching resource stacks" step, not a single-winner "get
+/// resource" accessor -- the
 /// same shape `ResourceManager::read_stack` already documents for language
 /// files). So the higher-priority pack's own 'A' must win, **and** the
 /// lower-priority pack's 'Z' -- which the top pack never mentions -- must

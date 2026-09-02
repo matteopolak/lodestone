@@ -183,7 +183,7 @@ fn unpadded_atlas_bleeds_the_neighbour_into_the_same_probe_position() {
     assert_eq!(
         got, expect_blue,
         "without padding, the red sprite's right-edge gutter at mip level {level} must read as \
-         the blue neighbour's own colour -- this is issue #575's bleed, reproduced here as the \
+         the blue neighbour's own colour -- this is the mip-bleed defect, reproduced here as the \
          control proving the assertion in the padded test above means something"
     );
 }
@@ -333,9 +333,11 @@ fn texel_at(rgba: &[u8], width: u32, x: u32, y: u32) -> [u8; 4] {
 /// Atlas **level 0** must carry the *prepared* base — the same image level 1
 /// was downsampled from — not the raw decoded PNG.
 ///
-/// Vanilla's `MipmapGenerator.generateMipLevels` runs `TextureUtil.solidify`
+/// Vanilla's own mipmap-generator "generate mip levels" step runs its own
+/// texture-util "solidify" step
 /// on `currentMips[0]` **in place** and then sets `result[0] = currentMips[0]`,
-/// and that same `NativeImage` is what `SpriteContents.uploadFirstFrame`
+/// and that same `NativeImage` is what its own sprite-contents "upload first
+/// frame" step
 /// uploads at level 0. This builder used to blit the raw image at level 0 while
 /// levels 1..n came from the solidified copy, so level 0 was the one level in
 /// the chain that disagreed with its own successor.

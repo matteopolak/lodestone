@@ -292,18 +292,22 @@ fn vanilla_classification_known_blocks() {
     assert_eq!(lodestone_assets::tint::stem_color(0), 0x00FF00);
 }
 
-/// `colorAsTerrainParticle` is a *different* virtual method from the in-world
-/// face tint, and vanilla's `BlockTintSources` (26.2) deliberately makes the two
+/// Vanilla's own "color as terrain particle" accessor is a *different* virtual
+/// method from the in-world
+/// face tint, and vanilla's own block-tint-sources registration (26.2) deliberately
+/// makes the two
 /// disagree for exactly two registrations. Both divergences are load-bearing on
 /// screen, and both are the kind a "reuse the face tint" implementation gets
 /// silently wrong:
 ///
-/// * `grass_block` — `grassBlock()` overrides `colorAsTerrainParticle` to `-1`,
+/// * `grass_block` — vanilla's own grass-block tint source overrides its "color
+///   as terrain particle" accessor to `-1`,
 ///   because `grass_block`'s `#particle` variable is `block/dirt`. Tinting it
 ///   throws **green dirt**.
-/// * `water` / `bubble_column` — `waterParticles()` is the mirror image: `color`
-///   and `colorInWorld` are `-1` (the surface is tinted by the fluid model) while
-///   `colorAsTerrainParticle` returns the biome water colour.
+/// * `water` / `bubble_column` — vanilla's own water-particles tint source is
+///   the mirror image: `color`
+///   and its own "color in world" accessor are `-1` (the surface is tinted by the fluid model) while
+///   its own "color as terrain particle" accessor returns the biome water colour.
 #[test]
 fn particle_tint_diverges_from_the_face_tint_exactly_where_vanilla_does() {
     let props = BTreeMap::new();

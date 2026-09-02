@@ -4,7 +4,7 @@
 //! direction depend on the neighbouring fluid cells, which only the mesher can
 //! supply. These tests exercise the pure, hermetic core: own/render heights,
 //! corner-height averaging from explicit neighbour heights, the verified
-//! `getFlow` horizontal vector, still-vs-flowing texture selection, and the
+//! flow-vector accessor's horizontal vector, still-vs-flowing texture selection, and the
 //! flow-angle used to rotate the flowing texture.
 
 use lodestone_assets::fluid::{
@@ -96,7 +96,7 @@ fn corner_height_weights_tall_cells_heavily() {
 /// The two hypotheses are computed here from arithmetic and they differ by
 /// `1/6` at this input, which is the whole reason it is the input:
 ///
-/// * **right** — vanilla `FluidRenderer.tesselate` sees `heightSelf >= 1.0F` (the
+/// * **right** — vanilla's own fluid-renderer tesselate step sees `heightSelf >= 1.0F` (the
 ///   same fluid is directly above) and sets every corner to `1.0` without looking
 ///   at a neighbour. The column is seamless.
 /// * **wrong** — average anyway. `add_weighted_height` gives the full self cell
@@ -109,7 +109,8 @@ fn corner_height_weights_tall_cells_heavily() {
 #[test]
 fn a_falling_column_renders_at_full_height_and_does_not_average_against_the_air() {
     // The falling cell: same fluid above, air on all four sides and all four
-    // diagonals. `height_self` is 1.0 by `FlowingFluid.getHeight`'s hasSameAbove.
+    // diagonals. `height_self` is 1.0 by vanilla's own flowing-fluid "get height"
+    // accessor's own has-same-above check.
     let corners = corner_heights(1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     assert_eq!(
         corners,
@@ -165,7 +166,8 @@ fn a_falling_column_against_a_wall_is_flat_not_sloped() {
 /// always full".
 ///
 /// A lone water **source** with air above is `heightSelf = 8/9`, because
-/// `WaterFluid.Source.getAmount` is `8` and not `9` — so it does *not* take the
+/// vanilla's own water-fluid source variant's "get amount" accessor is `8` and
+/// not `9` — so it does *not* take the
 /// short-circuit, and its corners must still be pulled down by the surrounding
 /// air. If this returned `1.0` the fix would have flattened every shoreline in the
 /// game, and no falling-column assertion above would have noticed.
@@ -421,7 +423,8 @@ fn flowing_top_face_uses_flow_sprite() {
 #[test]
 fn full_cell_emits_six_faces_no_cullface() {
     // No back-up-face and no overlay: the top and bottom stay single-sided, but
-    // each of the four sides gets a reversed back copy (`addBackFace` is
+    // each of the four sides gets a reversed back copy (vanilla's own "add back
+    // face" step is
     // unconditional for a non-overlay side face) — 1 + 1 + 4*2 = 10.
     let geom = FluidGeometry {
         corners: [1.0; 4],
@@ -499,7 +502,8 @@ fn side_face_uses_left_half_of_flow_texture() {
 #[test]
 fn overlay_side_face_is_single_sided_and_samples_the_overlay_sprite() {
     // A side face against glass/ice/leaves uses `water_overlay` and omits its
-    // back copy (`addBackFace = !isOverlay`), matching `FluidRenderer.tesselate`.
+    // back copy (its "add back face" step is `!isOverlay`), matching vanilla's
+    // own fluid-renderer tesselate step.
     let flow = uv(0.0, 0.0, 0.5, 0.5); // distinguishable ranges so a test bug
     let overlay = uv(0.5, 0.5, 1.0, 1.0); // would show up as a wrong-sprite UV
     let geom = FluidGeometry {

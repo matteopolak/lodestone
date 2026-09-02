@@ -39,7 +39,8 @@ fn hex_zip(body: &str) -> Vec<u8> {
             .expect("start hex member");
         w.write_all(body.as_bytes()).expect("write hex member");
         // A member the loader must ignore: only `.hex` entries are read
-        // (`UnihexProvider.Definition.loadData`'s `name.endsWith(".hex")`), and
+        // (vanilla's own unihex-provider-definition "load data" step's
+        // `name.endsWith(".hex")`), and
         // a real `unifont.zip` does ship a `LICENSE.txt` beside the data. If
         // this were read, the whole load would fail on a non-hex digit.
         w.start_file("LICENSE.txt", zip::write::SimpleFileOptions::default())
@@ -191,9 +192,10 @@ fn load(with_unihex: bool) -> Font {
 }
 
 /// A `unihex` glyph's advance is `width / 2 + 1` with `width = right - left + 1`
-/// (`UnihexProvider.Glyph.width` plus the anonymous `GlyphInfo` in
-/// `UnihexProvider.Glyph.info`), and the bounds come from the ink's own extent
-/// (`LineData.calculateWidth`) unless a `size_overrides` range replaces them.
+/// (vanilla's own unihex-glyph width field plus the anonymous glyph-info in
+/// its own info field), and the bounds come from the ink's own extent
+/// (vanilla's own line-data "calculate width" step) unless a `size_overrides`
+/// range replaces them.
 ///
 /// Mismatches are **collected**, not asserted in the loop: an `assert!` inside a
 /// `for` stops at the first failure, so one wrong arm would leave every later row
@@ -422,7 +424,7 @@ fn without_the_unihex_provider_those_codepoints_are_uncovered() {
 }
 
 /// A `size_overrides` range naming codepoints the `.hex` file does not contain
-/// contributes nothing (`UnihexProvider.Definition.loadData`'s
+/// contributes nothing (vanilla's own unihex-provider-definition "load data" step's
 /// `if (codepointBits != null)`) rather than inventing blank glyphs across the
 /// range. The fixture declares E000..E010 for exactly this.
 #[test]
@@ -449,7 +451,7 @@ fn an_override_range_does_not_invent_glyphs_the_hex_file_lacks() {
 
 /// A bound a `size_overrides` range pushes outside the source row's width pads
 /// with blank columns, not with a neighbour's ink
-/// (`unpackBitsToBytes`'s `i < 32 && i >= 0`).
+/// (vanilla's own "unpack bits to bytes" step's `i < 32 && i >= 0`).
 ///
 /// U+30FF has ink in exactly one column and is forced to 16. Asserting the exact
 /// set of lit texels rather than "some ink exists" is what separates a correct
@@ -499,7 +501,7 @@ fn a_real_unifont_glyph_lights_the_texels_its_hex_line_names() {
     );
 }
 
-/// The three rejections `UnihexProvider.readFromStream` and `decodeHex` make.
+/// The three rejections vanilla's own unihex-provider "read from stream" and "decode hex" steps make.
 ///
 /// Each malformed input is paired with the well-formed line it was derived from,
 /// which is the control: if the accepting case did not parse, an `Err` here would
@@ -569,7 +571,7 @@ fn a_missing_hex_file_leaves_the_rest_of_the_font_intact() {
 }
 
 /// A unihex glyph's bold offset is **0.5**, not 1
-/// (`UnihexProvider.Glyph.info`'s `getBoldOffset`), because it draws at
+/// (vanilla's own unihex-glyph info field's "get bold offset" accessor), because it draws at
 /// oversample 2. A sheet glyph keeps 1.
 ///
 /// The discriminating quantity is the *difference* between the bold and plain

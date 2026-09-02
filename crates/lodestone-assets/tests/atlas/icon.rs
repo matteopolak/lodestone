@@ -264,7 +264,7 @@ fn chest_becomes_a_special_renderer() {
 
 #[test]
 fn skull_special_renderer_carries_its_own_node_transformation() {
-    // The skull family's real gap (issue #645): the node's own
+    // The skull family's real gap: the node's own
     // `"transformation"` must survive from the parsed tree through
     // `ItemIconBuilder::part_for` onto `IconPart::Special`, not be dropped.
     let mgr = manager(&[(
