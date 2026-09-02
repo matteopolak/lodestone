@@ -30,7 +30,7 @@ New gameplay work targets `v770` unless an issue says otherwise.
 
 ## Build and test
 
-`just` (see [`docs/task-runner.md`](./docs/task-runner.md)) is the canonical command layer — one recipe
+`just` (see [`docs/repo-tooling.md`](./docs/repo-tooling.md)) is the canonical command layer — one recipe
 per raw invocation, so the recipe is never the only record of what it runs.
 
 ```bash
@@ -75,11 +75,11 @@ Smaller facts:
 - Live and GPU gates are `#[ignore]`d: `-- --ignored --nocapture`.
 - Live oracles are not repo state — recreate them with `just oracle-creative` / `oracle-terrain` /
   `oracle-survival`. They run under Apple `container`, not Docker
-  ([`docs/oracle-runtimes.md`](./docs/oracle-runtimes.md)); the host needs no `java`.
+  ([`docs/oracles-and-benchmarks.md`](./docs/oracles-and-benchmarks.md)); the host needs no `java`.
 - Test *counts* and *timings* gathered while other agents build are samples, not measurements. The
   invariant is zero failures, never an absolute number.
 - **PGO is opt-in and off by default** (`just pgo-instrument` / `pgo-merge` / `run-pgo`). See
-  [`docs/pgo-experiment.md`](./docs/pgo-experiment.md).
+  [`docs/oracles-and-benchmarks.md`](./docs/oracles-and-benchmarks.md).
 
 ---
 
