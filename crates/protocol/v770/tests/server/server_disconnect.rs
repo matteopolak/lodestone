@@ -50,12 +50,13 @@ use lodestone_v770::packet_ids::{configuration, login, play};
 use lodestone_v770::V770ServerProtocol;
 use lodestone_world::World;
 
+#[path = "../common/mod.rs"]
 mod common;
 
 /// The vanilla capture, parsed. Panics rather than skipping if absent — a
 /// *precondition*-species vacuous test would `return` here and report green.
 fn vanilla_capture() -> serde_json::Value {
-    let raw = include_str!("fixtures/vanilla_login_disconnect_26_2.json");
+    let raw = include_str!("../fixtures/vanilla_login_disconnect_26_2.json");
     serde_json::from_str(raw).expect("checked-in vanilla login-disconnect capture is valid JSON")
 }
 

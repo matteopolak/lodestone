@@ -73,6 +73,7 @@ use lodestone_v770::V770ServerProtocol;
 use lodestone_v770::packet_ids::{configuration, login, play};
 use uuid::Uuid;
 
+#[path = "../common/mod.rs"]
 mod common;
 use common::unique_username;
 

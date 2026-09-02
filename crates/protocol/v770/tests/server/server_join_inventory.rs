@@ -58,6 +58,7 @@ use lodestone_v770::{V770Adapter, V770ServerProtocol};
 use lodestone_world::World;
 use uuid::Uuid;
 
+#[path = "../common/mod.rs"]
 mod common;
 use common::unique_username;
 

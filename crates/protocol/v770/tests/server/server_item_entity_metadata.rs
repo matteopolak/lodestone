@@ -53,7 +53,7 @@ use lodestone_v770::V770ServerProtocol;
 use lodestone_v770::packet_ids::play;
 use lodestone_world::World;
 
-const DIAMOND_FIXTURE: &str = include_str!("fixtures/item_entity_metadata_diamond.hex");
+const DIAMOND_FIXTURE: &str = include_str!("../fixtures/item_entity_metadata_diamond.hex");
 
 /// Parses the reviewable hex-text fixture format: `#` comment lines carrying
 /// the capture's provenance, then whitespace-separated hex bytes. Same reader
