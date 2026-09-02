@@ -422,6 +422,36 @@ this block; the commands are given so you can. Stages 0-3 have landed:
 | 1 macro + builder | `#[mc(protocols)]` and `lodestone_core::dispatch` are consumed, not shelved |
 | 2 `lodestone-protocol-common` | ~1,500 lines; v1-8/v1-9/v1-14 `pub use` from it (15/21/16 references each) |
 | 3 dispatch tables | v1-8/v1-9/v1-14 carry 59/62/54 `Handler::new` entries and 20/32/52 `IGNORED` ones |
+| 4 first era crate | `lodestone_v1_9::PROTOCOLS` is `[110, 210, 316, 340]`, with a committed join capture per new protocol under `crates/versions/1.9/tests/captures/` |
+
+**Stage 4's measured cost, which is what this plan asked it to produce.** Diffed against
+`455a87d6`, excluding the three generated id tables (1,971 lines) and the three captured-byte
+files (157 lines):
+
+| bucket | lines added |
+|---|---|
+| era-crate source (`crates/versions/1.9/src`, excluding `generated/`) | 870 |
+| shared-crate source (`lodestone-core`'s dispatch, `lodestone-protocol-common`, one v1-14 call site) | 94 |
+| oracle script | 44 |
+| tests (in-file plus `tests/`) | 931 |
+| **hand-written total** | **1,939** |
+
+So ~1,008 hand-written *source* lines bought three protocols, about 336 each, against the
+~5.5k-per-version the copy-forward scheme charged. The number the plan named as its falsifier is
+the marginal one: adding 1.10.2 to a crate that already serves 1.9.4 and 1.12.2 costs a generated
+table, a capture, and roughly **twenty** hand-written lines (a protocol const, a `PROTOCOLS`
+entry, an `IDS_*` static, an `ids_for` arm, a dispatch slot, a `minecraft_versions` entry, and a
+`MEMBERS` row with its recorder and replay test) — well inside the ~500-line threshold, so the
+`since`/`until` mechanism is carrying the delta.
+
+Two corrections Stage 4 forces on the estimate above. First, the split between predicate and
+second struct is not free-form: a field **appearing or disappearing** is a `since`/`until`
+predicate on the shared definition, but a field **retype** must be a second struct, and four of
+this era's eight deltas are retypes. Second, tests are roughly half the hand-written cost and are
+*not* copies — the capture harness is shared across the three protocols, so a fourth would add
+about a dozen test lines, not another 300.
+
+See [`docs/protocol-1-9-era.md`](../protocol-1-9-era.md) for the era crate's own documentation.
 
 `cargo xtask connectedness` currently reports v1-8 59/74, v1-9 62/80, v1-14 54/92, v26-2 141/141
 clientbound, with zero decoded-but-stranded in every family.

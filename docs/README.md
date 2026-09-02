@@ -331,12 +331,23 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   ballistics and impact resolution (snowballs, eggs, ender pearls, potions, fireballs,
   arrows), the fishing rod's bobber, the riptide trident and elytra firework boost
   impulses, primed TNT, and the block-destroying half of an explosion.
+- [The 1.9 era crate: one family, four protocols](./protocol-1-9-era.md) —
+  `crates/versions/1.9` (package `lodestone-v1-9`) is the first *era* crate in this
+  repo: one family serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 — protocols
+  110, 210, 316 and 340 — from a single adapter, four generated packet-id tables,
+  and nine explicitly-carried shape deltas, rather than four copies of a family. It is
+  the calibration case for
+  [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md):
+  the same four versions cost ~336 hand-written source lines *each* under the
+  copy-forward scheme this replaces, and the marginal cost of the fourth is now about
+  twenty.
 - [Protocol packet ranges and data-driven dispatch](./protocol-dispatch.md) — Two
   additions that let one packet definition serve a range of protocol versions, and let
   a family's clientbound dispatch be checked at construction time instead of falling
   through a silent `_ =>` arm. Landed as Stage 1 of the multi-version protocol dedup
-  plan (`docs/plans/multi-version-protocol-dedup.md`): the macro attribute and the
-  dispatch builder, with no `crates/versions/*` family converted to use either yet.
+  plan (`docs/plans/multi-version-protocol-dedup.md`); `v1-8`, `v1-9` and `v1-14` now
+  all dispatch through it, and `v1-9` is a four-protocol era crate built on it (see
+  [`protocol-1-9-era.md`](./protocol-1-9-era.md)).
 - [Redstone execution model](./redstone-execution.md) — How a redstone change
   actually gets *executed* — what wakes up, what it costs, and why. This is the
   layer underneath `docs/redstone.md`'s per-device behaviour: the

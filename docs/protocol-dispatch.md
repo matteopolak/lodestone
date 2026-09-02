@@ -5,9 +5,9 @@
 Two additions that let one packet definition serve a range of protocol versions,
 and let a family's clientbound dispatch be checked at construction time instead
 of falling through a silent `_ =>` arm. Landed as Stage 1 of the multi-version
-protocol dedup plan (`docs/plans/multi-version-protocol-dedup.md`): the macro
-attribute and the dispatch builder, with no `crates/versions/*` family
-converted to use either yet.
+protocol dedup plan (`docs/plans/multi-version-protocol-dedup.md`); `v1-8`,
+`v1-9` and `v1-14` now all dispatch through it, and `v1-9` is a four-protocol
+era crate built on it (see [`protocol-1-9-era.md`](./protocol-1-9-era.md)).
 
 ## How it works
 
@@ -32,12 +32,23 @@ shape `gen-packet-ids` already emits as `ENTRIES`), a slice of
 `(name, Handler<T>)` bindings, and a slice of `IGNORED` entries (name +
 reason, for packets deliberately left untranslated). `Handler<T>` pairs a
 `ProtocolRange` with whatever payload a family actually runs (`T` is generic —
-this module has no notion of `ClientEvent`, `Directive`, or any session type).
+this module has no notion of `ClientEvent`, `Directive`, or any session type),
+and `IGNORED` carries a range too (`IGNORED::ranged`; `IGNORED::new` keeps
+`ProtocolRange::ALL`).
 Construction fails loudly, naming the offending packet, on: a wire id with no
-handler and no ignore entry (`UnlistedId`); a handler whose range excludes the
-protocol being built for (`OutOfRange`); a handler bound to a name absent from
-the id table (`UnboundHandler`); a duplicate handler; or a stale ignore entry.
-`Table::get` then does the runtime `id -> &T` lookup.
+handler and no in-range ignore entry (`UnlistedId`); a handler whose range
+excludes the protocol being built for (`OutOfRange`); a handler bound to a name
+absent from the id table (`UnboundHandler`); a duplicate handler; or a stale
+ignore entry. `Table::get` then does the runtime `id -> &T` lookup.
+
+The two absence checks are qualified by range, and that qualifier is what makes
+one handler list serve several protocols: a handler or ignore entry whose
+declared range **excludes** the protocol being built for is expected to find no
+id, and is skipped. One whose range includes it and still finds none is the
+defect it always was. An out-of-range ignore entry does not excuse an id the
+protocol really carries — that falls through to `UnlistedId`, so a range cannot
+be used to silence a live packet. Each half has a paired negative control in
+`dispatch.rs`'s own tests.
 
 **Canonical name aliases.** `xtask`'s packet-id generator (`gen-packet-ids`)
 gained a `canonical_name: Option<String>` field on `PacketEntry`. A
@@ -61,6 +72,11 @@ only 7 of 88 `ENTRIES` names as plain strings).
   `ENTRIES`, a `static CLIENTBOUND` handler list, and a `static IGNORED` list;
   propagate `Table::build`'s error rather than swallowing it, since a
   construction failure here is exactly the island `_ =>` used to hide.
+- A multi-protocol family builds one table **per protocol** (`v1-9` caches four
+  in an array of `OnceLock`s) and gives a range to every handler or ignore
+  entry naming a packet only some of its protocols carry. Leaving such an entry
+  at `ProtocolRange::ALL` fails construction for the protocols without it,
+  which is the intended loud failure rather than a trap.
 - A packet moving into a shared `lodestone-protocol-common`-style crate
   (a later stage) declares its real range via `#[mc(protocols = "a..=b")]`
   instead of leaving it at `ALL`; widen the range only alongside a capture
