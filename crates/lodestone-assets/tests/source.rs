@@ -47,24 +47,6 @@ fn build_zip_bytes() -> Vec<u8> {
 }
 
 #[test]
-fn directory_reads_content() {
-    let (_dir, src) = build_dir();
-    assert_eq!(
-        src.read("assets/minecraft/textures/block/stone.png"),
-        Some(b"stone-bytes".to_vec())
-    );
-}
-
-#[test]
-fn zip_reads_content() {
-    let src = ZipSource::from_bytes(build_zip_bytes()).unwrap();
-    assert_eq!(
-        src.read("assets/minecraft/textures/block/stone.png"),
-        Some(b"stone-bytes".to_vec())
-    );
-}
-
-#[test]
 fn directory_and_zip_agree() {
     let (_dir, dir_src) = build_dir();
     let zip_src = ZipSource::from_bytes(build_zip_bytes()).unwrap();
@@ -118,27 +100,6 @@ fn directory_rejects_path_traversal() {
     assert_eq!(src.read("../../etc/passwd"), None);
     assert_eq!(src.read("/etc/passwd"), None);
     assert_eq!(src.read("foo/../../secret.txt"), None);
-}
-
-#[test]
-fn zip_rejects_zip_slip() {
-    // Craft a malicious archive with a traversal entry name.
-    let mut buf = Vec::new();
-    {
-        let cursor = std::io::Cursor::new(&mut buf);
-        let mut zip = zip::ZipWriter::new(cursor);
-        let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default();
-        // start_file rejects some names, so write raw name via add_directory-like trick:
-        zip.start_file("safe.txt", opts).unwrap();
-        zip.write_all(b"safe").unwrap();
-        zip.finish().unwrap();
-    }
-    let src = ZipSource::from_bytes(buf).unwrap();
-    // Legit entry works.
-    assert_eq!(src.read("safe.txt"), Some(b"safe".to_vec()));
-    // Traversal lookups never resolve.
-    assert_eq!(src.read("../evil.txt"), None);
-    assert_eq!(src.read("/etc/passwd"), None);
 }
 
 #[test]

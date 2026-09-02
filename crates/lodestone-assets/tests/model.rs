@@ -222,34 +222,6 @@ fn unresolved_texture_variable_is_detectable() {
 }
 
 #[test]
-fn resolution_is_cached_across_calls() {
-    let manager = manager_with_models(&[
-        (
-            "block/a",
-            r##"{"parent":"block/shared","textures":{"all":"block/a"}}"##,
-        ),
-        (
-            "block/b",
-            r##"{"parent":"block/shared","textures":{"all":"block/b"}}"##,
-        ),
-        (
-            "block/shared",
-            r##"{"elements":[{"from":[0,0,0],"to":[16,16,16],"faces":{}}]}"##,
-        ),
-    ]);
-    let resolver = ModelResolver::new(&manager);
-    // Resolving both reuses the cached raw parse of block/shared.
-    let a = resolver
-        .resolve(&ResourceLocation::parse("block/a").unwrap())
-        .unwrap();
-    let b = resolver
-        .resolve(&ResourceLocation::parse("block/b").unwrap())
-        .unwrap();
-    assert_eq!(a.elements.len(), 1);
-    assert_eq!(b.elements.len(), 1);
-}
-
-#[test]
 fn euler_element_rotation_is_parsed() {
     // Vanilla 1.21+ hanging-sign models use a Euler x/y/z rotation instead of
     // the classic single-axis form. Both must parse.

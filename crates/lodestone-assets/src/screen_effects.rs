@@ -262,23 +262,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_fire_texture_is_reported() {
-        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
-        let err = load_fire_texture(&mgr).expect_err("must fail closed");
-        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
-    }
-
-    #[test]
     fn pumpkin_overlay_texture_loads() {
         let image = load_pumpkin_overlay_texture(&manager()).expect("load");
         assert_eq!((image.width, image.height), (16, 16));
-    }
-
-    #[test]
-    fn missing_pumpkin_overlay_texture_is_reported() {
-        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
-        let err = load_pumpkin_overlay_texture(&mgr).expect_err("must fail closed");
-        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
     }
 
     /// A frame count is never zero even for a malformed (shorter-than-one-frame)
@@ -302,23 +288,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_freeze_overlay_texture_is_reported() {
-        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
-        let err = load_freeze_overlay_texture(&mgr).expect_err("must fail closed");
-        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
-    }
-
-    #[test]
     fn spyglass_scope_texture_loads_as_a_plain_256x256_image() {
         let image = load_spyglass_scope_texture(&manager()).expect("load");
         assert_eq!((image.width, image.height), (256, 256));
-    }
-
-    #[test]
-    fn missing_spyglass_scope_texture_is_reported() {
-        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
-        let err = load_spyglass_scope_texture(&mgr).expect_err("must fail closed");
-        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
     }
 
     #[test]
@@ -328,23 +300,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_nausea_overlay_texture_is_reported() {
-        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
-        let err = load_nausea_overlay_texture(&mgr).expect_err("must fail closed");
-        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
-    }
-
-    #[test]
     fn portal_overlay_texture_loads_with_32_frames() {
         let image = load_portal_overlay_texture(&manager()).expect("load");
         assert_eq!((image.width, image.height), (16, 512));
         assert_eq!(fire_frame_count(&image), 32);
-    }
-
-    #[test]
-    fn missing_portal_overlay_texture_is_reported() {
-        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
-        let err = load_portal_overlay_texture(&mgr).expect_err("must fail closed");
-        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
     }
 }

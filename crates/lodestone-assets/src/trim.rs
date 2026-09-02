@@ -366,19 +366,9 @@ mod tests {
         assert_eq!(ids.len(), TRIM_MATERIALS.len());
     }
 
-    /// The exact worked example `docs/armour-rendering.md`'s "Trims" section
-    /// gives: a diamond trim on diamond armour is darker than the same trim
-    /// on any other material.
-    #[test]
-    fn diamond_trim_darkens_only_on_diamond_armour() {
-        let diamond = trim_material("diamond").expect("diamond material exists");
-        assert_eq!(diamond.suffix_for("diamond"), "diamond_darker");
-        assert_eq!(diamond.suffix_for("iron"), "diamond");
-        assert_eq!(diamond.suffix_for("netherite"), "diamond");
-        assert_eq!(diamond.suffix_for("leather"), "diamond");
-    }
-
-    /// All five overriding materials, each overriding exactly itself.
+    /// All five overriding materials, each overriding exactly itself. Covers
+    /// the exact worked example `docs/armour-rendering.md`'s "Trims" section
+    /// gives (diamond trim darkens only on diamond armour) as one iteration.
     #[test]
     fn the_five_overriding_materials_override_only_their_own_armour() {
         for id in ["iron", "netherite", "copper", "gold", "diamond"] {

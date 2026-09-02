@@ -643,41 +643,6 @@ fn bakes_all_block_states() {
 }
 
 #[test]
-#[ignore = "census helper: distinct tint indices across all baked states"]
-fn tint_index_census() {
-    let manager = manager();
-    let resolver = ModelResolver::new(&manager);
-    let atlas = full_block_atlas(&manager, &resolver);
-    let baker = BlockBaker::new(&manager, &resolver, &atlas);
-    let report = blocks_report();
-
-    let mut by_index: BTreeMap<i32, BTreeSet<String>> = BTreeMap::new();
-    for id in 0..report.state_count() {
-        let Some(rs) = report.resolve(id) else {
-            continue;
-        };
-        let Ok(baked) = baker.bake_state(&report, id, &FirstWeight) else {
-            continue;
-        };
-        for q in &baked.quads {
-            if let Some(t) = q.tint_index {
-                by_index.entry(t).or_default().insert(rs.block.to_string());
-            }
-        }
-    }
-    eprintln!("=== tint index census ===");
-    eprintln!("distinct tint indices: {}", by_index.len());
-    for (idx, blocks) in &by_index {
-        eprintln!("tintindex {idx}: {} blocks", blocks.len());
-        let mut v: Vec<&String> = blocks.iter().collect();
-        v.sort();
-        for b in v {
-            eprintln!("    {b}");
-        }
-    }
-}
-
-#[test]
 #[ignore = "requires a fetched vanilla client.jar"]
 fn loads_real_colormaps() {
     use lodestone_assets::tint::Colormaps;

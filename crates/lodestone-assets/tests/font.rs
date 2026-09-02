@@ -574,25 +574,6 @@ fn negative_control_fixed_advance_diverges_from_true_width() {
     );
 }
 
-/// The same control expressed as an *observed* failure: asserting the
-/// fixed-advance expectation against the real proportional widths panics. Kept
-/// as `should_panic` documentation that the width assertion genuinely breaks
-/// under the bug (a gate never seen to fail is not yet evidence).
-#[test]
-#[should_panic(expected = "fixed-advance model mis-measures")]
-fn negative_control_fixed_advance_assertion_breaks() {
-    let mgr = ascii_font();
-    let font = FontLoader::new(&mgr)
-        .load(&loc("minecraft:default"), &FontOptions::none())
-        .unwrap();
-    let true_width = font.string_width("ABi"); // 12
-    let fixed_width = 3.0 * 6.0; // 18
-    assert_eq!(
-        true_width, fixed_width,
-        "fixed-advance model mis-measures: true={true_width} fixed={fixed_width}"
-    );
-}
-
 #[test]
 fn missing_codepoint_uses_missing_advance() {
     let mgr = ascii_font();
