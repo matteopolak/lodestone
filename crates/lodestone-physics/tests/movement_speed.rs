@@ -1,4 +1,4 @@
-//! `PlayerState::movement_speed` reaching the integrator (issue #193).
+//! `PlayerState::movement_speed` reaching the integrator.
 //!
 //! # What this file is for, and what it is not
 //!
@@ -22,29 +22,30 @@
 //!    resulting positions, and the divergence is attributable to
 //!    `movement_speed` alone because nothing else differs between the runs.
 //! 2. **A hand-derived expectation for each arm**, computed here directly from
-//!    the jar's formula (`Entity.getInputVector` at yaw 0, on a default-
-//!    friction floor), not by calling the crate's own `tick`/`friction_
+//!    the jar's formula (vanilla's own input-vector accessor at yaw 0, on a
+//!    default-friction floor), not by calling the crate's own `tick`/`friction_
 //!    influenced_speed`/`input_vector` helpers to produce the *expected*
 //!    number — that would just be testing the code against itself.
 //!
 //! # Why one tick, and why yaw 0 on 0.6 friction
 //!
-//! `getFrictionInfluencedSpeed` only passes `getSpeed()` through unmodified
-//! when `blockFriction > 0.6F` is *false* (`LivingEntity.java:2710-2716`) —
-//! the crate's own `friction_influenced_speed_default_ground_is_getspeed`
+//! Vanilla's own friction-influenced speed step only passes its own speed
+//! accessor through unmodified when `blockFriction > 0.6F` is *false* — the
+//! crate's own `friction_influenced_speed_default_ground_is_getspeed`
 //! test already pins this for the default terrain friction (`0.6F` exactly,
-//! and `0.6F > 0.6F` is `false`). Combined with yaw `0.0` (so
-//! `getInputVector`'s rotation is the identity: `sin = 0`, `cos = 1`) and a
+//! and `0.6F > 0.6F` is `false`). Combined with yaw `0.0` (so vanilla's own
+//! input-vector accessor's rotation is the identity: `sin = 0`, `cos = 1`) and a
 //! flat floor with no obstruction, one tick from rest reduces to:
 //!
 //! ```text
 //! Δz = 0.98F(widened) * movement_speed
 //! ```
 //!
-//! — vanilla's analog-input scaling (`modifyInputSpeedForSquareMovement`'s
-//! `strafe * 0.98F` / `forward * 0.98F`, unchanged by the unit-square
-//! normalization for a single-axis input whose squared length is already
-//! `<= 1.0`) times the speed `moveRelative`/`getInputVector` scales by. This
+//! — vanilla's analog-input scaling (its own "modify input speed for square
+//! movement" step's `strafe * 0.98F` / `forward * 0.98F`, unchanged by the
+//! unit-square normalization for a single-axis input whose squared length is
+//! already `<= 1.0`) times the speed vanilla's own relative-move step /
+//! input-vector accessor scales by. This
 //! is exactly what the pure control below asserts against, for two different
 //! `movement_speed` values, with no reliance on the crate's own maths to
 //! produce the expected side.
@@ -90,9 +91,8 @@ fn speed_ii_and_sprint_are_the_only_difference() {
         ..MovementInput::NONE
     };
 
-    // The player's own MOVEMENT_SPEED base (`Player.createAttributes().add(
-    // MOVEMENT_SPEED, 0.1F)`, `Player.java:209` — not the generic
-    // `RangedAttribute` default of `0.7`).
+    // The player's own movement-speed attribute base (`0.1F` — not the
+    // generic ranged-attribute default of `0.7`).
     let base_speed = f64::from(profile.base_movement_speed);
     // The widening is observable (0.1f64 != f64::from(0.1f32), same footgun
     // `effect.rs`'s `speed_modifier_is_widened_float_times_level` pins), so
@@ -100,22 +100,23 @@ fn speed_ii_and_sprint_are_the_only_difference() {
     assert_eq!(
         base_speed.to_bits(),
         f64::from(0.1f32).to_bits(),
-        "profile.base_movement_speed must match Player.java:209's 0.1F"
+        "profile.base_movement_speed must match vanilla's own 0.1F"
     );
 
-    // MobEffects.SPEED: MOVEMENT_SPEED `+0.2F`, ADD_MULTIPLIED_TOTAL. Amount is
-    // `base * (amplifier + 1)` in the widened `f64` (`AttributeModifier.create`);
-    // amplifier 1 = Speed II.
+    // Vanilla's own speed mob-effect definition: movement-speed `+0.2F`,
+    // added as an "add multiplied total" modifier. Amount is
+    // `base * (amplifier + 1)` in the widened `f64` (vanilla's own
+    // attribute-modifier construction); amplifier 1 = Speed II.
     let speed_ii_amount = f64::from(0.2f32) * 2.0;
-    // AttributeInstance.calculateValue's multiplicative stage: result = base *
-    // (1 + amount). This is the value the entity layer would fold and hand to
+    // Vanilla's own attribute-value-calculation step's multiplicative stage:
+    // result = base * (1 + amount). This is the value the entity layer would fold and hand to
     // PlayerState::with_movement_speed — computed here from the jar constants
     // directly, not via lodestone_entity::attribute's own fold.
     let speed_ii = base_speed * (1.0 + speed_ii_amount);
     assert!(speed_ii > base_speed, "Speed II must walk faster than base");
 
-    // Sprinting (SPEED_MODIFIER_SPRINTING: `+0.3F` ADD_MULTIPLIED_TOTAL,
-    // `LivingEntity.java:154-157`) folded onto the *same* base the way
+    // Sprinting (vanilla's own sprinting speed-modifier constant: `+0.3F`
+    // added as an "add multiplied total" modifier) folded onto the *same* base the way
     // `player_physics`'s scoped fix combines the attribute-derived base with
     // the existing sprint arithmetic (`docs/swimming.md`): base * (1 + 0.3).
     let sprint_amount = 0.3;
@@ -150,9 +151,9 @@ fn speed_ii_and_sprint_are_the_only_difference() {
     // Hand-derived expectation for each arm, per this file's module doc: at
     // yaw 0 on default (0.6F) terrain friction, one tick from rest is
     // `Δz = 0.98F(widened) * movement_speed`. `movement_speed` here is the
-    // double-precision `AttributeInstance` value; the `(float)` cast happens
-    // where vanilla's own `Player.aiStep` does it —
-    // `this.setSpeed((float)this.getAttributeValue(...))`, reproduced by
+    // double-precision attribute-instance value; the `(float)` cast happens
+    // where vanilla's own per-tick AI step does it — its own speed field is
+    // set to its own resolved attribute value cast to `float`, reproduced by
     // `effective_speed`'s `v as f32` — so the hand-derived side must apply
     // that same truncation, not multiply the full f64 precision through.
     let scale = f64::from(0.98f32);

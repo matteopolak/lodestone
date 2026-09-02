@@ -1,7 +1,7 @@
 //! Pose-dependent dimensions where they meet the rest of the pipeline.
 //!
-//! `src/pose.rs`'s own tests pin the state machine (the fallback chain, the outer
-//! guard, the deflation, `getDesiredPose`'s priority order) and
+//! `src/pose.rs`'s own tests pin the state machine (the fallback chain, the
+//! outer guard, the deflation, vanilla's own "desired pose" priority order) and
 //! `tests/golden.rs`'s six pose traces pin the arithmetic bit-for-bit against the
 //! Python oracle. What is left, and what this file is for, is the *seams*: the
 //! places where a pose-sized box is read by something other than the collision
@@ -90,9 +90,9 @@ fn sprint_forward() -> MovementInput {
 }
 
 /// The box and the eye height are one `EntityDimensions` record in vanilla, and
-/// this is the measurement that says why: `EntityFluidInteraction.update` bounds
-/// its cell sweep by the **box**, so a `0.6`-high box with a `1.62` eye can never
-/// see the eye's own cell.
+/// this is the measurement that says why: vanilla's own fluid-interaction
+/// update bounds its cell sweep by the **box**, so a `0.6`-high box with a
+/// `1.62` eye can never see the eye's own cell.
 #[test]
 fn a_swimming_box_with_a_standing_eye_reports_dry_eyes_while_submerged() {
     let world = World::deep_water();
@@ -109,8 +109,8 @@ fn a_swimming_box_with_a_standing_eye_reports_dry_eyes_while_submerged() {
     // CONTROL — the bug this coupling prevents. Same box, same position, same
     // world, only the eye height left at the standing value: the sweep covers
     // y = 90 alone, the eye sits at 91.62, and the player reads *dry* while
-    // twenty blocks under water. No fog, no overlay, and `updateSwimming` can
-    // never re-enter the pose.
+    // twenty blocks under water. No fog, no overlay, and vanilla's own
+    // swimming-state update can never re-enter the pose.
     let split = compute_fluid_state(swimming_box, feet, 1.62, &world);
     assert!(
         !split.eye_in_water,
@@ -133,8 +133,8 @@ fn tick_keeps_the_eye_height_in_step_with_the_pose() {
     assert_eq!(s.eye_height, Pose::Swimming.eye_height());
     assert!(s.eye_in_water, "the eye must still be wet after the shrink");
 
-    // Stop sprinting: `updateSwimming` drops the flag, the gate grants STANDING
-    // (open water, nothing overhead) and both fields revert together.
+    // Stop sprinting: vanilla's own swimming-state update drops the flag, the
+    // gate grants STANDING (open water, nothing overhead) and both fields revert together.
     for _ in 0..3 {
         tick(&mut s, MovementInput::NONE, &world, &p);
     }
@@ -187,7 +187,8 @@ fn tick_ignores_an_out_of_band_eye_height_write() {
     assert_eq!(clean.eye_in_water, clobbered.eye_in_water);
 }
 
-/// `tick_air` is vanilla's `travel`, not `Player.tick`. It must read the pose and
+/// `tick_air` is vanilla's own travel step, not its own per-tick player
+/// update. It must read the pose and
 /// never write it — otherwise the 19 pre-existing golden traces that replay
 /// through a travel entry point would have silently acquired a pose.
 #[test]
@@ -208,12 +209,12 @@ fn the_travel_entry_points_do_not_touch_the_pose() {
     assert_eq!(
         air.pose,
         Pose::Standing,
-        "`travel` must not run updatePlayerPose"
+        "the travel step must not run vanilla's own pose-update step"
     );
     assert_eq!(air.eye_height, Pose::Standing.eye_height());
 
-    // CONTROL: the same 20 ticks through `tick` — which *is* `Player.tick` — do
-    // adopt the crouch, so the assertion above is about where the machine lives
+    // CONTROL: the same 20 ticks through `tick` — which *is* vanilla's own
+    // per-tick player update — do adopt the crouch, so the assertion above is about where the machine lives
     // and not about an inert machine.
     let mut full = PlayerState::at(Vec3d::new(0.5, 1.0, 0.5), -90.0);
     full.on_ground = true;
@@ -223,11 +224,13 @@ fn the_travel_entry_points_do_not_touch_the_pose() {
     assert_eq!(full.pose, Pose::Crouching);
 }
 
-/// The pose sizes `getBoundingBox()`, and the crowd push's pair test reads that
-/// box — so a neighbour that overlaps a standing player's head does not overlap a
-/// crouching one. This is also why `tick_among_entities` runs the push *before*
-/// the pose: `pushEntities` is the tail of `aiStep`, inside `super.tick()`, while
-/// `updatePlayerPose` is the tail of `Player.tick`.
+/// The pose sizes vanilla's own bounding-box accessor, and the crowd push's
+/// pair test reads that box — so a neighbour that overlaps a standing
+/// player's head does not overlap a crouching one. This is also why
+/// `tick_among_entities` runs the push *before* the pose: vanilla's own
+/// entity-push pass is the tail of its own AI step, inside its own base
+/// per-tick update, while its own pose-update step is the tail of its own
+/// per-tick player update.
 #[test]
 fn the_push_pair_test_uses_the_pose_sized_box() {
     let world = World::default();
@@ -257,7 +260,7 @@ fn the_push_pair_test_uses_the_pose_sized_box() {
     );
 
     // CONTROL: identical everything, crouching. The 1.5 box tops out at 2.5, the
-    // boxes do not intersect, and `getPushableEntities` returns nothing.
+    // boxes do not intersect, and vanilla's own pushable-entities query returns nothing.
     let mut crouching = PlayerState::at(feet, 0.0).with_pose(Pose::Crouching);
     crouching.on_ground = true;
     tick_among_entities(
@@ -274,9 +277,10 @@ fn the_push_pair_test_uses_the_pose_sized_box() {
     );
 }
 
-/// Vanilla has **no** recovery for a player whose box grows into a space it does
-/// not fit: `Entity.refreshDimensions` gates `fudgePositionAfterSizeChange` on
-/// `!level.isClientSide() && … && !(this instanceof Player)`, excluding us twice.
+/// Vanilla has **no** recovery for a player whose box grows into a space it
+/// does not fit: vanilla's own dimensions-refresh step gates its own
+/// size-growth recovery on "not client-side and ... not a player", excluding
+/// us twice.
 /// So the correct behaviour when a pose is seeded that cannot fit is that the
 /// *pose* changes and the position does not move at all.
 #[test]
