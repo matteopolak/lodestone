@@ -1,8 +1,8 @@
-//! `/clear`, from `ClearInventoryCommand.java`.
+//! `/clear`.
 //!
-//! # `item` is [`lodestone_command_mc::ItemArg`], not `ItemPredicateArgument`
+//! # `item` is [`lodestone_command_mc::ItemArg`], not a full item-predicate parser
 //!
-//! Vanilla's `<item>` node accepts an item **tag** (`#minecraft:...`) as well
+//! The real `<item>` node accepts an item **tag** (`#minecraft:...`) as well
 //! as a bare id. `ItemArg` — the same type `/give` uses — accepts only a bare
 //! id, for the same reason `/give`'s own doc gives: v1 ships with no textual
 //! SNBT/tag grammar anywhere in this workspace. A single-item filter is exact
@@ -15,7 +15,7 @@ use super::registrar::{Ctx, Registrar};
 use super::CommandResult;
 use crate::commands::Effect;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const CLEAR_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {

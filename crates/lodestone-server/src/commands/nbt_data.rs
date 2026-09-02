@@ -1,11 +1,10 @@
-//! `/data storage`, from `DataCommand.java` (issue #48's remainder — the
-//! consumer `crate::commands::nbt_storage` was built for) plus `/execute
-//! if`/`unless data storage`, its dedicated conditional in
-//! `crate::commands::execute`.
+//! `/data storage` (the consumer `crate::commands::nbt_storage` was built
+//! for) plus `/execute if`/`unless data storage`, its dedicated conditional
+//! in `crate::commands::execute`.
 //!
 //! # Only `storage`, not `entity`/`block`
 //!
-//! Vanilla's `/data` has three targets. This crate builds one — see
+//! The real `/data` has three targets. This crate builds one — see
 //! `crate::commands::nbt_storage`'s module doc for why `entity`/`block` are
 //! a different, still-missing subsystem (a live, command-reachable, mutable
 //! NBT view of an entity or block entity) rather than an oversight here.
@@ -15,7 +14,7 @@ use lodestone_command_mc::{NbtCompoundArg, NbtPathArg, SnbtValue, StorageIdArg};
 use super::registrar::{Ctx, Registrar};
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`, matching `/scoreboard`/`/team`.
+/// The game-masters permission level, matching `/scoreboard`/`/team`.
 const DATA_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {

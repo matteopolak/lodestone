@@ -1,18 +1,19 @@
-//! `/difficulty`, from `DifficultyCommand.java`.
+//! `/difficulty`.
 //!
 //! # One literal per difficulty, not a dedicated argument type
 //!
-//! Vanilla's own tree uses a `DifficultyArgument`, but this server's
-//! [`lodestone_model::command_tree::ArgumentParser`] has no wire entry for it —
-//! the closed four-value set is exactly [`crate::commands::gamerule`]'s own
-//! reasoning for one literal per value, applied here instead of inventing a
-//! parser this server cannot transmit correctly.
+//! The real command tree uses a dedicated difficulty argument type, but this
+//! server's [`lodestone_model::command_tree::ArgumentParser`] has no wire
+//! entry for it — the closed four-value set is exactly
+//! [`crate::commands::gamerule`]'s own reasoning for one literal per value,
+//! applied here instead of inventing a parser this server cannot transmit
+//! correctly.
 //!
 //! # The locked-difficulty refusal
 //!
-//! [`crate::world_state::WorldStateHandle::set_difficulty`] returns `false` for
-//! a locked world (`MinecraftServer.setDifficulty`'s own guard) — reported as a
-//! refusal here rather than silently doing nothing, which is the failure this
+//! [`crate::world_state::WorldStateHandle::set_difficulty`] returns `false`
+//! for a locked world (the real rule's own guard) — reported as a refusal
+//! here rather than silently doing nothing, which is the failure this
 //! server's own `docs/world-state.md` names as the one that looks like it works.
 
 use lodestone_model::Difficulty;
@@ -20,7 +21,7 @@ use lodestone_model::Difficulty;
 use super::registrar::Registrar;
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const DIFFICULTY_LEVEL: u8 = 2;
 
 const DIFFICULTIES: [(&str, Difficulty); 4] = [

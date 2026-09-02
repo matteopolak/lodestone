@@ -1,5 +1,4 @@
-//! `/stopwatch`, from `StopwatchCommand.java` (issue #48's remainder) — the
-//! producer `/execute if`/`unless stopwatch` reads.
+//! `/stopwatch` — the producer `/execute if`/`unless stopwatch` reads.
 //!
 //! # What it is
 //!
@@ -9,7 +8,7 @@
 //! `scale` defaulting to `1.0`), `restart <id>` (a hard reset — see the
 //! store's own doc for why that is not a pause/resume), and `remove <id>`.
 //! Each of the three id-taking subcommands other than `create` refuses an
-//! unknown id by name, matching vanilla's own `ERROR_DOES_NOT_EXIST`.
+//! unknown id by name with a "does not exist" error.
 //!
 //! See the store's own module doc for what this deliberately does not do
 //! (persist across a restart) and why.
@@ -20,7 +19,7 @@ use lodestone_command_mc::IdentifierArg;
 use super::registrar::{Ctx, Registrar};
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const STOPWATCH_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -74,7 +73,7 @@ pub(super) fn register(registrar: &mut Registrar) {
     });
 }
 
-/// `StopwatchCommand.queryStopwatch` — shared by the bare `query <id>` form
+/// The shared query logic — used by both the bare `query <id>` form
 /// (`scale` defaulting to `1.0`) and the explicit-scale form.
 fn run_query(
     ctx: &mut Ctx<'_>,

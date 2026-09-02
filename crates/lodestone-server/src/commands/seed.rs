@@ -1,5 +1,5 @@
-//! `/seed`, from `SeedCommand.java` — reports the world seed this server is
-//! actually generating from.
+//! `/seed` — reports the world seed this server is actually generating
+//! from.
 //!
 //! [`crate::worldgen_data::active_world_seed`] is the one place that value lives
 //! (see that function's own doc for the single-world caveat); this is its first
@@ -7,9 +7,9 @@
 
 use super::registrar::Registrar;
 
-/// Vanilla gates `/seed` at `Commands.LEVEL_GAMEMASTERS` (2) — it is listed
-/// under `ALLOW_CHEATS`-guarded commands (`SeedCommand.register`'s own
-/// `requiresCheats` in a singleplayer/LAN world), same as `/difficulty`.
+/// The real rule gates `/seed` at the game-masters permission level (2) — it
+/// is one of the cheats-guarded commands in a singleplayer/LAN world, same
+/// as `/difficulty`.
 const SEED_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {

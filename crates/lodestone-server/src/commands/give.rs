@@ -1,12 +1,12 @@
-//! `/give`, from `GiveCommand.java`.
+//! `/give`.
 //!
-//! # The tree, as vanilla declares it
+//! # The tree, as the real command declares it
 //!
 //! ```text
-//! literal("give").requires(LEVEL_GAMEMASTERS)
-//!   └─ argument("targets", EntityArgument.players())
-//!        └─ argument("item", ItemArgument.item(ctx))        [executable: count = 1]
-//!             └─ argument("count", integer(1))              [executable]
+//! literal("give").requires(game-masters level)
+//!   └─ argument("targets", players only)
+//!        └─ argument("item", an item stack)        [executable: count = 1]
+//!             └─ argument("count", integer(1))     [executable]
 //! ```
 //!
 //! Confirmed against the captured 26.2 tree (nodes 25 / 265 / 601 / 853): the
@@ -33,7 +33,7 @@ use super::effect::Effect;
 use super::registrar::{Ctx, Registrar};
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`.
+/// The game-masters permission level.
 const GIVE_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -45,9 +45,9 @@ pub(super) fn register(registrar: &mut Registrar) {
     let (item_node, item_key) = registrar.arg(targets_node, "item", ItemArg);
 
     // Two executable nodes on one path, one body. The default count is written
-    // out at the shallow node — `giveItem(…, 1)` in vanilla — rather than being
-    // an absent parameter, so the wire tree shows both nodes executable and
-    // neither handler has to ask whether the other's argument was supplied.
+    // out at the shallow node — a fixed `1` — rather than being an absent
+    // parameter, so the wire tree shows both nodes executable and neither
+    // handler has to ask whether the other's argument was supplied.
     registrar.exec(item_node, move |ctx| {
         let selector = ctx.get(targets_key).clone();
         let item = ctx.get(item_key).clone();
@@ -63,7 +63,7 @@ pub(super) fn register(registrar: &mut Registrar) {
     });
 }
 
-/// `GiveCommand.giveItem`.
+/// The real give-item rule.
 fn give_item(
     ctx: &mut Ctx<'_>,
     selector: &lodestone_command_mc::EntitySelector,
