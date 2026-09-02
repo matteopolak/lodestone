@@ -1,6 +1,6 @@
 //! Goal set for the horse family — horse, donkey, mule — one table shared by
-//! all three, transcribed from
-//! `.cache/mc/26.2/src/net/minecraft/world/entity/animal/equine/AbstractHorse.java`.
+//! all three, transcribed from vanilla's own abstract-horse goal
+//! registration in the 26.2 decompiled sources.
 //!
 //! # What it is
 //!
@@ -14,9 +14,9 @@
 //!
 //! # Why one table for three species
 //!
-//! `Horse`, `Donkey`, `Mule` and the abstract `AbstractChestedHorse` between
-//! the latter two all decline to override `registerGoals`, so every one of
-//! them runs `AbstractHorse.registerGoals` verbatim (`AbstractHorse.java:134-152`).
+//! The horse, donkey and mule, plus the abstract chested-horse type between
+//! the latter two, all decline to override goal registration, so every one of
+//! them runs the abstract horse's own registration verbatim.
 //! `skeleton_horse` and `zombie_horse` are deliberately **not** claimed here:
 //! nothing in this crate has verified whether either overrides it, and
 //! guessing "no override" the way the shared-table gate below checks for
@@ -25,8 +25,8 @@
 //! # Known gaps, all disclosed as `Missing` rows
 //!
 //! * **`RunAroundLikeCrazyGoal` and `AbstractHorse.MountPanicGoal`** both
-//!   require an existing passenger to run at all (`Goal::canUse` reads
-//!   `isVehicle()`/the rider), and this table has no way to express "only
+//!   require an existing passenger to run at all (vanilla's own eligibility
+//!   check reads whether the mob is a ridden vehicle), and this table has no way to express "only
 //!   while ridden". The tame roll they gate is already ported directly as
 //!   [`MobSim::attempt_horse_tame`](crate) — called once per empty-handed
 //!   mount attempt from `interact_horse` rather than as a recurring goal —
@@ -59,12 +59,12 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
     }
 }
 
-/// `AbstractHorse.registerGoals` (`AbstractHorse.java:134-152`), in the
-/// method's own call order: its own six `addGoal` calls (including the
-/// `canPerformRearing()`-gated ninth, which is unconditionally `true` —
-/// `AbstractHorse.canPerformRearing` returns `true` and neither `Donkey` nor
-/// `Mule` override it), then `addBehaviourGoals`'s three, called last from
-/// inside `registerGoals`.
+/// Vanilla's own abstract-horse goal registration, in the
+/// method's own call order: its own six goal registrations (including the
+/// rearing-gated ninth, which is unconditionally `true` —
+/// vanilla's own rearing-eligibility check returns `true` and neither the
+/// donkey nor the mule override it), then a shared three-goal helper's own
+/// registrations, called last from inside the main registration method.
 pub static HORSE_FAMILY: &[Registration] = &[
     Registration::missing(Selector::Goal, 1, "RunAroundLikeCrazyGoal"),
     Registration::goal(2, "BreedGoal", breed_1_0),
@@ -78,24 +78,27 @@ pub static HORSE_FAMILY: &[Registration] = &[
     Registration::missing(Selector::Goal, 3, "TemptGoal(HORSE_TEMPT_ITEMS)"),
 ];
 
-/// `BreedGoal(this, 1.0, AbstractHorse.class)`.
+/// Vanilla's own breed-goal registration: speed multiplier `1.0`, mate class
+/// the abstract horse type.
 fn breed_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(BreedGoal::new(ctx.speed))
 }
 
-/// `FollowParentGoal(this, 1.0)`.
+/// Vanilla's own follow-parent-goal registration: speed multiplier `1.0`.
 fn follow_parent_1_0(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FollowParentGoal::new(ctx.speed))
 }
 
-/// `WaterAvoidingRandomStrollGoal(this, 0.7)` — slower than every farm animal
+/// Vanilla's own water-avoiding-random-stroll-goal registration at speed
+/// multiplier `0.7` — slower than every farm animal
 /// in [`passive`](super::passive), whose shared [`super::passive`] strollers
 /// are all `1.0`.
 fn stroll_0_7(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RandomStrollGoal::new(ctx.speed * 0.7))
 }
 
-/// `LookAtPlayerGoal(this, Player.class, 6.0F)`.
+/// Vanilla's own look-at-player-goal registration: look distance `6.0F`,
+/// target class the player.
 fn look_at_player_6(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(LookAtPlayerGoal::new(6.0, LOOK_PROBABILITY))
 }
