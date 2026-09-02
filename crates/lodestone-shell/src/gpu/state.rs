@@ -73,7 +73,7 @@ impl RenderState {
         // the choice is made once here and mirrors the mesh classifier.
         let (atlas, uv_buffer) = match vanilla {
             Some(va) => {
-                let atlas = GpuAtlas::from_atlas(device, queue, va.atlas());
+                let atlas = GpuAtlas::from_atlas_terrain(device, queue, va.atlas());
                 let uv_buffer = sprite_uv_buffer(device, va.uv_table());
                 (atlas, uv_buffer)
             }
@@ -180,7 +180,7 @@ impl RenderState {
             // translucent block.
             let translucent_pipeline =
                 ModelPipeline::for_layer(device, color_format, lodestone_render::RenderLayer::Translucent);
-            let atlas = GpuAtlas::from_atlas(device, queue, models.atlas());
+            let atlas = GpuAtlas::from_atlas_terrain(device, queue, models.atlas());
             let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas);
             let palette_buffer =
                 lodestone_render::model_palette_buffer(device, models.tint_palette());
@@ -1268,7 +1268,7 @@ impl RenderState {
     /// Entity textures, the item atlas and the GUI/menu atlases are separate
     /// owners entirely — see `crate::app::lifecycle` for those.
     pub fn reload_block_atlas(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, vanilla: &BlockAtlas) {
-        let new_atlas = GpuAtlas::from_atlas(device, queue, vanilla.atlas());
+        let new_atlas = GpuAtlas::from_atlas_terrain(device, queue, vanilla.atlas());
         let new_uv_buffer = sprite_uv_buffer(device, vanilla.uv_table());
         let new_atlas_bind_group = self
             .pipeline
@@ -1279,7 +1279,7 @@ impl RenderState {
 
         match (vanilla.models(), self.model.as_mut()) {
             (Some(models), Some(model)) => {
-                let new_model_atlas = GpuAtlas::from_atlas(device, queue, models.atlas());
+                let new_model_atlas = GpuAtlas::from_atlas_terrain(device, queue, models.atlas());
                 let new_model_atlas_bind_group =
                     model.pipeline.atlas_bind_group(device, &new_model_atlas);
                 let new_crack_atlas_bind_group =

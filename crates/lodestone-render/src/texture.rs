@@ -486,7 +486,7 @@ impl GpuAtlas {
             sprites
         };
         let mips = generate_isolated_mips(width, height, rgba, src, levels);
-        Self::upload_mips(device, queue, width, height, &mips)
+        Self::upload_mips(device, queue, width, height, &mips, wgpu::FilterMode::Nearest)
     }
 
     /// Create the texture, upload every mip level, and build the sampler. Shared
@@ -494,12 +494,21 @@ impl GpuAtlas {
     /// (asset-supplied mips). The texture's `mip_level_count` follows `mips.len()`
     /// so an asset that capped its pyramid on an awkward sprite is honoured
     /// exactly.
+    ///
+    /// `mag_filter` is the one thing that differs between the two kinds of
+    /// consumer, and vanilla differs the same way: `TextureAtlas` keeps its own
+    /// sampler at `getClampToEdge(FilterMode.NEAREST)` — right for a GUI, item
+    /// or particle sheet, which is only ever drawn at or above 1:1 and must
+    /// stay crisp — while `LevelRenderer` builds a **separate**
+    /// `chunkLayerSampler` for terrain with `LINEAR` for *both* filters. See
+    /// [`Self::from_atlas_terrain`].
     fn upload_mips(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         width: u32,
         height: u32,
         mips: &[MipLevel],
+        mag_filter: wgpu::FilterMode,
     ) -> Self {
         let levels = mips.len().max(1) as u32;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
@@ -545,7 +554,7 @@ impl GpuAtlas {
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
+            mag_filter,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
@@ -570,35 +579,97 @@ impl GpuAtlas {
     #[must_use]
     pub fn from_atlas(device: &wgpu::Device, queue: &wgpu::Queue, atlas: &Atlas) -> Self {
         let mips = atlas_mip_levels(atlas);
-        Self::upload_mips(device, queue, atlas.width, atlas.height, &mips)
+        Self::upload_mips(
+            device,
+            queue,
+            atlas.width,
+            atlas.height,
+            &mips,
+            wgpu::FilterMode::Nearest,
+        )
+    }
+
+    /// [`Self::from_atlas`] with the sampler **terrain** wants: `LINEAR`
+    /// magnification as well as minification.
+    ///
+    /// Vanilla keeps two samplers over the same block atlas, and this is the
+    /// second one: `TextureAtlas`'s own is `getClampToEdge(FilterMode.NEAREST)`,
+    /// but `LevelRenderer` creates `chunkLayerSampler` as
+    /// `createSampler(CLAMP_TO_EDGE, CLAMP_TO_EDGE, LINEAR, LINEAR,
+    /// maxAnisotropy, empty)` and binds *that* as `Sampler0` for every chunk
+    /// layer. So the mag filter is not a preference here, it is which of the
+    /// two samplers a draw is using.
+    ///
+    /// It matters because `model.wgsl`'s default sampling path is now
+    /// `sample_nearest`, and that function's whole mechanism is `snap_uv`:
+    /// it moves the sample *within* a texel, rescaling the sub-texel offset by
+    /// screen-pixels-per-texel and clamping, so a magnified surface gets point
+    /// sampling with a one-pixel anti-aliased ramp at each texel edge. Against
+    /// a `Nearest` sampler that whole rescale is a **no-op** — moving a
+    /// coordinate inside a texel cannot change a point fetch — so the ramp
+    /// vanishes and magnified terrain gets hard, aliased texel edges instead of
+    /// vanilla's. Use this for anything the terrain pass samples; use
+    /// [`Self::from_atlas`] for GUI, item, container and particle sheets, where
+    /// `Nearest` magnification is what vanilla does and what keeps them crisp.
+    #[must_use]
+    pub fn from_atlas_terrain(device: &wgpu::Device, queue: &wgpu::Queue, atlas: &Atlas) -> Self {
+        let mips = atlas_mip_levels(atlas);
+        Self::upload_mips(
+            device,
+            queue,
+            atlas.width,
+            atlas.height,
+            &mips,
+            wgpu::FilterMode::Linear,
+        )
     }
 }
 
-/// The mip levels to upload for an [`Atlas`].
+/// The mip levels to upload for an [`Atlas`] — **exactly the ones it carries**,
+/// never more.
 ///
-/// When the atlas carries a pyramid (`mip_count() > 1`), its levels are returned
-/// verbatim: lodestone-assets already downsampled them vanilla-faithfully
-/// (linear-light RGB mean, cutout `solidify`, alpha-coverage preservation), and
-/// regenerating with the local box filter would both waste work and corrupt
-/// colour. A bare single-level atlas falls back to per-sprite isolated
-/// generation so it still gets a seam-free chain.
+/// lodestone-assets already downsampled them vanilla-faithfully (linear-light
+/// RGB mean, cutout `solidify`, alpha-coverage preservation, and a gutter
+/// re-extruded from each sprite's own edge at every level), so they are
+/// returned verbatim. An atlas that carries no pyramid uploads a **single**
+/// level, which is vanilla's own arithmetic: `TextureAtlas.createTexture` asks
+/// for `mipLevel + 1` levels, so `mipmapLevels = 0` is one level and no mip
+/// chain at all.
+///
+/// This used to fall back to [`generate_isolated_mips`] over the *stitched*
+/// image, and that was a shipped defect rather than a nicety. Two things go
+/// wrong at once, and both were measured against the real `client.jar` block
+/// atlas at `mipmapLevels = 0`:
+///
+/// * **The gutter is never written.** That generator allocates each level
+///   zero-filled and then writes only the sprite rectangles, which carry no
+///   padding — so every texel between sprites is transparent **black** from
+///   level 1 down. The block atlas's sampler is `min_filter: Linear`, so a tap
+///   at a face's own edge blends that in: alpha falls below `model.wgsl`'s
+///   cutout threshold on an alpha-tested quad (a background-coloured pinprick
+///   at a block edge, from a fully opaque sprite) and the colour is dragged
+///   toward black on one that bypasses the test. The contaminated share of a
+///   face is half a texel out of `16 >> level`, so it *grows* with distance —
+///   3% at level 0, 25% at level 3, 50% at level 4 — and then stops growing
+///   when the level clamps. Thin near, thicker further, then constant.
+/// * **It invents levels the sprites cannot support.** A 2048-wide atlas asks
+///   for 11 extra levels; by level 5 a 16x16 sprite is under one texel, sprites
+///   collide in the destination and the deepest levels are an average of
+///   unrelated textures. Measured beside `block/stone`: `0x00000000` at levels
+///   1-4, then `2a766f`, `9b9c62`, and a flat `f7c526` at the top.
+///
+/// [`generate_isolated_mips`] stays for [`GpuAtlas::from_rgba`], whose callers
+/// are synthetic atlases with no asset pyramid to consume.
 #[must_use]
 pub fn atlas_mip_levels(atlas: &Atlas) -> Vec<MipLevel> {
-    let count = atlas.mip_count();
-    if count > 1 {
-        (0..count)
-            .filter_map(|level| atlas.mip(level))
-            .map(|m| MipLevel {
-                width: m.width,
-                height: m.height,
-                rgba: m.rgba.to_vec(),
-            })
-            .collect()
-    } else {
-        let rects = sprite_rects(atlas);
-        let levels = mip_level_count(atlas.width, atlas.height);
-        generate_isolated_mips(atlas.width, atlas.height, &atlas.rgba, &rects, levels)
-    }
+    (0..atlas.mip_count())
+        .filter_map(|level| atlas.mip(level))
+        .map(|m| MipLevel {
+            width: m.width,
+            height: m.height,
+            rgba: m.rgba.to_vec(),
+        })
+        .collect()
 }
 
 #[cfg(test)]

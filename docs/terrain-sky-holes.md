@@ -459,27 +459,134 @@ vanilla's default `maxAnisotropyBit` of 2, twice ours). That is the next piece o
 work here, and it is the one that would let a cutout surface keep RGSS-grade
 stability without an opaque one paying for it.
 
-### What this does *not* explain
+### What this does *not* explain — **retracted**
 
-**The sky pinpricks are a separate report and remain open.** Nothing above
-involves the alpha test, and the section above already measured that no ordinary
-building block has a non-opaque texel to discard; this change alters *which mip
-level an opaque texel is read from*, which cannot produce a background-coloured
-fragment. The two reports arrived together and share a regime (distance,
-grazing angles) but not, on this evidence, a mechanism.
+This section used to say the sky pinpricks could not be affected by a change to
+which mip level an opaque texel is read from, and that they therefore remained
+open. **The owner reports they are completely gone**, and the reasoning was
+wrong. It is left here in corrected form rather than deleted, because the shape
+of the mistake is the reusable part: the argument was *"an opaque sprite has no
+transparent texel to filter toward, so the filtered alpha cannot fall"*, and
+that is a claim about the whole **neighbourhood** a filter reaches, not about
+the sprite. The section below it — measuring 1,269 sprites' alpha histograms —
+is still correct and was never the weak link. The gutter is.
+
+Two things it missed, one of them measured in this file:
+
+* At `mipmapLevels = 0` the gutter beside every sprite was **transparent
+  black**, so a fully opaque sprite's filtered alpha did fall, at every face
+  edge. See the section below.
+* Even with a sound gutter, a sprite that is genuinely `Cutout`-classified is
+  alpha-tested, and `sample_rgss` blends four sub-texel taps across **two**
+  adjacent mip levels, so its filtered alpha slides continuously with the camera
+  and crosses the threshold; `sample_nearest`'s `snap_uv` locks the sample to
+  the texel lattice and removes exactly that sliding term — which is what that
+  function's own comment says it is for. The 911/309/49 histogram names the
+  sprites it names correctly, but the same section records a second scanner
+  putting 517 sprites in `Cutout`, so the population of alpha-tested quads in a
+  real scene is larger than "no ordinary building block" suggests.
+
+Which of the two was the owner's is not established here, and the honest way to
+settle it is to ask what his **Mipmap Levels** slider was on — it was moved to
+`0` for an earlier experiment.
+
+## `mipmapLevels = 0` uploaded eleven invented levels with an unwritten gutter
+
+A shipped defect, found by dumping the texels the GPU actually receives rather
+than reasoning about the generator, and the cause of the grey grid the owner
+reported after the filtering change landed.
+
+`AtlasBuilder` only produces a pyramid when `with_mip_levels` was asked for a
+non-zero depth, so at `mipmapLevels = 0` the `Atlas` carries one level.
+`atlas_mip_levels` then fell back to `generate_isolated_mips` over the
+**stitched** image, and two things went wrong at once:
+
+* **The gutter was never written.** That generator allocates each level
+  zero-filled and writes only the sprite rectangles, and a `SpriteRect` carries
+  no padding. So from level 1 down, every texel between sprites is transparent
+  black.
+* **It invented levels the sprites cannot support.** A 2048-wide atlas asks for
+  `mip_level_count(2048, 2048)` = 11. By level 5 a 16x16 sprite is under one
+  texel, sprites collide in the destination, and the deepest levels hold an
+  average of unrelated textures.
+
+Measured beside `block/stone` in the real jar-built atlas at `mipmapLevels = 0`:
+`0x00000000` immediately outside the sprite at levels 1 through 4, then
+`2a766f`, `9b9c62`, and a flat `f7c526` at the top. Across five ordinary opaque
+sprites and every uploaded level, **164 of 465** probed gutter texels failed to
+replicate their sprite's own edge — 47 of them fully transparent, the other 117
+opaque but belonging to some other sprite. **Every one of the 164 is at
+`mipmapLevels = 0`**; 1 through 4 are clean, which is what localises it.
+
+That is the reported artefact, in all three of its details. The lines are
+**grey** because a foreign texel at a deep invented level is an average of
+unrelated block textures, and a transparent one drags the fragment toward black.
+They are at **every block boundary on opaque blocks** because it is the gutter,
+not alpha, that is wrong. And the thickness **saturates** because the
+contaminated share of a face is half a texel out of `16 >> level` — 3% at level
+0, 6%, 12.5%, 25%, 50% at level 4 — so it grows as the level climbs with
+distance and then stops when the level clamps at the top of the chain.
+
+The fix is vanilla's own arithmetic: `TextureAtlas.createTexture(width, height,
+mipLevel)` asks for `mipLevel + 1` levels, so `mipmapLevels = 0` is **one**
+level and no mip chain at all. `atlas_mip_levels` now returns exactly the levels
+the atlas carries and never invents any; `generate_isolated_mips` stays for
+`GpuAtlas::from_rgba`, whose callers are synthetic atlases with no asset pyramid
+to consume.
+
+`atlas_uploaded_chain_gutter_gate` is the guard, and its two claims are the two
+halves of the bug: `mipmapLevels = n` uploads exactly `n + 1` levels (predicted,
+not floored — the bug uploaded 11 at `n = 0`, which "at least one" would have
+passed), and every texel orthogonally outside a sprite's rect, at every uploaded
+level, equals that sprite's own nearest edge texel. Run under a neuter that
+restores the fallback, it reports `[(0, 11), (1, 2), (2, 3), (3, 4), (4, 5)]`
+against the expected counts and names all 164 gutter mismatches; restored, 300
+of 300 texels agree.
+
+Note what this says about the `mipmapLevels = 0` **experiment** itself: it was
+proposed here as a way to separate mip/gutter causes from UV or geometry ones,
+and it was not a clean control — that setting has its own severe defect. Any
+observation taken under it before this fix is about the fallback path, not about
+the shipped chain.
+
+### The terrain mag filter is now vanilla's, and it is *not* the grey grid
+
+`GpuAtlas`'s sampler used `mag_filter: Nearest` for every consumer. Vanilla
+keeps **two** samplers over the same block atlas: `TextureAtlas`'s own is
+`getClampToEdge(FilterMode.NEAREST)`, which is right for a GUI, item or particle
+sheet, but `LevelRenderer` builds a separate `chunkLayerSampler` as
+`createSampler(CLAMP_TO_EDGE, CLAMP_TO_EDGE, LINEAR, LINEAR, maxAnisotropy,
+empty)` and binds *that* as `Sampler0` for every chunk layer. So the mag filter
+is not a preference, it is which of the two samplers a draw uses.
+`GpuAtlas::from_atlas_terrain` is the second one; the four terrain call sites in
+`lodestone-shell`'s `gpu::state` take it, and the particle sheet beside them
+deliberately does not.
+
+This was recorded here as "deliberately not changed" while the default sampling
+path was `sample_rgss`. It stopped being cosmetic when the default became
+`sample_nearest`, because that function's entire mechanism is `snap_uv` — it
+moves the sample *within* a texel, rescaling the sub-texel offset by
+screen-pixels-per-texel and clamping, to get point sampling with a one-pixel
+anti-aliased ramp at each texel edge. Against a `Nearest` sampler that rescale
+is a **no-op**: moving a coordinate inside a texel cannot change a point fetch.
+So we shipped vanilla's `NONE` mode with its defining function inert over half
+its range.
+
+**It does not explain the grey grid**, and it was worth checking rather than
+assuming: `mag_filter` is consulted only when the level of detail is `<= 0`,
+which is magnification, and the reported artefact is strictly a minification one
+("farther away", "disappears as I get close"). The two regimes are disjoint. Its
+symptom is the opposite one — hard, aliased texel edges on *near* terrain where
+vanilla has a one-pixel ramp.
 
 ### Still divergent, deliberately not changed here
 
-`GpuAtlas`'s sampler uses `mag_filter: Nearest` where vanilla's chunk-layer
-sampler uses `LINEAR`. It matters only under **magnification**, which is the one
-regime both reports say is fine, and it is not free to change: `GpuAtlas` is the
-shared upload path for the GUI, item, container and icon atlases too, where
-`Nearest` magnification is correct (vanilla's `TextureAtlas` keeps its own
-sampler at `getClampToEdge(FilterMode.NEAREST)`), so a terrain-only variant has
-to be threaded through four call sites first. It is worth doing, because with
-`use_rgss = 0` the whole of vanilla's `NONE` mode is `snap_uv`, and `snap_uv`'s
-sub-texel rescale is a **no-op** against a `Nearest` sampler — the one-pixel
-anti-aliased ramp at each texel edge that vanilla gets, we do not.
+Anisotropy. Vanilla's third `TextureFilteringMethod` value needs
+`anisotropy_clamp > 1` on the terrain sampler and, as `Stitcher` does, an atlas
+gutter that grows with the anisotropy bit (`1 << mipLevel << clamp(anisotropyBit
+- 1, 0, 4)` — 32 texels at vanilla's default `maxAnisotropyBit` of 2, twice
+ours). It is the piece that would let a cutout surface keep RGSS-grade stability
+without an opaque one paying for it.
 
 ## One divergence left, deliberately unfixed
 
@@ -516,7 +623,8 @@ than changed alongside an unrelated fix.
 
 ## Dependencies
 
-* `lodestone-render` — `cull.rs` (`within_view_distance`), `model_pipeline.rs`,
+* `lodestone-render` — `cull.rs` (`within_view_distance`), `model_pipeline.rs`
+  (`TextureFiltering`), `texture.rs` (`atlas_mip_levels`, `GpuAtlas::from_atlas_terrain`),
   `block_models.rs` (`BlockModels::sprite_layer`), `models.rs`
   (`ModelSectionView::quad_layer`, `mesh_models_layers`), `shaders/model.wgsl`.
 * `lodestone-assets` — `atlas.rs` (`AtlasBuilder::build`'s level-0 blit) and
