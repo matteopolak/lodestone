@@ -19,7 +19,7 @@
 //! a stair, and could step over a fence that vanilla makes 1.5 blocks tall.
 //!
 //! That mattered quantitatively, not just aesthetically. 26.2's server replays
-//! our movement delta through `move(MoverType.PLAYER, …)` and rubber-bands as
+//! our movement delta through its own player-move handling and rubber-bands as
 //! soon as horizontal disagreement passes **0.25 blocks in a single packet, with
 //! no accumulator** (`docs/baritone-port.md` §3.2). `lodestone-physics` is
 //! bit-exact against two independent oracles across 26 zero-tolerance golden
@@ -117,8 +117,8 @@ const FULL_CUBE: &[BlockAabb] = &[BlockAabb {
     max: [1.0, 1.0, 1.0],
 }];
 
-/// No collision at all. Distinct from a zero-volume box: vanilla's
-/// `Shapes.empty()` contributes nothing to a sweep, and a zero-volume box would
+/// No collision at all. Distinct from a zero-volume box: vanilla's own
+/// empty-shape sentinel contributes nothing to a sweep, and a zero-volume box would
 /// still be tested (and, with the `1.0E-7` epsilon, could stop a movement).
 const NO_COLLISION: &[BlockAabb] = &[];
 
@@ -153,7 +153,7 @@ trait BlockView {
     /// value the overwhelming majority of blocks have.
     fn name_of(&self, state: u32) -> Option<&'static str>;
 
-    /// Vanilla `BlockState.blocksMotion()` for a state, or `None` when this
+    /// Vanilla's own block-state blocks-motion check for a state, or `None` when this
     /// adapter has no census for it — in which case [`blocks_motion_at`] falls
     /// back to deriving it from the shape, which is wrong for 202 blocks. See
     /// that function's docs; this must never be synthesised from
@@ -237,10 +237,10 @@ fn shape_is_solid(shape: &[BlockAabb]) -> bool {
     mean >= 0.7291666666666666 || f64::from(size[1]) >= 1.0
 }
 
-/// `Block.isFaceFull(collisionShape, dir)` for a horizontal direction: does the
+/// Vanilla's own is-face-full check for a horizontal direction: does the
 /// shape cover that whole 1×1 face?
 ///
-/// **Under-approximation, deliberately.** Vanilla unions the whole `VoxelShape`
+/// **Under-approximation, deliberately.** Vanilla unions the whole voxel shape
 /// before testing, so a face covered by *several* boxes jointly counts; this
 /// asks whether any *single* box covers it. Every real block whose face is full
 /// has one box that does it (a cube, a slab's own side, a double-height door),
@@ -381,7 +381,7 @@ fn fluid_at(v: &impl BlockView, x: i32, y: i32, z: i32) -> Option<FluidCell> {
     v.fluid_cell_of(v.state_at(x, y, z))
 }
 
-/// `BlockState.blocksMotion()`, from the version crate's per-state census
+/// Vanilla's own block-state blocks-motion check, from the version crate's per-state census
 /// ([`VersionAdapter::block_blocks_motion`]) when there is one, and from
 /// [`shape_is_solid`] only when there is not.
 ///
@@ -795,12 +795,12 @@ pub struct LiveCollision {
     air_states: Vec<u32>,
 }
 
-/// The blocks whose **outline** shape is `Shapes.empty()` *and* whose cell holds
+/// The blocks whose **outline** shape is vanilla's own empty-shape sentinel *and* whose cell holds
 /// no fluid, i.e. the ones vanilla's own entity-pick routine must walk straight through without them
 /// being identifiable as "a fluid cell".
 ///
 /// All three register as vanilla's own air block type, whose shape getter
-/// returns `Shapes.empty()`, so none of them is targetable
+/// returns vanilla's own empty-shape sentinel, so none of them is targetable
 /// in vanilla. This matters because **`minecraft:air` is not the only air**:
 /// vanilla's own world-carver writes `minecraft:cave_air`, as do lakes,
 /// monster rooms and strongholds, and the end's void column is `void_air`. Each is
@@ -1122,8 +1122,8 @@ impl LiveCollision {
         self.atlas.classify(self.block_at(x, y, z), 0, 0).occludes
     }
 
-    /// The block-local **outline** boxes for a state — vanilla
-    /// `BlockStateBase.getShape(...).toAabbs()`, via
+    /// The block-local **outline** boxes for a state — vanilla's own
+    /// per-state outline-shape accessor decomposed into AABBs, via
     /// [`VersionAdapter::block_outline`] — or a degraded proxy when no version
     /// census is available for this state.
     ///
@@ -1131,7 +1131,7 @@ impl LiveCollision {
     /// emptiness, and it is also what a selection box should be drawn from:
     /// unlike [`shape_of`](BlockView::shape_of) (collision), the outline is
     /// what vanilla's crosshair and selection box actually use
-    /// (`ClipContext.Block.OUTLINE`).
+    /// (vanilla's own outline clip-context mode).
     ///
     /// # Two fallback tiers, and why neither guesses a cube from nothing
     ///
@@ -1152,8 +1152,9 @@ impl LiveCollision {
     ///
     /// The pre-census proxy's second clause ("no fluid ⇒ pickable") kept
     /// `light` targetable as a side effect of having no baked model geometry.
-    /// The real census says vanilla's own light-block shape getter is
-    /// `isHoldingItem(Items.LIGHT) ? block() : empty()`
+    /// The real census says vanilla's own light-block shape getter returns the
+    /// full block's shape only while the viewer holds a light item, and an
+    /// empty shape otherwise
     ///, dumped with no item held — so light is now
     /// **un**pickable, matching what vanilla does for every player who is not
     /// holding a light item. This is the correct default-case answer, and
@@ -1218,13 +1219,14 @@ impl LiveCollision {
     /// Picking is *not* collision (a cross-plant has an empty collision shape and is
     /// still breakable), and it is *not* "the cell has no fluid" either. Vanilla
     /// walks the **outline** shape (vanilla's own block-state shape getter) with fluid shapes
-    /// switched off (`Fluid.NONE`, vanilla's own entity-pick routine). So the
+    /// switched off (no fluid, vanilla's own entity-pick routine). So the
     /// real question is *does the block in this cell have a non-empty outline*:
     ///
-    /// * vanilla's own liquid-block shape getter → `Shapes.empty()`, so
+    /// * vanilla's own liquid-block shape getter → vanilla's own empty-shape
+    ///   sentinel, so
     ///   open water and lava are never targeted;
-    /// * vanilla's own kelp block's is `Block.column(16, 0, 9)` and
-    ///   its own seagrass block's is `Block.column(12, 0, 12)` —
+    /// * vanilla's own kelp block's is a 16-wide, 0-to-9-tall column and
+    ///   its own seagrass block's is a 12-wide, 0-to-12-tall column —
     ///   **non-empty**, so kelp and seagrass are targeted and breakable, even though
     ///   both hardcode their own fluid-state getter → vanilla's own water-fluid constant.
     ///
@@ -1677,7 +1679,7 @@ mod tests {
         ] {
             assert!(
                 block_physics(name).climbable,
-                "{name} is in BlockTags.CLIMBABLE"
+                "{name} is in vanilla's own climbable block tag"
             );
         }
         // Controls: near-misses that are *not* in the tag.
@@ -1689,7 +1691,7 @@ mod tests {
         ] {
             assert!(
                 !block_physics(name).climbable,
-                "{name} is NOT in BlockTags.CLIMBABLE"
+                "{name} is NOT in vanilla's own climbable block tag"
             );
         }
 
@@ -1852,12 +1854,12 @@ mod tests {
     ///
     /// Not from this module. Each one is vanilla's own constructor call, read out
     /// of the decompiled 26.2 jar and converted from sixteenths by hand:
-    /// `SlabBlock.SHAPE_BOTTOM = Block.column(16, 0, 8)` and `SHAPE_TOP =
-    /// Block.column(16, 8, 16)`; `SoulSandBlock.SHAPE = Block.column(16, 0, 14)`;
-    /// `FenceBlock` passes `collisionHeight = 24` with `postWidth = 4` to
-    /// `CrossCollisionBlock`, whose post is `Block.column(4, 0, 24)`; `COBWEB` is
-    /// registered `.noCollision()`. `Block.column(w, lo, hi)` centres `w`, so
-    /// `column(4, …)` spans `6/16..10/16`.
+    /// vanilla's own slab block's bottom shape is a 16-wide, 0-to-8-tall column and its top shape is a
+    /// 16-wide, 8-to-16-tall column; vanilla's own soul-sand block's shape is a 16-wide, 0-to-14-tall column;
+    /// vanilla's own fence block passes a 24-tall collision height with a 4-wide post to
+    /// its own cross-collision base, whose post is a 4-wide, 0-to-24-tall column; `COBWEB` is
+    /// registered with no collision. Vanilla's own column-shape helper centres its width, so
+    /// a 4-wide column spans `6/16..10/16`.
     ///
     /// # The controls
     ///
@@ -2305,13 +2307,14 @@ mod tests {
     /// **The deliberate behaviour change.** The pre-census proxy's "no fluid ⇒
     /// pickable" clause kept `minecraft:light` targetable as a side effect of it
     /// having no baked model geometry. The real outline census says
-    /// vanilla's own light-block shape getter is `isHoldingItem(Items.LIGHT) ? block() : empty()`
+    /// vanilla's own light-block shape getter returns the full block's shape
+    /// only while the viewer holds a light item, and an empty shape otherwise
     ///, dumped with no item held, so vanilla itself does
     /// not let you target a bare-handed light block — and now neither do we.
     ///
     /// `minecraft:barrier` is the control proving this is a real outline read and
     /// not "everything with no rendered geometry is now unpickable": barrier's
-    /// shape is a context-free unit cube (`BarrierBlock` overrides no shape
+    /// shape is a context-free unit cube (vanilla's own barrier block overrides no shape
     /// getter), so it must stay targetable exactly as before, even though it also
     /// has no baked model quads.
     #[test]
@@ -2339,7 +2342,7 @@ mod tests {
     /// **The visible half of this change.** Before the outline census, every
     /// pickable cell was drawn as a full unit-cube selection box; a bottom slab's
     /// box should be a half-height box like its own collision shape
-    /// (vanilla's own slab block class: `SHAPE_BOTTOM = Block.column(16, 0, 8)`), not the
+    /// (vanilla's own slab block class's bottom shape: a 16-wide, 0-to-8-tall column), not the
     /// full cell.
     ///
     /// Stone is the control: a state whose outline genuinely *is* a full unit
@@ -2425,9 +2428,9 @@ mod tests {
             "the ray must stop at the kelp, not tunnel through to the stone"
         );
 
-        // The 9/16 column belongs to the **head**, not the body. `Block.column(16,
-        // 0, 9)` is `KelpBlock`'s `SHAPE`, passed to
-        // `GrowingPlantHeadBlock`; `kelp_plant` is the `GrowingPlantBodyBlock`
+        // The 9/16 column belongs to the **head**, not the body. A 16-wide,
+        // 0-to-9-tall column is vanilla's own kelp block's shape, passed to
+        // its own growing-plant head base; `kelp_plant` is the growing-plant body
         // half, which overrides no shape and so outlines to a full cube. The
         // committed JVM dump agrees: `kelp_plant` is `0..1`, `kelp[age=0]` is
         // `0..0.5625`. Casting at both pins that the ray reads a *per-state*
@@ -2468,10 +2471,10 @@ mod tests {
     /// (`lodestone-data/tests/support/outline_shape_jvm.txt`), not produced by
     /// the ray under test:
     ///
-    /// * vanilla's own carpet block — `SHAPE = Block.column(16.0, 0.0, 1.0)`, i.e. the
+    /// * vanilla's own carpet block — a 16-wide, 0-to-1-tall column, i.e. the
     ///   full cell in x/z and **`1/16` of a block tall**;
     /// * vanilla's own leaf-litter block via its own segmentable-block base class —
-    ///   `Block.box(0, 0, 0, 8, getShapeHeight() = 1, 8)` per segment, so a
+    ///   an 8×8 box, 1 unit tall per segment, so a
     ///   four-segment litter is the same `1/16`-tall plate over the whole cell.
     ///
     /// The first assertion is the **world-species guard**: if the census handed

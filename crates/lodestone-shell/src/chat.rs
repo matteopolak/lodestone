@@ -99,8 +99,7 @@
 //!   ([`Completion::NeedsServer`]) rather than guessed at locally. Vanilla's
 //!   own client actually answers several of these locally too (entity/player
 //!   names from the tab list, team names from the scoreboard, …) via
-//!   `ClientSuggestionProvider` — see `SuggestionProviders.java` and
-//!   `ClientSuggestionProvider.java` in `.cache/mc/26.2/client-src`. Doing
+//!   its own client-side suggestion provider. Doing
 //!   the same here needs session/world state this crate deliberately does
 //!   not hold (`chat.rs` stays pure — no client handle, no ECS query). Until
 //!   that state is threaded in, routing these to the server is strictly
@@ -133,14 +132,14 @@
 //! Two seams, not one, and mixing them up is how the dropdown would go back to
 //! being Tab-only:
 //!
-//! * [`ChatInput::update_command_info`] is vanilla's `EditBox` responder
-//!   (`ChatScreen.onEdited` → `CommandSuggestions.updateCommandInfo`) and is
+//! * [`ChatInput::update_command_info`] is vanilla's own `EditBox` responder
+//!   (its own edit callback feeding its own suggestion-popup command-info update) and is
 //!   what makes the popup appear **while typing**.
 //!   `app::menus::handle_chat_key` calls it after every edit.
 //! * [`ChatInput::tab`] is the Tab key
-//!   (`CommandSuggestions.keyPressed`), plus [`ChatInput::suggestion_up`],
+//!   (vanilla's own suggestion-popup key handling), plus [`ChatInput::suggestion_up`],
 //!   [`ChatInput::suggestion_down`] and [`ChatInput::suggestion_escape`] for the
-//!   rest of `SuggestionsList.keyPressed`. The mouse half —
+//!   rest of vanilla's own suggestions-list key handling. The mouse half —
 //!   [`ChatInput::suggestion_hover`], [`ChatInput::suggestion_click`],
 //!   [`ChatInput::suggestion_scroll`] — is driven from `app::lifecycle`'s
 //!   pointer arms against the rect `hud::suggestion_layout` resolved for the
@@ -183,11 +182,11 @@ use lodestone_model::command_tree::{
 };
 use lodestone_model::text::Text;
 
-/// Vanilla's cap on the recent-chat store — `new ArrayListDeque<>(100)` plus the
-/// `size() >= 100 → removeFirst()` guard in `ChatComponent.addRecentChat`.
+/// Vanilla's cap on the recent-chat store — a 100-entry deque plus the
+/// size-at-least-100-drops-oldest guard in vanilla's own add-recent-chat handling.
 pub const RECENT_CHAT_MAX: usize = 100;
 
-/// `ChatScreen.init`'s `this.input.setMaxLength(256)`, in `char`s.
+/// Vanilla's own chat-screen init sets its input's max length to 256, in `char`s.
 pub const MAX_CHAT_LENGTH: usize = 256;
 
 /// What one key press did to the chat line — [`ChatInput::handle_key`]'s answer.
@@ -204,10 +203,10 @@ pub struct ChatKeyResult {
 
 /// The lines the player has **sent**, oldest first, for the Up/Down arrows.
 ///
-/// Vanilla's `ChatComponent.recentChat`. The thing to notice is that it does
+/// Vanilla's own recent-chat deque. The thing to notice is that it does
 /// **not** live on the chat screen: the deque belongs to the persistent HUD
 /// component and the screen only holds a *cursor* into it
-/// (`ChatScreen.historyPos`), so reopening chat still walks everything sent
+/// (its own history-position field), so reopening chat still walks everything sent
 /// earlier in the session.
 ///
 /// Here it is a field of [`ChatInput`], which is the equivalent placement rather
@@ -215,7 +214,7 @@ pub struct ChatKeyResult {
 /// lifetime and survives every chat open, close and cancel — only its `buf` is
 /// screen-scoped. What matters is that the store outlives the screen, and it
 /// does. The cursor into it is [`ChatInput::history_pos`], reset on open exactly
-/// as `ChatScreen.init` resets `historyPos`.
+/// as vanilla's own chat-screen init resets its history position.
 ///
 /// Three behaviours transcribed from `addRecentChat`, each of which a plausible
 /// implementation gets wrong:
@@ -237,12 +236,12 @@ impl ChatHistory {
         Self::default()
     }
 
-    /// Record a line the player just sent — `ChatComponent.addRecentChat`.
+    /// Record a line the player just sent — vanilla's own add-recent-chat handling.
     ///
     /// The line is **normalised first**, because vanilla records the normalised
-    /// form and not the keystrokes: `ChatScreen.handleChatInput` runs
-    /// `normalizeChatMessage` (`StringUtil.trimChatMessage(normalizeSpace(msg.trim()))`)
-    /// and only then `if (!msg.isEmpty())` guards the store. `normalizeSpace`
+    /// form and not the keystrokes: vanilla's own chat-input handling runs
+    /// its own message normalization (trim, then collapse internal whitespace)
+    /// and only then guards the store on the result being non-empty. `normalizeSpace`
     /// collapses every internal whitespace run to one space, so recalling
     /// `"hello    world"` really does give back `"hello world"` — and, less
     /// obviously, it is what makes the consecutive-duplicate check below fire for
@@ -281,7 +280,7 @@ impl ChatHistory {
     }
 }
 
-/// `StringUtils.normalizeSpace` — trim, then collapse every internal whitespace
+/// Vanilla's own whitespace-normalization — trim, then collapse every internal whitespace
 /// run to a single space.
 fn normalize_space(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -291,15 +290,16 @@ fn normalize_space(text: &str) -> String {
 /// chat box, editing, and cancelling never touch the received history.
 #[derive(Debug, Clone)]
 pub struct ChatInput {
-    /// The line itself — vanilla's `ChatScreen.input`, an
+    /// The line itself — vanilla's own chat-screen input field, an
     /// [`EditBox`], not a bare `String`.
     ///
     /// This used to be a `String` edited only at its end, and the whole of
     /// ordinary text editing was missing as a result: no caret to move, so no
     /// Left/Right, no Home/End, no shift-selection, no word skip, no
-    /// select-all, and copy/cut had nothing to read. `ChatScreen.init` builds
-    /// a real `EditBox` (`setMaxLength(256)`, `setBordered(false)`,
-    /// `setCanLoseFocus(false)`, focused on init), and every one of those
+    /// select-all, and copy/cut had nothing to read. Vanilla's own chat-screen
+    /// init builds
+    /// a real edit box (256-char cap, unbordered,
+    /// unable to lose focus, focused on init), and every one of those
     /// behaviours is already ported on this type — routing the chat line
     /// through it is therefore reuse, not a second implementation. See
     /// [`Self::new_box`] for the construction and for what geometry means here.
@@ -314,14 +314,14 @@ pub struct ChatInput {
     /// The cursor into [`ChatHistory`], in `0..=history.len()`.
     ///
     /// `history.len()` — one past the last entry — is vanilla's "live buffer"
-    /// slot, the value `ChatScreen.init` assigns. Walking off that slot stashes
+    /// slot, the value vanilla's own chat-screen init assigns. Walking off that slot stashes
     /// the part-typed line in [`Self::history_buffer`]; walking back onto it
     /// restores it. Reset by [`Self::take`], which is what the chat-open path
-    /// calls, so this reproduces `init`'s assignment without needing a hook of
+    /// calls, so this reproduces vanilla's own init assignment without needing a hook of
     /// its own.
     history_pos: usize,
     /// The part-typed line stashed when the arrows first leave the live slot —
-    /// `ChatScreen.historyBuffer`.
+    /// vanilla's own history-buffer field.
     history_buffer: String,
     /// Everything the player has sent this session — see [`ChatHistory`].
     history: ChatHistory,
@@ -481,8 +481,8 @@ impl ChatInput {
 
     /// Clear and return the typed line, ready to compose into an action.
     ///
-    /// Also rewinds the history cursor, which is how `ChatScreen.init`'s
-    /// `historyPos = getRecentChat().size()` is reproduced without a separate
+    /// Also rewinds the history cursor, which is how vanilla's own chat-screen init's
+    /// history-position reset (to the recent-chat count) is reproduced without a separate
     /// open hook: every path that opens the chat box clears the buffer through
     /// here first. [`Self::history_up`] resolves the cursor against the store it
     /// is handed, so "one past the end" needs no length stored on this side.
@@ -503,7 +503,7 @@ impl ChatInput {
     /// The player names Tab offers when the line is not a command.
     ///
     /// Vanilla recomputes this on every keystroke through
-    /// `ClientSuggestionProvider.getCustomTabSuggestions`; the caller refreshes
+    /// its own custom-tab-suggestions lookup; the caller refreshes
     /// it from the live tab list instead, which keeps this module free of a
     /// client handle exactly as its own header requires. Pass **every** entry,
     /// listed or not: vanilla's provider reads `getOnlinePlayers()`, not
@@ -514,8 +514,8 @@ impl ChatInput {
     }
 
     /// Record a line the player just sent, so the arrows can recall it —
-    /// `ChatComponent.addRecentChat`, called from
-    /// `ChatScreen.handleChatInput(msg, addToRecent = true)`.
+    /// vanilla's own add-recent-chat handling, called from
+    /// its own chat-input handling with recall enabled.
     ///
     /// **Call this before [`Self::take`]**, which is what actually clears the
     /// line: `take` is on the cancel path too, and a cancelled line is not part
@@ -531,7 +531,7 @@ impl ChatInput {
         &self.history
     }
 
-    /// Up in the chat box — `ChatScreen.moveInHistory(-1)`.
+    /// Up in the chat box — vanilla's own move-in-history, upward.
     ///
     /// Returns whether the line changed, so the caller can tell a consumed key
     /// from one that should fall through.
@@ -539,12 +539,12 @@ impl ChatInput {
         self.move_in_history(-1)
     }
 
-    /// Down in the chat box — `ChatScreen.moveInHistory(1)`.
+    /// Down in the chat box — vanilla's own move-in-history, downward.
     pub fn history_down(&mut self) -> bool {
         self.move_in_history(1)
     }
 
-    /// `ChatScreen.moveInHistory`, transcribed.
+    /// Vanilla's own move-in-history, transcribed.
     ///
     /// The three edge behaviours, all of which are easy to invent differently:
     ///
@@ -623,18 +623,18 @@ pub struct HighlightSpan {
 /// What one [`HighlightSpan`] is, matching vanilla's three styles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HighlightKind {
-    /// The leading `/`, or a matched literal keyword. Vanilla's
-    /// `LITERAL_STYLE` (`ChatFormatting.GRAY`).
+    /// The leading `/`, or a matched literal keyword. Vanilla's own
+    /// literal style, gray.
     Literal,
     /// A matched, valid argument value. The carried index cycles `0..5` once
-    /// per argument regardless of nesting depth, selecting vanilla's
-    /// `ARGUMENT_STYLES` in order — `AQUA, YELLOW, GREEN, LIGHT_PURPLE, GOLD`
-    ///. Colour-to-`ChatFormatting` mapping
+    /// per argument regardless of nesting depth, selecting vanilla's own
+    /// per-depth argument styles in order — `AQUA, YELLOW, GREEN, LIGHT_PURPLE, GOLD`
+    ///. Colour-to-formatting mapping
     /// is a draw-call concern (`hud.rs`, brokered — not this crate), not
     /// modelled as an actual colour here.
     Argument(u8),
     /// Everything from the point parsing first failed to the end of the
-    /// line. Vanilla's `UNPARSED_STYLE` (`ChatFormatting.RED`).
+    /// line. Vanilla's own unparsed style, red.
     Unparsed,
 }
 
@@ -865,11 +865,11 @@ struct ParseWalk {
 /// Such a token is still being typed, and completion must therefore be offered
 /// by its **parent**, filtered by the token as a prefix — not by the token's own
 /// children. This is not a simplification; it is what vanilla does.
-/// `CommandContextBuilder.findSuggestionContext(cursor)` takes the
-/// `range.getEnd() < cursor` branch only when the cursor is strictly *past* the
+/// Vanilla's own suggestion-context lookup takes the
+/// past-the-range branch only when the cursor is strictly *past* the
 /// parsed range; with the cursor sitting exactly on the end it falls into the
-/// loop that returns `new SuggestionContext<>(prev, nodeRange.getStart())` —
-/// `prev` being the node *before* the one containing the cursor. So `/gamemode`
+/// loop that returns the previous node paired with the current node's own start —
+/// the previous node being the one *before* the one containing the cursor. So `/gamemode`
 /// suggests `gamemode`, and only `/gamemode ` suggests the four game modes.
 ///
 /// Getting this wrong is silent and was measured: advancing into the matched
@@ -1005,9 +1005,9 @@ fn parse_line(tree: &CommandTree, line: &str) -> Option<ParseWalk> {
         // at `token_start` — and `CommandSuggestions` still asks that
         // *parent* node's children for suggestions filtered by the
         // unmatched text as a live prefix, while simultaneously colouring
-        // the same text `UNPARSED_STYLE` (`CommandSuggestions.java`'s
-        // `updateCommandInfo`/`formatText` both run off the same
-        // `currentParse`, and neither waits for the other). A token with
+        // the same text with its own unparsed style (vanilla's own
+        // suggestion-popup command-info and formatting updates both run off the same
+        // parse state, and neither waits for the other). A token with
         // more input *after* it, though, can never become anything else by
         // more typing — that is the genuine, unrecoverable failure
         // `complete` must refuse to suggest through.
@@ -1026,8 +1026,8 @@ fn parse_line(tree: &CommandTree, line: &str) -> Option<ParseWalk> {
     }
 }
 
-/// Syntax-highlights `line` against `tree`, mirroring vanilla's
-/// `CommandSuggestions.formatText`. Returns an empty list when `line` is not
+/// Syntax-highlights `line` against `tree`, mirroring vanilla's own
+/// suggestion-popup text formatting. Returns an empty list when `line` is not
 /// a command (does not start with `/`) — plain chat gets no highlighting,
 /// matching vanilla.
 #[must_use]
@@ -1198,8 +1198,8 @@ impl SuggestionRequests {
     }
 }
 
-/// Byte offset of the word the cursor is in — `CommandSuggestions.getLastWordIndex`,
-/// whose body walks `WHITESPACE_PATTERN` (`(\s+)`) and keeps the **end** of the
+/// Byte offset of the word the cursor is in — vanilla's own last-word-index
+/// lookup, whose body walks a whitespace-run pattern (`(\s+)`) and keeps the **end** of the
 /// last match.
 ///
 /// So it is the offset just past the final whitespace run, or `0` when there is
@@ -1228,11 +1228,11 @@ fn last_word_index(text: &str) -> usize {
     result
 }
 
-/// The characters `SharedSuggestionProvider.MATCH_SPLITTER` treats as word
-/// boundaries inside a candidate — `CharMatcher.anyOf("._/")`.
+/// The characters vanilla's own suggestion-matching treats as word
+/// boundaries inside a candidate.
 const MATCH_SPLITTER: [char; 3] = ['.', '_', '/'];
 
-/// `SharedSuggestionProvider.matchesSubStr`: does `input` start with `pattern`,
+/// Vanilla's own substring-match check: does `input` start with `pattern`,
 /// at offset `0` or immediately after any [`MATCH_SPLITTER`] character?
 ///
 /// **Not a plain `starts_with`, and not a plain `contains` either.** It is
@@ -1257,9 +1257,9 @@ fn matches_sub_str(pattern: &str, input: &str) -> bool {
 ///
 /// Two orderings compose, and both come from vanilla:
 ///
-/// 1. brigadier's `Suggestions.create` sorts the built list with
-///    `compareToIgnoreCase`;
-/// 2. `CommandSuggestions.sortSuggestions` then moves every candidate that
+/// 1. brigadier's own suggestions-create sorts the built list
+///    case-insensitively;
+/// 2. vanilla's own suggestion-sort then moves every candidate that
 ///    literally **starts with** the lower-cased partial word ahead of the ones
 ///    that only matched through a splitter, preserving (1) within each group.
 ///
@@ -1285,13 +1285,13 @@ fn player_name_candidates(names: &[String], partial: &str) -> Vec<Candidate> {
         .collect()
 }
 
-/// The most rows the popup shows at once — `ChatScreen.init`'s
-/// `suggestionLineLimit` argument to the `CommandSuggestions` constructor
-/// (`new CommandSuggestions(…, 1, 10, true, -805306368)`). Candidates past this
+/// The most rows the popup shows at once — vanilla's own chat-screen init's
+/// suggestion-line-limit argument to its own suggestion-popup constructor.
+/// Candidates past this
 /// are reachable by scrolling the window, not by growing the box.
 pub const SUGGESTION_LINE_LIMIT: usize = 10;
 
-/// `ChatScreen.init`'s `lineStartOffset` argument — the `1` in the same
+/// Vanilla's own chat-screen init's line-start-offset argument — the `1` in the same
 /// constructor call. It appears in exactly one expression,
 /// [`SuggestionsList::cycle`]'s forward scroll, and nowhere else; naming it
 /// separately is what keeps that from reading as an off-by-one.
@@ -1404,9 +1404,10 @@ impl SuggestionsList {
         }
     }
 
-    /// `SuggestionsList.mouseScrolled`, minus the rect test the caller has
+    /// Vanilla's own suggestions-list mouse-scroll handling, minus the rect
+    /// test the caller has
     /// already done: `offset = clamp(offset - scroll, 0, max_offset)` with
-    /// `scroll` itself clamped to `-1..=1` by `CommandSuggestions.mouseScrolled`.
+    /// `scroll` itself clamped to `-1..=1` by vanilla's own popup mouse-scroll handling.
     ///
     /// **The selection does not move.** Scrolling changes only which rows are on
     /// screen, so the highlight can scroll out of view — vanilla's behaviour, and
@@ -1418,7 +1419,7 @@ impl SuggestionsList {
     }
 
     /// The line committing the highlighted row produces —
-    /// `Suggestion.apply(originalContents)`. See the struct doc for why this is
+    /// vanilla's own suggestion-apply. See the struct doc for why this is
     /// computed from `original` rather than from the line on screen.
     fn applied(&self) -> String {
         let mut s = String::with_capacity(self.original.len() + 16);
@@ -1426,7 +1427,7 @@ impl SuggestionsList {
         if let Some(c) = self.candidates.get(self.current) {
             s.push_str(&c.text);
         }
-        // Brigadier's `Suggestion.apply` splices over `[start, end)` and keeps
+        // Brigadier's own suggestion-apply splices over `[start, end)` and keeps
         // whatever follows. `end` is the caret at the moment the list was built,
         // so this is a plain append while the caret is at the end of the line
         // (the only case that used to exist) and a real splice otherwise.
@@ -1435,7 +1436,8 @@ impl SuggestionsList {
     }
 
     /// Where the caret lands once [`Self::applied`] is committed —
-    /// `SuggestionsList.useSuggestion`'s `setCursorPosition(end)`, in `char`s,
+    /// vanilla's own use-suggestion handling sets the cursor to the applied
+    /// range's end, in `char`s,
     /// i.e. just past the text this splices in rather than at the end of the
     /// whole line.
     fn applied_cursor(&self) -> usize {
@@ -1446,9 +1448,9 @@ impl SuggestionsList {
         self.original[..self.start].chars().count() + inserted
     }
 
-    /// The grey preview drawn after the caret — vanilla's
-    /// `EditBox.setSuggestion(calculateSuggestionSuffix(input.getValue(),
-    /// suggestion.apply(originalContents)))`, which is the applied line's tail
+    /// The grey preview drawn after the caret — vanilla's own
+    /// suggestion-suffix calculation over the applied line against the
+    /// current input, which is the applied line's tail
     /// past whatever is currently typed, or nothing when the applied line is not
     /// an extension of it (a candidate that *shortens* or rewrites the token).
     #[must_use]
@@ -1497,17 +1499,17 @@ impl SuggestionsList {
 /// for a [`Completion::NeedsServer`] position.
 ///
 /// Held **inside [`ChatInput`]** rather than beside it, mirroring vanilla,
-/// where `ChatScreen` owns one `CommandSuggestions` bound to its one `EditBox`
-/// (`ChatScreen.java`'s `commandSuggestions` field): the completion state is
+/// where its own chat screen owns one command-suggestions popup bound to its own edit box
+/// (vanilla's own chat-screen field for it): the completion state is
 /// only ever meaningful against one specific in-progress line, and separating
 /// them is how the two drift apart.
 ///
 /// # What is deliberately simpler than vanilla
 ///
 /// Only the **usage box** is missing — vanilla's grey `commandUsage` lines
-/// (`CommandSuggestions.extractUsage`), which restate a node's argument grammar
-/// when there is no suggestion list to show. It needs Brigadier's
-/// `getSmartUsage` over the whole reachable subtree, which is a second walker
+/// (vanilla's own usage-extraction from the suggestions popup), which restate a node's argument grammar
+/// when there is no suggestion list to show. It needs Brigadier's own
+/// smart-usage computation over the whole reachable subtree, which is a second walker
 /// rather than a draw. The list itself, its window, its navigation and its
 /// tooltips are all here.
 ///
@@ -1518,10 +1520,10 @@ impl SuggestionsList {
 pub struct ChatCompletion {
     requests: SuggestionRequests,
     list: Option<SuggestionsList>,
-    /// Vanilla's `allowSuggestions`. `false` from the moment the line is
+    /// Vanilla's own allow-suggestions flag. `false` from the moment the line is
     /// replaced wholesale — chat opened, or a history entry recalled — and set
-    /// `true` again by the first real edit, exactly as `ChatScreen.onEdited`
-    /// sets it and `ChatScreen.moveInHistory` clears it. Without it, opening
+    /// `true` again by the first real edit, exactly as its own edit callback
+    /// sets it and its own move-in-history clears it. Without it, opening
     /// chat with a seeded `/` would pop the whole command list before the player
     /// has typed anything.
     allow_suggestions: bool,
@@ -1541,7 +1543,7 @@ impl ChatCompletion {
     }
 
     /// Forget any list and any in-flight request, and stop offering suggestions
-    /// until the next real edit — `setAllowSuggestions(false)` plus a cleared
+    /// until the next real edit — vanilla's own suggestions-disable plus a cleared
     /// pending request. Called when the line is replaced wholesale (chat opened,
     /// a history entry recalled, or the line sent).
     pub fn reset(&mut self) {
@@ -1550,7 +1552,7 @@ impl ChatCompletion {
         self.pending_line = None;
     }
 
-    /// `CommandSuggestions.hide` — drop the list but leave suggestions allowed,
+    /// Vanilla's own suggestions-hide — drop the list but leave suggestions allowed,
     /// so the next keystroke brings a fresh one back. This is what Escape does
     /// while the popup is up.
     pub fn hide(&mut self) {
@@ -1583,7 +1585,7 @@ impl ChatCompletion {
         self.requests.is_pending()
     }
 
-    /// `CommandSuggestions.showSuggestions`: build the list and highlight its
+    /// Vanilla's own show-suggestions: build the list and highlight its
     /// first row, **without touching the line**.
     ///
     /// The line is untouched on purpose and it is the whole difference between
@@ -1613,7 +1615,8 @@ impl ChatCompletion {
 }
 
 impl ChatInput {
-    /// `ChatScreen.onEdited` → `CommandSuggestions.updateCommandInfo`: the line
+    /// Vanilla's own edit callback into its own suggestion-popup command-info
+    /// update: the line
     /// changed, so recompute the candidate set and show the popup.
     ///
     /// **Call this after every edit** — a typed character, a backspace, a paste.
@@ -1626,15 +1629,16 @@ impl ChatInput {
     ///
     /// Returns the same [`ClientAction`] [`Self::tab`] does, for a position only
     /// the server can answer. Vanilla re-requests on every keystroke as well
-    /// (`getCompletionSuggestions` is called from `updateCommandInfo`), and
+    /// (its own completion-suggestions lookup is called from its own
+    /// command-info update), and
     /// [`SuggestionRequests`]' transaction id is what keeps a stale reply from
     /// landing on a newer line.
     pub fn update_command_info(&mut self, tree: Option<&CommandTree>) -> Option<ClientAction> {
-        // `allowSuggestions = true` (`ChatScreen.onEdited`). The line the player
+        // Vanilla's own allow-suggestions enable (its own edit callback). The line the player
         // is *typing* always gets a popup; the line they opened the box with, or
         // recalled from history, does not until they touch it.
         self.completion.allow_suggestions = true;
-        // `updateCommandInfo`'s own `this.suggestions = null` under
+        // Vanilla's own command-info update clears its suggestions under
         // `!keepSuggestions`: the list about to be rebuilt describes the old
         // line, so it goes before anything can read it. `keepSuggestions` — the
         // flag that suppresses this during `useSuggestion` — has no analogue
@@ -1649,8 +1653,9 @@ impl ChatInput {
     /// the key, and show what comes back.
     ///
     /// Vanilla forks here, and the fork is on the line:
-    /// `CommandSuggestions.updateCommandInfo` computes `isCommand = commandsOnly
-    /// || startsWithSlash`, and an ordinary chat line takes the `else if
+    /// vanilla's own command-info update computes whether the line counts as
+    /// a command from "commands only" or "starts with slash", and an
+    /// ordinary chat line takes the `else if
     /// (!command.isBlank())` branch, which suggests online player names with no
     /// server round trip at all. So that path needs no command tree and works
     /// against any server — including one that has sent us no
@@ -1700,16 +1705,16 @@ impl ChatInput {
         }
     }
 
-    /// The Tab key — `CommandSuggestions.keyPressed`'s `isCycleFocus` path,
-    /// which is two different behaviours depending on whether the popup is up.
+    /// The Tab key — vanilla's own suggestion-popup key handling's cycle-focus
+    /// path, which is two different behaviours depending on whether the popup is up.
     ///
-    /// * **Popup up**: `SuggestionsList.keyPressed` commits the highlighted row
+    /// * **Popup up**: vanilla's own suggestions-list key handling commits the highlighted row
     ///   ([`Self::use_selected_suggestion`]), cycling first if the previous Tab
     ///   already committed one — see [`SuggestionsList`]'s doc on `tab_cycles`.
-    ///   `shift` reverses the cycle (`event.hasShiftDown()`).
-    /// * **Popup down**: `showSuggestions(true)` — build and show the list,
-    ///   editing nothing. Reachable because `ChatScreen.init` calls
-    ///   `setAllowHiding(false)`, which is what makes the outer
+    ///   `shift` reverses the cycle (the shift-modifier state).
+    /// * **Popup down**: vanilla's own show-suggestions-with-selection — build and show the list,
+    ///   editing nothing. Reachable because vanilla's own chat-screen init calls
+    ///   its own allow-hiding disable, which is what makes the outer
     ///   `allowHiding && !isVisible` early return false for the chat box.
     ///
     /// So against the running client, where the popup is already up from typing,
@@ -1789,8 +1794,9 @@ impl ChatInput {
     /// Escape in the popup — the `event.isEscape()` arm: hide the list and drop
     /// the ghost preview, consuming the key.
     ///
-    /// Consuming it is the point. `CommandSuggestions.keyPressed` runs *before*
-    /// `ChatScreen`'s own handling, so the first Escape closes the popup and
+    /// Consuming it is the point. Vanilla's own suggestion-popup key handling
+    /// runs *before*
+    /// the chat screen's own handling, so the first Escape closes the popup and
     /// only a second one closes the chat box.
     pub fn suggestion_escape(&mut self) -> bool {
         if self.completion.list.is_none() {
@@ -1927,13 +1933,13 @@ impl ChatInput {
 }
 
 /// The chat scrollback's scroll position while the box is open — vanilla's
-/// `ChatComponent.chatScrollbarPos`/`newMessageSinceScroll`.
+/// own scrollbar-position and new-message-since-scroll fields.
 ///
 /// # Where this differs from vanilla, and why
 ///
 /// **Granularity is one *logical entry*, not one *wrapped visual row*.**
-/// Vanilla scrolls through `trimmedMessages` — messages already split into
-/// `FormattedCharSequence` lines by `GuiMessage.splitLines`, which needs real
+/// Vanilla scrolls through its own trimmed-messages list — messages already split into
+/// wrapped lines by its own message-split routine, which needs real
 /// font metrics. This module has none ([`highlight`]/[`complete`] already
 /// return byte spans rather than pixel runs for the identical reason — see
 /// this module's own doc). Entry granularity is the exact one-line-per-entry
@@ -1942,8 +1948,8 @@ impl ChatInput {
 /// fewer visual rows than vanilla's would. Named here rather than silently
 /// shipped, matching this module's other documented simplifications.
 ///
-/// **Adjustment on a new arrival is read-time, not push-time.** Vanilla's
-/// `ChatComponent.addMessageToDisplayQueue` checks `isChatFocused()` and
+/// **Adjustment on a new arrival is read-time, not push-time.** Vanilla's own
+/// add-message-to-display-queue checks whether chat is focused and
 /// compensates the instant a message is queued
 /// (`if (chatting && chatScrollbarPos > 0) { newMessageSinceScroll = true;
 /// scrollChat(1); }`). This crate's received log ([`lodestone_game::chat::
@@ -1976,7 +1982,7 @@ impl ChatScroll {
         Self::default()
     }
 
-    /// `ChatComponent.scrollChat`, transcribed exactly — including the order
+    /// Vanilla's own scroll-chat, transcribed exactly — including the order
     /// of its two clamps. The upper clamp (`total - rows_per_page`) can be
     /// negative when everything already fits on screen; vanilla does not
     /// guard against that with a saturating subtraction, it relies on the
@@ -1995,7 +2001,7 @@ impl ChatScroll {
         self.scrolled = pos as usize;
     }
 
-    /// `ChatScreen.removed`'s `resetChatScroll()` — everything back to the
+    /// Vanilla's own chat-screen close handling resets the chat scroll — everything back to the
     /// live position. [`Self::sync`] calls this itself whenever the box is
     /// closed, so a caller need not hook every place the box can close
     /// separately (see [`Self::sync`]'s own doc).
@@ -2126,7 +2132,7 @@ mod tests {
     mod chat_scroll {
         use super::*;
 
-        /// Both ends of `ChatComponent.scrollChat`'s clamp: cannot scroll past
+        /// Both ends of vanilla's own scroll-chat clamp: cannot scroll past
         /// the newest (below `0`) and cannot scroll further back than the
         /// oldest entry that would still fill a page.
         #[test]
@@ -2268,7 +2274,7 @@ mod tests {
             assert_eq!(s.window(&h, 10), &["line 0", "line 1"]);
         }
 
-        /// Explicit [`ChatScroll::reset`] (the direct `resetChatScroll()`
+        /// Explicit [`ChatScroll::reset`] (the direct chat-scroll-reset
         /// equivalent, for a caller with its own close hook) clears both the
         /// position and the "new message" flag.
         #[test]
@@ -2374,7 +2380,7 @@ mod tests {
     }
 
     /// Command-tree tab completion and syntax highlighting.
-    // -- Up/Down chat history (`ChatScreen.moveInHistory`) --------------
+    // -- Up/Down chat history (vanilla's own move-in-history) --------------
 
     /// A chat box seeded with `sent`, already "reopened" — i.e. through `take`,
     /// which is what rewinds the cursor to the live slot.
@@ -2493,7 +2499,8 @@ mod tests {
 
     /// Reopening the chat box rewinds the cursor to the live slot, so the next Up
     /// starts from the newest line again rather than continuing where the last
-    /// session left off — `ChatScreen.init`'s `historyPos = getRecentChat().size()`.
+    /// session left off — vanilla's own chat-screen init resets its history
+    /// position to the recent-chat count.
     #[test]
     fn reopening_the_box_rewinds_the_history_cursor() {
         let mut input = with_history(&["a", "b"]);
@@ -2648,7 +2655,8 @@ mod tests {
     }
 
     /// The popup does **not** open on a line the player has not edited —
-    /// `allowSuggestions` is `false` until `ChatScreen.onEdited` sets it.
+    /// vanilla's own allow-suggestions flag is `false` until its own edit
+    /// callback sets it.
     ///
     /// Opening chat with the command key seeds a `/`, and vanilla shows nothing
     /// there. Without this the whole root command list would appear the instant
@@ -2661,7 +2669,7 @@ mod tests {
         // The responder has not run, so `allow_suggestions` is still false.
         assert!(input.suggestion_list().is_none());
         // A recalled history entry behaves the same way
-        // (`moveInHistory`'s `setAllowSuggestions(false)`).
+        // (vanilla's own move-in-history disables suggestions).
         input.record_sent("Ste");
         let _ = input.take();
         assert!(input.history_up());
@@ -2677,7 +2685,8 @@ mod tests {
 
     /// Escape closes the **popup**, not the box, and only once.
     ///
-    /// `CommandSuggestions.keyPressed` runs before `ChatScreen`'s own handling,
+    /// Vanilla's own suggestion-popup key handling runs before the chat
+    /// screen's own handling,
     /// so the caller must be told the key was consumed — otherwise one Escape
     /// both hides the list and cancels the message.
     #[test]
@@ -2853,7 +2862,7 @@ mod tests {
 
     /// With the popup down, Tab **shows** it and edits nothing — vanilla's
     /// `autoSuggestions`-off ordering, reachable here because
-    /// `ChatScreen.init` calls `setAllowHiding(false)`.
+    /// vanilla's own chat-screen init calls its own allow-hiding disable.
     #[test]
     fn tab_with_no_popup_shows_it_without_editing() {
         let mut input = ChatInput::new();
@@ -2937,7 +2946,7 @@ mod tests {
         /// token right after `/gamemode `, the only reachable child is the
         /// `GameMode` argument with no suggestions provider, so
         /// [`local_domain`] must supply all four vanilla game modes —
-        /// sourced from `GameType.java`'s declaration order
+        /// sourced from vanilla's own game-type declaration order
         /// (`survival, creative, adventure, spectator`), then resorted here
         /// alphabetically to match Brigadier's own `SuggestionsBuilder`.
         /// **Rejected ranking**: declaration order
@@ -3204,8 +3213,8 @@ mod tests {
             // `local_domain` entry — the same documented "never wrong, sometimes
             // slower than vanilla" route as
             // `an_opaque_argument_with_no_provider_still_needs_the_server`.
-            // Identical on screen: `MessageArgument` has no `listSuggestions`
-            // override, so Brigadier's default returns `Suggestions.empty()`
+            // Identical on screen: vanilla's own message-argument type has no
+            // suggestions override, so Brigadier's default returns an empty list
             // and the server answers our round trip with an empty list.
             //
             // This assertion previously read `Completion::None`, which was an
