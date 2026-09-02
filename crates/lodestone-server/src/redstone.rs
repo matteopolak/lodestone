@@ -521,7 +521,7 @@ pub fn diode_powered(state: &str) -> bool {
 pub fn repeater_locked(state: &str) -> bool {
     get_bool_property(state, "locked").unwrap_or(false)
 }
-/// `RepeaterBlock.DELAY`, `1..=4` (vanilla default `1`).
+/// Vanilla's own repeater-block `DELAY`, `1..=4` (vanilla default `1`).
 #[must_use]
 pub fn repeater_delay_ticks(state: &str) -> u32 {
     get_u32_property(state, "delay").unwrap_or(1).clamp(1, 4)
@@ -554,9 +554,10 @@ pub fn observer_powered(state: &str) -> bool {
     get_bool_property(state, "powered").unwrap_or(false)
 }
 
-/// A diode's own output value while powered — `DiodeBlock.getOutputSignal`
+/// A diode's own output value while powered — vanilla's own diode-block
+/// output-signal getter
 /// defaults to `15` (unmodified by
-/// `RepeaterBlock`); `ComparatorBlock` overrides it to read its stored
+/// the repeater block); the comparator block overrides it to read its stored
 /// analog output — see
 /// [`comparator_output`]'s own doc comment for where that value lives here.
 #[must_use]
@@ -568,12 +569,11 @@ fn diode_output_signal(state: &str) -> u8 {
     }
 }
 
-/// `BlockState.getOwnSignal`/each block's `ownSignal` override: wire ->
+/// Vanilla's own `getOwnSignal`/each block's `ownSignal` override: wire ->
 /// `POWER`; torch -> `15` if lit else `0`
-/// (`RedstoneTorchBlock.ownSignal`, `:109-111`); diode -> its own output
-/// signal if `POWERED` else `0` (`DiodeBlock.ownSignal`, `:142-144`);
-/// observer -> `15` if `POWERED` else `0` (`ObserverBlock.ownSignal`,
-/// `:100-102`).
+/// (its own redstone-torch-block override); diode -> its own output
+/// signal if `POWERED` else `0` (its own diode-block override);
+/// observer -> `15` if `POWERED` else `0` (its own observer-block override).
 #[must_use]
 pub fn own_signal(state: &str) -> u8 {
     crate::redstone_counters::bump_state_parse();
@@ -598,8 +598,8 @@ pub fn own_signal(state: &str) -> u8 {
             0
         }
     } else if is_lever(state) || is_button(state) || is_tripwire_hook(state) || is_detector_rail(state) {
-        // `LeverBlock.ownSignal` / `ButtonBlock.ownSignal` /
-        // `TripWireHookBlock.ownSignal` / `DetectorRailBlock.ownSignal` — all
+        // Vanilla's own lever-block/button-block/
+        // tripwire-hook-block/detector-rail-block own-signal overrides — all
         // four are `POWERED ? 15 : 0`.
         if powered_property(state) {
             15
@@ -607,27 +607,27 @@ pub fn own_signal(state: &str) -> u8 {
             0
         }
     } else if is_pressure_plate(state) || is_weighted_pressure_plate(state) {
-        // `BasePressurePlateBlock.ownSignal` delegates to `getSignalForState`.
+        // Vanilla's own base-pressure-plate-block own-signal override delegates to `getSignalForState`.
         pressure_plate_signal(state)
     } else if is_target(state) || is_daylight_detector(state) {
-        // `TargetBlock.ownSignal` / `DaylightDetectorBlock.ownSignal` — both
+        // Vanilla's own target-block/daylight-detector-block own-signal overrides — both
         // read their own analog `POWER`, so neither is a flat 15. A target
         // decays back to `0` on a scheduled tick after a projectile hit and a
         // daylight detector tracks sky light, and both of those producers are
         // separate from this read.
         analog_power(state)
     } else if is_redstone_block(state) {
-        // `PoweredBlock.ownSignal` — the unconditional constant source.
+        // Vanilla's own powered-block own-signal override — the unconditional constant source.
         15
     } else {
         0
     }
 }
 
-/// `true` for anything `BlockState.isSignalSource()` reports true for among
+/// `true` for anything vanilla's own is-signal-source check reports true for among
 /// the families this crate models. Every one of them returns an unconditional
 /// `true` in the jar — a source is a source whether or not it is currently
-/// emitting, and the *value* is what goes to zero: `RedstoneTorchBlock`,
+/// emitting, and the *value* is what goes to zero: the redstone-torch block,
 /// `DiodeBlock`, `ObserverBlock`, `LeverBlock`, `ButtonBlock`,
 /// `BasePressurePlateBlock` (both plate families), `TripWireHookBlock`,
 /// `DetectorRailBlock`, `TargetBlock`, `DaylightDetectorBlock` and
