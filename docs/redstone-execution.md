@@ -176,7 +176,7 @@ Stated up front rather than discovered later.
 `redstone_graph`'s
 `classification_agrees_with_the_dispatch_chain_for_every_state_in_the_game`
 walks **every** block state in 26.2 (`lodestone_data::block_states::STATE_COUNT`,
-28,922 of them), rebuilds each into its canonical `name[k=v,…]` form, and
+**32,366** of them), rebuilds each into its canonical `name[k=v,…]` form, and
 requires `classify` to agree with a second, independent transcription of the
 dispatch chain written from the dispatch site rather than from `classify`. The
 domain is finite and all of it is checked, so the claim is not "the two agree on
@@ -206,6 +206,75 @@ it:
   until its arm matched; an inert cell ran all fifteen).
 - `dispatch_state_clones_avoided` — how many heap-allocated block-state string
   copies the old dispatch made and this one does not.
+
+### What was measured after
+
+**Behavioural identity on the real contraption.** The same harness command,
+re-run against `raid_farm.litematic` with its two captured repeater rechecks
+re-injected, reads:
+
+```
+notifications_issued=837  cell_reads=5899  state_parses=55
+signal_queries=164  wire_recomputes=157
+schedules_requested=3  schedules_deduped=15  max_notifications_per_drain=726
+```
+
+**Every one of those eight counters is identical to the baseline above**,
+reproduced across three independent runs including one under deliberate
+six-way CPU load. This is the differential that matters: it is the only
+measurement phase driven by a deterministic re-injection rather than by a
+wall-clock settle, and it is the one that exercises redstone.
+
+One caveat, recorded rather than smoothed over. `bee-and-crop-farm`'s
+*steady-state* row read `notifications_issued=153` at baseline and **159** in
+every after-run — stable, reproduced three times, and unmoved by CPU load, so
+not noise. It is nonetheless not attributable to this change: that phase
+reports `cell_reads=0` and `max_notifications_per_drain=6` in both runs, which
+means every notification in it returned an **empty cascade** and no family arm
+that reads anything ever ran. The total is therefore
+`6 × (independent mutations in the window)`, trimmed at column edges — a
+quantity determined by the random-tick pass over that fixture's crops, which
+this change cannot influence. Thirty-six commits and a good deal of other
+agents' uncommitted `lodestone-server` work landed in the shared checkout
+between the two measurements. The pre-change binary was not rebuilt to settle
+it further.
+
+**Behavioural identity on the hermetic fixture the previous cost-split pass
+used.** `redstone_counters::tests::measured_cost_split_for_a_fifteen_cell_dust_run`
+— a 15-long dust run lit from one end — reads, with the classification live:
+
+```
+notifications_issued=659  cell_reads=3038  reactions_total=155
+state_parses=0  signal_queries=152  wire_recomputes=152
+schedules_requested=0  schedules_deduped=0  max_notifications_per_drain=659
+```
+
+Every one of those is **identical** to the reading taken before the
+classification existed. That is the point: the change is a constant-factor
+change, and a counter that moved would mean a behavioural change.
+
+**The saving, on a fixture with five families populated.** The 15-cell run plus
+a non-interacting row carrying a repeater, an observer and a comparator
+(`the_class_histogram_agrees_with_what_the_dispatch_actually_ran`, run with
+`--test-threads=1`):
+
+```
+reaction-class histogram over 677 notifications:
+  inert=519  wire=152  torch=3  repeater=1  comparator=1  observer=1
+inert = 519 (76.7% of all notifications)
+string family predicates avoided = 8274 (12.22 per notification)
+block-state string clones avoided = 519
+```
+
+**Three quarters of the notifications in a live circuit land on a cell that
+reacts to nothing.** Each of those previously cost a heap-allocated copy of the
+cell's state string plus a full fifteen-predicate scan to establish exactly
+that; each now costs one array index and a branch. The 12.22 predicates per
+notification is the whole-fixture average, inert and non-inert together.
+
+Both figures are for these fixtures' shapes, not universal constants — the
+inert share depends on how much inert scaffolding a circuit is embedded in, and
+a real contraption is embedded in a great deal more than a test fixture is.
 
 **The counters are process-global and their `TEST_LOCK` only covers their own
 module.** Any counters reading must be taken with `--test-threads=1` or a filter
