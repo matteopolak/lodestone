@@ -7692,7 +7692,7 @@ impl<'w> MobSim<'w> {
         std::mem::take(&mut self.pending_mining_fatigue)
     }
 
-    /// Drains every `Zombie.hurtServer` reinforcement roll that passed since
+    /// Drains every vanilla zombie hurt-handler reinforcement roll that passed since
     /// the last call — see [`ReinforcementCall`]'s own doc for what the
     /// driver still owes vanilla (the 50-candidate terrain search) before
     /// actually spawning one.
@@ -7707,7 +7707,8 @@ impl<'w> MobSim<'w> {
     /// position with `crate::fire::can_survive` against the *live* world and
     /// write `crate::fire::state_for_placement` only where the cell is air and
     /// survives — this drain hands over candidates, not verified placements,
-    /// exactly matching `LightningBolt.spawnFire`'s own "air and canSurvive"
+    /// exactly matching vanilla's own lightning-bolt "spawn fire" step's own
+    /// "air and can-survive" check
     /// gate at the call site rather than here.
     pub fn take_lightning_fires(&mut self) -> Vec<BlockPos> {
         std::mem::take(&mut self.pending_lightning_fires)
@@ -7724,11 +7725,11 @@ impl<'w> MobSim<'w> {
     }
 
     /// Every live mob or connected player's position, floored to a
-    /// [`BlockPos`] — `findLightningTargetAround`'s
-    /// `getEntitiesOfClass(LivingEntity.class, searchBounds, ...)` census,
+    /// [`BlockPos`] — vanilla's own "find lightning target around" step's
+    /// own living-entity-in-box census,
     /// pre-culling deferred to the caller (`lightning::find_lightning_target_around`
     /// filters to its own search box internally, matching vanilla's own
-    /// `getEntitiesOfClass` shape).
+    /// entities-in-class-and-box shape).
     #[must_use]
     pub fn living_entity_positions(&self) -> Vec<BlockPos> {
         self.mobs
@@ -7821,11 +7822,12 @@ impl<'w> MobSim<'w> {
     /// # Two knockback contributions, chained like vanilla's two calls
     ///
     /// Vanilla applies knockback to a melee target in two independent
-    /// `LivingEntity.knockback` calls, not one: `LivingEntity.hurtServer`
-    /// calls `dealDefaultKnockback` — a flat `0.4F` applied to **every**
+    /// generic knockback calls, not one: its own generic hurt handler
+    /// calls its own default-knockback step — a flat `0.4F` applied to **every**
     /// damaging hit regardless of the attacker's own attributes — and,
-    /// separately, `Player.attack` calls `causeExtraKnockback` with
-    /// `getKnockback(...) + (sprintAttack ? 0.5F : 0.0F)`, which for a
+    /// separately, its own player-attack step calls its own extra-knockback
+    /// step with
+    /// the attacker's own knockback attribute plus a `0.5F` sprint bonus, which for a
     /// bare-handed, non-enchanted attacker is `0.0` unless sprinting.
     /// `knockback_power` here is that
     /// *second*, caller-supplied bonus (`crate::server::apply_attack`'s
@@ -7845,11 +7847,12 @@ impl<'w> MobSim<'w> {
     ///
     /// Both calls use the same horizontal direction: the vector from the
     /// target's position to the attacker's, i.e. `dx = attacker_pos.x -
-    /// target_pos.x` — vanilla's own `dealDefaultKnockback`
-    /// (`source.getSourcePosition().x() - this.getX()`).
+    /// target_pos.x` — vanilla's own default-knockback step's own
+    /// source-position-minus-own-position formula.
     /// `knockback_impulse` then subtracts that
     /// direction's contribution from velocity, so the target moves *away*
-    /// from the attacker. This also substitutes for `causeExtraKnockback`'s
+    /// from the attacker. This also substitutes for vanilla's own
+    /// extra-knockback step's
     /// real attacker-facing formula
     /// (`lodestone_physics::knockback::attack_direction`) for the bonus half,
     /// since nothing server-side tracks player rotation yet — a materially
@@ -7898,7 +7901,8 @@ impl<'w> MobSim<'w> {
             // and it needs no new plumbing, because `attacker_pos` was already
             // a parameter here for knockback direction.
             mob.mob.note_hurt(Some(attacker_pos));
-            // Issue #458, primitive 1. Vanilla's `NeutralMob.setLastHurtByMob`
+            // Issue #458, primitive 1. Vanilla's own neutral-mob "set last
+            // hurt by mob" setter
             // starts a persistent grudge alongside the retaliation record, so
             // the two begin at the same instant and by the same event.
             //
@@ -7915,11 +7919,12 @@ impl<'w> MobSim<'w> {
                 target: attacker_pos,
             });
             // Issue #233: zombified-piglin group aggro and wolf pack aggro
-            // (`ZombifiedPiglin.alertOthers` /
-            // `HurtByTargetGoal(this).setAlertOthers()` — see
+            // (vanilla's own zombified-piglin alert-others call /
+            // its own "alert others of the same owner" goal registration — see
             // `alert_species`'s own doc for the box/owner-filter citations).
-            // Gated on the grudge being *new*: vanilla fires `alertOthers`
-            // from `HurtByTargetGoal.start()`/`customServerAiStep`, i.e. once
+            // Gated on the grudge being *new*: vanilla fires its own
+            // alert-others call
+            // from that goal's own start hook/AI step, i.e. once
             // per acquisition, not once per hit — an already-angry victim
             // re-hit mid-grudge must not re-wake its whole pack every tick.
             let pack_alert = if was_already_angry {
@@ -7936,9 +7941,9 @@ impl<'w> MobSim<'w> {
                     )
                 })
             };
-            // `LivingEntity.setLastHurtByPlayer`: this is the *player* attack path, so
+            // Vanilla's own "set last hurt by player" setter: this is the *player* attack path, so
             // the kill counts as a player kill for the next 100 ticks. Vanilla's
-            // `dropExperience` reads exactly this, which is why a mob killed by
+            // own drop-experience call reads exactly this, which is why a mob killed by
             // anything else drops no XP — see `hurt_by_player_until`.
             mob.hurt_by_player_until = Some(now + PLAYER_HURT_EXPERIENCE_TIME);
             if damage_dealt > 0.0 && mob.health() > 0.0 {
@@ -8052,15 +8057,15 @@ impl<'w> MobSim<'w> {
 
     /// How far a witnessing villager can be from a killed one and still
     /// gossip about the murderer (issue #246,
-    /// `tellWitnessesThatIWasMurdered`). Vanilla's own witness set comes from
-    /// the victim's `NEAREST_VISIBLE_LIVING_ENTITIES` memory, which carries
+    /// vanilla's own "tell witnesses that I was murdered" step). Vanilla's own witness set comes from
+    /// the victim's own "nearest visible living entities" memory, which carries
     /// no single fixed radius of its own — this crate's own scope choice,
     /// the same shape as [`GOSSIP_SPREAD_RADIUS_SQR`](Self::GOSSIP_SPREAD_RADIUS_SQR).
     const VILLAGER_KILLED_WITNESS_RADIUS_SQR: f64 = 100.0; // 10 blocks
 
     /// [`attack`](Self::attack), plus the villager-reputation half of
-    /// vanilla's `Villager.setLastHurtByMob`/`die`/
-    /// `tellWitnessesThatIWasMurdered` (issue #246): a player-identified
+    /// vanilla's own villager "set last hurt by mob"/die/
+    /// "tell witnesses that I was murdered" steps (issue #246): a player-identified
     /// attacker hurting or killing a villager writes `VillagerHurt`/
     /// `VillagerKilled` gossip, exactly as
     /// [`villager::reputation::apply_reputation_event`] already does for the
@@ -8078,11 +8083,11 @@ impl<'w> MobSim<'w> {
     /// behaves exactly like [`attack`](Self::attack).
     ///
     /// A hit's gossip is written to the **victim's own** ledger
-    /// (`onReputationEventFrom`'s receiver is the villager whose
-    /// `setLastHurtByMob` fired); a kill's gossip is written to **every
+    /// (vanilla's own "on reputation event from" receiver is the villager whose
+    /// "set last hurt by mob" fired); a kill's gossip is written to **every
     /// nearby witnessing villager's own** ledger instead, since the victim no
     /// longer exists to hold one — matching vanilla's own
-    /// `witness.onReputationEventFrom`, not the dead villager's.
+    /// witness-side reputation-event receiver, not the dead villager's.
     pub fn attack_from_player(
         &mut self,
         target_id: i32,
@@ -8113,8 +8118,8 @@ impl<'w> MobSim<'w> {
             return self.attack_dragon(target_id, raw_damage);
         }
         // An end crystal lives in `self.crystals`, not `self.mobs` — the same
-        // reason the wither and dragon branches above exist. `EndCrystal
-        // .hurtServer` is a one-hit kill (no health, no armour, no
+        // reason the wither and dragon branches above exist. Vanilla's own
+        // end-crystal hurt-handler is a one-hit kill (no health, no armour, no
         // knockback), so this returns straight from `destroy_end_crystal`
         // rather than routing through the generic `self.attack`. Before this
         // branch existed a player attacking a crystal reached neither
@@ -8124,7 +8129,8 @@ impl<'w> MobSim<'w> {
         // strategy the dragon fight is built around.
         // A boat, raft or minecart lives in `self.vehicles`, not `self.mobs` --
         // the same reason the wither, dragon and crystal branches around this one
-        // exist. `VehicleEntity.hurtServer` shares nothing with a mob's damage
+        // exist. Vanilla's own generic vehicle hurt-handler shares nothing
+        // with a mob's damage
         // pipeline: no health, no armour, no knockback, no gossip. Before this
         // branch a punch on a boat reached `self.attack`, found nothing in
         // `self.mobs`, and returned `None` -- so the hurt/hurt-dir/damage triple
@@ -8144,7 +8150,7 @@ impl<'w> MobSim<'w> {
         let target_was_villager = self
             .get(target_id)
             .is_some_and(|m| m.entity_type.path() == "villager");
-        // `Raider.die`'s player-kill half (issue #246's Hero of the Village
+        // Vanilla's own raider-death step's player-kill half (issue #246's Hero of the Village
         // gap): resolved *before* `self.attack` below, the same reason
         // `target_pos_before` is — `raid::MobSim::raid_containing_raider`
         // reads the raid's still-live `raiders` list, which a kill only
@@ -8159,7 +8165,7 @@ impl<'w> MobSim<'w> {
         {
             self.add_raid_hero(raid_id, actor.uuid);
         }
-        // `Zombie.hurtServer`'s reinforcement call: only the *roll* happens
+        // Vanilla's own zombie hurt-handler's reinforcement call: only the *roll* happens
         // here — see `ReinforcementCall`'s own doc for why the terrain search
         // is the driver's job. Gated on the hit actually landing on a
         // survivor (`super.hurtServer` returning `true`), Hard world
