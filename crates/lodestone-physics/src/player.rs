@@ -2437,10 +2437,11 @@ fn tick_water_among_entities(
     state.velocity = state.velocity.add(accel);
     do_move(state, view, profile, input.sneak, input.sneak, nearby);
 
-    // `Entity.move()`'s `checkFallDamage` call. `in_water` is `true` — the reset
-    // above already zeroed `fall_distance` for this whole tick, and vanilla's own
-    // `!isInWater()` guard would block any accumulation here too, so this is only
-    // reachable for its grounded-reset half (e.g. touching a submerged floor).
+    // Vanilla's own fall-damage bookkeeping call. `in_water` is `true` — the
+    // reset above already zeroed `fall_distance` for this whole tick, and
+    // vanilla's own `!isInWater()` guard would block any accumulation here
+    // too, so this is only reachable for its grounded-reset half (e.g.
+    // touching a submerged floor).
     accumulate_fall_distance(state, state.position.y - old_y, true);
 
     // `if (horizontalCollision && onClimbable()) movement = (x, 0.2, z)` — a ladder
@@ -2460,8 +2461,8 @@ fn tick_water_among_entities(
     jump_out_of_fluid(state, old_y, view, profile);
 }
 
-/// One tick of movement while submerged in lava (`travelInLava`,
-/// `LivingEntity.java:2539-2555`).
+/// One tick of movement while submerged in lava (vanilla's own in-lava
+/// travel).
 ///
 /// Lava is a *different branch* from water, not a retuned one: input speed is a
 /// flat `0.02F`, and gravity is applied as an extra `-baseGravity/4` term
@@ -2476,17 +2477,18 @@ fn tick_water_among_entities(
 ///   always gets, which deep lava never does.
 ///
 /// The predicate and both arms were ported from the jar directly (not from a
-/// summary): `isInShallowFluid` is `getFluidHeight(tag) <=
-/// getFluidJumpThreshold()`, already used by [`apply_fluid_jump`] for the jump
-/// decision, so this reuses the same [`FluidState::lava_height`] /
+/// summary): vanilla's own "is in shallow fluid" check is `getFluidHeight(tag)
+/// <= getFluidJumpThreshold()`, already used by [`apply_fluid_jump`] for the
+/// jump decision, so this reuses the same [`FluidState::lava_height`] /
 /// [`fluid_jump_threshold`] inputs rather than adding a parallel predicate.
 ///
-/// `fallDistance` does **not** participate in this predicate or either arm —
-/// `isFalling` here is `getDeltaMovement().y <= 0.0`, not a fall-distance
-/// comparison, despite the "fall-distance or depth comparison" pattern this
-/// file's sibling gravity code might suggest. Confirmed by reading
-/// `travelInFluid`/`travelInLava`/`getFluidFallingAdjustedMovement` directly:
-/// none of the three references `fallDistance`.
+/// The fall-distance accumulator does **not** participate in this predicate
+/// or either arm — `isFalling` here is `getDeltaMovement().y <= 0.0`, not a
+/// fall-distance comparison, despite the "fall-distance or depth comparison"
+/// pattern this file's sibling gravity code might suggest. Confirmed by
+/// reading vanilla's own in-fluid travel, in-lava travel and fluid-falling
+/// adjusted-movement functions directly: none of the three references the
+/// fall-distance field.
 pub fn tick_lava(
     state: &mut PlayerState,
     input: MovementInput,
@@ -2511,10 +2513,10 @@ fn tick_lava_among_entities(
             unimplemented!("1.8 fluid movement is not implemented yet")
         }
     }
-    // baseTick's `if (isInLava()) fallDistance *= 0.5;` (`Entity.java:555-557`).
+    // Vanilla's own per-tick lava halving: `if (isInLava()) fallDistance *= 0.5;`.
     // This function is only reached when the per-tick fluid summary already says
-    // `in_lava()`, matching vanilla's `isInLava()` predicate deciding both this
-    // halving and the `travelInLava` dispatch.
+    // `in_lava()`, matching vanilla's own "in lava" predicate deciding both this
+    // halving and the in-lava travel dispatch.
     state.fall_distance *= 0.5;
     // baseTick fluid current push (see `tick_water`); lava uses its own scale.
     apply_fluid_push(
@@ -2529,16 +2531,18 @@ fn tick_lava_among_entities(
 
     let (xxa, zza) = set_sprint_and_modify_input(state, input, profile);
 
-    // aiStep's jump block: in *shallow* lava while on the ground you jump out
-    // normally; only deep lava gets `jumpInLiquid`'s +0.04 (see `apply_fluid_jump`).
+    // Vanilla's own jump block: in *shallow* lava while on the ground you
+    // jump out normally; only deep lava gets the in-liquid jump's +0.04 (see
+    // `apply_fluid_jump`).
     apply_fluid_jump(state, input, fluid, view, profile);
 
-    // `isFalling`/`baseGravity` are read here, at the top of `travelInFluid`
-    // (`LivingEntity.java:2495-2497`), i.e. after the jump block above has
-    // already altered velocity but before moveRelative adds this tick's input
-    // acceleration. `getEffectiveGravity()` folds in the Slow Falling clamp
-    // exactly as `tick_water` computes it a few lines above; lava shares the
-    // same `travelInFluid` call site, so it must apply the same clamp.
+    // `isFalling`/`baseGravity` are read here, at the top of vanilla's own
+    // in-fluid travel, i.e. after the jump block above has already altered
+    // velocity but before the relative-move step adds this tick's input
+    // acceleration. Vanilla's own effective-gravity check folds in the Slow
+    // Falling clamp exactly as `tick_water` computes it a few lines above;
+    // lava shares the same in-fluid travel call site, so it must apply the
+    // same clamp.
     let is_falling = state.velocity.y <= 0.0;
     let base_gravity = effective_gravity(
         f64::from(profile.gravity),
@@ -2547,16 +2551,17 @@ fn tick_lava_among_entities(
     );
     let old_y = state.position.y;
 
-    // moveRelative(0.02) → move → shallow/deep branch → -baseGravity/4.
+    // Vanilla's own relative-move(0.02) → move → shallow/deep branch →
+    // -baseGravity/4.
     let accel = input_vector(xxa, zza, profile.fluid_input_speed, state.yaw);
     state.velocity = state.velocity.add(accel);
     do_move(state, view, profile, input.sneak, input.sneak, nearby);
 
-    // `Entity.move()`'s `checkFallDamage` call. Not water on this path.
+    // Vanilla's own fall-damage bookkeeping call. Not water on this path.
     accumulate_fall_distance(state, state.position.y - old_y, false);
 
-    // `isInShallowFluid(LAVA)` (`LivingEntity.java:2542-2548`): shallow gets the
-    // same buoyant falling-adjustment water always gets, on top of a
+    // Vanilla's own "is in shallow lava" check: shallow gets the same
+    // buoyant falling-adjustment water always gets, on top of a
     // Y-asymmetric `multiply(0.5, 0.8, 0.5)`; deep gets a flat `scale(0.5)`
     // with no adjustment at all. Reuses the same threshold/height inputs
     // `apply_fluid_jump` already reads for the jump decision.
