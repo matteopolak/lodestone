@@ -164,7 +164,7 @@ pub fn lerp_f32(alpha: f32, p0: f32, p1: f32) -> f32 {
     p0 + alpha * (p1 - p0)
 }
 
-/// Vanilla's own `wrapDegrees`.
+/// Vanilla's own degree-wrapping step.
 #[must_use]
 pub fn wrap_degrees_f64(angle: f64) -> f64 {
     let mut a = angle % 360.0;
@@ -177,7 +177,7 @@ pub fn wrap_degrees_f64(angle: f64) -> f64 {
     a
 }
 
-/// Vanilla's own `wrapDegrees`, `float` width.
+/// Vanilla's own degree-wrapping step, `float` width.
 #[must_use]
 pub fn wrap_degrees_f32(angle: f32) -> f32 {
     let mut a = angle % 360.0;
@@ -387,7 +387,8 @@ mod tests {
         // (4290772992), because SSE's `sqrtsd` sets the sign bit and AArch64's
         // `fsqrt` does not; `1.0 / NaN` then propagates whichever it got. A
         // raw-bits expectation transcribed on one of the two therefore fails
-        // on the other for a reason that has nothing to do with `invSqrt` —
+        // on the other for a reason that has nothing to do with the
+        // inverse-square-root port —
         // which is exactly what happened: this gate was green on the dev Macs
         // and red on every x86_64 CI runner.
         //
