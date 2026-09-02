@@ -5064,7 +5064,7 @@ where
             if !dig.may_break_at(game_tick) {
                 // **Not a refusal.** Vanilla's shortfall branch arms
                 // `hasDelayedDestroy` and keeps accruing progress in
-                // `ServerPlayerGameMode.tick` until the block is fully earned
+                // its own per-player game-mode tick until the block is fully earned
                 // (vanilla's own per-player game-mode tick); it sends no rollback
                 // here at all. Refusing instead — which is what this arm did
                 // between #531 and this fix — made every non-instant block
@@ -6051,7 +6051,7 @@ where
             // overwriting.
             //
             // Read the "already present" fact *before* calling `apply` — that is
-            // exactly the distinction `ServerPlayer.onEffectAdded` (a brand-new
+            // exactly the distinction vanilla's own on-effect-added routine (a brand-new
             // instance) vs. `onEffectUpdated` (an existing one refreshed) makes,
             // and it is what the encoded packet's `blend` flag carries (see
             // `ServerProtocol::encode_update_mob_effect`'s own doc). Without this
@@ -6105,7 +6105,7 @@ where
             apply(conn, state, proto.encode_system_chat(&line)).await?;
         }
         crate::commands::Effect::Kill => {
-            // `Entity.kill()`: straight to zero, no armour/defenses consulted —
+            // Vanilla's own entity kill routine: straight to zero, no armour/defenses consulted —
             // vanilla's `genericKill` damage type is what `/kill` always deals.
             vitals.kill();
             publish_health(
@@ -8009,7 +8009,7 @@ where
 /// doc, not in this state struct.)
 /// Applies a difficulty-change request (`ServerBound::DifficultyChanged`),
 /// mirroring vanilla's own `handleChangeDifficulty`.
-/// Vanilla gates this on `Permissions.COMMANDS_GAMEMASTER` **or**
+/// Vanilla gates this on vanilla's own `COMMANDS_GAMEMASTER` permission constant **or**
 /// `isSingleplayerOwner()` — the caller in `dispatch_play_packet` now performs
 /// that same check (`commands.permission_level`, which already resolves an
 /// unconfigured/no-ops world to the singleplayer-owner shape) before this
@@ -8267,7 +8267,7 @@ where
 
 /// Applies a `SET_CARRIED_ITEM` request (`ServerBound::CarriedItemChanged`),
 /// mirroring vanilla's own carried-item-set handler, which
-/// writes straight into `Inventory.setSelectedSlot` and sends **no**
+/// writes straight into its own selected-slot setter and sends **no**
 /// confirmation packet back — see that `ServerBound` variant's own doc
 /// comment. A no-op if `slot` is already out of range (the protocol decoder
 /// only ever constructs this variant with a validated slot, so this guard is
@@ -8397,7 +8397,7 @@ const JOIN_CONTENT_STATE_ID: i32 = 1;
 /// recording why only one is correct here.
 /// `ClientboundSetPlayerInventoryPacket` is a **single-slot** record — `(int slot,
 /// ItemStack contents)` — and vanilla's only producer is
-/// vanilla's own inventory-update-packet builder, called from `Inventory.add` to
+/// vanilla's own inventory-update-packet builder, called from its own add-item routine to
 /// acknowledge one item pickup. It carries no slot list and no cursor, so it cannot
 /// express a snapshot. `ClientboundContainerSetContentPacket` is what
 /// `sendInitialData` sends, and `handleContainerContent`'s `containerId == 0` arm
@@ -8575,7 +8575,7 @@ fn join_attributes<P: ServerProtocol>(proto: &P, inventory: &PlayerInventory) ->
 /// (`ServerBound::ContainerClicked`).
 ///
 /// The click's slot/button/click-type go into [`crate::container_click::do_click`],
-/// vanilla's own `AbstractContainerMenu.doClick`, run over the menu read out of
+/// vanilla's own container-menu do-click routine, run over the menu read out of
 /// this connection's real state. The client's `changed_slots`/`carried_item`
 /// prediction is **never stored** — it is compared against what was derived, and a
 /// disagreement sends a full corrective `container_set_content`. So an honest
@@ -9164,8 +9164,8 @@ fn apply_rename_item<P: ServerProtocol>(
 
 /// [`ServerBound::EditBook`]'s consumer — vanilla's own update-book-contents/
 /// sign-book handlers, reached the same way its own edit-book handler
-/// gates it: `slot` must be a hotbar index or the off-hand (vanilla's
-/// `Inventory.isHotbarSlot(slot) || slot == 40`), and the item sitting there
+/// gates it: `slot` must be a hotbar index or the off-hand (vanilla's own
+/// `isHotbarSlot(slot) || slot == 40`), and the item sitting there
 /// must be a `minecraft:writable_book` — vanilla's `carried.has(DataComponents
 /// .WRITABLE_BOOK_CONTENT)` gate, which is always true for that item because
 /// vanilla's own item registration for writable books registers the component as a **prototype default**
@@ -9579,8 +9579,8 @@ fn spawn_dropped_stacks(
 /// Throws the selected hotbar stack into the world — `Q` (`whole_stack: false`,
 /// one item) or `Ctrl+Q` (`whole_stack: true`, all of it).
 ///
-/// Vanilla's own `ServerPlayer.drop(boolean)`, which is
-/// three steps: `Inventory.removeFromSelected(all)` takes the items, the menu is
+/// Vanilla's own per-player drop routine, which is
+/// three steps: its own remove-from-selected routine takes the items, the menu is
 /// told the selected slot's *new* contents, and vanilla's own entity-drop routine spawns the
 /// entity with [`crate::block_drops::thrown_item_velocity`].
 ///
@@ -11298,7 +11298,7 @@ where
         }
         ServerBound::DifficultyChanged { difficulty } => {
             // Vanilla's own change-difficulty handler's own gate:
-            // `Permissions.COMMANDS_GAMEMASTER` (level 2) or the singleplayer
+            // vanilla's own `COMMANDS_GAMEMASTER` permission constant (level 2) or the singleplayer
             // owner. `commands.permission_level` already *is* that check —
             // `AccessLists::command_permission_level` resolves to the real op
             // level, or to `MAX_PERMISSION_LEVEL` for a world with no operator
@@ -11683,7 +11683,7 @@ where
         ServerBound::SetCommandBlock { pos, command, mode, track_output, conditional, automatic } => {
             // Vanilla's own can-use-game-master-blocks check: creative mode (`abilities
             // .instabuild`, which `Abilities::for_mode` sets only for
-            // `GameMode::Creative`) **and** `Permissions.COMMANDS_GAMEMASTER`
+            // `GameMode::Creative`) **and** vanilla's own `COMMANDS_GAMEMASTER` permission constant
             // (level 2) — both, not either. This was a disclosed omission
             // before `crate::access` existed; real now the model does, and
             // `commands.permission_level` is the same already-resolved check
@@ -12704,7 +12704,7 @@ where
         // below echo the mode this server actually applied, so a client that
         // guessed wrong (including one that guessed a refusal wrong) is
         // corrected either way. Vanilla's own game-mode-command permission check
-        // (`Permissions.COMMANDS_GAMEMASTER`, level 2) is
+        // (vanilla's own `COMMANDS_GAMEMASTER` permission constant, level 2) is
         // its own change-game-mode handler's own gate — real now `crate::access` exists,
         // see `DifficultyChanged`'s own comment above; this crate's `/gamemode`
         // built-in already carries the identical `GAMEMODE_LEVEL` check on the
