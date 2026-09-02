@@ -1,18 +1,19 @@
 //! Swept-AABB collision against block collision shapes, reproducing vanilla's
 //! axis order, per-box epsilon semantics, and the 0.6-block auto-step mechanic.
 //!
-//! Vanilla resolves movement in [`Shapes.collide`] one axis at a time, in an
-//! order chosen by [`Direction.axisStepOrder`]: always `Y` first, then `X`/`Z`
-//! with the smaller-magnitude horizontal component last. Collision against a
-//! block's [`VoxelShape`] reduces, for the box shapes used by real blocks, to a
-//! per-box sweep with a `1.0E-7` epsilon on every comparison. We reproduce that
-//! epsilon placement rather than the classic pre-1.13 form, because the epsilon
-//! decides borderline contacts that the server's anti-cheat also sees.
+//! Vanilla resolves movement in its own shape-collide step one axis at a
+//! time, in an order chosen by its own per-axis step-order helper: always
+//! `Y` first, then `X`/`Z` with the smaller-magnitude horizontal component
+//! last. Collision against a block's own voxel shape reduces, for the box
+//! shapes used by real blocks, to a per-box sweep with a `1.0E-7` epsilon on
+//! every comparison. We reproduce that epsilon placement rather than the
+//! classic pre-1.13 form, because the epsilon decides borderline contacts
+//! that the server's anti-cheat also sees.
 
 use crate::fluid::{FluidCell, FluidKind, HorizontalDir};
 use crate::geometry::{Aabb, Axis, Vec3d};
 
-/// Vanilla's collision epsilon (`1.0E-7`), used throughout `VoxelShape.collideX`.
+/// Vanilla's collision epsilon (`1.0E-7`), used throughout its own per-axis box-collide step.
 const EPSILON: f64 = 1.0E-7;
 
 /// Read-only view of the world's block collision geometry, in world space.
@@ -28,7 +29,7 @@ pub trait CollisionView {
     fn collision_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<Aabb>);
 
     /// Block-local top surface Y of the collision shape at `(x, y, z)` —
-    /// vanilla's `shape.max(Axis.Y)`. **Uncapped**: this is *not* clamped to
+    /// vanilla's own shape-max-on-Y accessor. **Uncapped**: this is *not* clamped to
     /// `1.0`. Fences, walls and fence gates return **1.5**; `soul_sand` `0.875`;
     /// a bottom slab `0.5`; air / water / lava / cobweb `0.0`.
     ///
@@ -50,24 +51,24 @@ pub trait CollisionView {
             .fold(0.0_f64, f64::max)
     }
 
-    /// Friction (`Block.getFriction`) of the block at `(x, y, z)`; default `0.6`.
+    /// Friction (vanilla's own block-friction accessor) of the block at `(x, y, z)`; default `0.6`.
     fn friction(&self, _x: i32, _y: i32, _z: i32) -> f32 {
         0.6
     }
 
-    /// Speed factor (`Block.getSpeedFactor`); default `1.0`. Soul sand is
+    /// Speed factor (vanilla's own block-speed-factor accessor); default `1.0`. Soul sand is
     /// `0.4`, honey `0.4`.
     fn speed_factor(&self, _x: i32, _y: i32, _z: i32) -> f32 {
         1.0
     }
 
-    /// Jump factor (`Block.getJumpFactor`); default `1.0`. Honey is `0.5`.
+    /// Jump factor (vanilla's own block-jump-factor accessor); default `1.0`. Honey is `0.5`.
     fn jump_factor(&self, _x: i32, _y: i32, _z: i32) -> f32 {
         1.0
     }
 
     /// Whether the block at `(x, y, z)` is a water source/flowing water column
-    /// for the purposes of `Entity.isInWater`. Default `false`.
+    /// for the purposes of vanilla's own in-water check. Default `false`.
     ///
     /// This is a deliberately coarse hook: it models a fully-submerged player
     /// (the tractable, well-defined part of fluid movement). It does **not**
@@ -77,10 +78,11 @@ pub trait CollisionView {
         false
     }
 
-    /// Whether the block at `(x, y, z)` is climbable (in `BlockTags.CLIMBABLE`:
-    /// ladders, vines, twisting/weeping vines, scaffolding). Default `false`.
+    /// Whether the block at `(x, y, z)` is climbable (vanilla's own climbable
+    /// block tag: ladders, vines, twisting/weeping vines, scaffolding).
+    /// Default `false`.
     ///
-    /// Vanilla's `LivingEntity.onClimbable` tests the block at the entity's
+    /// Vanilla's own "on climbable" check tests the block at the entity's
     /// *feet* block position, so a consumer maps this to the ladder/vine tag.
     /// The sneak-to-hold behaviour differs for scaffolding — see
     /// [`Self::is_scaffolding`], the narrow hook that carries exactly that
@@ -92,10 +94,9 @@ pub trait CollisionView {
     /// Whether the block at `(x, y, z)` is `minecraft:scaffolding` specifically,
     /// among the [`Self::is_climbable`] set. Default `false`.
     ///
-    /// One line of vanilla needs this and nothing else does:
-    /// `LivingEntity.handleOnClimbable`'s sneak-to-hold clamp reads
-    /// `!this.getInBlockState().is(Blocks.SCAFFOLDING)`
-    /// (`LivingEntity.java:2700`) — on a ladder or vine, holding sneak while
+    /// One line of vanilla needs this and nothing else does: vanilla's own
+    /// "handle on climbable" step's sneak-to-hold clamp reads "not standing
+    /// in a scaffolding block" — on a ladder or vine, holding sneak while
     /// moving down clamps the Y velocity to `0.0` (you hang in place); on
     /// scaffolding that conjunct is `false`, so the clamp never engages and
     /// sneaking keeps descending at the same `-0.15` cap as everything else.
@@ -104,30 +105,30 @@ pub trait CollisionView {
     /// exception differs.
     ///
     /// **Deliberately narrow.** Vanilla's other scaffolding-specific behaviour
-    /// — the stable/unstable collision-shape toggle
-    /// (`ScaffoldingBlock.getCollisionShape`, `ScaffoldingBlock.java:137-147`)
-    /// that lets a sneaking player fall *through* the platform instead of
-    /// standing on it — depends on the entity's sneak state and vertical
-    /// approach direction at query time, which [`Self::collision_boxes`] has no
-    /// parameter for. Modelling that would mean widening every implementer's
-    /// shape query with a descending/approach context most blocks never use.
-    /// Not attempted here; a consumer that needs it must special-case
+    /// — the stable/unstable collision-shape toggle that lets a sneaking
+    /// player fall *through* the platform instead of standing on it —
+    /// depends on the entity's sneak state and vertical approach direction at
+    /// query time, which [`Self::collision_boxes`] has no parameter for.
+    /// Modelling that would mean widening every implementer's shape query
+    /// with a descending/approach context most blocks never use. Not
+    /// attempted here; a consumer that needs it must special-case
     /// scaffolding at the collision-box layer itself.
     fn is_scaffolding(&self, _x: i32, _y: i32, _z: i32) -> bool {
         false
     }
 
-    /// Whether the block at `(x, y, z)` is lava for `Entity.isInLava`. Default
-    /// `false`. Like [`Self::is_water`], this is the coarse fully-submerged hook:
-    /// it does not model lava's fluid height (the shallow-vs-deep branch in
-    /// `travelInLava`), so a consumer modelling *deep* lava returns `true` here.
+    /// Whether the block at `(x, y, z)` is lava for vanilla's own in-lava
+    /// check. Default `false`. Like [`Self::is_water`], this is the coarse
+    /// fully-submerged hook: it does not model lava's fluid height (the
+    /// shallow-vs-deep branch in vanilla's own lava-travel step), so a
+    /// consumer modelling *deep* lava returns `true` here.
     fn is_lava(&self, _x: i32, _y: i32, _z: i32) -> bool {
         false
     }
 
     /// The **"stuck in block" speed multiplier** for the block at `(x, y, z)`,
-    /// if that block impedes movement (`Block.entityInside` →
-    /// `Entity.makeStuckInBlock`). Returns `None` for the overwhelming majority
+    /// if that block impedes movement (vanilla's own "entity inside" block
+    /// hook → its own "make stuck in block" step). Returns `None` for the overwhelming majority
     /// of blocks (air and everything that does not grab you), so an implementer
     /// only overrides for the handful that do:
     ///
@@ -144,24 +145,24 @@ pub trait CollisionView {
     /// as vanilla, rather than folding it into drag.
     ///
     /// This is the base, entity-independent value. Vanilla lets a per-entity
-    /// effect override it (a `WEAVING` mob gets `(0.5, 0.25, 0.5)` in cobweb);
-    /// that refinement is deferred and, if ever needed, belongs on the entity,
-    /// not this block-keyed seam.
+    /// effect override it (a Weaving-effect mob gets `(0.5, 0.25, 0.5)` in
+    /// cobweb); that refinement is deferred and, if ever needed, belongs on
+    /// the entity, not this block-keyed seam.
     fn stuck_multiplier(&self, _x: i32, _y: i32, _z: i32) -> Option<Vec3d> {
         None
     }
 
     /// Whether the block at `(x, y, z)` is `minecraft:powder_snow`, for the
-    /// freezing mechanic (`InsideBlockEffectType.FREEZE`,
-    /// `InsideBlockEffectType.java:6-11`). Default `false`.
+    /// freezing mechanic (vanilla's own "freeze" inside-block effect).
+    /// Default `false`.
     ///
     /// A separate hook from [`Self::stuck_multiplier`] because the two answer
     /// different vanilla questions over the same block, on different gates.
-    /// `PowderSnowBlock.entityInside` (`PowderSnowBlock.java:63-83`) applies
-    /// **both** effects to a `LivingEntity` standing in the block — the stuck
-    /// multiplier via `makeStuckInBlock`, which `Player` suppresses while
-    /// flying (`Player.java:1515-1518`), and `FREEZE` via the
-    /// `InsideBlockEffectApplier`, which **no** flying conjunct gates. A
+    /// Vanilla's own powder-snow "entity inside" hook applies **both**
+    /// effects to a living entity standing in the block — the stuck
+    /// multiplier via its own "make stuck in block" step, which a player
+    /// suppresses while flying, and the freeze effect via its own
+    /// inside-block-effect applier, which **no** flying conjunct gates. A
     /// creative-flying player drifting through powder snow keeps accumulating
     /// `frozen_ticks` even though they feel none of the `(0.9, 1.5, 0.9)` drag —
     /// collapsing this into "same cells as `stuck_multiplier`, filtered by
@@ -171,89 +172,90 @@ pub trait CollisionView {
     }
 
     /// The fluid occupying `(x, y, z)`, if any, for **flow-current** (fluid-push)
-    /// computation (`FlowingFluid.getFlow` / `EntityFluidInteraction.update`).
-    /// Default `None` (no fluid) → no current, preserving existing behaviour.
+    /// computation (vanilla's own flow-vector step / fluid interaction
+    /// update). Default `None` (no fluid) → no current, preserving existing
+    /// behaviour.
     ///
     /// This is the finer-grained companion to [`Self::is_water`]/[`Self::is_lava`]:
     /// where those coarse booleans only report *presence* (enough for buoyancy and
     /// drag), the current push needs each cell's fluid **level** and its
     /// neighbours' levels, because a fluid flows from a higher column toward a
-    /// lower one. Return the fluid's [`FluidCell`] (kind, `getAmount()` in
-    /// `1..=8`, and the `FALLING` flag).
+    /// lower one. Return the fluid's [`FluidCell`] (kind, its own
+    /// fluid-amount in `1..=8`, and the "falling" flag).
     fn fluid_at(&self, _x: i32, _y: i32, _z: i32) -> Option<FluidCell> {
         None
     }
 
-    /// `BlockState.blocksMotion()` for the block at `(x, y, z)`, consulted only by
+    /// Vanilla's own "blocks motion" check for the block at `(x, y, z)`, consulted only by
     /// [`crate::fluid::get_flow`]'s empty-neighbour downflow branch (a fluid spills
     /// over an open edge but not through a solid wall). Default `false` (air-like).
     fn blocks_motion(&self, _x: i32, _y: i32, _z: i32) -> bool {
         false
     }
 
-    /// Whether the block at `(x, y, z)` presents a sturdy solid face toward `dir`,
-    /// **from the point of view of a falling `kind` fluid** (`FlowingFluid`
-    /// instance method `isSolidFace`, `FlowingFluid.java:105-115`), used only by a
-    /// *falling* fluid's downward jet. Default `false`.
+    /// Whether the block at `(x, y, z)` presents a sturdy solid face toward
+    /// `dir`, **from the point of view of a falling `kind` fluid** (vanilla's
+    /// own "is solid face" check, an instance method on the flowing-fluid
+    /// type), used only by a *falling* fluid's downward jet. Default `false`.
     ///
     /// `kind` is the fluid asking the question, not the fluid at `(x, y, z)`:
-    /// vanilla's `isSolidFace` is called *on* the flowing fluid instance
-    /// (`this.isSolidFace(...)` from `WaterFluid`/`LavaFluid`), and its first
-    /// line is `fluidState.getType().isSame(this)` — `false` when the neighbour
-    /// holds the **same** fluid as the one computing its flow, regardless of
-    /// what the neighbour's own block is. A neighbour holding a *different*
-    /// fluid (or none) falls through to the ice/sturdy-face check. Implementers
-    /// must not shortcut "any fluid present → not solid" — that answers "same
+    /// vanilla's own "is solid face" check is called *on* the flowing-fluid
+    /// instance (the water or lava fluid singleton), and its first line
+    /// checks whether the neighbour holds the **same** fluid type as the one
+    /// computing its flow — `false` when it does, regardless of what the
+    /// neighbour's own block is. A neighbour holding a *different* fluid (or
+    /// none) falls through to the ice/sturdy-face check. Implementers must
+    /// not shortcut "any fluid present → not solid" — that answers "same
     /// fluid" for the common case (water beside water) but is wrong for a
-    /// waterlogged solid block asked by a *different* fluid's jet (falling lava
-    /// beside a waterlogged stair should still see a sturdy face).
+    /// waterlogged solid block asked by a *different* fluid's jet (falling
+    /// lava beside a waterlogged stair should still see a sturdy face).
     fn is_solid_face(&self, _x: i32, _y: i32, _z: i32, _dir: HorizontalDir, _kind: FluidKind) -> bool {
         false
     }
 
-    /// `BubbleColumnBlock`'s `DRAG_DOWN` blockstate property for the cell at
-    /// `(x, y, z)`, or `None` when the cell is not a bubble column.
+    /// Vanilla's own bubble-column block's "drag down" blockstate property
+    /// for the cell at `(x, y, z)`, or `None` when the cell is not a bubble
+    /// column.
     ///
-    /// * `Some(true)` — **drag down**. The column stands over a
-    ///   `BlockTags.ENABLES_BUBBLE_COLUMN_DRAG_DOWN` block, which in 26.2 is
-    ///   `minecraft:magma_block` alone (`data/minecraft/tags/block/
-    ///   enables_bubble_column_drag_down.json`). This is also the block's
-    ///   *default* state (`BubbleColumnBlock:49`).
-    /// * `Some(false)` — **push up**. The column stands over a
-    ///   `ENABLES_BUBBLE_COLUMN_PUSH_UP` block, which in 26.2 is
+    /// * `Some(true)` — **drag down**. The column stands over a block tagged
+    ///   to enable bubble-column drag-down, which in 26.2 is
+    ///   `minecraft:magma_block` alone. This is also the block's *default*
+    ///   state.
+    /// * `Some(false)` — **push up**. The column stands over a block tagged
+    ///   to enable bubble-column push-up, which in 26.2 is
     ///   `minecraft:soul_sand` alone.
     ///
     /// The property is on the wire and in the generated state table — the two
     /// bubble-column states are `15294` (`drag=true`, default) and `15295`
-    /// (`drag=false`) in the 26.2 global palette, per Mojang's own
-    /// `generated/reports/blocks.json`. Physics stays version-free by asking here
-    /// rather than knowing ids, exactly as [`Self::stuck_multiplier`] does.
+    /// (`drag=false`) in the 26.2 global palette, per Mojang's own block
+    /// report. Physics stays version-free by asking here rather than knowing
+    /// ids, exactly as [`Self::stuck_multiplier`] does.
     ///
-    /// **The base block is not this seam's business.** Vanilla resolves soul sand
-    /// versus magma once, at *block-update* time, into this single boolean
-    /// (`BubbleColumnBlock.getColumnState`); the entity-side code
-    /// (`Entity.handleOnInsideBubbleColumn`) only ever reads the boolean and never
-    /// looks below the column. So there is no "doubled if a magma block is the
-    /// base" term to model — see [`crate::player::tick_water`]'s notes.
+    /// **The base block is not this seam's business.** Vanilla resolves soul
+    /// sand versus magma once, at *block-update* time, into this single
+    /// boolean; the entity-side code only ever reads the boolean and never
+    /// looks below the column. So there is no "doubled if a magma block is
+    /// the base" term to model — see [`crate::player::tick_water`]'s notes.
     fn bubble_column(&self, _x: i32, _y: i32, _z: i32) -> Option<bool> {
         None
     }
 
-    /// Effective bounce restitution of the block at `(x, y, z)`
-    /// (`Block.getBounceRestitution`, already accounting for
-    /// `BlockTags.SUPPRESSES_BOUNCE` → `0.0`). Default `0.0`.
+    /// Effective bounce restitution of the block at `(x, y, z)` (vanilla's
+    /// own bounce-restitution accessor, already accounting for the
+    /// "suppresses bounce" block tag → `0.0`). Default `0.0`.
     ///
-    /// Slime is `1.0`, bed `0.75`. Consulted by `restituteMovementAfterCollisions`
-    /// when the entity lands (vertical-collision-below) *fast enough*
-    /// (`-vy >= effectiveGravity`) and is **not** sneaking — the sneak-cancels-
-    /// bounce rule (`isSuppressingBounce`). A `LivingEntity` (player) does **not**
-    /// get the `×0.8` that non-living entities do, so return the raw value.
+    /// Slime is `1.0`, bed `0.75`. Consulted by vanilla's own post-collision
+    /// restitution step when the entity lands (vertical-collision-below)
+    /// *fast enough* (descent speed at least the effective gravity) and is
+    /// **not** sneaking — the sneak-cancels-bounce rule. A living entity
+    /// (player) does **not** get the `×0.8` that non-living entities do, so
+    /// return the raw value.
     fn bounce_restitution(&self, _x: i32, _y: i32, _z: i32) -> f32 {
         0.0
     }
 }
 
-/// `Direction.axisStepOrder(Vec3)` — the per-axis resolution order.
+/// Vanilla's own per-axis step-order helper — the per-axis resolution order.
 ///
 /// `Math.abs(x) < Math.abs(z) ? [Y, Z, X] : [Y, X, Z]`.
 fn axis_step_order(movement: Vec3d) -> [Axis; 3] {
@@ -265,7 +267,7 @@ fn axis_step_order(movement: Vec3d) -> [Axis; 3] {
 }
 
 /// Gathers every block collision box overlapping `region`, expanded to include
-/// the blocks the box touches, mirroring `level.getBlockCollisions`.
+/// the blocks the box touches, mirroring vanilla's own block-collisions query.
 fn gather_colliders(view: &dyn CollisionView, region: Aabb) -> Vec<Aabb> {
     // Vanilla iterates the block cursor over floor(min) ..= (ceil(max) - 1),
     // i.e. every block cell the AABB overlaps. We use inclusive floor bounds.
@@ -286,9 +288,9 @@ fn gather_colliders(view: &dyn CollisionView, region: Aabb) -> Vec<Aabb> {
     out
 }
 
-/// `Shapes.collide(axis, moving, shapes, distance)` for one axis, iterating the
-/// candidate boxes and short-circuiting to `0.0` once the residual distance is
-/// within epsilon.
+/// Vanilla's own shape-collide step for one axis, iterating the candidate
+/// boxes and short-circuiting to `0.0` once the residual distance is within
+/// epsilon.
 fn collide_axis(axis: Axis, moving: &Aabb, shapes: &[Aabb], mut distance: f64) -> f64 {
     for shape in shapes {
         if distance.abs() < EPSILON {
@@ -299,12 +301,13 @@ fn collide_axis(axis: Axis, moving: &Aabb, shapes: &[Aabb], mut distance: f64) -
     distance
 }
 
-/// One box's contribution to `VoxelShape.collideX`, specialised for a single
-/// axis-aligned box (which is what real block shapes decompose into).
+/// One box's contribution to vanilla's own per-axis box-collide step,
+/// specialised for a single axis-aligned box (which is what real block
+/// shapes decompose into).
 ///
-/// The epsilon placement is derived directly from vanilla's index arithmetic in
-/// `VoxelShape.collideX`/`findIndex` (see the crate docs), so borderline
-/// contacts resolve identically.
+/// The epsilon placement is derived directly from vanilla's own index
+/// arithmetic in that step and its own index-finder helper (see the crate
+/// docs), so borderline contacts resolve identically.
 fn collide_one_box(axis: Axis, shape: &Aabb, moving: &Aabb, distance: f64) -> f64 {
     let (a, b, c) = perpendicular_axes(axis);
 
@@ -348,7 +351,7 @@ fn perpendicular_axes(axis: Axis) -> (Axis, Axis, Axis) {
     }
 }
 
-/// `Entity.collectCollidersIgnoringWorldBorder` (`Entity.java:1220-1236`) — the
+/// Vanilla's own "collect colliders ignoring world border" step — the
 /// one collider list the sweep sees: **entity colliders first**, then the world
 /// border (unmodelled), then the block colliders over `region`.
 ///
@@ -370,8 +373,8 @@ fn collect_colliders(
     out
 }
 
-/// `Entity.collideWithShapes(Vec3, AABB, List<VoxelShape>)` — resolves movement
-/// axis by axis, moving the box after each resolved axis.
+/// Vanilla's own "collide with shapes" step — resolves movement axis by
+/// axis, moving the box after each resolved axis.
 fn collide_with_shapes(movement: Vec3d, bounding_box: Aabb, shapes: &[Aabb]) -> Vec3d {
     if shapes.is_empty() {
         return movement;
@@ -388,8 +391,8 @@ fn collide_with_shapes(movement: Vec3d, bounding_box: Aabb, shapes: &[Aabb]) -> 
     resolved
 }
 
-/// `Entity.collideBoundingBox` — gather colliders over the swept box, then
-/// resolve.
+/// Vanilla's own "collide bounding box" step — gather colliders over the
+/// swept box, then resolve.
 fn collide_bounding_box(
     view: &dyn CollisionView,
     movement: Vec3d,
@@ -401,31 +404,31 @@ fn collide_bounding_box(
     collide_with_shapes(movement, bounding_box, &shapes)
 }
 
-/// `CollisionGetter.noCollision(entity, box)` restricted to **block** shapes:
+/// Vanilla's own "no collision" check restricted to **block** shapes:
 /// whether `box` overlaps no block collider at all.
 ///
-/// This is the `noBlockCollision` term alone. The entity term is
+/// This is the block-only-collision term alone. The entity term is
 /// [`crate::push::no_entity_collision`] and the conjunction of both is
-/// [`crate::push::no_collision_among_entities`], which is what
-/// `Player.canPlayerFitWithinBlocksAndEntitiesWhen` and `Player.canFallAtLeast`
-/// actually call; this block-only form stays for callers with no entity snapshot,
-/// which today is every caller inside this crate. The gap it leaves is narrow by
-/// construction — `getEntityCollisions` filters on `canBeCollidedWith`, which no
-/// player and no mob satisfies, so only a boat, a shulker or a happy ghast is ever
-/// missing from the answer. The remaining unmodelled term of the three is
-/// `noBorderCollision` (no world border in this engine).
+/// [`crate::push::no_collision_among_entities`], which is what vanilla's own
+/// pose-fit check and its own "can fall at least" check actually call; this
+/// block-only form stays for callers with no entity snapshot, which today is
+/// every caller inside this crate. The gap it leaves is narrow by
+/// construction — vanilla's own nearby-entity-collisions query filters on
+/// its own "can be collided with" check, which no player and no mob
+/// satisfies, so only a boat, a shulker or a happy ghast is ever missing from
+/// the answer. The remaining unmodelled term of the three is the world-border
+/// collision check (no world border in this engine).
 ///
-/// Overlap is the
-/// strict `min < max` test vanilla's `Shapes.joinIsNotEmpty(…, AND)` reduces to
-/// for box shapes — a flush contact does **not** count as a collision, so a
-/// player standing exactly on a ledge can still hop onto it.
+/// Overlap is the strict `min < max` test vanilla's own shape-intersection
+/// join reduces to for box shapes — a flush contact does **not** count as a
+/// collision, so a player standing exactly on a ledge can still hop onto it.
 #[must_use]
 pub fn no_collision(view: &dyn CollisionView, box_: Aabb) -> bool {
     let shapes = gather_colliders(view, box_);
     !shapes.iter().any(|s| overlaps(&box_, s))
 }
 
-/// Strict AABB overlap (`Shapes.joinIsNotEmpty(a, b, BooleanOp.AND)` for boxes).
+/// Strict AABB overlap (vanilla's own shape-intersection join, for boxes).
 fn overlaps(a: &Aabb, b: &Aabb) -> bool {
     a.min_x < b.max_x
         && a.max_x > b.min_x
@@ -435,13 +438,14 @@ fn overlaps(a: &Aabb, b: &Aabb) -> bool {
         && a.max_z > b.min_z
 }
 
-/// `LevelReader.containsAnyLiquid(AABB)` — whether any cell the box spans holds a
-/// fluid (`!blockState.getFluidState().isEmpty()`).
+/// Vanilla's own "contains any liquid" check — whether any cell the box
+/// spans holds a fluid (its own block-state fluid-state-is-empty check,
+/// negated).
 ///
-/// The cell range is vanilla's **exclusive-max** `floor(min) ..< ceil(max)`
-/// (`LevelReader.java:140-155`), which is *not* the `..= ceil(max) - 1` range the
-/// fluid-height sweep uses — the two differ for a box whose max lands exactly on
-/// a cell boundary, and this one is deliberately the wider of the two.
+/// The cell range is vanilla's **exclusive-max** `floor(min) ..< ceil(max)`,
+/// which is *not* the `..= ceil(max) - 1` range the fluid-height sweep uses —
+/// the two differ for a box whose max lands exactly on a cell boundary, and
+/// this one is deliberately the wider of the two.
 #[must_use]
 pub fn contains_any_liquid(view: &dyn CollisionView, box_: Aabb) -> bool {
     let x0 = crate::mth::floor(box_.min_x);
@@ -465,16 +469,16 @@ pub fn contains_any_liquid(view: &dyn CollisionView, box_: Aabb) -> bool {
     false
 }
 
-/// `Entity.collide(Vec3)` including the auto-step mechanic, against **block
-/// geometry only**.
+/// Vanilla's own "collide" step including the auto-step mechanic, against
+/// **block geometry only**.
 ///
 /// `on_ground` and `max_up_step` come from the entity; for a player on the
 /// ground `max_up_step` is `0.6`. Returns the resolved movement.
 ///
-/// Equivalent to [`collide_among_entities`] with an empty collider slice, which is
-/// what makes that addition provably inert for every existing caller: vanilla's
-/// `collectCollidersIgnoringWorldBorder` prepends an empty entity list to produce a
-/// bit-identical collider list.
+/// Equivalent to [`collide_among_entities`] with an empty collider slice,
+/// which is what makes that addition provably inert for every existing
+/// caller: vanilla's own "collect colliders ignoring world border" step
+/// prepends an empty entity list to produce a bit-identical collider list.
 #[must_use]
 pub fn collide(
     view: &dyn CollisionView,
@@ -486,22 +490,23 @@ pub fn collide(
     collide_among_entities(view, movement, bounding_box, on_ground, max_up_step, &[])
 }
 
-/// `Entity.collide(Vec3)` (`Entity.java:1143-1172`) with the entity half wired: the
-/// same swept resolve, over blocks **and** the collider boxes of nearby collidable
+/// Vanilla's own "collide" step with the entity half wired: the same swept
+/// resolve, over blocks **and** the collider boxes of nearby collidable
 /// entities.
 ///
 /// `entity_colliders` must be gathered by
 /// [`crate::push::entity_collision_boxes`] over
-/// `bounding_box.expand_towards(movement)` — vanilla's
-/// `getEntityCollisions(this, aabb.expandTowards(movement))` (`:1145`). Two things
+/// `bounding_box.expand_towards(movement)` — vanilla's own nearby-entity-
+/// collisions query over the box expanded toward the movement. Two things
 /// about that follow the source and would be natural to "improve" wrongly:
 ///
 /// * the list is gathered **once**, from the *movement* box, and then reused
-///   verbatim for the step-up pass even though the step-up box (`stepUpAABB`) is
-///   strictly larger (`:1158`). An entity that only overlaps the taller step-up box
-///   is therefore invisible to the step. That is vanilla; do not re-gather.
-/// * entity colliders participate in `collectCandidateStepUpHeights`, so you can
-///   auto-step onto a boat's deck exactly as onto a slab.
+///   verbatim for the step-up pass even though the step-up box is strictly
+///   larger. An entity that only overlaps the taller step-up box is
+///   therefore invisible to the step. That is vanilla; do not re-gather.
+/// * entity colliders participate in vanilla's own "collect candidate
+///   step-up heights" step, so you can auto-step onto a boat's deck exactly
+///   as onto a slab.
 #[must_use]
 pub fn collide_among_entities(
     view: &dyn CollisionView,
@@ -555,8 +560,8 @@ pub fn collide_among_entities(
     movement_step
 }
 
-/// `Entity.collectCandidateStepUpHeights` — the sorted set of candidate step
-/// heights derived from the top faces of nearby colliders.
+/// Vanilla's own "collect candidate step-up heights" step — the sorted set
+/// of candidate step heights derived from the top faces of nearby colliders.
 fn candidate_step_up_heights(
     bounding_box: &Aabb,
     colliders: &[Aabb],
