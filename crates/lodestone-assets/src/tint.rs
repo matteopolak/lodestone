@@ -46,20 +46,20 @@ pub type Rgb = u32;
 pub mod colors {
     use super::Rgb;
 
-    /// `FoliageColor.FOLIAGE_DEFAULT` — colormap fallback and the default map
+    /// Vanilla's own foliage-color "foliage default" constant — colormap fallback and the default map
     /// colour for out-of-range samples.
     pub const FOLIAGE_DEFAULT: Rgb = 0x48B518;
-    /// `FoliageColor.FOLIAGE_EVERGREEN` — spruce leaves (no biome tint).
+    /// Vanilla's own foliage-color "foliage evergreen" constant — spruce leaves (no biome tint).
     pub const FOLIAGE_EVERGREEN: Rgb = 0x619961;
-    /// `FoliageColor.FOLIAGE_BIRCH` — birch leaves (no biome tint).
+    /// Vanilla's own foliage-color "foliage birch" constant — birch leaves (no biome tint).
     pub const FOLIAGE_BIRCH: Rgb = 0x80A755;
-    /// `FoliageColor.FOLIAGE_MANGROVE`. Note: mangrove *leaves* actually use the
-    /// foliage colormap (per `BlockColors`); this constant is kept for
+    /// Vanilla's own foliage-color "foliage mangrove" constant. Note: mangrove *leaves* actually use the
+    /// foliage colormap (per vanilla's own block-colors registration); this constant is kept for
     /// completeness / other mangrove parts.
     pub const FOLIAGE_MANGROVE: Rgb = 0x92C648;
-    /// `DryFoliageColor.FOLIAGE_DRY_DEFAULT` — dry foliage colormap fallback.
+    /// Vanilla's own dry-foliage-color "foliage dry default" constant — dry foliage colormap fallback.
     pub const DRY_FOLIAGE_DEFAULT: Rgb = 0x5C3C32;
-    /// `BlockColors.LILY_PAD_IN_WORLD` — lily pad's constant in-world tint.
+    /// Vanilla's own block-colors "lily pad in world" constant — lily pad's constant in-world tint.
     pub const LILY_PAD_IN_WORLD: Rgb = 0x208030;
 }
 
@@ -113,9 +113,9 @@ impl Colormap {
         })
     }
 
-    /// Samples the map for a temperature and downfall, following vanilla's
-    /// `ColorMapColorUtil.get`: `rain *= temp; x = (1-temp)*255; y = (1-rain)*255;
-    /// index = y<<8 | x`. Inputs are clamped to `[0, 1]` first (as `Biome` does).
+    /// Samples the map for a temperature and downfall, following vanilla's own
+    /// color-map-color-util "get" step: `rain *= temp; x = (1-temp)*255; y = (1-rain)*255;
+    /// index = y<<8 | x`. Inputs are clamped to `[0, 1]` first (as vanilla's own biome class does).
     #[must_use]
     pub fn sample(&self, temperature: f32, downfall: f32) -> Rgb {
         let temp = f64::from(temperature.clamp(0.0, 1.0));
@@ -271,15 +271,15 @@ pub trait BiomeTint: std::fmt::Debug {
     fn grass_modifier(&self, _pos: BlockPos) -> GrassColorModifier {
         GrassColorModifier::None
     }
-    /// The `Biome.BIOME_INFO_NOISE` sample the swamp modifier needs at `pos`
+    /// Vanilla's own biome-info-noise sample the swamp modifier needs at `pos`
     /// (`noise(x*0.0225, z*0.0225)`). Only consulted for swamp biomes.
     fn grass_modifier_noise(&self, _pos: BlockPos) -> f64 {
         0.0
     }
 }
 
-/// A biome's grass colour modifier, matching
-/// `BiomeSpecialEffects.GrassColorModifier`.
+/// A biome's grass colour modifier, matching vanilla's own
+/// biome-special-effects grass-color-modifier enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GrassColorModifier {
     /// No modification.
@@ -293,7 +293,7 @@ pub enum GrassColorModifier {
 
 impl GrassColorModifier {
     /// Applies the modifier to a base grass colour. `noise` is the
-    /// `Biome.BIOME_INFO_NOISE` value the swamp variant needs (ignored by the
+    /// vanilla biome-info-noise value the swamp variant needs (ignored by the
     /// others).
     #[must_use]
     pub fn modify(self, base: Rgb, noise: f64) -> Rgb {
@@ -316,7 +316,7 @@ impl GrassColorModifier {
 }
 
 /// The redstone wire power ramp, `power` in `0..=15`, verified against
-/// `RedStoneWireBlock.COLORS`.
+/// vanilla's own redstone-wire-block colors table.
 #[must_use]
 pub fn redstone_power_color(power: u8) -> Rgb {
     let p = f32::from(power.min(15)) / 15.0;
@@ -328,10 +328,10 @@ pub fn redstone_power_color(power: u8) -> Rgb {
 }
 
 /// Classifies a block, its `tintindex` layer and its state into a [`TintKind`],
-/// matching vanilla's `BlockColors.createDefault()` registrations.
+/// matching vanilla's own block-colors "create default" registrations.
 ///
-/// Verified against the client source (`net.minecraft.client.color.block.
-/// BlockColors`/`BlockTintSources`). The `tintindex` is the *layer*: most blocks
+/// Verified against the client source (vanilla's own block-color and
+/// block-tint-source registration classes). The `tintindex` is the *layer*: most blocks
 /// have one layer at index 0, but `pink_petals`/`wildflowers` register
 /// `[blank, grass]`, so their index 1 is grass-tinted while index 0 is untinted.
 /// Blocks that carry a `tintindex` in their model but are *not* registered here
@@ -398,28 +398,34 @@ pub fn vanilla_tint_kind(
     }
 }
 
-/// The tint a **break/hit particle** of `block` takes, matching vanilla's
-/// `BlockTintSource.colorAsTerrainParticle` at layer 0 — what
+/// The tint a **break/hit particle** of `block` takes, matching vanilla's own
+/// "color as terrain particle" accessor at layer 0 — what
 /// `TerrainParticle`'s constructor multiplies its `0.6` grey by.
 ///
 /// This is *not* the same lookup as `vanilla_tint_kind(block, 0, …)`. In-world
 /// face tinting and particle tinting are separate virtual methods on
-/// `BlockTintSource`, and two registrations override the particle one to
-/// disagree with the in-world one (`net.minecraft.client.color.block.
-/// BlockTintSources`, 26.2):
+/// vanilla's own block-tint-source base class, and two registrations override
+/// the particle one to
+/// disagree with the in-world one (vanilla's own block-tint-sources
+/// registration class, 26.2):
 ///
-/// * **`grass_block`** — `grassBlock()` overrides `colorAsTerrainParticle` to
+/// * **`grass_block`** — vanilla's own grass-block tint source overrides its
+///   "color as terrain particle" accessor to
 ///   return `-1` (untinted). It has to: `grass_block`'s `#particle` variable is
 ///   `block/dirt`, so applying the grass colormap would throw *green dirt*.
 ///   This is the same special case the pre-26.x client spelled out inline as
 ///   `if (!state.is(Blocks.GRASS_BLOCK))`.
-/// * **`water` / `bubble_column`** — `waterParticles()` is the mirror image:
-///   `color`/`colorInWorld` are `-1` (the fluid *surface* is tinted by the fluid
+/// * **`water` / `bubble_column`** — vanilla's own water-particles tint source
+///   is the mirror image:
+///   `color`/its own "color in world" accessor are `-1` (the fluid *surface* is
+///   tinted by the fluid
 ///   model instead, which is why [`vanilla_tint_kind`] reports `None` for them)
-///   while `colorAsTerrainParticle` returns the biome water colour.
+///   while its own "color as terrain particle" accessor returns the biome water colour.
 ///
-/// Every other registration inherits `colorAsTerrainParticle` from
-/// `colorInWorld`, so it agrees with [`vanilla_tint_kind`] at layer 0 — hence
+/// Every other registration inherits its "color as terrain particle" accessor
+/// from
+/// its "color in world" accessor, so it agrees with [`vanilla_tint_kind`] at
+/// layer 0 — hence
 /// the delegation rather than a second copy of the whole table.
 ///
 /// Getting this wrong is not subtle on screen but *is* subtle in review: the
@@ -439,7 +445,8 @@ pub fn vanilla_particle_tint_kind(
     }
 }
 
-/// The stem tint for `age` (0..=7), matching `BlockTintSources.stem`:
+/// The stem tint for `age` (0..=7), matching vanilla's own block-tint-sources
+/// stem provider:
 /// `ARGB.color(age*32, 255 - age*8, age*4)`.
 #[must_use]
 pub fn stem_color(age: u8) -> Rgb {
@@ -460,12 +467,12 @@ pub fn stem_color(age: u8) -> Rgb {
 /// check. `water_color`, `grass_color`, `foliage_color` and
 /// `dry_foliage_color` are `effects.*_color`; `grass_modifier` is
 /// `effects.grass_color_modifier`; `temperature`/`downfall` are the
-/// biome-level fields `Biome.ClimateSettings` reads (see
+/// biome-level fields vanilla's own biome climate-settings record reads (see
 /// [`Colormap::sample`]'s doc for why those two, not the override colours,
 /// still need clamping downstream).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BiomeEffects {
-    /// Declared `temperature`, matching `Biome.getBaseTemperature()`.
+    /// Declared `temperature`, matching vanilla's own "get base temperature" accessor.
     pub temperature: f32,
     /// Declared `downfall`.
     pub downfall: f32,
@@ -644,13 +651,16 @@ pub fn biome_effects(id: &str) -> Option<&'static BiomeEffects> {
 
 /// Vanilla's biome-tint smoothing kernel: a `(2*radius+1)²` box average of a
 /// per-position colour, sampled at `radius`-many neighbours on each side of
-/// `(x, z)` at a fixed height. Matches `ClientLevel.calculateBlockTint`
+/// `(x, z)` at a fixed height. Matches vanilla's own client-level "calculate
+/// block tint" step
 /// exactly, including its per-channel integer
 /// (floor) division — `sample` should already be vanilla's un-blended
-/// `ColorResolver.getColor` for one position (i.e. one [`Colormaps::resolve`]
+/// color-resolver "get color" accessor for one position (i.e. one
+/// [`Colormaps::resolve`]
 /// call), and this function performs the averaging **around** it, matching
-/// the split between `Biome.getGrassColor`/`getFoliageColor`/`getWaterColor`
-/// (one point) and `calculateBlockTint` (the box that wraps them).
+/// the split between vanilla's own biome "get grass color"/"get foliage
+/// color"/"get water color" accessors
+/// (one point) and its own "calculate block tint" step (the box that wraps them).
 ///
 /// `radius: 0` skips the loop entirely and returns `sample(x, z)` directly —
 /// vanilla's own `dist == 0` fast path, which the "Fast" video-settings
@@ -658,7 +668,8 @@ pub fn biome_effects(id: &str) -> Option<&'static BiomeEffects> {
 /// tint (a single-sample world) diverge only in what `sample` does, not in
 /// this function's control flow.
 ///
-/// The default `biomeBlendRadius` is `2` (`Options.biomeBlendRadius`'s
+/// The default biome-blend-radius option value is `2` (vanilla's own options class's own
+/// biome-blend-radius option's
 /// `new OptionInstance.IntRange(0, 7, false), 2, …`), giving the vanilla
 /// default 5x5 = 25-sample average this crate's callers should use unless a
 /// video setting says otherwise (this client has no such setting yet, so `2`
@@ -681,11 +692,12 @@ pub fn blend_box<F: FnMut(i32, i32) -> Rgb>(x: i32, z: i32, radius: i32, mut sam
     ((r / count) << 16) | ((g / count) << 8) | (b / count)
 }
 
-/// Vanilla's default biome-blend radius (`Options.biomeBlendRadius`). See
+/// Vanilla's default biome-blend radius (vanilla's own options class's own
+/// biome-blend-radius option). See
 /// [`blend_box`]'s doc for why this is the only reachable value right now.
 pub const DEFAULT_BLEND_RADIUS: i32 = 2;
 
-/// The largest `biomeBlendRadius` vanilla's option exposes — its
+/// The largest value vanilla's own biome-blend-radius option exposes — its
 /// `new OptionInstance.IntRange(0, 7, false)`. It bounds [`BlendRowCursor`]'s
 /// window, which is why that type needs no allocation.
 pub const MAX_BLEND_RADIUS: i32 = 7;
