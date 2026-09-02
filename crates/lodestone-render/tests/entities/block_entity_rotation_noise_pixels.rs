@@ -49,6 +49,7 @@
 //! cargo test -p lodestone-render --test block_entity_rotation_noise_pixels -- --ignored --nocapture
 //! ```
 
+#[path = "../gate_harness/mod.rs"]
 mod gate_harness;
 
 use glam::Vec3;

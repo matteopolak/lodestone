@@ -55,6 +55,7 @@
 //!   full-screen pass would show up as a shifted background, not a bounded
 //!   silhouette, and this gate's failure output prints the bounding box.
 
+#[path = "../gate_harness/mod.rs"]
 mod gate_harness;
 
 use glam::Vec3;
