@@ -11,146 +11,114 @@
 //! `random_tick.rs` owns the *selection* machinery (the position LCG, the
 //! per-section eligibility scan, the two-generator split) that is genuinely
 //! shared across every randomly-ticking block. This module owns the
-//! *per-block-family* decision logic — three families, each cited from its
-//! own jar class — kept apart from the selection machinery the same way
-//! `SpreadingSnowyBlock`/`CropBlock`/`SaplingBlock`/`LeavesBlock` are
-//! separate Java classes sharing one `BlockState.randomTick` call site.
+//! *per-block-family* decision logic — three families, each transcribed from
+//! the real class that implements it — kept apart from the selection
+//! machinery the same way the real crop, sapling and leaves blocks are
+//! separate classes sharing one random-tick call site.
 //!
-//! # Crop growth, cited directly
+//! # Crop growth, transcribed from the real crop block
 //!
-//! `CropBlock.randomTick`:
-//!
-//! ```text
-//! protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
-//!    if (level.getRawBrightness(pos, 0) >= 9) {
-//!       int age = this.getAge(state);
-//!       if (age < this.getMaxAge()) {
-//!          float growthSpeed = getGrowthSpeed(this, level, pos);
-//!          if (random.nextInt((int)(25.0F / growthSpeed) + 1) == 0) {
-//!             level.setBlock(pos, this.getStateForAge(age + 1), 2);
-//!          }
-//!       }
-//!    }
-//! }
-//! ```
+//! The real crop's random tick, transcribed as the rule it implements: if
+//! the raw brightness at this position is at least 9, and this crop's age is
+//! below its own maximum, draw once with a bound of `(25.0 / growth_speed)
+//! as i32 + 1` and, on a hit (`0`), advance the crop to the next age.
 //!
 //! The light check wraps the **entire** body, including the RNG draw — a
 //! crop with insufficient light draws **zero** times, not "draws and always
 //! misses." [`crop_random_tick`]'s `above_is_air` proxy stands in for
-//! `getRawBrightness(pos, 0) >= 9` exactly like `random_tick.rs`'s own
+//! that light check exactly like `random_tick.rs`'s own
 //! `is_air_variant` proxy for grass's light check (same named simplification:
 //! this crate has no light engine — see that module's doc comment for why
 //! the **draw pattern**, not the literal light value, is what is asserted).
 //!
-//! `CropBlock.getGrowthSpeed` reads farmland moisture
-//! (`FarmlandBlock.MOISTURE`) on the block below and up to eight neighbours,
+//! The real crop's growth-speed derivation reads farmland moisture
+//! on the block below and up to eight neighbours,
 //! plus same-type crops in the four cardinal/diagonal directions. This crate
 //! has no farmland-moisture block-state property and no vegetation in
 //! worldgen at all (`crate::chunk`'s module doc: the generator produces no
-//! trees/crops/farmland), so [`crop_random_tick`] fixes `growthSpeed` at the
-//! jar's own "nothing adjacent helps" baseline of `1.0`, giving a bound of
+//! trees/crops/farmland), so [`crop_random_tick`] fixes the real growth-speed multiplier at the
+//! real "nothing adjacent helps" baseline of `1.0`, giving a bound of
 //! `(25.0 / 1.0) as i32 + 1 == 26` — a named simplification of the speed
 //! *multiplier* only; the `nextInt` call shape (one draw, bound 26, hit on
 //! `0`) is exact.
 //!
-//! `wheat`/`carrots`/`potatoes` are plain `CropBlock` (max age 7,
-//! `CropBlock.MAX_AGE`/`AGE_7` — `CarrotBlock.java`, `PotatoBlock.java` both
-//! extend `CropBlock` with no override of `randomTick`/`getMaxAge`).
-//! `beetroots` is the one crop with its own draw gate — cited below.
+//! `wheat`/`carrots`/`potatoes` are plain crop-block subclasses (max age 7,
+//! and neither carrot nor potato overrides the random tick or max-age
+//! query).
+//! `beetroots` is the one crop with its own draw gate — transcribed below.
 //!
-//! # Beetroot's extra gate, cited directly
+//! # Beetroot's extra gate, transcribed from the real beetroot block
 //!
-//! `BeetrootBlock.randomTick`:
-//!
-//! ```text
-//! protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
-//!    if (random.nextInt(3) != 0) {
-//!       super.randomTick(state, level, pos, random);
-//!    }
-//! }
-//! ```
+//! The real beetroot's random tick, transcribed as the rule it implements:
+//! draw once with a bound of `3`; if that draw is *not* a hit (`0`), fall
+//! through into the shared crop-block body above; otherwise stop.
 //!
 //! This draw happens **unconditionally, before any light check** — a
 //! beetroot with insufficient light still consumes this one draw (it just
-//! never reaches `CropBlock.randomTick`'s own light-gated draw). So the full
+//! never reaches the shared crop-block body's own light-gated draw). So the full
 //! draw pattern for beetroot is: 1 draw always; if that draw is `0`
 //! (1-in-3), stop (0 further draws); otherwise fall into the shared
-//! `CropBlock` body above (0 further draws if unlit, 1 further draw if lit).
-//! `BeetrootBlock.MAX_AGE = 3` (`AGE_3`).
+//! crop-block body above (0 further draws if unlit, 1 further draw if lit).
+//! The real beetroot's own max age is `3`.
 //!
-//! # Sapling growth, cited directly
+//! # Sapling growth, transcribed from the real sapling block
 //!
-//! `SaplingBlock.randomTick`/`advanceTree`:
+//! The real sapling's random tick and its advance-tree step, transcribed as
+//! the rules they implement:
 //!
-//! ```text
-//! protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
-//!    if (level.getMaxLocalRawBrightness(pos.above()) >= 9 && random.nextInt(7) == 0) {
-//!       this.advanceTree(level, pos, state, random);
-//!    }
-//! }
-//! public void advanceTree(ServerLevel level, BlockPos pos, BlockState state, RandomSource random) {
-//!    if (state.getValue(STAGE) == 0) {
-//!       level.setBlock(pos, state.cycle(STAGE), 260);
-//!    } else {
-//!       this.treeGrower.growTree(level, level.getChunkSource().getGenerator(), pos, state, random);
-//!    }
-//! }
-//! ```
+//! On the random tick: if the raw brightness at the block above is at least
+//! 9 **and** a draw with bound `7` hits (`0`), advance the tree.
 //!
-//! Java's `&&` short-circuits: the light check is `pos.above()`-based (the
+//! To advance the tree: if the sapling's own growth stage is `0`, cycle it
+//! to the next stage. Otherwise, hand off to the tree-growing feature for
+//! this sapling's species.
+//!
+//! The `&&` short-circuits: the light check is above-block-based (the
 //! sapling's own light-proxy target, matching this module's `above_is_air`
 //! parameter) and gates the `nextInt(7)` draw entirely — unlit means **zero**
 //! draws, lit means **exactly one**, hit on `0` (1-in-7).
 //!
-//! **`advanceTree`'s `else` branch (an already-stage-1 sapling growing an
-//! actual tree) is a named, uncloseable gap, not an oversight**: `TreeGrower`
+//! **The advance-tree step's "hand off to the tree-growing feature" branch
+//! (an already-stage-1 sapling growing an
+//! actual tree) is a named, uncloseable gap, not an oversight**: that feature
 //! calls into a tree *feature* (a multi-block structure placer) this crate
 //! has no equivalent of — `lodestone-worldgen` (off-limits to this task;
 //! see the vegetation-oracle agent's ownership) generates no trees at all
 //! today, so there is no decorator this module could call even if it wanted
 //! to guess at a shape. [`sapling_random_tick`] returns
 //! [`SaplingOutcome::TreeGrowthNotModeled`] for this case rather than
-//! fabricating a placeholder tree: a real, jar-cited stage-0→1 cycle is
-//! implemented (the one part of `advanceTree` this crate *can* do
+//! fabricating a placeholder tree: a real, faithfully transcribed stage-0→1
+//! cycle is
+//! implemented (the one part of the advance-tree step this crate *can* do
 //! correctly), and a stage-1 sapling that rolls its 1-in-7 chance again
 //! simply stays at stage 1 forever until a future tree feature exists to
 //! plug into this exact call site — stated plainly, per this repo's own
 //! "nothing is done until something on screen changes" rule, rather than
 //! silently no-op'd.
 //!
-//! # Leaf decay, cited directly
+//! # Leaf decay, transcribed from the real leaves block
 //!
-//! `LeavesBlock.isRandomlyTicking`/`randomTick`/`decaying`:
+//! The real leaves block's is-randomly-ticking check, random tick, and
+//! decaying predicate, transcribed as the rules they implement: a leaves
+//! block is randomly ticking iff its distance-to-log value is `7` and it is
+//! not marked persistent — the identical condition its own decaying
+//! predicate checks. On the random tick, if decaying, drop its resources and
+//! remove the block (without dropping experience).
 //!
-//! ```text
-//! protected boolean isRandomlyTicking(BlockState state) {
-//!    return state.getValue(DISTANCE) == 7 && !state.getValue(PERSISTENT);
-//! }
-//! protected void randomTick(BlockState state, ServerLevel level, BlockPos pos, RandomSource random) {
-//!    if (this.decaying(state)) {
-//!       dropResources(state, level, pos);
-//!       level.removeBlock(pos, false);
-//!    }
-//! }
-//! protected boolean decaying(BlockState state) {
-//!    return !state.getValue(PERSISTENT) && state.getValue(DISTANCE) == 7;
-//! }
-//! ```
-//!
-//! `isRandomlyTicking` and `decaying` are the **identical predicate** —
+//! Is-randomly-ticking and decaying are the **identical predicate** —
 //! every leaf this crate ever selects for a random tick is, by construction,
 //! already decaying, so [`leaves_should_decay`] doubles as both this
-//! module's selection gate and its action gate, and `randomTick` itself
-//! draws **zero** RNG values (no `random.nextInt` call anywhere in the
-//! excerpt above): the check is entirely deterministic once selected.
+//! module's selection gate and its action gate, and the random tick itself
+//! draws **zero** RNG values: the check is entirely deterministic once selected.
 //! The leaf-decay dispatch in `random_tick.rs` skips
-//! `dropResources` (item-drop spawning is a separate system this task does
+//! the real drop-resources step (item-drop spawning is a separate system this task does
 //! not own — see `crate::block_entities`/mob loot for the precedent, out of
 //! scope here) and removes the block (sets it to air), which is the
 //! visually-observable half of decay.
 //!
-//! **The `distance`-recompute half of `LeavesBlock` (`LeavesBlock.updateShape`
-//! scheduling a `tick()` that walks all six neighbours)
+//! **The `distance`-recompute half of the real leaves block (its own
+//! shape-update hook
+//! scheduling a tick that walks all six neighbours)
 //! is deliberately not implemented here.** That
 //! half only matters once something maintains `distance` as logs/leaves are
 //! placed or removed near each other — and nothing in this crate places logs
@@ -160,8 +128,8 @@
 //! correct in isolation, with no producer that could ever call it. A leaf
 //! block's `distance` is therefore fixed for its lifetime in this crate —
 //! only ever set by whoever constructs the block-state string (a test, or a
-//! future tree feature) — and only the already-cited `isRandomlyTicking`/
-//! `decaying` predicate over that fixed value is modeled.
+//! future tree feature) — and only the already-transcribed is-randomly-ticking/
+//! decaying predicate over that fixed value is modeled.
 
 use crate::mob_spawn::SpawnRng;
 
@@ -195,7 +163,7 @@ fn get_u32_property(state: &str, key: &str) -> Option<u32> {
 /// Parses one `key=value` block-state boolean property. `None` if absent
 /// (see [`get_u32_property`]'s doc comment for the same "absent means the
 /// vanilla default" handling — `persistent`'s vanilla default is `false`,
-/// per `LeavesBlock`'s own constructor).
+/// per the real leaves block's own constructor).
 fn get_bool_property(state: &str, key: &str) -> Option<bool> {
     let (_, props) = state.split_once('[')?;
     let props = props.strip_suffix(']').unwrap_or(props);
@@ -223,8 +191,9 @@ pub const POTATOES: &str = "minecraft:potatoes";
 pub const BEETROOTS: &str = "minecraft:beetroots";
 
 /// `Some(max_age)` for a canonical crop base name, `None` otherwise. `7` for
-/// wheat/carrots/potatoes (`CropBlock.MAX_AGE`, plain `CropBlock` subclasses
-/// with no override); `3` for beetroots (`BeetrootBlock.MAX_AGE`).
+/// wheat/carrots/potatoes (the real crop block's max age, plain crop-block
+/// subclasses
+/// with no override); `3` for beetroots (the real beetroot's own max age).
 #[must_use]
 pub fn crop_max_age(base: &str) -> Option<u32> {
     match base {
@@ -235,7 +204,7 @@ pub fn crop_max_age(base: &str) -> Option<u32> {
 }
 
 /// `true` iff `block_state` is a crop strictly below its own max age —
-/// mirrors `CropBlock.isRandomlyTicking`
+/// mirrors the real crop block's is-randomly-ticking query
 /// (`!this.isMaxAge(state)`).
 #[must_use]
 pub fn is_growable_crop(block_state: &str) -> bool {
@@ -246,7 +215,7 @@ pub fn is_growable_crop(block_state: &str) -> bool {
     }
 }
 
-/// The crop's current age (vanilla default `0` — `CropBlock`'s own constructor,
+/// The crop's current age (real default `0` — the real crop block's own constructor,
 /// `registerDefaultState(... setValue(AGE, 0))`).
 #[must_use]
 pub fn get_age(block_state: &str) -> u32 {
@@ -263,11 +232,11 @@ pub fn set_age(base: &str, age: u32) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CropOutcome {
     /// Beetroot's own extra gate (`nextInt(3) == 0`) rejected this tick
-    /// before `CropBlock`'s own body ever ran. Only reachable for
+    /// before the real crop block's own body ever ran. Only reachable for
     /// [`BEETROOTS`].
     SkippedByOuterGate,
     /// `above_is_air` was `false` (the light-check proxy) — zero further
-    /// draws, per `CropBlock.randomTick`'s light check wrapping the whole
+    /// draws, per the real crop block's random tick's light check wrapping the whole
     /// body.
     NoLight,
     /// Light was sufficient, the growth-chance draw did not hit `0`.
@@ -285,7 +254,8 @@ pub enum CropOutcome {
 /// calling any per-block handler).
 pub fn crop_random_tick(base: &str, age: u32, above_is_air: bool, rng: &mut SpawnRng) -> CropOutcome {
     if base == BEETROOTS {
-        // `BeetrootBlock.randomTick`: `random.nextInt(3) != 0` — unconditional,
+        // The real beetroot's random tick: a draw with bound 3 that must be
+        // non-zero — unconditional,
         // before any light check.
         if rng.next_int(3) == 0 {
             return CropOutcome::SkippedByOuterGate;
@@ -309,8 +279,9 @@ pub fn crop_random_tick(base: &str, age: u32, above_is_air: bool, rng: &mut Spaw
 /// `true` for any of vanilla's suffix-`_sapling` blocks (oak/spruce/birch/
 /// jungle/acacia/dark_oak/cherry — mangrove's `mangrove_propagule` is a
 /// distinct class with its own age mechanic, not covered here). Vanilla sets
-/// `isRandomlyTicking` unconditionally true for every `SaplingBlock`
-/// instance (no override narrowing it, unlike `LeavesBlock`/`CropBlock`), so
+/// the real is-randomly-ticking check unconditionally true for every real
+/// sapling
+/// instance (no override narrowing it, unlike leaves/crop blocks), so
 /// this predicate alone is the full selection gate.
 #[must_use]
 pub fn is_sapling(block_state: &str) -> bool {
@@ -318,7 +289,7 @@ pub fn is_sapling(block_state: &str) -> bool {
 }
 
 /// The sapling's current growth stage (vanilla default `0` —
-/// `SaplingBlock`'s own constructor).
+/// the real sapling block's own constructor).
 #[must_use]
 pub fn get_stage(block_state: &str) -> u32 {
     get_u32_property(block_state, "stage").unwrap_or(0)
@@ -338,11 +309,12 @@ pub enum SaplingOutcome {
     /// Light was sufficient; the `nextInt(7)` draw did not hit `0`.
     NoRoll,
     /// Light was sufficient, the draw hit `0`, and the sapling was at stage
-    /// `0` — advances to stage `1` (`advanceTree`'s `if` branch, a real
+    /// `0` — advances to stage `1` (the real advance-tree step's `if` branch, a real
     /// mutation this crate can perform exactly).
     AdvancedToStage1,
     /// Light was sufficient, the draw hit `0`, and the sapling was already
-    /// at stage `1` — vanilla would call `TreeGrower.growTree` here; this
+    /// at stage `1` — the real engine would hand off to the tree-growing
+    /// feature here; this
     /// crate has no tree feature to call (see module doc comment), so
     /// nothing is mutated.
     TreeGrowthNotModeled,
@@ -376,10 +348,10 @@ pub fn is_leaves(block_state: &str) -> bool {
 }
 
 /// `true` iff this leaves block is currently decaying — the single shared
-/// predicate for both `LeavesBlock.isRandomlyTicking` and
-/// `LeavesBlock.decaying` (see this module's doc comment for why those two
+/// predicate for both the real leaves block's is-randomly-ticking query and
+/// its decaying query (see this module's doc comment for why those two
 /// are the identical check). `distance` defaults to `7` when the property is
-/// absent (`LeavesBlock`'s own constructor registers this default — a leaf with no
+/// absent (the real leaves block's own constructor registers this default — a leaf with no
 /// `distance` written is, by vanilla's own default, maximally far from any
 /// log and therefore eligible), `persistent` defaults to `false`.
 #[must_use]
