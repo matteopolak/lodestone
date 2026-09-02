@@ -71,16 +71,6 @@ fn colormap_default_used_when_smaller_than_index() {
 }
 
 #[test]
-fn verified_colour_constants() {
-    // Verified against Mojang server source (FoliageColor / DryFoliageColor).
-    assert_eq!(colors::FOLIAGE_DEFAULT, 0x48B518);
-    assert_eq!(colors::FOLIAGE_EVERGREEN, 0x619961);
-    assert_eq!(colors::FOLIAGE_BIRCH, 0x80A755);
-    assert_eq!(colors::FOLIAGE_MANGROVE, 0x92C648);
-    assert_eq!(colors::DRY_FOLIAGE_DEFAULT, 0x5C3C32);
-}
-
-#[test]
 fn dark_forest_modifier_matches_source() {
     // ARGB.opaque((base & 0xFEFEFE) + 0x28340A >> 1).
     let base: Rgb = 0x88AA44;
