@@ -468,7 +468,7 @@ impl Mining {
     /// Release the dig, mirroring `stopDestroyBlock`.
     ///
     /// Sends `ABORT_DESTROY_BLOCK` for the live target (vanilla uses
-    /// `Direction.DOWN` for this abort) and clears progress. No arm swing. A
+    /// the down direction for this abort) and clears progress. No arm swing. A
     /// no-op when nothing is being mined.
     pub fn stop(&mut self) -> Vec<ClientAction> {
         // An abort destroys nothing, and clearing here keeps the latch scoped to

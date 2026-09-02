@@ -267,7 +267,7 @@ impl Menu {
         // On a **result slot** this is what makes one shift-click craft a whole
         // stack — but only where something refills the result between
         // iterations, and that is the server. A client's `CraftingMenu` is
-        // built with `ContainerLevelAccess.NULL`, so its `slotsChanged` never
+        // built with a null level access, so its `slotsChanged` never
         // recomputes the recipe and the result slot stays empty after the first
         // take; the loop then exits after exactly one craft. That is precisely
         // what vanilla's client predicts too. The server runs this same loop

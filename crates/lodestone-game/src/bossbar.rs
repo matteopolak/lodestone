@@ -56,7 +56,7 @@ impl BossBarColor {
     }
 
     /// The GUI atlas sprite id for this colour's **background** plate —
-    /// `BossHealthOverlay.BAR_BACKGROUND_SPRITES` (`.cache/mc/26.2/client-src`).
+    /// vanilla's own background-sprites table.
     /// Each colour is a distinct pre-baked sprite; vanilla's `blitSprite` call
     /// for it passes no tint (`color = -1`, i.e. opaque white), so a renderer
     /// must select the sprite by id rather than tint a shared greyscale one.
@@ -74,7 +74,7 @@ impl BossBarColor {
     }
 
     /// The GUI atlas sprite id for this colour's **progress** fill —
-    /// `BossHealthOverlay.BAR_PROGRESS_SPRITES`. Also untinted; see
+    /// vanilla's own progress-sprites table. Also untinted; see
     /// [`Self::background_sprite_id`].
     #[must_use]
     pub fn progress_sprite_id(self) -> &'static str {

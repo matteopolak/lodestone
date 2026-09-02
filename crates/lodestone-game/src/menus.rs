@@ -807,7 +807,7 @@ fn build_menu(menu_type: Option<&ResourceKey>, container_size: usize) -> Menu {
         (Some("merchant"), 3) => Menu::merchant(),
         // The beacon screen (the `SetBeaconEffects` remainder).
         // `container_size == 1` matches `BeaconMenu`'s one payment slot
-        // (`BeaconMenu.SLOT_COUNT`).
+        // (vanilla's own beacon slot-count constant).
         (Some("beacon"), 1) => Menu::beacon(),
         _ => Menu::generic(container_size),
     }

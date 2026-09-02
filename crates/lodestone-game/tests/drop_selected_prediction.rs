@@ -221,8 +221,9 @@ fn dropping_from_an_empty_slot_changes_nothing() {
 
         assert_eq!(
             dropped, None,
-            "an empty slot drops nothing (all = {all}); vanilla returns `ItemStack.EMPTY` here, \
-             and `LocalPlayer.drop` turns that into the `false` that suppresses the arm swing"
+            "an empty slot drops nothing (all = {all}); vanilla returns its own empty \
+             item stack here, \
+             and its own local-player drop step turns that into the `false` that suppresses the arm swing"
         );
         assert_eq!(
             menus.player().player_native(NATIVE_HOTBAR_0),

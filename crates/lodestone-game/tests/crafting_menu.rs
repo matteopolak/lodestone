@@ -297,7 +297,7 @@ fn the_result_slot_still_refuses_a_placement() {
 
 /// **The repeat rule.** Vanilla's `doClick` QUICK_MOVE loop repeats while the
 /// slot still holds the same item — but a client's `CraftingMenu` is built with
-/// `ContainerLevelAccess.NULL`, so nothing refills the result between
+/// a null level access, so nothing refills the result between
 /// iterations and the loop stops after exactly one craft. The repetition is the
 /// *server's*: it runs the same loop over a menu that does refill, and pushes
 /// the difference back as `container_set_slot`s.

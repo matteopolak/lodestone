@@ -100,17 +100,17 @@ pub const HONEY_DRINK_SOUND: &str = "minecraft:item.honey_bottle.drink";
 /// burp.
 pub const BURP_SOUND: &str = "minecraft:entity.player.burp";
 
-/// `Consumables.DEFAULT_CONSUME_SECONDS` (`1.6F`) in ticks.
+/// Vanilla's own default consume-seconds constant (`1.6F`) in ticks.
 ///
 /// 41 of the 43 consumables in 26.2 use this. `1.6F * 20.0F` is exactly `32.0F` in
 /// float, so the `(int)` cast has no truncation-to-31 trap here.
 pub const DEFAULT_CONSUME_TICKS: u32 = 32;
 
-/// `Consumable.CONSUME_EFFECTS_INTERVAL` — effects fire on every 4th *remaining*
+/// Vanilla's own consume-effects-interval constant — effects fire on every 4th *remaining*
 /// tick.
 pub const CONSUME_EFFECTS_INTERVAL: u32 = 4;
 
-/// `Consumable.CONSUME_EFFECTS_START_FRACTION` — no effects until this fraction of
+/// Vanilla's own consume-effects-start-fraction constant — no effects until this fraction of
 /// the use has elapsed.
 pub const CONSUME_EFFECTS_START_FRACTION: f32 = 0.218_75;
 

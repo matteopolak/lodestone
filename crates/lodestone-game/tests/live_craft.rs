@@ -16,7 +16,7 @@
 //! fill the result slot**. Vanilla computes the result server-side:
 //! `CraftingMenu.slotsChanged` runs `slotChangedCraftingGrid`, which sends a
 //! `container_set_slot` for slot 0 — and a *client's* `CraftingMenu` is built with
-//! `ContainerLevelAccess.NULL`, so its `slotsChanged` does nothing at all. Our
+//! a null level access, so its `slotsChanged` does nothing at all. Our
 //! `RecipeBook`/`predicted_craft_result` exist for the recipe book, ghost
 //! previews and offline play, and are deliberately not used here. Every
 //! result-slot assertion below therefore reads a value that **originated on the
@@ -826,7 +826,7 @@ async fn run_gate() {
     // so the player region fills from the back — slot 45 first. And the prediction
     // is one craft, not two: `doClick`'s QUICK_MOVE loop repeats only while the
     // slot still holds the same item, and a client's `CraftingMenu` has
-    // `ContainerLevelAccess.NULL`, so nothing refills slot 0 between iterations.
+    // a null level access, so nothing refills slot 0 between iterations.
     // Predicting more would mean matching the recipe locally.
     // ---------------------------------------------------------------------
     let (_, quick) = send_click(&shared, &handle, Click::shift(RESULT)).await;

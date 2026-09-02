@@ -1502,7 +1502,7 @@ fn remove_sorted(bucket: &mut Vec<Identifier>, id: &Identifier) {
 ///
 /// [`Self::for_type`] is the read accessor; keep the wire order (`crafting`,
 /// `furnace`, `blast_furnace`, `smoker`) if you index positionally, because that
-/// order is fixed by `RecipeBookSettings.STREAM_CODEC` and is not alphabetical.
+/// order is fixed by vanilla's own recipe-book-settings wire codec and is not alphabetical.
 ///
 /// `reported` exists for the same reason `SpawnPoint`'s `Option` does: a server
 /// that has never sent this packet is not the same thing as a server that sent
