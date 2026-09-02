@@ -47,7 +47,7 @@ use std::sync::{Arc, Mutex};
 ///
 /// The real record also carries `accumulated_elapsed` — nonzero only after
 /// the real load-from-disk rule seeds it from a **persisted** value on world load, so
-/// a fresh `creationTime` can keep counting forward from where a previous
+/// a fresh `creation_time` can keep counting forward from where a previous
 /// session's elapsed time left off. This module builds no persistence (see
 /// the module doc), so that field would carry exactly one value, `0`,
 /// everywhere in this crate — `cargo run -p xtask -- islands` flags exactly

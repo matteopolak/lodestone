@@ -182,7 +182,7 @@ impl std::fmt::Display for SelectorError {
 ///
 /// The order of operations is the real rule's and each step matters:
 ///
-/// 1. `@s` short-circuits to the caller (`currentEntity`), still subject to the
+/// 1. `@s` short-circuits to the caller (vanilla's own current-entity read), still subject to the
 ///    predicates — `@s[gamemode=creative]` legitimately matches nobody.
 /// 2. A bare name or uuid is an exact lookup, not a filter.
 /// 3. Otherwise: every candidate, filtered by the predicates, then by
@@ -327,7 +327,8 @@ fn matches_predicates(
         SelectorPredicate::EntityType { id, inverted } => {
             (id == lodestone_command_mc::entity::PLAYER_TYPE) != *inverted
         }
-        // A roster holds live players only, so `isAlive` is always satisfied.
+        // A roster holds live players only, so the real is-alive check is always
+        // satisfied.
         // Stated rather than skipped so a future roster that carries the dead
         // (which is a real possibility — a dead player stays connected on the
         // death screen) has one place to change.

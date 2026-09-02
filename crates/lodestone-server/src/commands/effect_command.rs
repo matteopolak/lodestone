@@ -28,7 +28,7 @@
 //!
 //! `give` down to `amplifier`, and `clear` at all three depths. Deliberately absent:
 //!
-//! * **`hideParticles`.** Purely presentational (a visibility flag on the
+//! * **The hide-particles flag.** Purely presentational (a visibility flag on the
 //!   effect instance), and `crate::mob_effects` does not model the
 //!   presentational fields at all — see its own doc for why. A node that
 //!   parsed the flag and discarded it would be worse than one that is not

@@ -132,7 +132,7 @@ impl FunctionHandle {
 
     /// A tag's member function ids by fully-qualified id (no leading `#`),
     /// or an empty list for an undeclared tag — matching vanilla's own
-    /// `getTag`'s `getOrDefault(tag, List.of())`, which is *not* an error the
+    /// get-tag rule, which defaults to an empty list rather than an error the
     /// way an unknown single function is.
     #[must_use]
     pub fn tag(&self, id: &str) -> Vec<String> {

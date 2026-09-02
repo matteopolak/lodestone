@@ -332,7 +332,7 @@ fn register_run(registrar: &mut Registrar, execute: NodeId, root: NodeId) {
 
 // ---- store -------------------------------------------------------------
 
-/// `wrapStores` — `store result`/`store success`, each redirecting into
+/// The real store-command wrapping rule — `store result`/`store success`, each redirecting into
 /// `execute`'s own children exactly like every other subcommand here, but
 /// carrying a [`StoreSink`] instead of rewriting the source. Only the `score`
 /// and `data storage` targets are built: `bossbar` has no subsystem in this
@@ -915,9 +915,9 @@ fn min_max(a: i32, b: i32) -> (i32, i32) {
     }
 }
 
-/// `biome <pos> <biome>` — `ResourceOrTagArgument`'s own boolean shape
-/// (`ExecuteCommand`'s `biome` branch is `addConditional`'s
-/// [`add_boolean_conditional`], same as `block`/`dimension`). Reads
+/// `biome <pos> <biome>` — vanilla's own resource-or-tag argument boolean shape
+/// (the real execute-command `biome` branch uses the same conditional-add
+/// helper as [`add_boolean_conditional`], same as `block`/`dimension`). Reads
 /// [`crate::chunk::ChunkSource::biome_state_at`] — the primitive
 /// [`crate::chunk::ChunkColumn::biome_state_at`] already exposed, now on the
 /// trait the command layer reaches through — and refuses cleanly rather than

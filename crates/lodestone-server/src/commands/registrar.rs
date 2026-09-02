@@ -132,8 +132,8 @@ type Executor = ExecutorEntry;
 /// returns many (a **fork**). Both are this one signature; [`Registrar::modifier`]'s
 /// `forks` flag is what distinguishes them, and it changes error handling rather
 /// than the return type — a failure inside a fork is swallowed so the other
-/// branches still run, which is `CommandDispatcher::execute`'s
-/// `forkedStopControl` behaviour.
+/// branches still run, which is vanilla's own command-dispatch execute rule's
+/// forked-stop-control behaviour.
 pub type ModifierEntry = Arc<
     dyn Fn(&mut Ctx<'_>, Vec<CommandSource>, &ParsedCommand) -> Result<Vec<CommandSource>, String>
         + Send
