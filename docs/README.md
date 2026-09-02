@@ -237,7 +237,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `crates/lodestone-server/src/natural_spawn.rs`, with entity-side timing state in
   `crates/lodestone-entity/src/ai/navigating_mob.rs`.
 - [The multi-protocol seam: version crates, canonicalisation, and framing](./multi-protocol-seam.md) —
-  How `crates/versions/vNNN` family crates are structured and named, how the registry
+  How `crates/versions/<family>` family crates are structured and named, how the registry
   resolves a negotiated protocol number to the right adapter, how each pre-26.2 family
   translates its own wire block-state representation into the canonical 26.2
   block-state space, the reference table of protocol/data-version numbers this project
@@ -655,7 +655,7 @@ of these caught the *brief* being wrong rather than the code.
   plan sequences a perception-and-driver spine ahead of every species unit.
 - [Multi-version protocol dedup: wire eras, a shared packet library, and version-ranged definitions](./plans/multi-version-protocol-dedup.md) —
   A staged plan to stop paying the full per-family cost for each of the twelve
-  protocol versions still to come. Today every `crates/versions/vNNN` crate is a
+  protocol versions still to come. Today every `crates/versions/<family>` crate is a
   near-copy of its neighbour — measured here, at `16b72257`, as **0 byte-identical
   files but 54–61 of ~80 packet structs identical, 65–70% of adapter dispatch-arm
   lines identical or near-identical between adjacent legacy families, and 42% of
