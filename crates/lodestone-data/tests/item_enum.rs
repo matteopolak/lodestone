@@ -7,7 +7,7 @@
 //! # Data provenance
 //!
 //! `tests/support/item_prototype_jvm.txt` is already the committed JVM dump for
-//! this registry: `ItemPrototypeOracle.java` walks `BuiltInRegistries.ITEM` on
+//! this registry: `ItemPrototypeOracle.java` walks vanilla's own item registry on
 //! the real 26.2 server and writes one `P <registryId> <itemName> …` line per
 //! item, in registration order. `tests/item_prototypes.rs`'s
 //! `dump_ids_and_names_match_the_registries_json_table` already cross-checked

@@ -3,7 +3,7 @@
 //! # Provenance of every expected value here
 //!
 //! The anchor is `tests/support/tool_jvm.txt`, the committed headless-26.2-server
-//! dump of `BuiltInRegistries.BLOCK`'s registration order — the same external
+//! dump of vanilla's own block registry's registration order — the same external
 //! file the generator reads, but parsed here by an independent parser, and
 //! compared against the *compiled* enum rather than against the generator's
 //! output string. So a generator that emitted a plausible-but-wrong table would
