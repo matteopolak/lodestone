@@ -1,4 +1,4 @@
-//! The beardifier — this change's S3, and the only part of structure generation
+//! The beardifier — S3, and the only part of structure generation
 //! that changes *terrain* rather than adding blocks to it.
 //!
 //! # What it is

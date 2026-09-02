@@ -186,7 +186,7 @@ pub type BlockCanon = HashMap<String, String>;
 /// a context).
 enum Cond {
     AbovePreliminarySurface,
-    /// `biome` — this change made this a per-column runtime check
+    /// `biome` — a per-column runtime check
     /// (`ctx.biome` membership) rather than a build-time constant, since a
     /// generator run no longer has one fixed biome for its whole life. The
     /// list is the rule's raw `biome_is` set, exactly as written in JSON.
@@ -237,8 +237,8 @@ enum Rule {
     Condition(Cond, Box<Rule>),
     /// Badlands/eroded_badlands/wooded_badlands' banded-terracotta rule
     /// (vanilla's bandlands rule, whose logic delegates to its surface
-    /// system's own band lookup, this change's
-    /// carried-over gap, closed here). Unconditional and parameterless in
+    /// system's own band lookup — previously a carried-over gap, closed
+    /// here). Unconditional and parameterless in
     /// vanilla's own DSL (its bandlands rule is a zero-field enum
     /// singleton), so the [`BandBlocks`] payload is built once at parse time
     /// from the generator's own seed, not from anything in the JSON node —
@@ -449,7 +449,7 @@ impl SurfaceSystem {
     /// per-world random-state holder does.
     /// `canon` resolves result-state partial keys to full canonical strings.
     ///
-    /// Unlike before this change, this takes **no biome** — a generator run no
+    /// This takes **no biome** — a generator run no
     /// longer has one fixed biome for its whole life, so `biome`/
     /// `cold_enough_to_snow` moved from build-time constants here to
     /// per-column runtime inputs on [`build_surface`](Self::build_surface)/
@@ -744,7 +744,7 @@ impl SurfaceSystem {
     /// # Why this still returns an owned `String` (U21)
     ///
     /// The carver seam (`crate::carver`'s `top_material: &dyn Fn(..) ->
-    /// Option<String>`) is outside this change's scope and was left untouched,
+    /// Option<String>`) is out of scope here and was left untouched,
     /// so this method resolves its id back to a name at the boundary. That is
     /// **allocation-neutral, by construction**: the pre-U21 body allocated one
     /// `String` for the biome and one for the matched state, and this one

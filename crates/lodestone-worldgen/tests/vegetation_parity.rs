@@ -171,7 +171,7 @@ struct Fixture {
     chunk_x: i32,
     chunk_z: i32,
     seed: i64,
-    /// `meta.biome` — this change's savanna fixtures share this parser with
+    /// `meta.biome` — the savanna fixtures share this parser with
     /// the original plains-only ones, so the biome can no longer be a
     /// hardcoded literal at the call site.
     biome: String,
@@ -256,7 +256,7 @@ fn load(name: &str) -> Fixture {
     f
 }
 
-/// Two plains fixtures plus two savanna fixtures (this change,
+/// Two plains fixtures plus two savanna fixtures,
 /// picked from a scan of several savanna coordinates specifically because
 /// they contain real acacia — see this module's own doc "The acacia oracle
 /// bug" section for why most savanna coordinates tried during that scan did
@@ -297,7 +297,7 @@ fn run_our_engine(f: &Fixture, resolver: &FsResolver) -> HashMap<(i32, i32, i32)
 }
 
 /// Runs `crate::feature::vegetation`'s real, production
-/// `apply_vegetal_decoration_step_3x3_per_source` (this change's real vanilla
+/// `apply_vegetal_decoration_step_3x3_per_source` (the real vanilla
 /// 3×3 driver — the exact function
 /// `OverworldGenerator::vegetation_stage` calls in production once its
 /// centre and 8 neighbours' post-ore terrain is stitched), seeded from
@@ -346,8 +346,8 @@ fn assert_matches_single(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32)
     // engine's known, named single-chunk scope, not a discrepancy this gate
     // is checking.
     // `glow_lichen` (`multiface_growth`) is a named, accepted gap — see
-    // `crate::feature::vegetation`'s module doc: nothing in this change's
-    // scope models `MultifaceGrowthFeature` (it isn't a tree/grass/flower),
+    // `crate::feature::vegetation`'s module doc: nothing in this engine's
+    // scope models vanilla's own multiface-growth feature (it isn't a tree/grass/flower),
     // so it's excluded here rather than treated as a correctness failure.
     // Every OTHER cell in `single_diff` (grass/flowers/trees) is real,
     // implemented scope and must match exactly.
@@ -479,12 +479,12 @@ fn strip_distance(state: &str) -> String {
 /// to the centre 16×16 window (the same `inCentre` boundary
 /// `VegetationOracle.java::dumpDiff` itself uses to report
 /// `full3x3.meta.centreChanged`) instead of `f.single_diff` over the whole
-/// region — this is the gate this change exists to make pass.
+/// region — this is the gate the full-3×3 driver must pass.
 ///
 /// **A measured, bounded, named residual, not a silently loosened bound**
 /// (CLAUDE.md's evidence standard: report a residual, don't hide it).
 /// `crate::feature::vegetation::update_leaf_distances`'s real vanilla port
-/// (vanilla's own tree-feature update-leaves, this change) gets *which block occupies each
+/// (vanilla's own tree-feature update-leaves) gets *which block occupies each
 /// cell* exactly right — checked here as a hard requirement via
 /// [`strip_distance`] — but for a handful of cells, `distance=N` differs by
 /// a small amount from the oracle. Investigated directly on the one
@@ -594,7 +594,7 @@ fn assert_matches_full3x3(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32
     (distance_only.len() + identity_mismatches.len(), expected.len())
 }
 
-/// The headline result for this change: driving `crate::feature::vegetation`'s
+/// The headline result: driving `crate::feature::vegetation`'s
 /// real 3×3 driver against the JVM's own `FULL3X3` pass, centre window, must
 /// match **exactly on block identity** (modulo the same named `glow_lichen`
 /// gap [`assert_matches_single`] already excludes) — not merely move the

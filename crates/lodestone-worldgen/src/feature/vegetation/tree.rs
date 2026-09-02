@@ -74,8 +74,7 @@ pub enum TrunkPlacerCfg {
         height_rand_b: i32,
     },
     /// The fancy trunk placer — the `fancy_oak_*`/`fancy_oak_checked` branch
-    /// shared by oak, jungle and dark_forest (this change's highest-value
-    /// remaining gap). Structurally distinct from every other placer here:
+    /// shared by oak, jungle and dark_forest. Structurally distinct from every other placer here:
     /// a slim central trunk plus a scattered spray of diagonal limbs, each
     /// walked out from a randomly-angled, randomly-scaled offset and only
     /// actually grown if a dry-run check finds room. See
@@ -754,7 +753,7 @@ fn trim_branches(height: i32, local_y: i32) -> bool {
 }
 
 /// The fancy trunk placer's own trunk placement — oak's `fancy_oak_*`/`fancy_oak_checked`
-/// branch (this change's highest-value remaining gap): a slim central trunk,
+/// branch: a slim central trunk,
 /// plus a scattered spray of short diagonal "check" limbs (one candidate
 /// per `relative_y` level counting down from `height - 5`, gated by
 /// [`tree_shape`]'s envelope), each of which only actually grows — as a
@@ -1461,7 +1460,7 @@ pub(super) fn simulate_roots<R: RandomSource>(
 /// "fresh, undecayed" default) is not what a real reference client ever actually
 /// serves near a trunk — before this function existed, this engine placed
 /// every leaf at the JSON's literal `distance=7` and never corrected it, a
-/// real, measured mismatch found by this change's savanna oracle fixtures
+/// real, measured mismatch found by the savanna oracle fixtures
 /// (real oak/acacia canopies are NOT reachable at plains' ~5%-per-chunk tree
 /// rate with the two originally-committed fixtures, which is why this
 /// gap was invisible until now — see this module's own parity test's doc

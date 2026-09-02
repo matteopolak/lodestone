@@ -281,8 +281,8 @@ impl OverworldGenerator {
     }
 
     /// Materialises the full `16×height×16` post-surface column into a
-    /// dense, world-anchored grid (this change's Job 2 —
-    /// [`crate::dense_grid::DenseBlockGrid`], not a `HashMap`) — the shape
+    /// dense, world-anchored grid
+    /// ([`crate::dense_grid::DenseBlockGrid`], not a `HashMap`) — the shape
     /// [`crate::carver::apply_carvers`] consumes via [`CarveGrid::from_dense`].
     /// Seeded from `field` (the same solid/fluid/air default
     /// [`Self::surface_stage`]'s own `pre` closure computes) and overlaid
@@ -307,8 +307,8 @@ impl OverworldGenerator {
         );
         // `surface_diff` is consulted by **point lookup**, in the same fixed
         // `(lz, lx, ly)` order as the base fill below — never iterated
-        // directly. This was a real bug (this change's Job 2, found by
-        // `worldgen_data::tests::column_is_byte_identical_across_two_independently_constructed_generators`):
+        // directly. This was a real bug, found by
+        // `worldgen_data::tests::column_is_byte_identical_across_two_independently_constructed_generators`:
         // a `DenseBlockGrid`'s palette is built incrementally, in `.set()`
         // call order, unlike the old `HashMap<(i32,i32,i32), String>` `world`
         // this replaced, whose palette used to be assigned by a *separate*,

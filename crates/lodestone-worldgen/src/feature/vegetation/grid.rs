@@ -19,8 +19,8 @@ use super::config::is_fluid;
 /// chunk-local (`0..16` × `0..16`, absolute `y`) via [`VegGrid::new`] — see
 /// module doc's "Scope" section for why single-chunk was this module's
 /// original footprint. [`VegGrid::with_footprint`] widens the local bound to
-/// an arbitrary `[lo, hi)` on both axes (this change: the real vanilla 3×3
-/// `blockStateWriteRadius(1)` driver uses [`crate::feature::REGION_MIN`]/
+/// an arbitrary `[lo, hi)` on both axes (the real vanilla 3×3
+/// per-source write-radius driver uses [`crate::feature::REGION_MIN`]/
 /// [`crate::feature::REGION_MAX`], the exact constants
 /// [`crate::feature::OreInput::region_local`] already established for the
 /// ore engine's own 3×3 driver — reused here rather than duplicated, per
@@ -547,7 +547,7 @@ impl VegGrid {
 /// so `setFeatureSeed`'s index is the JSON array position, not a filtered
 /// count.
 /// Per-thread census of what the vegetal-decoration placer actually *did* —
-/// this change's "make absence loud" half.
+/// the "make absence loud" half of that convention.
 ///
 /// # Why this exists, and why the existing gate was not enough
 ///

@@ -28,7 +28,7 @@ pub enum GenStage {
 
 impl OverworldGenerator {
     /// Adopts the final dense world grid straight into a [`GeneratedColumn`] —
-    /// no re-intern pass (this change's Job 2): a centre-chunk-sized
+    /// no re-intern pass (the dense-grid materialization work): a centre-chunk-sized
     /// [`crate::dense_grid::DenseBlockGrid`]'s own `(palette, blocks)` layout is
     /// already identical to [`GeneratedColumn`]'s (`((ly * 16 + lz) * 16 + lx)`,
     /// verified by the `debug_assert!` below rather than merely asserted in a
@@ -208,8 +208,7 @@ fn motion_blocking_from_palette(
 }
 
 /// Per-stage wall-clock cost of one [`OverworldGenerator::column_timed`] call:
-/// **one field per stage the pipeline actually has**, which is what this change
-/// asks for.
+/// **one field per stage the pipeline actually has**.
 ///
 /// # What changed here, and why the old field names were misleading
 ///
@@ -228,7 +227,7 @@ fn motion_blocking_from_palette(
 ///   rot the per-stage cost split exists to stop. Those four now have their own fields.
 ///
 /// So a `stage_intern_pct` figure in `bench-results/generation.jsonl` recorded
-/// before this change is **not** interning cost and must not be compared
+/// before the fields above were split out is **not** interning cost and must not be compared
 /// against `stage_intern_pct` recorded after it. The scene strings differ, which
 /// is what stops `cargo xtask bench-compare` from silently pairing them.
 ///
@@ -254,14 +253,14 @@ pub struct StageTimes {
     /// The noise router: `fill_stage` (density field, aquifer-participating
     /// fill) plus `heights_from_field`.
     pub shape: std::time::Duration,
-    /// Biome sampling (this change's [`OverworldGenerator::biome_stage`]).
+    /// Biome sampling ([`OverworldGenerator::biome_stage`]).
     /// Previously, and misleadingly, called `fluid_heightmap`.
     pub biome: std::time::Duration,
     /// Surface rules.
     pub surface: std::time::Duration,
     /// Turning the density field plus the surface diff into a dense block grid.
     pub materialize: std::time::Duration,
-    /// Carvers (`crate::carver::apply_carvers`, this change).
+    /// Carvers (`crate::carver::apply_carvers`).
     pub carve: std::time::Duration,
     /// The `UNDERGROUND_ORES` 3×3 neighbourhood driver.
     pub ore: std::time::Duration,
@@ -273,7 +272,7 @@ pub struct StageTimes {
     /// *quantitative* prediction about it (<5% of composed column cost) that
     /// something has to be able to check.
     pub top_layer: std::time::Duration,
-    /// Palette interning, plus this change's `MOTION_BLOCKING` heightmap scan —
+    /// Palette interning, plus the `MOTION_BLOCKING` heightmap scan —
     /// and nothing else.
     ///
     /// The heightmap is folded in here rather than given its own field because
@@ -321,7 +320,7 @@ pub struct GeneratedColumn {
     /// the biome a player standing on the column sees, and it is what surface
     /// material, carve and decorate consume.
     ///
-    /// It is *not* the biome of the column, and this change is why: broadcasting
+    /// It is *not* the biome of the column: broadcasting
     /// it vertically is what made `lush_caves`/`dripstone_caves`/`deep_dark`
     /// unreachable. Read [`Self::biome_cells`] for anything that has a `y`.
     biome_quarts: [String; 16],

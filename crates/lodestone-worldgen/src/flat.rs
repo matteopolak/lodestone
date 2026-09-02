@@ -1,4 +1,4 @@
-//! Superflat world generation — this change's third missing generator, after
+//! Superflat world generation — the third missing generator, after
 //! `WorldType::{Amplified,LargeBiomes}` landed as pure wiring onto
 //! [`crate::overworld::OverworldGenerator`].
 //!
@@ -9,7 +9,7 @@
 //! override in vanilla), so composing it out of the
 //! overworld pipeline would carry stages that do not apply to a flat world
 //! and could silently produce non-flat terrain under a flat world's name —
-//! the exact trap this change's own doc names ("a selection that silently
+//! the exact trap this module's own doc names ("a selection that silently
 //! produces ordinary terrain under a preset's name is worse than an absent
 //! option").
 //!

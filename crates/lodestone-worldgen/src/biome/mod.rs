@@ -93,7 +93,7 @@
 //! scoped to what Phase 1 needs to be observable and testable — "the biome a
 //! player sees while exploring the surface" — and is *cheaper*, not just
 //! simpler, than full 3-D: caves are not composed into
-//! [`crate::overworld::OverworldGenerator`] yet (this change / Phase 2), so
+//! [`crate::overworld::OverworldGenerator`] yet (tracked as Phase 2), so
 //! there is no cave volume for a vertically-varying biome to describe today.
 //! Revisiting this is the natural first step of Phase 2, once caves exist to
 //! carry `dripstone_caves`/`lush_caves`/`deep_dark` into.

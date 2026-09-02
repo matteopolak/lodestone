@@ -713,7 +713,7 @@ impl StructureTemplate {
     /// of `(position, palette index)` pairs — no NBT decode in the loop.
     ///
     /// For a plugin constructing a structure programmatically rather than
-    /// shipping a `.nbt` file (this change's other origin for a template,
+    /// shipping a `.nbt` file (the other origin for a template,
     /// alongside [`Self::parse`]), and for tests that want a template with a
     /// known, hand-written shape. Every block gets no attached `nbt`
     /// compound — a plugin that needs a data marker (a jigsaw block, a

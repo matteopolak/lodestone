@@ -666,7 +666,7 @@ fn bench_column_throughput(c: &mut Criterion) {
 ///   present in the total but invisible, filed under "interning".
 ///
 /// Both are fixed by [`StageTimes`]'s new fields. **Do not compare a
-/// `stage_intern_pct` from before this change with one from after**; the scene
+/// `stage_intern_pct` from before the fields above were split with one from after**; the scene
 /// string differs, which is what keeps `cargo xtask bench-compare` from pairing
 /// them.
 ///
@@ -1173,7 +1173,7 @@ const SWEEP_STRUCTURE_RADIUS: i32 =
 
 /// Chunks whose **structure starts** one cold `column()` must compute.
 ///
-/// This is this change's new closure and it is much wider than the terrain one.
+/// This closure is much wider than the terrain one.
 /// `pre_ore_stage` reads `structure_refs_stage` for its own chunk (S1's ordering
 /// edge), and `structure_refs_stage` walks `structure_starts_stage` over
 /// `overworld::structures::REFS_RADIUS` = 8 chunks in every direction —
@@ -1311,7 +1311,7 @@ fn bench_counter_calibration(_c: &mut Criterion) {
          neighbourhood); got {}",
         s.stage_entered[Stage::Shape as usize]
     );
-    // `block_at` has **two** consumers as of this change, and this assertion is an
+    // `block_at` has **two** consumers, and this assertion is an
     // exhaustive decomposition rather than a literal.
     //
     // 1. `fill_stage` — one call per cell, `256 × height` per chunk fill, over the

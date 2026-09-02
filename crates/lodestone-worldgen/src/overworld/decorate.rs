@@ -299,7 +299,7 @@ impl OverworldGenerator {
     /// 9×). Biome (and therefore feature list) is resolved per-source from
     /// that source's own **surface-height** biome — [`Self::biome_stage`]'s
     /// per-quart map, quart 0 (the source's min-block corner) — **not**
-    /// [`Self::biome_for_carver_source`]'s y=0 answer: this change, the
+    /// [`Self::biome_for_carver_source`]'s y=0 answer — see the
     /// `crate::biome` module doc's "y = 0 trap" (at y=0 the `depth` gradient
     /// is already ≈ +1.0, so surface dark_forest chunks resolved as lush_caves
     /// and decorated with that biome's all-silent feature list). Vegetation
@@ -419,7 +419,7 @@ impl OverworldGenerator {
             // a surface dark_forest chunk resolved as lush_caves and decorated
             // with lush_caves' feature list (vines/vegetation_patch/
             // root_system — all silent no-ops), meaning dark_forest's own step
-            // (including the 66.7%-weight dark oak branch, this change) never
+            // (including the 66.7%-weight dark oak branch) never
             // ran. The source's `PreOreResult` is already in
             // [`Self::pre_ore_cache`] from the stitching loop above
             // (each neighbour's `post_ore_world` ran its own `pre_ore_stage`),

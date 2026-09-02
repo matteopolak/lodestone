@@ -288,7 +288,7 @@ fn distance_control_fires_when_a_prunable_tree_node_is_perturbed() {
 /// **The ruling's divergence, characterised rather than tolerated.** Where the tree and
 /// brute force pick different rows, it must always be because several rows tie on
 /// the minimum distance — never because one of them found a nearer row. That
-/// distinction is the whole reason this change is safe to make: the tree is not
+/// distinction is what makes accepting these differences safe: the tree is not
 /// finding a *different nearest*, it is taking a different member of the tied set,
 /// which is exactly what vanilla does.
 #[test]
@@ -616,7 +616,7 @@ fn the_tiebreak_moves_exactly_the_eight_recorded_source_biomes_and_no_surface_qu
     // the carver/ore biome is sampled at `y = 0` where `depth` is already ~+1.0, deep
     // in cave climate-space where the table's rows crowd together and exact ties are
     // reachable; the surface convention samples near each column's own terrain, where
-    // over this region no tie occurred at all. So this change moves carver and ore
+    // over this region no tie occurred at all. So this divergence moves carver and ore
     // selection at a handful of chunks and moves the biome a player sees nowhere in
     // the measured region.
     assert_eq!(

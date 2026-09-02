@@ -76,7 +76,7 @@ pub enum BlockPredicate {
     AllOf(Vec<BlockPredicate>),
     AnyOf(Vec<BlockPredicate>),
     MatchingBlockTag(String),
-    /// The matching-blocks predicate — this change. `blocks` is the JSON's `blocks`
+    /// The matching-blocks predicate. `blocks` is the JSON's `blocks`
     /// field, which is either one id or a list; `offset` is added to the tested
     /// position. Matched by **base** id, so `minecraft:water[level=0]` counts as
     /// `minecraft:water` — the same collapse [`BlockPredicate::MatchingFluid`]
@@ -684,7 +684,7 @@ pub enum VegPlacement {
         y: IntProvider,
     },
     BlockPredicateFilter(BlockPredicate),
-    // --- this change: the five modifiers neither engine had, plus `height_range`,
+    // --- the five modifiers neither engine had, plus `height_range`,
     // which existed only in the ore engine. 86 of the bundled placed features use
     // `height_range`, so before this every one of them reached a decoration step
     // and was silently dropped.
@@ -1089,7 +1089,7 @@ fn find_on_ground_y(
 /// so the consumption order is byte-identical: the driver's depth-first `recurse`
 /// walks `Repeat`'s `n` copies in the same order `for next in vec` did. The plan
 /// marks U8 **"must not"** change RNG order and names breadth-first
-/// "optimisation" of this exact recursion as instant desync — this change never
+/// "optimisation" of this exact recursion as instant desync — the walk below never
 /// touches the recursion's shape, only what it iterates.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Positions {
@@ -1135,7 +1135,7 @@ pub enum Decorator {
     TrunkVine,
     /// The attached-to-logs decorator — one block (a mushroom, for every shipped
     /// instance) on a random direction off a random log, gated by
-    /// `probability` (this change: every `fallen_*_tree`'s `log_decorators`).
+    /// `probability` (every `fallen_*_tree`'s `log_decorators`).
     /// See [`super::place::place_attached_to_logs_decorator`].
     AttachedToLogs {
         probability: f32,
@@ -1192,8 +1192,8 @@ impl Decorator {
 /// The reference feature-size base kind — both
 /// subclasses a faithful implementation ships, each reachable from tree configs this module
 /// implements: [`Self::TwoLayers`] (oak, birch, spruce, pine, acacia) and
-/// [`Self::ThreeLayers`] (dark oak, pale oak — the 2×2-trunk species,
-/// this change). The two share the `getSizeAtHeight(treeHeight, yo)` shape but
+/// [`Self::ThreeLayers`] (dark oak, pale oak — the 2×2-trunk species).
+/// The two share the same size-at-height shape but
 /// answer it differently: `TwoLayers` splits at `limit`; `ThreeLayers` splits
 /// into lower/middle/upper bands using `upper_limit` measured down from the
 /// tree's own height, which is why the caller must pass `tree_height`.
@@ -1347,7 +1347,7 @@ impl TreeConfig {
     }
 }
 
-/// The reference block-column configuration and feature — this change's cacti/sugar-cane increment. Used by
+/// The reference block-column configuration and feature, backing
 /// `cactus` (desert) and `sugar_cane` (desert/swamp/badlands/beach), both
 /// previously a silent no-op under [`ConfiguredFeature::Unsupported`].
 /// `direction` is `(dx, dy, dz)`; only `up`/`down` parse (every configured
@@ -1414,7 +1414,7 @@ pub enum ConfiguredFeature {
         options: Vec<(f32, PlacedRef)>,
     },
     SimpleRandomSelector(Vec<PlacedRef>),
-    // --- this change: the types beyond the original seven. Bodies live in
+    // --- the types beyond the original seven. Bodies live in
     // [`super::features`]; each arm's parse is immediately below in
     // `parse_configured_feature_doc`.
     Spring(Box<super::features::SpringCfg>),
@@ -1858,7 +1858,7 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
 /// [`ConfiguredFeature::Unsupported`] reason string actually reachable from
 /// `placed`. This is the read side of this module's "unsupported degrades to
 /// a silent no-op" rule: a caller that wants that silence to be **loud**
-/// (this change's "does this biome's declared vegetation include a placer we
+/// (the "does this biome's declared vegetation include a placer we
 /// don't implement" gate, in `lodestone_server::worldgen_data`) diffs this
 /// against a maintained allow-list instead of trusting the resolved tree to
 /// run and simply place fewer blocks than vanilla. Reasons are **not**

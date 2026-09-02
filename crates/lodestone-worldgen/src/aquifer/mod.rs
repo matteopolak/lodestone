@@ -367,7 +367,7 @@ impl AquiferSystem {
         // region" contract `NoiseChunkSampler::new_bounded` documents for the
         // shape stage's own `DenseShape`. Swapping this one sampler to the
         // dense/bounded cache avoids a `HashMap`-backed `CornerCache` on the
-        // single hottest per-block call in the composed pipeline (this change
+        // single hottest per-block call in the composed pipeline (found by an
         // architecture review). `erosion`/`depth` stay on the hashed
         // `new` — they're queried from `is_deep_dark_region` at aquifer-grid
         // locations that legitimately range outside this chunk's own bounds

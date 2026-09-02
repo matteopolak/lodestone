@@ -1,4 +1,4 @@
-//! Structure **placement and starts** — this change's S1, the engine that decides
+//! Structure **placement and starts** — S1, the engine that decides
 //! *which chunk gets which structure* for a seed.
 //!
 //! # What it is

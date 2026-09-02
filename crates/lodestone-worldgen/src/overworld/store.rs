@@ -415,7 +415,7 @@ impl<E: Default> StagedStore<E> {
     /// `inserted` flag is always false, and its ceiling check is unreachable in
     /// the game. For one release that meant `reclaim` never ran at all outside
     /// tests and the store grew by 21 entries (~7.9 MiB) per chunk of travel,
-    /// without bound: this change, `docs/worldgen-store-distance-leak.md`,
+    /// without bound — see `docs/worldgen-store-distance-leak.md`,
     /// DESIGN.md §12.108–§12.109. Hence the ceiling check below.
     ///
     /// # Why the check is after the loop and cannot go inside it
@@ -867,7 +867,7 @@ mod tests {
         let join_len = store.len();
 
         // The closure of a 17×17 view is 37×37 = 1,369 (it was 21×21 = 441 before
-        // this change widened the pin). Asserting it here is what says this hermetic
+        // the pin was widened). Asserting it here is what says this hermetic
         // model reproduces production's geometry rather than some cheaper shape
         // that could not leak in the first place — and it is under the ceiling, so
         // it holds on both arms.

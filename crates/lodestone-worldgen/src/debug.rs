@@ -1,4 +1,4 @@
-//! Debug-world generation — this change's fourth missing generator
+//! Debug-world generation — the fourth missing generator
 //! (`debug_all_block_states`), after `WorldType::{Amplified,LargeBiomes}` and
 //! [`crate::flat`] landed.
 //!

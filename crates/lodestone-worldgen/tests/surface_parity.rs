@@ -168,7 +168,7 @@ fn run_fixture(label: &str, text: &str) {
     let hm_fn = |x: i32, z: i32| -> i32 { *r.hm.get(&(x, z)).expect("heightmap") };
     // plains is not "cold enough to snow"; the temperature condition is only
     // reached inside snowy/frozen biome branches, none of which match plains.
-    // Fixed for the whole fixture (this change made biome a runtime input, but
+    // Fixed for the whole fixture (biome became a runtime input, but
     // this fixture — like the JVM dump it compares against — only ever ran
     // under one biome).
     let biome_at = |_x: i32, _z: i32| -> (&str, bool) { (r.biome.as_str(), false) };

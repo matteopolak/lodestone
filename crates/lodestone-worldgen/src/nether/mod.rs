@@ -44,8 +44,8 @@
 //! horizontal quart instead of once per 4×4×4 cell. `nether_biomes_do_not_vary_with_y`
 //! in `tests/nether_gen.rs` is the gate on that, and it is the reason
 //! [`NetherColumn`] carries 16 biomes rather than 128 — **do not copy this shape
-//! into a dimension whose climate has a real depth channel**; this change is the
-//! record of what broadcasting a biome vertically costs when it is not.
+//! into a dimension whose climate has a real depth channel**: broadcasting a
+//! biome vertically only stays correct because the Nether's does not have one.
 //!
 //! ## Structures are here, and they were the island this generator shipped with
 //!

@@ -151,7 +151,7 @@ impl VerticalAnchor {
 
 /// Vanilla's own int-provider type (the subset features use).
 ///
-/// [`IntProvider::WeightedList`] (this change's `trees_plains`/`trees_birch`/
+/// [`IntProvider::WeightedList`] (used by `trees_plains`/`trees_birch`/
 /// `trees_taiga` outer `count` — e.g. `{data: 0, weight: 19}, {data: 1,
 /// weight: 1}`) is additive: nothing in the ore engine
 /// constructs it, so this is a strict superset, not a behaviour change to
@@ -179,8 +179,8 @@ pub enum IntProvider {
     /// crate's vegetation engine actually uses) draws `nextInt` TWICE and
     /// subtracts, while `Uniform` draws once — every RNG call after the
     /// first desyncs completely from vanilla's own stream. Found via
-    /// `tests/vegetation_parity.rs` (this change's real-oracle evidence
-    /// gap): `patch_grass_plain`'s placed positions were disjoint,
+    /// `tests/vegetation_parity.rs` (real-oracle evidence that surfaced
+    /// this gap): `patch_grass_plain`'s placed positions were disjoint,
     /// bit-for-bit, from the real JVM's — not "close but off by a block",
     /// a full stream desync — because `random_offset`'s `xz_spread`/
     /// `y_spread` are exactly this symmetric trapezoid shape. See
@@ -288,7 +288,7 @@ pub enum HeightProvider {
         plateau: i32,
     },
     /// Vanilla's own very-biased-to-bottom height provider — three chained bounded-int draws, not one.
-    /// Added by this change because two bundled placed features use it in a
+    /// Added because two bundled placed features use it in a
     /// *decoration* step (nothing in the ore step does, which is why
     /// [`HeightProvider::parse`]'s `panic!` never fired on it).
     VeryBiasedToBottom {
@@ -491,8 +491,8 @@ impl Placement {
 /// is returned, so the consumption order is byte-identical: the driver's
 /// depth-first `recurse` walks `Repeat`'s `n` copies in the same order
 /// `for next in vec` did. `docs/plans/worldgen-rewrite.md` names breadth-first
-/// "optimisation" of this exact recursion as instant desync — this change never
-/// touches the recursion's shape, only what it iterates.
+/// "optimisation" of this exact recursion as instant desync — the walk below
+/// never touches the recursion's shape, only what it iterates.
 ///
 /// `Repeat`'s `n` is stored **unclamped**, exactly as `IntProvider::sample`
 /// returned it, and the consumer's `0..n` range is empty for `n <= 0` — the same
@@ -982,7 +982,7 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
 }
 
 /// The real vanilla 3×3 neighbourhood driver, generalised to a **per-source**
-/// ore list (this change's ore-composition increment): `ores_for_source(x, z)`
+/// ore list: `ores_for_source(x, z)`
 /// is called once per of the 9 source chunks (their own chunk coordinates,
 /// not centre-relative) and must return that source's own biome's
 /// underground-ore list — vanilla's own biome-decoration application
