@@ -4690,6 +4690,32 @@ impl<'w> MobSim<'w> {
         mob
     }
 
+    /// Removes a mob by entity id, returning whether one was actually removed.
+    ///
+    /// The missing despawn half of a native plugin's spawn/despawn/modify
+    /// surface: [`spawn_species`](Self::spawn_species) plus
+    /// [`SimMob::id`] already give a caller "spawn and get an id back", and this
+    /// is the same [`self.mobs`](MobSim) retain shape already used inline at
+    /// the creeper self-detonation and [`reap_dead`](Self::reap_dead) call
+    /// sites, named and made public rather than duplicated a third time.
+    ///
+    /// **Cannot remove a player.** Player entity ids are allocated from
+    /// `PLAYER_ENTITY_ID_BASE` and live in `PlayerRegistry`, never in
+    /// `self.mobs` — so a plugin calling this with a connected player's id is a
+    /// harmless no-op, never an accidental disconnect. This is the server-side
+    /// analogue of the client's `apply_entity_removal` skipping an id held by
+    /// `LocalPlayer`.
+    ///
+    /// **Drops no loot and grants no experience** — unlike
+    /// [`reap_dead`](Self::reap_dead)'s death sweep, this is Java's plain
+    /// `Entity.remove()`, not a kill. A plugin that wants a despawned mob to
+    /// drop loot calls whatever already grants that on a real death, not this.
+    pub fn remove_mob(&mut self, id: i32) -> bool {
+        let before = self.mobs.len();
+        self.mobs.retain(|m| m.id != id);
+        self.mobs.len() != before
+    }
+
     /// Given a just-placed carved pumpkin or jack o'lantern at `pumpkin_pos`,
     /// checks whether it completes a valid snow- or iron-golem block pattern
     /// and, if so, spawns the golem — vanilla
