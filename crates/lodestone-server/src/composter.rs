@@ -12,7 +12,7 @@
 //! ## The state machine
 //!
 //! * `MIN_LEVEL = 0`, `MAX_LEVEL = 7`, `READY = 8`.
-//! * [`addItem`] is only ever called with
+//! * [`insert`](Composter::insert) is only ever called with
 //!   `fillLevel < 7` (both call sites — the right-click insert path,
 //!   and the shared insert path hoppers/
 //!   dispensers use — guard on `fillLevel < 7` before calling

@@ -139,7 +139,7 @@ mod tests {
     }
 
     /// Out-of-range, missing, or negative selection all fall back to no
-    /// result — `isValidRecipeIndex`'s guard.
+    /// result — the real is-valid-recipe-index guard.
     #[test]
     fn an_invalid_selection_has_no_result() {
         let input = stack("minecraft:cobblestone");

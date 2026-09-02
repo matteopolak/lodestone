@@ -96,12 +96,12 @@ pub fn bookshelf_power(source: &dyn ChunkSource, pos: BlockPos) -> u32 {
 }
 
 /// The real per-slot enchantment-cost rule for `slot` (`0..3`) at `bookcases`
-/// power, seeded by `rng` — the caller reseeds `rng` from the table's
-/// `enchantmentSeed` once per evaluation and calls this three times in slot
+/// power, seeded by `rng` — the caller reseeds `rng` from the table's own
+/// enchantment-seed field once per evaluation and calls this three times in slot
 /// order (order matters: the draw is one shared roll per slot, not three
 /// independent ones — the real per-slot loop draws once
-/// and derives the other two slots' displayed costs from the *same* `selected`
-/// value via arithmetic, not three separate `nextInt` calls).
+/// and derives the other two slots' displayed costs from the *same* selected
+/// value via arithmetic, not three separate random-int calls).
 ///
 /// `bookcases` is pre-clamped by [`bookshelf_power`]; this function clamps it
 /// again defensively so a caller feeding a raw value cannot exceed the real
