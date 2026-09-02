@@ -2,6 +2,7 @@
 //! concurrent edits to different packets never touch the same file.
 
 pub mod login;
+pub mod movement;
 pub mod player_info;
 pub mod position;
 pub mod slot;
