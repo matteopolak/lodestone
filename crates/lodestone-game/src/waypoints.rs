@@ -1,4 +1,4 @@
-//! Tracked waypoints — vanilla's locator bar (issue #26).
+//! Tracked waypoints — vanilla's locator bar.
 //!
 //! ## What it is
 //!

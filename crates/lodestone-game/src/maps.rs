@@ -1,4 +1,4 @@
-//! Filled-map contents, keyed by map id (issue #184).
+//! Filled-map contents, keyed by map id.
 //!
 //! ## What it is
 //!

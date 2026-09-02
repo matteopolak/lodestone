@@ -1,5 +1,4 @@
-//! The drag preview must show what the release will actually do (issue #378
-//! part 2).
+//! The drag preview must show what the release will actually do.
 //!
 //! `Menu::quick_craft_plan` is the split arithmetic. The container screen draws
 //! its per-cell preview numbers from it, and `finish_quick_craft` distributes the
@@ -272,7 +271,7 @@ fn the_clone_drag_previews_full_stacks_and_a_full_cursor() {
 ///
 /// In production they cannot be, because `MenuInput::dragged` applies the same
 /// three conditions `can_drag_place` does, so the screen never paints a cell the
-/// machine would refuse (issue #378 part 1). So this passes the *filtered* set,
+/// machine would refuse. So this passes the *filtered* set,
 /// which is what `drag_paint` actually returns, and asserts the refusal at the
 /// paint boundary instead.
 #[test]

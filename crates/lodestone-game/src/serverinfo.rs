@@ -1,5 +1,5 @@
 //! Server-announced session metadata: links, report details, chat completions,
-//! tick rate and dialogs (issue #26).
+//! tick rate and dialogs.
 //!
 //! ## What it is
 //!

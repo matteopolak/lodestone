@@ -25,7 +25,7 @@
 //! and wrong without any error, since the id still resolves to *an* enchantment.
 //! The exact shape of the mesher's `FALLBACK_BIOME_NAMES` bug, one registry over,
 //! and the table was already decoded the whole time: `ClientRegistries::entry_names`
-//! has carried it since #288 and simply never left the version crate.
+//! has carried it for a long time and simply never left the version crate.
 //!
 //! ## How to change it
 //!

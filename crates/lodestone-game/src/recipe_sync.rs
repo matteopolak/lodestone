@@ -1,4 +1,4 @@
-//! The server's recipe-book sync: unlocks, ghosts and property sets (issue #26).
+//! The server's recipe-book sync: unlocks, ghosts and property sets.
 //!
 //! ## What it is
 //!
@@ -281,7 +281,7 @@ mod tests {
     }
 
     /// The station item id must survive the fold — this is what a recipe-unlock
-    /// toast's corner icon reads (issue #687's missing hop 3). Distinct from
+    /// toast's corner icon reads. Distinct from
     /// `result_items` so a transposition of the two would fail this.
     #[test]
     fn station_items_survive_the_fold() {

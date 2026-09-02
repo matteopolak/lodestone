@@ -160,8 +160,9 @@ pub struct Reconciliation {
 /// A [`ClientMenu`] deliberately holds **two** [`Menu`]s — the prediction the UI
 /// draws and the last thing the server confirmed — so "the one inventory" is a
 /// pair here rather than a single [`Container`]. That is not the duplication
-/// issue #373 was about: those two are the same *window*'s two points in time,
-/// and `reconcile` exists precisely to collapse them. What #373 was about is two
+/// the single-owner-inventory fix was about: those two are the same *window*'s
+/// two points in time,
+/// and `reconcile` exists precisely to collapse them. That fix was about two
 /// **windows** each owning a copy of the player's 41 native slots, which nothing
 /// collapses.
 ///
