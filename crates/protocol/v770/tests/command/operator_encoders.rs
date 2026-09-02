@@ -70,7 +70,7 @@ fn query_entity_tag_is_two_var_ints() {
 
 #[test]
 fn change_difficulty_writes_the_registry_id_not_the_declaration_index_of_our_enum() {
-    // `Difficulty.getId()` is PEACEFUL=0, EASY=1, NORMAL=2, HARD=3 — the same
+    // `vanilla's own difficulty's own get id()` is PEACEFUL=0, EASY=1, NORMAL=2, HARD=3 — the same
     // order as ours, which is exactly why this needs asserting rather than
     // assuming: if our enum is ever reordered the ids must not move with it.
     for (difficulty, expected) in [

@@ -6,14 +6,14 @@
 //! about some unrelated later field. So the layout is asserted byte for byte
 //! against the stream codecs read as record definitions:
 //!
-//! * `RecipeDisplayEntry.STREAM_CODEC` — id, display, `OPTIONAL_VAR_INT` group,
+//! * `vanilla's own recipe display entry's own stream codec` — id, display, `OPTIONAL_VAR_INT` group,
 //!   `recipe_book_category` registry id, optional ingredient list.
-//! * `SlotDisplay.STREAM_CODEC` — `ByteBufCodecs.registry(SLOT_DISPLAY)` dispatch
-//!   then the variant body, with `SlotDisplays.bootstrap`'s registration order as
+//! * `vanilla's own slot display's own stream codec` — `vanilla's own byte buf codecs's own registry(SLOT_DISPLAY)` dispatch
+//!   then the variant body, with `vanilla's own slot displays's own bootstrap`'s registration order as
 //!   the id assignment.
-//! * `ItemStackTemplate.STREAM_CODEC` — item **then** count, the opposite field
-//!   order from `ItemStack.OPTIONAL_STREAM_CODEC`.
-//! * `ByteBufCodecs.holderSet` — `0` means "a tag reference follows", `n + 1`
+//! * `vanilla's own item stack template's own stream codec` — item **then** count, the opposite field
+//!   order from `vanilla's own item stack's own optional stream codec`.
+//! * `vanilla's own byte buf codecs's own holder set` — `0` means "a tag reference follows", `n + 1`
 //!   means "`n` direct entries follow". Every ingredient list here takes the
 //!   direct form, so every count is one more than its length.
 //!
@@ -89,7 +89,7 @@ fn shaped_entry_matches_the_stream_codecs_byte_for_byte() {
 
     let mut want: Vec<u8> = Vec::new();
     want.extend(varint(1)); // one entry
-    want.extend(varint(7)); // RecipeDisplayId.index
+    want.extend(varint(7)); // vanilla's own recipe display id's own index
     want.extend(varint(1)); // recipe_display: crafting_shaped
     want.extend(varint(2)); // width
     want.extend(varint(2)); // height

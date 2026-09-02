@@ -5,7 +5,7 @@
 //! Expected payloads are built from the wire specification with an
 //! independent VarInt encoder (never the adapter's own codec), so a
 //! symmetric bug cannot pass. Layouts are verified against 26.2's
-//! `ServerboundPlayerLoadedPacket` (`StreamCodec.unit`, empty body),
+//! `ServerboundPlayerLoadedPacket` (`vanilla's own stream codec's own unit`, empty body),
 //! `ServerboundSeenAdvancementsPacket` (VarInt `Action` ordinal, plus a
 //! conditional identifier only for `OPENED_TAB`), `ServerboundCommandSuggestionPacket`
 //! (VarInt id + UTF-8 string), `ServerboundPaddleBoatPacket` (two plain
@@ -78,7 +78,7 @@ fn seen_advancements_opened_tab_carries_the_identifier() {
         )
         .expect("encode seen advancements");
     let mut want = Vec::new();
-    want.extend_from_slice(&varint(0)); // Action.OPENED_TAB
+    want.extend_from_slice(&varint(0)); // vanilla's own action's own opened tab
     let id = "minecraft:story/root";
     want.extend_from_slice(&varint(id.len() as i32));
     want.extend_from_slice(id.as_bytes());
@@ -98,7 +98,7 @@ fn seen_advancements_closed_screen_has_no_identifier() {
         encoded,
         Some((
             play::serverbound::SEEN_ADVANCEMENTS,
-            varint(1) // Action.CLOSED_SCREEN, nothing follows
+            varint(1) // vanilla's own action's own closed screen, nothing follows
         ))
     );
 }

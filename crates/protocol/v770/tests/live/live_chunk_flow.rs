@@ -234,7 +234,7 @@ async fn drive_flow(ack_enabled: bool, stop_after_batches: Option<usize>) -> Flo
         // position: the server's own collision/on-ground check does not know
         // about our claimed position, and a long enough straight-line walk
         // eventually crosses a ledge or an un-flat spot and trips vanilla's
-        // "floating too long" kick (`ServerGamePacketListenerImpl.tickPlayer`),
+        // "floating too long" kick (`vanilla's own server game packet listener impl's own tick player`),
         // which has nothing to do with the property under test and previously
         // aborted only the (much longer) negative-control run.
         if reached_play && have_pos && Instant::now() >= next_move {
@@ -337,7 +337,7 @@ async fn drive_flow(ack_enabled: bool, stop_after_batches: Option<usize>) -> Flo
 }
 
 /// The credit window the server ramps to after the first ACK
-/// (`PlayerChunkSender.maxUnacknowledgedBatches`). Reaching more finished
+/// (`vanilla's own player chunk sender's own max unacknowledged batches`). Reaching more finished
 /// batches than this is impossible without a continuously-flowing ACK loop.
 const CREDIT_WINDOW: usize = 10;
 

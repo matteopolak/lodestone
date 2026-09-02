@@ -5,7 +5,7 @@
 //! actually reach a client's screen.
 //!
 //! Serverbound bytes are hand-built from the wire spec
-//! (`ServerboundEditBookPacket.STREAM_CODEC`), never round-tripped through
+//! (`vanilla's own serverbound edit book packet's own stream codec`), never round-tripped through
 //! this crate's own encoder — there is no serverbound `EditBook` encoder in
 //! this client-side crate to round-trip through anyway, so this is the only
 //! available check. Clientbound bytes go through the real, independently
@@ -177,7 +177,7 @@ fn writable_book_content_reaches_a_client_container_set_slot() {
     let expected_tail: Vec<u8> = vec![
         0x01, // 1 added component
         0x00, // 0 removed components (both counts precede every entry —
-        // `DataComponentPatch.STREAM_CODEC`'s own `encode`, verified against
+        // `vanilla's own data component patch's own stream codec`'s own `encode`, verified against
         // the jar; not added-count/entries/removed-count)
         0x36, // component id 54 = minecraft:writable_book_content
         0x02, // 2 pages

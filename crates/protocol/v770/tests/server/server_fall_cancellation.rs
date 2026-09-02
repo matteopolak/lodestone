@@ -21,7 +21,7 @@
 //!
 //! # Where the expected values come from
 //!
-//! The fall formula, from `LivingEntity.calculateFallDamage`/`calculateFallPower`:
+//! The fall formula, from `vanilla's own living entity's own calculate fall damage`/`calculateFallPower`:
 //! `floor((distance + 1e-6 - 3.0) * blockModifier)`. Every assertion below
 //! predicts an exact health, and each names the wrong-hypothesis value it is
 //! distinguishing itself from.
@@ -310,7 +310,7 @@ async fn a_fall_into_one_block_of_water_hurts_neither_now_nor_later() {
 }
 
 /// A hay bale reduces rather than cancels, by exactly `0.2` —
-/// `HayBlock.fallOn`'s own `damageModifier`.
+/// `vanilla's own hay block's own fall on`'s own `damageModifier`.
 ///
 /// This is the arm that proves `fall_sample` reads the cell **below** the feet and
 /// not the feet cell itself: the hay is at `WATER_Y` and the player's feet land at

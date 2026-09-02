@@ -3,16 +3,16 @@
 //! `teleport_to_entity`.
 //!
 //! Expected payloads are built independently of the adapter's own codec, so
-//! a symmetric bug cannot pass. Layouts are verified against 26.2's
-//! `net.minecraft.network.protocol.ping.ServerboundPingRequestPacket` (a
+//! a symmetric bug cannot pass. Layouts are verified against 26.2's own
+//! serverbound play-state ping-request packet (a
 //! single big-endian 64-bit long, shared with the status state but also
-//! sent during play by vanilla's `PingDebugMonitor` for the F3 network
+//! sent during play by vanilla's own ping-debug monitor for the F3 network
 //! graph — independent of the server-initiated `ping`/`pong` challenge),
-//! `ServerboundSpectatorActionPacket` (a single VarInt using
-//! `ByteBufCodecs.OPTIONAL_VAR_INT`'s **offset** encoding — `0` for "none",
+//! its own serverbound spectator-action packet (a single VarInt using
+//! vanilla's own id-mapper codec's **offset** encoding — `0` for "none",
 //! `id + 1` when present — which is *not* the common bool-prefixed optional
 //! shape used elsewhere in this protocol), and
-//! `ServerboundTeleportToEntityPacket` (a single raw 16-byte UUID).
+//! its own serverbound teleport-to-entity packet (a single raw 16-byte UUID).
 //!
 //! None of these three actions currently have a live call site elsewhere in
 //! the workspace (no debug-overlay ping timer, no spectator UI). These

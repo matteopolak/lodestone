@@ -2,7 +2,7 @@
 //! `update_advancements` (id 130).
 //!
 //! Byte vectors are hand-built from the 26.2 decompiled record definitions
-//! (`ClientboundMapItemDataPacket`, `MapItemSavedData.MapPatch`,
+//! (`ClientboundMapItemDataPacket`, `vanilla's own map item saved data's own map patch`,
 //! `ClientboundUpdateAdvancementsPacket`, `Advancement`, `DisplayInfo`), never
 //! round-tripped through anything of ours — this crate has no encoder for either
 //! packet, so there is nothing symmetric available to be wrong in both
@@ -50,7 +50,7 @@ fn utf(value: &str) -> Vec<u8> {
 }
 
 /// A network-NBT string component, which is how `TRUSTED_STREAM_CODEC` writes a
-/// `Component.literal`: TAG_String (0x08) with no name, then a big-endian u16
+/// `vanilla's own component's own literal`: TAG_String (0x08) with no name, then a big-endian u16
 /// length and the bytes.
 fn nbt_string(value: &str) -> Vec<u8> {
     let mut out = vec![0x08];
@@ -142,7 +142,7 @@ fn a_zero_width_byte_is_an_absent_patch() {
     payload.push(0u8); // scale
     payload.push(0u8); // unlocked
     payload.push(0u8); // no decorations
-    payload.push(0u8); // width 0 -> Optional.empty, and the packet ends here
+    payload.push(0u8); // width 0 -> an empty optional, and the packet ends here
 
     let directives = handle(play::clientbound::MAP_ITEM_DATA, &payload);
     let [Directive::Emit(ClientEvent::MapItemData {

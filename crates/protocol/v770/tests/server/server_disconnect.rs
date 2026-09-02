@@ -7,8 +7,8 @@
 //!
 //! | phase | packet | reason encoded as |
 //! |---|---|---|
-//! | Login | `ClientboundLoginDisconnectPacket` | **JSON string** (`ByteBufCodecs.lenientJson(262144)`, `login/ClientboundLoginDisconnectPacket.java`) |
-//! | Configuration / Play | `ClientboundDisconnectPacket` | **NBT** (`TRUSTED_CONTEXT_FREE_STREAM_CODEC` = `fromCodecTrusted`, `common/ClientboundDisconnectPacket.java`, `chat/ComponentSerialization.java`) |
+//! | Login | `ClientboundLoginDisconnectPacket` | **JSON string** (`vanilla's own byte buf codecs's own lenient json(262144)`, `login/vanilla's own clientbound login disconnect packet's own java`) |
+//! | Configuration / Play | `ClientboundDisconnectPacket` | **NBT** (`TRUSTED_CONTEXT_FREE_STREAM_CODEC` = `fromCodecTrusted`, `common/vanilla's own clientbound disconnect packet's own java`, `chat/vanilla's own component serialization's own java`) |
 //!
 //! `login_phase_reason_is_json_and_play_phase_reason_is_nbt` is the load-bearing
 //! test: it asserts each phase's body parses under its *own* encoding and
@@ -105,7 +105,7 @@ fn payload_of(directive: ServerDirective) -> (i32, Vec<u8>) {
 }
 
 /// The reason our server sends on a keep-alive timeout, restated rather than
-/// imported: vanilla's own key (`ServerCommonPacketListenerImpl.java`) with
+/// imported: vanilla's own key (`vanilla's own server common packet listener impl's own java`) with
 /// vanilla's own English string for it, under the same key, in
 /// `.cache/mc/26.2/client-src/assets/minecraft/lang/en_us.json`.
 const TIMEOUT_KEY: &str = "disconnect.timeout";
@@ -446,7 +446,7 @@ async fn an_unanswered_keep_alive_kicks_the_client_with_a_reason() {
         } => {
             assert_eq!(
                 key, TIMEOUT_KEY,
-                "the key must be vanilla's own (ServerCommonPacketListenerImpl.java)",
+                "the key must be vanilla's own (vanilla's own server common packet listener impl's own java)",
             );
             assert_eq!(
                 fallback.as_deref(),
@@ -470,7 +470,7 @@ async fn an_unanswered_keep_alive_kicks_the_client_with_a_reason() {
 #[tokio::test]
 async fn an_invalid_username_is_refused_with_a_login_disconnect() {
     // A tab is `0x09`, which is `<= 32` and so rejected by
-    // `StringUtil.isValidPlayerName` (`StringUtil.java`).
+    // `vanilla's own string util's own is valid player name` (`vanilla's own string util's own java`).
     let (sent, outcome) = attempt_login("bad\tname").await;
     let (id, payload) = sent
         .iter()
@@ -523,8 +523,9 @@ async fn a_valid_username_is_not_refused() {
     );
 }
 
-/// The name-validation boundary, straight from `StringUtil.isValidPlayerName`
-/// (`net/minecraft/util/StringUtil.java`): at most 16 chars, and no char
+/// The name-validation boundary, straight from vanilla's own string-util
+/// class's is-valid-player-name check (confirmed against the decompiled
+/// 26.2 source): at most 16 chars, and no char
 /// `<= 32` or `>= 127`.
 ///
 /// Exercised through the **server loop**, not by calling a private helper, so it
@@ -533,7 +534,7 @@ async fn a_valid_username_is_not_refused() {
 /// # Two rejection paths, and only one of them explains itself
 ///
 /// The length half of vanilla's check is already enforced *one layer earlier*, by
-/// the wire decoder: `LoginHello.name` carries `#[mc(max = 16)]`, so a 17-char
+/// the wire decoder: `vanilla's own login hello's own name` carries `#[mc(max = 16)]`, so a 17-char
 /// name fails `decode_full` and the loop sees `ServerBound::Ignored` — the packet
 /// is dropped with no `LoginStart` and therefore no reason to send. That is a
 /// **silent** rejection, and it is why this table has two boolean columns rather

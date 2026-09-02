@@ -255,7 +255,7 @@ fn big_undecodable_advancements(component_name: &str, filler: usize) -> Vec<u8> 
 /// (`serializeToNetwork` uses `writeInt`, not a byte), then the background
 /// identifier only when bit 0 is set, then x and y as floats. The icon is an
 /// `ItemStackTemplate`, whose fields are item-then-count — the reverse of
-/// `ItemStack.OPTIONAL_STREAM_CODEC`.
+/// `vanilla's own item stack's own optional stream codec`.
 fn write_advancement(w: &mut Writer, id: &str, title: &str, icon_component: Option<&str>) {
     w.string(id);
     w.bool(false); // no parent

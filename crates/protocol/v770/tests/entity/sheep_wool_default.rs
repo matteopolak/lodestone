@@ -1,10 +1,10 @@
 //! Proves the fix for the "white sheep render with no wool" report: vanilla's
 //! `SynchedEntityData` only ever puts a field on the wire when it differs from
-//! the accessor's own default (`DataItem.isSetToDefault`,
-//! `SynchedEntityData.getNonDefaultValues` — the only source `ServerEntity`
+//! the accessor's own default (`vanilla's own data item's own is set to default`,
+//! `vanilla's own synched entity data's own get non default values` — the only source `ServerEntity`
 //! ever draws a spawn's initial `set_entity_data` from), and
-//! `Sheep.defineSynchedData` defines `DATA_WOOL_ID` with default byte `0`
-//! (`DyeColor.byId(0) == WHITE`, sheared bit unset). A naturally white,
+//! `vanilla's own sheep's own define synched data` defines `DATA_WOOL_ID` with default byte `0`
+//! (`vanilla's own dye color's own by id(0) == WHITE`, sheared bit unset). A naturally white,
 //! unsheared sheep therefore never puts index 18 on the wire, at spawn or
 //! ever — not a decode bug, a wire *absence* — so `read_entity_metadata`
 //! alone can never recover it (see

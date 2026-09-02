@@ -155,7 +155,7 @@ fn resource_pack_response_is_byte_exact() {
         .expect("encode resource pack response");
     let mut want = Vec::new();
     want.extend_from_slice(id.as_bytes());
-    want.extend_from_slice(&varint(3)); // Action.ACCEPTED
+    want.extend_from_slice(&varint(3)); // vanilla's own action's own accepted
     assert_eq!(encoded, Some((play::serverbound::RESOURCE_PACK, want)));
 }
 

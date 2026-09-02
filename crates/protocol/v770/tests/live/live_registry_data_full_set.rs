@@ -54,8 +54,8 @@ const REPAIR: &str = "recreate the creative oracle with: ./scripts/live-oracles/
 
 const CTX: Ctx = Ctx { version: 776 };
 
-/// The 29 entries of `RegistryDataLoader.SYNCHRONIZED_REGISTRIES`
-/// (`.cache/mc/26.2/src/net/minecraft/resources/RegistryDataLoader.java`),
+/// The 29 entries of vanilla's own registry-data loader's own
+/// synchronized-registries list,
 /// read directly off the decompiled source rather than
 /// `generated/reports/registries.json` — that file is authoritative about
 /// registry *contents*, not about which registries are synchronized to a

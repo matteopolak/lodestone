@@ -225,7 +225,7 @@ fn biome_sky_colours_resolve_by_holder_id() {
 
     /// One biome entry shaped the way the wire carries it: an `attributes`
     /// compound keyed by attribute id, whose value for a plain `override` is the
-    /// bare hex string (`EnvironmentAttributeMap.Entry`'s `Codec.either` left
+    /// bare hex string (`vanilla's own environment attribute map's own entry`'s `vanilla's own codec's own either` left
     /// branch).
     fn biome(id: &str, sky: Option<&str>) -> PackedRegistryEntry {
         let mut attributes = vec![(
@@ -304,7 +304,7 @@ fn biome_sky_colours_resolve_by_holder_id() {
 
 /// The `has_precipitation`/`temperature`/`downfall` triple lives at the top of
 /// the biome compound, a sibling of `attributes` — not nested under it like
-/// `sky_color` — per `Biome.ClimateSettings.CODEC`.
+/// `sky_color` — per `vanilla's own biome's own climate settings's own codec`.
 /// This is the input `precipitation_for_temperature` and
 /// `height_adjusted_temperature` (`lodestone-render`'s `weather.rs`) have had
 /// unit tests for but no real caller for, per `docs/weather.md`'s "Snow: the
@@ -399,8 +399,8 @@ fn biome_climates_resolve_by_holder_id_and_hold_place_for_a_bad_entry() {
 /// The modifier form of an attribute entry, which no vanilla biome uses for
 /// `sky_color` and a data pack may.
 ///
-/// `EnvironmentAttributeMap.Entry::createCodec` is
-/// `Codec.either(valueCodec, fullCodec)`: a plain `override` collapses to the
+/// `vanilla's own environment attribute map's own entry::createCodec` is
+/// `vanilla's own codec's own either(valueCodec, fullCodec)`: a plain `override` collapses to the
 /// bare value, anything else serialises as `{ modifier, argument }`. Reading only
 /// the bare tag would return `None` here — a silently untinted sky rather than a
 /// visible failure, which is the direction this repo keeps getting burned in.
@@ -494,8 +494,9 @@ fn server_registry_data_payloads_match_the_captured_vanilla_fixtures() {
         },
     };
 
-    // The 29 entries of `RegistryDataLoader.SYNCHRONIZED_REGISTRIES`
-    // (`.cache/mc/26.2/src/net/minecraft/resources/RegistryDataLoader.java`),
+    // The 29 entries of vanilla's own registry-data loader's own
+    // synchronized-registries list
+    // (confirmed against the decompiled 26.2 source),
     // not `generated/reports/registries.json` — that file is authoritative
     // about registry *contents*, not which registries are synchronized, and
     // it omits `dimension_type`/`world_clock` entirely (`CLAUDE.md`).

@@ -296,7 +296,7 @@ fn an_argument_nodes_suggestions_id_is_written_after_its_parser_payload() {
         0x01,                                     // writeVarInt(redirect = 1), present only under FLAG_REDIRECT
         0x07, b't', b'a', b'r', b'g', b'e', b't', b's', // writeUtf("targets")
         0x06,                                     // parser id 6 = minecraft:entity
-        0x03,                                     // EntityArgument.Info: single | playersOnly << 1
+        0x03,                                     // vanilla's own entity argument's own info: single | playersOnly << 1
         0x14, b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', b':',
               b'a', b's', b'k', b'_', b's', b'e', b'r', b'v', b'e', b'r', // writeIdentifier, AFTER the payload
         // entries 1 and 2: TYPE_LITERAL, no children, no redirect, writeUtf("x")
@@ -420,13 +420,13 @@ fn permission_pruning_predicts_both_ends_exactly() {
     assert_eq!(round_tripped, nobody);
 }
 
-/// Pruning is by **subtree**, matching `Commands.fillUsableCommands`' recursion
+/// Pruning is by **subtree**, matching `vanilla's own commands's own fill usable commands`' recursion
 /// sitting inside the `canUse` branch — and the surviving indices are renumbered
 /// against the pruned list rather than left pointing into the unfiltered arena.
 ///
 /// # Why the shipped tree cannot measure this
 ///
-/// All four built-ins are `Commands.LEVEL_GAMEMASTERS` (2), so the real tree is
+/// All four built-ins are `vanilla's own commands's own level gamemasters` (2), so the real tree is
 /// all-or-nothing across every level: 1 node at levels 0–1 and the whole thing at
 /// 2–4. An input where the right and the wrong hypothesis coincide is not a test,
 /// so this uses `ServerCommands::from_registrar` — the seam

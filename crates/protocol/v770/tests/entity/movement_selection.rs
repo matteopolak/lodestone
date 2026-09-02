@@ -6,14 +6,15 @@
 //! This is deliberately *not* a per-packet round-trip test — a round-trip
 //! passes even when the encoder is self-consistently wrong. These tests pin
 //! the exact sequence of wire bytes a stateful adapter instance produces
-//! across several consecutive `Move` actions, mirroring vanilla's
-//! `LocalPlayer.sendPosition()` (26.2's
-//! `net.minecraft.client.player.LocalPlayer`) against
-//! `ServerboundMovePlayerPacket`'s four nested packet classes. Expected
+//! across several consecutive `Move` actions, mirroring vanilla's own
+//! client-side local-player position-send tick (confirmed against the
+//! decompiled 26.2 client source) against
+//! vanilla's own serverbound move-player packet's four nested packet
+//! classes. Expected
 //! bodies are built by hand from `f64::to_be_bytes` / `f32::to_be_bytes`,
 //! never from the adapter's own encoder.
 //!
-//! The rule (see `LocalPlayer.sendPosition`): position is "dirty" when the
+//! The rule (see `vanilla's own local player's own send position`): position is "dirty" when the
 //! squared distance from the last **sent** position exceeds `(2e-4)²`, or
 //! every 20 ticks regardless of movement (a periodic forced update,
 //! `positionReminder >= 20`); rotation is dirty on *any* nonzero yaw/pitch

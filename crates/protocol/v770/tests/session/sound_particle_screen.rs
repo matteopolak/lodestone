@@ -219,7 +219,7 @@ fn level_particles_decodes_registry_particle() {
 /// report) is `minecraft:dust`, whose payload is a packed RGB24 `i32` plus an
 /// `f32` scale (`DustParticleOptions::STREAM_CODEC`). Pairwise-distinct R/G/B
 /// bytes (`0x11`, `0x22`, `0x33`) so a channel transposition in the decode
-/// could not survive this test unnoticed, matching `ARGB.red/green/blue`'s
+/// could not survive this test unnoticed, matching `vanilla's own argb's own red/green/blue`'s
 /// `>> 16`/`>> 8`/plain `& 0xFF` order.
 #[test]
 fn level_particles_decodes_a_dust_payload() {
@@ -291,11 +291,11 @@ fn level_particles_bytes(particle_id: u8, options: &[u8]) -> Vec<u8> {
 /// 23 `effect`, 53 `instant_effect`, 28 `entity_effect`.
 ///
 /// * `SpellParticleOption::streamCodec` is
-///   `StreamCodec.composite(ByteBufCodecs.INT, colour, ByteBufCodecs.FLOAT,
+///   `vanilla's own stream codec's own composite(vanilla's own byte buf codecs's own int, colour, vanilla's own byte buf codecs's own float,
 ///   power)` — eight bytes, and its accessors read only the three low bytes of
 ///   the word, so the top byte is **not** an alpha here.
-/// * `ColorParticleOption::streamCodec` is `ByteBufCodecs.INT` alone — four
-///   bytes, ARGB, and `SpellParticle.MobEffectProvider` really does call
+/// * `ColorParticleOption::streamCodec` is `vanilla's own byte buf codecs's own int` alone — four
+///   bytes, ARGB, and `vanilla's own spell particle's own mob effect provider` really does call
 ///   `setAlpha(options.getAlpha())` with the top byte.
 ///
 /// Every byte in every colour word below is pairwise distinct, so neither a
@@ -370,7 +370,7 @@ fn level_particles_decodes_the_potion_effect_payloads() {
     );
 }
 
-/// `sculk_charge` (registry id 45) carries a single `ByteBufCodecs.FLOAT`
+/// `sculk_charge` (registry id 45) carries a single `vanilla's own byte buf codecs's own float`
 /// roll — `SculkChargeParticleOptions::STREAM_CODEC`. The value is what makes
 /// a spreading charge's motes lie along the direction it is travelling; with
 /// the payload dropped they all shared one orientation.
@@ -394,7 +394,7 @@ fn level_particles_decodes_a_sculk_charge_roll() {
 }
 
 /// `dragon_breath` (registry id 15) carries a `PowerParticleOption` — one
-/// `ByteBufCodecs.FLOAT` power and nothing else. It is a *different* option
+/// `vanilla's own byte buf codecs's own float` power and nothing else. It is a *different* option
 /// class from `effect`'s `SpellParticleOption` despite both ending in a power:
 /// `DragonBreathParticle` draws its purple out of the RNG, so there is no
 /// colour word in front of it and the payload is four bytes rather than eight.
@@ -420,7 +420,7 @@ fn level_particles_decodes_a_dragon_breath_power() {
 ///
 /// One payload type across five registry entries, and the **one width
 /// discontinuity** in `decode_particle_options`: `BlockParticleOption`'s stream
-/// codec is `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)`, which is a
+/// codec is `vanilla's own byte buf codecs's own id mapper(vanilla's own block's own block state registry)`, which is a
 /// `VarInt`, where every other arm in that function reads a fixed-width `INT`
 /// or `FLOAT`.
 ///
@@ -594,10 +594,10 @@ fn stop_sound_rejects_truncated_source() {
 
 // ---- explode (issue: live player report, "creeper has no explosion sound") --
 //
-// `ClientboundExplodePacket`'s wire order (`ClientboundExplodePacket.java`'s
+// `ClientboundExplodePacket`'s wire order (`vanilla's own clientbound explode packet's own java`'s
 // `STREAM_CODEC.composite(...)` list): `center: Vec3` (three raw `f64`s, *not*
-// the sound packet's fixed-point ints — see `Vec3.java`'s own `STREAM_CODEC`),
-// `radius: f32`, `blockCount: i32` (plain 4-byte, `ByteBufCodecs.INT`),
+// the sound packet's fixed-point ints — see `vanilla's own vec3's own java`'s own `STREAM_CODEC`),
+// `radius: f32`, `blockCount: i32` (plain 4-byte, `vanilla's own byte buf codecs's own int`),
 // `playerKnockback: Optional<Vec3>`, `explosionParticle: ParticleOptions`,
 // `explosionSound: Holder<SoundEvent>`, `blockParticles: WeightedList<...>`
 // (not decoded — see `decode_explode`'s doc). Golden bytes are hand-assembled
@@ -654,7 +654,7 @@ fn explode_decodes_the_explosion_sound_at_its_centre() {
         panic!("expected a Sound directive second, got {:?}", directives[1]);
     };
     assert_eq!(*sound, key("minecraft:entity.generic.explode"));
-    assert_eq!(*category, SoundCategory::Block, "SoundSource.BLOCKS");
+    assert_eq!(*category, SoundCategory::Block, "vanilla's own sound source's own blocks");
     assert_eq!(
         *pos,
         Vec3 {
@@ -664,7 +664,7 @@ fn explode_decodes_the_explosion_sound_at_its_centre() {
         }
     );
     // `volume` (4.0) and `pitch`'s formula are client constants, never on the
-    // wire (`ClientPacketListener.handleExplosion`); pitch is rolled fresh
+    // wire (`vanilla's own client packet listener's own handle explosion`); pitch is rolled fresh
     // each decode, so only its documented bound is checked, not an exact
     // value — `(1.0 ± 0.2) * 0.7` bounds to `[0.56, 0.84]`.
     assert_eq!(*volume, 4.0);
@@ -675,7 +675,7 @@ fn explode_decodes_the_explosion_sound_at_its_centre() {
 }
 
 /// The `explosion` particle (registry id 30) is the other simple particle type
-/// `Level.explode`'s call sites can select; it must decode exactly like
+/// `vanilla's own level's own explode`'s call sites can select; it must decode exactly like
 /// `explosion_emitter` above.
 #[test]
 fn explode_accepts_the_plain_explosion_particle_too() {

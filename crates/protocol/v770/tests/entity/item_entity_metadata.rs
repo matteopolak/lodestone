@@ -49,7 +49,7 @@ fn fixture_bytes(text: &str) -> Vec<u8> {
 }
 
 /// The component the capture actually carries. It was unmodeled when the bytes
-/// were captured and is decoded now (`ByteBufCodecs.VAR_INT`), which is why
+/// were captured and is decoded now (`vanilla's own byte buf codecs's own var int`), which is why
 /// [`with_unmodeled_component`] exists.
 const CAPTURED_COMPONENT: &str = "minecraft:repair_cost";
 

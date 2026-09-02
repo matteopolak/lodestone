@@ -400,7 +400,7 @@ async fn a_plain_pickaxe_sends_no_tool_component() {
          \n\
          THE POINT OF THIS FIXTURE: those last two bytes are the whole patch.\n\
          A real diamond pickaxe sends NO minecraft:tool. The component lives in\n\
-         the item's prototype component map (ToolMaterial.applyToolProperties),\n\
+         the item's prototype component map (vanilla's own tool material's own apply tool properties),\n\
          and a clientbound stack transmits only the delta from that prototype,\n\
          so the client is expected to already know it. Decoding the wire alone\n\
          can never make a pickaxe dig faster; the per-item census in\n\
@@ -461,7 +461,7 @@ async fn an_explicit_tool_component_round_trips_from_the_server() {
          00        DataComponentPatch: 0 removed\n\
          1c        component type id 28 = minecraft:tool\n\
          \n\
-         then Tool.STREAM_CODEC:\n\
+         then vanilla's own tool's own stream codec:\n\
            02                    VarInt rule count = 2\n\
            rule 1:\n\
              00                  HolderSet discriminator 0 = named tag follows\n\
@@ -483,8 +483,8 @@ async fn an_explicit_tool_component_round_trips_from_the_server() {
          no verdict. Collapsing either pair is the bug this fixture catches.\n\
          Note above all that the direct holders are NOT offset by one: only the\n\
          set-size discriminator is. `holderSet` delegates to\n\
-         `ByteBufCodecs.holderRegistry`, which writes the raw registry id, not to\n\
-         `ByteBufCodecs.holder`, which reserves 0 for an inline definition and so\n\
+         `vanilla's own byte buf codecs's own holder registry`, which writes the raw registry id, not to\n\
+         `vanilla's own byte buf codecs's own holder`, which reserves 0 for an inline definition and so\n\
          writes id + 1. We shipped `id + 1` first; the hermetic test agreed with\n\
          it because it encoded the same way, and these captured bytes are what\n\
          disproved it (`01`, not `02`, for stone).\n\

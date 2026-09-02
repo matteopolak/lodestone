@@ -3,7 +3,7 @@
 //! # What was broken
 //!
 //! Four serverbound movement packets exist, and vanilla's
-//! `LocalPlayer.sendPosition` sends exactly **one** of them per tick, chosen
+//! `vanilla's own local player's own send position` sends exactly **one** of them per tick, chosen
 //! by which of position/look changed:
 //!
 //! | packet | position | look |
@@ -25,7 +25,7 @@
 //! # Where the expected values come from
 //!
 //! **Not from our own encoder.** The two packed-angle bytes are computed by
-//! hand from vanilla's own formula, `Mth.packDegrees` —
+//! hand from vanilla's own formula, `vanilla's own mth's own pack degrees` —
 //! `degrees * 256 / 360`, truncated into a signed byte — and the inputs were
 //! chosen so that formula lands on an *exact integer*, making the expectation
 //! independent of whether an implementation floors or rounds:
@@ -120,7 +120,7 @@ impl ChunkSource for AirSource {
 
 /// Hand-written serverbound `move_player_pos_rot`: `f64`×3, `f32` yaw, `f32`
 /// pitch, then the flags byte — the layout of
-/// `ServerboundMovePlayerPacket.PosRot` in `.cache/mc/26.2/src`, written here
+/// `vanilla's own serverbound move player packet's own pos rot` in `.cache/mc/26.2/src`, written here
 /// rather than obtained from `crate::adapter` so the decode side is not being
 /// compared against its own mirror image.
 fn pos_rot_bytes(x: f64, y: f64, z: f64, yaw: f32, pitch: f32) -> Vec<u8> {
@@ -418,7 +418,7 @@ async fn a_players_facing_reaches_another_connection() {
         "B must see A's pitch as the exact -45.0 A sent"
     );
 
-    // The packed byte, predicted by hand from vanilla's `Mth.packDegrees`
+    // The packed byte, predicted by hand from vanilla's `vanilla's own mth's own pack degrees`
     // (`90 * 256 / 360 == 64` exactly, so floor and round agree and this
     // expectation does not encode our rounding choice).
     let heads = head_rotations(&after_walk);

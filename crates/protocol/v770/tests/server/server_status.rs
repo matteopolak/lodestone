@@ -26,10 +26,10 @@
 //!    and nesting, the 8-byte pong payload, the verbatim echo, and the fact that
 //!    vanilla closes the connection after answering a ping.
 //! 2. **The decompiled 26.2 source** at `.cache/mc/26.2/src`, cited inline per
-//!    assertion — `status/ServerStatus.java`,
-//!    `status/ClientboundStatusResponsePacket.java`,
-//!    `ping/{Serverbound,Clientbound}*.java`, and
-//!    `server/network/ServerStatusPacketListenerImpl.java` for the lifecycle.
+//!    assertion — vanilla's own server-status record source,
+//!    its own clientbound status-response packet source,
+//!    its own status/play ping-request and pong-response packet sources, and
+//!    vanilla's own server-status packet-listener source for the lifecycle.
 //! 3. **`/usr/bin/base64`**, the OS tool, for the favicon encoding — the three
 //!    padding cases below were computed by it, not by us.
 
@@ -147,7 +147,7 @@ fn read_status_json(payload: &[u8]) -> String {
          reports status_response_trailing_bytes = 0, and \
          ClientboundStatusResponsePacket's STREAM_CODEC is a single \
          lenientJson(32767) field with nothing after it \
-         (status/ClientboundStatusResponsePacket.java)",
+         (status/vanilla's own clientbound status response packet's own java)",
         payload.len() - json.len(),
     );
     json
@@ -187,8 +187,8 @@ where
         .write_packet(0, &handshake_bytes(1))
         .await
         .expect("handshake writes");
-    // `status_request`: packet id 0, **empty** body — `StreamCodec.unit`
-    // (status/ServerboundStatusRequestPacket.java).
+    // `status_request`: packet id 0, **empty** body — `vanilla's own stream codec's own unit`
+    // (status/vanilla's own serverbound status request packet's own java).
     for _ in 0..=extra_status_requests {
         client
             .write_packet(0, &[])
@@ -197,7 +197,7 @@ where
     }
     if let Some(time) = ping_time {
         // `ping_request`: packet id 1, a single big-endian i64
-        // (ping/ServerboundPingRequestPacket.java).
+        // (ping/vanilla's own serverbound ping request packet's own java).
         let mut w = Writer::default();
         w.i64(time);
         client
@@ -210,7 +210,7 @@ where
     //
     // **This is not a convenience.** With no ping, our server — like vanilla's,
     // which only closes on a ping or a repeat request
-    // (`ServerStatusPacketListenerImpl.java`) — deliberately keeps the
+    // (`vanilla's own server status packet listener impl's own java`) — deliberately keeps the
     // connection open after answering a status request. An unbounded
     // `while let Ok(Some(..)) = read_packet()` therefore *deadlocks* here: both
     // ends hold the transport and neither will speak again. The first version of
@@ -329,7 +329,7 @@ async fn packet_ids_and_framing_match_a_live_vanilla_servers_own_reply() {
         "pong_response payload must be the same 8 bytes vanilla sent",
     );
     // Vanilla terminates a status connection after answering the ping
-    // (ServerStatusPacketListenerImpl.java); the capture observed exactly
+    // (vanilla's own server status packet listener impl's own java); the capture observed exactly
     // that (`server_closed_after_pong: true`, `bytes_after_pong: 0`).
     assert!(
         capture["server_closed_after_pong"] == serde_json::Value::Bool(true),
@@ -346,7 +346,7 @@ async fn packet_ids_and_framing_match_a_live_vanilla_servers_own_reply() {
 ///
 /// The live capture confirms verbatim echo for one value
 /// (`echo_is_verbatim: true`); `ClientboundPongResponsePacket` writes the same
-/// `long` it read (`ping/ClientboundPongResponsePacket.java`), so every
+/// `long` it read (`ping/vanilla's own clientbound pong response packet's own java`), so every
 /// value must survive. This is a *magnitude*-species guard: asserting merely
 /// that some 8 bytes came back would pass for a server that always echoed zero.
 #[tokio::test]
@@ -407,7 +407,7 @@ async fn status_json_carries_every_key_the_live_vanilla_document_did() {
         assert!(
             ours_obj.contains_key(key),
             "our status document is missing `{key}`, which a live vanilla 26.2 \
-             server sent (ServerStatus.java). Present: {:?}",
+             server sent (vanilla's own server status's own java). Present: {:?}",
             ours_obj.keys().collect::<Vec<_>>(),
         );
     }
@@ -432,26 +432,26 @@ async fn status_json_carries_every_key_the_live_vanilla_document_did() {
     }
 
     // Types, not just presence: a `max` serialized as a string parses as JSON
-    // and would still break a real client's `Codec.INT` field.
+    // and would still break a real client's `vanilla's own codec's own int` field.
     assert!(
         ours["players"]["max"].is_i64() && ours["players"]["online"].is_i64(),
-        "players.max/online must be JSON integers (Codec.INT, \
-         ServerStatus.java), got {:?}",
+        "players.max/online must be JSON integers (vanilla's own codec's own int, \
+         vanilla's own server status's own java), got {:?}",
         ours["players"],
     );
     assert!(
         ours["version"]["protocol"].is_i64(),
-        "version.protocol must be a JSON integer (Codec.INT, \
-         ServerStatus.java)",
+        "version.protocol must be a JSON integer (vanilla's own codec's own int, \
+         vanilla's own server status's own java)",
     );
     assert!(
         ours["version"]["name"].is_string(),
-        "version.name must be a JSON string (Codec.STRING, ServerStatus.java)",
+        "version.name must be a JSON string (vanilla's own codec's own string, vanilla's own server status's own java)",
     );
     assert!(
         ours["players"]["sample"].is_array(),
-        "players.sample must be a JSON array (NameAndId.CODEC.listOf(), \
-         ServerStatus.java)",
+        "players.sample must be a JSON array (vanilla's own name and id's own codec's own list of(), \
+         vanilla's own server status's own java)",
     );
 }
 
@@ -487,8 +487,8 @@ async fn status_json_reports_the_real_motd_cap_version_and_protocol() {
     );
 
     // Both optional-with-a-default fields must be *absent*, not present-and-
-    // empty. `Favicon.CODEC` errors with "Unknown format" on any string lacking
-    // the `data:image/png;base64,` prefix (ServerStatus.java), so an
+    // empty. `vanilla's own favicon's own codec` errors with "Unknown format" on any string lacking
+    // the `data:image/png;base64,` prefix (vanilla's own server status's own java), so an
     // empty-string favicon would make a real client reject the whole document;
     // and the live capture omits both keys entirely.
     assert!(
@@ -497,7 +497,7 @@ async fn status_json_reports_the_real_motd_cap_version_and_protocol() {
     );
     assert!(
         !ours.as_object().unwrap().contains_key("enforcesSecureChat"),
-        "enforcesSecureChat defaults to false (ServerStatus.java) and vanilla \
+        "enforcesSecureChat defaults to false (vanilla's own server status's own java) and vanilla \
          omits it; the live capture has no such key",
     );
 }
@@ -529,9 +529,9 @@ async fn our_own_real_server_status_parser_accepts_the_document() {
 // ---------------------------------------------------------------------------
 
 /// A second status request on one connection is a disconnect, not a second
-/// reply — `ServerStatusPacketListenerImpl.handleStatusRequest` guards on
+/// reply — `vanilla's own server status packet listener impl's own handle status request` guards on
 /// `hasRequestedStatus` and calls `connection.disconnect` otherwise
-/// (`ServerStatusPacketListenerImpl.java`).
+/// (`vanilla's own server status packet listener impl's own java`).
 #[tokio::test]
 async fn a_second_status_request_terminates_the_connection() {
     let (sent, outcome) = status_exchange(V770ServerProtocol, None, 1).await;
@@ -549,7 +549,7 @@ async fn a_second_status_request_terminates_the_connection() {
 
 /// A ping with no preceding status request is still answered. Vanilla's
 /// `handlePingRequest` has no `hasRequestedStatus` guard at all
-/// (`ServerStatusPacketListenerImpl.java`) — so neither may we, or a
+/// (`vanilla's own server status packet listener impl's own java`) — so neither may we, or a
 /// latency-only probe gets nothing.
 #[tokio::test]
 async fn a_ping_with_no_preceding_status_request_is_still_answered() {
@@ -561,8 +561,8 @@ async fn a_ping_with_no_preceding_status_request_is_still_answered() {
 }
 
 /// A `status_request` carrying a body is malformed and must be dropped, not
-/// answered. Its codec is `StreamCodec.unit`
-/// (`status/ServerboundStatusRequestPacket.java`) — the body is empty by
+/// answered. Its codec is `vanilla's own stream codec's own unit`
+/// (`status/vanilla's own serverbound status request packet's own java`) — the body is empty by
 /// construction, so bytes in it mean a peer that is not speaking this protocol.
 #[tokio::test]
 async fn a_status_request_with_a_body_is_dropped_rather_than_answered() {
@@ -680,7 +680,7 @@ async fn favicon_is_a_data_uri_whose_base64_matches_the_os_encoder() {
             favicon,
             format!("data:image/png;base64,{expected}"),
             "favicon must be the mandatory `data:image/png;base64,` prefix \
-             (ServerStatus.java) followed by exactly what base64(1) produces \
+             (vanilla's own server status's own java) followed by exactly what base64(1) produces \
              for {bytes:?}",
         );
         // And, for a real PNG, our own real-server favicon decoder must recover
@@ -707,8 +707,8 @@ async fn favicon_is_a_data_uri_whose_base64_matches_the_os_encoder() {
 /// A `players.sample` entry uses `NameAndId`'s JSON keys and the *hyphenated*
 /// uuid string form.
 ///
-/// `NameAndId.CODEC` writes the id through `UUIDUtil.STRING_CODEC`
-/// (`server/players/NameAndId.java`) — a string, not the two-longs array a
+/// `vanilla's own name and id's own codec` writes the id through `vanilla's own uuid util's own string codec`
+/// (`server/players/vanilla's own name and id's own java`) — a string, not the two-longs array a
 /// packet field would use. The live capture's own sample entry is
 /// `{"id": "00000000-0000-0000-0000-000000000000", "name": "Anonymous Player"}`,
 /// which pins both the keys and the format.
@@ -745,7 +745,7 @@ async fn a_player_sample_entry_uses_nameandids_keys_and_hyphenated_uuid() {
     assert_eq!(
         entry["id"].as_str(),
         Some("f81d4fae-7dec-11d0-a765-00a0c91e6bf6"),
-        "uuid must be the hyphenated string form UUIDUtil.STRING_CODEC writes, \
+        "uuid must be the hyphenated string form vanilla's own uuid util's own string codec writes, \
          matching the capture's own sample entry",
     );
     assert_eq!(entry["name"].as_str(), Some("Steve"));
@@ -787,6 +787,6 @@ async fn enforces_secure_chat_is_written_only_when_true() {
     assert_eq!(
         value["enforcesSecureChat"],
         serde_json::Value::Bool(true),
-        "an enforcing server must say so (ServerStatus.java)",
+        "an enforcing server must say so (vanilla's own server status's own java)",
     );
 }

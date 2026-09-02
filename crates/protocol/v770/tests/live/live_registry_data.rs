@@ -400,7 +400,7 @@ async fn registry_data_from_a_real_server_decodes_and_matches_mojangs_own_data()
 /// Mojang's own biome JSONs.
 ///
 /// Joins the same oracle as the gate above and reads
-/// `minecraft:worldgen/biome` — **not** `minecraft:biome`; `Registries.BIOME`'s
+/// `minecraft:worldgen/biome` — **not** `minecraft:biome`; `vanilla's own registries's own biome`'s
 /// key carries the `worldgen/` prefix, and a lookup by the short name silently
 /// finds nothing.
 ///
@@ -696,7 +696,7 @@ async fn biome_climates_from_a_real_server_match_mojangs_own_biome_files() {
     // running can still sanity-check this gate's shape: desert has no
     // precipitation and is warm; frozen_peaks has precipitation and is cold
     // enough to snow. Both read straight from the same JSON files above.
-    // `Biome.warmEnoughToRain`'s threshold (`Biome.java`), inlined
+    // `vanilla's own biome's own warm enough to rain`'s threshold (`vanilla's own biome's own java`), inlined
     // rather than a cross-crate import: this protocol crate must not depend on
     // `lodestone-render` for one constant, and `lodestone_render::
     // WARM_ENOUGH_TO_RAIN` already pins the same `0.15` from the same source.
@@ -722,7 +722,7 @@ async fn biome_climates_from_a_real_server_match_mojangs_own_biome_files() {
 
 /// `has_precipitation`/`temperature`/`downfall` as Mojang's own biome file
 /// declares them (top-level fields, siblings of `attributes` — see
-/// `Biome.ClimateSettings.CODEC`, `Biome.java`), or `None` if any of
+/// `vanilla's own biome's own climate settings's own codec`, `vanilla's own biome's own java`), or `None` if any of
 /// the three required fields is absent from the file.
 fn mojang_biome_climate(short_name: &str) -> Option<lodestone_v770::packets::registry::BiomeClimate> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

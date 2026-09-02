@@ -1,17 +1,17 @@
 //! Hermetic framing tests for `minecraft:chunks_biomes` (id `13`).
 //!
-//! `ClientboundChunksBiomesPacket` (`.cache/mc/26.2/src/net/minecraft/network/
-//! protocol/game/ClientboundChunksBiomesPacket.java`) carries a VarInt-prefixed
+//! Vanilla's own clientbound chunks-biomes packet (confirmed against the
+//! decompiled 26.2 source) carries a VarInt-prefixed
 //! list of `(ChunkPos, byte[])` entries, where each byte array is, per
-//! `ChunkBiomeData.extractChunkData`, every section's
-//! `PalettedContainer<Holder<Biome>>.write` **back to back with no other
+//! `vanilla's own chunk biome data's own extract chunk data`, every section's
+//! biome-container encoder output **back to back with no other
 //! framing** — no non-air/fluid counts, no block-state container, just
 //! `section_count` biome containers in ascending section order. `ChunkPos` is
-//! `readChunkPos`/`ChunkPos.pack`: a raw `i64` with `x` in the low 32 bits and
+//! `readChunkPos`/`vanilla's own chunk pos's own pack`: a raw `i64` with `x` in the low 32 bits and
 //! `z` in the high 32, the same layout `forget_level_chunk` (id `0x21` at this
 //! protocol) already unpacks.
 //!
-//! Vanilla's only sender is `ChunkMap.resendBiomesForChunks`, whose only
+//! Vanilla's only sender is `vanilla's own chunk map's own resend biomes for chunks`, whose only
 //! caller is `FillBiomeCommand` (`/fillbiome`) — it *updates* a chunk a player
 //! already has loaded; the client never needs it to *create* one, which is why
 //! [`lodestone_world::World::merge_biomes`] is a no-op for an absent chunk. See
@@ -41,7 +41,7 @@ fn var_i32(value: i32) -> Vec<u8> {
     out
 }
 
-/// `ChunkPos.pack`: x in the low 32 bits, z in the high 32.
+/// `vanilla's own chunk pos's own pack`: x in the low 32 bits, z in the high 32.
 fn pack_chunk_pos(x: i32, z: i32) -> i64 {
     (i64::from(x) & 0xFFFF_FFFF) | (i64::from(z) << 32)
 }
@@ -140,7 +140,7 @@ fn chunks_biomes_overwrites_the_named_section_and_leaves_blocks_untouched() {
 #[test]
 fn chunks_biomes_is_a_noop_for_a_chunk_the_client_does_not_hold() {
     // Vanilla only ever sends this for a chunk a player already has loaded
-    // (`ChunkMap.resendBiomesForChunks` iterates `getPlayers`), so a chunk we
+    // (`vanilla's own chunk map's own resend biomes for chunks` iterates `getPlayers`), so a chunk we
     // do not hold must be dropped rather than fabricated from biomes alone —
     // biomes carry no shape (min-Y, section count, palettes) to build one from.
     let shape = ChunkShape::overworld_1_21();

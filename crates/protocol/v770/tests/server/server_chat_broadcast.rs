@@ -13,7 +13,7 @@
 //! * **The serverbound frame is hand-built from the 26.2 wire layout**
 //!   (`ServerboundChatPacket`'s own constructor: `readUtf(256)`,
 //!   `readInstant()`, `readLong()` salt, `readNullable(MessageSignature::read)`,
-//!   then `LastSeenMessages.Update`'s VarInt offset + fixed 20-bit set +
+//!   then `vanilla's own last seen messages's own update`'s VarInt offset + fixed 20-bit set +
 //!   checksum byte). It is **not** produced by our own `ChatMessage` encoder,
 //!   so this is an external anchor rather than `decode(encode(x)) == x`.
 //! * **B's reply is decoded by the pre-existing client-side decoder**
@@ -32,7 +32,7 @@
 //! # The sender receives their own message
 //!
 //! Checked against the jar rather than assumed:
-//! `PlayerList.broadcastChatMessage` (`PlayerList.java`) loops
+//! `vanilla's own player list's own broadcast chat message` (`vanilla's own player list's own java`) loops
 //! `for (ServerPlayer player : this.players)` with no sender exclusion, and a
 //! vanilla client does not echo its own chat locally — it waits for the
 //! server. So A must see A's own message too, and this test asserts it.
@@ -119,7 +119,7 @@ fn hello_bytes(name: &str, uuid: Uuid) -> Vec<u8> {
 /// readInstant()                         i64 epoch millis
 /// readLong()                            i64 salt
 /// readNullable(MessageSignature::read)  bool present, then 256 bytes if so
-/// LastSeenMessages.Update(input):
+/// vanilla's own last seen messages's own update(input):
 ///   readVarInt()                        offset
 ///   readFixedBitSet(20)                 3 bytes, no length prefix
 ///   readByte()                          checksum (0 = ignore)

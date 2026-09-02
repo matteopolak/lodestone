@@ -16,7 +16,7 @@
 //! test**:
 //!
 //! 1. the real vanilla 26.2 server's own bytes, captured off the socket; and
-//! 2. `crate::block_states`' generated census of `Block.BLOCK_STATE_REGISTRY`
+//! 2. `crate::block_states`' generated census of `vanilla's own block's own block state registry`
 //!    (32,366 states, dumped from the real jar) for what `minecraft:torch`'s
 //!    state id actually *is*.
 //!
@@ -32,8 +32,8 @@
 //! is visible on screen.
 //!
 //! This gate therefore triggers a cascade rather than a punch: `setblock` the
-//! supporting block to air and let vanilla's `Block.updateOrDestroy` →
-//! `Level.destroyBlock` path emit the torch's 2001 itself.
+//! supporting block to air and let vanilla's `vanilla's own block's own update or destroy` →
+//! `vanilla's own level's own destroy block` path emit the torch's 2001 itself.
 //!
 //! Full invocation (all three parts are required):
 //!
@@ -74,11 +74,11 @@ const GAME_ADDR: &str = "127.0.0.1:25570";
 const RCON_ADDR: &str = "127.0.0.1:25571";
 const RCON_PASSWORD: &str = "lodestone";
 
-/// Vanilla's `LevelEvent.PARTICLES_DESTROY_BLOCK`.
+/// Vanilla's `vanilla's own level event's own particles destroy block`.
 const PARTICLES_DESTROY_BLOCK: i32 = 2001;
 
 /// The first state id of `block`, straight from the generated census of
-/// `Block.BLOCK_STATE_REGISTRY` — the id space the wire uses.
+/// `vanilla's own block's own block state registry` — the id space the wire uses.
 fn first_state_of(block: &str) -> u32 {
     (0..block_states::STATE_COUNT)
         .find(|&id| block_states::block_name(id) == Some(block))
@@ -198,7 +198,7 @@ async fn pump_capturing(
 /// A cascading break (torch loses its support) must produce a `level_event`
 /// 2001 at the **torch's** position whose `data` is the **torch's** block state
 /// id, hand-decoded from the captured bytes and cross-checked against the
-/// generated `Block.BLOCK_STATE_REGISTRY` census.
+/// generated `vanilla's own block's own block state registry` census.
 #[tokio::test]
 #[ignore = "requires the live flat creative 26.2 oracle on :25570 (+ RCON :25571)"]
 async fn cascading_break_reports_the_cascaded_blocks_own_state_id() {
@@ -294,7 +294,7 @@ async fn cascading_break_reports_the_cascaded_blocks_own_state_id() {
     captured.clear();
 
     // Pull the support out. `setblock ... air` does **not** emit 2001 for the
-    // support itself (that is `Level.setBlock`, not `destroyBlock`), so the only
+    // support itself (that is `vanilla's own level's own set block`, not `destroyBlock`), so the only
     // 2001 this can produce is the torch's own cascade — the isolation this gate
     // depends on.
     let removed = rcon.cmd(&format!("setblock {gx} {gy} {gz} minecraft:air"));
@@ -351,7 +351,7 @@ async fn cascading_break_reports_the_cascaded_blocks_own_state_id() {
     let hand_pos = i64::from_be_bytes(cascade.raw[4..12].try_into().unwrap());
     let hand_data = i32::from_be_bytes(cascade.raw[12..16].try_into().unwrap());
     let hand_global = cascade.raw[16];
-    // `BlockPos.asLong`: x in bits 38..64, z in bits 12..38, y in bits 0..12.
+    // `vanilla's own block pos's own as long`: x in bits 38..64, z in bits 12..38, y in bits 0..12.
     // Each field is sign-extended by shifting it up to the sign bit and then
     // arithmetic-shifting it back down — x needs no up-shift because it is
     // already top-aligned.
@@ -370,7 +370,7 @@ async fn cascading_break_reports_the_cascaded_blocks_own_state_id() {
     );
 
     // 2. The id must be the *torch's* state id, taken from the generated
-    //    `Block.BLOCK_STATE_REGISTRY` census rather than from anything in the
+    //    `vanilla's own block's own block state registry` census rather than from anything in the
     //    particle path.
     let torch_state = first_state_of("minecraft:torch");
     eprintln!(

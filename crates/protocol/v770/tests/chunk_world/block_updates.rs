@@ -66,7 +66,7 @@ impl WorldSink for RecordingSink {
     }
 }
 
-/// Independently packs a `BlockPos` the way vanilla `BlockPos.asLong` does:
+/// Independently packs a `BlockPos` the way vanilla `vanilla's own block pos's own as long` does:
 /// `x` in bits 38–63, `z` in bits 12–37, `y` in bits 0–11.
 fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
     ((i64::from(x) & 0x3FF_FFFF) << 38)
@@ -74,7 +74,7 @@ fn pack_block_pos(x: i32, y: i32, z: i32) -> i64 {
         | (i64::from(y) & 0xFFF)
 }
 
-/// Independently packs a `SectionPos` the way vanilla `SectionPos.asLong` does:
+/// Independently packs a `SectionPos` the way vanilla `vanilla's own section pos's own as long` does:
 /// `x` in bits 42–63, `z` in bits 20–41, `y` in bits 0–19.
 fn pack_section_pos(x: i32, y: i32, z: i32) -> i64 {
     ((i64::from(x) & 0x3F_FFFF) << 42)
@@ -627,7 +627,7 @@ fn a_section_blocks_update_reconstructs_negative_coordinates() {
 /// A `block_entity_data` for a chest whose state is already set must **not** wipe
 /// the record's payload on the next `block_update` that repeats the same state.
 ///
-/// This is vanilla's `isValidBlockState` branch (`LevelChunk.java`): a
+/// This is vanilla's `isValidBlockState` branch (`vanilla's own level chunk's own java`): a
 /// same-type sync keeps the existing entity. A chest's contents arrive by
 /// `block_entity_data`, and the server re-sends `block_update` for a chest
 /// whenever its `type`/`facing` changes (a neighbouring chest making it a double),
