@@ -2703,16 +2703,12 @@ impl V340Adapter {
         // warning_time, warning_blocks — matching
         // `ClientEvent::WorldBorderInitialized`'s field order one-for-one.
         let mut reader = Reader::new(payload);
-        let raw_action = reader.var_i32().map_err(dec_err)?;
-        // 1.11 inserted the action-bar case as `2`, shifting times/clear/reset
-        // up by one. Normalise the earlier numbering onto the 1.11+ one so the
-        // arm bodies below read a single vocabulary; the alternative -- two
-        // parallel matches -- is where a mis-numbered case hides.
-        let action = if self.protocol >= PROTOCOL_1_11_2 || raw_action < 2 {
-            raw_action
-        } else {
-            raw_action + 1
-        };
+        // Unlike `title`, this packet's action vocabulary is unchanged across
+        // every protocol in this era -- verified against a real 1.9.4
+        // `world_border` capture, whose action-3 body decodes with zero
+        // trailing bytes here and did not before this comment's own code was
+        // corrected.
+        let action = reader.var_i32().map_err(dec_err)?;
         let directive = match action {
             0 => {
                 let radius = reader.f64().map_err(dec_err)?;

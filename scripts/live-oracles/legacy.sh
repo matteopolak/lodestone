@@ -6,19 +6,26 @@
 #
 #   version   family  game port  RCON port  container name
 #   1.8.9     v1-8    25566      25576      lodestone-mc189
+#   1.9.4     v1-9    25580      25581      lodestone-mc194
+#   1.10.2    v1-9    25582      25583      lodestone-mc1102
+#   1.11.2    v1-9    25584      25585      lodestone-mc1112
 #   1.12.2    v1-9    25568      25569      lodestone-legacy-1-12
 #   1.16.5    v1-14   25573      25574      lodestone-mc1165
 #
-# (container name / ports read directly off crates/versions/<fam>/tests/
-# live_*.rs's own doc comments and #[ignore] messages -- not invented here.)
+# (1.8.9/1.12.2/1.16.5 container names and ports read directly off
+# crates/versions/<fam>/tests/live_*.rs's own doc comments and #[ignore]
+# messages -- not invented here. The three 1.9-era rows arrived with the era
+# merge that made crates/versions/1.9 speak 110, 210 and 316 as well as 340;
+# their ports avoid every port already used here and are named by
+# crates/versions/1.9/tests/capture_join.rs.)
 #
 # 1.12.2 already had a working script (legacy-1.12.sh); this one covers the
-# other two, and also answers for 1.12.2 so one entry point serves all three.
+# rest, and also answers for 1.12.2 so one entry point serves them all.
 # legacy-1.12.sh is left in place untouched -- v1-9's live test doc comments
 # name it directly, and there is no reason to disturb a script that already
 # works.
 #
-# Usage: ./legacy.sh <version>   (1.8.9 | 1.12.2 | 1.16.5)
+# Usage: ./legacy.sh <version>   (1.8.9 | 1.9.4 | 1.10.2 | 1.11.2 | 1.12.2 | 1.16.5)
 #
 # Runtime: Apple `container`, not Docker -- see docs/oracles-and-benchmarks.md
 # ("Oracle runtimes: Apple container"). That content used to live in
@@ -40,7 +47,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 <version>" >&2
-  echo "  supported versions: 1.8.9 (v1-8), 1.12.2 (v1-9), 1.16.5 (v1-14)" >&2
+  echo "  supported versions: 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.16.5 (v1-14)" >&2
   exit 1
 }
 
@@ -51,8 +58,11 @@ VERSION="${1:-}"
 # every oracle here always sets (server-port, RCON, online-mode) -- read off
 # each family's own live_*.rs doc comments, not guessed:
 #   - v1-8 (live_entity.rs): "flat world, spawn-monsters=true"
-#   - v1-9 (legacy-1.12.sh, unchanged): no extra properties -- vanilla
-#     defaults, matching the script this generalises
+#   - v1-9 at 1.12.2 (legacy-1.12.sh, unchanged): no extra properties --
+#     vanilla defaults, matching the script this generalises
+#   - v1-9 at 1.9.4/1.10.2/1.11.2 (capture_join.rs): a flat world only, so a
+#     join capture is small and its chunk columns are the same shape every
+#     run; nothing there depends on mobs
 #   - v1-14 (live_entity.rs / live_interaction.rs): "flat world, RCON enabled";
 #     live_entity.rs additionally: "spawn-monsters=false/spawn-animals=false
 #     ... difficulty=peaceful" (it summons what it needs over RCON instead of
@@ -65,6 +75,24 @@ case "$VERSION" in
     GAME_PORT=25566
     RCON_PORT=25576
     EXTRA_PROPS=(level-type=FLAT spawn-monsters=true spawn-animals=true)
+    ;;
+  1.9.4)
+    NAME=lodestone-mc194
+    GAME_PORT=25580
+    RCON_PORT=25581
+    EXTRA_PROPS=(level-type=FLAT)
+    ;;
+  1.10.2)
+    NAME=lodestone-mc1102
+    GAME_PORT=25582
+    RCON_PORT=25583
+    EXTRA_PROPS=(level-type=FLAT)
+    ;;
+  1.11.2)
+    NAME=lodestone-mc1112
+    GAME_PORT=25584
+    RCON_PORT=25585
+    EXTRA_PROPS=(level-type=FLAT)
     ;;
   1.12.2)
     NAME=lodestone-legacy-1-12
@@ -93,6 +121,13 @@ if [ ! -f "$WORLD/server.jar" ]; then
   exit 1
 fi
 
+# The three 1.9-era jars arrive from `fetch-version` as a bare server.jar in
+# an otherwise empty directory, unlike 1.8.9/1.12.2/1.16.5 which were booted
+# by hand long ago. Accepting the EULA is what every other script in this
+# directory does for a fresh directory, and the server refuses to start
+# without it.
+printf 'eula=true\n' > "$WORLD/eula.txt"
+
 PROPS="$WORLD/server.properties"
 set_prop() {
   local key="$1" value="$2"
@@ -118,8 +153,8 @@ container system start >/dev/null 2>&1 || true
 
 container rm -f "$NAME" >/dev/null 2>&1 || true
 
-# `eclipse-temurin:8-jdk`, matching legacy-1.12.sh: all three of these
-# server.jars target Java 8, and there is no reason to rely on a newer JVM's
+# `eclipse-temurin:8-jdk`, matching legacy-1.12.sh: every one of these
+# server.jars targets Java 8, and there is no reason to rely on a newer JVM's
 # forward-compatibility with old bytecode when the exact intended runtime is
 # one `container run` away.
 container run -d --rm --name "$NAME" \
