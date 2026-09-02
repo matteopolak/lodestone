@@ -38,7 +38,7 @@ pub fn yaw_towards(dx: f64, dz: f64) -> f32 {
 /// `(dx, dz) = (s·cos θ − f·sin θ, f·cos θ + s·sin θ)`. That matrix is its own
 /// inverse (its determinant is `−1`), so the same expression recovers the axes from
 /// a direction — and because the recovered pair is a unit vector, vanilla's
-/// `movementInputToVelocity` normalisation leaves it alone and the resulting speed
+/// own movement-input-to-velocity normalisation leaves it alone and the resulting speed
 /// is the full walk speed, not a fraction of it.
 ///
 /// Holding `forward = 1.0` and *assuming* yaw is correct is the version that

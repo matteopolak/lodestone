@@ -423,7 +423,7 @@ impl BlockCensus for FixtureCensus {
     }
 
     fn blocks_motion(&self, state: u32) -> Option<bool> {
-        // `forceSolidOff`: a ladder never blocks motion despite its nonzero
+        // Vanilla's own solidity override: a ladder never blocks motion despite its nonzero
         // collision shape (`graph::stand_surface`'s doc comment).
         Some(!matches!(
             state,

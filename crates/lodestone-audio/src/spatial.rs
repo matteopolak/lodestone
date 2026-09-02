@@ -95,7 +95,7 @@ pub struct Spatialization {
     /// (its clamped effect on *gain* is applied separately by the mixer).
     pub instance_volume: f32,
     /// When true the source is head-relative: no attenuation and no panning
-    /// (vanilla `isRelative`), used for UI/music.
+    /// (vanilla's own head-relative flag), used for UI/music.
     pub relative: bool,
 }
 

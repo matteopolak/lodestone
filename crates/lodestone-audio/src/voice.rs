@@ -38,7 +38,7 @@ pub struct Voice {
     category: SoundCategory,
     spat: Spatialization,
     /// Playback-rate multiplier, already clamped to `[0.5, 2.0]` (vanilla's
-    /// `calculatePitch`).
+    /// own pitch calculation).
     pitch: f32,
     looping: bool,
     /// Fractional read head, in source frames.

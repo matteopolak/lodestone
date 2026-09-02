@@ -1441,7 +1441,7 @@ mod real_collision {
 
     /// Real flat `minecraft:stone` at world `y = 0` everywhere — the ground
     /// every column stands on, `Climb` included: a real ladder never floats
-    /// free of `canSurvive`'s own support requirement, and this crate trusts
+    /// free of vanilla's own survival/support requirement, and this crate trusts
     /// a persisted block's own tag membership rather than re-deriving it
     /// (`lodestone_nav::graph::climb_step`'s own doc comment). A ladder
     /// occupies `(LADDER_X, 1..=LADDER_TOP, LADDER_Z)`; when `platform` is

@@ -21,7 +21,8 @@ pub struct NavPolicy {
     ///
     /// **`false` in M1, deliberately.** Sprint reaches the server only as a
     /// `PlayerCommand::{Start,Stop}Sprinting` edge — the `SetPlayerInput` sprint bit
-    /// is stored as `lastClientInput` and does *not* call `setSprinting` — and the
+    /// is stored as vanilla's own last-client-input field and does *not* set the
+    /// live sprinting flag — and the
     /// sprint-through-a-descent overshoot rules are M2/M3. A sprinting M1 bot would
     /// move faster and be wrong in a way that looks like a physics bug.
     pub allow_sprint: bool,

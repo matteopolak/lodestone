@@ -57,7 +57,7 @@
 //!   `#[derive(Message)]` type. Nothing in this crate is privileged; it is
 //!   ordinary third-party plugin code.
 //! * [`ServerBrand::decode`] is deliberately **strict about trailing bytes**. A
-//!   `minecraft:brand` payload is exactly one `readUtf` string, so anything left
+//!   `minecraft:brand` payload is exactly one vanilla-style length-prefixed string, so anything left
 //!   over means we are not looking at a brand payload and guessing would be
 //!   worse than rejecting — a rejection is counted in
 //!   `PluginChannelState::rejected` rather than lost.
@@ -175,7 +175,7 @@ mod tests {
 
     use super::{PluginChannel, ServerBrand, read_var_int};
 
-    /// A `readUtf` body: single-byte length, then the bytes.
+    /// A vanilla-style length-prefixed string body: single-byte length, then the bytes.
     #[test]
     fn decodes_a_single_byte_length_brand() {
         let payload = b"\x07vanilla";
