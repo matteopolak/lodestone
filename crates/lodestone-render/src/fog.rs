@@ -9,8 +9,9 @@
 //! the shader reads, both constructible and testable without a GPU. The shader
 //! applies `mix(fragment, fog_colour, fog_factor)` using exactly this math.
 //!
-//! The factor is **linear** between `start` and `end` (vanilla's `RENDER`
-//! distance fog is linear; the exponential water fog is a separate, later
+//! The factor is **linear** between `start` and `end` (vanilla's own
+//! render-distance
+//! fog is linear; the exponential water fog is a separate, later
 //! concern). `start`/`end` are world-space distances from the eye.
 
 use bytemuck::{Pod, Zeroable};
@@ -124,8 +125,7 @@ impl FogSettings {
     /// [`for_render_distance`](Self::for_render_distance), which implements
     /// vanilla's actual span rather than a fraction. What is left here is
     /// vanilla's *environmental* fog shape: a range the caller states outright,
-    /// which is what water (`WaterFogEnvironment`), lava
-    /// (`LavaFogEnvironment`) and the declared
+    /// which is what vanilla's own water and lava fog environments, and the declared
     /// `visual/fog_start_distance`/`visual/fog_end_distance` attributes are.
     /// Those must **not** acquire a render-distance span — water fog ramps from
     /// the eye (`start_fraction` 0), and folding the span in would push its
@@ -133,7 +133,7 @@ impl FogSettings {
     ///
     /// # Why this still writes `start`/`end`, not `environmental_start`/`end`
     ///
-    /// Vanilla's `WaterFogEnvironment`/`LavaFogEnvironment` set exactly the
+    /// Vanilla's own water and lava fog environments set exactly the
     /// *environmental* attributes, so the semantically pure port would land
     /// this range in `environmental_start`/`environmental_end` and leave
     /// `start`/`end` disabled. That was tried and reverted: `sim.rs`'s water
@@ -144,7 +144,7 @@ impl FogSettings {
     /// touching a single one of them. This constructor's range stays in the
     /// render-distance pair, which keeps every current caller — water, lava,
     /// and `sim::fog_for_render_distance`'s pre-#388 fraction path — pixel-
-    /// identical to before this change. The one measurable cost: the shader
+    /// identical to the range it always wrote. The one measurable cost: the shader
     /// now measures this pair **cylindrically** rather than spherically, which
     /// is a few percent of a block of difference at the short ranges these
     /// callers use and does not reach the reported symptom (open-sky
@@ -222,7 +222,8 @@ impl FogSettings {
     /// Vanilla's Nether fog is not a render-distance edge fade like the
     /// overworld's: `the_nether` dimension type fixes
     /// `visual/fog_start_distance`/`visual/fog_end_distance` at `10.0`/`96.0`
-    /// blocks regardless of render distance (`AtmosphericFogEnvironment.setupFog`
+    /// blocks regardless of render distance (vanilla's own atmospheric
+    /// fog-environment's fog-setup function
     /// reads those two attributes directly), so the haze is thick and close no
     /// matter how far the player can see. The colour is the `nether_wastes`
     /// biome's `visual/fog_color` (`#330808`) — the dimension type itself
@@ -238,9 +239,10 @@ impl FogSettings {
     /// the loaded world, exactly like [`FogSettings::for_view_distance`]'s
     /// `end`.
     ///
-    /// Vanilla applies the render-distance term here **as well** — `setupFog`
-    /// sets `renderDistanceStart`/`End` unconditionally, after the environment
-    /// hook, and `total_fog_value` takes the `max` of the two. Both terms are
+    /// Vanilla applies the render-distance term here **as well** — vanilla's
+    /// own fog-setup function
+    /// sets its own render-distance start/end fields unconditionally, after the environment
+    /// hook, and its own total-fog-value function takes the `max` of the two. Both terms are
     /// now modelled explicitly: `environmental_start`/`environmental_end`
     /// carry the fixed `10.0`/`96.0` (clamped to the loaded world, exactly as
     /// this constructor always clamped its one pair before), and `start`/`end`
@@ -286,7 +288,8 @@ impl FogSettings {
     ///
     /// This reuses that edge-fade shape with the End's colour rather than
     /// vanilla's separate `sky_color`/`fog_color` blend curve
-    /// (`AtmosphericFogEnvironment.getBaseColor`'s `skyColorMixFactor`): with
+    /// (vanilla's own atmospheric fog-environment's base-colour function's own
+    /// sky-colour mix factor): with
     /// no sky dome to blend into (the End draws its own starfield, which nothing
     /// in this renderer attempts), a single flat colour is the closest
     /// approximation reachable without a second bind-group slot or a new
