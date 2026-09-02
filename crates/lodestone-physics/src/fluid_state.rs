@@ -1,12 +1,14 @@
-//! Eye-in-fluid / box-in-fluid state (`EntityFluidInteraction.update`).
+//! Eye-in-fluid / box-in-fluid state (vanilla's own fluid-interaction update).
 //!
-//! Vanilla computes, once per tick in `Entity.baseTick`, a per-fluid summary of
-//! how the entity's box sits in water and lava: the fluid **height** it reaches
-//! (`getFluidHeight`, `> 0` ⇒ [`FluidState::in_water`]/[`FluidState::in_lava`])
-//! and whether the **eye** is submerged (`isEyeInFluid`). Those two are *distinct*
-//! — the box can intersect water while the eye is in open air (wading), and the
-//! eye can be under while the feet are not (at a ledge) — and vanilla tracks water
-//! and lava **separately**. This module reproduces that distinction bit-exactly.
+//! Vanilla computes, once per tick in its own per-tick base update, a
+//! per-fluid summary of how the entity's box sits in water and lava: the
+//! fluid **height** it reaches (`getFluidHeight`, `> 0` ⇒
+//! [`FluidState::in_water`]/[`FluidState::in_lava`]) and whether the **eye**
+//! is submerged (`isEyeInFluid`). Those two are *distinct* — the box can
+//! intersect water while the eye is in open air (wading), and the eye can
+//! be under while the feet are not (at a ledge) — and vanilla tracks water
+//! and lava **separately**. This module reproduces that distinction
+//! bit-exactly.
 //!
 //! It gates four consumers that today have no shared source of truth:
 //! submerged fog colour / view distance, the underwater overlay, the
@@ -27,18 +29,20 @@
 //!
 //! # Widths (load-bearing)
 //!
-//! `FluidState.getHeight()` is a **`float`** (`amount / 9.0F`), added to a
-//! `double` `fluidBottom`; `getEyeY()` adds a **`float`** `eyeHeight` to a
-//! `double` `position.y`. Both float→double promotions are reproduced at the same
-//! places, because the server re-derives eye-in-water from the position we report
-//! and a `0.001`-scale disagreement at the waterline flips the boolean.
+//! Vanilla's own per-block fluid-height getter is a **`float`** (`amount /
+//! 9.0F`), added to a `double` `fluidBottom`; vanilla's own eye-Y accessor
+//! adds a **`float`** `eyeHeight` to a `double` `position.y`. Both
+//! float→double promotions are reproduced at the same places, because the
+//! server re-derives eye-in-water from the position we report and a
+//! `0.001`-scale disagreement at the waterline flips the boolean.
 
 use crate::collision::CollisionView;
 use crate::fluid::FluidKind;
 use crate::geometry::{Aabb, Vec3d};
 use crate::mth;
 
-/// The result of `EntityFluidInteraction.update` for one entity this tick:
+/// The result of vanilla's own fluid-interaction update for one entity this
+/// tick:
 /// per-fluid reach height and eye-submersion, for water and lava separately.
 ///
 /// All four fields are *outputs* — derived from the entity's pre-move box and eye
@@ -46,16 +50,19 @@ use crate::mth;
 /// ([`Self::in_water`], [`Self::under_water`], …) rather than the raw heights.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FluidState {
-    /// `getFluidHeight(WATER)` — the tallest `fluidTop - feetY` over the box's
-    /// water cells (`0.0` if the box touches no water). `> 0.0` ⇒ in water.
+    /// Vanilla's own fluid-height getter for water — the tallest `fluidTop -
+    /// feetY` over the box's water cells (`0.0` if the box touches no
+    /// water). `> 0.0` ⇒ in water.
     pub water_height: f64,
-    /// `getFluidHeight(LAVA)` — as [`Self::water_height`] for lava.
+    /// Vanilla's own fluid-height getter for lava — as [`Self::water_height`]
+    /// for lava.
     pub lava_height: f64,
-    /// `isEyeInFluid(WATER)` — the eye block-column holds water spanning the eye
-    /// Y. On its own this is *not* `isUnderWater`; combine with [`Self::in_water`]
-    /// via [`Self::under_water`], exactly as vanilla's `wasEyeInWater && isInWater`.
+    /// Vanilla's own eye-in-fluid check for water — the eye block-column
+    /// holds water spanning the eye Y. On its own this is *not*
+    /// `isUnderWater`; combine with [`Self::in_water`] via
+    /// [`Self::under_water`], exactly as vanilla's `wasEyeInWater && isInWater`.
     pub eye_in_water: bool,
-    /// `isEyeInFluid(LAVA)`.
+    /// Vanilla's own eye-in-fluid check for lava.
     pub eye_in_lava: bool,
 }
 
@@ -68,21 +75,22 @@ impl FluidState {
         eye_in_lava: false,
     };
 
-    /// `Entity.isInWater()` — the box intersects water (`getFluidHeight > 0`).
+    /// Vanilla's own "is in water" check — the box intersects water
+    /// (`getFluidHeight > 0`).
     #[must_use]
     pub fn in_water(&self) -> bool {
         self.water_height > 0.0
     }
 
-    /// `Entity.isInLava()` — the box intersects lava.
+    /// Vanilla's own "is in lava" check — the box intersects lava.
     #[must_use]
     pub fn in_lava(&self) -> bool {
         self.lava_height > 0.0
     }
 
-    /// `Entity.isUnderWater()` = `wasEyeInWater && isInWater()`. This is the flag
-    /// that gates submerged fog, the overlay, the ambient sounds, and the
-    /// sprint-swimming pose.
+    /// Vanilla's own "is underwater" check = `wasEyeInWater && isInWater()`.
+    /// This is the flag that gates submerged fog, the overlay, the ambient
+    /// sounds, and the sprint-swimming pose.
     #[must_use]
     pub fn under_water(&self) -> bool {
         self.eye_in_water && self.in_water()
@@ -95,17 +103,21 @@ impl FluidState {
     }
 }
 
-/// `EntityFluidInteraction.update(entity, ignoreCurrent = true)` — the flow
-/// current is *not* accumulated here (that lives in [`crate::fluid`]); this
-/// computes only the height/eye summary the four consumers need.
+/// Vanilla's own fluid-interaction update (with the flow current ignored) —
+/// the flow current is *not* accumulated here (that lives in
+/// [`crate::fluid`]); this computes only the height/eye summary the four
+/// consumers need.
 ///
 /// * `bounding_box` is the entity's **un-deflated** box at its pre-move position;
-///   the interaction box is `deflate(0.001)` of it, matching `getFluidInteractionBox`.
-/// * `position` supplies `getBlockX()`/`getBlockZ()` (the eye column, `floor` of
-///   the box centre) — passed explicitly rather than recomputed from the box so
-///   the `float`-cancellation of `±width/2` never perturbs the floor.
+///   the interaction box is `deflate(0.001)` of it, matching vanilla's own
+///   fluid-interaction box.
+/// * `position` supplies vanilla's own block-X/block-Z accessors (the eye
+///   column, `floor` of the box centre) — passed explicitly rather than
+///   recomputed from the box so the `float`-cancellation of `±width/2`
+///   never perturbs the floor.
 /// * `eye_height` is the pose eye height (`1.62` standing, `0.4` swimming); the
-///   eye Y is `position.y + (double)eye_height`, reproducing `getEyeY`.
+///   eye Y is `position.y + (double)eye_height`, reproducing vanilla's own
+///   eye-Y accessor.
 #[must_use]
 pub fn compute_fluid_state(
     bounding_box: Aabb,
@@ -113,8 +125,8 @@ pub fn compute_fluid_state(
     eye_height: f32,
     view: &dyn CollisionView,
 ) -> FluidState {
-    // `getFluidInteractionBox()` = `boundingBox.deflate(0.001)`. The cell range is
-    // `floor(min) ..= ceil(max) - 1` of that deflated box.
+    // Vanilla's own fluid-interaction box = `boundingBox.deflate(0.001)`.
+    // The cell range is `floor(min) ..= ceil(max) - 1` of that deflated box.
     let d = 0.001;
     let x0 = mth::floor(bounding_box.min_x + d);
     let y0 = mth::floor(bounding_box.min_y + d);
@@ -124,8 +136,9 @@ pub fn compute_fluid_state(
     let z1 = mth::ceil(bounding_box.max_z - d) - 1;
 
     // The skip test compares against the *deflated* box min; the height subtracts
-    // the *un-deflated* box min (`entity.getBoundingBox().minY`). Vanilla uses the
-    // two different boxes here and the 0.001 gap is observable at the waterline.
+    // the *un-deflated* box min (vanilla's own bounding-box min-Y). Vanilla
+    // uses the two different boxes here and the 0.001 gap is observable at
+    // the waterline.
     let deflated_min_y = bounding_box.min_y + d;
     let entity_y = bounding_box.min_y;
 
@@ -188,7 +201,8 @@ fn fluid_kind_at(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> Option<Flu
     }
 }
 
-/// `FluidState.getHeight(level, pos)` = `hasSameAbove ? 1.0F : getOwnHeight()`.
+/// Vanilla's own per-block fluid height: `1.0F` if the same fluid sits in
+/// the cell directly above, else the fluid's own fractional level height.
 ///
 /// Height is a **`float`**. When [`CollisionView::fluid_at`] gives the level, the
 /// own-height is `amount / 9.0F`; without it (coarse presence only) a present cell
@@ -197,11 +211,10 @@ fn fluid_kind_at(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> Option<Flu
 ///
 /// # A known, narrow approximation
 ///
-/// Vanilla's `hasSameAbove` is `fluidState.getType().isSame(above.getType())` —
-/// `Fluid` **object identity**, and a source (`Fluids.WATER`) and flowing water
-/// (`Fluids.FLOWING_WATER`) are two *different* registered `Fluid` instances
-/// (`WaterFluid.getSource()`/`getFlowing()`, `.cache/mc/26.2/src/.../WaterFluid.java`).
-/// So in real vanilla, a flowing cell directly under a *source* does **not**
+/// Vanilla's own "has same above" check is a fluid-type identity comparison
+/// — **object identity**, and a water source and flowing water are two
+/// *different* registered fluid instances. So in real vanilla, a flowing
+/// cell directly under a *source* does **not**
 /// count as "the same fluid above" — only two cells that are both sources, or
 /// both flowing (any two levels), do. This function folds that down to "same
 /// [`FluidKind`] above" (any water above water, any lava above lava,
