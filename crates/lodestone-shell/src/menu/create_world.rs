@@ -40,18 +40,26 @@
 //!   (`MoreTab`'s constructor). All three now have real models
 //!   ([`GAME_RULES_ROW`]/[`GameRulesEditor`] and
 //!   [`DATA_PACKS_ROW`]/[`DataPacksEditor`], both issue #592;
-//!   [`EXPERIMENTS_ROW`]/[`ExperimentsEditor`], issue #693). Unlike the other
-//!   two, [`ExperimentsEditor`]'s collected choice is **fully decorative**
-//!   past [`WorldCreationConfig::experiments`] — see that field's own doc for
-//!   why (vanilla's `enabledFeatures` lives in `level.dat`, not on the wire,
-//!   and this crate has no `lodestone-server` world-creation hook to write
-//!   it into). The tab itself is real regardless: selectable, its own real
-//!   [`TabEntryView`](super::render::TabEntryView), never disabled for having
-//!   a partially-decorative feature under it — unlike Statistics's Items/Mobs,
+//!   [`EXPERIMENTS_ROW`]/[`ExperimentsEditor`], issue #693).
+//!   [`ExperimentsEditor`]'s collected choice reaches disk now too:
+//!   [`WorldCreationConfig::experiments`] is written into the freshly created
+//!   world's `level.dat` as vanilla's own `enabled_features` field
+//!   (`crate::saves::create_world_in`, through
+//!   [`lodestone_anvil::level_dat::LevelDat::with_enabled_features`]) — no
+//!   `lodestone-server` hook needed, since the shell writes `level.dat`
+//!   itself before the server ever opens the directory (see that function's
+//!   own doc). What is still unbuilt is the *engine* half: nothing reads
+//!   `enabled_features` back to gate the trade-rebalance/redstone/minecart
+//!   behaviours themselves, matching vanilla's own scope for a stable-channel
+//!   client (`GameTab`'s copy of this button, per its own note above, is
+//!   simply absent — there is no in-game surface for those behaviours to
+//!   reach yet either). The tab itself is real regardless: selectable, its
+//!   own real [`TabEntryView`](super::render::TabEntryView), never disabled
+//!   for having an unbuilt feature under it — unlike Statistics's Items/Mobs,
 //!   which vanilla disables **because the underlying list is empty**
 //!   (`StatsScreen.setTabActiveStateAndTooltip`). Nothing here is
-//!   data-driven-empty; Experiments is feature-not-yet-built, and disabling
-//!   the tab for it would misrepresent that as vanilla's own behaviour.
+//!   data-driven-empty; disabling the tab for it would misrepresent that as
+//!   vanilla's own behaviour.
 //! - [`ONLINE_MODE_ROW`] has no vanilla tab at all — see its own doc on why it
 //!   exists — and is placed on **World**, after Bonus Chest: it is a
 //!   network-exposure setting for the world being created, which is closer in
@@ -516,15 +524,23 @@ pub struct WorldCreationConfig {
     /// Feature flags the player turned on (issue #693's Experiments half), as
     /// [`ExperimentFlag::id`] strings — collected from [`CreateWorldNav`]'s
     /// own [`ExperimentsEditor`] when Create is pressed, the exact
-    /// `Vec<String>` shape [`Self::data_packs`] already takes and for the
-    /// same reason: **fully decorative**. Vanilla's own
+    /// `Vec<String>` shape [`Self::data_packs`] takes. Unlike that field,
+    /// this one reaches disk: vanilla's own
     /// `WorldDataConfiguration.enabledFeatures` is written into a freshly
     /// created world's `level.dat` at creation time — it is never a network
-    /// packet, unlike [`Self::game_rules`] — so consuming this needs a
-    /// `lodestone-server` world-creation hook this crate cannot reach (that
-    /// crate is out of scope for the pass that added this field). Empty for
-    /// a world that never had any experiment turned on, matching
-    /// `FeatureFlags.DEFAULT_FLAGS == VANILLA_SET`.
+    /// packet, unlike [`Self::game_rules`] — and `crate::saves::create_world_in`
+    /// writes it there, through
+    /// [`lodestone_anvil::level_dat::LevelDat::with_enabled_features`], from
+    /// the same layer that already writes the world's name and game type. No
+    /// `lodestone-server` hook is needed for *that* much: the shell owns
+    /// `level.dat`'s creation, and the server only ever reads it back
+    /// afterwards (`region_source::LevelDatHandle::open_or_create`'s
+    /// existing-file branch), preserving whatever this crate wrote. Still
+    /// unbuilt: nothing downstream reads `enabled_features` back to make the
+    /// three flags actually change engine behaviour — that is real gameplay
+    /// work, not a wiring gap. Empty for a world that never had any
+    /// experiment turned on, matching `FeatureFlags.DEFAULT_FLAGS ==
+    /// VANILLA_SET`, and writes nothing extra to `level.dat` in that case.
     pub experiments: Vec<String>,
 }
 
@@ -2209,8 +2225,8 @@ fn data_packs_frame(nav: &CreateWorldNav) -> MenuFrame<'static> {
 /// #693's Experiments half). `WorldDataConfiguration`'s own
 /// `enabledFeatures` field is exactly this set, written into a freshly
 /// created world's `level.dat`, never sent over any network packet — see
-/// [`WorldCreationConfig::experiments`]'s own doc for why that makes this
-/// decorative here, the same way [`WorldCreationConfig::data_packs`] is.
+/// [`WorldCreationConfig::experiments`]'s own doc for where that write
+/// actually happens and what is still unbuilt past it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExperimentFlag {
     TradeRebalance,

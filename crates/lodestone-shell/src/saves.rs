@@ -691,8 +691,12 @@ impl std::error::Error for SaveError {}
 /// # Errors
 ///
 /// See [`create_world_in`].
-pub fn create_world(name: &str, game_type: i32) -> Result<PathBuf, SaveError> {
-    create_world_in(&saves_dir(), name, game_type)
+pub fn create_world(
+    name: &str,
+    game_type: i32,
+    enabled_features: &[String],
+) -> Result<PathBuf, SaveError> {
+    create_world_in(&saves_dir(), name, game_type, enabled_features)
 }
 
 /// Create a new world directory under `root` for a world the player named
@@ -716,11 +720,25 @@ pub fn create_world(name: &str, game_type: i32) -> Result<PathBuf, SaveError> {
 /// `world_gen_settings.dat` on the world's first open, and because this
 /// directory is new the requested seed is the one that wins.
 ///
+/// `enabled_features` is [`crate::menu::create_world::WorldCreationConfig::experiments`]
+/// (issue #693's Experiments half) — bare flag ids, [`ExperimentFlag::id`]'s
+/// own shape — written into `level.dat`'s `enabled_features` field through
+/// [`lodestone_anvil::level_dat::LevelDat::with_enabled_features`]. Empty
+/// (nothing turned on) writes nothing extra, matching every other decorative
+/// field this function already leaves at its vanilla default.
+///
+/// [`ExperimentFlag::id`]: crate::menu::create_world::ExperimentFlag::id
+///
 /// # Errors
 ///
 /// [`SaveError::Io`] if either directory cannot be created,
 /// [`SaveError::Anvil`] if `level.dat` cannot be written.
-pub fn create_world_in(root: &Path, name: &str, game_type: i32) -> Result<PathBuf, SaveError> {
+pub fn create_world_in(
+    root: &Path,
+    name: &str,
+    game_type: i32,
+    enabled_features: &[String],
+) -> Result<PathBuf, SaveError> {
     // Browser: refuse explicitly rather than half-succeeding. `create_dir_all`
     // below returns `Err(Unsupported)` on wasm32 (measured), so this would already
     // fail — but it would fail as `SaveError::Io("operation not supported on this
@@ -730,7 +748,7 @@ pub fn create_world_in(root: &Path, name: &str, game_type: i32) -> Result<PathBu
     // `saves/` directory and no `level.dat`.
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (root, name, game_type);
+        let _ = (root, name, game_type, enabled_features);
         return Err(SaveError::Io(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "a browser has no saves directory; browser worlds are in-memory only",
@@ -761,7 +779,8 @@ pub fn create_world_in(root: &Path, name: &str, game_type: i32) -> Result<PathBu
         level_name,
         &lodestone_anvil::level_dat::Spawn::default(),
         game_type,
-    );
+    )
+    .with_enabled_features(enabled_features);
     lodestone_anvil::level_dat::write_to_file(
         &level,
         &lodestone_anvil::level_dat::path_in(&dir),
@@ -1173,7 +1192,7 @@ mod tests {
     #[test]
     fn creating_a_world_writes_the_typed_name_and_a_fresh_directory() {
         let root = temp_root("create");
-        let dir = create_world_in(&root, "My World!", 1).expect("creates");
+        let dir = create_world_in(&root, "My World!", 1, &[]).expect("creates");
         assert_eq!(
             dir.file_name().and_then(|n| n.to_str()),
             Some("My World!"),
@@ -1191,7 +1210,7 @@ mod tests {
         // The second create with the same name must be a **different**
         // directory — this is the whole bug the save list exists to fix, so it
         // is asserted directly rather than inferred from `available_dir_name`.
-        let second = create_world_in(&root, "My World!", 1).expect("creates a second");
+        let second = create_world_in(&root, "My World!", 1, &[]).expect("creates a second");
         assert_ne!(second, dir, "Create New World must not reopen the first one");
         assert_eq!(
             second.file_name().and_then(|n| n.to_str()),
@@ -1218,7 +1237,7 @@ mod tests {
     #[test]
     fn a_name_of_only_illegal_characters_still_produces_a_usable_folder() {
         let root = temp_root("illegal-only");
-        let dir = create_world_in(&root, "///", 0).expect("creates");
+        let dir = create_world_in(&root, "///", 0, &[]).expect("creates");
         assert_eq!(dir.file_name().and_then(|n| n.to_str()), Some("___"));
         assert_eq!(list_worlds_in(&root).len(), 1);
     }
