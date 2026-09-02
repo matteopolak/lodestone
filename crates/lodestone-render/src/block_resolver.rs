@@ -65,8 +65,8 @@ pub const MAX_SPRITES: usize = 2048;
 pub(crate) const PLAINS_TEMPERATURE: f32 = 0.8;
 pub(crate) const PLAINS_DOWNFALL: f32 = 0.4;
 
-/// Vanilla's default water tint (`BiomeSpecialEffects` water colour), used where
-/// no colormap applies.
+/// Vanilla's default water tint (a biome's default water-colour effect), used
+/// where no colormap applies.
 pub(crate) const DEFAULT_WATER_TINT: u32 = 0x003F_76E4;
 
 /// Errors from [`BlockAtlas::build`].
@@ -171,7 +171,7 @@ impl BlockAtlas {
     }
 
     /// As [`Self::build`], with an explicit mip depth rather than the shipped
-    /// default — the live `mipmapLevels` video setting's consumer
+    /// default — the live mipmap-levels video setting's consumer
     /// (`crate::resources::mipmap_levels` in the shell) reaches here so
     /// changing the setting rebuilds the atlas at the new level count, through
     /// the same `pack_generation` hot-reload machinery a resource-pack
@@ -402,7 +402,7 @@ impl BlockAtlas {
     /// unrecognised or partial string returns `None` **loudly** rather than
     /// resolving to a plausible-but-wrong id — the caller decides how to handle a
     /// miss (log, fall back), and no silent mis-mapping is possible. Vanilla's own
-    /// `BlockState` string form always lists every property, so a faithful
+    /// block-state string form always lists every property, so a faithful
     /// generator string round-trips exactly.
     #[must_use]
     pub fn state_id_of(&self, block_state: &str) -> Option<u32> {

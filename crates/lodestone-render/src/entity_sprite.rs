@@ -4,11 +4,11 @@
 //!
 //! # What it is
 //!
-//! Three of the 26.2 entity renderers draw a single textured quad turned to
-//! face the eye: `ExperienceOrbRenderer` (which lives in
+//! Three of the 26.2 entity types draw a single textured quad turned to
+//! face the eye: the experience orb (which lives in
 //! [`crate::entity`](crate::entity) because it also owns an eleven-cell sprite
-//! sheet and a pulsing tint), `DragonFireballRenderer` and
-//! `FishingHookRenderer`. The last two are this module: one table row each, one
+//! sheet and a pulsing tint), the dragon fireball and
+//! the fishing bobber. The last two are this module: one table row each, one
 //! shared mesh builder, one shared placement matrix — and, for the hook, the
 //! sixteen-segment catenary back to the caster's hand.
 //!
@@ -34,9 +34,9 @@
 //! is `y ∈ [-0.25, 0.75]` (three-quarters above its own origin) while the
 //! hook's is `y ∈ [-0.5, 0.5]` (centred). Centring the fireball sinks half the
 //! sprite into whatever it is flying over; lifting the hook floats it above the
-//! water it is meant to sit in. Read them off the renderer's own `vertex`
-//! calls rather than from the entity's `EntityDimensions`, which is a hitbox
-//! and is a different number.
+//! water it is meant to sit in. Read them off the renderer's own vertex
+//! calls rather than from the entity's hitbox dimensions, which is a
+//! different number.
 //!
 //! # Dependencies
 //!
@@ -51,20 +51,19 @@ use lodestone_physics::mth;
 
 use crate::models::ModelVertex;
 
-/// Where the dragon fireball's sheet lives in the vanilla jar —
-/// `DragonFireballRenderer.TEXTURE_LOCATION`. A standalone sheet like
+/// Where the dragon fireball's sheet lives in the vanilla jar — the
+/// renderer's own texture-location constant. A standalone sheet like
 /// [`crate::entity::EXPERIENCE_ORB_TEXTURE`], not a slice of any atlas.
 pub const DRAGON_FIREBALL_TEXTURE: &str =
     "assets/minecraft/textures/entity/enderdragon/dragon_fireball.png";
 
-/// Where the fishing bobber's sheet lives in the vanilla jar —
-/// `FishingHookRenderer.TEXTURE_LOCATION`. Standalone, like
+/// Where the fishing bobber's sheet lives in the vanilla jar — the
+/// renderer's own texture-location constant. Standalone, like
 /// [`DRAGON_FIREBALL_TEXTURE`].
 pub const FISHING_HOOK_TEXTURE: &str =
     "assets/minecraft/textures/entity/fishing/fishing_hook.png";
 
-/// The entity-type path a fishing bobber reports (`minecraft:fishing_bobber`,
-/// `EntityTypes.FISHING_BOBBER`).
+/// The entity-type path a fishing bobber reports (`minecraft:fishing_bobber`).
 ///
 /// Named rather than spelled inline because three separate things key on it:
 /// the sprite row below, the line pass, and the owner-id decode on the wire.
@@ -86,15 +85,17 @@ pub struct EntitySprite {
     pub type_path: &'static str,
     /// The standalone sheet this sprite samples, as a jar path.
     pub texture: &'static str,
-    /// `poseStack.scale(s, s, s)` from the renderer's own `submit`.
+    /// The renderer's own uniform pose-stack scale, applied before the
+    /// billboard rotation.
     pub scale: f32,
     /// The quad's lower-left corner in local space, before [`Self::scale`] —
-    /// `(x, y)` from the renderer's `vertex` calls, with the constant offset
-    /// each one subtracts already folded in.
+    /// `(x, y)` from the renderer's own vertex calls, with the constant
+    /// offset each one subtracts already folded in.
     pub quad_min: [f32; 2],
     /// The quad's upper-right corner, the same way.
     pub quad_max: [f32; 2],
-    /// Whether the renderer overrides `getBlockLightLevel` to a flat `15`.
+    /// Whether the renderer overrides the entity's block-light sample to a
+    /// flat `15`.
     ///
     /// Vanilla's override returns the **block** level only; the sky nibble is
     /// still the probe's, which is why this is a flag rather than a whole
@@ -111,10 +112,10 @@ pub struct EntitySprite {
 /// renderers that are *not* item billboards. Everything else in that list
 /// either has a corpus rig or is drawn as an item.
 pub const ENTITY_SPRITES: &[EntitySprite] = &[
-    // `DragonFireballRenderer`: `scale(2.0F)`, then `mulPose(camera.orientation)`,
-    // and a quad whose four `vertex(buffer, pose, light, x, y, u, v, color)`
-    // calls place `(x - 0.5F, y - 0.25F, 0.0F)` for `(x, y)` over
-    // `(0,0) (1,0) (1,1) (0,1)`. `getBlockLightLevel` is a flat `15`.
+    // The dragon fireball renderer: a uniform 2x scale, then the camera
+    // billboard rotation, and a quad whose four vertex calls place
+    // `(x - 0.5, y - 0.25, 0.0)` for `(x, y)` over `(0,0) (1,0) (1,1) (0,1)`.
+    // The block-light sample is overridden to a flat `15`.
     EntitySprite {
         type_path: "dragon_fireball",
         texture: DRAGON_FIREBALL_TEXTURE,
@@ -123,10 +124,10 @@ pub const ENTITY_SPRITES: &[EntitySprite] = &[
         quad_max: [0.5, 0.75],
         full_bright: true,
     },
-    // `FishingHookRenderer`: `scale(0.5F)`, `mulPose(camera.orientation)`, and
-    // `(x - 0.5F, y - 0.5F, 0.0F)` over the same four `(x, y)` — a **centred**
-    // quad, unlike the fireball's. No `getBlockLightLevel` override, so the
-    // bobber is lit by the probe like any other entity.
+    // The fishing hook renderer: a uniform 0.5x scale, the camera billboard
+    // rotation, and `(x - 0.5, y - 0.5, 0.0)` over the same four `(x, y)` — a
+    // **centred** quad, unlike the fireball's. No block-light override, so
+    // the bobber is lit by the probe like any other entity.
     EntitySprite {
         type_path: FISHING_BOBBER_TYPE_PATH,
         texture: FISHING_HOOK_TEXTURE,
@@ -213,8 +214,8 @@ pub fn entity_sprite_mesh(sprite: &EntitySprite) -> (Vec<ModelVertex>, Vec<u32>)
 /// T(feet) · S(scale) · camera_orientation
 /// ```
 ///
-/// Source order, matching both renderers' pose stacks (`scale` then
-/// `mulPose`). A **uniform** scale commutes with a rotation, so this is the
+/// Source order, matching both renderers' pose stacks (scale, then the
+/// camera-billboard rotation). A **uniform** scale commutes with a rotation, so this is the
 /// same matrix as the orb's `T · orientation · S` — written in vanilla's order
 /// anyway, because the next sprite added here might not be uniform and a
 /// reader should not have to re-derive that the two agree.
@@ -234,16 +235,14 @@ pub fn entity_sprite_matrix(feet: Vec3, orientation: Mat4, scale: f32) -> Mat4 {
 // The fishing line
 // ---------------------------------------------------------------------------
 //
-// `FishingHookRenderer`'s second submission: sixteen segments from the hook up
-// to the caster's hand, sagging on the way. Vanilla draws them through
-// `RenderTypes.lines()` at `appropriateLineWidth`, i.e. a **screen-space**
-// width — see the shell's own line pass for why reproducing that with a
-// `PrimitiveTopology::LineList` primitive would make the line invisible at any
-// real resolution.
+// The fishing hook renderer's second submission: sixteen segments from the
+// hook up to the caster's hand, sagging on the way. Vanilla draws them
+// through its line render type at a screen-space-scaled width — see the
+// shell's own line pass for why reproducing that with a plain GPU line-list
+// primitive would make the line invisible at any real resolution.
 
-/// How many segments the line is divided into — `int steps = 16` in
-/// `FishingHookRenderer.submit`, which emits `fraction(i, 16)` for `i` in
-/// `0..16`.
+/// How many segments the line is divided into — a fixed `16`, sampled at
+/// `i / 16` for `i` in `0..16`.
 ///
 /// The count is visible in the result: the sag is a quadratic evaluated at
 /// these sample points and joined by straight chords, so halving it visibly
@@ -253,8 +252,8 @@ pub const FISHING_LINE_STEPS: usize = 16;
 /// The constant `+0.25` that appears **twice** in vanilla's line maths, once in
 /// each half — and it is the same 0.25 both times.
 ///
-/// `extractRenderState` anchors the offset at
-/// `entity.getPosition(t).add(0.0, 0.25, 0.0)`, and `stringVertex` then adds
+/// The render-state extraction anchors the offset at the entity's position
+/// plus `(0.0, 0.25, 0.0)`, and the per-sample vertex builder then adds
 /// `0.25` back to every sample's local `y`. The pose stack is at the entity's
 /// **feet**, so the two together put the line's `a = 0` end exactly at the hook
 /// point and its `a = 1` end exactly at the hand — which is the check worth
@@ -262,14 +261,14 @@ pub const FISHING_LINE_STEPS: usize = 16;
 /// that simply starts a quarter block off.
 pub const FISHING_LINE_HOOK_LIFT: f32 = 0.25;
 
-/// `stringVertex`'s `setColor(-16777216)` — opaque black, as straight RGBA
-/// floats.
+/// Vanilla's line colour — opaque black, as straight RGBA floats.
 pub const FISHING_LINE_COLOR: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
-/// `state.lineOriginOffset` — the vector from the **hook point** to the
-/// caster's hand, which is what the whole curve is denominated in.
+/// The vector from the **hook point** to the caster's hand, which is what
+/// the whole curve is denominated in.
 ///
-/// `playerPos.subtract(hookPos)` where `hookPos` is the bobber's feet lifted by
+/// The caster's hand position minus the hook point, where the hook point is
+/// the bobber's feet lifted by
 /// [`FISHING_LINE_HOOK_LIFT`]. Exposed separately from
 /// [`fishing_line_points`] because it is the quantity a gate can predict from
 /// the two endpoints alone, with no curve arithmetic in the way.
@@ -282,8 +281,8 @@ pub fn fishing_line_origin_offset(hand: Vec3, bobber_feet: Vec3) -> Vec3 {
 /// through, from the hook (index `0`) to the hand (index
 /// [`FISHING_LINE_STEPS`]).
 ///
-/// `stringVertex`, verbatim, with the pose stack's translation to the bobber's
-/// feet folded in:
+/// Vanilla's per-sample vertex builder, verbatim, with the pose stack's
+/// translation to the bobber's feet folded in:
 ///
 /// ```text
 /// x = dx · a
@@ -326,18 +325,18 @@ pub fn fishing_line_points(bobber_feet: Vec3, hand: Vec3) -> Vec<Vec3> {
         .collect()
 }
 
-/// Which side of the caster the line leaves from — vanilla's
-/// `getHoldingArm(owner)`, reduced to the `invert` sign both hand-position
-/// branches multiply by.
+/// Which side of the caster the line leaves from — vanilla's holding-arm
+/// resolution, reduced to the sign both hand-position branches multiply by.
 ///
-/// `owner.getMainHandItem().getItem() instanceof FishingRodItem ? owner.getMainArm()
-/// : owner.getMainArm().getOpposite()`, then `RIGHT ? 1 : -1`. So a player who
-/// cast the rod and then switched hotbar slots has the line jump to their other
-/// hand, which is vanilla's own behaviour and not a bug to smooth over.
+/// The arm is the player's main arm if the item in their main hand is a
+/// fishing rod, and the *opposite* arm otherwise; right maps to `1`, left to
+/// `-1`. So a player who cast the rod and then switched hotbar slots has the
+/// line jump to their other hand, which is vanilla's own behaviour and not a
+/// bug to smooth over.
 ///
-/// `main_arm_left` is `Player.getMainArm() == LEFT`; `rod_in_main_hand` is the
-/// `instanceof` test. Both are the caller's to answer — this is the truth table,
-/// not the lookup.
+/// `main_arm_left` is whether the player's main arm is the left one;
+/// `rod_in_main_hand` is whether the main-hand item is a fishing rod. Both
+/// are the caller's to answer — this is the truth table, not the lookup.
 #[must_use]
 pub fn fishing_holding_arm_sign(main_arm_left: bool, rod_in_main_hand: bool) -> f32 {
     let arm_is_left = if rod_in_main_hand {
@@ -348,21 +347,21 @@ pub fn fishing_holding_arm_sign(main_arm_left: bool, rod_in_main_hand: bool) -> 
     if arm_is_left { -1.0 } else { 1.0 }
 }
 
-/// Vanilla's `swing2` — the shaped attack-swing amount the first-person hand
+/// Vanilla's shaped attack-swing amount — the value the first-person hand
 /// anchor is rotated by.
 ///
-/// `Mth.sin(Mth.sqrt(swing) * (float) Math.PI)` for `swing =
-/// owner.getAttackAnim(partialTicks)`, a `0..1` ramp. The `sqrt` inside the
-/// `sin` is what makes the swing snap out and ease back rather than being
-/// symmetric, and it is easy to drop when transcribing.
+/// `sin(sqrt(swing) * pi)` where `swing` is the entity's interpolated
+/// attack-animation progress, a `0..1` ramp. The `sqrt` inside the `sin` is
+/// what makes the swing snap out and ease back rather than being symmetric,
+/// and it is easy to drop when transcribing.
 #[must_use]
 pub fn fishing_swing_shaping(attack_anim: f32) -> f32 {
     mth::sin(f64::from(attack_anim.max(0.0).sqrt() * std::f32::consts::PI))
 }
 
 /// Where the line meets a caster this client draws as an ordinary entity —
-/// vanilla's `getPlayerHandPos` **else** branch, taken for every remote player
-/// and for our own body whenever the camera is detached.
+/// vanilla's player-hand-position **else** branch, taken for every remote
+/// player and for our own body whenever the camera is detached.
 ///
 /// ```text
 /// rightOffset   = invert · 0.35 · scale
@@ -378,10 +377,10 @@ pub fn fishing_swing_shaping(attack_anim: f32) -> f32 {
 ///
 /// # `eye`, not feet
 ///
-/// Vanilla adds this offset to `owner.getEyePosition(partialTicks)` and then
-/// subtracts `0.45 · scale` from it, so the anchor ends up roughly at shoulder
-/// height. Passing feet and expecting the `−0.45` to do the lifting puts the
-/// line at the caster's ankles.
+/// Vanilla adds this offset to the entity's interpolated eye position and
+/// then subtracts `0.45 · scale` from it, so the anchor ends up roughly at
+/// shoulder height. Passing feet and expecting the `−0.45` to do the lifting
+/// puts the line at the caster's ankles.
 ///
 /// # The two horizontal terms are a rotation, and transposing them is silent
 ///
@@ -409,17 +408,17 @@ pub fn fishing_hand_anchor_third_person(
     )
 }
 
-/// `getPointOnPlane`'s `x`, from `getPlayerHandPos`'s
-/// `invert * 0.525F` — how far across the near plane the rod tip sits.
+/// Vanilla's near-plane point, `x` term — the holding-arm sign times
+/// `0.525` — how far across the near plane the rod tip sits.
 const FIRST_PERSON_PLANE_X: f32 = 0.525;
-/// `getPointOnPlane`'s `y`, from the same call's literal `-0.1F`.
+/// Vanilla's near-plane point, `y` term — the literal `-0.1`.
 const FIRST_PERSON_PLANE_Y: f32 = -0.1;
-/// `FishingHookRenderer.VIEW_BOBBING_SCALE` — the numerator of the
+/// Vanilla's view-bobbing scale constant — the numerator of the
 /// `960.0 / fov` factor the near-plane point is scaled by.
 const VIEW_BOBBING_SCALE: f32 = 960.0;
 
 /// Where the line meets the caster when the caster is **us** and the camera is
-/// in first person — vanilla's `getPlayerHandPos` **if** branch.
+/// in first person — vanilla's player-hand-position **if** branch.
 ///
 /// There is no entity to read a position off here (vanilla's own first-person
 /// player body is not drawn either), so the anchor is projected onto the
@@ -432,13 +431,13 @@ const VIEW_BOBBING_SCALE: f32 = 960.0;
 /// hand        = eye + point · (960/fov) · yRot(swing·0.5) · xRot(−swing·0.7)
 /// ```
 ///
-/// with `left = −right`, matching `Camera.setRotation`'s own `LEFT = (−1, 0, 0)`
-/// basis vector.
+/// with `left = −right`, matching vanilla's own camera basis, whose left
+/// vector at zero rotation is `(−1, 0, 0)`.
 ///
 /// # Two faithful details worth keeping
 ///
-/// * The **whole point is proportional to `zNear`**, and it is then multiplied
-///   by `960 / fov`. Neither factor cancels: dropping `zNear` moves the hand to
+/// * The **whole point is proportional to `near`**, and it is then multiplied
+///   by `960 / fov`. Neither factor cancels: dropping `near` moves the hand to
 ///   ~14 blocks in front of the eye, dropping the scale leaves it 5 cm away and
 ///   permanently clipped.
 /// * The two rotations are **not** the same angle: `yRot(+swing · 0.5)` and
@@ -448,7 +447,7 @@ const VIEW_BOBBING_SCALE: f32 = 960.0;
 /// # A deliberate divergence, stated
 ///
 /// Vanilla reads `options.fov()` — the *setting* — for both the plane height
-/// and the `960 / fov` factor, while taking `zNear` and the aspect ratio from
+/// and the `960 / fov` factor, while taking `near` and the aspect ratio from
 /// the live projection. This takes all four off the same [`crate::camera::Camera`],
 /// so a dynamic FOV modifier (sprinting, a spyglass) moves the anchor slightly
 /// where vanilla's would not. The alternative is plumbing the raw option
@@ -480,7 +479,7 @@ pub fn fishing_hand_anchor_first_person(
     eye + rotate_x(rotate_y(scaled, swing * 0.5), -swing * 0.7)
 }
 
-/// `Vec3.yRot(radians)`: `(x·cos + z·sin, y, z·cos − x·sin)`.
+/// Vanilla's own rotate-about-Y: `(x·cos + z·sin, y, z·cos − x·sin)`.
 ///
 /// Written out rather than reached for through `glam::Mat3::from_rotation_y`
 /// because vanilla's sign convention here is its own — `z·cos − x·sin`, not the
@@ -492,7 +491,7 @@ fn rotate_y(v: Vec3, radians: f32) -> Vec3 {
     Vec3::new(v.x * cos + v.z * sin, v.y, v.z * cos - v.x * sin)
 }
 
-/// `Vec3.xRot(radians)`: `(x, y·cos + z·sin, z·cos − y·sin)`.
+/// Vanilla's own rotate-about-X: `(x, y·cos + z·sin, z·cos − y·sin)`.
 fn rotate_x(v: Vec3, radians: f32) -> Vec3 {
     let cos = mth::cos(f64::from(radians));
     let sin = mth::sin(f64::from(radians));
@@ -503,20 +502,20 @@ fn rotate_x(v: Vec3, radians: f32) -> Vec3 {
 // The ominous item spawner
 // ---------------------------------------------------------------------------
 
-/// `OminousItemSpawnerRenderer.ROTATION_SPEED` — degrees per tick the held item
+/// Vanilla's spawner rotation-speed constant — degrees per tick the held item
 /// spins about `+Y`.
 pub const OMINOUS_SPAWNER_ROTATION_SPEED: f32 = 40.0;
-/// `OminousItemSpawnerRenderer.TICKS_SCALING` — how many ticks the item takes to
+/// Vanilla's spawner ticks-scaling constant — how many ticks the item takes to
 /// grow from nothing to full size after the spawner appears.
 pub const OMINOUS_SPAWNER_TICKS_SCALING: f32 = 50.0;
 
 /// How large the spawner's item draws at `age_ticks` —
-/// `min(ageInTicks, 50) / 50`, clamped to `1.0` afterwards.
+/// `min(age_ticks, 50) / 50`, clamped to `1.0` afterwards.
 ///
-/// Vanilla writes this as `if (ageInTicks <= 50) scale(min(age, 50) / 50)`,
-/// which is the same function with the `> 50` case left as an implicit `1.0`
-/// (no `scale` call at all). Folding the two arms into one expression is safe
-/// here precisely because `min` already saturates.
+/// Vanilla writes this as a conditional scale call only while `age_ticks <=
+/// 50`, which is the same function with the `> 50` case left as an implicit
+/// `1.0` (no scale call at all). Folding the two arms into one expression is
+/// safe here precisely because `min` already saturates.
 ///
 /// A negative age cannot occur but clamps to `0` rather than mirroring.
 #[must_use]
@@ -524,7 +523,7 @@ pub fn ominous_spawner_item_scale(age_ticks: f32) -> f32 {
     (age_ticks.max(0.0) / OMINOUS_SPAWNER_TICKS_SCALING).min(1.0)
 }
 
-/// The spawner item's spin in degrees — `Mth.wrapDegrees(ageInTicks * 40)`.
+/// The spawner item's spin in degrees — `wrap_degrees(age_ticks * 40)`.
 ///
 /// The wrap is preserved rather than dropped as "periodic anyway": it is, for a
 /// rotation, but the wrapped value is also what a gate can predict without
@@ -536,26 +535,26 @@ pub fn ominous_spawner_spin_degrees(age_ticks: f32) -> f32 {
 }
 
 /// The world placement for one copy of an ominous item spawner's item cluster,
-/// matching `OminousItemSpawnerRenderer.submit`'s pose stack:
+/// matching the spawner renderer's own pose stack:
 ///
 /// ```text
 /// T(feet) · S(scale) · Ry(spin) · T(offset) · display_matrix(ground)
 /// ```
 ///
-/// `offset` is `ItemEntityRenderer.submitMultipleFromCount`'s per-copy scatter
-/// (zero for the first copy), and the item's own `display.ground` transform sits
+/// `offset` is the per-copy scatter vanilla's multi-item submission applies
+/// (zero for the first copy), and the item's own ground display transform sits
 /// on the right for the reason [`crate::entity::dropped_item_matrix`] documents:
-/// vanilla applies it *inside* `ItemStackRenderState.submit`, after every pose
-/// the caller pushed.
+/// vanilla applies it *inside* the item-stack render state's own submission,
+/// after every pose the caller pushed.
 ///
 /// # It is **not** a dropped item, and the difference is two missing terms
 ///
-/// `ItemEntityRenderer.submit` translates by a bob (`sin(age/10 + bobOffset) ·
-/// 0.1 + 0.1`) plus a hover lift, and spins at `ItemEntity.getSpin`'s own rate.
-/// `OminousItemSpawnerRenderer` calls neither — it goes straight from the scale
-/// to its own 40°/tick spin. Reusing the dropped-item matrix here draws an item
-/// that bobs when it should hang still and spins at the wrong speed, which
-/// reads as "close enough" in a screenshot and is wrong in motion.
+/// A dropped item's renderer translates by a bob (`sin(age/10 + bobOffset) ·
+/// 0.1 + 0.1`) plus a hover lift, and spins at the item entity's own rate.
+/// The ominous spawner's renderer calls neither — it goes straight from the
+/// scale to its own 40°/tick spin. Reusing the dropped-item matrix here draws
+/// an item that bobs when it should hang still and spins at the wrong speed,
+/// which reads as "close enough" in a screenshot and is wrong in motion.
 #[must_use]
 pub fn ominous_spawner_item_matrix(
     feet: Vec3,
@@ -575,9 +574,9 @@ pub fn ominous_spawner_item_matrix(
 /// [`crate::ModelMesh`], for the same pass and the same camera uniform
 /// [`crate::entity::dropped_item_mesh`] feeds.
 ///
-/// `light` is `OminousItemSpawnerRenderer.submit`'s literal `15728880`, i.e.
-/// `LightTexture.FULL_BRIGHT` — the renderer never samples the world, so the
-/// item glows at any time of day and in any cell. Passing a world sample here
+/// `light` is the spawner renderer's own literal `15728880`, vanilla's
+/// full-bright light-map packing — the renderer never samples the world, so
+/// the item glows at any time of day and in any cell. Passing a world sample here
 /// instead draws a spawner item that goes dark at night, which is the
 /// plausible-looking wrong version because every *other* item in this crate does
 /// exactly that.
@@ -715,8 +714,9 @@ mod tests {
         assert!((mid.z - (hook.z + d.z * 0.5)).abs() < 1e-4);
     }
 
-    /// `getHoldingArm`'s truth table, all four rows — a two-boolean function
-    /// where three of the four rows agree, so sampling fewer cannot see it.
+    /// Vanilla's holding-arm resolution's truth table, all four rows — a
+    /// two-boolean function where three of the four rows agree, so sampling
+    /// fewer cannot see it.
     #[test]
     fn the_holding_arm_sign_covers_all_four_rows() {
         // Right-handed, rod in main hand -> the right arm.
@@ -769,7 +769,7 @@ mod tests {
     ///
     /// The prediction is computed from the vanilla expression rather than from
     /// a remembered round number, and the two dropped-factor hypotheses (no
-    /// `zNear`, no `960 / fov`) are computed alongside so the measurement has
+    /// `near`, no `960 / fov`) are computed alongside so the measurement has
     /// to land on the right one of three.
     #[test]
     fn the_first_person_anchor_sits_at_the_rod_tip() {
@@ -801,7 +801,7 @@ mod tests {
         assert!((hand.y - (eye.y + expect_y)).abs() < 1e-4, "{hand:?}");
 
         // The two wrong hypotheses, each computed from the same constants: drop
-        // `zNear`, or drop the `960 / fov` boost. Both must be far from the
+        // `near`, or drop the `960 / fov` boost. Both must be far from the
         // measurement, or this gate is only checking that the function runs.
         let without_near = 1.0 * boost;
         let without_boost = near;

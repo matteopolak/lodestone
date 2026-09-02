@@ -1,5 +1,5 @@
-//! The lightning bolt's procedural geometry — `LightningBoltRenderer.submit`
-//! (26.2), transcribed.
+//! The lightning bolt's procedural geometry — vanilla's own bolt-submission
+//! routine (26.2), transcribed.
 //!
 //! # What it is
 //!
@@ -16,8 +16,9 @@
 //!
 //! Segment heights are `h * 16` for `h` in `0..=8`, in **blocks** — the pose
 //! stack is unscaled entity space. A bolt is therefore **128 blocks tall** and
-//! wanders ±5 blocks per level. Vanilla's `affectedByCulling` returns `false`
-//! for exactly this reason: no hitbox comes close to bounding it, and
+//! wanders ±5 blocks per level. Vanilla's own frustum-culling override
+//! disables culling entirely for exactly this reason: no hitbox comes close
+//! to bounding it, and
 //! `lodestone_data::entity_dimensions` records a lightning bolt as having no
 //! box at all.
 //!
@@ -56,19 +57,18 @@ pub struct BoltVertex {
     pub color: [f32; 4],
 }
 
-/// `LightningBoltRenderer.quad`'s colour, on every vertex of every quad:
-/// `setColor(0.45, 0.45, 0.5, 0.3)`.
+/// Vanilla's own per-quad colour, on every vertex of every quad:
+/// `(0.45, 0.45, 0.5, 0.3)`.
 ///
-/// The alpha is **not** an opacity in the usual sense. Vanilla's
-/// `BlendFunction.LIGHTNING` is `(SRC_ALPHA, ONE)` — additive with a
-/// source-alpha scale — so `0.3` is how much of the bolt's colour each layer
-/// *adds*, and four overlapping shells is what makes the core read as white
-/// rather than as the dim blue-grey this triple is on its own.
+/// The alpha is **not** an opacity in the usual sense. Vanilla's lightning
+/// blend function is `(SRC_ALPHA, ONE)` — additive with a source-alpha scale
+/// — so `0.3` is how much of the bolt's colour each layer *adds*, and four
+/// overlapping shells is what makes the core read as white rather than as
+/// the dim blue-grey this triple is on its own.
 ///
-/// Two decompiler artefacts in the source are worth naming so nobody hunts for
-/// them: `float br = 0.5F` is declared and never used, and the local
-/// `boltRed`/`boltGreen`/`boltBlue` are shadowed by the same literals passed
-/// straight to `quad`. Neither changes a pixel.
+/// One decompiler artefact in the source is worth naming so nobody hunts for
+/// it: a local brightness variable is declared and never used. It changes no
+/// pixel.
 pub const BOLT_COLOR: [f32; 4] = [0.45, 0.45, 0.5, 0.3];
 
 /// Quads emitted for one bolt: 4 shells x 14 segments x 4 faces.
@@ -80,7 +80,7 @@ pub const BOLT_QUADS: usize = 4 * (8 + 3 + 3) * 4;
 
 /// Triangle-list vertices one bolt emits — six per quad.
 ///
-/// Vanilla submits `PrimitiveTopology.QUADS`, which this engine does not have,
+/// Vanilla submits a quad-primitive topology, which this engine does not have,
 /// so each quad becomes two triangles.
 pub const BOLT_VERTICES: usize = BOLT_QUADS * 6;
 
@@ -167,7 +167,7 @@ pub fn lightning_bolt_vertices(seed: i64) -> Vec<BoltVertex> {
 
                 let y0 = (h * 16) as f32;
                 let y1 = ((h + 1) * 16) as f32;
-                // The four faces, in `submit`'s own order. Each tuple is
+                // The four faces, in vanilla's own submission order. Each tuple is
                 // `(px1, pz1, px2, pz2)` — which corner of the square section
                 // each of the quad's two edges sits on.
                 for (px1, pz1, px2, pz2) in [
@@ -183,7 +183,7 @@ pub fn lightning_bolt_vertices(seed: i64) -> Vec<BoltVertex> {
                         [xo1 + sign(px2, rr1), y1, zo1 + sign(pz2, rr1)],
                         [xo0 + sign(px2, rr2), y0, zo0 + sign(pz2, rr2)],
                     ];
-                    // Vanilla's QUADS topology as two triangles, wound the
+                    // Vanilla's quad topology as two triangles, wound the
                     // same way every other quad in this crate is. Winding is
                     // not load-bearing for visibility — the pass disables
                     // culling, as it must for geometry a player can stand
@@ -206,18 +206,18 @@ pub fn lightning_bolt_vertices(seed: i64) -> Vec<BoltVertex> {
 ///
 /// # Why this is not vanilla's seed, and why that is acceptable
 ///
-/// `LightningBolt`'s `seed` field is a plain `public long`, **not synched**:
-/// the constructor rolls `random.nextLong()` on both sides independently, so a
+/// The bolt entity's own seed field is a plain, **not synched**, value:
+/// its constructor rolls a fresh random long on both sides independently, so a
 /// vanilla client's bolt never matches its own server's and nothing about the
 /// shape is on the wire. Any seed is therefore exactly as faithful as any
 /// other, and one derived from the entity id has the property a fresh roll
 /// does not: it is stable for the bolt's lifetime and identical across a
 /// reconnect.
 ///
-/// **What is not ported is the re-roll.** `LightningBolt.tick` re-rolls `seed`
-/// between each of its `rand(3) + 1` flashes, and that reseeding is what makes
+/// **What is not ported is the re-roll.** Vanilla's own tick handler re-rolls
+/// the seed between each of its `rand(3) + 1` flashes, and that reseeding is what makes
 /// a vanilla bolt visibly *flicker into a different shape*. Reproducing it
-/// needs per-bolt `life`/`flashes` state on this side, which does not exist —
+/// needs per-bolt lifetime and flash-count state on this side, which does not exist —
 /// so a bolt here holds one shape for as long as the server keeps the entity
 /// alive. The sky flash, which is the larger half of the effect, already
 /// pulses correctly through `crate::weather`.
