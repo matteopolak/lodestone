@@ -65,9 +65,9 @@ fn split_mob_effect_path(path: &str) -> Option<(&str, &str)> {
 /// carry no sibling `.mcmeta` and vanilla does not scale them through any of
 /// [`lodestone_assets::gui::GuiScaling`]'s three modes. Instead it blits
 /// hand-placed sub-rectangles of each 256×256 sheet at native size —
-/// `ContainerScreen.java` draws the chest background as *two* blits (the
+/// Vanilla's own generic-container screen draws the chest background as *two* blits (the
 /// row-count-dependent top part, then a fixed 96 px bottom part immediately
-/// below it), `CraftingScreen.java` and `InventoryScreen.java` each
+/// below it), its own crafting and inventory screens each
 /// draw one whole-panel blit. `GuiScaling` has no variant for an arbitrary
 /// sub-rect, so this reads the sheets' atlas placement directly and computes
 /// the same UV windows vanilla's `blit` calls use, rather than forcing the
@@ -106,7 +106,7 @@ pub struct ContainerBackground {
     /// `textures/gui/container/beacon.png` (`SetBeaconEffects`
     /// remainder) — a `256×256` sheet like every non-merchant one above, but
     /// a taller-than-usual `230×219` whole-panel blit
-    /// (`BeaconScreen.java`'s `super(menu, inventory, title, 230, 219)`).
+    /// (vanilla's own beacon-screen constructor passes `230, 219`).
     beacon: ResourceLocation,
     /// The creative screen's three sheets — `tab_items`,
     /// `tab_item_search`, `tab_inventory`. Same family as every sheet above:
@@ -198,17 +198,17 @@ pub(super) enum BackgroundKind {
 /// Every `special_layout` sheet but one is a single whole-panel `176×166`
 /// blit at the sheet's origin, exactly like
 /// [`BackgroundKind::Inventory`]/[`BackgroundKind::Crafting`]
-/// (`AnvilScreen.java`-adjacent `blit` calls; every one of these screens'
+/// (screens adjacent to vanilla's own anvil-screen blit calls; every one of these screens'
 /// `blit(texture, x, y, 0, 0, imageWidth, imageHeight)` uses the vanilla
 /// `176×166` default, none override `imageWidth`/`imageHeight` — re-verified
-/// against `AbstractContainerScreen.java`'s own default constructor for
+/// against vanilla's own container-screen base's own default constructor for
 /// the six added by #28, not merely assumed to match the first four). Three
 /// exceptions pass a non-default size to their own `super(...)` constructor
 /// and [`ContainerBackground::quads`] special-cases each rather than reusing
 /// the `whole_panel` closure's hardcoded size: [`BackgroundKind::Hopper`]
-/// (`176, 133`, `HopperScreen.java`), [`BackgroundKind::Merchant`] (`276,
-/// 166`, `MerchantScreen.java`) and [`BackgroundKind::Beacon`] (`230, 219`,
-/// `BeaconScreen.java`).
+/// (`176, 133`, vanilla's own hopper-screen constructor), [`BackgroundKind::Merchant`] (`276,
+/// 166`, vanilla's own merchant-screen constructor) and [`BackgroundKind::Beacon`] (`230, 219`,
+/// vanilla's own beacon-screen constructor).
 pub(super) fn background_kind(menu: &Menu) -> BackgroundKind {
     match menu.special_layout() {
         Some(SpecialLayout::Anvil) => return BackgroundKind::Anvil,
@@ -472,7 +472,8 @@ impl ContainerBackground {
     ///
     /// The `252 x 140` sample is scaled by the sprite's **real placed size**
     /// against vanilla's declared `256 x 256` sheet
-    /// (`BACKGROUND_TEXTURE_WIDTH`/`HEIGHT`, `AdvancementsScreen.java`) —
+    /// (its own background-texture-width/height constants, in its own
+    /// advancements-screen rendering) —
     /// first defect ("the bottom and right side don't have UI on
     /// the edges"). `window.png` has no sibling `.mcmeta` (see this struct's
     /// own doc), so a higher-resolution pack is the only way this sheet's real
@@ -739,7 +740,7 @@ impl ContainerBackground {
     /// but wrong for the furnace family's lit/burn bars and the brewing
     /// stand's fuel/brew/bubble bars: vanilla grows every one of
     /// those from a partial `blitSprite` sub-rectangle of a larger sprite —
-    /// e.g. `AbstractFurnaceScreen.java`'s lit flame samples a `14×n`
+    /// e.g. vanilla's own abstract furnace-screen's lit flame samples a `14×n`
     /// window of a `14×14` sprite, offset from the *bottom*, via
     /// `blitSprite(pipeline, sprite, 14, 14, 0, 14 - h, x, y, 14, h)`. That
     /// `14, 14` pair is `declared`, not a real pixel measurement, exactly
