@@ -309,7 +309,7 @@ impl Goal for GuardianBeamGoal {
     }
 }
 
-/// `Guardian.GuardianAttackGoal(this)` on an ordinary guardian, registered in
+/// Vanilla's own guardian beam-attack goal, registered in
 /// vanilla's own guardian goal registration. Takes no speed — the goal never moves the mob.
 pub fn guardian_beam(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(GuardianBeamGoal::guardian())

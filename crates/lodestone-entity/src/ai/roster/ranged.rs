@@ -577,7 +577,7 @@ const GHAST_FIREBALL_RANGE_SQR: f64 = 4096.0;
 
 impl GhastFireballGoal {
     /// The goal as a ghast registers it — no constructor arguments in
-    /// vanilla (`new Ghast.GhastShootFireballGoal(this)`).
+    /// vanilla's own ghast fireball-attack goal.
     #[must_use]
     pub fn new() -> Self {
         Self { charge_time: 0 }
@@ -650,8 +650,7 @@ pub fn bow_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RangedBowAttackGoal::new(ctx.speed * 1.0, 40, 15.0))
 }
 
-/// `Drowned.DrownedTridentAttackGoal(this, 1.0, 40, 10.0F)`
-/// (vanilla's own drowned registration), a `RangedAttackGoal` subclass that additionally
+/// Vanilla's own drowned trident-attack goal, a `RangedAttackGoal` subclass that additionally
 /// requires holding a trident (its own eligibility check) and
 /// drives the throw animation through `start`/`stop`
 /// (its own start/stop-using-item plus its own aggressive-flag setter).
@@ -671,7 +670,7 @@ pub fn trident_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     )
 }
 
-/// `new Ghast.GhastShootFireballGoal(this)` (vanilla's own ghast registration).
+/// Vanilla's own ghast fireball-attack goal.
 ///
 /// `pub` because the ghast's row lives in [`super::specialist`] — the same
 /// cross-module shape [`bow_attack`]/[`trident_attack`] already have for
@@ -683,15 +682,14 @@ pub fn ghast_fireball(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(GhastFireballGoal::new())
 }
 
-/// `Blaze.BlazeAttackGoal(this)` (vanilla's own blaze registration). The `1.0` speed
+/// Vanilla's own blaze fireball-attack goal. The `1.0` speed
 /// multiplier is inside the goal (its own per-tick update), and `48.0` is the blaze's own
 /// `FOLLOW_RANGE` (its own attribute builder).
 fn blaze_fireball(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(BlazeFireballGoal::new(ctx.speed * 1.0, 48.0))
 }
 
-/// `RangedAttackGoal(this, 1.25, 20, 10.0F)`
-/// (vanilla's own snow-golem registration), throwing a snowball at `1.6F`
+/// Vanilla's own snow-golem ranged-attack goal, throwing a snowball at `1.6F`
 /// (its own ranged-attack step).
 fn snowball_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(RangedAttackGoal::new(
