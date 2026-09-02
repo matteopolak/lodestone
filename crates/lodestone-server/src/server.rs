@@ -9847,7 +9847,7 @@ fn apply_use_item(
     hand: u8,
     yaw: f32,
     pitch: f32,
-    // `FishingRodItem.use`'s cast/retrieve dispatch needs the caster's own
+    // Vanilla's own fishing-rod-item use routine's cast/retrieve dispatch needs the caster's own
     // entity id, both to own the bobber (`MobSim::cast_fishing_bobber`'s
     // `owner`) and to find it again on the next click
     // (`MobSim::player_active_bobber`).
@@ -9917,7 +9917,7 @@ fn apply_use_item(
         };
     }
 
-    // `FishingRodItem.use`: overrides `Item.use` entirely, exactly like the
+    // Vanilla's own fishing-rod-item use routine: overrides its own item-use routine entirely, exactly like the
     // launch-intent items above, so it sits ahead of the `Consumable`/
     // `Equippable` arms rather than as one of them. A rod already carrying a
     // live bobber reels it in; otherwise it casts a fresh one.
@@ -9926,7 +9926,7 @@ fn apply_use_item(
             return UseItemOutcome::Nothing;
         };
         if let Some(bobber_id) = mobs.with(|sim| sim.player_active_bobber(player_entity_id)) {
-            // `FishingRodItem.use`'s "already fishing" arm — reel it in.
+            // Vanilla's own fishing-rod-item use routine's "already fishing" arm — reel it in.
             // `FishingRetrieve::rod_damage` is vanilla's own `hurtAndBreak`
             // tier for the rod; this crate models no item durability at all
             // (see the flint-and-steel precedent in `apply_use_item_on`, whose
@@ -9935,7 +9935,7 @@ fn apply_use_item(
             // half is the disclosed no-op.
             mobs.with(|sim| sim.retrieve_fishing_bobber(bobber_id, Vec3::new(x, y, z), 0));
         } else {
-            // `FishingRodItem.use`'s cast arm. `luck`/`lure_speed` are `0, 0`
+            // Vanilla's own fishing-rod-item use routine's cast arm. `luck`/`lure_speed` are `0, 0`
             // — no enchantment model reaches this call site yet (see
             // `MobSim::cast_fishing_bobber`'s own doc).
             mobs.with(|sim| {
@@ -9954,7 +9954,7 @@ fn apply_use_item(
     }
 
     // Arm 1: `DataComponents.CONSUMABLE` → `Consumable.startConsuming`, whose
-    // own `canConsume` is `Player.canEat`. A refusal is vanilla's `FAIL` — no use
+    // own `canConsume` is vanilla's own can-eat check. A refusal is vanilla's `FAIL` — no use
     // starts, so a full player's right-click on steak does nothing at all, which
     // is the behaviour whose absence is most visible.
     if let Some(food) = crate::item_use::food_for_item(&held) {
@@ -9986,8 +9986,8 @@ fn apply_use_item(
     UseItemOutcome::Nothing
 }
 
-/// Finishes a consume whose clock ran out — `LivingEntity.completeUsingItem` →
-/// `Item.finishUsingItem` → `Consumable.onConsume` → `FoodProperties.onConsume`,
+/// Finishes a consume whose clock ran out — vanilla's own complete-using-item →
+/// finish-using-item → consumable-on-consume → food-properties-on-consume chain,
 /// which is `player.getFoodData().eat(this)` plus `stack.consume(1, entity)`.
 ///
 /// Returns the slot to report and the stack now in it, or `None` when the use is
@@ -10020,7 +10020,7 @@ fn finish_consuming(
     ))
 }
 
-/// `OminousBottleAmplifier.onConsume`: finishing a drink of
+/// Vanilla's own ominous-bottle-amplifier on-consume routine: finishing a drink of
 /// `minecraft:ominous_bottle` grants `minecraft:bad_omen` for 120000 ticks
 /// and consumes the bottle — issue #241's remaining producer gap
 /// (`item_use.rs`'s own disclosed "potions" gap, closed for exactly this one
@@ -10070,7 +10070,7 @@ fn finish_drinking_ominous_bottle(
     ))
 }
 
-/// `PotionContents.onConsume` → `applyToLivingEntity(user, durationScale)`:
+/// Vanilla's own potion-contents on-consume → `applyToLivingEntity(user, durationScale)` chain:
 /// finishing a drink of `minecraft:potion` applies its full, **unscaled**
 /// built-in effect list — issue #690's central gap, the one that made every
 /// potion in the game do nothing at all.
@@ -10118,8 +10118,8 @@ fn finish_drinking_potion(
     ))
 }
 
-/// `Consumables.MILK_BUCKET`'s `onConsume(ClearAllStatusEffectsConsumeEffect
-/// .INSTANCE)` — a drunk milk bucket wipes every active status effect.
+/// Vanilla's own consumables table's milk-bucket on-consume entry
+/// (its own clear-all-status-effects consume effect) — a drunk milk bucket wipes every active status effect.
 ///
 /// Returns the `(slot, remaining stack)` pair plus the ids that were actually
 /// active (and are now gone), so the caller can send one
