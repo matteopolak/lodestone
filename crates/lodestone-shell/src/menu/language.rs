@@ -101,8 +101,8 @@
 //!   (measured, not assumed) rather than "corrected".
 //! - [`ROW_H`] = 18: the same constructor's `itemHeight` parameter (`:106`).
 //! - [`ROW_WIDTH`] = 270: `getRowWidth() = super.getRowWidth() + 50` (`:136-138`);
-//!   `AbstractSelectionList.getRowWidth()`'s own default is `220` (`:389-391`).
-//! - Row *y*: `AbstractSelectionList.getFirstEntryY() = getY() + 2` (`:104-106`)
+//!   vanilla's own abstract selection-list base's get-row-width accessor's own default is `220` (`:389-391`).
+//! - Row *y*: vanilla's own abstract selection-list base's get-first-entry-y accessor `= getY() + 2` (`:104-106`)
 //!   — the same "+2" as [`super::options::LIST_TOP_INSET`] — then one
 //!   [`ROW_H`] per subsequent row.
 //! - Row *x*: `Entry.extractContent`'s `centeredText(font, text, width / 2,
@@ -149,7 +149,7 @@ use super::widget::{LayoutElement, Widget};
 pub struct LanguageEntry {
     /// The language code, e.g. `"en_us"` (`LanguageManager`'s map key).
     pub code: &'static str,
-    /// The display name, `LanguageInfo.toComponent()`'s `"{name} ({region})"`.
+    /// The display name, vanilla's own language-info to-component accessor's `"{name} ({region})"`.
     pub name: &'static str,
 }
 
@@ -161,7 +161,7 @@ pub const LANGUAGES: &[LanguageEntry] = &[LanguageEntry {
 }];
 
 /// Vanilla's own filter predicate (`filterEntries`,
-/// `LanguageSelectScreen.java`): a case-insensitive substring match
+/// vanilla's own language-select screen rendering): a case-insensitive substring match
 /// against the display name. Vanilla also matches the region separately, but
 /// that is already folded into [`LanguageEntry::name`] here (there is no
 /// separate region field), so one comparison covers both.
@@ -226,7 +226,7 @@ fn sized(w: f32, h: f32) -> Box<dyn LayoutElement> {
 
 /// Index into [`frame_widget_rects`]'s output for each header/footer widget,
 /// in `visitWidgets` order (`addTitle` then `addFooter`,
-/// `LanguageSelectScreen.java`; the content list is not part of
+/// vanilla's own language-select screen rendering; the content list is not part of
 /// this tree — see the module docs, it is positioned by [`first_entry_y`]
 /// directly).
 const TITLE_RECT: usize = 0;
@@ -243,16 +243,16 @@ const FONT_BUTTON_RECT: usize = 3;
 pub fn frame_widget_rects(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)> {
     let mut root = HeaderAndFooterLayout::with_heights(width, height, HEADER_HEIGHT, FOOTER_HEIGHT);
 
-    // `LinearLayout header = layout.addToHeader(LinearLayout.vertical().spacing(4))`
-    // `header.defaultCellSetting().alignHorizontallyCenter()` (`:40-41`).
+    // Vanilla's own header layout: a vertical linear layout at spacing 4, added
+    // to the header, with its default cell setting horizontally centred (`:40-41`).
     let mut header = LinearLayout::vertical().spacing(4);
     *header.default_cell_setting() = LayoutSettings::defaults().align_horizontally_center();
     header.add_child(label_stand_in(options::HEADER_LINE_HEIGHT)); // title
     header.add_child(sized(SEARCH_W, SEARCH_H)); // search box
     root.add_to_header(Box::new(header));
 
-    // `LinearLayout footer = layout.addToFooter(LinearLayout.vertical()).spacing(8)`
-    // `footer.defaultCellSetting().alignHorizontallyCenter()` (`:73-74`).
+    // Vanilla's own footer layout: a vertical linear layout at spacing 8, added
+    // to the footer, with its default cell setting horizontally centred (`:73-74`).
     let mut footer = LinearLayout::vertical().spacing(8);
     *footer.default_cell_setting() = LayoutSettings::defaults().align_horizontally_center();
     footer.add_child(label_stand_in(options::HEADER_LINE_HEIGHT)); // warning line

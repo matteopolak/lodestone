@@ -96,7 +96,7 @@ impl ServerPackPolicy {
         }
     }
 
-    /// The row's display text — `ServerPackStatus.getName()`
+    /// The row's display text — vanilla's own server-pack-status get-name accessor
     /// (`manageServer.resourcePack.{enabled,disabled,prompt}`).
     #[must_use]
     pub fn label(self) -> &'static str {

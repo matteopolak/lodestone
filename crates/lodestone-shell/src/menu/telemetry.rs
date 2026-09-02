@@ -15,7 +15,7 @@
 //! populate one. Vanilla's own conditional makes this an easier call than it
 //! looks: `TelemetryInfoScreen.EXTRA_TELEMETRY_AVAILABLE` is what gates the
 //! opt-in checkbox's existence in the *real* game too
-//! (`Minecraft.extraTelemetryAvailable()`), and this client is always on
+//! (vanilla's own client entry point's extra-telemetry-available check), and this client is always on
 //! that screen's "false" branch — vanilla itself draws no checkbox then, so
 //! omitting it here is not a reduction at all, just the same conditional
 //! vanilla already has, permanently resolved one way.
@@ -35,7 +35,7 @@
 //!   client has no font metrics at layout-build time either, so that is not
 //!   a gap introduced here).
 //! - [`FOOTER_HEIGHT`] = 33: the same constructor's ternary,
-//!   `EXTRA_TELEMETRY_AVAILABLE ? 33 + Checkbox.getBoxSize(font) : 33` — this
+//!   `EXTRA_TELEMETRY_AVAILABLE ? 33 + (vanilla's own checkbox get-box-size accessor of font) : 33` — this
 //!   client is always the `: 33` branch (see above), which is also
 //!   [`super::options::FOOTER_HEIGHT`]'s own value, so the footer band is
 //!   reused directly rather than re-derived — see "Dependencies" below.
@@ -120,7 +120,7 @@ pub const DESCRIPTION_LINES: [&str; 2] = [
 
 // -- geometry, transcribed (see the module docs) -----------------------------
 
-/// `TelemetryInfoScreen.java`'s literal `16 + 9 * 5 + 20`.
+/// Vanilla's own telemetry-info screen's literal `16 + 9 * 5 + 20`.
 pub const HEADER_HEIGHT: f32 = 81.0;
 /// The same constructor's `EXTRA_TELEMETRY_AVAILABLE ? … : 33` — always the
 /// `33` branch here (see the module docs), which is also
@@ -150,8 +150,8 @@ const FEEDBACK_RECT: usize = 2;
 pub fn header_widget_rects(width: f32, height: f32) -> Vec<(f32, f32, f32, f32)> {
     let mut root = HeaderAndFooterLayout::with_heights(width, height, HEADER_HEIGHT, FOOTER_HEIGHT);
 
-    // `LinearLayout header = layout.addToHeader(LinearLayout.vertical().spacing(4))`
-    // `header.defaultCellSetting().alignHorizontallyCenter()` (`:52-53`).
+    // Vanilla's own header layout: a vertical linear layout at spacing 4, added
+    // to the header, with its default cell setting horizontally centred (`:52-53`).
     let mut header = LinearLayout::vertical().spacing(4);
     *header.default_cell_setting() = LayoutSettings::defaults().align_horizontally_center();
     header.add_child(label_stand_in(options::HEADER_LINE_HEIGHT)); // title

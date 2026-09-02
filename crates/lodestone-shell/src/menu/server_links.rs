@@ -30,7 +30,7 @@
 //!   rather than greyed out once published (see that variant's own doc).
 //! - **Known links get vanilla's own captions.** `ServerLinks.KnownLinkType`'s
 //!   ten `known_server_link.<name>` strings, transcribed in [`known_caption`]
-//!   — `ByIdMap.continuous(..., OutOfBoundsStrategy.ZERO)` means an id outside
+//!   — vanilla's own by-id-map continuous helper with an out-of-bounds-strategy of zero means an id outside
 //!   `0..=9` resolves to id `0`'s caption rather than erroring, which
 //!   [`known_caption`] reproduces.
 //! - **Custom links show the server's own label, and it cannot break the
@@ -97,7 +97,7 @@ pub const ROW_LABEL: &str = "Server Links...";
 /// `menu.server_links.title` — this screen's own title label.
 pub const TITLE: &str = "Server Links";
 /// `Dialogs.SERVER_LINKS`'s own back button — `CommonComponents.GUI_BACK`
-/// (`Dialogs.java`'s `DEFAULT_BACK_BUTTON`), not `gui.done`: this is the one
+/// (vanilla's own dialogs declarations' `DEFAULT_BACK_BUTTON`), not `gui.done`: this is the one
 /// vanilla screen in this cluster whose footer button says "Back".
 pub const BACK_LABEL: &str = "Back";
 /// `chat.link.confirm` — the untrusted-link confirmation's title. Every
@@ -126,7 +126,7 @@ const WARNING_COLOUR: [f32; 4] = [1.0, 204.0 / 255.0, 204.0 / 255.0, 1.0];
 
 /// `ServerLinks.KnownLinkType`'s ten `known_server_link.<name>` captions
 /// (`en_us.json`), in `KnownLinkType`'s own declaration order — which is also
-/// its wire id order (`ServerLinks.java`: `BUG_REPORT(0, ..)` through
+/// its wire id order (vanilla's own server-links declarations: `BUG_REPORT(0, ..)` through
 /// `ANNOUNCEMENTS(9, ..)`).
 const KNOWN_CAPTIONS: [&str; 10] = [
     "Report Server Bug",
@@ -141,8 +141,8 @@ const KNOWN_CAPTIONS: [&str; 10] = [
     "Announcements",
 ];
 
-/// A known link type's caption, vanilla's own `ByIdMap.continuous(..,
-/// OutOfBoundsStrategy.ZERO)` rule applied to [`KNOWN_CAPTIONS`]: an id
+/// A known link type's caption, vanilla's own by-id-map continuous helper
+/// with an out-of-bounds-strategy of zero rule applied to [`KNOWN_CAPTIONS`]: an id
 /// outside `0..=9` — which cannot come off a well-formed wire, but a
 /// malicious or buggy server can send anything — decodes as id `0` rather
 /// than panicking or dropping the row.
@@ -330,7 +330,7 @@ pub const NO_ROW: usize = 1;
 // -- geometry: a flat, unscrolled list, the same departure `create_world.rs`
 // already documents for its own vanilla screen -----------------------------
 
-/// Vanilla's `Dialogs.SERVER_LINKS`' own button width (`Dialogs.java`,
+/// Vanilla's `Dialogs.SERVER_LINKS`' own button width (vanilla's own dialogs declarations,
 /// `ServerLinksDialog(.., 1, 310)`'s last argument).
 const ROW_W: f32 = 310.0;
 const ROW_H: f32 = options::WIDGET_H;
@@ -515,7 +515,7 @@ mod tests {
         assert_eq!(known_caption(9), "Announcements");
     }
 
-    /// `ByIdMap.continuous(.., OutOfBoundsStrategy.ZERO)`: an id outside
+    /// Vanilla's own by-id-map continuous helper with an out-of-bounds-strategy of zero: an id outside
     /// `0..=9` must resolve to id 0's caption, not panic and not some other
     /// row's text.
     #[test]

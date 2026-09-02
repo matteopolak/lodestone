@@ -62,7 +62,7 @@
 //!   is this tall. Unlike `OptionsList`, there is no
 //!   [`super::options::header_padding_top`] rule: a `CategoryEntry` is added
 //!   through the same `addEntry(entry, defaultEntryHeight)` as a `KeyEntry`
-//!   (`KeyBindsList.java`, `AbstractSelectionList.java`), so the
+//!   (vanilla's own key-binds list and its own abstract selection-list base), so the
 //!   window math here has no first-entry special case.
 //! - `getRowWidth() = 340` (`:59-61`). `getRowLeft() = x + width/2 -
 //!   rowWidth/2`, and this list's `x`
@@ -92,7 +92,7 @@
 //!   vertical position is a documented approximation
 //!   ([`CATEGORY_TEXT_DY`]) rather than `FocusableTextWidget`'s real border
 //!   metrics, which this client does not model.
-//! - The footer is `LinearLayout.horizontal().spacing(8)` of two default-width
+//! - The footer is vanilla's own horizontal linear layout at spacing 8 of two default-width
 //!   (150 px) buttons — **identical** in shape
 //!   to [`super::options::SettingsPage::Accessibility`]'s own two-button
 //!   footer, so this reuses [`super::options::Placement::Footer`] and
@@ -130,7 +130,7 @@ use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
 
 /// `KeyBindsList.ITEM_HEIGHT` (`:21`).
 pub const ROW_H: f32 = 20.0;
-/// `KeyBindsList.getRowWidth()` (`:59-61`).
+/// Vanilla's own key-binds list's get-row-width accessor (`:59-61`).
 pub const ROW_WIDTH: f32 = 340.0;
 /// `KeyEntry.changeButton`'s bound width (`:114`).
 pub const BIND_BUTTON_W: f32 = 75.0;
@@ -160,7 +160,8 @@ pub const LIST_WINDOW_PX: f32 = crate::config::MIN_SCALED_HEIGHT as f32
     - options::FOOTER_HEIGHT
     - options::LIST_TOP_INSET;
 
-/// `getRowLeft()` on a `width`-wide canvas (`AbstractSelectionList.java`,
+/// `getRowLeft()` on a `width`-wide canvas (vanilla's own abstract
+/// selection-list base,
 /// this list's own `x = 0`).
 #[must_use]
 pub fn row_left(width: f32) -> f32 {
@@ -825,7 +826,7 @@ pub fn frame(nav: &KeyBindsNav, keybinds: &Keybinds) -> MenuFrame<'static> {
 
 /// The category's caption, verbatim from `en_us.json`'s **real** 26.2 key —
 /// `key.category.minecraft.<id>` (`KeyMapping.Category.label`,
-/// `KeyMapping.java`, `Identifier.toLanguageKey(String)`). **Not**
+/// vanilla's own key-binding declarations, vanilla's own to-language-key helper). **Not**
 /// `key.categories.<id>`, which is legacy/unused text still sitting in the lang
 /// file from an older versioning scheme — a trap worth naming because it reads
 /// as the obvious key and is wrong (measured by reading `toLanguageKey`'s
@@ -938,9 +939,9 @@ mod tests {
             })
             .collect();
         // 36: 29 (Pick Block and Take Screenshot included) plus the seven F3
-        // chords, which `Options.java` declares as `Category.DEBUG`
-        // `KeyMapping`s in `debugKeys` and `KeyboardHandler.handleDebugKeys`
-        // dispatches through `KeyMapping::matches` — so they belong on this
+        // chords, which vanilla's own persisted-options declarations declare as `Category.DEBUG`
+        // `KeyMapping`s in `debugKeys` and vanilla's own debug-key handling
+        // dispatches through its own key-matching check — so they belong on this
         // screen, and hardcoding them in `resolve_key` was the divergence.
         // Debug was already non-empty (`DebugOverlay`), so the *category* list
         // above is unchanged and only the action count moves. Deriving this

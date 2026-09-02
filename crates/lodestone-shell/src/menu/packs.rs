@@ -25,8 +25,8 @@
 //! pack on top overrides nothing. Both directions are attested from the record
 //! definitions in
 //! [`ResourceManager::from_priority_order`](lodestone_assets::ResourceManager::from_priority_order)'s
-//! own doc (`FallbackResourceManager.java` and
-//! `PackSelectionModel.java`) — that is the single place the reversal
+//! own doc (vanilla's own fallback-resource-manager type and
+//! its own pack-selection-model type) — that is the single place the reversal
 //! happens, and [`crate::resources`] is its only caller.
 //!
 //! ## The built-in pack
@@ -60,7 +60,7 @@
 //!
 //! - **Pack-format validation.** Vanilla checks `pack_format` against the host's
 //!   and shows an "incompatible" warning, a red content box and a confirmation
-//!   prompt (`TransferableSelectionList.java`, `pack.incompatible.*`).
+//!   prompt (vanilla's own transferable selection list, `pack.incompatible.*`).
 //!   [`lodestone_assets::PackMeta::accepts`] already exists to answer it and
 //!   [`crate::resources::DiscoveredPack::pack_format`] already carries the
 //!   number, but **nothing in this client declares a host `pack_format`** to
@@ -92,7 +92,8 @@
 //!
 //! - Header: the generic 33 px band ([`options::SUB_HEADER_HEIGHT`]) — see
 //!   above. Footer: vanilla's own shape, `Open Pack Folder` + `Done`
-//!   (`LinearLayout.horizontal().spacing(8)`, `PackSelectionScreen.java`)
+//!   (its own horizontal linear layout at spacing 8, in its own pack-selection
+//!   screen rendering)
 //!   through [`options::footer_rects`].
 //! - The two lists: `width/2 - 15 - 200` and `width/2 + 15`, each 200 px wide,
 //!   at the header's bottom. Row geometry:
@@ -973,7 +974,7 @@ fn persist(ids: Vec<String>) {
 fn persist(_ids: Vec<String>) {}
 
 /// Opens the `resourcepacks/` folder in the platform file manager — vanilla's
-/// `pack.openFolder` button, which calls `Util.getPlatform().openPath(...)`.
+/// `pack.openFolder` button, which calls its own get-platform accessor's open-path call.
 ///
 /// Creates the folder first, because the most likely reason a player pressed
 /// this is that it does not exist yet. Forked for [`discover`]'s reason: a unit

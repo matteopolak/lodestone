@@ -65,7 +65,7 @@
 //! ## Always sends on close — the one rule that is *not* like
 //! [`super::command_block`]
 //!
-//! `AbstractSignEditScreen.removed()` sends `ServerboundSignUpdatePacket`
+//! Vanilla's own abstract sign-edit screen's removed hook sends `ServerboundSignUpdatePacket`
 //! unconditionally, whichever way the screen closed — the Done button
 //! (`onDone` → `setScreen(null)` → `removed()`) and Escape (`onClose` →
 //! `onDone` → the same) both route through it, and there is no Cancel that
@@ -109,10 +109,11 @@ pub const LINE_SPACING: f32 = 24.0;
 /// The title's y, matching `AbstractSignEditScreen.extractRenderState`'s
 /// `graphics.centeredText(this.font, this.title, this.width / 2, 40, -1)`.
 pub const TITLE_Y: f32 = 40.0;
-/// `Component.translatable("sign.edit")` (`en_us.json`).
+/// Vanilla's own translatable-component construction for "sign.edit" (`en_us.json`).
 pub const TITLE_TEXT: &str = "Edit sign message";
 /// The Done button's width/height — vanilla's standard `200x20`
-/// (`AbstractSignEditScreen.init`'s `Button.builder(..).bounds(this.width / 2
+/// (vanilla's own abstract sign-edit screen's init routine's button-builder
+/// bounds `(this.width / 2
 /// - 100, this.height / 4 + 144, 200, 20)`).
 pub const DONE_W: f32 = 200.0;
 /// See [`DONE_W`].
