@@ -3,64 +3,47 @@
 //!
 //! # Where the truth comes from
 //!
-//! `.cache/mc/26.2/src/net/minecraft/world/level/block/entity/
-//! BrewingStandBlockEntity.java` (the state machine) and
-//! `net/minecraft/world/item/alchemy/PotionBrewing.java` (the recipe
-//! registry — **not** `BrewingRecipeRegistry`, a name that does not exist in
-//! this decompile; verified directly rather than assumed).
+//! The decompiled brewing-stand block entity (the state machine) and the
+//! decompiled potion-brewing recipe registry (**not** a "recipe registry" name —
+//! that name does not exist in this decompile; verified directly rather than
+//! assumed).
 //!
-//! * Brew time is a **bare literal**, not a named constant:
-//!   `entity.brewTime = 400;` (in `BrewingStandBlockEntity.serverTick`).
-//!   `PotionBrewing.BREWING_TIME_SECONDS = 20`
-//!   exists but is never referenced or multiplied anywhere in the class —
-//!   confirmed by grep, not assumed — so it is purely documentary and
-//!   [`BREW_TIME_TICKS`] restates the real literal (`400`, i.e. 20 real
-//!   seconds at 20 ticks/s, which is presumably what that unused constant
-//!   was *meant* to document) rather than deriving from it.
-//! * `BrewingStandBlockEntity.FUEL_USES = 20` **is** the real value used:
-//!   `entity.fuel = 20;` when the fuel slot holds blaze powder and
-//!   the charge counter is empty. One blaze powder = 20 brews; the charge
-//!   decrements once per brew *started* (`entity.fuel--`, in the same
-//!   method), not per
-//!   tick.
-//! * `BrewingStandBlockEntity.serverTick` — quoted in full below as the model for
-//!   [`BrewingStand::tick`]:
-//!   ```java
-//!   if (entity.fuel <= 0 && fuel.is(ItemTags.BREWING_FUEL)) {
-//!       entity.fuel = 20;
-//!       fuel.shrink(1);
-//!   }
-//!   boolean brewable = isBrewable(level.potionBrewing(), entity.items);
-//!   boolean isBrewing = entity.brewTime > 0;
-//!   if (isBrewing) {
-//!       entity.brewTime--;
-//!       boolean isDoneBrewing = entity.brewTime == 0;
-//!       if (isDoneBrewing && brewable) {
-//!           doBrew(level, pos, entity.items);
-//!       } else if (!brewable || !ingredient.is(entity.ingredient)) {
-//!           entity.brewTime = 0;
-//!       }
-//!   } else if (brewable && entity.fuel > 0) {
-//!       entity.fuel--;
-//!       entity.brewTime = 400;
-//!       entity.ingredient = ingredient.getItem();
-//!   }
-//!   ```
-//!   The `!ingredient.is(entity.ingredient)` abort check compares the
-//!   *current* ingredient-slot item against whichever item was captured
-//!   (`entity.ingredient`) the moment this brew started — swapping the
-//!   ingredient mid-brew cancels it, even with plenty of brew time left.
-//! * `BrewingStandBlockEntity.doBrew` calls `potionBrewing.mix(ingredient, items.get
-//!   (dest))` on **all three** bottle slots unconditionally (an empty or
-//!   non-matching slot is a no-op inside `mix` itself — see
-//!   [`mix_bottle`]), then shrinks the ingredient by 1.
+//! * Brew time is a **bare literal**, not a named constant: the real tick handler
+//!   assigns `400` directly to the brew-time counter. A separate
+//!   `BREWING_TIME_SECONDS = 20` constant exists but is never referenced or
+//!   multiplied anywhere in the class — confirmed by grep, not assumed — so it is
+//!   purely documentary and [`BREW_TIME_TICKS`] restates the real literal (`400`,
+//!   i.e. 20 real seconds at 20 ticks/s, which is presumably what that unused
+//!   constant was *meant* to document) rather than deriving from it.
+//! * The real fuel-uses constant, `20`, **is** the real value used: the fuel
+//!   counter is set to 20 when the fuel slot holds blaze powder and the charge
+//!   counter is empty. One blaze powder = 20 brews; the charge decrements once per
+//!   brew *started* (in the same tick handler), not per tick.
+//! * The real per-tick rule, restated as the model for [`BrewingStand::tick`]:
+//!   if the fuel counter is at or below zero and the fuel slot holds a
+//!   brewing-fuel item, the counter resets to 20 and the fuel item shrinks by one.
+//!   Then, if the current ingredient/bottle combination is brewable and the brew
+//!   counter is positive, the counter decrements; if it just hit zero and the
+//!   combination is still brewable, the brew completes, and otherwise — if the
+//!   combination stopped being brewable, or the ingredient slot's item changed
+//!   from what started the brew — the counter is reset to zero, aborting it.
+//!   Otherwise, if not already brewing and the combination is brewable and fuel
+//!   remains, a new brew starts: fuel decrements, the brew counter is set to 400,
+//!   and the started ingredient item is captured.
+//!   The ingredient-changed abort check compares the *current* ingredient-slot
+//!   item against whichever item was captured the moment this brew started —
+//!   swapping the ingredient mid-brew cancels it, even with plenty of brew time
+//!   left.
+//! * The real complete-brew rule applies the mix function to **all three** bottle
+//!   slots unconditionally (an empty or non-matching slot is a no-op inside the
+//!   mix function itself — see [`mix_bottle`]), then shrinks the ingredient by 1.
 //! * **Splash/lingering is not a separate post-processing step** — this was
 //!   the vanilla belief specifically worth re-checking (CLAUDE.md's
-//!   "re-verify before routing around" rule): `PotionBrewing.mix`
-//!   checks `containerMixes` (gunpowder: `POTION` ->
-//!   `SPLASH_POTION`; dragon's breath: `SPLASH_POTION` -> `LINGERING_POTION`,
-//!   registered in `PotionBrewing.addVanillaMixes`) **before** falling through
-//!   to `potionMixes` (the potion-type table), in the exact same 400-tick
+//!   "re-verify before routing around" rule): the real mix rule
+//!   checks the container-promotion table (gunpowder: potion ->
+//!   splash potion; dragon's breath: splash potion -> lingering potion,
+//!   registered alongside every other vanilla mix) **before** falling through
+//!   to the potion-type table, in the exact same 400-tick
 //!   brew cycle as any other ingredient — gunpowder simply occupies the
 //!   ingredient slot for one ordinary brew like anything else.
 //!
@@ -74,30 +57,28 @@
 //!   issue's file ownership. [`Bottle`] is this module's own minimal stand-in
 //!   (container kind + potion id string) rather than a real `ItemStack`; see
 //!   the top-level report for this as a declared, named gap.
-//! * **Empty glass bottles sitting in a bottle slot.** Vanilla allows it
-//!   (`canPlaceItem`'s slot 0-2 branch also accepts `Items.GLASS_BOTTLE`),
-//!   but `mix()` is a no-op against one regardless (a glass bottle has no
-//!   `PotionContents` component, so `hasPotionMix`/`hasContainerMix` are
-//!   both trivially false) — modeling it would add a variant that never
+//! * **Empty glass bottles sitting in a bottle slot.** Vanilla allows it (the
+//!   real slot-acceptance rule for slots 0-2 also accepts a plain glass bottle),
+//!   but the mix function is a no-op against one regardless (a glass bottle has no
+//!   potion-contents component, so both "has a potion mix" and "has a container
+//!   mix" are trivially false) — modeling it would add a variant that never
 //!   does anything, so a bottle slot here is `Option<Bottle>` and empty
 //!   means "nothing here at all," not "an empty bottle."
 //! * **Ingredient item validation beyond the mix table itself.** Vanilla's
-//!   `canPlaceItem` for slot 3 calls `potionBrewing.isIngredient`, the same
-//!   check this module's [`is_ingredient`] performs — no separate
-//!   allow-list.
+//!   real slot-acceptance rule for slot 3 calls the same is-ingredient check
+//!   this module's [`is_ingredient`] performs — no separate allow-list.
 
-/// The literal `400` from `BrewingStandBlockEntity.serverTick` — see the module doc comment
-/// for why this is not derived from `PotionBrewing.BREWING_TIME_SECONDS`
-/// (unused in vanilla itself).
+/// The literal `400` from the real per-tick rule — see the module doc comment
+/// for why this is not derived from the unused `BREWING_TIME_SECONDS` constant.
 pub const BREW_TIME_TICKS: i32 = 400;
 
-/// `BrewingStandBlockEntity.FUEL_USES`, and the value `BrewingStandBlockEntity.serverTick`
+/// The real fuel-uses constant, and the value the real per-tick rule
 /// actually assigns — one blaze powder charges 20 brews.
 pub const FUEL_USES: i32 = 20;
 
 /// Which of the three bottle-item kinds a [`Bottle`] is — determines which
-/// `containerMixes` entry (if any) can promote it (`PotionBrewing.addVanillaMixes`'s
-/// registrations).
+/// container-promotion entry (if any) can promote it (from the real
+/// vanilla-mixes registration).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BottleKind {
     Potion,
@@ -125,11 +106,11 @@ impl Bottle {
     }
 }
 
-/// The container-promotion table (`PotionBrewing.addVanillaMixes`'s
-/// `addContainerRecipe` calls for gunpowder and dragon's breath): gunpowder
-/// promotes a `Potion` bottle to `Splash`; dragon's breath promotes a
-/// `Splash` bottle to `Lingering`. Checked before [`potion_mix`], matching
-/// `PotionBrewing.mix`'s own order.
+/// The container-promotion table, transcribed from the real vanilla-mixes
+/// registration's container-recipe calls for gunpowder and dragon's breath:
+/// gunpowder promotes a `Potion` bottle to `Splash`; dragon's breath promotes a
+/// `Splash` bottle to `Lingering`. Checked before [`potion_mix`], matching the
+/// real mix rule's own order.
 #[must_use]
 fn container_mix(kind: BottleKind, ingredient: &str) -> Option<BottleKind> {
     match (kind, ingredient) {
@@ -139,11 +120,10 @@ fn container_mix(kind: BottleKind, ingredient: &str) -> Option<BottleKind> {
     }
 }
 
-/// The potion-type transition table, transcribed directly from
-/// `PotionBrewing.addVanillaMixes` — every
-/// `addMix`/`addStartMix` call, with `addStartMix(ingredient, potion)`
-/// expanded to its documented pair (`WATER + ingredient -> MUNDANE`,
-/// `AWKWARD + ingredient -> potion`, per `PotionBrewing.Builder.addStartMix`).
+/// The potion-type transition table, transcribed directly from the real
+/// vanilla-mixes registration — every mix and start-mix registration, with each
+/// start-mix registration expanded to its documented pair (`WATER + ingredient ->
+/// MUNDANE`, `AWKWARD + ingredient -> potion`).
 #[must_use]
 #[allow(clippy::too_many_lines)]
 fn potion_mix(from: &str, ingredient: &str) -> Option<&'static str> {
@@ -243,8 +223,8 @@ fn potion_mix(from: &str, ingredient: &str) -> Option<&'static str> {
 
 /// Every ingredient item referenced anywhere in [`potion_mix`] — used by
 /// [`is_ingredient`] to answer "is this item usable as *some* brewing
-/// ingredient" without needing a specific bottle to check against (mirrors
-/// `PotionBrewing.isPotionIngredient`, which likewise only checks
+/// ingredient" without needing a specific bottle to check against (mirrors the
+/// real is-potion-ingredient rule, which likewise only checks
 /// ingredient membership, not a specific mix).
 fn is_potion_ingredient(item: &str) -> bool {
     matches!(
@@ -275,23 +255,23 @@ fn is_container_ingredient(item: &str) -> bool {
     matches!(item, "minecraft:gunpowder" | "minecraft:dragon_breath")
 }
 
-/// `PotionBrewing.isIngredient`: whether `item` is usable as an
+/// The real is-ingredient rule: whether `item` is usable as an
 /// ingredient at all, in either table.
 #[must_use]
 pub fn is_ingredient(item: &str) -> bool {
     is_container_ingredient(item) || is_potion_ingredient(item)
 }
 
-/// `PotionBrewing.hasMix`: whether `ingredient` has *some* effect
+/// The real has-mix rule: whether `ingredient` has *some* effect
 /// on this specific `bottle` (container promotion or potion-type change).
 #[must_use]
 pub fn has_mix(bottle: &Bottle, ingredient: &str) -> bool {
     container_mix(bottle.kind, ingredient).is_some() || potion_mix(&bottle.potion, ingredient).is_some()
 }
 
-/// `PotionBrewing.mix`: applies `ingredient` to `bottle`,
+/// The real mix rule: applies `ingredient` to `bottle`,
 /// container promotion first, then potion-type change, returning the
-/// bottle unchanged if neither applies (matching `BrewingStandBlockEntity.doBrew`
+/// bottle unchanged if neither applies (matching the real complete-brew rule
 /// calling this unconditionally on every bottle slot).
 #[must_use]
 pub fn mix_bottle(bottle: &Bottle, ingredient: &str) -> Bottle {
@@ -327,12 +307,13 @@ pub struct BrewingStand {
     /// `(item id, count)` — the ingredient slot (vanilla's slot 3).
     ingredient: Option<(String, u32)>,
     /// The fuel slot (vanilla's slot 4) — `(item id, count)`, expected to
-    /// only ever hold blaze powder (`ItemTags.BREWING_FUEL`'s sole member).
+    /// only ever hold blaze powder (the `minecraft:brewing_fuel` tag's sole
+    /// member).
     fuel_item: Option<(String, u32)>,
     fuel_charges: i32,
     brew_time: i32,
     /// The ingredient item captured when the current brew started
-    /// (`entity.ingredient`) — compared against the live ingredient slot
+    /// — compared against the live ingredient slot
     /// each tick to detect a mid-brew swap.
     locked_ingredient: Option<String>,
 }
@@ -422,7 +403,7 @@ impl BrewingStand {
         self.brew_time > 0
     }
 
-    /// `BrewingStandBlockEntity.isBrewable`: the ingredient slot must hold a valid
+    /// The real is-brewable rule: the ingredient slot must hold a valid
     /// ingredient, and at least one bottle slot must actually respond to it.
     fn is_brewable(&self) -> bool {
         let Some((ingredient, _)) = &self.ingredient else {
@@ -455,8 +436,8 @@ impl BrewingStand {
     }
 
     /// Advances by exactly one server tick — a direct port of
-    /// `BrewingStandBlockEntity.serverTick`; see the module doc
-    /// comment for the quoted control flow this mirrors line-by-line.
+    /// the real per-tick rule; see the module doc
+    /// comment for the control flow this mirrors step-by-step.
     pub fn tick(&mut self) -> BrewTick {
         let mut out = BrewTick::default();
 
@@ -607,9 +588,9 @@ mod tests {
         s.set_ingredient(Some(("minecraft:nether_wart".into(), 3)));
 
         // The tick that *starts* a brew (setting `brew_time = 400`) does
-        // not also decrement it — vanilla's `isBrewing`/start branch is a
-        // mutually exclusive `if`/`else if` (see the module doc comment's
-        // quoted `serverTick`). So completion is exactly `BREW_TIME_TICKS`
+        // not also decrement it — the real per-tick rule's is-brewing/start
+        // branch is mutually exclusive (see the module doc comment's
+        // control-flow restatement). So completion is exactly `BREW_TIME_TICKS`
         // *additional* tick calls after the start call, not
         // `BREW_TIME_TICKS` calls total.
         assert!(s.tick().started); // start call
@@ -647,8 +628,8 @@ mod tests {
         assert_eq!(s.bottle(0), Some(&water()), "bottle must be untouched by the aborted brew");
     }
 
-    /// **Control**: with no bottle in any slot at all, `isBrewable` is
-    /// false (nothing for `.any(has_mix)` to find), so a brew must never
+    /// **Control**: with no bottle in any slot at all, the real is-brewable
+    /// rule is false (nothing for `.any(has_mix)` to find), so a brew must never
     /// start — even with fuel and a recognized ingredient present.
     #[test]
     fn no_bottle_at_all_means_no_brew_starts() {
@@ -666,9 +647,10 @@ mod tests {
     /// Potion-type mixes (unlike container promotions) key only on the
     /// potion value, not the bottle's container kind — nether wart turns an
     /// already-*splash* water bottle into a splash awkward potion exactly
-    /// as readily as a plain one, because `PotionBrewing.mix`'s
-    /// `potionMixes` loop checks `mix.from.is(potion.get())` only, with no
-    /// container-kind test (that check belongs to `containerMixes` alone).
+    /// as readily as a plain one, because the real mix rule's
+    /// potion-type-table loop checks only the potion value, with no
+    /// container-kind test (that check belongs to the container-promotion table
+    /// alone).
     /// A control worth having on record precisely because it is easy to
     /// mis-assume the opposite.
     #[test]
