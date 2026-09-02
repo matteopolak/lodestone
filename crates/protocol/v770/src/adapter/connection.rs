@@ -134,8 +134,8 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::PONG_RESPONSE {
-            // `ClientboundPongResponsePacket` (the `net.minecraft.network.
-            // protocol.ping` one), distinct from the `PING`/`ClientEvent::Ping`
+            // The clientbound pong-response packet (the play-state ping
+            // protocol's own one), distinct from the `PING`/`ClientEvent::Ping`
             // pair handled above.
             let mut reader = Reader::new(payload);
             let time = reader.i64().map_err(dec_err)?;
@@ -145,17 +145,16 @@ impl V770Adapter {
         if packet_id == play::clientbound::UPDATE_TAGS {
             // Same wire shape and override as the Configuration-state arm —
             // vanilla can resend tags in Play too (e.g. a
-            // reload), and `ClientCommonPacketListener::handleUpdateTags` is
-            // shared by both states in the decompiled source.
+            // reload), and vanilla's own tag-update handler is shared by both
+            // states in the decompiled source.
             decode_update_tags(payload)?;
             return Ok(Vec::new());
         }
         if packet_id == play::clientbound::BUNDLE_DELIMITER {
-            // No fields: `ClientboundBundleDelimiterPacket` extends
-            // `BundleDelimiterPacket`, which overrides neither a reader nor a
-            // writer (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/
-            // BundleDelimiterPacket.java`) — vanilla's own pipeline
-            // (`BundlerInfo.java`) never puts a body on the wire for it either;
+            // No fields: vanilla's own bundle-delimiter packet base class
+            // overrides neither a reader nor a writer (confirmed against the
+            // decompiled 26.2 client source) — vanilla's own pipeline never
+            // puts a body on the wire for it either;
             // it is purely a toggle the pipeline uses to group the packets
             // between two delimiters into one atomic apply. Before
             // this arm existed, `BUNDLE_DELIMITER` fell through to the catch-all below
@@ -170,7 +169,7 @@ impl V770Adapter {
             return Ok(vec![Directive::BundleDelimiter]);
         }
         if packet_id == play::clientbound::LOW_DISK_SPACE_WARNING {
-            // `StreamCodec.unit(INSTANCE)`: zero bytes. `ensure_empty` is the
+            // Vanilla's own unit stream codec: zero bytes. `ensure_empty` is the
             // whole decode, and it is worth keeping — a non-empty body would mean
             // the id table is wrong, not that the packet grew a field.
             Reader::new(payload).ensure_empty().map_err(dec_err)?;
@@ -193,9 +192,9 @@ impl V770Adapter {
 /// invent.
 const BLOCK_REGISTRY_KEY: &str = "minecraft:block";
 /// Decodes `update_tags`, shared by the Configuration and Play
-/// states — `ClientboundUpdateTagsPacket` is a `ClientCommonPacketListener`
-/// packet with one wire shape used in both
-/// (`.cache/mc/26.2/src/net/minecraft/network/protocol/common/ClientboundUpdateTagsPacket.java`):
+/// states — vanilla's clientbound tag-update packet is a common-listener
+/// packet with one wire shape used in both (confirmed against the
+/// decompiled 26.2 source):
 ///
 /// ```text
 /// VarInt registry_count
@@ -291,16 +290,16 @@ fn decode_custom_payload(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
 
 /// Decodes a clientbound `custom_query` (Login state only): a VarInt
 /// transaction id, a channel identifier, then however many bytes remain
-/// (`ClientboundCustomQueryPacket`). This is the older, pre-`custom_payload`
-/// plugin-message mechanism (historically Forge/FML's login handshake); even
-/// vanilla's own reference client never interprets a payload — every channel
-/// decodes to `DiscardedQueryPayload`, which just skips the remaining bytes —
-/// and unconditionally answers with no payload
-/// (`ClientHandshakePacketListenerImpl.handleCustomQuery`:
-/// `new ServerboundCustomQueryAnswerPacket(transactionId, null)`, no channel
-/// check, no UI). This mirrors that exactly: decode to stay byte-aligned,
-/// answer `None`, surface no event — there is nothing to observe that
-/// vanilla itself does not already discard silently.
+/// (vanilla's clientbound custom-query packet). This is the older,
+/// pre-`custom_payload` plugin-message mechanism (historically Forge/FML's
+/// login handshake); even vanilla's own reference client never interprets a
+/// payload — every channel decodes to a discarded-payload stand-in, which
+/// just skips the remaining bytes — and unconditionally answers with no
+/// payload (vanilla's own login-handshake handler builds its answer packet
+/// with a null payload unconditionally, no channel check, no UI). This
+/// mirrors that exactly: decode to stay byte-aligned, answer `None`,
+/// surface no event — there is nothing to observe that vanilla itself does
+/// not already discard silently.
 fn decode_custom_query(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     let mut reader = Reader::new(payload);
     let transaction_id = reader.var_i32().map_err(dec_err)?;
@@ -595,11 +594,12 @@ fn decode_custom_report_details(payload: &[u8]) -> Result<Vec<Directive>, Adapte
     })])
 }
 
-/// Decodes `ClientboundServerLinksPacket`.
+/// Decodes vanilla's clientbound server-links packet.
 ///
-/// Each entry is `ByteBufCodecs.either(KnownLinkType, Component)` then the URL,
-/// and **`true` selects `Left`, which is the known-type id** — not the custom
-/// component. Getting that polarity backwards produces a decode that succeeds
+/// Each entry is an either-codec over a known-link-type id and a text
+/// component, then the URL, and **`true` selects the left arm, which is
+/// the known-type id** — not the custom component. Getting that polarity
+/// backwards produces a decode that succeeds
 /// while reading a VarInt as the start of an NBT blob, which is why it is called
 /// out here and gated in `tests/remaining_clientbound.rs`.
 fn decode_server_links(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
@@ -642,8 +642,8 @@ mod tests {
     /// **The owner-reported bug, reproduced from a real captured shape.**
     /// A server refusing a login (banned/whitelisted/wrong version) sends a
     /// styled component — `extra` children, a root `color`, a `bold` run —
-    /// as a **JSON** chat component (`login/ClientboundLoginDisconnectPacket
-    /// .java`'s `ByteBufCodecs.lenientJson`), not NBT. Before this fix the
+    /// as a **JSON** chat component (vanilla's own login-disconnect packet
+    /// uses a lenient-JSON stream codec there), not NBT. Before this fix the
     /// login-state arm ran the raw JSON straight through `Text::literal`, so
     /// a player saw the brace-and-quote source text instead of a message —
     /// exactly the report: `{"extra":... with colour, bold, etc.}` on
@@ -728,10 +728,10 @@ mod tests {
     }
 
     /// The negative control the coordinator asked for: the configuration-state
-    /// arm shares `ClientboundDisconnectPacket` with Play (NBT, not JSON) —
-    /// see `.cache/mc/26.2/client-src/net/minecraft/network/protocol/common/
-    /// ClientboundDisconnectPacket.java`'s `TRUSTED_CONTEXT_FREE_STREAM_CODEC`
-    /// versus login's own `ByteBufCodecs.lenientJson`. A JSON payload fed to
+    /// arm shares vanilla's clientbound disconnect packet with Play (NBT, not
+    /// JSON) — its trusted, context-free stream codec there, confirmed
+    /// against the decompiled 26.2 client source, versus login's own
+    /// lenient-JSON stream codec. A JSON payload fed to
     /// the configuration arm must NOT decode as if it were NBT.
     #[test]
     fn configuration_disconnect_rejects_a_json_payload_as_not_nbt() {

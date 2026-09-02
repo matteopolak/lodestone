@@ -40,21 +40,21 @@
 //!
 //! # `select_known_packs`
 //!
-//! [`select_known_packs_directive`] needs no fixture: it is
-//! `ClientboundSelectKnownPacks(requestedPacks)` with an empty pack list,
-//! since this server ships no datapacks
-//! (`.cache/mc/26.2/src/net/minecraft/server/network/config/SynchronizeRegistriesTask.java`).
-//! Real vanilla then waits for the client's own reply before sending
-//! registries, so it can skip contents the client already has
-//! (`RegistrySynchronization.packRegistry`'s `canSkipContents`). This server
-//! does not wait: with an **empty** `requestedPacks`,
-//! `SynchronizeRegistriesTask.handleResponse`'s own logic
-//! (`acceptedPacks.equals(this.requestedPacks) ? Set.copyOf(requestedPacks)
-//! : Set.of()`) yields an **empty** negotiated set either way — a client
-//! that echoes back the empty list satisfies the `equals` branch and gets
-//! `Set.copyOf([])`; a client that replies with anything else falls to the
-//! `else` branch's `Set.of()` — so `clientKnownPacks` is unconditionally
-//! empty and every entry is sent in full regardless of what the client says.
+//! [`select_known_packs_directive`] needs no fixture: it is the
+//! clientbound "select known packs" packet carrying the server's requested
+//! pack list, sent with an empty pack list since this server ships no
+//! datapacks (confirmed against the decompiled 26.2 registry-synchronize
+//! handshake). Real vanilla then waits for the client's own reply before
+//! sending registries, so it can skip contents the client already has (the
+//! per-registry pack-sync routine's own "can skip contents" check). This
+//! server does not wait: with an **empty** requested-pack list, the
+//! handshake handler's own accept/reject logic yields an **empty**
+//! negotiated set either way — a client that echoes back the empty list
+//! satisfies the "accepted equals requested" branch and gets an empty
+//! copied set; a client that replies with anything else falls to the
+//! empty-set branch — so the server's notion of "packs the client already
+//! knows" is unconditionally empty and every entry is sent in full
+//! regardless of what the client says.
 //! That is exactly what every captured fixture here contains (full NBT, no
 //! elided entries), so firing the whole burst — `select_known_packs` then
 //! every `registry_data` then `update_tags` — without reading the client's
@@ -89,7 +89,8 @@ macro_rules! fixture {
 /// The 27 synchronized registries (of 29 —
 /// `minecraft:dimension_type`/`minecraft:world_clock` are the structured
 /// exceptions above) this server relays as opaque captured bytes, in
-/// `RegistryDataLoader.SYNCHRONIZED_REGISTRIES`' own order (not load-bearing —
+/// the vanilla registry loader's own synchronized-registries list order
+/// (not load-bearing —
 /// each `registry_data` packet is independently framed — but matching a real
 /// server's own emission order costs nothing and helps a packet capture diff
 /// cleanly against vanilla's).
@@ -205,9 +206,9 @@ const PASSTHROUGH_REGISTRY_FIXTURES: &[(&str, &str)] = &[
 ];
 
 /// The captured `update_tags` payload sent once, after every `registry_data`
-/// packet and before `FINISH_CONFIGURATION` — matching
-/// `SynchronizeRegistriesTask.sendRegistries`'s own order (registries, then
-/// one `ClientboundUpdateTagsPacket`).
+/// packet and before `FINISH_CONFIGURATION` — matching the vanilla
+/// registry-synchronize handshake's own send order (registries, then one
+/// tag-update packet).
 const UPDATE_TAGS_FIXTURE: &str = include_str!("../tests/fixtures/update_tags_configuration.hex");
 
 /// Builds the 27 opaque `registry_data` sends (see module docs for why
@@ -232,8 +233,8 @@ pub(crate) fn update_tags_directive() -> ServerDirective {
 
 /// Builds `select_known_packs`, requesting zero packs (see module docs for
 /// why an empty request needs no negotiation wait). Wire layout: a single
-/// VarInt `0` — `ClientboundSelectKnownPacks(List.of())`'s
-/// `FriendlyByteBuf.writeCollection` with nothing to write.
+/// VarInt `0` — the vanilla packet's own collection-writer with nothing to
+/// write.
 pub(crate) fn select_known_packs_directive() -> ServerDirective {
     let mut w = lodestone_core::Writer::default();
     w.var_i32(0);

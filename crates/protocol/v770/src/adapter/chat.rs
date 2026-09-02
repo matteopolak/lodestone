@@ -11,7 +11,7 @@ impl V770Adapter {
             let mut reader = Reader::new(payload);
             let global_index = reader.var_i32().map_err(dec_err)?;
             let sender = reader.uuid().map_err(dec_err)?;
-            // `SignedMessageLink.index` — this message's position in the
+            // The signed-message-link index — this message's position in the
             // sender's signing chain. Used to be discarded (`let _index`);
             // now carried through `ChatAckInfo::message_index` so the client
             // driver can reconstruct the exact link a signature verification
@@ -22,7 +22,8 @@ impl V770Adapter {
             } else {
                 Vec::new()
             };
-            // SignedMessageBody.Packed: raw content, timestamp, salt, last-seen.
+            // Vanilla's packed signed-message body: raw content, timestamp,
+            // salt, last-seen.
             let content = reader.string(256).map_err(dec_err)?;
             // Epoch **milliseconds** on the wire — see `ChatAckInfo::timestamp_millis`'s
             // own doc for why this used to be discarded (`let _timestamp`) and
@@ -31,7 +32,7 @@ impl V770Adapter {
             let salt = reader.i64().map_err(dec_err)?;
             // Resolve the packed last-seen list against the signature cache and
             // push it — plus this message's own signature — back in, mirroring
-            // vanilla's `handlePlayerChat`. The push keeps the client's cache id
+            // vanilla's own signed-chat handler. The push keeps the client's cache id
             // space aligned with the server's; pushing only the *new* signatures
             // would drift every subsequent cache id, so the complete resolved
             // list is pushed.
@@ -139,7 +140,7 @@ impl V770Adapter {
             )]);
         }
         if packet_id == play::clientbound::DELETE_CHAT {
-            // `MessageSignature.Packed`: a VarInt `id + 1`; `0` is followed by
+            // Vanilla's packed message signature: a VarInt `id + 1`; `0` is followed by
             // a full 256-byte signature, any other value is `id - 1` into the
             // last-seen signature cache. Cached references are resolved here
             // against the connection's `chat_cache`; one that cannot be
@@ -301,8 +302,8 @@ fn read_chat_type_bound(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
     Ok(())
 }
 
-/// `ClientboundCommandsPacket`'s own node-flag bits
-/// (`.cache/mc/26.2/client-src/net/minecraft/network/protocol/game/ClientboundCommandsPacket.java`).
+/// The clientbound command-tree packet's own node-flag bits, confirmed
+/// against the decompiled 26.2 client source.
 mod command_node_flags {
     /// `MASK_TYPE`: the low two bits select root / literal / argument.
     pub(super) const MASK_TYPE: u8 = 3;
@@ -345,16 +346,16 @@ fn command_count(reader: &mut Reader<'_>, payload_len: usize, what: &str) -> Res
 ///
 /// Every branch mirrors that parser's own `ArgumentTypeInfo::deserializeFromNetwork`
 /// — see `lodestone_model::command_tree`'s module doc for the file list. Ids
-/// with no branch here are `SingletonArgumentInfo`s, whose
-/// `deserializeFromNetwork` consumes nothing, so falling through to
+/// with no branch here use vanilla's single-instance argument-info kind,
+/// whose network deserializer consumes nothing, so falling through to
 /// [`ArgumentParser::from_registry_id_no_payload`] reads zero bytes and is
 /// correct rather than a guess.
 ///
 /// Returns `None` for an id this build doesn't model, having consumed no
 /// payload for it. **This is a deliberate, documented divergence from vanilla**:
-/// `ClientboundCommandsPacket.read` bails out of the *whole* node the moment
-/// `BuiltInRegistries.COMMAND_ARGUMENT_TYPE.byId` returns `null`, without
-/// reading the payload or the custom-suggestions id, which leaves its own
+/// vanilla's own command-tree packet reader bails out of the *whole* node
+/// the moment the argument-type registry lookup by id returns nothing,
+/// without reading the payload or the custom-suggestions id, which leaves its own
 /// reader mid-node and corrupts every subsequent entry. Assuming "no payload"
 /// keeps the stream in sync for the 44-of-57 ids that genuinely have none, so a
 /// datapack or mod argument type we don't model costs one unusable node instead
@@ -364,8 +365,9 @@ fn read_argument_parser(
     reader: &mut Reader<'_>,
     parser_id: i32,
 ) -> Result<Option<ArgumentParser>, AdapterError> {
-    // `ArgumentUtils.numberHasMin` / `numberHasMax`: bit 0 and bit 1 of a
-    // leading flags byte, an absent bound meaning the type's own extreme.
+    // Vanilla's number-argument flag helpers (has-min / has-max): bit 0 and
+    // bit 1 of a leading flags byte, an absent bound meaning the type's own
+    // extreme.
     const HAS_MIN: u8 = 1;
     const HAS_MAX: u8 = 2;
 
@@ -461,12 +463,12 @@ fn read_argument_parser(
                 multiple: flags & 1 != 0,
             }
         }
-        // `TimeArgument.Info`: a plain big-endian `int`, no flags byte.
+        // The time-argument type: a plain big-endian `int`, no flags byte.
         43 => ArgumentParser::Time {
             min: reader.i32().map_err(dec_err)?,
         },
-        // The five `resource*` parsers: `FriendlyByteBuf.readRegistryKey`, which
-        // is `readIdentifier` — a VarInt-length UTF-8 string, not a
+        // The five `resource*` parsers: vanilla's registry-key reader, which is
+        // just its identifier reader — a VarInt-length UTF-8 string, not a
         // namespace/path pair.
         44..=48 => {
             let raw = reader.string(32767).map_err(dec_err)?;
@@ -526,8 +528,8 @@ fn read_command_node(
             let parser_id = reader.var_i32().map_err(dec_err)?;
             match read_argument_parser(reader, parser_id)? {
                 Some(parser) => {
-                    // Read *after* the parser payload, exactly as
-                    // `ArgumentNodeStub.write` emits it.
+                    // Read *after* the parser payload, exactly as vanilla's own
+                    // argument-node writer emits it.
                     let suggestions = if flags & flag::CUSTOM_SUGGESTIONS != 0 {
                         let raw = reader.string(32767).map_err(dec_err)?;
                         Some(parse_key(&raw, "command suggestions provider")?)

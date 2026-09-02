@@ -152,21 +152,22 @@ impl V770Adapter {
             )?]);
         }
         if packet_id == play::clientbound::CHUNKS_BIOMES {
-            // `ClientboundChunksBiomesPacket` (id 13): a VarInt-prefixed list of
-            // `(ChunkPos, byte[])` entries. Vanilla sends this to *resend* biomes
-            // for chunks a player already has loaded — `ChunkMap.
-            // resendBiomesForChunks`, whose only caller is `/fillbiome`
-            // (`FillBiomeCommand.java`) — never at initial load, which is why the
+            // The clientbound chunks-biomes packet (id 13): a VarInt-prefixed
+            // list of `(chunk position, byte[])` entries. Vanilla sends this
+            // to *resend* biomes for chunks a player already has loaded —
+            // the chunk map's own biome-resend routine, whose only caller is
+            // `/fillbiome` — never at initial load, which is why the
             // per-section biome container already rides `level_chunk_with_light`
             // and this packet only ever *updates* it.
             //
-            // Each entry's byte array is, per `ChunkBiomeData.extractChunkData`,
-            // every section's `PalettedContainer<Holder<Biome>>.write` back to
-            // back with **no other framing at all** — no non-air/fluid counts (it
-            // has no blocks to count), no block-state container, just
-            // `section_count` biome containers in ascending section order. That
-            // makes this the one chunk-shaped packet whose per-section loop is
-            // *shorter* than `level_chunk_with_light`'s, not a variant of it.
+            // Each entry's byte array is, per vanilla's own chunk-biome-data
+            // extraction routine, every section's biome-container encoder
+            // output back to back with **no other framing at all** — no
+            // non-air/fluid counts (it has no blocks to count), no
+            // block-state container, just `section_count` biome containers
+            // in ascending section order. That makes this the one
+            // chunk-shaped packet whose per-section loop is *shorter* than
+            // `level_chunk_with_light`'s, not a variant of it.
             let shape = self.current_shape();
             let mut reader = Reader::new(payload);
             let count = reader.var_i32().map_err(dec_err)?;
@@ -174,8 +175,9 @@ impl V770Adapter {
                 .map_err(|_| AdapterError::Decode(format!("negative chunk-biomes count {count}")))?;
             let mut directives = Vec::with_capacity(count.min(1024));
             for _ in 0..count {
-                // `ChunkPos.pack`/`unpack`: x in the low 32 bits, z in the high 32
-                // — the same layout `forget_level_chunk` already unpacks.
+                // Vanilla's packed chunk-position encoding: x in the low 32
+                // bits, z in the high 32 — the same layout `forget_level_chunk`
+                // already unpacks.
                 let packed = reader.i64().map_err(dec_err)?;
                 let (x, z) = (packed as i32, (packed >> 32) as i32);
                 let bytes = reader.var_bytes(2_097_152).map_err(dec_err)?;
@@ -273,7 +275,8 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::FORGET_LEVEL_CHUNK {
             // A single packed long: x in the low 32 bits, z in the high 32
-            // (`ChunkPos.pack`, verified against 26.2 source).
+            // (vanilla's own packed chunk-position encoding, verified against
+            // 26.2 source).
             let mut reader = Reader::new(payload);
             let packed = reader
                 .i64()
@@ -301,8 +304,8 @@ impl V770Adapter {
                 .map_err(|_| AdapterError::Decode(format!("negative block state id {state}")))?;
             world.set_block(pos.x, pos.y, pos.z, state);
             // Writing a block state is what creates (or destroys) a block
-            // entity: vanilla does it inside `LevelChunk.setBlockState`, with no
-            // packet involved. Skipping this leaves
+            // entity: vanilla does it inside the chunk's own block-state setter,
+            // with no packet involved. Skipping this leaves
             // a placed chest with a state, no record, and zero pixels,
             // which still *opened* because interaction reads the state.
             // `World::sync_block_entity` documents the create/keep/replace/remove
@@ -355,8 +358,8 @@ impl V770Adapter {
             world.set_blocks(section_x, section_y, section_z, &blocks);
             // Every state write goes through `sync_block_entity`, one call per
             // changed cell, for the same reason `BLOCK_UPDATE` does: in vanilla
-            // `LevelChunk.setBlockState` is what creates and removes block
-            // entities, no packet involved. A piston
+            // the chunk's own block-state setter is what creates and removes
+            // block entities, no packet involved. A piston
             // or a `/fill` arrives here rather than as N `BLOCK_UPDATE`s, so
             // skipping it would leave exactly the same missing-block-entity bug for bulk edits.
             // Section-relative coordinates back to absolute — `set_blocks` does
@@ -395,10 +398,11 @@ impl V770Adapter {
             // already exists*, created by the chunk packet's block-entity list or
             // by a state write through `sync_block_entity`. It nonetheless still
             // **creates** on a miss (`set_block_entity` is an upsert), which is a
-            // deliberate divergence: vanilla's `handleBlockEntityData` drops the
-            // payload when `getBlockEntity(pos, type)` is empty
-            // (`ClientPacketListener.java`, `BlockGetter.java`) because
-            // it has `pendingBlockEntities` to promote from later, and we do not.
+            // deliberate divergence: vanilla's own client-side handler drops
+            // the payload when the block entity is not already present at
+            // that position and type (confirmed against the decompiled 26.2
+            // client and world sources) because it has a pending-block-entities
+            // list to promote from later, and we do not.
             // The two failure modes are not symmetric: an orphan record whose
             // state is not a chest resolves to no material and draws nothing (see
             // `lodestone-shell`'s `block_entities`), so creating is inert, whereas
@@ -567,10 +571,9 @@ impl V770Adapter {
                     })
                     .unwrap_or_default(),
                 // WIN_GAME: exiting the End through the exit
-                // portal after the dragon fight. Vanilla's own handler
-                // (`ClientPacketListener.handleGameEvent`'s `WIN_GAME` arm)
-                // ignores `param` for this event and always opens
-                // `WinScreen` with `poem = true`, so nothing from
+                // portal after the dragon fight. Vanilla's own game-event
+                // handler ignores `param` for this event and always opens
+                // the credits/win screen with the poem shown, so nothing from
                 // the wire needs to ride along — see `ClientEvent::WinGame`'s
                 // own doc.
                 4 => vec![Directive::Emit(ClientEvent::WinGame)],
@@ -775,8 +778,8 @@ impl V770Adapter {
         }
         if packet_id == play::clientbound::DEBUG_CHUNK_VALUE {
             let mut reader = Reader::new(payload);
-            // `ChunkPos.STREAM_CODEC` is one packed long: low 32 bits x, high 32
-            // bits z (`ChunkPos.unpack`). Not two VarInts.
+            // Vanilla's chunk-position stream codec is one packed long: low 32
+            // bits x, high 32 bits z. Not two VarInts.
             let packed = reader.i64().map_err(dec_err)?;
             #[allow(clippy::cast_possible_truncation)]
             let chunk = ChunkPos {
@@ -801,10 +804,10 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::DEBUG_EVENT {
-            // `DebugSubscription.Event` dispatches the same way `Update` does but
-            // **without** the `ByteBufCodecs.optional` wrapper — an event always
-            // has a value. Reusing `read_debug_update` here would eat the first
-            // payload byte as a present-flag.
+            // Vanilla's debug-subscription event dispatches the same way its
+            // update variant does but **without** the optional-value wrapper
+            // — an event always has a value. Reusing `read_debug_update`
+            // here would eat the first payload byte as a present-flag.
             let mut reader = Reader::new(payload);
             let subscription = read_debug_subscription_key(&mut reader)?;
             let value = reader.remaining_bytes().to_vec();
@@ -909,7 +912,8 @@ impl V770Adapter {
     }
 }
 
-/// Unpacks a vanilla `SectionPos.asLong` value into section-grid coordinates.
+/// Unpacks vanilla's packed section-position long value into section-grid
+/// coordinates.
 ///
 /// The packing places `x` in bits 42–63 (22 bits), `z` in bits 20–41 (22 bits),
 /// and `y` in bits 0–19 (20 bits), each a two's-complement signed field.
@@ -962,7 +966,7 @@ fn read_sound_holder(reader: &mut Reader<'_>) -> Result<(String, Option<f32>), A
     }
 }
 
-/// Reads a `SoundSource` enum ordinal (a VarInt) as the canonical
+/// Reads vanilla's sound-source enum ordinal (a VarInt) as the canonical
 /// [`SoundCategory`].
 fn read_sound_category(reader: &mut Reader<'_>) -> Result<SoundCategory, AdapterError> {
     let ordinal = reader.var_i32().map_err(dec_err)?;
@@ -1019,26 +1023,26 @@ fn decode_sound_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
-// `explosionParticle` is a registry id: `ParticleTypes.STREAM_CODEC` dispatches
-// through `ByteBufCodecs.registry(Registries.PARTICLE_TYPE)`, a plain 0-based
+// `explosionParticle` is a registry id: vanilla's own particle-type stream
+// codec dispatches through a plain registry-id codec, a plain 0-based
 // VarInt — **not** the `id + 1` "holder" scheme `read_sound_holder` and the
-// villager-data field use. A `SimpleParticleType`'s own stream codec then reads
-// no further bytes, which is what makes it skippable without modelling the full
-// particle-options codec (dust colour, block state, item stack, …) that
-// `metadata.rs`'s `SER_PARTICLE`/`SER_PARTICLES` reject for the identical
-// reason. `lodestone_data::particle_types::is_simple_particle_type` is the
-// single source of truth for that classification.
+// villager-data field use. A simple (argument-less) particle type's own
+// stream codec then reads no further bytes, which is what makes it skippable
+// without modelling the full particle-options codec (dust colour, block
+// state, item stack, …) that `metadata.rs`'s `SER_PARTICLE`/`SER_PARTICLES`
+// reject for the identical reason.
+// `lodestone_data::particle_types::is_simple_particle_type` is the single
+// source of truth for that classification.
 /// Decodes `explode` (protocol id 36): a creeper/TNT/bed/respawn-anchor
-/// detonation, `ClientboundExplodePacket`.
+/// detonation, the clientbound explosion packet.
 ///
 /// # Server-sent, not client-predicted
 ///
 /// Unlike a player's own block break (`e2544b9`: no level event is ever sent
 /// at all, and the sound is predicted), an explosion's sound rides explicitly
-/// on this packet's `explosionSound` field, and
-/// `ClientPacketListener.handleExplosion` (`ClientPacketListener.java`)
-/// does nothing but play exactly what the server sent, at a
-/// **client-rolled** pitch:
+/// on this packet's `explosionSound` field, and vanilla's own client-side
+/// explosion handler does nothing but play exactly what the server sent, at
+/// a **client-rolled** pitch:
 ///
 /// ```text
 /// playLocalSound(center, packet.explosionSound(), SoundSource.BLOCKS, 4.0F,
@@ -1055,21 +1059,21 @@ fn decode_sound_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 ///
 /// `radius`, `blockCount` and `playerKnockback` are consumed for wire
 /// alignment only — no consumer today. `explosionParticle` is consumed via
-/// the narrow allowlist above. `blockParticles` (the flying-debris
-/// `WeightedList<ExplosionParticleInfo>`) is **not** decoded at all:
-/// `explosionSound` is the second-to-last field the packet carries, so once
-/// it is read there is nothing left this seam needs, and modelling
-/// `ExplosionParticleInfo`'s own nested particle-options codec would cost
-/// real complexity for zero consumers. This is therefore one of the packets
-/// that does not run the trailing-bytes misparse check — like `metadata.rs`'s
-/// partial item-stack decode, deliberately, not an oversight.
+/// the narrow allowlist above. `blockParticles` (the flying-debris weighted
+/// list of particle infos) is **not** decoded at all: `explosionSound` is
+/// the second-to-last field the packet carries, so once it is read there is
+/// nothing left this seam needs, and modelling the flying-debris entry's own
+/// nested particle-options codec would cost real complexity for zero
+/// consumers. This is therefore one of the packets that does not run the
+/// trailing-bytes misparse check — like `metadata.rs`'s partial item-stack
+/// decode, deliberately, not an oversight.
 ///
 /// The flying block-debris particles (`blockParticles`) remain unimplemented
 /// for the reason above. The shockwave/smoke visual itself is implemented:
 /// this decoder now also emits a `ClientEvent::Particles` directive for
-/// `explosion_emitter` (`ParticleTypes.EXPLOSION_EMITTER`, the id this
-/// packet actually carries — `HugeExplosionSeedParticle` is what schedules
-/// the follow-up `HugeExplosionParticle`s vanilla-side, per
+/// `explosion_emitter` (the registry id this packet actually carries — a
+/// dedicated seed-particle kind is what schedules the follow-up
+/// full explosion particles vanilla-side, per
 /// `docs/particle-catalogue.md`'s "Built" entry), alongside the
 /// existing `Sound` directive. `net.rs`/`sim.rs` need no new arm: this
 /// crate's `ClientEvent::Particles` already forwards generically into
@@ -1114,24 +1118,24 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     //
     // The shockwave/smoke visual, alongside the sound below.
     // Always `explosion_emitter` regardless of which of the two ids this
-    // packet carried — `HugeExplosionSeedParticle` is what schedules the
-    // follow-up `HugeExplosionParticle`s client-side (see
+    // packet carried — a dedicated seed-particle kind is what schedules the
+    // follow-up full explosion particles client-side (see
     // `Particle::tick_huge_explosion_seed`), so the seed is the one real
     // vanilla explosions actually spawn from this packet.
     Ok(vec![
         Directive::Emit(ClientEvent::Particles {
             particle: parse_key("explosion_emitter", "particle")?,
             long_distance: false,
-            // `ClientPacketListener.handleExplosion` reaches the three-argument
-            // `Level.addParticle` overload, which passes `false` for both the
-            // limiter override and always-show. Neither is a field of
-            // `ClientboundExplodePacket`, so this is vanilla's value rather
-            // than a value we chose.
+            // Vanilla's own client-side explosion handler reaches the
+            // three-argument particle-add overload, which passes `false` for
+            // both the limiter override and always-show. Neither is a field
+            // of the wire packet, so this is vanilla's value rather than a
+            // value we chose.
             always_show: false,
             pos: Vec3::new(x, y, z),
             offset: Vec3f::new(0.0, 0.0, 0.0),
             max_speed: 0.0,
-            // `ParticleTypes.EXPLOSION_EMITTER` is a bare `SimpleParticleType`.
+            // The explosion-emitter particle type is a bare, argument-less registry entry.
             options: ParticleOptions::None,
             count: 1,
         }),
@@ -1152,55 +1156,54 @@ fn decode_explode(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 /// [`ParticleOptions`] this crate models today.
 ///
 /// Every name this match does not recognise resolves to
-/// [`ParticleOptions::None`] — the correct decode for a true
-/// `SimpleParticleType` (the overwhelming majority of registry entries carry
-/// no payload at all) and, for now, the honest answer for every payload-
-/// carrying type this crate has not modelled yet. Getting this dispatch wrong
-/// in the other direction — decoding a plain `SimpleParticleType` as if it
-/// carried bytes — cannot happen here because there is nothing left in
-/// `bytes` for those names to misread past `LevelParticles`'s own
-/// fixed-width prefix, and this function is never called with any of the
-/// packet's own fields still unread.
+/// [`ParticleOptions::None`] — the correct decode for a true simple
+/// (argument-less) particle type (the overwhelming majority of registry
+/// entries carry no payload at all) and, for now, the honest answer for
+/// every payload-carrying type this crate has not modelled yet. Getting
+/// this dispatch wrong in the other direction — decoding a plain
+/// argument-less particle as if it carried bytes — cannot happen here
+/// because there is nothing left in `bytes` for those names to misread past
+/// the level-particles packet's own fixed-width prefix, and this function is
+/// never called with any of the packet's own fields still unread.
 ///
-/// `minecraft:dust`/`minecraft:dust_color_transition`
-/// (`DustParticleOptions`/`DustColorTransitionOptions`,
-/// `.cache/mc/26.2/client-src/net/minecraft/core/particles/`): one or two
-/// packed RGB24 big-endian `i32`s (`ARGB.vector3fFromRGB24` unpacks each byte
-/// to `[0, 1]` via `red(color) = color >> 16 & 0xFF`, ditto green/blue) then a
-/// big-endian `f32` scale — `StreamCodec.composite(ByteBufCodecs.INT, …,
-/// ByteBufCodecs.FLOAT, …)`, ordinary fixed-width fields, not VarInts.
+/// `minecraft:dust`/`minecraft:dust_color_transition` (confirmed against the
+/// decompiled 26.2 client's particle-options sources): one or two packed
+/// RGB24 big-endian `i32`s (vanilla's own colour-unpack helper reads each
+/// byte to `[0, 1]` via `red(color) = color >> 16 & 0xFF`, ditto
+/// green/blue) then a big-endian `f32` scale — a composite stream codec of
+/// an `INT` then a `FLOAT`, ordinary fixed-width fields, not VarInts.
 ///
 /// The potion-effect family reads the same way and is three *different* option
 /// types, which is why they cannot share one arm:
 ///
-/// * `minecraft:effect`/`minecraft:instant_effect` carry a
-///   `SpellParticleOption` — `StreamCodec.composite(ByteBufCodecs.INT, colour,
-///   ByteBufCodecs.FLOAT, power)`, eight bytes. Its accessors read only the
+/// * `minecraft:effect`/`minecraft:instant_effect` carry vanilla's
+///   colour+power option type — a composite `INT` (colour) then `FLOAT`
+///   (power) stream codec, eight bytes. Its accessors read only the
 ///   low three bytes of the word, so the colour unpacks exactly like `dust`'s.
-/// * `minecraft:entity_effect` carries a `ColorParticleOption` —
-///   `ByteBufCodecs.INT` alone, four bytes, and **ARGB** rather than RGB24:
-///   `MobEffectProvider` calls `setAlpha(options.getAlpha())`, so the top byte
+/// * `minecraft:entity_effect` carries vanilla's plain-colour option type —
+///   a single `INT`, four bytes, and **ARGB** rather than RGB24: its
+///   provider applies the options' own alpha, so the top byte
 ///   is a real field here.
-/// * `minecraft:sculk_charge` carries a `SculkChargeParticleOptions` — one
-///   `ByteBufCodecs.FLOAT` roll.
-/// * `minecraft:dragon_breath` carries a `PowerParticleOption` — one
-///   `ByteBufCodecs.FLOAT` power, and no colour, since
-///   `DragonBreathParticle` draws its purple out of the RNG.
+/// * `minecraft:sculk_charge` carries vanilla's sculk-charge option type —
+///   one `FLOAT` roll.
+/// * `minecraft:dragon_breath` carries vanilla's power-only option type —
+///   one `FLOAT` power, and no colour, since vanilla's dragon-breath
+///   particle draws its purple out of the RNG.
 ///
 /// `minecraft:block`, `minecraft:block_marker`, `minecraft:falling_dust`,
-/// `minecraft:dust_pillar` and `minecraft:block_crumble` carry a
-/// `BlockParticleOption`, whose stream codec is
-/// `ByteBufCodecs.idMapper(Block.BLOCK_STATE_REGISTRY)` — a **VarInt**
+/// `minecraft:dust_pillar` and `minecraft:block_crumble` carry vanilla's
+/// block-particle option type, whose stream codec is a registry-indexed
+/// mapper over the block-state registry — a **VarInt**
 /// block-state id and nothing else. That is the one width discontinuity in
 /// this function: every other arm reads fixed-width `INT`/`FLOAT` fields, and
 /// reading four raw bytes here would decode a state id of 5 as 83,886,080.
 ///
 /// `minecraft:tinted_leaves` and `minecraft:flash` carry the **same**
-/// `ColorParticleOption` and share `minecraft:entity_effect`'s arm below. All
-/// three read the alpha byte for real — `FallingLeavesParticle.
-/// TintedLeavesProvider` drops it and `FireworkParticles.FlashProvider` calls
-/// `setAlpha` with it — so one four-component decode serves them and the arm
-/// must not be narrowed to RGB24 for the leaf's sake.
+/// plain-colour option type and share `minecraft:entity_effect`'s arm below.
+/// All three read the alpha byte for real — the falling-leaves tinted
+/// provider drops it and the firework flash provider applies it — so one
+/// four-component decode serves them and the arm must not be narrowed to
+/// RGB24 for the leaf's sake.
 fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, AdapterError> {
     fn rgb24(reader: &mut Reader<'_>) -> Result<[f32; 3], AdapterError> {
         let packed = reader.i32().map_err(dec_err)?;
@@ -1210,8 +1213,8 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
             f32::from((packed & 0xff) as u8) / 255.0,
         ])
     }
-    /// `ARGB.red`/`green`/`blue`/`alpha` over one packed word — the same three
-    /// low bytes [`rgb24`] reads, plus the top byte as alpha.
+    /// Vanilla's own ARGB component-unpack over one packed word — the same
+    /// three low bytes [`rgb24`] reads, plus the top byte as alpha.
     fn argb(reader: &mut Reader<'_>) -> Result<[f32; 4], AdapterError> {
         let packed = reader.i32().map_err(dec_err)?;
         Ok([
@@ -1260,9 +1263,9 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
             let roll = reader.f32().map_err(dec_err)?;
             Ok(ParticleOptions::SculkCharge { roll })
         }
-        // The whole `BlockParticleOption` family, in one arm because the wire
-        // payload really is one type — `ByteBufCodecs.idMapper(Block.
-        // BLOCK_STATE_REGISTRY)`, i.e. a single **VarInt** block-state id, not
+        // The whole block-particle-option family, in one arm because the wire
+        // payload really is one type — a registry-indexed mapper over the
+        // block-state registry, i.e. a single **VarInt** block-state id, not
         // the fixed-width `INT` every arm above reads. The five differ only in
         // which particle class the provider builds from it.
         "minecraft:block"
@@ -1275,7 +1278,7 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
             let state = u32::try_from(raw).map_err(|_| {
                 AdapterError::Decode(format!(
                     "{name}: block-state id {raw} is negative — \
-                     `Block.BLOCK_STATE_REGISTRY` ids are non-negative"
+                     vanilla's own block-state registry ids are non-negative"
                 ))
             })?;
             Ok(ParticleOptions::BlockState { state })
@@ -1285,8 +1288,9 @@ fn decode_particle_options(name: &str, bytes: &[u8]) -> Result<ParticleOptions, 
 }
 
 /// Reads a wire `BitSet` — a varint `long`-count followed by that many
-/// big-endian 64-bit words (`BitSet.toLongArray()`, LSB-first bit order) —
-/// returning the words for [`LightPatch::from_light_masks`] to index. The count
+/// big-endian 64-bit words (vanilla's own long-array bit-set encoding,
+/// LSB-first bit order) — returning the words for
+/// [`LightPatch::from_light_masks`] to index. The count
 /// is bounded by the readable words so a garbled length cannot pre-allocate an
 /// enormous vector.
 fn read_wire_bitset(r: &mut Reader<'_>) -> Result<Vec<u64>, AdapterError> {
@@ -1331,9 +1335,10 @@ fn read_light_arrays(r: &mut Reader<'_>) -> Result<Vec<NibbleArray>, AdapterErro
     Ok(arrays)
 }
 
-/// Reads a `DebugSubscription.Update`'s dispatch head: the subscription's
-/// registry id resolved to its identifier, then `ByteBufCodecs.optional`'s
-/// present-flag, then the rest of the payload as opaque bytes.
+/// Reads vanilla's debug-subscription update dispatch head: the
+/// subscription's registry id resolved to its identifier, then the
+/// optional-value wrapper's present-flag, then the rest of the payload as
+/// opaque bytes.
 ///
 /// The payload is opaque because the value codec is chosen per registry entry and
 /// the seventeen registered ones share no shape — one (`dedicated_server_tick_time`)
@@ -1366,8 +1371,8 @@ fn read_debug_subscription_key(reader: &mut Reader<'_>) -> Result<ResourceKey, A
     parse_key(name, "debug subscription")
 }
 
-/// Decodes `ClientboundTrackedWaypointPacket` and its hand-written
-/// `TrackedWaypoint.write`.
+/// Decodes the clientbound tracked-waypoint packet and its hand-written
+/// waypoint-position writer.
 ///
 /// The position is a four-way tagged union, not an optional: `EMPTY` carries
 /// nothing, `VEC3I` three VarInts, `CHUNK` two, and `AZIMUTH` one f32 bearing.
