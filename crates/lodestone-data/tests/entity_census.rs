@@ -36,7 +36,7 @@
 //!
 //! ```text
 //! CACHE="$(cd .cache/mc/26.2 && pwd)"
-//! HERE="$(cd crates/protocol/v770/oracle-java && pwd)"
+//! HERE="$(cd crates/versions/26.2/oracle-java && pwd)"
 //! docker run --rm -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work eclipse-temurin:25-jdk bash -c '
 //!   CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
 //!   cp /oracle/EntityCensusOracle.java /work/ && javac -cp "$CP" -d /work /work/EntityCensusOracle.java
@@ -432,7 +432,7 @@ fn generate(rows: &[Row]) -> String {
     // stand's `0x04` is "show arms" where a mob's is "aggressive", so an
     // is-*living* guard is not enough for index 15 the way it is for index 8:
     // an armour stand is living. See `tests/support/entity_data_index_jvm.txt` in
-    // the `v770` crate for the collision, read off the jar.
+    // the `v26-2` crate for the collision, read off the jar.
     let _ = writeln!(
         out,
         "\n/// Whether this type's implementation class is a `Mob`, by network registry id."

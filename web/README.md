@@ -380,7 +380,7 @@ browser joins a server":
 `wasm32` cannot open a raw TCP socket (`lodestone-net/src/connection.rs` documents
 this), so a browser must go through the relay. `src/multiplayer.rs` is the producer
 that had been missing: it opens `WsWebTransport`, hands it to
-`ClientBuilder::connect_with` with the real `lodestone_v770::adapter()`, and then
+`ClientBuilder::connect_with` with the real `lodestone_v26_2::adapter()`, and then
 rebuilds the drawn scene by **querying** the client-owned chunk store
 (`ClientHandle::sections_at`) rather than folding `ChunkLoaded` events — which is
 idempotent, so it converges no matter when the loop starts relative to the stream.
@@ -429,7 +429,7 @@ the release profile is `panic = "abort"` they kill the session with no unwind:
 | site | when it fires | fix |
 |---|---|---|
 | `lodestone-ecs`'s `hold_read`/`hold_write` | the first ingested event, just after `Login` | **landed** — `hold_clock()` returns `None` on wasm and the hold goes unmeasured |
-| `V770Adapter::new`'s `batch_start` | adapter construction, before the first byte | **brokered** (`crates/protocol/` is owned elsewhere) — make `batch_start` an `Option<Instant>` |
+| `V770Adapter::new`'s `batch_start` | adapter construction, before the first byte | **brokered** (`crates/versions/` is owned elsewhere) — make `batch_start` an `Option<Instant>` |
 
 Neither is findable by any `cargo` command, and the *first* is why
 `src/singleplayer.rs` was never evidence of anything here: it reaches `Play`

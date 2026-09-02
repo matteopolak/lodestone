@@ -7,7 +7,7 @@
 //!
 //! `ClientboundAnimatePacket` decoded cleanly into `ClientEvent::EntityAnimation`
 //! long before this fix, with a green protocol-layer test
-//! (`v770/tests/entity_events.rs`) and a component (`Skeleton::pose`'s
+//! (`v26-2/tests/entity_events.rs`) and a component (`Skeleton::pose`'s
 //! `attack_anim`) that was itself unit-tested and correct. Neither of those
 //! tests could ever fail on the missing wiring: `lodestone_ecs::ingest::
 //! handles_event`'s routing switch had no arm for `EntityAnimation`, so

@@ -26,7 +26,7 @@
 //! Do not "fix" this to point at :25565 — the gate would then have no way to send
 //! the message it asserts on.
 //!
-//! Gated behind the `live` feature (which compiles the v770 family into the
+//! Gated behind the `live` feature (which compiles the v26-2 family into the
 //! registry) **and** `#[ignore]`, so the default `cargo test` stays hermetic and
 //! version-free. Run it explicitly:
 //!
@@ -140,25 +140,25 @@ fn server_sent_chat_reaches_the_display_log_with_colour() {
     // deliverable and is proven the moment we get here with the token present.
     println!("OK  server chat reached the display log through the shell: {line:?}");
 
-    // Claim 2 (depends on the v770 chat decode): the server-authored colour must
+    // Claim 2 (depends on the v26-2 chat decode): the server-authored colour must
     // survive the wire. `tellraw ... color:red` becomes the legacy `§c` code via
-    // Text::to_legacy_string — *if* the adapter delivers a styled Text. v770
+    // Text::to_legacy_string — *if* the adapter delivers a styled Text. v26-2
     // currently flattens chat NBT with `plain_text_from_nbt_component` +
     // `Text::literal`, dropping colour before it reaches `ClientEvent::Chat`
     // (adapter.rs SYSTEM_CHAT/DISGUISED_CHAT/PLAYER_CHAT). The fix (decode with
-    // `Text::from_nbt`) is routed to impl-v770; when it lands, this goes green
+    // `Text::from_nbt`) is routed to impl-v26-2; when it lands, this goes green
     // with no shell change, and the HUD lights up server colours. Until then
     // this assertion is the honest tracker that coloured chat does NOT yet reach
     // pixels live — a flat-white log is the §12.24 "wired to nothing" shape.
     assert!(
         line.contains('\u{00a7}'),
         "chat reached the log but carries no legacy formatting codes — colour was flattened away \
-         upstream in the v770 chat decode (Text::literal(plain_text_from_nbt_component(..))). \
-         Routed to impl-v770: decode with Text::from_nbt. (line: {line:?})"
+         upstream in the v26-2 chat decode (Text::literal(plain_text_from_nbt_component(..))). \
+         Routed to impl-v26-2: decode with Text::from_nbt. (line: {line:?})"
     );
     assert!(
         line.contains("\u{00a7}c"),
-        "the server-authored red (`§c`) code did not survive to the display log — see the v770 \
-         chat-decode fix routed to impl-v770. (line: {line:?})"
+        "the server-authored red (`§c`) code did not survive to the display log — see the v26-2 \
+         chat-decode fix routed to impl-v26-2. (line: {line:?})"
     );
 }

@@ -262,7 +262,7 @@ pub struct ItemComponents {
     /// **Server-side bookkeeping only.** The wire component exists
     /// (`minecraft:repair_cost`, a bare VarInt) but this build's protocol
     /// decoder currently only consumes it for byte-alignment and does not
-    /// surface it (see `crates/protocol/v770/src/adapter/inventory.rs`'s
+    /// surface it (see `crates/versions/26.2/src/adapter/inventory.rs`'s
     /// "consumed for alignment" component group) — so a stack that arrived
     /// over the wire always reports `0` here even if a real client sent a
     /// worked item. Every stack this server itself produces (anvil/grindstone

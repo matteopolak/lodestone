@@ -1352,7 +1352,7 @@ fn cell_rgb(pixels: &[u8], rect: [u32; 4]) -> std::collections::HashMap<(u32, u3
 /// patterns**, not just its base colour — the half named as still missing by
 /// the doc comment on both `lodestone_render::banner_item_rig` and this
 /// file's own sibling test above, closed by decoding
-/// `minecraft:banner_patterns` for an item stack (`crates/protocol/v770`) and
+/// `minecraft:banner_patterns` for an item stack (`crates/versions/26.2`) and
 /// a real translucent pattern-layer pass in `hud/item_icon.rs`'s
 /// `SpecialIconDraw::BannerLayer` (mirroring the world block-entity pass's
 /// `banner_layer_pipeline`).

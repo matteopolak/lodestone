@@ -17,7 +17,7 @@
 //! server actually put it, renders one frame through the exact call the live
 //! frame loop makes, and reads the pixels back.
 //!
-//! Gated behind the `live` feature (which compiles the v770 family into the
+//! Gated behind the `live` feature (which compiles the v26-2 family into the
 //! registry) **and** `#[ignore]`, so the default `cargo test` stays hermetic and
 //! version-free. Run it explicitly:
 //!
@@ -186,7 +186,7 @@ fn server_sent_mob_reaches_pixels_through_shell() {
              oracle up? A missing RCON is a harness failure, not a passing render path.",
         );
         // `@p` is the nearest player to the command origin; with our single bot
-        // joined it resolves to us. v770 does not emit TeleportPlayer, so the
+        // joined it resolves to us. v26-2 does not emit TeleportPlayer, so the
         // read-model's position never populates on 26.2 — RCON is the only way
         // to learn where the server actually put the player.
         let pos = r.cmd("data get entity @p Pos");

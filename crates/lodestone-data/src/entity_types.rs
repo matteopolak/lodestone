@@ -4,8 +4,8 @@
 //! varint), not its identifier. The id→name mapping is generated from
 //! Mojang's own `registries.json` for 26.2, the one canonical internal
 //! version, so it lives here in this data crate rather than in
-//! `lodestone-v770` — it is a game-data census, not wire-format
-//! code. The older version crates (`v47`, `v340`, `v735`) keep their own
+//! `lodestone-v26-2` — it is a game-data census, not wire-format
+//! code. The older version crates (`v1-8`, `v1-9`, `v1-14`) keep their own
 //! separate copies of this table, because for them it is genuinely
 //! translation data from an old wire id to this canonical name space. The
 //! generated array is the single source of truth; this module is only the

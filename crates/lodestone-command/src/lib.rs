@@ -57,13 +57,13 @@
 //!
 //! - **No decode of `COMMANDS` (packet id 16) or `COMMAND_SUGGESTIONS` (id
 //!   15).** Verified directly: `grep -rn "clientbound::COMMANDS"
-//!   crates/protocol/v770/src/adapter.rs` returns zero hits, even though the
+//!   crates/versions/26.2/src/adapter.rs` returns zero hits, even though the
 //!   packet id constants exist in the generated tables
-//!   (`crates/protocol/v770/src/generated/packet_ids.rs`). Both packets have
+//!   (`crates/versions/26.2/src/generated/packet_ids.rs`). Both packets have
 //!   **zero decode** in every protocol family in this workspace today. This
 //!   crate does not add any — that is explicitly someone else's question
 //!   (owned by whoever is currently working `chat.rs`/`lodestone-client`),
-//!   and reaching into `crates/protocol/**` was out of scope here
+//!   and reaching into `crates/versions/**` was out of scope here
 //!   regardless.
 //! - **No ECS registry, no dispatcher, no plugin API.** Those are separate
 //!   tracked work items, plus the client-input-interception work; this

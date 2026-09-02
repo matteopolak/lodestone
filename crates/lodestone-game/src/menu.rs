@@ -1310,7 +1310,7 @@ impl Menu {
     /// `minecraft:tool` (see [`lodestone_model::ToolPatch`]'s docs and
     /// `docs/tool-mining.md`), vanilla puts it in the item's built-in
     /// component map, so a clientbound stack — which carries only the
-    /// *patch* — never mentions it on its own. `crates/protocol/v770/src/
+    /// *patch* — never mentions it on its own. `crates/versions/26.2/src/
     /// adapter/inventory.rs`'s `read_component_patch` seeds
     /// [`lodestone_model::ItemComponents::equippable`] from
     /// [`lodestone_data::item_prototypes::prototype`] before the patch is
@@ -2020,7 +2020,7 @@ mod tests {
     ///
     /// This exercises `From<&lodestone_model::ItemStack>`, which is the only
     /// path a wire stack takes into the menu model. The values here stand in for
-    /// what the v770 prototype census folds in during decode — this crate cannot
+    /// what the v26-2 prototype census folds in during decode — this crate cannot
     /// depend on a version crate to decode for real, so the fields are set
     /// directly and the *conversion* is what is under test.
     #[test]

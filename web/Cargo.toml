@@ -78,7 +78,7 @@ tracing = { version = "0.1", features = ["log"] }
 # **Not used by any code here — this edge exists only to turn a feature on.**
 # `getrandom` 0.2 has a hard `compile_error!` on `wasm*-unknown-unknown` unless
 # its `js` feature is enabled, and it reaches this graph several levels down
-# (`lodestone-v770` -> `rand` 0.8 -> `rand_core` 0.6 -> `getrandom` 0.2). None of
+# (`lodestone-v26-2` -> `rand` 0.8 -> `rand_core` 0.6 -> `getrandom` 0.2). None of
 # those can enable it (the parent workspace builds natively, where `js` would be
 # wrong), so under Cargo's feature unification the only crate that can is this
 # one. Symptom without it: `cargo build --target wasm32-unknown-unknown` fails in

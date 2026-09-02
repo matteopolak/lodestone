@@ -70,10 +70,10 @@ new, wider trait — not a reason to widen this one.
 
 **`crate::dimension::Dimension` stays closed.** Its own doc says so explicitly: every variant needs a
 generator, a chunk store, a wire `dimension_type` holder id and a travel rule, and the holder id is
-published from a **fixed, compile-time NBT table** (`DIMENSION_TYPE_REGISTRY` in the v770 protocol
+published from a **fixed, compile-time NBT table** (`DIMENSION_TYPE_REGISTRY` in the v26-2 protocol
 family — four entries, `overworld`/`overworld_caves`/`the_end`/`the_nether`, each a literal NBT byte
 array). Making `Dimension` open-ended would mean either wiring a genuinely new wire `dimension_type`
-registry entry through the protocol family (a version-crate change: `crates/protocol/v770`, which sits
+registry entry through the protocol family (a version-crate change: `crates/versions/26.2`, which sits
 outside both `lodestone-worldgen`'s and `lodestone-server`'s own seam and outside this issue's file
 ownership) or silently mis-describing a plugin dimension's real properties to a joining client — worse
 than not offering it at all.
@@ -226,7 +226,7 @@ untouched by this work.
   generator applies here too: **grep for every `impl ChunkGenerator for` in the workspace before
   changing the trait**, not just the one plugin you have in mind.
 * **Wiring the wire `dimension_type` registry gap** (making a `DimensionRegistry` entry reachable as a
-  *second*, portal-travel dimension): needs `crates/protocol/v770/src/server_protocol.rs`'s
+  *second*, portal-travel dimension): needs `crates/versions/26.2/src/server_protocol.rs`'s
   `DIMENSION_TYPE_REGISTRY`/`encode_registry_data`/`dimension_type_holder_id` to publish a
   dynamically-supplied entry instead of the fixed four, plus `crate::dimension::Dimension`'s travel
   machinery to accept a non-enum destination key. Both are real, scoped, future work — not attempted
@@ -248,7 +248,7 @@ populates — nothing reads an env var or a config file here.
 keeping the trait itself version-free and server-free. `lodestone_server::plugin_worldgen`/
 `plugin_dimension`/`structure_placement` depend on `lodestone-worldgen` (already a normal dependency of
 `lodestone-server`) and on `crate::chunk::{ChunkSource, ChunkColumn}`. `crates/plugins/lodestone-void-world`
-depends on both path-wise, plus `lodestone-client`/`lodestone-v770`/`lodestone-model`/`lodestone-data`/
+depends on both path-wise, plus `lodestone-client`/`lodestone-v26-2`/`lodestone-model`/`lodestone-data`/
 `uuid`/`tokio` as dev-dependencies for its end-to-end gate only — its own library has no dependency on
 any protocol family, matching the version-seam discipline every other worldgen code in this repo
 follows.

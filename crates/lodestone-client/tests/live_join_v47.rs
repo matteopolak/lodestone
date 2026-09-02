@@ -1,11 +1,11 @@
 //! Live acceptance test against a real 1.8.x server (protocol 47).
 //!
-//! This test is gated behind the `live-v47` feature AND `#[ignore]`, so the
+//! This test is gated behind the `live-v1-8` feature AND `#[ignore]`, so the
 //! default `cargo test` stays hermetic and version-free. Run it against a real
 //! 1.8.9 server (offline mode) with:
 //!
 //! ```text
-//! cargo test -p lodestone-client --features live-v47 -- --ignored
+//! cargo test -p lodestone-client --features live-v1-8 -- --ignored
 //! ```
 //!
 //! The server host/port default to `127.0.0.1:25566` (the 1.8 container uses a
@@ -17,7 +17,7 @@
 //! TCP, complete handshake -> login -> play (there is no configuration state in
 //! 1.8), and confirm the client reaches Play (a `Login` event) and receives a
 //! keep-alive.
-#![cfg(feature = "live-v47")]
+#![cfg(feature = "live-v1-8")]
 
 use std::time::Duration;
 
@@ -46,7 +46,7 @@ async fn joins_real_1_8_server_and_receives_keep_alive() {
     };
 
     let adapter = lodestone_registry::adapter_for_protocol(47)
-        .expect("v47 family compiled into the registry via the live-v47 feature");
+        .expect("v1-8 family compiled into the registry via the live-v1-8 feature");
 
     let (handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()

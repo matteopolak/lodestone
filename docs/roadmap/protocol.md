@@ -25,10 +25,10 @@ cargo xtask connectedness
 
 ```
 protocol connectedness (denominators from each family play::{clientbound,serverbound} packet_ids.rs):
-v47  clientbound decoded 59/74; emits 59/74; decoded-but-stranded 0; serverbound encoded 21/26; examined 59 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
-v340  clientbound decoded 62/80; emits 62/80; decoded-but-stranded 0; serverbound encoded 24/33; examined 62 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
-v735  clientbound decoded 54/92; emits 54/92; decoded-but-stranded 0; serverbound encoded 25/48; examined 54 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
-v770  clientbound decoded 141/141; emits 139/141; decoded-but-stranded 0; serverbound encoded 68/69; examined 141 arm(s); serverbound decoded 66/69, connected 47/69; examined 66 arm(s); decodes-to-Ignored-only 19 [ACCEPT_TELEPORTATION, BLOCK_ENTITY_TAG_QUERY, CHAT_ACK, CLIENT_TICK_END, CONFIGURATION_ACKNOWLEDGED, CUSTOM_CLICK_ACTION, ENTITY_TAG_QUERY, JIGSAW_GENERATE, PLAYER_ABILITIES, PLAYER_LOADED, PONG, RECIPE_BOOK_CHANGE_SETTINGS, RECIPE_BOOK_SEEN_RECIPE, RESOURCE_PACK, SEEN_ADVANCEMENTS, SET_COMMAND_MINECART, SET_JIGSAW_BLOCK, SET_STRUCTURE_BLOCK, SET_TEST_BLOCK]
+v1-8  clientbound decoded 59/74; emits 59/74; decoded-but-stranded 0; serverbound encoded 21/26; examined 59 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
+v1-9  clientbound decoded 62/80; emits 62/80; decoded-but-stranded 0; serverbound encoded 24/33; examined 62 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
+v1-14  clientbound decoded 54/92; emits 54/92; decoded-but-stranded 0; serverbound encoded 25/48; examined 54 arm(s); serverbound decode: not applicable (no src/server_protocol.rs — family does not implement ServerProtocol, so it cannot host)
+v26-2  clientbound decoded 141/141; emits 139/141; decoded-but-stranded 0; serverbound encoded 68/69; examined 141 arm(s); serverbound decoded 66/69, connected 47/69; examined 66 arm(s); decodes-to-Ignored-only 19 [ACCEPT_TELEPORTATION, BLOCK_ENTITY_TAG_QUERY, CHAT_ACK, CLIENT_TICK_END, CONFIGURATION_ACKNOWLEDGED, CUSTOM_CLICK_ACTION, ENTITY_TAG_QUERY, JIGSAW_GENERATE, PLAYER_ABILITIES, PLAYER_LOADED, PONG, RECIPE_BOOK_CHANGE_SETTINGS, RECIPE_BOOK_SEEN_RECIPE, RESOURCE_PACK, SEEN_ADVANCEMENTS, SET_COMMAND_MINECART, SET_JIGSAW_BLOCK, SET_STRUCTURE_BLOCK, SET_TEST_BLOCK]
 ```
 
 Re-measured 2026-08-23. This leading block is the current snapshot; the dated sections below
@@ -39,9 +39,9 @@ dated subsection's count back into this block.
 ### `connected` moved to 15/69: `CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED` were dead-code decode arms (2026-08-04)
 
 The 13/69 figure above's own decode-arm half turned out to be the exact bug behind a separate,
-concurrently-reported chunk-streaming regression: `cargo test -p lodestone-v770 --test
+concurrently-reported chunk-streaming regression: `cargo test -p lodestone-v26-2 --test
 block_edit -- dig_and_place_persist_through_forget_and_reload` timed out waiting for a
-forgotten chunk to be re-sent after walking back into it, and `cargo test -p lodestone-v770
+forgotten chunk to be re-sent after walking back into it, and `cargo test -p lodestone-v26-2
 --test server_liveness -- real_client_view_follows_player_across_chunk_boundaries` failed the
 same way. Root cause: `server_protocol.rs`'s `decode()` match had `CLIENT_INFORMATION` and
 `CHUNK_BATCH_RECEIVED` both decode-then-drop to `ServerBound::Ignored` unconditionally — a
@@ -56,11 +56,11 @@ after the fix, with `CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED` no longer in the
 `decodes-to-Ignored-only` list:
 
 ```
-v770  clientbound decoded 113/141; emits 111/141; decoded-but-stranded 0; serverbound encoded 54/69; examined 113 arm(s); serverbound decoded 60/69, connected 15/69; examined 60 arm(s); decodes-to-Ignored-only 45
+v26-2  clientbound decoded 113/141; emits 111/141; decoded-but-stranded 0; serverbound encoded 54/69; examined 113 arm(s); serverbound decoded 60/69, connected 15/69; examined 60 arm(s); decodes-to-Ignored-only 45
 ```
 
 Re-verified against `66c895a` (several unrelated commits later): both tests still pass, and
-the full `cargo test -p lodestone-v770 --no-fail-fast` suite (all binaries) stays green. Five
+the full `cargo test -p lodestone-v26-2 --no-fail-fast` suite (all binaries) stays green. Five
 new regression tests in `server_protocol.rs`'s `view_streaming_decode_tests` module chain the
 real client encoder/adapter into this module's decoder for both packet ids, so a future decode
 arm reverting to `Ignored` fails loudly rather than silently reopening this gap.
@@ -86,7 +86,7 @@ radius)`, fed from a new `MobSim::take_detonations()` drain and an `ExplosionFee
 `V770ServerProtocol`'s implementations of both are byte-format-verified against the
 `EntityDataIndexOracle` dump (indices 16/18) and Mojang's decompiled sources for the explosion
 packet and its two server-side callers respectively, not guessed from
-our own decoder. See `crates/protocol/v770/tests/server_creeper_metadata_and_explode.rs` for
+our own decoder. See `crates/versions/26.2/tests/server_creeper_metadata_and_explode.rs` for
 the gate: encodes with our own server, decodes with the real, already-live-validated
 `V770Adapter`.
 
@@ -148,7 +148,7 @@ A same-day pass closed the four client-side (not server-side) gaps this doc's ow
   missing. Server-side `custom_payload` handling remains entirely absent;
   `lodestone-server` was off-limits this pass.
 
-Measured before this pass: `v770 clientbound decoded 111/141; serverbound encoded 53/69`.
+Measured before this pass: `v26-2 clientbound decoded 111/141; serverbound encoded 53/69`.
 After: `112/141` → `113/141` clientbound decoded (`+2`: `BUNDLE_DELIMITER`, `UPDATE_TAGS` —
 the `112` mid-session reading briefly overlapped with unrelated concurrent work, see the
 note on the code block above), `54/69` serverbound encoded (`+1`: `COOKIE_RESPONSE`).
@@ -185,7 +185,7 @@ the same pattern the pre-existing `difficulty_change_is_confirmed_back_to_the_co
 test already used for issue #268). At the time this section was written, what this
 **could not** prove was that a real vanilla client's bytes decoded to anything but
 `ServerBound::Ignored` for all four, because
-`crates/protocol/v770/src/server_protocol.rs`'s own `V770ServerProtocol::decode` arms for
+`crates/versions/26.2/src/server_protocol.rs`'s own `V770ServerProtocol::decode` arms for
 `SET_CREATIVE_MODE_SLOT`, `CLIENT_COMMAND`, `CLIENT_INFORMATION` and
 `CHUNK_BATCH_RECEIVED` still discarded the parsed fields with
 `let _ = decoded;` and unconditionally returned `Ignored`.
@@ -200,10 +200,10 @@ above; the `SET_CREATIVE_MODE_SLOT`/`CLIENT_COMMAND` half landed later still and
 otherwise dated in this doc. Re-run `cargo xtask connectedness` before quoting a
 `connected` figure from this section — it predates both fixes.
 
-`v47`/`v340`/`v735` were **never measured before today** — `xtask`'s connectedness scanner
-had a hard `if family != "v770" { continue; }` while its own header claimed to take
+`v1-8`/`v1-9`/`v1-14` were **never measured before today** — `xtask`'s connectedness scanner
+had a hard `if family != "v26-2" { continue; }` while its own header claimed to take
 "denominators from each family." That filter is gone; every `vNN` directory under
-`crates/protocol/` is scanned, and a family that can't be scanned (missing
+`crates/versions/` is scanned, and a family that can't be scanned (missing
 `packet_ids.rs`/`adapter.rs`) is now named in a `SKIPPED` section instead of silently
 vanishing from the family list. Nothing above is a defect in the legacy families — they're
 dormant by design (see [multi-version](#multi-version-what-it-would-cost-and-the-call-this-roadmap-does-not-make)
@@ -221,7 +221,7 @@ decoded/connected** figure at the top of this section are two different axes, an
 conflating them is exactly how this doc went stale the first time. Encoded means *our
 client* can send the packet.
 Decoded means *our server* can receive and act on it — measured directly against
-`crates/protocol/v770/src/server_protocol.rs`'s `ServerProtocol::decode` (the
+`crates/versions/26.2/src/server_protocol.rs`'s `ServerProtocol::decode` (the
 `State::Play if packet_id == play::serverbound::…` arms) joined against
 `crates/lodestone-server/src/server.rs`'s dispatcher, which is a second, cross-crate hop:
 a packet can decode to a real `ServerBound` variant and still be stranded if nothing
@@ -259,7 +259,7 @@ real `ServerBound` variant) and does not know which issue a given packet id belo
 ### Decoded-but-stranded: `CHUNK_BATCH_START`, and why it isn't actually a defect
 
 `xtask`'s one flagged island is `CHUNK_BATCH_START`. On inspection
-(`crates/protocol/v770/src/adapter/chunk.rs`) the arm calls a real
+(`crates/versions/26.2/src/adapter/chunk.rs`) the arm calls a real
 `self.begin_chunk_batch()` — it starts the rate-timing window that `CHUNK_BATCH_FINISHED`
 closes and reports back via `chunk_batch.rs`'s vanilla-matching `ChunkBatchSizeCalculator`.
 It emits zero `ClientEvent`s, which is all the heuristic can see, but it is not an
@@ -274,14 +274,14 @@ The eleven-islands figure the domain brief cited (`ClientboundAnimatePacket`,
 `Directive::BeginEncryption`, `TakeItemEntity`/`SET_EQUIPMENT`) is **partially stale**:
 see [corrections](#corrections-to-the-briefing-this-roadmap-started-from).
 
-### v47 (1.8.9) / v340 (1.12.2): ten clientbound decode arms landed (2026-08-04)
+### v1-8 (1.8.9) / v1-9 (1.12.2): ten clientbound decode arms landed (2026-08-04)
 
 Picked by what a player would actually notice, not by packet id order — the two
 families' "under a quarter decoded" figure at the top of this section was concentrated
 in exactly the packets a live session needs continuously, not just at join. Four
 packets decode identically on both families (same shape confirmed against
 minecraft-data's `pc/1.8` and `pc/1.12.2` `protocol.json`) plus a fifth pair unique to
-v340:
+v1-9:
 
 - **`update_health`/`respawn` were dead code, not missing.** Both structs already
   existed in `packets/game.rs` on both crates — `UpdateHealth`/`Respawn` — with a
@@ -293,18 +293,18 @@ v340:
   a portal respawn changes dimension before the next `map_chunk` arrives.
 - **`entity_status`/`entity_head_rotation`** (hurt/death animation flashes, totem
   particles, and independent head-turn) had no struct at all; both are hand-decoded with
-  a `Reader` directly, matching `lodestone-v770`'s own `ENTITY_EVENT`/`ROTATE_HEAD` arms
+  a `Reader` directly, matching `lodestone-v26-2`'s own `ENTITY_EVENT`/`ROTATE_HEAD` arms
   byte-for-byte (raw `i32` entity id + raw status byte; VarInt entity id + packed yaw
   byte).
-- **v340 only: `block_change`/`multi_block_change`** → `ClientEvent::SectionBlocksChanged`,
+- **v1-9 only: `block_change`/`multi_block_change`** → `ClientEvent::SectionBlocksChanged`,
   the single biggest "player would notice" gap in either family (block breaks/places from
-  other players or the server were invisible before this). This reuses `v340`'s existing
+  other players or the server were invisible before this). This reuses `v1-9`'s existing
   `canonical::resolve_or_air` id:meta→26.2-state bridge (built against the real 1.13.2
   jar's own flattening fix — see `src/canonical.rs`) rather than inventing a second
   table; `multi_block_change` records can span several of `lodestone-world`'s 16-tall
   sections in one packet (1.12.2 has no chunk sections on the wire, just full-height
-  columns), so records are grouped by section before emitting. **Not done for v47**: it
-  has no flattening table of its own, and reusing v340's would break each crate's
+  columns), so records are grouped by section before emitting. **Not done for v1-8**: it
+  has no flattening table of its own, and reusing v1-9's would break each crate's
   documented "deletable by removing this one folder" independence — filed as follow-up
   scope below rather than silently borrowed.
 
@@ -313,8 +313,8 @@ trap is worst:**
 
 - Every wire shape above came from `vendor/minecraft-data/data/pc/{1.8,1.12.2}/protocol.json`
   — **not** from this crate's own `Encode` derive. The `tests/join_flow.rs` additions and
-  the new `crates/protocol/v340/tests/block_updates.rs` hand-assemble raw byte vectors
-  from that spec (mirroring `lodestone-v770`'s own `tests/block_updates.rs`), so a
+  the new `crates/versions/1.9/tests/block_updates.rs` hand-assemble raw byte vectors
+  from that spec (mirroring `lodestone-v26-2`'s own `tests/block_updates.rs`), so a
   symmetric encode/decode bug in the derive macro cannot pass silently the way the
   `decode(encode(x))` trap allows.
 - **One exception, flagged rather than hidden**: `multi_block_change`'s `horizontalPos`
@@ -342,10 +342,10 @@ trap is worst:**
 **Measured**, `cargo xtask connectedness` before/after this pass:
 
 ```
-before: v47  clientbound decoded 17/74; serverbound encoded 17/26
-        v340 clientbound decoded 16/80; serverbound encoded 20/33
-after:  v47  clientbound decoded 21/74; serverbound encoded 17/26
-        v340 clientbound decoded 22/80; serverbound encoded 20/33
+before: v1-8  clientbound decoded 17/74; serverbound encoded 17/26
+        v1-9 clientbound decoded 16/80; serverbound encoded 20/33
+after:  v1-8  clientbound decoded 21/74; serverbound encoded 17/26
+        v1-9 clientbound decoded 22/80; serverbound encoded 20/33
 ```
 
 `serverbound encoded` is unchanged on both — this pass added no new `ClientAction`
@@ -354,7 +354,7 @@ serverbound *decode* stays "not applicable" for both, per the header measurement
 
 **Follow-up scope, not done here:**
 
-- A v47-native `id:meta`→state table (or a shared version-free bridge both crates use),
+- A v1-8-native `id:meta`→state table (or a shared version-free bridge both crates use),
   so `block_change`/`multi_block_change` can land on 1.8.9 too.
 - An item-id → `ResourceKey` registry, unblocking `entity_equipment` on both families and
   the existing `SetCreativeModeSlot`/`ContainerClick` gaps the interaction tests already
@@ -391,16 +391,16 @@ section was written; as of this pass it is 60/69 decoded (see "Measured coverage
 but still mostly unconnected — 13/69 — since decoding a packet and having a real
 `ServerBound` variant/`lodestone-server` consumer for it are two different, still-mostly-
 unmet bars. Every one of the issues below was found by direct inspection of
-`crates/protocol/v770/src/server_protocol.rs` and `crates/lodestone-server/src/`, not by
+`crates/versions/26.2/src/server_protocol.rs` and `crates/lodestone-server/src/`, not by
 extrapolation.
 
 | issue | title | note |
 |---|---|---|
 | [#262](https://github.com/matteopolak/lodestone/issues/262) | Server-side decode: movement and player-state (0/11) | **decoded 11/11, connected 3/11** — remaining 8 need new `ServerBound` variants, `lodestone-server` is off-limits right now |
 | [#264](https://github.com/matteopolak/lodestone/issues/264) | Server-side decode: entity actions, combat, interaction (0/9) | **decoded 9/9, connected 3/9** — same blocker |
-| [#266](https://github.com/matteopolak/lodestone/issues/266) | Server-side decode: inventory and container (0/16) | **decoded 17/16, connected 3/16** — cross-checked against `docs/container-clicks.md`; `SET_CREATIVE_MODE_SLOT` now has a real, tested `PlayerInventory` consumer (see ["Consumer landed"](#consumer-landed-decode-arm-still-off-limits-2026-08-04) above), still counted `Ignored` by the automated figure until the v770 decode arm itself is edited |
+| [#266](https://github.com/matteopolak/lodestone/issues/266) | Server-side decode: inventory and container (0/16) | **decoded 17/16, connected 3/16** — cross-checked against `docs/container-clicks.md`; `SET_CREATIVE_MODE_SLOT` now has a real, tested `PlayerInventory` consumer (see ["Consumer landed"](#consumer-landed-decode-arm-still-off-limits-2026-08-04) above), still counted `Ignored` by the automated figure until the v26-2 decode arm itself is edited |
 | [#268](https://github.com/matteopolak/lodestone/issues/268) | Server-side decode: world/block-admin (0/13) | **decoded 12/13, connected 3/13** — lowest priority of the five; `TEST_INSTANCE_BLOCK_ACTION` deliberately left undecoded (nested codec this crate has no type for) |
-| [#270](https://github.com/matteopolak/lodestone/issues/270) | Server-side decode: connection-lifecycle and system | **decoded 11/13, connected 1/13** — `CLIENT_COMMAND`/`CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED` now have real, tested consumers (respawn, view-distance resize, and the actual one-batch-in-flight gate — see ["Consumer landed"](#consumer-landed-decode-arm-still-off-limits-2026-08-04) above), still counted `Ignored` until the v770 decode arms are edited; `COOKIE_RESPONSE`/`DEBUG_SUBSCRIPTION_REQUEST` deliberately left undecoded |
+| [#270](https://github.com/matteopolak/lodestone/issues/270) | Server-side decode: connection-lifecycle and system | **decoded 11/13, connected 1/13** — `CLIENT_COMMAND`/`CLIENT_INFORMATION`/`CHUNK_BATCH_RECEIVED` now have real, tested consumers (respawn, view-distance resize, and the actual one-batch-in-flight gate — see ["Consumer landed"](#consumer-landed-decode-arm-still-off-limits-2026-08-04) above), still counted `Ignored` until the v26-2 decode arms are edited; `COOKIE_RESPONSE`/`DEBUG_SUBSCRIPTION_REQUEST` deliberately left undecoded |
 | [#271](https://github.com/matteopolak/lodestone/issues/271) | Server-side chat: no decode, no verification, no secure-profile enforcement | pairs with #283 (client-side signing) |
 | [#273](https://github.com/matteopolak/lodestone/issues/273) | Server-side login has no encryption or compression | client-side crypto is proven; this is the mirror |
 | [#275](https://github.com/matteopolak/lodestone/issues/275) | Server sends no registries/known-packs/tags during configuration | pairs with #288 (client-side ingestion) — one wire format, ideally |
@@ -451,7 +451,7 @@ symmetric mirror of the server list.
 | [#306](https://github.com/matteopolak/lodestone/issues/306) | Multi-version: cost of a fifth family, and whether it's worth it | design question, see below |
 
 `registry_data` ingestion (#288) was the highest-leverage single item in this list, and
-the **client half is done**: `crates/protocol/v770/src/packets/registry.rs` decodes the
+the **client half is done**: `crates/versions/26.2/src/packets/registry.rs` decodes the
 packet, `minecraft:dimension_type` and `minecraft:world_clock` are typed, and three
 previously-hardcoded values now come off the wire (column height, `has_skylight`, which
 clock is the day clock). It was the confirmed root cause of two already-observed bugs
@@ -535,15 +535,15 @@ per the domain brief's instruction not to assume the answer. `HANDOFF.md` §1 al
 contains the load-bearing analysis — read it before touching this. Reduced to what's
 new or worth restating here:
 
-- The reduction from 17 target families to v770-only happened for a structural reason,
+- The reduction from 17 target families to v26-2-only happened for a structural reason,
   not a scoping preference: **neither adapter dispatch nor wire-shape migration can be
-  code-generated.** `xtask new-version` mechanically cloning v340 → v735 produced "a
+  code-generated.** `xtask new-version` mechanically cloning v1-9 → v1-14 produced "a
   1.12.2 client wearing 1.16 packet IDs." Only packet ids and registry tables are the
   cheap, generatable part.
 - The measured **irreducible** cost of one family is ~900 hand-written lines (~1 day),
   concentrated in `adapter.rs` (dispatch) and `chunk.rs` (paletted decode/light-split).
-- Confirmed today: `v47`/`v340`/`v735` were all last touched at the identical timestamp
-  (a mechanical fixture update unrelated to version work), two days before `v770`'s last
+- Confirmed today: `v1-8`/`v1-9`/`v1-14` were all last touched at the identical timestamp
+  (a mechanical fixture update unrelated to version work), two days before `v26-2`'s last
   touch — dormant, not actively rotting, receiving zero new work, exactly as
   `CLAUDE.md`'s stated scope implies.
 - Confirmed today: there is **no shared packet-definition layer** across families beyond
@@ -552,10 +552,10 @@ new or worth restating here:
   crate has not gotten cheaper in packet-porting terms as more crates were added, only in
   scaffolding/integration terms.
 - If resumed: `ClientAction` encode breadth is 16–17/43 on the older families versus
-  42/43 on v770 (a 1.8.9 client cannot break a block today), and some of that gap is
+  42/43 on v26-2 (a 1.8.9 client cannot break a block today), and some of that gap is
   **correct by design** — some actions have no pre-1.9 wire form — so `HANDOFF.md`'s own
   requirement stands: produce the absent-by-design-vs-not-done-yet table *before*
-  resuming, because a table where those look identical is exactly how v735 previously
+  resuming, because a table where those look identical is exactly how v1-14 previously
   shipped registered-but-unreviewed.
 
 No recommendation is made here. The mechanical facts say a fifth family is cheap in

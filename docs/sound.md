@@ -54,7 +54,7 @@ now, using the block's `sound_types` census (see
 expression appears at both of vanilla's own call sites.
 
 The explosion sound was missing for a structural reason, not a routing gap:
-v770 never decoded packet id 36 (`minecraft:explode`) at all, so there was
+v26-2 never decoded packet id 36 (`minecraft:explode`) at all, so there was
 nothing to forward. The explosion's pitch is **rolled client-side** from the
 packet's own particle roll (vanilla sends the sound but not a fixed
 volume/pitch — both are rolled locally on receipt), so the decoder rolls the

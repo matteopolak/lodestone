@@ -484,7 +484,7 @@ impl GeneratedColumn {
     ///
     /// **Nothing downstream consumes this yet**, the same as
     /// [`Self::block_entities`]: `ChunkColumn` has no heightmap field and
-    /// `crates/protocol/v770/src/server_protocol.rs:1465` still writes
+    /// `crates/versions/26.2/src/server_protocol.rs:1465` still writes
     /// `Heightmaps::new().encode(&mut w)` — a well-framed, zero-entry NBT. Both are
     /// outside this crate. The consumer patch is three lines, and the only
     /// non-obvious part is which registry id to key it under:

@@ -1,10 +1,10 @@
 //! Property: decoding arbitrary bytes must never panic.
 //!
 //! Covers `VersionAdapter::handle_packet` for all four client families
-//! (`v47`, `v340`, `v735`, `v770`) — the exact function every real
-//! connection drives, per `crates/protocol/v770/tests/entity_encoders.rs`'s
+//! (`v1-8`, `v1-9`, `v1-14`, `v26-2`) — the exact function every real
+//! connection drives, per `crates/versions/26.2/tests/entity_encoders.rs`'s
 //! own rationale for testing through it rather than a lower-level decode fn.
-//! `v735` speaks protocol 754 despite the folder name; that only matters for
+//! `v1-14` speaks protocol 754 despite the folder name; that only matters for
 //! interpreting results, not for driving the fuzz, since this harness never
 //! derives a protocol number from the family name.
 //!
@@ -59,7 +59,7 @@ fn deterministic_sweep_over_every_declared_clientbound_packet_id() {
     }
     // A sanity floor, not a target: CLAUDE.md's connectedness numbers put
     // total declared clientbound packets across all four families near 400
-    // (v47 74 + v340 80 + v735 92 + v770 141). If this collapses toward zero,
+    // (v1-8 74 + v1-9 80 + v1-14 92 + v26-2 141). If this collapses toward zero,
     // the sweep is iterating an empty table, not proving anything.
     assert!(
         cases > 1000,

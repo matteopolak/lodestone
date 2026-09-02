@@ -4,7 +4,7 @@
 //! registry id (a VarInt) before any per-particle payload data. The id→name
 //! mapping is generated from Mojang's own `registries.json` for 26.2, the one
 //! canonical internal version, so it lives here in this data crate
-//! rather than in `lodestone-v770` — it is a game-data census,
+//! rather than in `lodestone-v26-2` — it is a game-data census,
 //! not wire-format code.
 
 pub use crate::generated_particle_types::PARTICLE_TYPE_COUNT;

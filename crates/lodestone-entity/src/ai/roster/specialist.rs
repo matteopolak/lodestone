@@ -168,7 +168,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 ///   its own attack-animation-scale getter drives the render. [`MobController`] has
 ///   no metadata or entity-event seam, so this goal deals damage a player would
 ///   feel and draws no laser. Wiring it needs a metadata index from
-///   `protocol/v770/oracle-java/EntityDataIndexOracle.java` — never hand-counted —
+///   `protocol/v26-2/oracle-java/EntityDataIndexOracle.java` — never hand-counted —
 ///   plus a renderer.
 /// * **The 1.0 magic-damage component.** Vanilla hurts the target *twice*:
 ///   `indirectMagic` for `magicDamage` (1.0, +2.0 on Hard, +2.0 for an elder) and

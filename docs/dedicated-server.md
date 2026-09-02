@@ -22,7 +22,7 @@ which one is running.
 `lodestone-registry` is the only crate allowed to name a version crate; the shell/binary ask it
 for `server_protocol_for_protocol(protocol)` rather than naming `V770ServerProtocol` directly, so a
 version-free build (`--no-default-features`) still compiles and correctly reports "no servable
-family" instead of silently refusing every join. Only `v770` (protocol 776, MC 26.2) implements
+family" instead of silently refusing every join. Only `v26-2` (protocol 776, MC 26.2) implements
 `ServerProtocol` today — joinable and hostable are different sets.
 
 ### The tick loop
@@ -205,7 +205,7 @@ lost if the world is stopped before a player ever visits.
 
 ## Dependencies
 
-`lodestone-server` (the shared implementation), `lodestone-registry` (feature-gated `v770`, the
+`lodestone-server` (the shared implementation), `lodestone-registry` (feature-gated `v26-2`, the
 only crate allowed to name a version family), `lodestone-ecs`/`bevy_app`/`bevy_ecs` (server-side
 plugin scheduling, no `multi_threaded`), `lodestone-auth` + `reqwest` (online-mode session-server
 verification), `lodestone-net` (the shared connection/codec seam), `tokio` (`time`, `net`, `signal`,

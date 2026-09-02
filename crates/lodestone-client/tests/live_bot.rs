@@ -1,11 +1,11 @@
 //! Live end-to-end bot test against a real vanilla server (Phase 1 gate).
 //!
-//! Gated behind the `live-v770` feature AND `#[ignore]`, so the default
+//! Gated behind the `live-v26-2` feature AND `#[ignore]`, so the default
 //! `cargo test` stays hermetic and version-free. Run it against a real server
 //! (offline mode, flat world) on `127.0.0.1:25565` with:
 //!
 //! ```text
-//! cargo test -p lodestone-client --features live-v770 --test live_bot -- --ignored --nocapture
+//! cargo test -p lodestone-client --features live-v26-2 --test live_bot -- --ignored --nocapture
 //! ```
 //!
 //! Unlike `live_join`, which only asserts the transport reaches Play and gets a
@@ -17,7 +17,7 @@
 //!
 //! Version selection goes through `lodestone-registry`; `lodestone-client` never
 //! names a concrete version crate.
-#![cfg(feature = "live-v770")]
+#![cfg(feature = "live-v26-2")]
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -44,7 +44,7 @@ async fn bot_joins_reads_world_and_acts() {
     };
 
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via the live-v770 feature");
+        .expect("v26-2 family compiled into the registry via the live-v26-2 feature");
 
     let (mut handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()
@@ -85,7 +85,7 @@ async fn bot_joins_reads_world_and_acts() {
     //    `chunk_batch_finished` after each and withholding the next once ten go
     //    unacknowledged, until the client returns a `chunk_batch_received` ACK.
     //    That ACK is version-specific flow-control behind `VersionAdapter` (as a
-    //    `Directive::Send`), and the v770 adapter now models it — so the stream
+    //    `Directive::Send`), and the v26-2 adapter now models it — so the stream
     //    continues well past the first batch. This test deliberately asserts only
     //    the minimum (`>= 1` chunk) because its subject is decoded terrain queried
     //    by block, not streaming volume; the batch-ack cliff and multi-hundred-
@@ -155,7 +155,7 @@ async fn bot_joins_reads_world_and_acts() {
     //    (a) SERVER-DERIVED: the pre-move `position` can only have been written by
     //        a server `TeleportPlayer` — nothing else sets it before we send our
     //        first `Move` (see `set_local_movement`). Requiring it `Some` proves
-    //        the server really placed us; a v770 that stopped emitting the
+    //        the server really placed us; a v26-2 that stopped emitting the
     //        placement teleport would fail here.
     //
     //    (b) CLIENT SEND+PREDICT PATH: `walk_to` issues real `ClientAction::Move`

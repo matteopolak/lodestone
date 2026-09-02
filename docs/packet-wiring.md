@@ -12,14 +12,14 @@ takes effect or reaches the wire.
 ### Serverbound: decode is not the bar, construction is
 
 `ServerBound` (the hosting-side action enum) is declared in `crates/lodestone-server/src/
-protocol.rs`; the arms that construct it live in `crates/protocol/v770/src/server_protocol.rs`
+protocol.rs`; the arms that construct it live in `crates/versions/26.2/src/server_protocol.rs`
 — a different crate, with nothing in the type system joining them. A variant can be declared,
 matched by `dispatch_play_packet`, given a fully-written consumer, and covered by an
 end-to-end test, and still be **constructed by no decode arm at all** — silently discarding
 the packet forever while everything else stays green. This has happened more than once from a
 single commit that wired consumers but updated only some of the matching decode arms.
 
-`crates/protocol/v770/tests/serverbound_wiring.rs` closes this structurally: every variant
+`crates/versions/26.2/tests/serverbound_wiring.rs` closes this structurally: every variant
 declared on `ServerBound` must be constructed somewhere in `server_protocol.rs`'s non-test
 code, with comments and `#[cfg(test)]` blocks stripped before scanning (a stray comment or a
 test assertion both look like a construction to a naive scanner, and both have hidden a real
@@ -107,7 +107,7 @@ a special case of the egress hook.
 - **Adding a `ServerBound` variant**: `serverbound_wiring.rs` fails until a decode arm
   constructs it — fix the arm, never add an exemption. A new decode arm that lifts a packet
   out of `Ignored` needs edits in three different crates: the variant
-  (`lodestone-server::protocol`), the decode arm (`v770::server_protocol`), and a
+  (`lodestone-server::protocol`), the decode arm (`v26-2::server_protocol`), and a
   `dispatch_play_packet` arm plus consumer (`lodestone-server::server`); missing the third
   leaves it stranded per `connectedness`, missing the second leaves the consumer dead per
   `serverbound_wiring.rs`.
@@ -135,7 +135,7 @@ a special case of the egress hook.
 ## Dependencies
 
 - `lodestone-server/src/protocol.rs` (`ServerBound`, `ServerProtocol`) and
-  `protocol/v770/src/server_protocol.rs` (the decode arms) for serverbound wiring.
+  `protocol/v26-2/src/server_protocol.rs` (the decode arms) for serverbound wiring.
 - `docs/event-routing.md` and `lodestone-model/src/event.rs` for clientbound routing.
 - `lodestone-ecs/src/egress.rs` and `veto.rs`, both depending only on `bevy_app`/`bevy_ecs`/
   `lodestone-model`; ask/drain call sites live in `lodestone-shell` and `lodestone-controller`.

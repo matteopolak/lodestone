@@ -14,7 +14,7 @@
 //! | `ClientAction::ChangeGameMode` | zero producers until a game-mode switcher was added |
 //! | `ClientAction::PlaceRecipe` | zero producers; the shell synthesises three container clicks instead |
 //! | `PlayerCommand::StartFallFlying` | four adapter encoders, zero producers, until riptide added the first |
-//! | `ClientAction::MoveVehicle`, `ClientAction::PaddleBoat`, `PlayerCommand::StartRidingJump` | encoded byte-exactly by the v770 adapter with its own round-trip tests; nothing moved a ridden vehicle at all until `lodestone_ecs::vehicle` simulated one |
+//! | `ClientAction::MoveVehicle`, `ClientAction::PaddleBoat`, `PlayerCommand::StartRidingJump` | encoded byte-exactly by the v26-2 adapter with its own round-trip tests; nothing moved a ridden vehicle at all until `lodestone_ecs::vehicle` simulated one |
 //!
 //! So the set is **snapshotted**, and landing the first producer for something on
 //! the list fails this gate — the fix being to delete the line, which is the
@@ -46,7 +46,7 @@
 //!   **21 false gaps**. `CLAUDE.md` names exactly this ("a hand-rolled Rust lexer
 //!   will be wrong"), so the tracking is gone; over-reporting *produced* costs a
 //!   missed entry, and the alternative cost a snapshot nobody could trust.
-//! - **`crates/protocol/**` and `lodestone-model` itself**, which is where the
+//! - **`crates/versions/**` and `lodestone-model` itself**, which is where the
 //!   encoders and the enum live. Counting those would make every variant look
 //!   produced.
 //!
@@ -60,7 +60,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-/// Variants with **no** producer outside `crates/protocol/` and `lodestone-model`,
+/// Variants with **no** producer outside `crates/versions/` and `lodestone-model`,
 /// each with what it is waiting for. Measured by running this gate, not derived
 /// from reading.
 ///

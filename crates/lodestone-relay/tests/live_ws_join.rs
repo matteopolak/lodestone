@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 /// The real vanilla server (offline mode, flat world) the relay bridges to.
 const MC_SERVER: &str = "127.0.0.1:25565";
-/// v770 family protocol number (matches the live TCP join test).
+/// v26-2 family protocol number (matches the live TCP join test).
 const PROTOCOL: i32 = 776;
 
 #[tokio::test]
@@ -75,7 +75,7 @@ async fn joins_real_server_through_relay_over_websocket() {
         uuid: Uuid::new_v4(),
     };
     let adapter: Box<dyn VersionAdapter> = lodestone_registry::adapter_for_protocol(PROTOCOL)
-        .expect("v770 family compiled into the registry via the v770 feature");
+        .expect("v26-2 family compiled into the registry via the v26-2 feature");
 
     let (handle, mut events) = ClientBuilder::new(server, profile, adapter).connect_with(transport);
 

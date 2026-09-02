@@ -103,7 +103,7 @@ about the same field pair getting fed straight across instead of negated:
 
 An unknown block state or a version-free build refuses to dig rather than
 guessing a hardness — guessing a number here is exactly how breaking got too
-fast the first time. The v770 census covers all 32,366 real states, so this
+fast the first time. The v26-2 census covers all 32,366 real states, so this
 never fires against a real server.
 
 ### Outline and interaction shapes

@@ -300,7 +300,7 @@ constant, not a tunable:
 - `lodestone-render` — item-model pipeline, non-living vehicle placement matrices.
 - `lodestone-shell` — the two `CollisionView` adapters, `sim`/`net` wiring for vehicles and pickups,
   moving-block rendering.
-- `lodestone-v770` — the only family with a working solidity census, boat metadata, and the
+- `lodestone-v26-2` — the only family with a working solidity census, boat metadata, and the
   falling-block Object Data field; legacy families discard it.
 
 ## See also

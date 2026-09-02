@@ -593,7 +593,7 @@ fn a_block_broken_under_a_committed_plan_forces_a_replan_around_it() {
 ///
 /// This section re-runs the happy path over **real, jar-derived collision
 /// data** — `lodestone_data::collision_shapes`/`block_states`/`block_solidity`,
-/// the exact tables `lodestone_v770::adapter::V770Adapter` itself reads (issue
+/// the exact tables `lodestone_v26_2::adapter::V770Adapter` itself reads (issue
 /// #361's census, dumped from the real 26.2 server's
 /// `Block.BLOCK_STATE_REGISTRY`) — and, critically, includes one **real bottom
 /// slab** (`minecraft:oak_slab[type=bottom]`, true collision top `0.5`, not a
@@ -648,7 +648,7 @@ mod real_collision {
 
     /// A [`VersionAdapter`] whose three block-census methods delegate straight
     /// to `lodestone-data`'s generated tables — the same functions
-    /// `lodestone_v770::adapter::V770Adapter` calls, so this is not a second,
+    /// `lodestone_v26_2::adapter::V770Adapter` calls, so this is not a second,
     /// independent implementation of the census that could quietly drift from
     /// the real one; it *is* the real one, minus the packet/login machinery
     /// this test never drives.

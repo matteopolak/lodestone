@@ -6,7 +6,7 @@ Two additions that let one packet definition serve a range of protocol versions,
 and let a family's clientbound dispatch be checked at construction time instead
 of falling through a silent `_ =>` arm. Landed as Stage 1 of the multi-version
 protocol dedup plan (`docs/plans/multi-version-protocol-dedup.md`): the macro
-attribute and the dispatch builder, with no `crates/protocol/*` family
+attribute and the dispatch builder, with no `crates/versions/*` family
 converted to use either yet.
 
 ## How it works
@@ -22,7 +22,7 @@ range is a hard precondition: `Encode`/`Decode` (and the `decode_context`
 inherent method) check `ctx.version` against it *before* touching the body,
 returning `Error::PacketOutOfProtocolRange` when the call is for a version
 outside the declared range. A packet with no declared range never runs this
-check, so every existing hand-copied packet in `crates/protocol/*` is
+check, so every existing hand-copied packet in `crates/versions/*` is
 unaffected until it opts in.
 
 **Data-driven dispatch.** `lodestone_core::dispatch` replaces a family's
@@ -47,8 +47,8 @@ minecraft-data-sourced report resolves through `MINECRAFT_DATA_CANONICAL_ALIASES
 run against the old jar, or a captured-bytes comparison), not a spelling
 guess. The generated `packet_ids.rs` carries a `CANONICAL_NAMES: &[(&str,
 &str)]` table of every entry with a known canonical name, so a later stage
-can join a legacy protocol's table against v770's without depending on
-matching literal strings across sources (measured: v735 and v770 agree on
+can join a legacy protocol's table against v26-2's without depending on
+matching literal strings across sources (measured: v1-14 and v26-2 agree on
 only 7 of 88 `ENTRIES` names as plain strings).
 
 ## How to change it
@@ -77,5 +77,5 @@ types; nothing here reads an environment variable or a feature flag.
 `lodestone-macros` (the `#[mc(protocols = ...)]` attribute) and
 `lodestone-core` (`ProtocolRange`, `Error::PacketOutOfProtocolRange`, the
 `dispatch` module) are the only two crates involved. Neither depends on any
-`crates/protocol/*` family, and no family depends on the other — the version
+`crates/versions/*` family, and no family depends on the other — the version
 seam (`cargo check -p lodestone-shell --no-default-features`) is unaffected.

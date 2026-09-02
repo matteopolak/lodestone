@@ -4,16 +4,16 @@
 //!
 //! [`EntityAction`], [`EntityDestroy`], [`EntityLook`] and
 //! [`EntityVelocityPacket`] are byte-identical across every protocol these
-//! three crates cover (47, 340, 754) -- measured against v735's own
+//! three crates cover (47, 340, 754) -- measured against v1-14's own
 //! definitions field for field -- and keep the derive's default
 //! `ProtocolRange::ALL`.
 //!
 //! [`AttachEntity`], [`Collect`], [`EntityMoveLook`], [`EntityTeleport`],
 //! [`RelEntityMove`], [`RemoveEntityEffect`], [`SetPassengers`] and
-//! [`TeleportConfirm`] are shared only between v340 and v735 (declared
+//! [`TeleportConfirm`] are shared only between v1-9 and v1-14 (declared
 //! `#[mc(protocols = "340..=754")]`): each is a 1.9+ packet (offhand,
 //! `f64` positions, wider relative-move deltas, or a packet 1.8 lacks
-//! entirely), so v47 either has no equivalent or a genuinely different
+//! entirely), so v1-8 either has no equivalent or a genuinely different
 //! shape and keeps its own definition.
 
 use lodestone_macros::{Decode, Encode, Packet};

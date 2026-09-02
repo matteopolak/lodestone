@@ -5,7 +5,7 @@
 //! zero flag introducing an inline definition. The registry id→name mapping is
 //! generated from Mojang's own `registries.json` for 26.2, the one canonical
 //! internal version, so it lives here in this data crate rather than
-//! in `lodestone-v770` — it is a game-data census, not
+//! in `lodestone-v26-2` — it is a game-data census, not
 //! wire-format code.
 //!
 //! Each entry pairs the identifier with the sound's optional fixed audible

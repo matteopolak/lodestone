@@ -2,7 +2,7 @@
 //! benches. Deliberately small and self-contained (not a crate, not a
 //! workspace dependency) — per the harness scope in `docs/roadmap/benchmarks.md`,
 //! creating a new shared crate is out of scope for this pass, and duplicating
-//! ~100 lines twice (worldgen + v770) is cheaper than the coordination cost of
+//! ~100 lines twice (worldgen + v26-2) is cheaper than the coordination cost of
 //! a third crate mid-epic. If a third bench site needs this, promoting it to a
 //! real crate is the right move then — see the harness patch note in the
 //! epic report for what that would need from the workspace root.

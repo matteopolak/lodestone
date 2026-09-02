@@ -22,7 +22,7 @@
 //! carry attributes, visibility qualifiers and multi-line generics), and the
 //! two arguments of a call that is frequently split across several lines
 //! (`crates/lodestone-render/src/entity.rs`'s `std::ptr::eq` call is four
-//! lines; `crates/protocol/v770/tests/prototype_shape_seams.rs`'s are two).
+//! lines; `crates/versions/26.2/tests/prototype_shape_seams.rs`'s are two).
 //! `xtask::islands` already made this trade for the same reason — three
 //! earlier scanners here hand-rolled a Rust lexer and each was wrong about
 //! lifetimes, because `&'static str` opens what looks like an unterminated

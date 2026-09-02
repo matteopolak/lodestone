@@ -15,7 +15,7 @@
 //! installs its own `EntityDraw`, so it says **nothing** about the producer.
 //! That the wire's `ADD_ENTITY` Object Data really lands in
 //! `EntityDraw::projectile_owner`, and that a spawner's `DATA_ITEM` really
-//! lands in `EntityDraw::item`, are `crates/protocol/v770`'s and
+//! lands in `EntityDraw::item`, are `crates/versions/26.2`'s and
 //! `entities::extract_entity_draws`' questions; the ECS ingest gate in
 //! `lodestone-ecs` covers the first hop of the owner chain separately.
 //!

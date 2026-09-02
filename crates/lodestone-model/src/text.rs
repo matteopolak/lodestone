@@ -802,11 +802,11 @@ impl Text {
     ///
     /// 1. **Serialising into an actual legacy-string wire field** — a
     ///    protocol whose own packet definition carries a `§`-coded string,
-    ///    e.g. `v47`/`v340`'s pre-1.13 `SCOREBOARD_TEAM` prefix/suffix
+    ///    e.g. `v1-8`/`v1-9`'s pre-1.13 `SCOREBOARD_TEAM` prefix/suffix
     ///    (verified in both adapters' own decode arms), where the flattening
     ///    is the wire format's own lossiness, not a bug we introduced. No
     ///    encoder in this workspace constructs such a field today —
-    ///    `v47`/`v340` only ever *decode* one (`Text::from_legacy`, the
+    ///    `v1-8`/`v1-9` only ever *decode* one (`Text::from_legacy`, the
     ///    reverse direction), because neither implements `ServerProtocol` and
     ///    so never emits a clientbound `SCOREBOARD_TEAM` of its own. Keep
     ///    this method for when one does.
@@ -822,7 +822,7 @@ impl Text {
     /// [`to_spans`](Self::to_spans) and draw the spans instead. This was the
     /// shape of three now-fixed production bugs (`styled_hover_name`'s
     /// tooltip title/held-item draw sites, `ChatLog::recent`'s HUD draw
-    /// path, and `v735`'s `TAB_COMPLETE` tooltip decode, which used to
+    /// path, and `v1-14`'s `TAB_COMPLETE` tooltip decode, which used to
     /// flatten straight into this call before `CommandSuggestionEntry::
     /// tooltip` was widened to carry a real [`Text`] end to end).
     #[must_use]

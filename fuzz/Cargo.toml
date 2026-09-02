@@ -36,7 +36,7 @@ lodestone-fuzz = { path = "../crates/lodestone-fuzz" }
 lodestone-core = { path = "../crates/lodestone-core" }
 lodestone-model = { path = "../crates/lodestone-model" }
 lodestone-server = { path = "../crates/lodestone-server" }
-lodestone-v770 = { path = "../crates/protocol/v770" }
+lodestone-v26-2 = { path = "../crates/versions/26.2" }
 # Added for the widened Track A scope (issue #549's "obvious first targets"
 # list: loot tables, block-state strings, the density compiler, the unihex
 # HEX parser) — each a leaf/near-leaf crate pulled in for exactly one parse
@@ -53,22 +53,22 @@ serde_json = "1"
 lodestone-anvil = { path = "../crates/lodestone-anvil" }
 
 [[bin]]
-name = "v770_clientbound_decode"
-path = "fuzz_targets/v770_clientbound_decode.rs"
+name = "v26_2_clientbound_decode"
+path = "fuzz_targets/v26_2_clientbound_decode.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "v770_clientbound_decode_by_id"
-path = "fuzz_targets/v770_clientbound_decode_by_id.rs"
+name = "v26_2_clientbound_decode_by_id"
+path = "fuzz_targets/v26_2_clientbound_decode_by_id.rs"
 test = false
 doc = false
 bench = false
 
 [[bin]]
-name = "v770_serverbound_decode"
-path = "fuzz_targets/v770_serverbound_decode.rs"
+name = "v26_2_serverbound_decode"
+path = "fuzz_targets/v26_2_serverbound_decode.rs"
 test = false
 doc = false
 bench = false

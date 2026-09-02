@@ -95,7 +95,7 @@ target, which the spawn cycle has no way to name yet).
 **#204 closed.** The fix this issue wants (a `PathWorld` that reads real
 per-block-state collision/path-type data instead of solid/air) used to be
 blocked on a real structural problem: the 32,366-state census only existed
-behind `crates/protocol/v770`, and `lodestone-server` correctly refuses a
+behind `crates/versions/26.2`, and `lodestone-server` correctly refuses a
 dependency on any `protocol/*` crate (`lodestone-server/Cargo.toml` documents
 "no version/protocol coupling" in its own dependency comment) — so wiring the
 real census into `MobSim::ChunkWorld` meant either reversing that boundary or
@@ -103,7 +103,7 @@ having `lodestone-shell` supply a richer `PathWorld`, making the server's
 fidelity depend on the client.
 
 Issue #361 extracted `path_types` (and the other eighteen game-data censuses) out
-of `crates/protocol/v770` into `lodestone-data`, a crate with no protocol
+of `crates/versions/26.2` into `lodestone-data`, a crate with no protocol
 dependency of its own — see `docs/lodestone-data-crate.md`. `lodestone-data`'s
 `path_types::PathTypes` already implements `lodestone_model::PathTypeRegistry`,
 and `PathType` in `lodestone-model`/`lodestone-entity` already mirrors it

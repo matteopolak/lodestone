@@ -5,11 +5,11 @@
 //! server's `ADD_ENTITY` / `MOVE_ENTITY_POS` / `TELEPORT_ENTITY` broadcasts).
 //! The gate asserts B's observed displacement of A matches A's commanded walk.
 //!
-//! Gated behind the `live-v770` feature AND `#[ignore]`. Run against a real
+//! Gated behind the `live-v26-2` feature AND `#[ignore]`. Run against a real
 //! server (offline mode, flat world) on `127.0.0.1:25565` with:
 //!
 //! ```text
-//! cargo test -p lodestone-client --features live-v770 --test live_second_observer -- --ignored --nocapture
+//! cargo test -p lodestone-client --features live-v26-2 --test live_second_observer -- --ignored --nocapture
 //! ```
 //!
 //! # Why this gate exists (§12.70)
@@ -20,7 +20,7 @@
 //! read-back is substantially *our own commanded target*, not server-confirmed
 //! displacement. Agreement between a component and its own forecast is not
 //! evidence, and it looks exactly like evidence. (The white-box
-//! `crates/protocol/v770/tests/live_physics.rs` gate closes the *arithmetic*
+//! `crates/versions/26.2/tests/live_physics.rs` gate closes the *arithmetic*
 //! claim with the server certifying it via zero corrective teleports — that
 //! result is untouched by this and remains the strongest physics evidence.)
 //!
@@ -49,7 +49,7 @@
 //!     is discarded and retried rather than mis-reported as a parity failure.
 //!     A is matched in B's read-model by the exact offline UUID the server
 //!     assigns it, so identification is immune to that position noise.
-#![cfg(feature = "live-v770")]
+#![cfg(feature = "live-v26-2")]
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -259,7 +259,7 @@ async fn join_walker(server: &ServerAddress) -> Option<Walker> {
         uuid: Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via the live-v770 feature");
+        .expect("v26-2 family compiled into the registry via the live-v26-2 feature");
 
     let (handle, mut events) = ClientBuilder::new(server.clone(), profile, adapter)
         .connect()
@@ -360,7 +360,7 @@ async fn join_observer(server: &ServerAddress) -> Observer {
         uuid: Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via the live-v770 feature");
+        .expect("v26-2 family compiled into the registry via the live-v26-2 feature");
 
     let (handle, mut events): (ClientHandle, EventStream) =
         ClientBuilder::new(server.clone(), profile, adapter)

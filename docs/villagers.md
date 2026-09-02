@@ -288,7 +288,7 @@ machinery), `lodestone_entity::attribute::default_attributes` (`"wandering_trade
 TypeSpecs), `crate::effects` (cure/conversion sounds), `crate::world_state::WorldStateHandle`
 (the day-time feed), `MobSim::try_leash`/`LeashHolder::Mob` (the wandering trader's llama escort), `lodestone_data::villager_trades`/`item_prototypes` (the static trade
 table and cost-item stack sizes), and `crate::protocol::{MetadataField, MerchantOfferOut,
-ServerProtocol::encode_merchant_offers}` (implemented only by `crates/protocol/v770`'s
+ServerProtocol::encode_merchant_offers}` (implemented only by `crates/versions/26.2`'s
 `V770ServerProtocol`). The workstation economy additionally depends on `crate::container_click`,
 `crate::inventory`, `crate::experience::PlayerExperience`, and `crate::mob_spawn::SpawnRng`
 (matches vanilla's draw order and count, not its bit stream).

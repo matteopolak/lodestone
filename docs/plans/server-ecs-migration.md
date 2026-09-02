@@ -328,7 +328,7 @@ exhaustive today — no bare `_ =>` — but it ends in a *grouped* no-op arm,
 `ServerBound::Handshake { .. } | … | ServerBound::Ignored => {}` (`dispatch_play_packet`, `server.rs`), with a
 second in `serve_connection_inner` (`server.rs`). Adding a variant fails to compile, which is good; adding your variant *to that
 group* compiles and silently discards, which is the island. The deeper factory is one layer down:
-`crates/protocol/v770/src/server_protocol.rs`'s `State::Play if packet_id == …` arms fall through to
+`crates/versions/26.2/src/server_protocol.rs`'s `State::Play if packet_id == …` arms fall through to
 `ServerBound::Ignored`, so a packet that decodes to `Ignored` is dropped with no trace. That is a
 **two-file join** — the packet id in the adapter, the arm in `server.rs` — exactly like the
 clientbound serverbound-decode axis `cargo xtask connectedness` measures.

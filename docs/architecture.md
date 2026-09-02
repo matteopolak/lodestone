@@ -32,10 +32,12 @@ lodestone-data        generated per-version tables (collision shapes, hardness,
                       blast/flammability, registries)
 lodestone-auth        MSA device-code OAuth, session server, profile keys
 
-crates/protocol/{v47, v340, v735, v770}
-                      one crate per protocol family, named for its LOWEST
-                      protocol number. Fully self-contained; depends ONLY on
-                      version-free shared crates.
+crates/versions/{1.8, 1.9, 1.14, 26.2}
+                      one crate per protocol family, its folder named for the
+                      era-start Minecraft version it covers (not a protocol
+                      number -- ask VersionAdapter::supports). Fully
+                      self-contained; depends ONLY on version-free shared
+                      crates.
 
 lodestone-registry    protocol number -> Box<dyn VersionAdapter>. The only
                       crate that knows which families exist. Two tables:
@@ -73,7 +75,7 @@ The split rule is **"is it generated data, or is it hand-written logic?"**
 
 **Isolation rule: a version crate may depend only on version-free shared crates, never on another
 version crate.** `cargo xtask check-isolation` derives "is a version crate" structurally from
-`crates/protocol/` membership rather than from an allowlist. The one intended aggregation point is
+`crates/versions/` membership rather than from an allowlist. The one intended aggregation point is
 `lodestone-registry`, which opts in via `[package.metadata.lodestone-isolation] role =
 "version-registry"` — a structural marker, not a name match, and one that can only downgrade an
 *already-optional* edge, so a required registry→version edge or any version→version edge still fails.
@@ -82,10 +84,13 @@ version crate.** `cargo xtask check-isolation` derives "is a version crate" stru
 reports the true fallout in manifest and source lines.
 
 One trap that a graph-plus-package-name check structurally cannot see: a feature forward such as
-`live-v47 = ["lodestone-registry/v47"]` names the folder *token*, not the package, so it is not a
-dependency edge at all. Cargo validates feature strings at resolve time, so deleting a family leaves a
-dangling feature forward that breaks the default build while the checker reports "unaffected". Token
-matching is bounded so `v47` never matches `v470`.
+`live-v1-8 = ["lodestone-registry/v1-8"]` names the package's feature *suffix*, not the package itself,
+so it is not a dependency edge at all. Cargo validates feature strings at resolve time, so deleting a
+family leaves a dangling feature forward that breaks the default build while the checker reports
+"unaffected". Token matching is bounded so `v1-8` never matches `v1-80`. That suffix is no longer the
+same string as the family's own directory: the four families live under an era-start Minecraft-version
+folder (`crates/versions/1.8`, not `crates/versions/v1-8`) while keeping a `vNNN`-style package/feature
+suffix, so a folder-name grep is not a safe stand-in for the feature token any more.
 
 **Canonical model direction.** The model is shaped by the *newest* protocol's concepts; older adapters
 translate **upward** (the ViaVersion insight). Deleting an old version removes only its adapter; adding
@@ -104,8 +109,8 @@ palettes), 578→735 (long packing), 754→755 (world height), 756→757 (biomes
 signing), 763→764 (configuration state), 764→765 (NBT text), 765→766 (item components). Within a family,
 small deltas use `#[mc(since/until)]` predicates.
 
-**Scope: the architecture supports seventeen families; the schedule funds four** — `v770` (26.2),
-`v735` (1.16.5), `v340` (1.12.2), `v47` (1.8.9). Modern, mid and legacy, enough to exercise every hard
+**Scope: the architecture supports seventeen families; the schedule funds four** — `v26-2` (26.2),
+`v1-14` (1.16.5), `v1-9` (1.12.2), `v1-8` (1.8.9). Modern, mid and legacy, enough to exercise every hard
 boundary above and to prove the folder-deletion property. `xtask new-version` plus an enforced
 `SHAPE_REVIEW.toml` remains the documented path for adding more.
 
@@ -195,7 +200,7 @@ layout that wrong.
    The bit-packing, thresholds and indexing are structural and shared, so this is a
    `LongArrayFraming::{Prefixed, FixedSize}` knob on the container profile — never a hardcoded modern
    default in the version-free crate. The boundary is **≤769 → `Prefixed`, ≥770 → `FixedSize`**, and
-   `v770` sits exactly on it. Heightmaps switch at the same boundary (NBT compound ≤1.21.4 vs typed
+   `v26-2` sits exactly on it. Heightmaps switch at the same boundary (NBT compound ≤1.21.4 vs typed
    long-array list ≥1.21.5).
 5. **Light is the real memory hog, not block states.** 4096 nibbles = 2048 B per section per light type
    × 2 × 26 light sections (light extends one section past the build range, top and bottom) = ~106 KB
@@ -243,7 +248,7 @@ cube corners and too coarse for baked models on a 1/16 grid, so non-cube geometr
 `ModelVertex`; the packed path survives only where a predicate can recognise "exactly a full opaque
 cube" *from the baked model*, and that predicate must be derived, never a hardcoded block list.
 
-Two measurements bound how much that fast path is worth. Baking all 32,366 v770 states: 1,377 empty,
+Two measurements bound how much that fast path is worth. Baking all 32,366 v26-2 states: 1,377 empty,
 30,989 renderable, of which only **2,874 (9.3%) are full-cube geometry** and 2,622 packed-eligible
 untinted cubes — and the two dominant overworld surfaces, grass (tinted top) and water (a fluid), are
 *not* packed cubes, so "the fast path carries most surfaces" is false. Separately, adopting vanilla's

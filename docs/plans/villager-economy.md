@@ -87,16 +87,16 @@ no line numbers.
 
 ### 1.3 The protocol and client side
 
-- **Clientbound `MERCHANT_OFFERS` decode exists** (`v770::adapter::decode_merchant_offers`), with a
+- **Clientbound `MERCHANT_OFFERS` decode exists** (`v26-2::adapter::decode_merchant_offers`), with a
   documented trap: five of `MerchantOffer`'s fields are **big-endian `i32`s, not VarInts**. The
   decoded offers flow to `ClientEvent::MerchantOffersReceived` → `SessionTrades`
   (`lodestone_game::trades`) — the client *data* half of trading is done.
-- **Serverbound `SELECT_TRADE` is decoded and discarded**: `v770::server_protocol` does
+- **Serverbound `SELECT_TRADE` is decoded and discarded**: `v26-2::server_protocol` does
   `let _ = decode_full::<SelectTrade>(payload)` — a stranded packet, the serverbound island shape.
 - **The merchant *screen* is deliberately unimplemented**: `lodestone_shell::container::frame`
   documents that `beacon` and `merchant` are excluded because the merchant screen needs to compose
   trade-level text rather than merely moving an anchor, unlike every other container screen.
-- **`VILLAGER_DATA` metadata decodes client-side** (`v770::packets::metadata`, serializer 18 → a
+- **`VILLAGER_DATA` metadata decodes client-side** (`v26-2::packets::metadata`, serializer 18 → a
   villager type/profession/level variant) and the shell resolves variant textures
   (`EntityTexture::resolve` has a production caller since the mob-variant-texture fix). **But the
   server cannot send it**: `lodestone_server::protocol::MetadataField` has no villager-data variant.
@@ -259,7 +259,7 @@ conventions). Every unit ends on screen.
 `crates/lodestone-server/src/villager.rs` (profession + villager-data state); a generated
 POI-type table in `crates/lodestone-data`.
 *Brokered:* `lib.rs` mod lines; a `MetadataField::VillagerData` variant in
-`lodestone-server/src/protocol.rs` + its encode arm in `v770/src/server_protocol.rs`; a short
+`lodestone-server/src/protocol.rs` + its encode arm in `v26-2/src/server_protocol.rs`; a short
 `mobs.rs` window (villager state on `SimMob`, snapshot metadata); the block-mutation hook.
 *Screen:* spawn-egg an unemployed villager next to a placed lectern → it acquires the librarian
 profession and **its robe changes** (the client's variant-texture path is already live); break the
@@ -316,7 +316,7 @@ entity crate, the impl in the server crate).
 state); merchant menu slots in `container_click.rs`.
 *Brokered:* the `InteractEntity` arm in `server.rs` (right-click villager → open merchant menu +
 send offers — the taming dispatch is the template); `encode_merchant_offers` + the merchant
-`OPEN_SCREEN` in `v770/src/server_protocol.rs`; routing the stranded `SelectTrade` decode into a
+`OPEN_SCREEN` in `v26-2/src/server_protocol.rs`; routing the stranded `SelectTrade` decode into a
 real `ServerBound` variant (it currently decodes and discards — a two-file join, grep the packet id).
 *Depends on:* V1 (professions decide the table); V3 for pixels — V4 and V3 are the two halves of one
 on-screen outcome and should be co-scheduled, V3 first.
@@ -383,7 +383,7 @@ defeat, the bell); Bad Omen / Raid Omen as *player* effects (the existing player
 suffices — vanilla's own omen-absorption rule converts on village entry, raid starts on Raid-Omen
 expiry, **not** the pre-1.21 flow the issue describes); vindicator added to `roster/hostile_melee.rs` (a melee
 raider is cheap; see §6 for who is excluded).
-*Brokered:* `BOSS_EVENT` encode in `v770/src/server_protocol.rs` (client HUD already draws it);
+*Brokered:* `BOSS_EVENT` encode in `v26-2/src/server_protocol.rs` (client HUD already draws it);
 `tick.rs` raid-manager tick; persisted raid state matching the vanilla `raids.dat` fixture; the HotV
 price hook in `villager.rs` (small; sequence behind V6).
 *Depends on:* V9 (group spawn + captain banner), V1 (raid center = POI cluster), V5/V6 (HotV
@@ -413,8 +413,8 @@ is why V5/V6 share an owner and V7/V10's patches there are small and late.
 Shared, from `CLAUDE.md` — restated against these units:
 
 - **Metadata indices come from `EntityDataIndexOracle.java`**
-  (`crates/protocol/v770/oracle-java/`, *not* `scripts/`), every time: the villager-data index is
-  now settled at **19** (§7 item 4 — not the 17 a v770 test fixture used to guess; use 19 for the
+  (`crates/versions/26.2/oracle-java/`, *not* `scripts/`), every time: the villager-data index is
+  now settled at **19** (§7 item 4 — not the 17 a v26-2 test fixture used to guess; use 19 for the
   `MetadataField::VillagerData` encode arm), the
   zombie-villager converting flag (V7), raider celebrating / pillager charging (V9, V10), the
   trader's drinking flag if V8 ever grows it. Index 18 alone has 37 claimants, four of them `BYTE`,
@@ -524,15 +524,15 @@ Unit-specific:
    projectile *damage* path's history ("hit detection not implemented" in the roster plan) needs
    re-verification at V9 dispatch; a patrol that cannot hurt anyone still satisfies V9's screen
    deliverable, a raid that cannot is not a raid.
-4. **The villager-data metadata index** — **settled: 19, not 17.** The existing v770 test fixture's
+4. **The villager-data metadata index** — **settled: 19, not 17.** The existing v26-2 test fixture's
    `17` was an unverified guess; the committed `EntityDataIndexOracle` dump
-   (`crates/protocol/v770/tests/support/entity_data_index_jvm.txt`) records
+   (`crates/versions/26.2/tests/support/entity_data_index_jvm.txt`) records
    `19 Villager.DATA_VILLAGER_DATA 18 VILLAGER_DATA` — index **19**, serializer 18
    (`VILLAGER_DATA`). `ZombieVillager.DATA_VILLAGER_DATA` sits at index **20** (its own
    `DATA_CONVERTING_ID`/`DATA_VILLAGER_DATA_FINALIZED` occupy 19/21 instead — the two
    species never share a concrete type, so this is the same mutual-exclusion shape as
    every other index-18-class collision in this file, not a real ambiguity).
-   `crates/protocol/v770/src/packets/metadata.rs`'s decode is unaffected by the wrong
+   `crates/versions/26.2/src/packets/metadata.rs`'s decode is unaffected by the wrong
    guess — its `read_entity_metadata` matches `Value::Villager` by **serializer alone**,
    not by index (see that match arm's own comment), so the fixture's `17` decoded
    correctly by coincidence. The **encode** side (this plan's `MetadataField::VillagerData`

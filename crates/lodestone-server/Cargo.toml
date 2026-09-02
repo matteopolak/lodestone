@@ -32,7 +32,7 @@ redstone-counters = []
 # data is no longer compiled in with **no** Cargo-level acknowledgement that
 # it is 26.2-specific at all — the prior state this issue was filed
 # against. Default on, so every existing consumer (`lodestone-shell`,
-# `lodestone-v770`'s dev-dependency, this crate's own test suite) is
+# `lodestone-v26-2`'s dev-dependency, this crate's own test suite) is
 # unaffected; a future non-v770 hosting family, or a build that wants to
 # drop the bundle's size, is the one that turns it off.
 bundled-worldgen-v26_2 = []
@@ -216,10 +216,10 @@ lodestone-model = { path = "../lodestone-model" }
 # `EncryptionResponse` sequence): the only real `ServerProtocol` implementor
 # with actual online-mode wire support, and its packet types, to drive a
 # faithful handshake rather than a hand-rolled wire format that could drift
-# from the real one. Dev-only: `lodestone-v770`'s own *normal* dependency on
+# from the real one. Dev-only: `lodestone-v26-2`'s own *normal* dependency on
 # this crate (for the `ServerProtocol` trait it implements) is not a cycle
 # here, since a dev-dependency is excluded from the normal build graph.
-lodestone-v770 = { path = "../protocol/v770" }
+lodestone-v26-2 = { path = "../versions/26.2" }
 # `tests/chunk_nbt_vanilla_oracle.rs` opens a real 26.2 `.mca` directly, rather
 # than through this crate's own loader, so the oracle reads the file with
 # something other than the code under test.

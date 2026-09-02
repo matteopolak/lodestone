@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-# `crates/lodestone-*` deliberately avoids matching the `crates/protocol/` and
+# `crates/lodestone-*` deliberately avoids matching the `crates/versions/` and
 # `crates/plugins/` grouping dirs, each of which gets its own glob so a new member
 # needs no manifest edit. `crates/plugins/*` is where **plugins** live — crates
 # that consume the public plugin API (`docs/plugin-api.md`) rather than being part
@@ -9,7 +9,7 @@ resolver = "3"
 members = [
     "crates/lodestone-*",
     "crates/plugins/*",
-    "crates/protocol/*",
+    "crates/versions/*",
     "xtask",
 ]
 # Crates that are **guests**, not members: they compile only for
@@ -86,13 +86,13 @@ lodestone-canonical = { path = "crates/lodestone-canonical" }
 # Version-free shared packet library (multi-version-protocol-dedup Stage 2):
 # packet definitions byte-identical across two or more legacy protocol
 # families, each with its own measured protocol range. Lives outside
-# `crates/protocol/` so the isolation lint never treats it as a version
+# `crates/versions/` so the isolation lint never treats it as a version
 # crate; no family may depend on another family through it.
 lodestone-protocol-common = { path = "crates/lodestone-protocol-common" }
-lodestone-v770   = { path = "crates/protocol/v770" }
-lodestone-v47    = { path = "crates/protocol/v47" }
-lodestone-v340 = { path = "crates/protocol/v340" }
-lodestone-v735 = { path = "crates/protocol/v735" }
+lodestone-v26-2 = { path = "crates/versions/26.2" }
+lodestone-v1-8  = { path = "crates/versions/1.8" }
+lodestone-v1-9  = { path = "crates/versions/1.9" }
+lodestone-v1-14 = { path = "crates/versions/1.14" }
 lodestone-ecs  = { path = "crates/lodestone-ecs" }
 # The composed client `App` (`docs/plugin-registration.md`), between
 # `lodestone-controller` and `lodestone-shell`: `client_app()` is the one

@@ -10,12 +10,12 @@
 //!
 //! ## Isolation: no version crate
 //!
-//! A version-free crate cannot take a dependency on a `crates/protocol/*`
+//! A version-free crate cannot take a dependency on a `crates/versions/*`
 //! family. So rather than reuse `V770Adapter`, this test hand-drives the
 //! handshake using only the SHARED wire crates ([`lodestone_core`],
 //! [`lodestone_net`]) plus a handful of documented protocol-776 packet-id
 //! constants declared locally below. Those constants are facts (like a port
-//! number), not a code dependency: deleting `crates/protocol/v770` would not
+//! number), not a code dependency: deleting `crates/versions/26.2` would not
 //! touch this file, and `cargo xtask check-isolation` stays clean.
 //!
 //! ## Run it
@@ -57,7 +57,7 @@ const PLAYER_WINDOW: i32 = 0;
 const PLAYER_MENU_SLOTS: usize = 46;
 
 /// Documented protocol-776 packet ids (from Mojang's generated report; mirrored
-/// in `crates/protocol/v770/src/generated/packet_ids.rs`). Local constants, not
+/// in `crates/versions/26.2/src/generated/packet_ids.rs`). Local constants, not
 /// a crate dependency.
 mod pkt {
     pub mod hs_sb {

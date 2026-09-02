@@ -29,7 +29,7 @@
 //! oracle unloads chunks when empty, so a player must be online before RCON can
 //! edit the world), read the player's spawn column, then RCON a sealed stone room
 //! inside it. The server relights the fully-enclosed interior to sky `0` and
-//! streams the block+light edits to the connected client (the v770 adapter applies
+//! streams the block+light edits to the connected client (the v26-2 adapter applies
 //! `BLOCK_UPDATE`/`SECTION_BLOCKS_UPDATE` + `LIGHT_UPDATE` live). The surrounding
 //! flat ground stays under open sky (`15`), so the meshed column carries the full
 //! gradient. Building the shadow (rather than hunting for one) is the same reason

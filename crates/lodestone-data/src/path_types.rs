@@ -5,7 +5,7 @@
 //! own walk-node-evaluator "get path type from state" step. This is the version-free seam
 //! ([`lodestone_model::PathTypeRegistry`]); the table itself is 26.2 game data
 //! generated from a headless-server dump and lives here in this data crate
-//! rather than in `lodestone-v770` — which is exactly what lets
+//! rather than in `lodestone-v26-2` — which is exactly what lets
 //! `lodestone-server` (zero protocol dependency by design) read it directly
 //! for real node classification instead of the solid/air approximation
 //! `ChunkWorld` uses today.

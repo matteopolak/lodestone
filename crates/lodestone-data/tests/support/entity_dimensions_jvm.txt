@@ -2,7 +2,7 @@
 #
 # Produced by booting the real 26.2 server headlessly and reading
 # EntityType.getWidth()/getHeight() (base EntityDimensions, scale 1) for every
-# registered type. Generator: crates/protocol/v770/oracle-java/EntityDimensionsOracle.java
+# registered type. Generator: crates/versions/26.2/oracle-java/EntityDimensionsOracle.java
 # run via the temurin:25-jdk Docker classpath (see tests/entity_dimensions.rs docs).
 #
 # These are BASE dims only: the SCALE-attribute fold and the STEP_HEIGHT

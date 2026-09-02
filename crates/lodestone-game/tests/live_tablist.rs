@@ -8,7 +8,7 @@
 //! [`ClientHandle::players()`](lodestone_client::ClientHandle::players) with the
 //! right name, game mode, and listed flag.
 //!
-//! The whole path is exercised: v770 decodes the action-bitmask packet, the
+//! The whole path is exercised: v26-2 decodes the action-bitmask packet, the
 //! adapter lifts it to `ClientEvent::PlayerListUpdate`, the client folds it into
 //! its read-model, and the public API returns it. A misparse anywhere shows up
 //! as a missing or wrong entry.
@@ -48,7 +48,7 @@ async fn tab_list_reaches_client_public_api() {
 
     // Version selection through the registry; `lodestone-game` names no version.
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via lodestone-client/live-v770");
+        .expect("v26-2 family compiled into the registry via lodestone-client/live-v26-2");
 
     let (mut handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()

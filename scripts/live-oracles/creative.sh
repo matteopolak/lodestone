@@ -4,7 +4,7 @@
 # This is the most widely depended-on oracle in the repo:
 #
 #   crates/lodestone-shell/tests/live_world_mesh.rs   (the live-world render gate)
-#   crates/protocol/v770/tests/*                      (RCON-driven block/state gates)
+#   crates/versions/26.2/tests/*                      (RCON-driven block/state gates)
 #   scripts/live-oracles/terrain.sh                   (copies this world's server.jar)
 #
 # A **superflat, creative, peaceful** world is deliberate: tests need to *cause* an

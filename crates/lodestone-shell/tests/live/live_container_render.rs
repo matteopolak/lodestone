@@ -55,7 +55,7 @@ async fn live_open_container_reaches_pixels() {
         uuid: uuid::Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(PROTOCOL_26_2)
-        .expect("v770 adapter compiled by lodestone-shell/live feature");
+        .expect("v26-2 adapter compiled by lodestone-shell/live feature");
     let (mut handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .event_buffer(4096)
         .connect_timeout(Some(Duration::from_secs(10)))

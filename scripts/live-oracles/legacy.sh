@@ -5,16 +5,16 @@
 # no script here creates:
 #
 #   version   family  game port  RCON port  container name
-#   1.8.9     v47     25566      25576      lodestone-mc189
-#   1.12.2    v340    25568      25569      lodestone-legacy-1-12
-#   1.16.5    v735    25573      25574      lodestone-mc1165
+#   1.8.9     v1-8    25566      25576      lodestone-mc189
+#   1.12.2    v1-9    25568      25569      lodestone-legacy-1-12
+#   1.16.5    v1-14   25573      25574      lodestone-mc1165
 #
-# (container name / ports read directly off crates/protocol/<fam>/tests/
+# (container name / ports read directly off crates/versions/<fam>/tests/
 # live_*.rs's own doc comments and #[ignore] messages -- not invented here.)
 #
 # 1.12.2 already had a working script (legacy-1.12.sh); this one covers the
 # other two, and also answers for 1.12.2 so one entry point serves all three.
-# legacy-1.12.sh is left in place untouched -- v340's live test doc comments
+# legacy-1.12.sh is left in place untouched -- v1-9's live test doc comments
 # name it directly, and there is no reason to disturb a script that already
 # works.
 #
@@ -40,7 +40,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 <version>" >&2
-  echo "  supported versions: 1.8.9 (v47), 1.12.2 (v340), 1.16.5 (v735)" >&2
+  echo "  supported versions: 1.8.9 (v1-8), 1.12.2 (v1-9), 1.16.5 (v1-14)" >&2
   exit 1
 }
 
@@ -50,10 +50,10 @@ VERSION="${1:-}"
 # Extra server.properties this version's live gates need beyond the base set
 # every oracle here always sets (server-port, RCON, online-mode) -- read off
 # each family's own live_*.rs doc comments, not guessed:
-#   - v47 (live_entity.rs): "flat world, spawn-monsters=true"
-#   - v340 (legacy-1.12.sh, unchanged): no extra properties -- vanilla
+#   - v1-8 (live_entity.rs): "flat world, spawn-monsters=true"
+#   - v1-9 (legacy-1.12.sh, unchanged): no extra properties -- vanilla
 #     defaults, matching the script this generalises
-#   - v735 (live_entity.rs / live_interaction.rs): "flat world, RCON enabled";
+#   - v1-14 (live_entity.rs / live_interaction.rs): "flat world, RCON enabled";
 #     live_entity.rs additionally: "spawn-monsters=false/spawn-animals=false
 #     ... difficulty=peaceful" (it summons what it needs over RCON instead of
 #     relying on natural spawns)

@@ -401,7 +401,7 @@ Everything else here is a vanilla constant, not a runtime option.
   shared between native and browser.
 * `lodestone-game` — the session aggregates (scoreboard, tab list, boss
   bars, menus, active effects) the ECS components wrap.
-* `crates/protocol/v770` — the only family implementing `ServerProtocol`,
+* `crates/versions/26.2` — the only family implementing `ServerProtocol`,
   hence the only one that can host any server-authoritative system here.
 * `docs/keybindings.md` — the eager-persistence rule the social screen's
   toggle follows.

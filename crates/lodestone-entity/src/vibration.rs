@@ -15,7 +15,7 @@
 //!
 //! **This is deliberately a third name for the same idea two others already
 //! claim.** `lodestone_ecs::GameEvent` is the client-side plugin event bus;
-//! `GAME_EVENT` in `crates/protocol/v770`'s packet ids is vanilla's
+//! `GAME_EVENT` in `crates/versions/26.2`'s packet ids is vanilla's
 //! clientbound weather/state-change packet. Neither is vanilla's world-event
 //! registry a sculk sensor or a warden listens on — `VibrationEvent` is
 //! chosen precisely to avoid colliding with either.

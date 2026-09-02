@@ -2,8 +2,8 @@
 //! panic on arbitrary (but UTF-8) bytes.
 //!
 //! Issue #549's "obvious first targets" list names "text/JSON parsing in
-//! `lodestone-model`" — this is it. Pre-1.20.3 protocol families (`v47`,
-//! `v340`, `v735`) send every chat message, sign line, book page and
+//! `lodestone-model`" — this is it. Pre-1.20.3 protocol families (`v1-8`,
+//! `v1-9`, `v1-14`) send every chat message, sign line, book page and
 //! scoreboard entry as a JSON-encoded text component, decoded by this one
 //! function; `from_json`'s own doc already claims "never panics and is
 //! depth-limited against hostile input" (`MAX_DEPTH = 64`), which is exactly
@@ -18,7 +18,7 @@
 //! literal) rather than returning `Result`, so there is no `Err` arm to
 //! branch on here — the only property this target can check is "did not
 //! panic and did not recurse without bound", matching
-//! `no_panic_v770_serverbound.rs`'s note that some decode APIs give up a
+//! `no_panic_v26_2_serverbound.rs`'s note that some decode APIs give up a
 //! `Result` split by design.
 
 #![no_main]

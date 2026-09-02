@@ -173,7 +173,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// Vanilla's own creeper goal registration.
 ///
 /// The reference shape for this family: a creeper's swell and detonation already
-/// reach a real client (`crates/protocol/v770/tests/server_creeper_metadata_and_explode.rs`),
+/// reach a real client (`crates/versions/26.2/tests/server_creeper_metadata_and_explode.rs`),
 /// so this is the one table whose end-to-end path was proven before the roster
 /// existed.
 ///

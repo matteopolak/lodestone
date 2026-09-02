@@ -62,8 +62,8 @@ geometry beyond the chunk-derived inner band, no caves or overhangs at distance.
 - **Fog is per-dimension data-driven** (`visual/fog_start_distance` / `visual/fog_end_distance`
   attributes, `crates/lodestone-render/src/fog.rs`), with `fog_factor(distance, start, end)`
   as the single curve.
-- **A custom-payload carrier exists in v770** (`CUSTOM_PAYLOAD` in
-  `crates/protocol/v770/src/server_protocol.rs` and the adapter) — the wire vehicle that
+- **A custom-payload carrier exists in v26-2** (`CUSTOM_PAYLOAD` in
+  `crates/versions/26.2/src/server_protocol.rs` and the adapter) — the wire vehicle that
   lets our client receive LOD tiles while a vanilla client, which ignores unknown plugin
   channels, receives none.
 - **`flate2` is already a `lodestone-server` dependency** (zlib-rs backed) and that crate

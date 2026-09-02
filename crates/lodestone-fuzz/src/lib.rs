@@ -33,7 +33,7 @@ pub mod differential;
 /// A [`WorldSink`] that discards every terrain call. Fuzz targets only care
 /// whether decoding panics, not what it decoded to, so every write is a
 /// no-op — mirrors the `NullSink` pattern already used by
-/// `crates/protocol/v770/tests/entity_encoders.rs` and friends.
+/// `crates/versions/26.2/tests/entity_encoders.rs` and friends.
 #[derive(Debug, Default)]
 pub struct NullSink;
 
@@ -65,7 +65,7 @@ impl WorldSink for NullSink {
 }
 
 /// The client protocol families compiled into this build, each behind its own
-/// workspace member per `CLAUDE.md`. `v735` speaks protocol 754 (1.16.5) — the
+/// workspace member per `CLAUDE.md`. `v1-14` speaks protocol 754 (1.16.5) — the
 /// folder name is not the protocol number, so this enum never derives a protocol
 /// from a variant name; adapters answer that themselves via
 /// `VersionAdapter::supports`.
@@ -79,13 +79,13 @@ impl WorldSink for NullSink {
 /// `families_are_compiled_in` exists to catch that.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Family {
-    #[cfg(feature = "v47")]
+    #[cfg(feature = "v1-8")]
     V47,
-    #[cfg(feature = "v340")]
+    #[cfg(feature = "v1-9")]
     V340,
-    #[cfg(feature = "v735")]
+    #[cfg(feature = "v1-14")]
     V735,
-    #[cfg(feature = "v770")]
+    #[cfg(feature = "v26-2")]
     V770,
 }
 
@@ -96,26 +96,26 @@ impl Family {
     /// function of the enabled features, so a fixed-size array could not express
     /// it. Callers iterate with `for &family in Family::ALL`.
     pub const ALL: &'static [Family] = &[
-        #[cfg(feature = "v47")]
+        #[cfg(feature = "v1-8")]
         Family::V47,
-        #[cfg(feature = "v340")]
+        #[cfg(feature = "v1-9")]
         Family::V340,
-        #[cfg(feature = "v735")]
+        #[cfg(feature = "v1-14")]
         Family::V735,
-        #[cfg(feature = "v770")]
+        #[cfg(feature = "v26-2")]
         Family::V770,
     ];
 
     pub fn name(self) -> &'static str {
         match self {
-            #[cfg(feature = "v47")]
-            Family::V47 => "v47",
-            #[cfg(feature = "v340")]
-            Family::V340 => "v340",
-            #[cfg(feature = "v735")]
-            Family::V735 => "v735",
-            #[cfg(feature = "v770")]
-            Family::V770 => "v770",
+            #[cfg(feature = "v1-8")]
+            Family::V47 => "v1-8",
+            #[cfg(feature = "v1-9")]
+            Family::V340 => "v1-9",
+            #[cfg(feature = "v1-14")]
+            Family::V735 => "v1-14",
+            #[cfg(feature = "v26-2")]
+            Family::V770 => "v26-2",
         }
     }
 
@@ -125,14 +125,14 @@ impl Family {
     /// would let one case's state bleed into the next.
     pub fn adapter(self) -> Box<dyn VersionAdapter> {
         match self {
-            #[cfg(feature = "v47")]
-            Family::V47 => Box::new(lodestone_v47::V47Adapter::default()),
-            #[cfg(feature = "v340")]
-            Family::V340 => Box::new(lodestone_v340::V340Adapter::default()),
-            #[cfg(feature = "v735")]
-            Family::V735 => Box::new(lodestone_v735::V735Adapter::default()),
-            #[cfg(feature = "v770")]
-            Family::V770 => Box::new(lodestone_v770::V770Adapter::default()),
+            #[cfg(feature = "v1-8")]
+            Family::V47 => Box::new(lodestone_v1_8::V47Adapter::default()),
+            #[cfg(feature = "v1-9")]
+            Family::V340 => Box::new(lodestone_v1_9::V340Adapter::default()),
+            #[cfg(feature = "v1-14")]
+            Family::V735 => Box::new(lodestone_v1_14::V735Adapter::default()),
+            #[cfg(feature = "v26-2")]
+            Family::V770 => Box::new(lodestone_v26_2::V770Adapter::default()),
         }
     }
 
@@ -154,14 +154,14 @@ impl Family {
             };
         }
         match self {
-            #[cfg(feature = "v47")]
-            Family::V47 => table!(lodestone_v47),
-            #[cfg(feature = "v340")]
-            Family::V340 => table!(lodestone_v340),
-            #[cfg(feature = "v735")]
-            Family::V735 => table!(lodestone_v735),
-            #[cfg(feature = "v770")]
-            Family::V770 => table!(lodestone_v770),
+            #[cfg(feature = "v1-8")]
+            Family::V47 => table!(lodestone_v1_8),
+            #[cfg(feature = "v1-9")]
+            Family::V340 => table!(lodestone_v1_9),
+            #[cfg(feature = "v1-14")]
+            Family::V735 => table!(lodestone_v1_14),
+            #[cfg(feature = "v26-2")]
+            Family::V770 => table!(lodestone_v26_2),
         }
     }
 
@@ -216,9 +216,9 @@ pub fn catch<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R, Str
 }
 
 /// Reads a `#`-commented hex-dump fixture in the same format
-/// `crates/protocol/v770/tests/world_state.rs` uses for its captured-bytes
+/// `crates/versions/26.2/tests/world_state.rs` uses for its captured-bytes
 /// oracles: one or more whitespace-separated hex byte tokens per line, lines
-/// starting with `#` ignored. Used to load `crates/protocol/v770/tests/fixtures/*.hex`
+/// starting with `#` ignored. Used to load `crates/versions/26.2/tests/fixtures/*.hex`
 /// — real vanilla-server bytes, not anything our own encoder produced — as
 /// fuzz-corpus seeds. See `docs/fuzz-harness.md` for which corpus entries
 /// come from here versus from our own encoders.
@@ -232,17 +232,17 @@ pub fn read_hex_fixture(path: &std::path::Path) -> Vec<u8> {
         .collect()
 }
 
-/// Absolute path to `crates/protocol/v770/tests/fixtures/<name>`, resolved
+/// Absolute path to `crates/versions/26.2/tests/fixtures/<name>`, resolved
 /// from this crate's own manifest dir so it does not depend on the caller's
 /// working directory (`cargo test` from a subdirectory, an IDE runner, …).
-pub fn v770_fixture_path(name: &str) -> std::path::PathBuf {
+pub fn v26_2_fixture_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../protocol/v770/tests/fixtures")
+        .join("../versions/26.2/tests/fixtures")
         .join(name)
 }
 
 /// Absolute path to this crate's own `tests/fixtures/<name>`, resolved the same
-/// manifest-dir way as [`v770_fixture_path`].
+/// manifest-dir way as [`v26_2_fixture_path`].
 ///
 /// These are *regression* inputs rather than corpus seeds: bytes a fuzz target
 /// actually found a defect with, committed so the gate for that defect is

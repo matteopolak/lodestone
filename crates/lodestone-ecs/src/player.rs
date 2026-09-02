@@ -709,7 +709,7 @@ pub struct LastSprintingSent(pub Option<bool>);
 ///
 /// `ClientAction::SetFlying` was itself an island before this component landed
 /// — encoded by four
-/// protocol adapters (`v47`, `v340`, `v735`, `v770`) with **zero** producers
+/// protocol adapters (`v1-8`, `v1-9`, `v1-14`, `v26-2`) with **zero** producers
 /// anywhere outside their own tests. This component and
 /// `lodestone_shell::interact::send_abilities` are its first consumer.
 ///

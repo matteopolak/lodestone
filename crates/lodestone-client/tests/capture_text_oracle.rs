@@ -276,13 +276,13 @@ async fn capture_real_chat_components() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(25565);
 
-    let v47 = lodestone_registry::adapter_for_protocol(47).expect("v47 in registry");
-    let v770 = lodestone_registry::adapter_for_protocol(776).expect("v770 in registry");
+    let v1_8 = lodestone_registry::adapter_for_protocol(47).expect("v1_8 in registry");
+    let v26_2 = lodestone_registry::adapter_for_protocol(776).expect("v26_2 in registry");
 
     let json = capture_join_broadcast(
         &json_host,
         json_port,
-        v47.as_ref(),
+        v1_8.as_ref(),
         &unique_username(),
         &unique_username(),
     )
@@ -290,7 +290,7 @@ async fn capture_real_chat_components() {
     let nbt = capture_join_broadcast(
         &nbt_host,
         nbt_port,
-        v770.as_ref(),
+        v26_2.as_ref(),
         &unique_username(),
         &unique_username(),
     )
@@ -336,13 +336,13 @@ async fn live_join_messages_flatten_equally() {
         .and_then(|value| value.parse().ok())
         .unwrap_or(25565);
 
-    let v47 = lodestone_registry::adapter_for_protocol(47).expect("v47 in registry");
-    let v770 = lodestone_registry::adapter_for_protocol(776).expect("v770 in registry");
+    let v1_8 = lodestone_registry::adapter_for_protocol(47).expect("v1_8 in registry");
+    let v26_2 = lodestone_registry::adapter_for_protocol(776).expect("v26_2 in registry");
 
     let (_, json_text) = capture_join_broadcast(
         &json_host,
         json_port,
-        v47.as_ref(),
+        v1_8.as_ref(),
         &unique_username(),
         &unique_username(),
     )
@@ -350,7 +350,7 @@ async fn live_join_messages_flatten_equally() {
     let (_, nbt_text) = capture_join_broadcast(
         &nbt_host,
         nbt_port,
-        v770.as_ref(),
+        v26_2.as_ref(),
         &unique_username(),
         &unique_username(),
     )

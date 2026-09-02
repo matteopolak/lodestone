@@ -83,7 +83,7 @@ not inherit the old picture.
   (`worldgen_data::nether_generator`, consumed by `chunk.rs`'s Nether column adoption), and
   `crates/lodestone-server/src/dimension.rs` plus `portal.rs` (1585 lines) implement multi-dimension
   chunk sources, 8:1 coordinate scaling, and portal travel — commit `dc98cb9a`. `encode_respawn` now
-  exists server-side (`crates/lodestone-server/src/protocol.rs`, `crates/protocol/v770/src/server_protocol.rs`),
+  exists server-side (`crates/lodestone-server/src/protocol.rs`, `crates/versions/26.2/src/server_protocol.rs`),
   so that blocker is also gone. **What is still an island:** `lodestone-worldgen` has a real `end/`
   module (`EndBiomeSource`, `EndGenerator`) but `dimension.rs`'s own doc comment says adding the End is
   still future work — `grep -rn "worldgen::end" crates/lodestone-server/src` has zero production hits.
@@ -372,7 +372,7 @@ pathspec commits.
 
 - **Files:** new `crates/lodestone-server/src/weather.rs` (state machine, pure, seeded-RNG
   constructor); `lib.rs` `mod weather;`; `tick.rs` (tick it before sleep; publish transitions
-  into a `WeatherFeed` mirroring `BlockTickFeed`); `protocol.rs` + `v770/server_protocol.rs`
+  into a `WeatherFeed` mirroring `BlockTickFeed`); `protocol.rs` + `v26-2/server_protocol.rs`
   (new trait method `encode_game_event(kind: u8, value: f32)`); `server.rs` sync arm forwards
   drained transitions.
 - **Mechanics:** exactly the vanilla weather cycle described above — the four bounded-random
@@ -413,7 +413,7 @@ pathspec commits.
 ### B1 — world border state + wire (server half)
 
 - **Files:** new `crates/lodestone-server/src/border.rs`; `lib.rs` `mod border;`; `tick.rs`
-  (tick first, per the vanilla per-tick order above); `protocol.rs` + `v770/server_protocol.rs`:
+  (tick first, per the vanilla per-tick order above); `protocol.rs` + `v26-2/server_protocol.rs`:
   encoders for `INITIALIZE_BORDER` (sent in `begin_play`'s join sequence, mirroring vanilla's
   join-info sequence) and the five `SET_BORDER_*` deltas; `server.rs` forwards a `BorderFeed`.
 - **State/defaults:** the resource row in the table above with 26.2 defaults — size
@@ -488,9 +488,9 @@ pathspec commits.
 - **Files:** new `crates/lodestone-server/src/world_spawn.rs` (the vanilla spiral search: 121
   iterations, ±5-chunk box, heightmap-based); `lib.rs`
   `mod world_spawn;`; **`protocol.rs` `begin_play` signature grows a spawn-position parameter**
-  (choke: the trait change touches all `ServerProtocol` impls — exactly one exists, `v770`) —
+  (choke: the trait change touches all `ServerProtocol` impls — exactly one exists, `v26-2`) —
   deleting the `(8,100,8)` literal in `V770ServerProtocol::begin_play`
-  (`crates/protocol/v770/src/server_protocol.rs`); `server.rs` threads the chosen spawn through;
+  (`crates/versions/26.2/src/server_protocol.rs`); `server.rs` threads the chosen spawn through;
   new `SET_DEFAULT_SPAWN_POSITION` encoder in the join sequence.
 - **Client half (same-commit pairing):** `SpawnPositionChanged` currently routes NOWHERE. Route
   → SHELL, fold into the session cell the death/respawn screen will read; the concrete consumer

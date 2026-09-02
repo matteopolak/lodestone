@@ -6,7 +6,7 @@
 //!
 //! A pure fold over the world-border packet family. Before this module all six
 //! variants decoded correctly, were covered by
-//! `crates/protocol/v770/tests/world_border.rs`, and then reached **nothing** —
+//! `crates/versions/26.2/tests/world_border.rs`, and then reached **nothing** —
 //! `lodestone_model::event::route` returned `Route::NOWHERE` for every one of
 //! them. They were the largest single cluster in `docs/event-routing.md`'s island
 //! list, and `docs/plans/world-state.md` §B2 is the consumer side.

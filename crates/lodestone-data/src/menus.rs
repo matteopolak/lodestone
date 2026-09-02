@@ -3,7 +3,7 @@
 //! `open_screen` carries the menu as a `minecraft:menu` registry id (a VarInt).
 //! The id→name mapping is generated from Mojang's own `registries.json` for
 //! 26.2, the one canonical internal version, so it lives here in this
-//! data crate rather than in `lodestone-v770` — it is a
+//! data crate rather than in `lodestone-v26-2` — it is a
 //! game-data census, not wire-format code.
 
 pub use crate::generated_menus::MENU_COUNT;

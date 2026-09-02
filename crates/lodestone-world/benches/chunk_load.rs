@@ -1,7 +1,7 @@
 //! Chunk-insertion throughput for the real per-chunk multiplayer consumer
 //! (the client-side chunk-loading half of this crate's per-chunk throughput
 //! benchmarks): [`World::load`], the
-//! exact call `protocol/v770/src/adapter.rs`'s `LEVEL_CHUNK_WITH_LIGHT` handler
+//! exact call `protocol/v26-2/src/adapter.rs`'s `LEVEL_CHUNK_WITH_LIGHT` handler
 //! makes once a packet is fully decoded —
 //! `world.load(pos, LoadedChunk::new(chunk.column, chunk.light,
 //! chunk.heightmaps, chunk.block_entities))`, moving every part with no clone.
@@ -19,7 +19,7 @@
 //! `light_propagation` bench in this same crate. Heightmap *decode* (the wire
 //! parse, as opposed to this bench's plain struct move) is `heightmap_decode`,
 //! also in this directory: `Heightmaps::decode` is called directly by
-//! `protocol/v770/src/packets/chunk.rs`'s `decode_heightmaps`, upstream of the
+//! `protocol/v26-2/src/packets/chunk.rs`'s `decode_heightmaps`, upstream of the
 //! `World::load` this bench measures.
 //!
 //! # What would make this measurement a lie
@@ -44,7 +44,7 @@
 //! it), so there is no "vacuous scene" failure mode to guard against here in
 //! the way `light_propagation.rs` must. The realistic terrain/light/heightmap
 //! shapes below are used anyway, for the same reason `chunk_light_decode`
-//! gives in `lodestone-v770`: an honest fixture is worth having even where
+//! gives in `lodestone-v26-2`: an honest fixture is worth having even where
 //! content-invariance means it is not load-bearing for correctness of the
 //! measurement.
 //!
@@ -100,7 +100,7 @@ fn realistic_terrain_column() -> ChunkColumn {
 /// A lit, terrain-following light column: full sky above the surface, none
 /// below, with the boundary sections carrying real per-cell arrays rather than
 /// uniform tags — the shape a resident, lit chunk actually carries on the
-/// wire, matching `lodestone-v770`'s `chunk_light_decode` fixture for the same
+/// wire, matching `lodestone-v26-2`'s `chunk_light_decode` fixture for the same
 /// reason (a uniform-only column would make container access nearly free).
 fn realistic_light() -> ColumnLight {
     let mut light = ColumnLight::new(SECTIONS);

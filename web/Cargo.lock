@@ -2369,6 +2369,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.0",
  "keyring",
+ "lodestone-time",
  "num-bigint",
  "rand 0.8.7",
  "reqwest",
@@ -2382,6 +2383,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "web-sys",
 ]
 
 [[package]]
@@ -2550,7 +2552,7 @@ dependencies = [
  "lodestone-model",
  "lodestone-physics",
  "lodestone-server",
- "lodestone-v770",
+ "lodestone-v26-2",
 ]
 
 [[package]]
@@ -2692,7 +2694,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lodestone-v770"
+name = "lodestone-v26-2"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",

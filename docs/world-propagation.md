@@ -140,7 +140,7 @@ Bubble columns have no configuration — the four constants are fixed vanilla li
 - `lodestone-physics`/`lodestone-model` — the bubble-column collision seam
   (`CollisionView::bubble_column`, `VersionAdapter::block_bubble_column_drag`).
 - `lodestone-worldgen`'s `nether` module — the Nether/End terrain generators portals travel into.
-- `lodestone-v770`'s `server_protocol` — the wire encoding for dimension changes; the mapping from a
+- `lodestone-v26-2`'s `server_protocol` — the wire encoding for dimension changes; the mapping from a
   dimension to its registry holder id is a property of the protocol family, not of `dimension`/`portal`
   themselves.
 

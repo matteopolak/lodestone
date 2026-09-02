@@ -33,7 +33,7 @@
 //! `crates/lodestone-server/src/server.rs`'s own test module is the
 //! end-to-end proof, not this crate: it depends on this crate as a
 //! **dev-dependency** (a safe cycle — see that `Cargo.toml`'s existing
-//! `lodestone-v770` dev-dependency comment for the identical reasoning) and
+//! `lodestone-v26-2` dev-dependency comment for the identical reasoning) and
 //! drives the *real* `apply_container_clicked`/`apply_workstation_clicked`/
 //! `apply_container_button_click` production dispatch functions with these
 //! exact hooks registered, because this crate cannot reach those

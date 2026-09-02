@@ -2,7 +2,7 @@
 //! these three crates cover (47, 340, 754) -- these carry raw `f64`/`f32`
 //! coordinates directly, unlike `BlockDig`/`SpawnPosition`, so there is no
 //! embedded [`Position`](super::position::Position) to inherit a narrower
-//! range from. Measured against v735's own definitions field for field; no
+//! range from. Measured against v1-14's own definitions field for field; no
 //! `#[mc(protocols = ...)]` is declared.
 
 use lodestone_macros::{Decode, Encode, Packet};

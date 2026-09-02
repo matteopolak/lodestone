@@ -25,7 +25,7 @@
 //!
 //! The boundaries are the ones production already crosses, read from the
 //! `LEVEL_CHUNK_WITH_LIGHT` arm of `handle_play_chunk`
-//! (`crates/protocol/v770/src/adapter/chunk.rs`) rather than invented here:
+//! (`crates/versions/26.2/src/adapter/chunk.rs`) rather than invented here:
 //!
 //! | stage | the exact production call |
 //! |---|---|
@@ -46,7 +46,7 @@
 //!
 //! Nothing here imports a version crate. `handle_packet` is reached through
 //! `lodestone_registry::adapter_for_protocol`, the same seam `net.rs` uses, so
-//! this file cannot become the hardcoded-`v770` dependency in shell code that
+//! this file cannot become the hardcoded-`v26-2` dependency in shell code that
 //! `just check-seam` exists to prevent — and the packet id comes out of
 //! `ServerDirective::Send` rather than being restated.
 //!

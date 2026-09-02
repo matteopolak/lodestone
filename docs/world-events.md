@@ -240,7 +240,7 @@ wither-effect duration (currently always Normal).
 
 * Weather: `lodestone-render`'s `crate::fog`/`crate::light`/`crate::Camera`,
   `lodestone-assets`; `lodestone-shell`'s `crate::net`/`crate::resources`; protocol
-  `GAME_EVENT`/`ADD_ENTITY` on v770.
+  `GAME_EVENT`/`ADD_ENTITY` on v26-2.
 * Lightning: `crate::chunk::ChunkSource`, `crate::mob_spawn::SpawnRng`,
   `crate::regional_difficulty::DifficultyInstance` (the trap-chance roll),
   `crate::fire`, `crate::weather`.
@@ -252,7 +252,7 @@ wither-effect duration (currently always Normal).
   [`docs/villagers.md`](./villagers.md) for the goal/roster and villager-POI sides.
 * Dragon fight: `lodestone_model::BlockPos` only — no dependency on
   `lodestone-entity`'s goal/pathfinder stack, `lodestone-world`, or any
-  `crates/protocol/*` crate, which keeps the module testable in isolation.
+  `crates/versions/*` crate, which keeps the module testable in isolation.
 * Wither fight: `lodestone_model::{BlockPos, Vec3, Difficulty}`,
   `lodestone_entity::projectile::Projectile`/`DamageFlags`,
   `ai::mob::ProjectileKind::WitherSkull` (shared projectile plumbing). See

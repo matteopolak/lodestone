@@ -1,22 +1,22 @@
 //! Live acceptance test against a real vanilla server (Phase 1 gate).
 //!
-//! This test is gated behind the `live-v770` feature AND `#[ignore]`, so the
+//! This test is gated behind the `live-v26-2` feature AND `#[ignore]`, so the
 //! default `cargo test` stays hermetic and version-free. Run it against a real
 //! server (offline mode, flat world) on `127.0.0.1:25565` with:
 //!
 //! ```text
-//! cargo test -p lodestone-client --features live-v770 -- --ignored
+//! cargo test -p lodestone-client --features live-v26-2 -- --ignored
 //! ```
 //!
 //! It exercises the full public API and the real join flow: connect over TCP,
 //! complete handshake -> login -> configuration -> play, and confirm the client
 //! reaches Play (a `Login` event) and receives a keep-alive.
 //!
-//! Version selection goes through `lodestone-registry`: enabling the `live-v770`
-//! feature turns on the registry's `v770` family, and this test asks the
+//! Version selection goes through `lodestone-registry`: enabling the `live-v26-2`
+//! feature turns on the registry's `v26-2` family, and this test asks the
 //! registry for the adapter by protocol number. `lodestone-client` never names a
 //! concrete version crate.
-#![cfg(feature = "live-v770")]
+#![cfg(feature = "live-v26-2")]
 
 use std::time::Duration;
 
@@ -41,10 +41,10 @@ async fn joins_real_server_and_receives_keep_alive() {
         uuid: Uuid::new_v4(),
     };
 
-    // Version selection via the registry: the `live-v770` feature enables the
-    // registry's v770 family, which this resolves by protocol number.
+    // Version selection via the registry: the `live-v26-2` feature enables the
+    // registry's v26-2 family, which this resolves by protocol number.
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via the live-v770 feature");
+        .expect("v26-2 family compiled into the registry via the live-v26-2 feature");
 
     let (handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()
@@ -84,7 +84,7 @@ async fn joins_real_server_and_receives_keep_alive() {
 ///
 /// This is the island check. Everything between the wire and here can be
 /// individually correct and still deliver nothing: the decode
-/// (`lodestone_v770::packets::registry`), the event
+/// (`lodestone_v26_2::packets::registry`), the event
 /// (`ClientEvent::DimensionTypeChanged`), the component
 /// (`lodestone_ecs::session::ServerDimensionType`), the fold
 /// (`apply_local_player_state`) — and the chain still reaches zero pixels unless
@@ -108,7 +108,7 @@ async fn the_servers_dimension_type_registry_reaches_the_read_model() {
         uuid: Uuid::new_v4(),
     };
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via the live-v770 feature");
+        .expect("v26-2 family compiled into the registry via the live-v26-2 feature");
 
     let (handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()

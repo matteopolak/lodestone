@@ -12,7 +12,7 @@
 //! pipeline, mesh bake, texture load and camera. It installs its own
 //! `EntityDraw`, so it says nothing about the producer — that the wire's
 //! painting-variant metadata really lands in that field is
-//! `crates/protocol/v770`'s question, and no assertion here can see it.
+//! `crates/versions/26.2`'s question, and no assertion here can see it.
 //!
 //! # Two assertions, because one of them is not enough
 //!

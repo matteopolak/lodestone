@@ -39,7 +39,7 @@
 // `unsafe_code = "deny"` (`Cargo.toml`'s `[workspace.lints.rust]`) — now one
 // of two, alongside `container_set_content_unbounded_allocation.rs` (a
 // second, independent instance of this exact defect shape, found by
-// `fuzz/fuzz_targets/v770_clientbound_decode.rs`). Both are scoped as
+// `fuzz/fuzz_targets/v26_2_clientbound_decode.rs`). Both are scoped as
 // narrowly as that lint allows:
 // `#![allow]` is a crate-root attribute, and cargo compiles every
 // `tests/*.rs` file as its own separate binary/crate, so this cannot leak
@@ -53,13 +53,13 @@
 // pure pass-throughs to `System` plus an atomic counter — no allocation
 // logic of their own to get wrong.
 #![allow(unsafe_code)]
-// This file drives `lodestone_v770` directly, so it exists only in a build that
+// This file drives `lodestone_v26_2` directly, so it exists only in a build that
 // compiles that family in. On by default; see the crate manifest's `[features]`.
-#![cfg(feature = "v770")]
+#![cfg(feature = "v26-2")]
 
 use lodestone_core::{Ctx, Decode, Reader, Writer};
-use lodestone_v770::packets::game::GameLogin;
-use lodestone_v770::packets::registry::RegistryData;
+use lodestone_v26_2::packets::game::GameLogin;
+use lodestone_v26_2::packets::registry::RegistryData;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -342,7 +342,7 @@ fn well_formed_small_payload_does_not_trigger_a_large_allocation() {
 /// packet that would start failing to decode or would leave trailing bytes.
 #[test]
 fn real_registry_data_fixture_still_decodes_cleanly_after_the_fix() {
-    let path = lodestone_fuzz::v770_fixture_path("registry_data_dimension_type.hex");
+    let path = lodestone_fuzz::v26_2_fixture_path("registry_data_dimension_type.hex");
     let bytes = lodestone_fuzz::read_hex_fixture(&path);
     let mut reader = Reader::new(&bytes);
 

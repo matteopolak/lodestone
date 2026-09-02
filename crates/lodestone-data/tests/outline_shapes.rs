@@ -62,7 +62,7 @@
 //!
 //! ```text
 //! CACHE="$(cd .cache/mc/26.2 && pwd)"
-//! HERE="$(cd crates/protocol/v770/oracle-java && pwd)"
+//! HERE="$(cd crates/versions/26.2/oracle-java && pwd)"
 //! docker run --rm -v "$CACHE":/mc:ro -v "$HERE":/oracle:ro -w /work eclipse-temurin:25-jdk bash -c '
 //!   CP="/mc/versions/26.2/server-26.2.jar:$(find /mc/libraries -name "*.jar" | tr "\n" ":")"
 //!   cp /oracle/OutlineShapeOracle.java /work/ && javac -cp "$CP" -d /work /work/OutlineShapeOracle.java

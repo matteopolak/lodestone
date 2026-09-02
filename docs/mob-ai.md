@@ -277,7 +277,7 @@ start (`1`) is unchanged for hermetic tests.
 - `lodestone_server::mobs` — `MobSim`/`SimMob`, the only production consumer:
   spawns species, feeds perception, resolves attacks/launches/anger/
   ownership, ticks the registries, and owns the live-wiring loop.
-- `crates/protocol/v770` — the entity encoders, and the entity-type registry
+- `crates/versions/26.2` — the entity encoders, and the entity-type registry
   ranged attacks validate projectile kinds against.
 - `.cache/mc/26.2/` — the pinned decompile and authority for every
   priority, speed multiplier, range and timing cited here.

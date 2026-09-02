@@ -17,7 +17,7 @@
 //! camera. It installs its own `EntityDraw`, so it says nothing about the
 //! producer — whether the wire's equipment packet actually lands
 //! `(EquipmentSlot::Chest, minecraft:elytra)` in that field is
-//! `crates/protocol/v770`'s question and no assertion here can see it.
+//! `crates/versions/26.2`'s question and no assertion here can see it.
 //!
 //! # The metric, and where the expected figure comes from
 //!

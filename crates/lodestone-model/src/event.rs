@@ -168,7 +168,7 @@ pub struct ChatAckInfo {
 ///
 /// The wire form is either a full 256-byte signature (for a signature the
 /// client has not cached yet) or an index into the last-seen signature
-/// cache. The v770 adapter resolves `Cached` references against its
+/// cache. The v26-2 adapter resolves `Cached` references against its
 /// per-connection signature cache before emitting — dropping the event on a
 /// miss — so a `ChatMessageDeleted` normally carries a `Full` signature; the
 /// `Cached` variant remains for adapters that pass the wire form through
@@ -1256,7 +1256,7 @@ pub struct PlayerListEntry {
     /// Profile properties from `ADD_PLAYER`, when the update carried it.
     ///
     /// **This is where a remote player's skin comes from**, and it was decoded and
-    /// thrown away until now: `v770`'s `read_add_player` consumed all three fields
+    /// thrown away until now: `v26-2`'s `read_add_player` consumed all three fields
     /// of every property into `let _`, so `minecraft:textures` never left the
     /// version crate and no remote player could have a skin.
     /// `lodestone_game::tablist` had a comment asking for exactly this carrier.
@@ -1275,7 +1275,7 @@ pub struct PlayerListEntry {
     /// key needed to verify a signed message from this player
     /// (`lodestone_auth::verify_signature`). It used to be decoded and
     /// discarded at the protocol-adapter layer with nowhere to put it —
-    /// `PlayerInfoEntry::chat_session` existed in `v770` but this canonical
+    /// `PlayerInfoEntry::chat_session` existed in `v26-2` but this canonical
     /// struct had no field to carry it into, so no consumer could ever look
     /// a sender's key up. See `docs/secure-chat.md`.
     pub chat_session: Option<ChatSessionInfo>,
@@ -1296,7 +1296,7 @@ pub struct PlayerListEntry {
 /// `key_signature` (Mojang's own signature over `public_key`) is
 /// deliberately not carried this far — nothing downstream re-verifies it
 /// against Mojang's key; only the *server* does, per
-/// `crates/protocol/v770/src/packets/player_info.rs`'s
+/// `crates/versions/26.2/src/packets/player_info.rs`'s
 /// `RemoteChatSessionData` doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatSessionInfo {
@@ -1690,7 +1690,7 @@ pub enum BossAction {
 /// fields read immediately after the registry id (`DustParticleOptions`,
 /// `BlockParticleOption`, `ItemParticleOption`, …). Adding a variant here
 /// does not by itself decode anything — the adapter's `LEVEL_PARTICLES` arm
-/// (`crates/protocol/v770/src/adapter/chunk.rs`) is what parses a payload out
+/// (`crates/versions/26.2/src/adapter/chunk.rs`) is what parses a payload out
 /// of the wire bytes based on the resolved particle name, and only for the
 /// names it recognises; every other name still resolves to [`Self::None`],
 /// same as before this type existed.
@@ -2122,7 +2122,7 @@ pub enum ClientEvent {
     /// An explosion occurred.
     ///
     /// One variant carrying two different wire shapes, deliberately: every
-    /// client protocol family from v47 (1.8.9) through v735 (1.16.5) sends
+    /// client protocol family from v1-8 (1.8.9) through v1-14 (1.16.5) sends
     /// `packet_explosion`'s own list of removed-block offsets on this same
     /// packet, while 26.2's explosion packet dropped that list in
     /// favour of a bare block **count** used only to scale cosmetic particle
@@ -2139,10 +2139,10 @@ pub enum ClientEvent {
         /// Blocks the explosion removed, as integer offsets from `pos`
         /// (`pos.floor() + offset` is the removed block's position) —
         /// `packet_explosion`'s own `affected_block_offsets` on every
-        /// pre-26.2 family (v47/v340/v735), each of which puts the list
+        /// pre-26.2 family (v1-8/v1-9/v1-14), each of which puts the list
         /// directly on this packet.
         ///
-        /// **Always empty on a 26.2 (`v770`) connection.**
+        /// **Always empty on a 26.2 (`v26-2`) connection.**
         /// The explosion packet on that version carries only a block count
         /// there —
         /// no positions at all — because the real removals now arrive as
@@ -2896,7 +2896,7 @@ pub enum ClientEvent {
         /// two sources is how a field ends up populated on one path and
         /// defaulted on another.
         ///
-        /// `false` when the sending family has no such field (only `v770`
+        /// `false` when the sending family has no such field (only `v26-2`
         /// emits this event today), which is also the non-flat answer, so a
         /// legacy session behaves exactly as it did.
         is_flat: bool,
@@ -2984,7 +2984,7 @@ pub enum ClientEvent {
     /// real vanilla server (or one with a data pack that reorders, adds, or
     /// removes a biome) sends its **own** registry order, and nothing told
     /// the mesher what that order was: `ClientRegistries::entry_names` (the
-    /// v770 adapter's already-correct decode of it) never left the version
+    /// v26-2 adapter's already-correct decode of it) never left the version
     /// crate. Joining a third-party server could therefore paint the wrong
     /// grass/foliage/water colour with no error anywhere — the id was valid,
     /// just resolved through the wrong table.

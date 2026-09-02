@@ -8,13 +8,13 @@
 //! though the wire shape is identical). No `#[mc(protocols = ...)]` is
 //! declared; it keeps the derive's default `ProtocolRange::ALL`.
 //!
-//! [`PlayerAbilities`] is shared only between v47 and v340 (declared
+//! [`PlayerAbilities`] is shared only between v1-8 and v1-9 (declared
 //! `#[mc(protocols = "47..=340")]`): both carry two trailing `f32` speed
-//! fields the vanilla server ignores serverbound; 1.16 (v735) dropped them
+//! fields the vanilla server ignores serverbound; 1.16 (v1-14) dropped them
 //! to a single flags byte.
 //!
-//! [`Settings`] and [`ResourcePackReceive`] are shared only between v340 and
-//! v735 (declared `#[mc(protocols = "340..=754")]`): 1.8's `Settings`
+//! [`Settings`] and [`ResourcePackReceive`] are shared only between v1-9 and
+//! v1-14 (declared `#[mc(protocols = "340..=754")]`): 1.8's `Settings`
 //! (called `Settings` there too, but a different shape) has no `main_hand`
 //! and a signed-byte `chat_flags` rather than a varint, and its
 //! `resource_pack_receive` carries a leading pack-hash string this era's
@@ -24,7 +24,7 @@
 //! declaring `#[mc(name = "minecraft:settings", ...)]`) is identical across
 //! all three families too, but is dead code in all of them -- every
 //! family's adapter actually encodes the `Settings` type from this module
-//! (or its own local one, for v47) for the real `minecraft:settings` wire
+//! (or its own local one, for v1-8) for the real `minecraft:settings` wire
 //! packet, and nothing reads `packets::game::ClientSettings` in production
 //! or tests. It is intentionally left unmoved and unwired; see the
 //! project's dead-code-removal backlog rather than treating its continued
@@ -35,8 +35,8 @@ use lodestone_macros::{Decode, Encode, Packet};
 /// Serverbound `custom_payload` carrying the client brand.
 ///
 /// Wire layout: string channel, string brand. The channel is the legacy
-/// pipe-namespaced `MC|Brand` pre-1.13 (v47, v340) and `minecraft:brand`
-/// from 1.13 onward (v735) -- a runtime value, not a wire-shape difference,
+/// pipe-namespaced `MC|Brand` pre-1.13 (v1-8, v1-9) and `minecraft:brand`
+/// from 1.13 onward (v1-14) -- a runtime value, not a wire-shape difference,
 /// so the struct itself is shared.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:custom_payload", state = Play, bound = Server)]

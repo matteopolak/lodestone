@@ -2,7 +2,7 @@
 //!
 //! ## Why this gate exists and why it lives here
 //!
-//! `crates/protocol/v770/tests/command_tree.rs` proves the bytes decode. That is
+//! `crates/versions/26.2/tests/command_tree.rs` proves the bytes decode. That is
 //! not the same claim as "tab completion works": a tree can decode perfectly,
 //! every wire link green, and still yield zero suggestions — the
 //! connected-wire-carrying-a-wrong-value failure `cargo xtask connectedness`
@@ -15,7 +15,7 @@
 //! ends: `lodestone_registry::adapter_for_protocol` (the same call the live
 //! client makes — driving the registry rather than naming `V770Adapter`) and
 //! `lodestone::chat::complete`, the completion walker. The fixture is read from
-//! `crates/protocol/v770/tests/fixtures/`, where the capture gate that authored
+//! `crates/versions/26.2/tests/fixtures/`, where the capture gate that authored
 //! it lives; a second copy would be a second thing to keep in sync.
 //!
 //! ## Where the expected values come from
@@ -53,11 +53,11 @@ const COMMANDS: i32 = 16;
 /// client uses.
 fn real_server_tree() -> CommandTree {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../protocol/v770/tests/fixtures/command_tree_creative.hex");
+        .join("../versions/26.2/tests/fixtures/command_tree_creative.hex");
     let text = std::fs::read_to_string(&path).unwrap_or_else(|err| {
         panic!(
             "read {}: {err} — this fixture is captured by \
-             `cargo test -p lodestone-v770 --features live-commands --test live_command_tree \
+             `cargo test -p lodestone-v26-2 --features live-commands --test live_command_tree \
              -- --ignored` against ./scripts/live-oracles/creative.sh",
             path.display()
         )
@@ -195,7 +195,7 @@ fn completing_an_empty_command_offers_the_servers_own_command_set() {
 
 // --- Unknown-parser tolerance, at the completion level -------------------
 //
-// `crates/protocol/v770/tests/command_tree.rs` asserts an unmodeled parser id
+// `crates/versions/26.2/tests/command_tree.rs` asserts an unmodeled parser id
 // decodes to an `Unrecognized` node instead of failing the packet. That is only
 // half the property: tolerance is worth having because the *rest of the tree
 // stays usable for completion*, which is a claim about `complete()`, not about

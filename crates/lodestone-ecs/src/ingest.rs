@@ -654,8 +654,8 @@ pub fn apply_entity_animation(
 /// # This was a total island
 ///
 /// `SET_PASSENGERS` decoded correctly in
-/// `lodestone_v770::adapter::V770Adapter::handle_play_entity` and was round-tripped by
-/// `crates/protocol/v770/tests/entity_events.rs`, and a tree-wide grep for
+/// `lodestone_v26_2::adapter::V770Adapter::handle_play_entity` and was round-tripped by
+/// `crates/versions/26.2/tests/entity_events.rs`, and a tree-wide grep for
 /// `EntityPassengersChanged` found **four** hits: the decode, its two tests, and
 /// the `ClientEvent` variant itself. Zero consumers, and — the usual
 /// factory — no arm in [`handles_event`], so `SharedState::apply` never routed
@@ -1085,7 +1085,7 @@ pub fn apply_entity_metadata(
 /// module, so it relies on the same `.chain()` sync point that lets a metadata
 /// packet in the *same* batch as the entity's own `AddEntity` still resolve.
 ///
-/// Before this system existed, `lodestone_v770`'s decoder already produced
+/// Before this system existed, `lodestone_v26_2`'s decoder already produced
 /// every one of these fields — [`crate`]'s own `EntityMetadataUpdated` event
 /// carried them end to end — and nothing here read them: a decoded field with
 /// no component, the metadata-shaped island this repo's evidence standards
@@ -2888,7 +2888,7 @@ mod tests {
     ///
     /// Live player report: *"stuff dying doesnt have the death animation (the one
     /// where they turn red and tilt on their side)"*. `EntityStatus` was decoded,
-    /// round-tripped by the `v770` tests, and routed **nowhere** — sitting in
+    /// round-tripped by the `v26-2` tests, and routed **nowhere** — sitting in
     /// `event.rs`'s "claimed by nothing" list — so no byte it carried reached any
     /// system. This is the island the routing assertions below exist to catch.
     ///
@@ -3643,8 +3643,8 @@ mod tests {
             action: AnimationAction::SwingMainHand,
         }));
         // `EntityPassengersChanged` was the fifth instance of the
-        // identical island: decoded at `v770`'s `SET_PASSENGERS`, round-tripped by
-        // `crates/protocol/v770/tests/entity_events.rs`, and a tree-wide grep for
+        // identical island: decoded at `v26-2`'s `SET_PASSENGERS`, round-tripped by
+        // `crates/versions/26.2/tests/entity_events.rs`, and a tree-wide grep for
         // the variant returned exactly **four** hits — the decode, those two tests,
         // and the `ClientEvent` declaration. No consumer anywhere and no arm here.
         assert!(handles_event(&ClientEvent::EntityPassengersChanged {

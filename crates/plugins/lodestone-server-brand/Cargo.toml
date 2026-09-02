@@ -34,7 +34,7 @@ bevy_app = { workspace = true }
 # rather than hand-building a `ClientEvent`, so the fixture proves the whole path
 # from wire bytes to plugin resource. Dev-only: the plugin itself is version-free
 # and must never link a protocol family.
-lodestone-v770 = { workspace = true }
+lodestone-v26-2 = { workspace = true }
 lodestone-model = { workspace = true }
 # `VersionAdapter::handle_packet` takes a `&mut lodestone_world::World`.
 lodestone-world = { workspace = true }

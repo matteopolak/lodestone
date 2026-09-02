@@ -3,7 +3,7 @@
 //! `update_attributes` carries each attribute as a network **registry id** (a
 //! varint), not its identifier. The id→name mapping is generated from Mojang's
 //! own `registries.json` for 26.2, the one canonical internal version,
-//! so it lives here in this data crate rather than in `lodestone-v770` —
+//! so it lives here in this data crate rather than in `lodestone-v26-2` —
 //! it is a game-data census, not wire-format code, so a version-free
 //! consumer can read it with no protocol dependency. The generated array is
 //! the single source of truth; this module is only the thin bounds-checked

@@ -49,8 +49,8 @@ use lodestone_ecs::app::App;
 use lodestone_ecs::{GameEvent, GameTick};
 use lodestone_model::{ClientEvent, ConnectionState, Directive, VersionAdapter};
 use lodestone_server_brand::{ReportedServerBrand, ServerBrandPlugin};
-use lodestone_v770::V770Adapter;
-use lodestone_v770::packet_ids::play;
+use lodestone_v26_2::V770Adapter;
+use lodestone_v26_2::packet_ids::play;
 use lodestone_world::World;
 
 /// The committed capture. See the file itself for provenance and layout.
@@ -78,7 +78,7 @@ fn hex_bytes(text: &str) -> Vec<u8> {
     out
 }
 
-/// Runs `body` through the real `v770` adapter as a clientbound
+/// Runs `body` through the real `v26-2` adapter as a clientbound
 /// `custom_payload` and returns the single event it emits.
 fn decode_custom_payload(body: &[u8]) -> ClientEvent {
     let adapter = V770Adapter::new();

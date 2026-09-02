@@ -13,18 +13,21 @@ detail is in [`docs/`](./docs/README.md). Open work is in
 
 ## Protocol families
 
-Four client protocol families exist, each a workspace member under `crates/protocol/` behind a
-`lodestone-registry` feature: `v47` (1.8.9), `v340` (1.12.2), `v735`, `v770` (protocol 776 / MC 26.2).
+Four client protocol families exist, each a workspace member under `crates/versions/` behind a
+`lodestone-registry` feature: `v1-8` (1.8.9), `v1-9` (1.12.2), `v1-14`, `v26-2` (protocol 776 / MC 26.2).
+Each folder is named for the *era-start* Minecraft version it covers (e.g. `crates/versions/1.8`), which
+is neither its package/feature suffix (`lodestone-v1-8`, feature `v1-8`) nor a protocol number — ask
+`VersionAdapter::supports`, never the folder or the feature name.
 
 - **No family is enabled by default** in `lodestone-registry`. The shell's default `live` feature turns
-  on `v770` and nothing else, so a legacy family is invisible to every command below unless you name
+  on `v26-2` and nothing else, so a legacy family is invisible to every command below unless you name
   its feature.
-- **Only `v770` implements `ServerProtocol`**, so 26.2 is the only version we can *host*. Joining and
+- **Only `v26-2` implements `ServerProtocol`**, so 26.2 is the only version we can *host*. Joining and
   hosting are different sets; `lodestone-registry` keeps `Family` and `ServerFamily` as two tables.
-- **`v735` speaks protocol 754** (1.16.5). The folder name is not the protocol number, unlike the other
-  three — ask `VersionAdapter::supports`, never the folder.
+- **`v1-14` speaks protocol 754** (1.16.5), same as every family: none of the four's folders, packages, or
+  features are their protocol number.
 
-New gameplay work targets `v770` unless an issue says otherwise.
+New gameplay work targets `v26-2` unless an issue says otherwise.
 
 ---
 

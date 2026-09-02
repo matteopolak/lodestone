@@ -13,7 +13,7 @@
 //! parser already sanitizes at open time (out-of-bounds locations zeroed) —
 //! exactly the kind of hand-rolled bounds arithmetic this workspace's own
 //! record shows is where a coordinate overflow or an off-by-one hides
-//! (`v340`'s `multi_block_change` chunk-coordinate multiply, per
+//! (`v1-9`'s `multi_block_change` chunk-coordinate multiply, per
 //! `docs/fuzz-harness.md`).
 //!
 //! This target does not stop at the header: after a successful parse it

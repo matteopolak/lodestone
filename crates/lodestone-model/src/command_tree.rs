@@ -63,7 +63,7 @@
 //!
 //! Depends only on [`crate::ids::Identifier`] (aliased [`crate::ids::ResourceKey`])
 //! for registry keys and suggestion-provider ids. No protocol or shell crate
-//! dependency in either direction — `crates/protocol/*` depends on this
+//! dependency in either direction — `crates/versions/*` depends on this
 //! crate, not the reverse.
 
 use std::collections::HashSet;
@@ -446,7 +446,7 @@ pub struct CommandSuggestionEntry {
     /// colour (`TextColor::Rgb`, added in 1.16) that no legacy code can
     /// represent — so a decode arm must not call
     /// [`Text::to_legacy_string`](crate::text::Text::to_legacy_string) on
-    /// this field. `v47`/`v340` predate the transaction-id/range/tooltip
+    /// this field. `v1-8`/`v1-9` predate the transaction-id/range/tooltip
     /// shape entirely (their `TAB_COMPLETE` is a bare `matches: string[]`),
     /// so they always construct `None` here regardless of this field's
     /// type; that is a real absence on the wire, not a flatten.

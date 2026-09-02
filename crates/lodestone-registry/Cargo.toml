@@ -44,15 +44,15 @@ lodestone-physics = { path = "../lodestone-physics" }
 # plus one line in `[features]`; deleting a family is deleting its folder and
 # removing those two lines. These are never required, so the default build is
 # version-free and every family stays independently deletable.
-lodestone-v47 = { workspace = true, optional = true }
-lodestone-v770 = { workspace = true, optional = true }
-lodestone-v340 = { workspace = true, optional = true }
-lodestone-v735 = { workspace = true, optional = true }
+lodestone-v1-8 = { workspace = true, optional = true }
+lodestone-v26-2 = { workspace = true, optional = true }
+lodestone-v1-9 = { workspace = true, optional = true }
+lodestone-v1-14 = { workspace = true, optional = true }
 
 [features]
 # One feature per version family. Enabling a feature compiles that family in and
 # registers its adapter. No family is enabled by default.
-v47 = ["dep:lodestone-v47"]
-v770 = ["dep:lodestone-v770"]
-v340 = ["dep:lodestone-v340"]
-v735 = ["dep:lodestone-v735"]
+v1-8 = ["dep:lodestone-v1-8"]
+v26-2 = ["dep:lodestone-v26-2"]
+v1-9 = ["dep:lodestone-v1-9"]
+v1-14 = ["dep:lodestone-v1-14"]

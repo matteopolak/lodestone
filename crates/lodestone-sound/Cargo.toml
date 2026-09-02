@@ -31,7 +31,7 @@ thiserror = { workspace = true }
 # Live-gate-only dependencies (a native integration test that drives real
 # packets from a running server). Optional so the *default* build and
 # `cargo test -p lodestone-sound` stay version-free (no protocol family pulled
-# in) and wasm-safe (no tokio-net / client stack). Enabled by `live-v770`,
+# in) and wasm-safe (no tokio-net / client stack). Enabled by `live-v26-2`,
 # mirroring `lodestone-client`'s proven pattern.
 lodestone-client = { workspace = true, optional = true }
 lodestone-registry = { workspace = true, optional = true }
@@ -48,15 +48,15 @@ serde_json = { workspace = true, optional = true }
 serde_json = { workspace = true }
 
 [features]
-# Turn on the v770 family inside the registry and pull the live-test stack. The
+# Turn on the v26-2 family inside the registry and pull the live-test stack. The
 # live gate is additionally `#[ignore]`d, so even with this feature the default
 # run stays hermetic; you opt in with `--ignored`.
-live-v770 = [
+live-v26-2 = [
     "dep:lodestone-client",
     "dep:lodestone-registry",
     "dep:lodestone-testsupport",
     "dep:tokio",
     "dep:uuid",
     "dep:serde_json",
-    "lodestone-registry/v770",
+    "lodestone-registry/v26-2",
 ]

@@ -580,7 +580,7 @@ pub struct ItemPrototype {
 ///
 /// That is a claim about *stability*, not about *correctness by construction*: the
 /// values here are anchored to a dump of the real 26.2 server
-/// (`crates/protocol/v770/tests/block_physics.rs` replays all 1,196 registered
+/// (`crates/versions/26.2/tests/block_physics.rs` replays all 1,196 registered
 /// blocks through [`block_physics`] and demands agreement, bit-exactly, on every
 /// field). If a future version *does* change one, that gate fails, and the fix at
 /// that point is a per-version override — not a silent edit here.
@@ -1129,7 +1129,7 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     ///
     /// Deriving the answer from a shape table alone therefore gets **2,618 of
     /// 26.2's 32,366 states, across 202 blocks**, wrong — measured, not estimated,
-    /// in `crates/protocol/v770/tests/block_physics.rs`. Every sign, hanging sign,
+    /// in `crates/versions/26.2/tests/block_physics.rs`. Every sign, hanging sign,
     /// banner, wall, pressure plate, chain, lantern, lightning rod, dead coral,
     /// *open* fence gate, cake, bell, conduit and turtle egg reads as
     /// non-blocking; azalea, big dripleaf, chorus plant/flower, end rod, snow and

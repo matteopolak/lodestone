@@ -43,9 +43,9 @@ Eleven targets, each a `[[bin]]` in `fuzz/Cargo.toml` under
 
 | target | what it fuzzes | crate |
 |---|---|---|
-| `v770_clientbound_decode` | `V770Adapter::handle_packet`, state+id from the input's own first bytes | `lodestone-v770` |
-| `v770_clientbound_decode_by_id` | as above, but selects a *real* declared packet id by index rather than an arbitrary `i32` — reaches real decode bodies far more often | `lodestone-v770` |
-| `v770_serverbound_decode` | `V770ServerProtocol::decode` — the attack surface a connecting *client* presents to our integrated server, the only family that hosts | `lodestone-v770`, `lodestone-server` |
+| `v26_2_clientbound_decode` | `V770Adapter::handle_packet`, state+id from the input's own first bytes | `lodestone-v26-2` |
+| `v26_2_clientbound_decode_by_id` | as above, but selects a *real* declared packet id by index rather than an arbitrary `i32` — reaches real decode bodies far more often | `lodestone-v26-2` |
+| `v26_2_serverbound_decode` | `V770ServerProtocol::decode` — the attack surface a connecting *client* presents to our integrated server, the only family that hosts | `lodestone-v26-2`, `lodestone-server` |
 | `nbt_decode` | `lodestone_core::read_named_nbt` | `lodestone-core` |
 | `loot_table_json` | `lodestone_server::loot::LootTable::from_json` | `lodestone-server` |
 | `block_state_string` | `lodestone_data::block_states::state_id` (`minecraft:oak_log[axis=y]` grammar) | `lodestone-data` |
@@ -234,7 +234,7 @@ What does **not** exist yet, named rather than glossed over:
 - **`libfuzzer-sys`** (`fuzz/Cargo.toml`) — the `fuzz_target!` macro and
   libFuzzer's runtime driver.
 - **`lodestone-fuzz`, `lodestone-core`, `lodestone-model`, `lodestone-server`,
-  `lodestone-v770`, `lodestone-data`, `lodestone-worldgen-core`,
+  `lodestone-v26-2`, `lodestone-data`, `lodestone-worldgen-core`,
   `lodestone-assets`, `lodestone-anvil`** — one leaf/near-leaf dependency per
   Track A target, pulled in for exactly one parse entry point each rather than
   any of these crates' heavier subsystems.

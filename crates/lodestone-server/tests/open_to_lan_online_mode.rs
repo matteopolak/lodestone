@@ -29,10 +29,10 @@
 use lodestone_core::{Ctx, Decode, Encode, Reader, Writer};
 use lodestone_net::{Connection, Transport, generate_shared_secret, rsa_encrypt};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer, LanConfig, OnlineModeConfig};
-use lodestone_v770::V770ServerProtocol;
-use lodestone_v770::packet_ids::{handshaking, login};
-use lodestone_v770::packets::handshake::Intention;
-use lodestone_v770::packets::login::{EncryptionRequest, EncryptionResponse, LoginFinished, LoginHello};
+use lodestone_v26_2::V770ServerProtocol;
+use lodestone_v26_2::packet_ids::{handshaking, login};
+use lodestone_v26_2::packets::handshake::Intention;
+use lodestone_v26_2::packets::login::{EncryptionRequest, EncryptionResponse, LoginFinished, LoginHello};
 use tokio::net::TcpStream;
 use uuid::Uuid;
 

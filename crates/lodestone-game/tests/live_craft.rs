@@ -404,7 +404,7 @@ async fn run_gate() {
     println!("player = {user}");
 
     let adapter = lodestone_registry::adapter_for_protocol(776)
-        .expect("v770 family compiled into the registry via lodestone-client/live-v770");
+        .expect("v26-2 family compiled into the registry via lodestone-client/live-v26-2");
     let (mut handle, mut events) = ClientBuilder::new(
         ServerAddress {
             host: HOST.into(),

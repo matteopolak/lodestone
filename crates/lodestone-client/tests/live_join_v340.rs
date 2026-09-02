@@ -1,11 +1,11 @@
 //! Live acceptance test against a real 1.12.2 server (protocol 340).
 //!
-//! This test is gated behind the `live-v340` feature AND `#[ignore]`, so the
+//! This test is gated behind the `live-v1-9` feature AND `#[ignore]`, so the
 //! default `cargo test` stays hermetic and version-free. Run it against a real
 //! 1.12.2 server (offline mode) with:
 //!
 //! ```text
-//! cargo test -p lodestone-client --features live-v340 -- --ignored
+//! cargo test -p lodestone-client --features live-v1-9 -- --ignored
 //! ```
 //!
 //! The server host/port default to `127.0.0.1:25567` (the 1.12.2 container uses
@@ -19,7 +19,7 @@
 //! receives a keep-alive. Reaching Play at all also proves the 1.9+ teleport
 //! confirm choreography works, because a 1.12.2 server rubber-bands (and
 //! eventually times out) a client that never confirms its initial teleport.
-#![cfg(feature = "live-v340")]
+#![cfg(feature = "live-v1-9")]
 
 use std::time::Duration;
 
@@ -48,7 +48,7 @@ async fn joins_real_1_12_2_server_and_receives_keep_alive() {
     };
 
     let adapter = lodestone_registry::adapter_for_protocol(340)
-        .expect("v340 family compiled into the registry via the live-v340 feature");
+        .expect("v1-9 family compiled into the registry via the live-v1-9 feature");
 
     let (handle, mut events) = ClientBuilder::new(server, profile, adapter)
         .connect()

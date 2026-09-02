@@ -2725,6 +2725,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.0",
  "keyring",
+ "lodestone-time",
  "num-bigint",
  "rand 0.8.7",
  "reqwest",
@@ -2738,6 +2739,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "web-sys",
 ]
 
 [[package]]
@@ -2908,10 +2910,10 @@ dependencies = [
  "lodestone-net",
  "lodestone-server",
  "lodestone-testsupport",
- "lodestone-v340",
- "lodestone-v47",
- "lodestone-v735",
- "lodestone-v770",
+ "lodestone-v1-14",
+ "lodestone-v1-8",
+ "lodestone-v1-9",
+ "lodestone-v26-2",
  "lodestone-world",
  "lodestone-worldgen-core",
  "proptest",
@@ -3082,10 +3084,10 @@ dependencies = [
  "lodestone-model",
  "lodestone-physics",
  "lodestone-server",
- "lodestone-v340",
- "lodestone-v47",
- "lodestone-v735",
- "lodestone-v770",
+ "lodestone-v1-14",
+ "lodestone-v1-8",
+ "lodestone-v1-9",
+ "lodestone-v26-2",
 ]
 
 [[package]]
@@ -3154,7 +3156,7 @@ dependencies = [
  "lodestone-net",
  "lodestone-physics",
  "lodestone-testsupport",
- "lodestone-v770",
+ "lodestone-v26-2",
  "lodestone-world",
  "lodestone-worldgen",
  "reqwest",
@@ -3178,7 +3180,7 @@ dependencies = [
  "bevy_ecs",
  "lodestone-ecs",
  "lodestone-model",
- "lodestone-v770",
+ "lodestone-v26-2",
  "lodestone-world",
 ]
 
@@ -3308,7 +3310,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "lodestone-v340"
+name = "lodestone-v1-14"
+version = "0.1.0"
+dependencies = [
+ "lodestone-core",
+ "lodestone-data",
+ "lodestone-macros",
+ "lodestone-model",
+ "lodestone-net",
+ "lodestone-protocol-common",
+ "lodestone-testsupport",
+ "lodestone-world",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lodestone-v1-8"
 version = "0.1.0"
 dependencies = [
  "lodestone-canonical",
@@ -3327,7 +3347,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lodestone-v47"
+name = "lodestone-v1-9"
 version = "0.1.0"
 dependencies = [
  "lodestone-canonical",
@@ -3346,25 +3366,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "lodestone-v735"
-version = "0.1.0"
-dependencies = [
- "lodestone-core",
- "lodestone-data",
- "lodestone-macros",
- "lodestone-model",
- "lodestone-net",
- "lodestone-protocol-common",
- "lodestone-testsupport",
- "lodestone-world",
- "serde_json",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "lodestone-v770"
+name = "lodestone-v26-2"
 version = "0.1.0"
 dependencies = [
  "bevy_app",
@@ -3400,7 +3402,7 @@ dependencies = [
  "lodestone-data",
  "lodestone-model",
  "lodestone-server",
- "lodestone-v770",
+ "lodestone-v26-2",
  "lodestone-worldgen",
  "tokio",
  "uuid",

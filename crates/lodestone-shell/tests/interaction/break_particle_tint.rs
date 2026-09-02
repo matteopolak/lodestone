@@ -5,7 +5,7 @@
 //!
 //! A user reported: *"if I break a block that causes another to break, the
 //! particles for the other block are white."* The wire was innocent — a live
-//! capture (`lodestone-v770`'s `live_destroy_block_event` gate) shows
+//! capture (`lodestone-v26-2`'s `live_destroy_block_event` gate) shows
 //! `level_event` 2001 carrying the cascaded block's correct block-state id, and
 //! that id resolves to the correct `#particle` sprite. What was missing is the
 //! *other* half of vanilla's break-particle construction: the base colour

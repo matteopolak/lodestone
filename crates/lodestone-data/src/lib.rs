@@ -1,6 +1,6 @@
 //! Canonical 26.2 game-data censuses.
 //!
-//! Extracted from `crates/protocol/v770`: of the ~20 tables that
+//! Extracted from `crates/versions/26.2`: of the ~20 tables that
 //! used to live under that crate's `generated/`, exactly one —
 //! `packet_ids.rs` — is wire format and stayed behind. Every table here
 //! answers a **game** question (block collision, entity hitboxes, item
@@ -25,8 +25,8 @@
 //!
 //! 26.2 is the one canonical internal version; these tables are
 //! this version's canonical data, not a version-parameterised abstraction.
-//! Older protocol crates (`v47`, `v340`, `v735`) keep their own
-//! version-specific translation tables (e.g. `v340`'s pre-Flattening
+//! Older protocol crates (`v1-8`, `v1-9`, `v1-14`) keep their own
+//! version-specific translation tables (e.g. `v1-9`'s pre-Flattening
 //! `id:meta` table) because that data is genuinely about translating an old
 //! wire format into this canonical space — it is not a second copy of the
 //! canonical census, and does not belong here. See

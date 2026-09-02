@@ -1,7 +1,7 @@
 //! libFuzzer target: `lodestone_model::text::Text::from_nbt` must never
 //! panic on an arbitrary (but well-formed-enough-to-decode) NBT document.
 //!
-//! The modern-protocol sibling of `text_chat_json`: `v770` (and any future
+//! The modern-protocol sibling of `text_chat_json`: `v26-2` (and any future
 //! post-1.20.3 family) sends chat, sign text, book pages and hover-event
 //! contents as binary NBT rather than a JSON string, decoded by this
 //! function. `from_nbt`'s own doc claims "non-panicking and depth-limited"

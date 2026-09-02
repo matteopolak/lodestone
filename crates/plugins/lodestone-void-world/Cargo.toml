@@ -32,7 +32,7 @@ lodestone-server = { path = "../../lodestone-server" }
 # calls this crate's own generator function directly (`CLAUDE.md`'s "closed
 # loop" trap).
 lodestone-client = { workspace = true }
-lodestone-v770 = { workspace = true }
+lodestone-v26-2 = { workspace = true }
 lodestone-model = { workspace = true }
 # Resolves `"minecraft:stone"`-style canonical states to the numeric ids
 # `ClientHandle::block_at` reports, for the assertion side of the gate —

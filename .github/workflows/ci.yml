@@ -283,7 +283,7 @@ jobs:
       - name: check-deletable (every version family)
         run: |
           set -eu
-          for family in v47 v340 v735 v770; do
+          for family in v1-8 v1-9 v1-14 v26-2; do
             echo "::group::check-deletable $family"
             cargo run -p xtask -- check-deletable "$family"
             echo "::endgroup::"

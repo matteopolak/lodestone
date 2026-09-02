@@ -61,7 +61,7 @@ fn strip_ns(id: &str) -> &str {
 }
 
 /// Parses one `Music` record. Anything other than the plain object shape is a hard
-/// error: `lodestone_v770::packets::registry::biome_sky_color` has to cope with
+/// error: `lodestone_v26_2::packets::registry::biome_sky_color` has to cope with
 /// an `Int`/`String`/modifier-compound union because it reads *wire* NBT, but these
 /// are our own committed JSON files and a surprise shape there means the assets
 /// changed in a way this generator has not been taught. Failing loudly beats

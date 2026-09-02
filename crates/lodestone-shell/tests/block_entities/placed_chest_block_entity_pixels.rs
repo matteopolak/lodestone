@@ -23,8 +23,8 @@
 //!
 //! So this gate starts one layer earlier: a real [`lodestone_world::World`] with
 //! a real loaded chunk, written through the [`WorldSink`] seam — `set_block`
-//! followed by `sync_block_entity`, which is exactly the pair the v770 adapter's
-//! `BLOCK_UPDATE` arm calls (`crates/protocol/v770/tests/block_updates.rs`
+//! followed by `sync_block_entity`, which is exactly the pair the v26-2 adapter's
+//! `BLOCK_UPDATE` arm calls (`crates/versions/26.2/tests/block_updates.rs`
 //! dispatches the real packet bytes into a real `World` and asserts the resulting
 //! records, so that link is proved there rather than assumed here). It then runs
 //! the **real** shell gather — `chest_candidates` + `chest_spawn` — and renders

@@ -1,6 +1,6 @@
 //! Heightmap-decode throughput for the real per-chunk consumer:
 //! [`Heightmaps::decode`], called directly by
-//! `protocol/v770/src/packets/chunk.rs`'s `decode_heightmaps` (the
+//! `protocol/v26-2/src/packets/chunk.rs`'s `decode_heightmaps` (the
 //! `#[mc(decode_with = "decode_heightmaps")]` field on `LevelChunkWithLight`)
 //! for every `level_chunk_with_light` packet. This is the "heightmap work"
 //! half of client-side chunk loading the benchmark epic asks for, living in
@@ -28,7 +28,7 @@
 //! # Evidence caveat
 //!
 //! No captured live-server heightmap bytes exist in this repo — the same gap
-//! `lodestone-v770`'s `chunk_light_decode`/`nbt_decode` document — so this
+//! `lodestone-v26-2`'s `chunk_light_decode`/`nbt_decode` document — so this
 //! builds a wire-accurate payload with [`Heightmaps::encode`] itself. That is a
 //! real limitation for *correctness* (a self-round-trip can validate a shared
 //! wrong understanding, per `CLAUDE.md`'s evidence standard) but not for

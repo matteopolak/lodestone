@@ -2,7 +2,7 @@
 //! `docs/plans/multi-version-protocol-dedup.md`'s "Duplication, four ways"
 //! section, plus its minecraft-data adjacency table, landed as a re-runnable
 //! instrument instead of four hand-typed scripts whose numbers rot the
-//! moment anyone touches `crates/protocol/`.
+//! moment anyone touches `crates/versions/`.
 //!
 //! # Why `syn`, not a hand-rolled scanner
 //!
@@ -27,7 +27,7 @@
 //!   strip. `#[cfg(test)]` modules are excluded so a test fixture struct
 //!   never inflates a "packet type" count.
 //! - **Dispatch arms** are scoped to the `handle_play` method of
-//!   `src/adapter.rs` only, in v47/v340/v735 — v770 is a directory module
+//!   `src/adapter.rs` only, in 1.8/1.9/1.14 — 26.2 is a directory module
 //!   with a structurally different dispatch (see the plan doc's "n/a" for
 //!   that pair), so it is not part of this measurement at all.
 //! - **Function identity** is scoped to **free functions only**
@@ -60,29 +60,30 @@ use syn::visit::Visit;
 use crate::islands::has_cfg_test;
 
 /// Families this command measures, oldest to newest. Matches
-/// `crates/protocol/`'s current folder names, not the plan's proposed
-/// post-migration names — this instrument reports what is on disk today.
-const FAMILIES: [&str; 4] = ["v47", "v340", "v735", "v770"];
+/// `crates/versions/`'s current folder names (era-start Minecraft versions,
+/// not protocol numbers), not the plan's proposed post-migration names —
+/// this instrument reports what is on disk today.
+const FAMILIES: [&str; 4] = ["1.8", "1.9", "1.14", "26.2"];
 
 /// Adjacent-family pairs: the ones a real wire-era migration would merge.
-const ADJACENT_PAIRS: [(&str, &str); 3] = [("v47", "v340"), ("v340", "v735"), ("v735", "v770")];
+const ADJACENT_PAIRS: [(&str, &str); 3] = [("1.8", "1.9"), ("1.9", "1.14"), ("1.14", "26.2")];
 
 /// The four pairs the packet struct/enum identity table reports.
 const STRUCT_PAIRS: [(&str, &str); 4] = [
-    ("v47", "v340"),
-    ("v340", "v735"),
-    ("v47", "v735"),
-    ("v735", "v770"),
+    ("1.8", "1.9"),
+    ("1.9", "1.14"),
+    ("1.8", "1.14"),
+    ("1.14", "26.2"),
 ];
 
 /// `handle_play` dispatch-arm comparison only makes sense where the family
-/// still has an if-chain `handle_play` in a single `adapter.rs` — v770 does
-/// not (directory module, data shape differs entirely).
-const ARM_PAIRS: [(&str, &str); 3] = [("v47", "v340"), ("v340", "v735"), ("v47", "v735")];
+/// still has an if-chain `handle_play` in a single `adapter.rs` — 26.2 (the
+/// former v770) does not (directory module, data shape differs entirely).
+const ARM_PAIRS: [(&str, &str); 3] = [("1.8", "1.9"), ("1.9", "1.14"), ("1.8", "1.14")];
 
 /// The three legacy families the function-identity "identical in all three"
 /// bucket is computed over.
-const LEGACY_TRIO: [&str; 3] = ["v47", "v340", "v735"];
+const LEGACY_TRIO: [&str; 3] = ["1.8", "1.9", "1.14"];
 
 /// The fifteen minecraft-data-covered target versions from the plan's wire
 /// table, oldest first. 26.2 is deliberately absent: minecraft-data has no
@@ -168,7 +169,7 @@ pub struct ProtocolDupReport {
 }
 
 pub fn protocol_dup_report(workspace_root: &Path) -> Result<ProtocolDupReport> {
-    let protocol_root = workspace_root.join("crates/protocol");
+    let protocol_root = workspace_root.join("crates/versions");
 
     let struct_totals = struct_totals(&protocol_root)?;
     let file_rows = file_similarity_rows(&protocol_root)?;
@@ -194,7 +195,7 @@ impl ProtocolDupReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "protocol-dup: duplication across crates/protocol/{{v47,v340,v735,v770}}\n\
+            "protocol-dup: duplication across crates/versions/{{1.8,1.9,1.14,26.2}}\n\
              (docs/plans/multi-version-protocol-dedup.md, \"Duplication, four ways\")\n"
         );
 
@@ -202,7 +203,7 @@ impl ProtocolDupReport {
         let _ = writeln!(
             out,
             "{:<40} {:>18} {:>18} {:>18}",
-            "path", "v47->v340", "v340->v735", "v735->v770"
+            "path", "1.8->1.9", "1.9->1.14", "1.14->26.2"
         );
         for row in &self.file_rows {
             let cell = |value: &Option<(usize, usize)>| match value {
@@ -246,7 +247,7 @@ impl ProtocolDupReport {
 
         let _ = writeln!(
             out,
-            "\n3. handle_play dispatch-arm token similarity (v770 excluded: directory module, not an if-chain)"
+            "\n3. handle_play dispatch-arm token similarity (26.2 excluded: directory module, not an if-chain)"
         );
         let _ = writeln!(
             out,
@@ -285,7 +286,7 @@ impl ProtocolDupReport {
         );
         let _ = writeln!(
             out,
-            "  identical across all three legacy families (v47/v340/v735): {} functions / {} lines",
+            "  identical across all three legacy families (1.8/1.9/1.14): {} functions / {} lines",
             self.function_report.triple_identical_count, self.function_report.triple_identical_lines
         );
         let _ = writeln!(out, "  near-duplicate (>=0.85) share of function-body lines:");
@@ -1232,7 +1233,7 @@ mod tests {
     #[test]
     fn struct_totals_are_positive_for_every_family_on_the_real_tree() {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let protocol_root = workspace_root.join("crates/protocol");
+        let protocol_root = workspace_root.join("crates/versions");
         if !protocol_root.is_dir() {
             return;
         }
@@ -1246,11 +1247,11 @@ mod tests {
     #[test]
     fn handle_play_arm_counts_are_positive_on_the_real_tree() {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        let protocol_root = workspace_root.join("crates/protocol");
+        let protocol_root = workspace_root.join("crates/versions");
         if !protocol_root.is_dir() {
             return;
         }
-        for family in ["v47", "v340", "v735"] {
+        for family in LEGACY_TRIO {
             let arms = handle_play_arms(&protocol_root, family)
                 .unwrap_or_else(|err| panic!("handle_play_arms({family}) failed: {err}"));
             assert!(!arms.is_empty(), "{family}'s handle_play had no arms");
@@ -1260,7 +1261,7 @@ mod tests {
     #[test]
     fn protocol_dup_report_runs_end_to_end_on_the_real_tree() {
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-        if !workspace_root.join("crates/protocol").is_dir() {
+        if !workspace_root.join("crates/versions").is_dir() {
             return;
         }
         let report =

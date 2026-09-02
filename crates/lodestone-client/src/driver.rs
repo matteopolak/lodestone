@@ -211,7 +211,7 @@ fn sign_chat_action(
     let mut last_seen = Vec::with_capacity(update.last_seen.len());
     for entry in &update.last_seen {
         let Ok(bytes) = <[u8; lodestone_auth::SIGNATURE_BYTES]>::try_from(entry.as_bytes()) else {
-            // Cannot happen with a v770 adapter — it only ever tracks real
+            // Cannot happen with a v26-2 adapter — it only ever tracks real
             // 256-byte RSA signatures — but a malformed entry must not
             // silently sign over a truncated window; degrade to unsigned
             // rather than emit a signature the server would reject anyway.
@@ -315,7 +315,7 @@ fn verify_chat_message(
 ///
 /// True today for exactly one shape: a [`ClientAction::Move`] while `state`
 /// is [`ConnectionState::Play`]. See [`Driver::handle_action`]'s call site
-/// for why that combination can only mean v770's `select_move_packet`
+/// for why that combination can only mean v26-2's `select_move_packet`
 /// throttling and not a missing arm.
 fn is_expected_move_no_op(action: &ClientAction, state: ConnectionState) -> bool {
     matches!(action, ClientAction::Move { .. }) && state == ConnectionState::Play
@@ -749,7 +749,7 @@ impl<T: Transport> Driver<T> {
                     // chain — the adapter's teleport/move lines, this
                     // transition, and the shell's own — without turning on
                     // `info` for everything else. See the `xfer` module in the
-                    // v770 adapter for what the chain is for.
+                    // v26-2 adapter for what the chain is for.
                     tracing::debug!(
                         target: "transfer",
                         from = ?self.state,
@@ -1497,10 +1497,10 @@ impl<T: Transport> Driver<T> {
             Ok(None) if is_expected_move_no_op(&action, self.state) => {
                 // This is NOT the state-mismatch case the sibling branch below
                 // exists to catch, and logging it identically is what made a
-                // routine per-tick no-op read as a live correctness bug: v770's
+                // routine per-tick no-op read as a live correctness bug: v26-2's
                 // `Move` arm delegates to `select_move_packet`, which mirrors
                 // vanilla's own position-send dirty tracking (see
-                // `crates/protocol/v770/src/adapter/mod.rs`) and legitimately
+                // `crates/versions/26.2/src/adapter/mod.rs`) and legitimately
                 // returns `None` on the large majority of ticks — any tick
                 // where position/rotation/on-ground/collision are all
                 // unchanged since the last **sent** update, short of the
@@ -1508,10 +1508,10 @@ impl<T: Transport> Driver<T> {
                 // `should_forward_action` already withholds `Move` from ever
                 // reaching this driver while the connection is not `Play`, so
                 // by the time a `Move` gets here `state` is already `Play` on
-                // every legacy family too (v47/v340/v735 gate `Move` on
+                // every legacy family too (v1-8/v1-9/v1-14 gate `Move` on
                 // nothing but state, unconditionally encoding `Some(..)` once
                 // state is `Play`) — meaning this arm's `Ok(None)` can only
-                // come from v770's deliberate throttling, never from a
+                // come from v26-2's deliberate throttling, never from a
                 // missing encode arm. `trace!`, not `debug!`: an idle player
                 // produces this on ~19 of every 20 ticks and it is not
                 // evidence of a dropped position update.
@@ -1824,7 +1824,7 @@ mod tests {
     }
 
     /// `Ok(None)` from `encode_action` for a `Move` while `state`
-    /// is `Play` must be recognised as v770's `select_move_packet` throttling
+    /// is `Play` must be recognised as v26-2's `select_move_packet` throttling
     /// (expected, not a drop), and every other combination must still be
     /// treated as a genuine "no packet in current state" case. Four arms, not
     /// one: `Move`-in-Play is the only `true`, and each of the other three

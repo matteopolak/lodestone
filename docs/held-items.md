@@ -155,7 +155,7 @@ duration, use-pose timing) are vanilla numbers hard-coded in `lodestone-render`/
   from decoded metadata.
 * `lodestone-data` — the entity census columns (`is_living`, `is_mob`) that disambiguate colliding
   metadata indices.
-* `crates/protocol/v770` — the metadata decodes feeding all of the above, and the `ANIMATE` packet decode
+* `crates/versions/26.2` — the metadata decodes feeding all of the above, and the `ANIMATE` packet decode
   for remote swings.
 * `lodestone-shell` — `gpu/first_person.rs` (held item, equip state), `entities.rs` (pose/swing
   extraction into `EntityDraw`), `sim.rs`/`interact.rs` (local swing producers).

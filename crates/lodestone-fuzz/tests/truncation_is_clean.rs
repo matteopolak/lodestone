@@ -11,24 +11,24 @@
 //! Per CLAUDE.md's evidence rule ("an expected value must originate outside
 //! the code under test"), corpus entries are ranked:
 //!
-//! - **Strong**: `crates/protocol/v770/tests/fixtures/*.hex` — real bytes
+//! - **Strong**: `crates/versions/26.2/tests/fixtures/*.hex` — real bytes
 //!   captured from a live vanilla 26.2 server, already checked in and used
 //!   by that crate's own hermetic tests (`registry_data`, `item_entity_metadata`,
 //!   `item_components`). Six fixtures, covering `registry_data`,
 //!   `set_entity_data`, and `container_set_slot`.
-//! - **Weak, explicitly marked as such**: for every family (including v770's
+//! - **Weak, explicitly marked as such**: for every family (including v26-2's
 //!   own remaining packet types with no captured fixture), a payload built
 //!   by that family's *own* `V*Adapter::begin_login`. This is self-encoded —
 //!   it proves nothing about whether we understood the protocol correctly,
 //!   only that truncating *something structurally packet-shaped* doesn't
-//!   panic. `v47`/`v340`/`v735` have no captured-fixture corpus at all today
+//!   panic. `v1-8`/`v1-9`/`v1-14` have no captured-fixture corpus at all today
 //!   (issue #282 didn't add JVM-oracle capture for the legacy families);
 //!   that gap is real and is called out in `docs/fuzz-harness.md`.
 
-// The corpus is built from `lodestone_v770`'s own packet-id tables, so this file
+// The corpus is built from `lodestone_v26_2`'s own packet-id tables, so this file
 // exists only in a build that compiles that family in. On by default; see the
 // crate manifest's `[features]`.
-#![cfg(feature = "v770")]
+#![cfg(feature = "v26-2")]
 
 use lodestone_fuzz::{Family, catch};
 use lodestone_model::ConnectionState;
@@ -45,34 +45,34 @@ fn strong_corpus() -> Vec<CorpusEntry> {
     let fixtures: &[(&str, i32)] = &[
         (
             "registry_data_dimension_type.hex",
-            lodestone_v770::packet_ids::configuration::clientbound::REGISTRY_DATA,
+            lodestone_v26_2::packet_ids::configuration::clientbound::REGISTRY_DATA,
         ),
         (
             "registry_data_world_clock.hex",
-            lodestone_v770::packet_ids::configuration::clientbound::REGISTRY_DATA,
+            lodestone_v26_2::packet_ids::configuration::clientbound::REGISTRY_DATA,
         ),
         (
             "item_entity_metadata_diamond.hex",
-            lodestone_v770::packet_ids::play::clientbound::SET_ENTITY_DATA,
+            lodestone_v26_2::packet_ids::play::clientbound::SET_ENTITY_DATA,
         ),
         (
             "item_entity_metadata_unmodeled_component.hex",
-            lodestone_v770::packet_ids::play::clientbound::SET_ENTITY_DATA,
+            lodestone_v26_2::packet_ids::play::clientbound::SET_ENTITY_DATA,
         ),
         (
             "tool_component_absent_plain_pickaxe.hex",
-            lodestone_v770::packet_ids::play::clientbound::CONTAINER_SET_SLOT,
+            lodestone_v26_2::packet_ids::play::clientbound::CONTAINER_SET_SLOT,
         ),
         (
             "tool_component_explicit.hex",
-            lodestone_v770::packet_ids::play::clientbound::CONTAINER_SET_SLOT,
+            lodestone_v26_2::packet_ids::play::clientbound::CONTAINER_SET_SLOT,
         ),
     ];
 
     fixtures
         .iter()
         .map(|(name, packet_id)| {
-            let path = lodestone_fuzz::v770_fixture_path(name);
+            let path = lodestone_fuzz::v26_2_fixture_path(name);
             let bytes = lodestone_fuzz::read_hex_fixture(&path);
             let state = if name.starts_with("registry_data") {
                 ConnectionState::Configuration

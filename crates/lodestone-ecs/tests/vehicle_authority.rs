@@ -1,7 +1,7 @@
 //! **The island gate for riding.**
 //!
 //! `ClientAction::MoveVehicle` and `ClientAction::PaddleBoat` were encoded
-//! byte-exactly by the v770 adapter, round-tripped by its own tests, and produced
+//! byte-exactly by the v26-2 adapter, round-tripped by its own tests, and produced
 //! by **nobody** — the `ClientAction::SetFlying` shape `CLAUDE.md` records. A test
 //! that calls `lodestone_physics::vehicle::tick_boat` directly passes whether or
 //! not anything drives it, and a test that calls the ECS system directly passes
