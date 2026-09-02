@@ -614,10 +614,9 @@ than skips.
 
 **What.** Two separable halves — land them separately, because only one is blocked:
 
-- **Drop (unblocked).** When a chunk's loading level exceeds `MAX_LEVEL` — `isLoaded(level)` is
-  `level <= MAX_LEVEL` (`ChunkLevel.java`), used at `ChunkMap.java` — move it to a
-  `pending_unloads` map (`ChunkMap.java`) and drain it. Keep vanilla's **re-arm** property
-  (`ChunkMap.java`): never drop while a save is in flight.
+- **Drop (unblocked).** When a chunk's loading level exceeds `MAX_LEVEL` — a chunk is loaded iff
+  `level <= MAX_LEVEL` — move it to a `pending_unloads` map and drain it. Keep the real game's
+  **re-arm** property: never drop while a save is in flight.
 - **Save (blocked on #437).** Behind a trait so the drop half lands now:
   ```
   trait ChunkSink { fn save(&self, cx: i32, cz: i32, column: &ChunkColumn) -> Result<()>; }
@@ -661,20 +660,19 @@ logic; confirmed (3.3 KB, no spawn-point code). Do not lose time there.
 **What — and note this is not what the issue says.** Per the citations above, implement the two
 things 26.2 actually has:
 
-1. **`PLAYER_SPAWN`: transient, radius 3, loading-only.** Timeout **20** ticks, flags **2**
-   (`TicketType.java`), added at the **configuration** phase — before the player entity exists —
-   mirroring `PrepareSpawnTask.java`, and refreshed per `Ready.keepAlive()`. Purpose is
+1. **`PLAYER_SPAWN`: transient, radius 3, loading-only.** Timeout **20** ticks, flags **2**,
+   added at the **configuration** phase — before the player entity exists — and refreshed by a
+   periodic keep-alive for as long as that phase lasts. Purpose is
    "the joining player has terrain to join into", nothing more. Anchor: the
    `ConfigurationFinished` arm at `server.rs`, where the join burst already lives.
-2. **`FORCED`: persistent, simulating, level 31.** `FORCED_TICKET_LEVEL = byStatus(ENTITY_TICKING)`
-   = 31 (`ChunkMap.java`), timeout 0, flags 15 (`TicketType.java`). This — **not** a spawn
-   radius — is 26.2's "keep loaded and ticking with nobody nearby", and it comes from `/forceload`.
-   Persisting it needs `TicketStorage`'s `chunk_tickets` saved data
-   (`TicketStorage.java`), so the *persistence* is #437's; the in-memory ticket type and
-   its level are U7's.
+2. **`FORCED`: persistent, simulating, level 31.** The forced-ticket level equals the
+   entity-ticking level (31), timeout 0, flags 15. This — **not** a spawn
+   radius — is the current game's "keep loaded and ticking with nobody nearby", and it comes from
+   `/forceload`. Persisting it needs the same saved-ticket storage described above, so the
+   *persistence* is #437's; the in-memory ticket type and its level are U7's.
 
-**Do not implement `spawnChunkRadius`.** It is deleted by datafix
-(`GameRuleRegistryFix.java`) and appears nowhere else in 26.2.
+**Do not implement a spawn-chunk-radius setting.** It is deleted by a data migration in the
+current game and appears nowhere else in it.
 
 **Gate.** `crates/lodestone-server/tests/spawn_ticket.rs`, asserting the **26.2** behaviour, which is
 the opposite of #297's suggested gate on the key point:

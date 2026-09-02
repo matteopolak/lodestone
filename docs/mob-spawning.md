@@ -147,13 +147,13 @@ or Peaceful — consumes nothing and places nothing; `Spawn` proceeds, consuming
 success).
 
 `apply_spawn_egg` composes the decision with `MobSim::spawn_species`, so an egg-spawned mob is the
-same object a natural spawn produces. Not modelled: random spawn yaw, and `Mob.finalizeSpawn`'s
-regional-difficulty equipment pass. A dispenser reuses `entity_type_for_egg` alone; clicking a
+same object a natural spawn produces. Not modelled: random spawn yaw, and vanilla's own
+regional-difficulty equipment pass at spawn. A dispenser reuses `entity_type_for_egg` alone; clicking a
 spawner block re-keys the block entity instead and must be tested for **before** this dispatch,
 since it still reports `Spawn` for that click. The right-click path is wired end to end
 (`ServerBound::InteractEntity`/`INTERACT` → `MobSim::interact`). Spawner blocks remain a
-`BlockEntity::Opaque` with no tick — `BaseSpawner.serverTick` needs block-entity access to
-`MobSim` that doesn't exist yet.
+`BlockEntity::Opaque` with no tick — reproducing vanilla's own spawner-block tick needs block-entity
+access to `MobSim` that doesn't exist yet.
 
 ### Breeding and aging
 
