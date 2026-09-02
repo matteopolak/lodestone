@@ -1218,8 +1218,8 @@ mod tests {
 
     #[test]
     fn defaults_match_the_decompiled_vanilla_key_mappings() {
-        // Transcribed from `.cache/mc/26.2/client-src/net/minecraft/client/
-        // Options.java`: (action, GLFW keysym, KeyMapping.Category).
+        // Transcribed from the decompiled client's own default keybind
+        // table: (action, GLFW keysym, key-mapping category).
         let vanilla: &[(InputAction, u32, Category)] = &[
             (InputAction::Forward, 87, Category::Movement),
             (InputAction::Left, 65, Category::Movement),

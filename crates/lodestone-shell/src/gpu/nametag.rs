@@ -6,9 +6,8 @@
 //!
 //! # The two depth passes, and the sign flip
 //!
-//! Reconciled against the real 26.2 client
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/rendertype/RenderPipelines.java`
-//! and `RenderTypes.java`), not guessed:
+//! Reconciled against the real 26.2 client, its own render-pipelines and
+//! render-types definitions, not guessed:
 //!
 //! * **Normal pass** (`RenderPipelines.TEXT`, via `WORLD_TEXT_SNIPPET`):
 //!   `DepthStencilState.DEFAULT = new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true)`

@@ -11,8 +11,8 @@ use super::*;
 /// Vanilla's cap on how many 20 Hz client ticks a single update may run.
 ///
 /// Read from the decompiled 26.2 client, not guessed:
-/// `.cache/mc/26.2/client-src/net/minecraft/client/Minecraft.java` declares
-/// `private static final int MAX_TICKS_PER_UPDATE = 10;` and `:1176` applies it
+/// vanilla's own client class declares
+/// `private static final int MAX_TICKS_PER_UPDATE = 10;` and applies it
 /// as `for (int i = 0; i < Math.min(10, ticksToDo); i++)`. Note *where* the cap
 /// lives: `DeltaTracker.Timer::advanceGameTime` returns the full uncapped tick
 /// count and keeps the sub-tick residual, and `runTick` then simply **runs at
@@ -332,8 +332,7 @@ impl FramePacer {
     /// return (a menu screen owning the whole frame, GPU state not yet ready)
     /// must not count.
     ///
-    /// Ported from `Minecraft.runTick`'s `fpsUpdate` block
-    /// (`.cache/mc/26.2/client-src/net/minecraft/client/Minecraft.java`):
+    /// Ported from vanilla's own run-tick's `fpsUpdate` block:
     /// vanilla does not take a reciprocal of a frame time at all. It
     /// increments a counter (`this.frames++`) once per presented frame and,
     /// whenever wall-clock time has crossed a one-second boundary since the

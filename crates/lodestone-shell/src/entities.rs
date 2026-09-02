@@ -212,8 +212,8 @@ fn item_friction_block(position: Vec3d) -> (i32, i32, i32) {
 /// `updateInterval(20)`) and visibly sinks through terrain in between — the
 /// gap the module docs on [`ItemPhysics`] call out.
 ///
-/// Mirrors `ItemEntity.tick()`'s real order, traced against
-/// `net/minecraft/world/entity/item/ItemEntity.java` in the 26.2 decompile:
+/// Mirrors vanilla's own item-entity tick's real order, traced against
+/// the 26.2 decompile:
 /// gravity is subtracted from `velocity.y` *before* the move
 /// (`applyGravity()`); [`move_entity`] is vanilla's own
 /// `Entity.move(MoverType.SELF, deltaMovement)` — the single shared collider
@@ -968,9 +968,8 @@ pub struct EntityDraw {
     /// formulas, and this field only drives the one this build implements).
     pub swim_amount: f32,
     /// Whether this entity's shared-flags byte reports bit `0x01` — vanilla's
-    /// `displayFireAnimation()` gate, `Entity.isOnFire() && !isSpectator()`
-    /// (`.cache/mc/26.2/client-src/net/minecraft/world/entity/Entity.java:
-    /// 2666-2668,3255-3256`). Issue #434, player report: "mobs dont show
+    /// own display-fire-animation gate: on fire and not a spectator. Player
+    /// report: "mobs dont show
     /// flames yet".
     ///
     /// Read off [`lodestone_ecs::entity::EntityFlags`] through [`EntityIndex`]
@@ -1692,9 +1691,9 @@ pub struct ExtractedDraws(Vec<EntityDraw>);
 // The item-pickup fly-to-collector animation
 // ---------------------------------------------------------------------------
 
-/// `ItemPickupParticle.LIFE_TIME` — the pickup flight lasts **3 ticks** (150 ms).
+/// Vanilla's own item-pickup-particle lifetime — the pickup flight lasts **3 ticks** (150 ms).
 ///
-/// Read from `net/minecraft/client/particle/ItemPickupParticle.java`:
+/// Read from the 26.2 decompile:
 /// `protected static final int LIFE_TIME = 3;`, and `tick()` removes the particle
 /// on the tick `life` reaches it.
 const PICKUP_LIFE_TICKS: f32 = 3.0;

@@ -141,9 +141,8 @@ pub(crate) fn launch_open_to_lan_online(
 }
 
 /// Vanilla's own seed rule (that fix's queued patch) —
-/// `WorldOptions.parseSeed`/`randomSeed()`
-/// (`.cache/mc/26.2/client-src/net/minecraft/world/level/levelgen/
-/// WorldOptions.java`): trim, empty means a fresh random `i64`, a valid
+/// its own seed-parsing/random-seed routines:
+/// trim, empty means a fresh random `i64`, a valid
 /// `i64` literal is used verbatim, and anything else — vanilla accepts
 /// free-text seeds rather than rejecting them — falls back to Java's own
 /// `String.hashCode()` widened (sign-extended) to `i64`.

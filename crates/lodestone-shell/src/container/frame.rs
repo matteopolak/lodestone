@@ -16,8 +16,8 @@ use super::layout::SlotLayout;
 pub struct ContainerFrame<'a> {
     /// Menu contents to draw. `None` draws nothing.
     pub menu: Option<&'a Menu>,
-    /// The screen's own title, already resolved to words — vanilla's
-    /// `AbstractContainerScreen.title`. Drawn at
+    /// The screen's own title, already resolved to words — vanilla's own
+    /// container-screen title field. Drawn at
     /// [`LabelLayout::title_x`]/[`title_y`](LabelLayout::title_y), which is
     /// **not** always `(8, 6)`: see [`label_layout`].
     ///
@@ -26,12 +26,12 @@ pub struct ContainerFrame<'a> {
     /// anvil opens as its custom name. Nothing here consults a table keyed on
     /// menu type; the generic name is only the server's default.
     pub title: &'a str,
-    /// Vanilla's *second* label — `AbstractContainerScreen.playerInventoryTitle`,
+    /// Vanilla's *second* label — its own player-inventory-title field,
     /// the word "Inventory" over the player's own storage rows.
     ///
     /// Unlike [`title`](Self::title) this never comes from a packet: vanilla
-    /// reads it from `Inventory.getDisplayName()`, whose default is the
-    /// client-side constant `Component.translatable("container.inventory")`
+    /// reads it from its own player-inventory display-name lookup, whose default is the
+    /// client-side translation key `container.inventory`
     ///, so resolving it locally *is* the vanilla
     /// behaviour. The default below is `en_us.json`'s value, which is what
     /// a jar-less run and every hermetic gate see; `app.rs` overrides it with
@@ -39,7 +39,7 @@ pub struct ContainerFrame<'a> {
     /// gets its own word.
     ///
     /// Drawn only when [`LabelLayout::inventory`] is `Some` — the player
-    /// inventory screen omits it (`InventoryScreen.extractLabels`).
+    /// inventory screen omits it (its own label-extract routine).
     pub inventory_label: &'a str,
     /// The player's active status effects, as
     /// `EffectsInInventory` would draw them beside the panel — already sorted,
@@ -48,9 +48,9 @@ pub struct ContainerFrame<'a> {
     ///
     /// Empty (the default) draws no column, which is what every headless
     /// caller and every hermetic gate sees. Drawn only on
-    /// [`MenuKind::Player`]: vanilla constructs an `EffectsInInventory` in
-    /// `InventoryScreen` and `CreativeModeInventoryScreen` only, and every
-    /// other screen's `Screen.showsActiveEffects()` returns `false`.
+    /// [`MenuKind::Player`]: vanilla constructs its own effects-in-inventory
+    /// widget on the inventory and creative-inventory screens only, and every
+    /// other screen's own "shows active effects" check returns `false`.
     ///
     /// The rows are resolved *outside* this crate's draw path because the
     /// language table lives on `Sim`; passing raw ids here and naming them at
@@ -116,14 +116,15 @@ pub struct ContainerFrame<'a> {
     /// maybe_default_from_uuid` for the consumer — "both sites
     /// derive from one resolver, keyed on the same uuid" requirement.
     pub avatar_uuid: Option<uuid::Uuid>,
-    /// `Player.hasInfiniteMaterials()` — `Abilities.instabuild`
-    /// (`AnvilMenu.java`, `EnchantmentScreen.java`). Gates the
+    /// Vanilla's own infinite-materials check — its own creative-abilities
+    /// flag. Gates the
     /// anvil's "Too Expensive!" branch and the enchanting rows' afford
     /// check. `false` (the default) is the honest value for every existing
     /// caller and for a survival session.
     pub has_infinite_materials: bool,
     /// The local player's XP level, for the same afford checks
-    /// (`AnvilMenu.mayPickup`, `EnchantmentScreen.java`). `0` (the
+    /// (vanilla's own anvil may-pickup and enchantment-screen affordability
+    /// checks). `0` (the
     /// default) matches every existing caller.
     pub xp_level: i32,
     /// Whether to draw the hovered slot's tooltip, and whether
@@ -140,7 +141,7 @@ pub struct ContainerFrame<'a> {
     /// express "no tooltip", and the pair could disagree.
     pub tooltips: Option<bool>,
     /// Whether the recipe book's panel is open, which **moves the container
-    /// panel** — vanilla's `RecipeBookComponent.updateScreenPosition`. See
+    /// panel** — vanilla's own screen-position update. See
     /// [`super::layout::recipe_book_panel_shift`].
     ///
     /// `false` (the default) is the unshifted centring every existing caller and
@@ -173,7 +174,7 @@ pub struct ContainerFrame<'a> {
     /// merchant screen with no offers yet, or any non-merchant menu). See
     /// [`with_trades`](Self::with_trades) and `super::merchant`.
     pub trades: Option<&'a TradeOffers>,
-    /// Which trade row is selected — vanilla's `MerchantScreen.shopItem`,
+    /// Which trade row is selected — vanilla's own selected-trade field,
     /// which trade's out-of-stock overlay and progress bar (if any) show, and
     /// the index the next `SELECT_TRADE` send carries. `0` (the default)
     /// matches vanilla's own initial value.
@@ -184,12 +185,12 @@ pub struct ContainerFrame<'a> {
     /// jar-less run and by every existing caller. See
     /// [`with_trades`](Self::with_trades).
     pub trades_label: &'a str,
-    /// The anvil's rename box **value** — vanilla's `EditBox::getValue()`
-    /// (`AnvilScreen`'s `name` field). `None`/empty (the default) draws no
+    /// The anvil's rename box **value** — vanilla's own edit-box value
+    /// (its own anvil screen's `name` field). `None`/empty (the default) draws no
     /// text in the box, which is every existing caller and every non-anvil
     /// menu.
     ///
-    /// **Keyboard-wired since issue #603.** This used to say there was no
+    /// **Keyboard-wired now.** This used to say there was no
     /// per-keystroke state anywhere in the crate, so the value could only
     /// ever be `slotChanged`'s own default (the slot-0 item's hover name),
     /// never anything the player had typed. `crate::container::AnvilRenameState`
@@ -370,7 +371,7 @@ impl<'a> ContainerFrame<'a> {
     /// Attach the **live pose** for the inventory avatar, so a player who opens
     /// their inventory mid-swing sees the tail of that swing rather than a
     /// standing rig — vanilla poses the live render state
-    /// (`InventoryScreen.extractEntityInInventoryFollowsMouse` is handed the real
+    /// (its own inventory-screen mouse-follow extract routine is handed the real
     /// player entity). `AnimInput::REST` (the default) is what every caller
     /// without a `Sim` keeps.
     ///
@@ -519,18 +520,11 @@ const DEFAULT_TRADES_LABEL: &str = "Trades";
 /// names, `en_us.json`. Index `0` is level `1` ("Novice").
 const MERCHANT_LEVEL_WORDS: [&str; 5] = ["Novice", "Apprentice", "Journeyman", "Expert", "Master"];
 
-/// Vanilla's `merchant.title` — the level-badge combined title
-/// (`MerchantScreen.extractLabels`, `MerchantScreen.java`):
-///
-/// ```java
-/// if (traderLevel > 0 && traderLevel <= 5 && this.menu.showProgressBar()) {
-///    Component titleAndLevel = Component.translatable("merchant.title", this.title,
-///       Component.translatable("merchant.level." + traderLevel));
-///    ...
-/// } else {
-///    ... this.title ...
-/// }
-/// ```
+/// Vanilla's `merchant.title` — the level-badge combined title, from vanilla's
+/// own merchant-screen label-extract routine: when the trader level is
+/// `1..=5` and the menu reports a progress bar, the title becomes the
+/// `merchant.title` translation of the villager's name and the level word;
+/// otherwise it is the bare name.
 ///
 /// `merchant.title` is `"%s - %s"` (`en_us.json`) — a genuinely nested
 /// translation, the villager's own name as the first argument and a *second*
@@ -588,8 +582,9 @@ pub fn merchant_trades_label(translate: &dyn Fn(&str) -> Option<String>) -> Stri
 
 /// The player inventory screen's own title: **"Crafting"**, not "Inventory".
 ///
-/// `InventoryScreen.java` passes `Component.translatable("container.crafting")`
-/// to `super`, naming the 2×2 grid rather than the screen. This client used to
+/// Vanilla's own inventory screen passes the translation key
+/// `container.crafting`
+/// to its superclass, naming the 2×2 grid rather than the screen. This client used to
 /// hardcode the string `"Inventory"` here (`app.rs`), which is wrong twice over:
 /// wrong word, and — because it went in as the *title* — drawn at the title
 /// anchor, which for this one screen is `x = 97`, not
@@ -607,7 +602,7 @@ pub fn player_inventory_title(translate: &dyn Fn(&str) -> Option<String>) -> Str
 
 /// Vanilla's `playerInventoryTitle` — `container.inventory`, "Inventory".
 ///
-/// A *client-side* constant in vanilla too (`Inventory.java`'s `DEFAULT_NAME`),
+/// A *client-side* constant in vanilla too (its own inventory default name),
 /// so unlike a container's title this is legitimately resolved locally rather
 /// than read off a packet. See [`ContainerFrame::inventory_label`].
 #[must_use]
@@ -641,13 +636,13 @@ pub struct LabelLayout {
 /// Vanilla's label anchors for `menu`'s screen, derived from `layout` rather than
 /// restated.
 ///
-/// Read out of `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/`:
+/// Read out of the decompiled 26.2 client's own inventory-screen classes:
 ///
-/// | screen | `titleLabelX` | second label | source |
-/// |---|---|---|---|
-/// | generic container | `8` | yes | `AbstractContainerScreen.java` |
-/// | crafting table | `29` | yes | `CraftingScreen.java` |
-/// | player inventory | `97` | **no** | `InventoryScreen.java` |
+/// | screen | `titleLabelX` | second label |
+/// |---|---|---|
+/// | generic container | `8` | yes |
+/// | crafting table | `29` | yes |
+/// | player inventory | `97` | **no** |
 ///
 /// The player inventory screen is the only one that omits the second label, and
 /// it does so by *overriding `extractLabels`* to drop the second `graphics.text`
@@ -655,8 +650,8 @@ pub struct LabelLayout {
 /// general, only there. Deleting it globally would trade one bug for another.
 ///
 /// `inventory` is `[8, layout.height - 94]`: `inventoryLabelX = 8` and
-/// `inventoryLabelY = imageHeight - 94` (`AbstractContainerScreen.java`,
-/// restated by `ContainerScreen.java` for the row-count-dependent chest).
+/// `inventoryLabelY = imageHeight - 94` (vanilla's own container screen,
+/// restated by its own chest/generic screen for the row-count-dependent chest).
 /// [`SlotLayout::height`] *is* `imageHeight` — 166 for the player and crafting
 /// panels, `114 + rows * 18` for a chest, both matching vanilla's own
 /// constructors — so this is the same expression the panel art is blitted with,
@@ -679,8 +674,8 @@ pub struct LabelLayout {
 #[must_use]
 pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
     // The merchant's `inventoryLabelX` is `107`, not `8`
-    // (`MerchantScreen.java`'s constructor sets `this.inventoryLabelX =
-    // 107`), the one screen in this whole family whose player-inventory
+    // (vanilla's own merchant screen constructor sets it to
+    // 107), the one screen in this whole family whose player-inventory
     // section is not left-aligned with the panel — see
     // `SpecialLayout::Merchant`'s doc comment. `title_x`/`title_y` here are
     // placeholders past what [`menu_type_title_anchor`]'s own `merchant`
@@ -714,20 +709,20 @@ pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
 /// overrides them away from [`label_layout`]'s two anchors — the screens that
 /// function's doc comment names as unmodelled.
 ///
-/// Read from `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/`,
+/// Read from the decompiled 26.2 client's own inventory-screen classes,
 /// and each line below was re-read from the decompile rather than taken from a
 /// summary:
 ///
-/// | wire `menu_type` | screen | `titleLabelX` | `titleLabelY` | source |
-/// |---|---|---|---|---|
-/// | `furnace` / `blast_furnace` / `smoker` | `AbstractFurnaceScreen` subclasses | centred | `6` | `AbstractFurnaceScreen.java` |
-/// | `brewing_stand` | `BrewingStandScreen` | centred | `6` | `BrewingStandScreen.java` |
-/// | `generic_3x3` | `DispenserScreen` (dispenser **and** dropper) | centred | `6` | `DispenserScreen.java` |
-/// | `crafter_3x3` | `CrafterScreen` | centred | `6` | `CrafterScreen.java` |
-/// | `anvil` | `AnvilScreen` | `60` | `6` | `AnvilScreen.java` |
-/// | `loom` | `LoomScreen` | `8` | `4` | `LoomScreen.java` (`titleLabelY -= 2`) |
-/// | `stonecutter` | `StonecutterScreen` | `8` | `5` | `StonecutterScreen.java` (`titleLabelY--`) |
-/// | `cartography_table` | `CartographyTableScreen` | `8` | `4` | `CartographyTableScreen.java` (`titleLabelY -= 2`) |
+/// | wire `menu_type` | screen | `titleLabelX` | `titleLabelY` |
+/// |---|---|---|---|
+/// | `furnace` / `blast_furnace` / `smoker` | vanilla's own furnace-family screen | centred | `6` |
+/// | `brewing_stand` | vanilla's own brewing-stand screen | centred | `6` |
+/// | `generic_3x3` | vanilla's own dispenser screen (dispenser **and** dropper) | centred | `6` |
+/// | `crafter_3x3` | vanilla's own crafter screen | centred | `6` |
+/// | `anvil` | vanilla's own anvil screen | `60` | `6` |
+/// | `loom` | vanilla's own loom screen | `8` | `4` (`titleLabelY -= 2`) |
+/// | `stonecutter` | vanilla's own stonecutter screen | `8` | `5` (`titleLabelY--`) |
+/// | `cartography_table` | vanilla's own cartography-table screen | `8` | `4` (`titleLabelY -= 2`) |
 ///
 /// Note the last three are expressed in vanilla as *decrements of the inherited
 /// `titleLabelY`*, not as absolute values. They are resolved to absolutes here
@@ -757,7 +752,7 @@ pub fn label_layout(menu: &Menu, layout: &SlotLayout) -> LabelLayout {
 ///
 /// **`merchant` has its own branch below, not a table row.** Two things set it
 /// apart from the "centred" family: its centring formula has a `49` offset
-/// vanilla's own default centring does not (`MerchantScreen.java`:
+/// vanilla's own default centring does not (vanilla's own merchant screen:
 /// `49 + this.imageWidth / 2 - this.font.width(this.title) / 2`, vs. the
 /// plain `(imageWidth - width) / 2` the furnace family etc. use), and its
 /// *title text itself* is composed from the trader's level
@@ -787,7 +782,7 @@ pub fn menu_type_title_anchor(
         return Some([((layout.width - text_width) / 2.0).floor(), 6.0]);
     }
     if key.path() == "merchant" {
-        // `MerchantScreen.java` — the same `49 +` offset in both the
+        // Vanilla's own merchant screen — the same `49 +` offset in both the
         // level-badge and bare-name branches, which is why this is unaffected
         // by which form `title` (already composed by [`merchant_title`])
         // actually is.

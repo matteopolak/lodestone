@@ -606,9 +606,8 @@ pub fn compose_chat_action(line: &str) -> Option<ClientAction> {
     }
 }
 
-/// One highlighted run of a command line, mirroring vanilla's
-/// `CommandSuggestions.formatText`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/components/CommandSuggestions.java`).
+/// One highlighted run of a command line, mirroring vanilla's own
+/// command-suggestions format-text routine.
 /// Byte offsets into the input string; see this module's own doc for why no
 /// pixel width is computed here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

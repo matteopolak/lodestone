@@ -262,9 +262,8 @@ fn lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
 
 /// The tooltip title: [`lodestone_game::item::styled_hover_name`], except for a
 /// potion-family stack carrying a `minecraft:potion_contents` potion id, whose real
-/// title is `PotionContents.getName(prefix)`
-/// (`.cache/mc/26.2/src/net/minecraft/world/item/alchemy/PotionContents.java`,
-/// read through `PotionItem.getName`/`TippedArrowItem.getName`) — composed from the
+/// title is vanilla's own potion-contents name lookup
+/// (read through `PotionItem.getName`/`TippedArrowItem.getName`) — composed from the
 /// potion's own registry id, not the bare item id.
 ///
 /// Resolving that needs `lodestone_data::potion`, which
@@ -478,8 +477,7 @@ pub(crate) fn book_generation_name(generation: u8) -> &'static str {
     }
 }
 
-/// `Enchantment.getFullname` (`.cache/mc/26.2/src/net/minecraft/world/item
-/// /enchantment/Enchantment.java`) for a stack carrying an
+/// Vanilla's own enchantment full-name routine for a stack carrying an
 /// [`lodestone_model::AuthoredEnchantment`] — currently only a creative-menu
 /// enchanted-book entry (see [`super::creative::stack_of`]'s own doc for why
 /// this needs no live session data: the identity and level are known statically).
@@ -535,8 +533,7 @@ fn enchantment_level_numeral(level: u8) -> &'static str {
     }
 }
 
-/// `MobEffectUtil.formatDuration` / `StringUtil.formatTickDuration`
-/// (`.cache/mc/26.2/src/net/minecraft/util/StringUtil.java`), with `scale = 1.0`
+/// Vanilla's own effect-duration/tick-duration formatting routines, with `scale = 1.0`
 /// (this build models no `minecraft:potion_duration_scale` component) and
 /// `tickrate = 20.0` (this build does not model a variable tick rate for tooltip
 /// purposes). `%02d:%02d` (minutes, seconds) below one hour — no potion in this

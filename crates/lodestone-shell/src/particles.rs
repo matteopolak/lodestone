@@ -450,9 +450,8 @@ impl Particles {
     ///
     /// # `count == 0` is not "spawn nothing"
     ///
-    /// Confirmed against the 26.2 client sources
-    /// (`ClientPacketListener.handleParticleEvent`,
-    /// `.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java`):
+    /// Confirmed against the 26.2 client sources, vanilla's own
+    /// particle-event packet handler:
     /// when `count == 0` vanilla spawns exactly **one** particle at the
     /// *exact* `pos` (no positional jitter), whose velocity is
     /// `maxSpeed * offset` per axis rather than drawn from noise:

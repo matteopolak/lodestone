@@ -1476,8 +1476,7 @@ pub struct HudFrame<'a> {
     /// Whether the input line's blinking caret is in its "on" phase this
     /// frame; only meaningful while `chat_input` is `Some`. Which *shape* it
     /// blinks in is [`Self::chat_cursor`]'s business, not this flag's. Vanilla
-    /// blinks it every 300ms (`TextCursorUtils.CURSOR_BLINK_INTERVAL_MS`,
-    /// `.cache/mc/26.2/client-src/net/minecraft/client/gui/components/TextCursorUtils.java`,
+    /// blinks it every 300ms (its own text-cursor blink interval,
     /// `isCursorVisible(millis) == (millis / 300) % 2 == 0`) — the caller
     /// computes this from a wall clock with that same formula so this pure
     /// geometry module owns no clock of its own. Defaults to always-visible
@@ -1974,8 +1973,7 @@ pub fn heart_fill(i: usize, health: f32) -> Option<HeartFill> {
 
 /// Vanilla's Chat Settings (plus one Accessibility-screen field it shares)
 /// values that shape how the scrollback and input line draw —
-/// `net.minecraft.client.Options`'s `chat*` fields
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/Options.java`).
+/// vanilla's own options type's `chat*` fields.
 /// `Copy` for the same reason [`crate::config::Options`] is: cheap to read
 /// once per frame with no borrow to fight.
 ///
@@ -5238,9 +5236,9 @@ mod chat_wrap_cache_tests {
 }
 
 /// The [`TextSpan`] sibling of [`strip_legacy`]: vanilla's
-/// `ChatFormatting.stripFormatting` deletes every `§`+code pair wholesale —
+/// Vanilla's own strip-formatting routine deletes every `§`+code pair wholesale —
 /// colour and all five format flags — for `options.chat.color == false`
-/// (`StringUtil.stripColor`, `.cache/mc/26.2/client-src/net/minecraft/util/StringUtil.java`).
+/// (its own strip-colour helper).
 /// A span list is already past that decode, so the equivalent operation is
 /// resetting every run's style to [`TextStyle::default`]: nothing to delete,
 /// because there is no literal code left to find.

@@ -29,8 +29,7 @@ use crate::keybinds::Keybinds;
 
 /// Sentinel `gui_scale` value meaning "auto": the largest integer scale that
 /// still fits [`MIN_SCALED_WIDTH`]x[`MIN_SCALED_HEIGHT`] into the framebuffer.
-/// Matches vanilla's `Options.AUTO_GUI_SCALE`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/Options.java`).
+/// Matches vanilla's own auto-gui-scale sentinel.
 pub const AUTO_GUI_SCALE: u32 = 0;
 
 /// Default look sensitivity — vanilla's own (`Options.java`,

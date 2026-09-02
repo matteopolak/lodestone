@@ -41,8 +41,7 @@ pub struct ScreenEffects {
     /// Whether the local player's helmet slot holds a carved pumpkin (issue
     /// That fix). Vanilla derives this generically from *any* equipped item's
     /// `minecraft:equippable.camera_overlay` component
-    /// (`Hud.extractCameraOverlays`,
-    /// `.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`)
+    /// (vanilla's own camera-overlays extract routine)
     /// — carved pumpkin is simply the only item that currently ships with the
     /// field set, so this is named for the one concrete case rather than
     /// modelling the general per-item lookup table that has exactly one

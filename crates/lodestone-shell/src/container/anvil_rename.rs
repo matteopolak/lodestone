@@ -1,7 +1,6 @@
 //! The anvil's rename box: a persistent per-menu editable-text value —
-//! vanilla's `AnvilScreen`'s `name` `EditBox` and its `onNameChanged`/
-//! `slotChanged` pair (`.cache/mc/26.2/client-src/net/minecraft/client/gui/
-//! screens/inventory/AnvilScreen.java`).
+//! vanilla's own anvil screen's `name` `EditBox` and its `onNameChanged`/
+//! `slotChanged` pair.
 //!
 //! ## What it is
 //!
