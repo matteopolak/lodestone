@@ -3351,8 +3351,8 @@ where
         None;
     let mut streamer = EntityStreamer::default();
     let mut player_list = PlayerListStreamer::default();
-    // Vanilla's `ServerStatusPacketListenerImpl.hasRequestedStatus`
-    // (`ServerStatusPacketListenerImpl.java:17`): one status reply per
+    // Vanilla's own status packet listener's own "has requested status"
+    // field: one status reply per
     // connection, a second request is a disconnect.
     let mut status_requested = false;
     // Issue #335. This connection's declared channel support, populated from
@@ -3373,8 +3373,8 @@ where
             ServerBound::Handshake { next_state } => {
                 state = next_state;
             }
-            // Issue #277. Mirrors `ServerStatusPacketListenerImpl
-            // .handleStatusRequest` exactly (`:34-41`): answer the first
+            // Issue #277. Mirrors vanilla's own status packet listener's own
+            // "handle status request" step exactly: answer the first
             // request, disconnect on any subsequent one. The repeat case is not
             // pedantry — it is what stops a peer holding a connection open
             // forever cheaply re-asking, which is the same class of leak issue
@@ -3401,7 +3401,8 @@ where
                 );
                 apply(conn, &mut state, directive).await?;
             }
-            // `ServerStatusPacketListenerImpl.handlePingRequest` (`:44-47`):
+            // Vanilla's own status packet listener's own "handle ping
+            // request" step:
             // echo the payload, then close. Note vanilla does *not* require a
             // preceding status request here, so neither does this.
             ServerBound::PingRequest { time } => {
@@ -3413,7 +3414,7 @@ where
                 uuid,
             } => {
                 // Issue #279's login-phase producer. Vanilla validates the name on
-                // this exact packet (`ServerLoginPacketListenerImpl.java:120`) —
+                // this exact packet, in its own generic login-phase packet listener —
                 // but by *throwing*, which closes the socket with no explanation.
                 // We reject the same names and say why, which is the whole point
                 // of this issue.
@@ -3426,7 +3427,7 @@ where
                     apply(conn, &mut state, directive).await?;
                     return Err(ServerError::InvalidUsername);
                 }
-                // Issue #336: vanilla `PlayerList.canPlayerLogin`, at vanilla's
+                // Issue #336: vanilla's own "can player login" check, at vanilla's
                 // own point in the sequence — after the name check, before
                 // `login_success`, so a refused player never reaches
                 // Configuration. `online` is 0 because this crate has no
@@ -3505,7 +3506,7 @@ where
                 apply(conn, &mut state, ServerDirective::EnableEncryption(secret.clone())).await?;
 
                 // Vanilla's server-id is always the empty string
-                // (`ServerLoginPacketListenerImpl.serverId`); the hash is
+                // (its own generic login-phase packet listener's own server-id field); the hash is
                 // taken over it, the secret, and the exact public-key DER
                 // bytes the client encrypted against.
                 let hash = lodestone_auth::server_hash("", &secret, keypair.public_key_der());
@@ -3561,7 +3562,7 @@ where
                 let t_cfg = JoinStopwatch::now();
                 // Issue #329: the world spawn point is a *search*, not a
                 // fixed local `(8, 8)` in the origin column. Vanilla's
-                // `MinecraftServer.setInitialSpawn` walks a ±5-chunk spiral
+                // own "set initial spawn" step walks a ±5-chunk spiral
                 // and picks the first chunk with a `getLevelRespawnPos`-valid
                 // surface (`world_spawn::find_initial_spawn`). Issue #461 had
                 // already replaced the hardcoded Y with terrain, but X/Z
@@ -3573,7 +3574,7 @@ where
                 // origin now moves the spawn to the nearest valid chunk
                 // instead of stranding the player.
                 // **Read the world's own spawn first.** The spiral is
-                // `MinecraftServer.setInitialSpawn`, which vanilla runs **once, at
+                // vanilla's own "set initial spawn" step, which vanilla runs **once, at
                 // world creation**, and persists to `level.dat`. Running it per
                 // connection re-paid a 121-column search on every join and meant
                 // the persisted value was written and never read — so a world could
@@ -3595,7 +3596,7 @@ where
 
                 // Issue #297/#619: keep the world spawn's own chunks loaded
                 // independent of where any particular player is standing —
-                // vanilla's `PrepareSpawnTask.java`, radius 3
+                // vanilla's own spawn-preparation task, radius 3
                 // (`ticket::PLAYER_SPAWN_RADIUS`). Re-granting under the same
                 // `(TicketOwner::Spawn, TicketKind::PlayerSpawn)` key on every
                 // join is a refresh, not a second ticket — see `ticket.rs`'s
@@ -3656,7 +3657,7 @@ where
                 let join_pos = join_position_for_saved_player(saved_player.as_ref(), spawn.pos);
                 #[cfg(target_arch = "wasm32")]
                 let join_pos = spawn.pos;
-                // Vanilla's `playerGameType`, restored — a player who typed
+                // Vanilla's own player-game-type field, restored — a player who typed
                 // `/gamemode survival` and quit comes back in survival. Shadowed
                 // rather than assigned so a world with no save keeps the mode the
                 // host opened with.
@@ -3670,7 +3671,7 @@ where
                 for directive in proto.begin_play_at(view_radius, join_pos, game_mode) {
                     apply(conn, &mut state, directive).await?;
                 }
-                // Vanilla's `PlayerList.placeNewPlayer` sends the abilities
+                // Vanilla's own "place new player" step sends the abilities
                 // packet right after the login packet, and it is not optional:
                 // the login packet's `game_type` tells the client *what* mode it
                 // is in, while flight permission and instant build live only
@@ -3688,17 +3689,17 @@ where
                 // `lodestone-shell`'s chat box, its `CommandTreeCell` and the whole
                 // suggestion UX were complete and starved of input.
                 //
-                // Position taken from `PlayerList.placeNewPlayer`, which calls
-                // `sendPlayerPermissionLevel` — the method that sends the tree —
-                // after the abilities packet and before `sendLevelInfo`. So it goes
+                // Position taken from vanilla's own "place new player" step, which calls
+                // its own "send player permission level" step — the method that sends the tree —
+                // after the abilities packet and before its own "send level info" step. So it goes
                 // here: after abilities above, before the clock sync below, and
                 // before any chunk goes out. Appending it after chunk streaming
                 // would have been easier (the `CommandSession` that owns the tree
                 // is built down there) and it is the wrong place.
                 //
                 // The tree is pruned to this connection's own permission level, as
-                // vanilla's `Commands.sendCommands` prunes with
-                // `fillUsableCommands`: a level-0 player is not sent `/gamemode`'s
+                // vanilla's own "send commands" step prunes with
+                // its own "fill usable commands" helper: a level-0 player is not sent `/gamemode`'s
                 // node, which is what stops the client suggesting a command the
                 // server will refuse.
                 //
