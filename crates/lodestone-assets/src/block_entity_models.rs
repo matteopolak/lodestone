@@ -1,6 +1,6 @@
 //! Hand-ported *block-entity* model geometry for the 26.2 family — the cuboid
-//! rigs that vanilla's `BlockEntityRenderer`s draw and that no block model
-//! covers.
+//! rigs that the real client's per-block-entity draw code renders and that no
+//! block model covers.
 //!
 //! # Why this module has to exist at all
 //!
@@ -11,16 +11,16 @@
 //! { "textures": { "particle": "minecraft:block/oak_planks" } }
 //! ```
 //!
-//! — **zero elements**. Every visible triangle of a chest comes from
-//! `ChestRenderer`/`ChestModel`, so a client with no block-entity renderer draws
-//! a chest as a *hole in the world*, not as a slightly-wrong box. That is the
-//! single highest-value thing in this module and the reason chest is first.
+//! — **zero elements**. Every visible triangle of a chest comes from the
+//! dedicated chest draw code and its own cuboid rig, so a client with no
+//! block-entity renderer draws a chest as a *hole in the world*, not as a
+//! slightly-wrong box. That is the single highest-value thing in this module
+//! and the reason chest is first.
 //!
 //! The converse is just as important and much easier to get wrong from memory:
 //! **a 26.2 sign is a real block model.** `assets/minecraft/blockstates/oak_sign.json`
 //! maps every one of the 16 `rotation` values to a `block/oak_sign_rot_N` model
-//! with genuine geometry, and `StandingSignRenderer` (checked in
-//! `.cache/mc/26.2/client-src/.../blockentity/StandingSignRenderer.java`) declares
+//! with genuine geometry, and the real sign's block-entity draw code declares
 //! **no model whatsoever** — only text transformations. So there is deliberately
 //! no `sign_model()` here: porting one would draw a second board inside the one
 //! the block model already meshes. Sign *text* is a text pass, not geometry, and
@@ -28,29 +28,31 @@
 //!
 //! # The geometry is vanilla's, exactly
 //!
-//! Transcribed from `net/minecraft/client/model/object/chest/ChestModel.java`
-//! (26.2 ships de-obfuscated, so `createSingleBodyLayer` /
-//! `createDoubleBodyLeftLayer` / `createDoubleBodyRightLayer` are the real
-//! names). Texel offsets, box extents, pivots and the 64×64 sheet size are the
-//! exact vanilla values; nothing here is rounded or "close enough".
+//! Transcribed from the real client's chest cuboid-rig builder. Texel offsets,
+//! box extents, pivots and the 64×64 sheet size are the exact vanilla values;
+//! nothing here is rounded or "close enough". A double chest's two halves are
+//! genuinely separate builders rather than one shared body posed twice — see
+//! [`BLOCK_ENTITY_MODELS`]'s own doc for why that matters.
 //!
 //! # Not entity models, despite sharing every primitive
 //!
 //! These reuse [`CubeDef`]/[`PartDef`]/[`EntityModelDef`] because the *bake* is
-//! identical — vanilla's `ModelPart` does not know or care whether its owner is
-//! a mob or a chest. What differs is **placement**, and that difference is
-//! load-bearing enough to keep the two corpora apart:
+//! identical — vanilla's own cuboid-part primitive does not know or care
+//! whether its owner is a mob or a chest. What differs is **placement**, and
+//! that difference is load-bearing enough to keep the two corpora apart:
 //!
 //! * An entity is placed by `entity_model_matrix`, which flips Y
 //!   (`scale(-1, -1, 1)`) and lifts by `MODEL_FEET_OFFSET = 1.501` because mob
 //!   model space is Y-**down**.
-//! * A block entity is **not flipped and not lifted**. `ChestRenderer.submit`'s
-//!   whole prologue is one `Matrix4f().rotationAround(Axis.YP.rotationDegrees(-facing.toYRot()), 0.5F, 0.0F, 0.5F)`,
-//!   and the model's own texels then land directly in block space: the chest
-//!   `bottom` box spans y `0..10` texels, i.e. `0..0.625` blocks off the floor,
-//!   and the `lid` pivot at y `9` puts the closed lid's top at `14/16` — the
-//!   real chest height. Reusing the entity placement matrix would bury a chest
-//!   1.5 blocks into the floor, upside down.
+//! * A block entity is **not flipped and not lifted**. The real chest draw
+//!   code's whole prologue is one rotation about the vertical axis, by the
+//!   negated yaw the block's facing implies, pivoting about the block's own
+//!   horizontal centre — and the model's own texels then land directly in
+//!   block space: the chest `bottom` box spans y `0..10` texels, i.e.
+//!   `0..0.625` blocks off the floor, and the `lid` pivot at y `9` puts the
+//!   closed lid's top at `14/16` — the real chest height. Reusing the entity
+//!   placement matrix would bury a chest 1.5 blocks into the floor, upside
+//!   down.
 //!
 //! # How to change it
 //!
@@ -68,66 +70,63 @@
 //! * `visible_faces` is indexed by `entity::FACE_ORDER`
 //!   (`[Down, Up, West, North, East, South]`), **not** by `Direction`'s own
 //!   discriminant order. The double-chest halves depend on this: the right half
-//!   omits `East` (index 4) and the left half omits `West` (index 2), which is
-//!   `Util.allOfEnumExcept(Direction.EAST)`/`WEST` in `ChestModel`. Getting the
-//!   index wrong deletes the wrong face, and the result is a chest with a hole
-//!   in its *front* that still passes any "does a chest draw" gate.
+//!   omits `East` (index 4) and the left half omits `West` (index 2), matching
+//!   vanilla's own "every direction except this one" face set for each half.
+//!   Getting the index wrong deletes the wrong face, and the result is a chest
+//!   with a hole in its *front* that still passes any "does a chest draw" gate.
 
 use crate::entity::{CubeDef, EntityModelDef, PartDef, PartPose};
 
-/// The chest sheet is 64×64 (`LayerDefinition.create(mesh, 64, 64)` in all three
-/// `ChestModel` layers). Asserted against the real `client.jar` PNGs by
+/// The chest sheet is 64×64 (the declared canvas size in all three real
+/// chest body-layer builders). Asserted against the real `client.jar` PNGs by
 /// `lodestone-assets/tests/real_jar.rs`.
 const CHEST_SHEET: (u32, u32) = (64, 64);
 
-/// The bell sheet is 32×32 (`BellModel.createBodyLayer`'s
-/// `LayerDefinition.create(mesh, 32, 32)`) — smaller than every chest/skull
-/// canvas so far, which is why [`bell_model`]'s own test does not reuse
-/// [`CHEST_SHEET`].
+/// The bell sheet is 32×32 (the real bell body-layer builder's declared
+/// canvas) — smaller than every chest/skull canvas so far, which is why
+/// [`bell_model`]'s own test does not reuse [`CHEST_SHEET`].
 const BELL_SHEET: (u32, u32) = (32, 32);
 
-/// The banner sheet is 64×64 (`BannerModel`/`BannerFlagModel`'s
-/// `LayerDefinition.create(mesh, 64, 64)` — both layers share one canvas
-/// size, same as [`CHEST_SHEET`]).
+/// The banner sheet is 64×64 (the real banner body and flag builders both
+/// declare this one canvas size, same as [`CHEST_SHEET`]).
 const BANNER_SHEET: (u32, u32) = (64, 64);
 
-/// The shulker sheet is 64×64 (`ShulkerModel.createBoxLayer`'s
-/// `LayerDefinition.create(mesh, 64, 64)`). Same size as [`CHEST_SHEET`] and
-/// [`BANNER_SHEET`], named separately so a jar change is one edit per family.
+/// The shulker sheet is 64×64 (the real box-layer builder's declared
+/// canvas). Same size as [`CHEST_SHEET`] and [`BANNER_SHEET`], named
+/// separately so a jar change is one edit per family.
 const SHULKER_SHEET: (u32, u32) = (64, 64);
 
-/// The shield sheet is 64×64 (`ShieldModel.createLayer`'s
-/// `LayerDefinition.create(mesh, 64, 64)`). Same canvas size as
+/// The shield sheet is 64×64 (the real shield layer builder's declared
+/// canvas). Same canvas size as
 /// [`CHEST_SHEET`]/[`BANNER_SHEET`]/[`SHULKER_SHEET`], named separately for
 /// the same reason those are: a jar change to any one family is one constant
 /// to edit.
 const SHIELD_SHEET: (u32, u32) = (64, 64);
 
-/// The book sheet is 64×**32** (`BookModel.createBodyLayer`'s
-/// `LayerDefinition.create(mesh, 64, 32)`) — the only non-square canvas in this
-/// module, so a builder that reused [`CHEST_SHEET`] would halve every `v`
-/// coordinate and draw the page texture at the wrong scale rather than not at
-/// all.
+/// The book sheet is 64×**32** (the real book body-layer builder's declared
+/// canvas) — the only non-square canvas in this module, so a builder that
+/// reused [`CHEST_SHEET`] would halve every `v` coordinate and draw the page
+/// texture at the wrong scale rather than not at all.
 const BOOK_SHEET: (u32, u32) = (64, 32);
 
-/// The conduit eye sheet, 16×16 — `ConduitRenderer.createEyeLayer()`'s
-/// `LayerDefinition.create(mesh, 16, 16)`.
+/// The conduit eye sheet, 16×16 — the real eye-layer builder's declared
+/// canvas.
 const CONDUIT_EYE_SHEET: (u32, u32) = (16, 16);
 
-/// The conduit wind sheet, 64×32 — `ConduitRenderer.createWindLayer()`'s
-/// `LayerDefinition.create(mesh, 64, 32)`. Same canvas size as [`BOOK_SHEET`],
-/// named separately so a jar change to either is one edit.
+/// The conduit wind sheet, 64×32 — the real wind-layer builder's declared
+/// canvas. Same canvas size as [`BOOK_SHEET`], named separately so a jar
+/// change to either is one edit.
 const CONDUIT_WIND_SHEET: (u32, u32) = (64, 32);
 
-/// The conduit's inactive-shell sheet, 32×16 — `ConduitRenderer.createShellLayer()`'s
-/// `LayerDefinition.create(mesh, 32, 16)`.
+/// The conduit's inactive-shell sheet, 32×16 — the real shell-layer
+/// builder's declared canvas.
 const CONDUIT_SHELL_SHEET: (u32, u32) = (32, 16);
 
-/// The conduit's active-shell ("cage") sheet, 32×16 — `ConduitRenderer.createCageLayer()`'s
-/// `LayerDefinition.create(mesh, 32, 16)`. Same dimensions as
-/// [`CONDUIT_SHELL_SHEET`] but a genuinely different sheet
-/// (`entity/conduit/cage`, not `entity/conduit/base`) and a genuinely
-/// different box (8×8×8, not 6×6×6) — named separately rather than reused.
+/// The conduit's active-shell ("cage") sheet, 32×16 — the real cage-layer
+/// builder's declared canvas. Same dimensions as [`CONDUIT_SHELL_SHEET`] but
+/// a genuinely different sheet (`entity/conduit/cage`, not
+/// `entity/conduit/base`) and a genuinely different box (8×8×8, not 6×6×6) —
+/// named separately rather than reused.
 const CONDUIT_CAGE_SHEET: (u32, u32) = (32, 16);
 
 /// `entity::FACE_ORDER` index of the `West` face — see the module doc on why
@@ -282,7 +281,7 @@ pub const BLOCK_ENTITY_MODELS: &[BlockEntityModelEntry] = &[
     },
     BlockEntityModelEntry {
         name: "shield",
-        // The default/no-pattern sheet — `ShieldSpecialRenderer.submit` picks
+        // The default/no-pattern sheet — the real shield draw code picks
         // this one whenever the stack has neither a stored pattern layer nor
         // a `minecraft:base_color`, which is every shield straight off a
         // crafting table. `lodestone_render::block_entity::shield_texture_stem`
@@ -319,7 +318,7 @@ pub fn block_entity_model(name: &str) -> Option<&'static BlockEntityModelEntry> 
     BLOCK_ENTITY_MODELS.iter().find(|e| e.name == name)
 }
 
-/// A single chest — `ChestModel.createSingleBodyLayer()`.
+/// A single chest — the real single-body chest cuboid rig.
 ///
 /// ```text
 /// bottom  texOffs(0, 19)  box(1, 0, 1,  14, 10, 14)  pose ZERO
@@ -327,10 +326,10 @@ pub fn block_entity_model(name: &str) -> Option<&'static BlockEntityModelEntry> 
 /// lock    texOffs(0,  0)  box(7,-2, 14,  2,  4,  1)  pose offset(0, 9, 1)
 /// ```
 ///
-/// `lid` and `lock` share a pivot on purpose: `ChestModel.setupAnim` assigns
-/// `this.lock.xRot = this.lid.xRot`, so the latch swings with the lid rather
-/// than staying put. They are **siblings**, not parent and child — a nested
-/// `lock` would compose the pivot twice.
+/// `lid` and `lock` share a pivot on purpose: the real chest's animation code
+/// assigns the lock's own rotation from the lid's every frame, so the latch
+/// swings with the lid rather than staying put. They are **siblings**, not
+/// parent and child — a nested `lock` would compose the pivot twice.
 #[must_use]
 pub fn chest_single_model() -> EntityModelDef {
     let root = PartDef::new(PartPose::ZERO)
@@ -365,7 +364,7 @@ pub fn chest_single_model() -> EntityModelDef {
     }
 }
 
-/// The left half of a double chest — `ChestModel.createDoubleBodyLeftLayer()`.
+/// The left half of a double chest — the real double-chest left-body builder.
 ///
 /// Boxes start at x `0` and are 15 wide (not 1/14 as in the single chest), and
 /// every box omits its `West` face: that face is the seam against the right
@@ -403,7 +402,7 @@ pub fn chest_double_left_model() -> EntityModelDef {
     }
 }
 
-/// The right half of a double chest — `ChestModel.createDoubleBodyRightLayer()`.
+/// The right half of a double chest — the real double-chest right-body builder.
 ///
 /// Boxes start at x `1` and are 15 wide, and every box omits its `East` face
 /// (the seam against the left half).

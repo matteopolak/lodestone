@@ -21,7 +21,7 @@ pub enum ChatKind {
 }
 
 /// A last-death location, from the optional `GlobalPos` field of
-/// `ClientboundRespawnPacket` (and the game-join packet's equivalent).
+/// the respawn packet (and the game-join packet's equivalent).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeathLocation {
     /// Dimension the death occurred in.
@@ -80,7 +80,7 @@ pub struct DimensionTypeInfo {
     /// Baseline light every block receives regardless of sky exposure — `0.0`
     /// overworld, `0.1` Nether, `0.25` End.
     pub ambient_light: f32,
-    /// `EnvironmentAttributes.AMBIENT_LIGHT_COLOR`, packed `0xRRGGBB` — the
+    /// The dimension's ambient-light-color attribute, packed `0xRRGGBB` — the
     /// colour the GPU lightmap seeds its accumulator with before either light
     /// half is added, so an unlit surface is not pure black. **Not** the same
     /// quantity as [`Self::ambient_light`] above (that one only ever blends a
@@ -110,7 +110,7 @@ impl DimensionTypeInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ChatAckInfo {
     /// Raw message signature bytes. Empty means this message carried no
-    /// signature at all (vanilla's `!PlayerChatMessage.hasSignature()`) —
+    /// signature at all —
     /// the common case on a server with signed chat disabled, and by itself
     /// enough to treat the message as unverified.
     pub signature: Vec<u8>,
@@ -118,15 +118,15 @@ pub struct ChatAckInfo {
     pub global_index: i32,
     /// Whether the message was shown to the user after filtering.
     pub was_shown: bool,
-    /// This message's position in the sender's signing chain
-    /// (`SignedMessageLink.index`, the wire's `index` field on `PLAYER_CHAT`).
+    /// This message's position in the sender's signing chain, the wire's
+    /// `index` field on `PLAYER_CHAT`.
     /// Needed, together with the sender's announced chat-session id
     /// ([`PlayerListEntry::chat_session`]), to reconstruct the exact
-    /// `SignedMessageLink` `lodestone_auth::verify_signature` hashes —
+    /// signing-chain link `lodestone_auth::verify_signature` hashes —
     /// verification cannot be attempted without it.
     pub message_index: i32,
     /// The signed body's own timestamp, epoch **milliseconds** — the wire
-    /// unit (`SignedMessageBody.Packed`'s field). The signature payload
+    /// unit. The signature payload
     /// itself is built over epoch **seconds**
     /// (`lodestone_auth::chat_session::build_signature_payload`'s
     /// `timestamp_epoch_seconds` parameter); converting is the verifier's
@@ -135,7 +135,7 @@ pub struct ChatAckInfo {
     /// that needs it, rather than an implicit unit change baked into a field
     /// name.
     pub timestamp_millis: i64,
-    /// The signed body's random salt (`SignedMessageBody.Packed`'s `salt`).
+    /// The signed body's random salt.
     pub salt: i64,
     /// The raw signed message content, verbatim — **not** [`ClientEvent::Chat`]'s
     /// own `text`, which may be the server's *decorated* form
@@ -143,8 +143,8 @@ pub struct ChatAckInfo {
     /// sender signed, so this is kept alongside the decorated text rather
     /// than reconstructed from it.
     pub raw_content: String,
-    /// The resolved last-seen signature chain this message was built over
-    /// (`SignedMessageBody.Packed.lastSeen`, already resolved against the
+    /// The resolved last-seen signature chain this message was built over,
+    /// already resolved against the
     /// connection's signature cache — see `read_last_seen_packed`), each
     /// entry 256 raw signature bytes.
     pub last_seen: Vec<Vec<u8>>,
@@ -159,12 +159,12 @@ pub struct ChatAckInfo {
     /// proven otherwise, never trusted by default), and the driver may raise
     /// it to `true` after a successful `lodestone_auth::verify_signature`
     /// call. An empty `signature` (no signature at all) is left `false` and
-    /// is never attempted — vanilla's own rule
-    /// (`ChatTrustLevel.evaluate`'s `!message.hasSignature()` arm).
+    /// is never attempted — the same rule the real client's own trust
+    /// evaluation applies for an unsigned message.
     pub verified: bool,
 }
 
-/// A packed message signature, from `MessageSignature.Packed`.
+/// A packed message signature.
 ///
 /// The wire form is either a full 256-byte signature (for a signature the
 /// client has not cached yet) or an index into the last-seen signature
@@ -181,7 +181,7 @@ pub enum PackedMessageSignature {
     Cached(i32),
 }
 
-/// The anchor point used by `ClientboundPlayerLookAtPacket`'s
+/// The anchor point used by the player look at packet's
 /// `EntityAnchorArgument.Anchor`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LookAnchor {
@@ -256,7 +256,7 @@ pub enum EntityPose {
     Other(u32),
 }
 
-/// A version-free entity animation kind, from `ClientboundAnimatePacket`.
+/// A version-free entity animation kind, from the animate packet.
 ///
 /// `non_exhaustive` with an [`Other`](AnimationAction::Other) escape hatch for
 /// the same reason as [`EntityPose`]: vanilla's action byte is a small, fixed
@@ -394,15 +394,15 @@ pub struct EntityMetadataUpdate {
     /// bitfield.
     pub living_flags: Option<u8>,
     /// The **mob** flags byte (no-AI / left-handed / **aggressive**), when present
-    /// and when the entity is known to be a `Mob`. Decode through
+    /// and when the entity is known to be a mob-type entity. Decode through
     /// `lodestone_entity::metadata::MobFlags` rather than by masking inline.
     ///
     /// # Why this is separate from [`living_flags`](Self::living_flags)
     ///
-    /// It is a different byte at a different index, declared by a different
-    /// vanilla class, and it is what actually drives a *mob*'s arm pose. Vanilla's
-    /// mob renderers (`AbstractSkeletonRenderer`, `DrownedRenderer`,
-    /// `AbstractZombieModel`) read `Mob.isAggressive()`; the using-item bit behind
+    /// It is a different byte at a different index, declared for a different
+    /// entity category, and it is what actually drives a *mob*'s arm pose. Every
+    /// mob renderer whose model draws an aggressive pose reads this
+    /// aggressive flag; the using-item bit behind
     /// [`living_flags`](Self::living_flags) is the *player* mechanism. A skeleton
     /// drawing on you never sets the using-item bit, so a client that only decodes
     /// index 8 leaves every mob in the rest pose.
@@ -410,23 +410,23 @@ pub struct EntityMetadataUpdate {
     /// # Why this can be absent on a packet that carried the byte
     ///
     /// Same reason as [`living_flags`](Self::living_flags), one notch tighter. The
-    /// byte's index is shared with `ArmorStand`'s client-flags byte of the same
+    /// byte's index is shared with the armor stand's client-flags byte of the same
     /// serializer, and an armour stand *is* a living entity — so establishing
-    /// "living" is not enough and the adapter must establish `Mob`. `None`
+    /// "living" is not enough and the adapter must establish "mob". `None`
     /// therefore means "not known to be mob flags", which a consumer must read as
     /// "not aggressive", never as a cleared bitfield.
     pub mob_flags: Option<u8>,
     /// The **armour stand client-flags** byte (small / show-arms / no-base-plate
     /// / marker), when present and when the entity is known to be an
-    /// `ArmorStand`. Decode through
+    /// armor stand. Decode through
     /// `lodestone_entity::metadata::ArmorStandFlags` rather than by masking
     /// inline.
     ///
     /// # Why this is separate from [`mob_flags`](Self::mob_flags)
     ///
     /// It is the *other* claimant of the same metadata index (15) with the same
-    /// serializer (`BYTE`) — `ArmorStand.DATA_CLIENT_FLAGS` rather than
-    /// `Mob.DATA_MOB_FLAGS_ID` — and `0x04` means `showArms` here where it means
+    /// serializer (`BYTE`) — the armor stand's client-flags field rather than
+    /// the mob's flags field — and `0x04` means `showArms` here where it means
     /// `aggressive` in [`mob_flags`](Self::mob_flags). Folding them into one
     /// field would make "is this stand's arm visible" and "is this mob
     /// attacking" read off whichever byte the adapter happened to establish
@@ -446,14 +446,14 @@ pub struct EntityMetadataUpdate {
     /// # Why this can be absent on a packet that carried the byte
     ///
     /// Same shape as [`mob_flags`](Self::mob_flags), the complementary half: a
-    /// version adapter that cannot establish the entity is an `ArmorStand`
+    /// version adapter that cannot establish the entity is an armor stand
     /// leaves this `None` rather than surfacing a byte that may mean a mob's
     /// aggressive bit. `None` therefore means "not known to be armour-stand
     /// flags", which a consumer must read as "no armour-stand-specific
     /// cosmetics known", never as a cleared bitfield.
     pub armor_stand_flags: Option<u8>,
     /// An armour stand's six part rotations, as far as *this* packet reported
-    /// them — `ArmorStand.DATA_HEAD_POSE` through `DATA_RIGHT_LEG_POSE`,
+    /// them — the head-pose through right-leg-pose fields,
     /// indices 16-21, each an `(x, y, z)` triple of Euler **degrees**.
     ///
     /// # Why the six stay individually optional
@@ -528,36 +528,36 @@ pub struct EntityMetadataUpdate {
     /// unrecognised component costs detail, never the answer to "which item is
     /// this".
     pub item: Reported<ItemStack>,
-    /// Current air supply in ticks, when present (`Entity.DATA_AIR_SUPPLY_ID`).
+    /// Current air supply in ticks, when present.
     /// Feeds the HUD's underwater bubble row (`docs/sky-and-air-bubbles.md`).
     pub air_supply: Option<i32>,
-    /// A creeper's fuse direction (`Creeper.DATA_SWELL_DIR`), when present and
+    /// A creeper's fuse direction, when present and
     /// the entity is known to be a creeper: `-1` while idle or backing off,
     /// `1` while counting up to detonation. The counter itself
-    /// (`Creeper.swell`/`oldSwell`) is never sent — only the direction is, and
+    /// is never sent — only the direction is, and
     /// a consumer integrates it client-side one tick at a time, exactly as
-    /// vanilla's own client does (`Creeper.java`). See
+    /// the real client does. See
     /// `lodestone_render::entity_anim::pose_swelling`'s docs for why the split
     /// between "synced direction" and "locally integrated counter" exists.
     pub creeper_swell_dir: Option<i32>,
     /// Whether a creeper is charged (lightning-struck), when present and the
-    /// entity is known to be a creeper (`Creeper.DATA_IS_POWERED`). Doubles the
+    /// entity is known to be a creeper. Doubles the
     /// explosion radius and drops a charged mob's head; set once and never
     /// cleared.
     pub creeper_powered: Option<bool>,
     /// Whether a creeper's fuse has been lit (flint-and-steel or fire charge),
-    /// when present and the entity is known to be a creeper
-    /// (`Creeper.DATA_IS_IGNITED`). Set once and never cleared — distinct from
+    /// when present and the entity is known to be a creeper. Set once and never
+    /// cleared — distinct from
     /// [`creeper_swell_dir`](Self::creeper_swell_dir) alone being positive,
-    /// which also happens from proximity (`SwellGoal`) without ever igniting.
+    /// which also happens from proximity (a nearby-player AI goal) without ever igniting.
     pub creeper_ignited: Option<bool>,
-    /// An experience orb's XP value (`ExperienceOrb.DATA_VALUE`), when present
+    /// An experience orb's XP value, when present
     /// and the entity is known to be an orb.
     ///
     /// This is what **one** absorption of the orb pays, not how many absorptions
-    /// the entity holds after merging — vanilla keeps those as two separate
+    /// the entity holds after merging — the game keeps those as two separate
     /// numbers and only the first is synced. The client needs it for exactly one
-    /// thing: `ExperienceOrb.getIcon()` picks one of eleven sprite cells from it,
+    /// thing: picking one of eleven sprite cells to draw,
     /// by a **bucketed** comparison ladder rather than a linear map, so two orbs
     /// worth 7 and 16 draw the same cell and one worth 17 draws the next.
     ///
@@ -571,16 +571,15 @@ pub struct EntityMetadataUpdate {
     /// `None` rather than surfacing a number that means something else.
     ///
     /// `None` therefore means "not known to be an orb value", which a consumer
-    /// reads as vanilla's own accessor default of `0` — `getIcon(0)` is cell 0 —
-    /// never as a cleared value.
+    /// reads as the real accessor's own default of `0` — the icon for value `0`
+    /// is cell 0 — never as a cleared value.
     pub experience_orb_value: Option<i32>,
     /// Whether a tamed-animal-family entity is tamed, when present and the
     /// entity is known to belong to that family.
     ///
-    /// Two different vanilla bytes feed this one field: `TamableAnimal.isTame()`
-    /// (`DATA_FLAGS_ID & 0x04`) for wolf/cat/parrot, and `AbstractHorse.isTamed()`
-    /// (`DATA_ID_FLAGS & 0x02`) for the horse family — a *different* bit at the
-    /// same wire index. A version adapter resolves which family the concrete
+    /// Two different bytes feed this one field: one bit for wolf/cat/parrot,
+    /// and a *different* bit at the
+    /// same wire index for the horse family. A version adapter resolves which family the concrete
     /// entity type belongs to and reads the matching bit; this field is the
     /// version-free result either way, so a consumer never needs to know the bit
     /// differed.
@@ -588,21 +587,21 @@ pub struct EntityMetadataUpdate {
     /// # Why this can be absent on a packet that carried the byte
     ///
     /// Same shape as [`living_flags`](Self::living_flags): index 18's `BYTE` is
-    /// also `Sheep.DATA_WOOL_ID` and `Shulker.DATA_COLOR_ID`. A version adapter
+    /// also a sheep's wool-colour field and a shulker's colour field. A version adapter
     /// that cannot establish the entity is a tamable-animal or a horse leaves
     /// this `None` rather than surfacing a byte that may mean a wool colour.
     /// `None` therefore means "not known to be a tameable family", which a
     /// consumer must treat as "draw the untamed/wild appearance", never as a
     /// cleared bitfield.
     pub tamed: Option<bool>,
-    /// `TamableAnimal.isInSittingPose()` (`DATA_FLAGS_ID & 0x01`), when present
-    /// and the entity is known to be a `TamableAnimal` (wolf/cat/parrot). The
+    /// Whether a tamable animal is sitting, when present
+    /// and the entity is known to be one of the wolf/cat/parrot family. The
     /// horse family has no equivalent bit at this index, so this is `None` for
     /// every horse-family entity regardless of pose. Same absence rule as
     /// [`tamed`](Self::tamed): `None` means "not known to be a tamable animal",
     /// not "not sitting".
     pub sitting: Option<bool>,
-    /// `EnderDragon.DATA_PHASE` (`Phase::id`), when present and the entity is
+    /// The ender dragon's current fight phase, when present and the entity is
     /// known to be an ender dragon.
     ///
     /// # Why this can be absent on a packet that carried the value
@@ -615,25 +614,25 @@ pub struct EntityMetadataUpdate {
     /// a consumer must treat as "no phase-specific pose", never as a cleared
     /// value.
     pub dragon_phase: Option<i32>,
-    /// `EndCrystal.DATA_BEAM_TARGET` — where the crystal's beam points, when
+    /// The end crystal's beam-target field — where the crystal's beam points, when
     /// present. [`Reported::Reported(None)`](Reported::Reported) is "no beam"
-    /// (vanilla's own default); [`Reported::Reported(Some(pos))`](Reported::Reported)
+    /// (the field's own empty default); [`Reported::Reported(Some(pos))`](Reported::Reported)
     /// is a beam aimed at `pos`. Self-identifying by `(index, serializer)`
     /// pair at the wire — see the version adapter's own decode-side doc for
-    /// why the serializer alone is not enough (`OPTIONAL_BLOCK_POS` is reused
-    /// at two other indices for unrelated fields).
+    /// why the serializer alone is not enough (that same optional-position
+    /// serializer is reused at two other indices for unrelated fields).
     pub crystal_beam_target: Reported<BlockPos>,
-    /// `EndCrystal.DATA_SHOW_BOTTOM` — whether the crystal draws its bedrock
+    /// The end crystal's show-bottom field — whether the crystal draws its bedrock
     /// base, when present and the entity is known to be an end crystal.
     ///
     /// # Why this can be absent on a packet that carried the byte
     ///
     /// Same shape as [`tamed`](Self::tamed): index 9's `BOOLEAN` is also
-    /// `AreaEffectCloud.DATA_WAITING` and `FishingHook.DATA_BITING`. `None`
+    /// an area-effect-cloud's waiting flag and a fishing hook's biting flag. `None`
     /// means "not known to be an end crystal", which a consumer must treat as
-    /// "draw the base" (vanilla's own default), never as a cleared flag.
+    /// "draw the base" (the field's own default), never as a cleared flag.
     pub crystal_show_bottom: Option<bool>,
-    /// `Painting.DATA_PAINTING_VARIANT_ID` — which painting is hung, as its
+    /// The painting's variant field — which painting is hung, as its
     /// registry key (`minecraft:kebab`), when present.
     ///
     /// # Why this one needs no class guard
@@ -655,47 +654,47 @@ pub struct EntityMetadataUpdate {
     /// see `lodestone_render::painting::painting_size`.
     pub painting_variant: Option<Identifier>,
     /// Whether a firework rocket is **attached to a gliding player** —
-    /// `FireworkRocketEntity.DATA_ATTACHED_TO_TARGET` reduced to its presence,
+    /// the attached-to-target field reduced to its presence,
     /// when present.
     ///
     /// Only presence is carried, not the target id, because
-    /// `FireworkRocketEntity.shouldRender` returns false for an attached rocket
+    /// an attached rocket is never itself drawn
     /// and nothing downstream would read which entity it rides. Reducing it
     /// here rather than passing the id on is a decision, not a dropped field.
     ///
     /// `None` means "never reported", which a consumer must treat as **not**
-    /// attached (vanilla's own empty default) — i.e. a rocket that draws.
+    /// attached (the field's own empty default) — i.e. a rocket that draws.
     pub firework_attached: Option<bool>,
     /// Whether a firework rocket was fired from a crossbow —
-    /// `FireworkRocketEntity.DATA_SHOT_AT_ANGLE`, when present and the entity
+    /// the shot-at-angle field, when present and the entity
     /// is known to be a firework rocket.
     ///
-    /// It is what tips the sprite out of the camera plane onto its flight axis
-    /// (`FireworkEntityRenderer.submit`'s three extra rotations).
+    /// It is what tips the sprite out of the camera plane onto its flight axis.
     ///
     /// # Why this can be absent on a packet that carried the byte
     ///
-    /// Index 10's `BOOLEAN` is also `AbstractArrow.IN_GROUND` and
-    /// `Interaction.DATA_RESPONSE_ID`, and none of the three claimants is a
+    /// Index 10's `BOOLEAN` is also an arrow's in-ground flag and
+    /// an interaction entity's response-id field, and none of the three claimants is a
     /// living entity, so the `living`/`mob` census cannot separate them. `None`
     /// therefore means "not known to be a firework's angle bit", which a
     /// consumer must read as "not shot at an angle", never as a cleared flag.
     pub firework_shot_at_angle: Option<bool>,
-    /// `ItemFrame.DATA_ROTATION` — which of the eight 45° steps the stack in
-    /// an item frame is turned to (`ItemFrame.getRotation()`, `0..8`).
+    /// The item frame's rotation field — which of the eight 45° steps the stack in
+    /// an item frame is turned to (`0..8`).
     ///
     /// # Why this can be absent on a packet that carried the int
     ///
-    /// Index 10's `INT` is also `Display.DATA_POS_ROT_INTERPOLATION_DURATION_ID`
-    /// and `VehicleEntity.DATA_ID_DAMAGE`'s neighbours in the jar dump, so an
+    /// Index 10's `INT` is also a display entity's position/rotation
+    /// interpolation-duration field and a vehicle's damage field's neighbours in
+    /// the jar dump, so an
     /// adapter raises this only for an entity it already knows is an item
     /// frame. `None` is "not known to be a frame's rotation", which a consumer
-    /// treats as vanilla's own default of `0` — an upright item — never as a
+    /// treats as the field's own default of `0` — an upright item — never as a
     /// cleared value.
     pub item_frame_rotation: Option<u8>,
-    /// `VehicleEntity.DATA_ID_HURT` — the boat/minecart hurt clock, set to
-    /// `10` by `hurtServer` and counted down one per tick by the vehicle's own
-    /// tick. `0` is "not hurt".
+    /// The vehicle's hurt-time field — the boat/minecart hurt clock, set to
+    /// `10` when the vehicle takes damage and counted down one per tick by the
+    /// vehicle's own tick. `0` is "not hurt".
     ///
     /// # Why this can be absent on a packet that carried the int
     ///
@@ -703,76 +702,76 @@ pub struct EntityMetadataUpdate {
     /// orb's value, a primed TNT's fuse, a fishing hook's hooked entity and a
     /// display entity's interpolation delay alongside this — and no census
     /// column separates them (none of the five is living). An adapter raises
-    /// this only for an entity it already knows is a `VehicleEntity`. `None`
+    /// this only for an entity it already knows is a vehicle. `None`
     /// therefore means "not known to be a vehicle's hurt clock", never a
     /// cleared value.
     pub vehicle_hurt_time: Option<i32>,
-    /// `VehicleEntity.DATA_ID_HURTDIR` — which way the hull rocks, `+1` or
-    /// `-1`; `hurtServer` negates it on every hit so consecutive punches tip
-    /// the boat alternately. Its `defineSynchedData` default is `1`, not `0`.
+    /// The vehicle's hurt-direction field — which way the hull rocks, `+1` or
+    /// `-1`; each hit negates it so consecutive punches tip
+    /// the boat alternately. Its default is `1`, not `0`.
     ///
     /// # Why this can be absent on a packet that carried the int
     ///
-    /// Index 9's `INT` is also `Display`'s transformation-interpolation
-    /// duration, so this is class-gated for the same reason
+    /// Index 9's `INT` is also a display entity's transformation-interpolation
+    /// duration, so this is entity-type-gated for the same reason
     /// [`vehicle_hurt_time`](Self::vehicle_hurt_time) is.
     pub vehicle_hurt_dir: Option<i32>,
-    /// `VehicleEntity.DATA_ID_DAMAGE` — accumulated damage × 10, decayed by
+    /// The vehicle's damage field — accumulated damage × 10, decayed by
     /// `1.0` per tick. It scales the rock amplitude, so a heavier hit tips the
-    /// hull further; vanilla destroys the vehicle past `40.0`.
+    /// hull further; the vehicle is destroyed past `40.0`.
     ///
     /// Index 10's `FLOAT` has this as its only claimant in the jar dump, so
-    /// the serializer alone identifies it — but it is class-gated anyway,
+    /// the serializer alone identifies it — but it is entity-type-gated anyway,
     /// beside its two siblings, because the three are one feature and a future
     /// jar could add a second `FLOAT` there.
     pub vehicle_damage: Option<f32>,
-    /// `Display.BillboardConstraints.getId()` (`Display.DATA_BILLBOARD_RENDER_CONSTRAINTS_ID`),
+    /// The display entity's billboard-constraint field, as its
     /// raw wire ordinal (`0`=fixed, `1`=vertical, `2`=horizontal, `3`=center),
-    /// when present and the entity is known to be one of the three `Display`
+    /// when present and the entity is known to be one of the three display
     /// subtypes (`text_display`/`item_display`/`block_display`).
     ///
     /// Kept as the raw ordinal rather than a decoded enum because this crate
     /// carries no renderer-facing billboard type — see
     /// `lodestone_render::display::BillboardMode::from_wire` for the
-    /// downstream conversion, which reproduces vanilla's own out-of-range
-    /// fallback to `Fixed` (`ByIdMap.OutOfBoundsStrategy.ZERO`).
+    /// downstream conversion, which reproduces the real client's own
+    /// out-of-range fallback to `Fixed`.
     ///
     /// # Why this can be absent on a packet that carried the byte
     ///
     /// Same shape as [`mob_flags`](Self::mob_flags): index 15's `BYTE` is also
-    /// `Mob.DATA_MOB_FLAGS_ID` and `ArmorStand.DATA_CLIENT_FLAGS`. `None`
+    /// a mob's flags field and an armor stand's client-flags field. `None`
     /// means "not known to be a display billboard byte", which a consumer
     /// must treat as "no billboard reported yet", never as a cleared value.
     pub display_billboard: Option<u8>,
-    /// `Display.DATA_TRANSLATION_ID`, in blocks — one quarter of the shared
-    /// `Transformation` every `Display` subtype carries (see
+    /// The display entity's translation field, in blocks — one quarter of the
+    /// shared transformation every display subtype carries (see
     /// `lodestone_render::display::DisplayTransformation`).
     ///
-    /// Unlike [`display_billboard`](Self::display_billboard), no class guard
-    /// is needed to surface this: the wire's `VECTOR3` serializer at this
-    /// index is exclusively `Display.DATA_TRANSLATION_ID` in the 26.2 jar
+    /// Unlike [`display_billboard`](Self::display_billboard), no entity-type
+    /// guard is needed to surface this: the wire's `VECTOR3` serializer at this
+    /// index is exclusively the translation field in the 26.2 jar
     /// dump (`tests/support/entity_data_index_jvm.txt` in the version crate),
     /// so the *value shape* alone disambiguates it — the same reasoning
     /// [`crystal_beam_target`](Self::crystal_beam_target) already documents
     /// for its own index.
     pub display_translation: Option<Vec3f>,
-    /// `Display.DATA_SCALE_ID` — the second quarter of the shared
-    /// `Transformation`, self-identifying by the same `VECTOR3`-at-this-index
+    /// The display entity's scale field — the second quarter of the shared
+    /// transformation, self-identifying by the same `VECTOR3`-at-this-index
     /// argument as [`display_translation`](Self::display_translation).
     pub display_scale: Option<Vec3f>,
-    /// `Display.DATA_LEFT_ROTATION_ID` — applied **before** scale
-    /// (`Transformation.compose`). Self-identifying: the wire's `QUATERNION`
+    /// The display entity's left-rotation field — applied **before** scale.
+    /// Self-identifying: the wire's `QUATERNION`
     /// serializer at this index is exclusively this field in the jar dump.
     pub display_left_rotation: Option<Quat>,
-    /// `Display.DATA_RIGHT_ROTATION_ID` — applied **after** scale. Same
+    /// The display entity's right-rotation field — applied **after** scale. Same
     /// self-identifying argument as
     /// [`display_left_rotation`](Self::display_left_rotation), one index over.
     pub display_right_rotation: Option<Quat>,
-    /// `Display.TextDisplay.DATA_TEXT_ID`, decoded to plain text the same way
+    /// The text display's text field, decoded to plain text the same way
     /// [`custom_name`](Self::custom_name) is. [`Reported::Unreported`] when
     /// this packet did not mention it; [`Reported::Reported(Some(text))`](Reported::Reported)
     /// carries the current text. Unlike `custom_name`, a version adapter
-    /// never reports the inner `None` here — vanilla's own accessor default
+    /// never reports the inner `None` here — the field's own accessor default
     /// is the empty string, not an absent component — so a consumer only
     /// ever sees `Unreported` or `Reported(Some(_))` in practice, but the
     /// shape stays `Reported<Text>` (not a bespoke wrapper) for the same
@@ -785,66 +784,66 @@ pub struct EntityMetadataUpdate {
     /// survive to whatever draws this `text_display`.
     ///
     /// Present only when the entity is known to be a `text_display` — index
-    /// 23's `COMPONENT` serializer is also `MinecartCommandBlock`'s last
+    /// 23's `COMPONENT` serializer is also a command-block minecart's last
     /// command output at index 14 (a different index, no collision), but the
-    /// class guard is kept anyway for the same defence-in-depth every other
-    /// `Display` field in this struct uses.
+    /// entity-type guard is kept anyway for the same defence-in-depth every
+    /// other display field in this struct uses.
     pub display_text: Reported<Text>,
-    /// `Display.TextDisplay.DATA_LINE_WIDTH_ID`, vanilla's own wrap width in
-    /// pixels (`Display.TextDisplay`'s accessor default is `200`). Present
+    /// The text display's line-width field, the wrap width in
+    /// pixels (default `200`). Present
     /// only for a `text_display` that has reported it.
     pub display_line_width: Option<i32>,
-    /// `Display.TextDisplay.DATA_BACKGROUND_COLOR_ID`, a packed ARGB int
-    /// (accessor default `0x40000000`, vanilla's translucent-black panel).
+    /// The text display's background-color field, a packed ARGB int
+    /// (default `0x40000000`, a translucent-black panel).
     /// Present only for a `text_display` that has reported it.
     pub display_background_color: Option<i32>,
-    /// `Display.TextDisplay.DATA_TEXT_OPACITY_ID`, a signed byte (accessor
+    /// The text display's text-opacity field, a signed byte (
     /// default `-1`, i.e. fully opaque once read as the top byte of an ARGB
     /// colour: `textOpacity << 24 | 0xFFFFFF`). Present only for a
     /// `text_display` that has reported it.
     pub display_text_opacity: Option<i8>,
-    /// `Display.TextDisplay.DATA_STYLE_FLAGS_ID`: bit `0x01` shadow, `0x02`
+    /// The text display's style-flags field: bit `0x01` shadow, `0x02`
     /// see-through, `0x04` use-the-viewer's-own-default-background, bits
-    /// `0x08`/`0x10` alignment (`Display.TextDisplay.getAlign`: neither set is
+    /// `0x08`/`0x10` alignment (neither set is
     /// centre, `0x08` left, `0x10` right). Present only for a `text_display`
     /// that has reported it.
     pub display_text_style_flags: Option<u8>,
-    /// `Display.BlockDisplay.DATA_BLOCK_STATE_ID`, the global block-state id
+    /// The block display's block-state field, the global block-state id
     /// this `block_display` is showing — the same id space
     /// `lodestone_ecs::entity::FallingBlockState` and `World::set_block` use.
     ///
-    /// # Why this needs a class guard where the transformation fields do not
+    /// # Why this needs an entity-type guard where the transformation fields do not
     ///
     /// Index 23's `BLOCK_STATE` serializer decodes to the same plain integer
     /// shape as several other fields at *other* indices (block state ids are
     /// carried as a `VarInt`, indistinguishable on the wire from any other
     /// `INT`), and — unlike [`display_translation`](Self::display_translation)'s
-    /// `VECTOR3` — index 23 has a real second `INT`-shaped claimant:
-    /// `Cat.DATA_COLLAR_COLOR`. Ungated, a cat's dye ordinal (`0..=15`) would
+    /// `VECTOR3` — index 23 has a real second `INT`-shaped claimant: a cat's
+    /// collar-color field. Ungated, a cat's dye ordinal (`0..=15`) would
     /// decode as a wildly out-of-range block-state id. Present only for a
     /// `block_display` that has reported it.
     pub display_block_state: Option<u32>,
-    /// `Display.ItemDisplay.DATA_ITEM_DISPLAY_ID`, the raw
-    /// `ItemDisplayContext` ordinal this `item_display` was told to pose its
-    /// item in. Vanilla's own accessor default is `NONE` (`0`), which selects
-    /// `ItemTransform.NO_TRANSFORM` — the identity pose, not "draw nothing" —
+    /// The item display's item-display-context field, the raw
+    /// display-context ordinal this `item_display` was told to pose its
+    /// item in. The default is `NONE` (`0`), which selects
+    /// the identity pose, not "draw nothing" —
     /// so that is what a consumer applies when this is absent. Present only
     /// for an `item_display` that has reported it.
     pub display_item_context: Option<u8>,
-    /// `Display.DATA_BRIGHTNESS_OVERRIDE_ID`, in vanilla's packed
-    /// `Brightness.pack()` layout (`block << 4 | sky << 20`), or its own
+    /// The display entity's brightness-override field, in the game's own
+    /// packed layout (`block << 4 | sky << 20`), or its own
     /// `-1` no-override sentinel. Carried unpacked so a consumer can tell the
     /// sentinel from a real `(0, 0)` override, which packs to `0`.
     ///
-    /// # Why this needs a class guard where the transformation fields do not
+    /// # Why this needs an entity-type guard where the transformation fields do not
     ///
     /// Index 16 has six `INT`-shaped claimants in the jar dump —
-    /// `Creeper.DATA_SWELL_DIR`, `EnderDragon.DATA_PHASE`, `Phantom.ID_SIZE`,
-    /// `Warden.CLIENT_ANGER_LEVEL` and `WitherBoss.DATA_TARGET_A` beside this
-    /// one — and none of the other five is a `Display` subtype, so the guard is
+    /// a creeper's swell direction, an ender dragon's phase, a phantom's size,
+    /// a warden's anger level and a wither's target beside this
+    /// one — and none of the other five is a display subtype, so the guard is
     /// "is this any display", the same one
     /// [`display_billboard`](Self::display_billboard) uses, rather than a
-    /// per-subtype class.
+    /// per-subtype check.
     pub display_brightness_override: Option<i32>,
 }
 
@@ -899,20 +898,20 @@ impl EntityMetadataUpdate {
 }
 
 /// An armour stand's six part rotations, merged into the whole pose a renderer
-/// applies — vanilla's `ArmorStand.ArmorStandPose` record, in **degrees**.
+/// applies, in **degrees**.
 ///
 /// [`EntityMetadataUpdate`] carries the same six values *individually* and
 /// optionally, because a metadata packet mentions only the accessors that
 /// changed; this is what a consumer gets after merging one such update onto the
 /// pose it already held. [`Self::VANILLA_DEFAULT`] is the starting point, and it
-/// is **not** the all-zero pose: `ArmorStand`'s own `defineId` calls give the
-/// arms and legs a small authored splay, so a stand nobody has ever posed still
+/// is **not** the all-zero pose: the arms and legs carry a small authored
+/// splay by default, so a stand nobody has ever posed still
 /// has a pose.
 ///
 /// # Why this exists as a value type at all
 ///
-/// Vanilla's `ArmorStandArmorModel.setupAnim` runs `HumanoidModel`'s whole
-/// `setupAnim` — head tracking, walk cycle, idle bob — and then **assigns** all
+/// The real armour-stand model runs the ordinary humanoid pose setup — head
+/// tracking, walk cycle, idle bob — and then **assigns** all
 /// six of these over the top. That assignment is the only thing stopping an
 /// armour stand animating like a walking humanoid, so this value has to reach
 /// the rig; a client that decodes it and drops it draws a stand that swings its
@@ -923,25 +922,24 @@ impl EntityMetadataUpdate {
 /// the other unit choices its model space makes.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ArmorStandPose {
-    /// `ArmorStand.getHeadPose()`.
+    /// The head part's rotation.
     pub head: Vec3f,
-    /// `ArmorStand.getBodyPose()`. Also drives the visible stand model's three
+    /// The body part's rotation. Also drives the visible stand model's three
     /// body sticks — see [`EntityMetadataUpdate::armor_stand_body_pose`].
     pub body: Vec3f,
-    /// `ArmorStand.getLeftArmPose()`.
+    /// The left arm part's rotation.
     pub left_arm: Vec3f,
-    /// `ArmorStand.getRightArmPose()`.
+    /// The right arm part's rotation.
     pub right_arm: Vec3f,
-    /// `ArmorStand.getLeftLegPose()`.
+    /// The left leg part's rotation.
     pub left_leg: Vec3f,
-    /// `ArmorStand.getRightLegPose()`.
+    /// The right leg part's rotation.
     pub right_leg: Vec3f,
 }
 
 impl ArmorStandPose {
-    /// The pose every armour stand starts with — `ArmorStand`'s six
-    /// `DEFAULT_*_POSE` constants, the values its `defineEntityData` registers
-    /// each accessor with.
+    /// The pose every armour stand starts with — the six
+    /// default-pose constants each accessor is registered with.
     ///
     /// Head and body are level; the arms and legs carry a small authored splay,
     /// which is why this is a named constant rather than [`Default`]'s zeroes.
@@ -961,7 +959,7 @@ impl ArmorStandPose {
     ///
     /// This is the merge the split in [`ArmorStandPoseUpdate`] exists to make
     /// possible: an update that moves one arm must not reset the other five
-    /// parts, and vanilla's `SynchedEntityData` has exactly these
+    /// parts, and the real synced-entity-data mechanism has exactly these
     /// per-accessor-overwrite semantics.
     #[must_use]
     pub fn merged(mut self, update: ArmorStandPoseUpdate) -> Self {
@@ -993,22 +991,22 @@ impl ArmorStandPose {
 /// should be. Names are the only thing that makes such a swap a compile error.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct ArmorStandPoseUpdate {
-    /// `ArmorStand.DATA_HEAD_POSE`, index 16, in degrees.
+    /// The head-pose field, index 16, in degrees.
     pub head: Option<Vec3f>,
-    /// `ArmorStand.DATA_BODY_POSE`, index 17, in degrees.
+    /// The body-pose field, index 17, in degrees.
     ///
-    /// Poses four parts rather than one: vanilla's `ArmorStandModel.setupAnim`
-    /// — the *visible* stand model, one subclass below the armour model — drives
+    /// Poses four parts rather than one: the *visible* stand model, one layer
+    /// below the armour model, drives
     /// `right_body_stick`, `left_body_stick` and `shoulder_stick` from this same
     /// value as well as the body itself.
     pub body: Option<Vec3f>,
-    /// `ArmorStand.DATA_LEFT_ARM_POSE`, index 18, in degrees.
+    /// The left-arm-pose field, index 18, in degrees.
     pub left_arm: Option<Vec3f>,
-    /// `ArmorStand.DATA_RIGHT_ARM_POSE`, index 19, in degrees.
+    /// The right-arm-pose field, index 19, in degrees.
     pub right_arm: Option<Vec3f>,
-    /// `ArmorStand.DATA_LEFT_LEG_POSE`, index 20, in degrees.
+    /// The left-leg-pose field, index 20, in degrees.
     pub left_leg: Option<Vec3f>,
-    /// `ArmorStand.DATA_RIGHT_LEG_POSE`, index 21, in degrees.
+    /// The right-leg-pose field, index 21, in degrees.
     pub right_leg: Option<Vec3f>,
 }
 
@@ -1034,7 +1032,7 @@ impl Default for ArmorStandPose {
     /// [`Self::VANILLA_DEFAULT`], **not** the zero pose.
     ///
     /// Deliberate: every caller that reaches for a default here wants "the pose
-    /// an unposed stand is in", and that is the one vanilla registers. A zeroed
+    /// an unposed stand is in", and that is the one the game registers. A zeroed
     /// default would silently straighten every stand's arms and legs the first
     /// time one appeared without metadata.
     fn default() -> Self {
@@ -1137,7 +1135,7 @@ pub enum EquipmentSlot {
 }
 
 impl EquipmentSlot {
-    /// Slots in vanilla `EquipmentSlot` declaration order.
+    /// Slots in the wire's own ordinal order.
     ///
     /// Protocol adapters that decode raw enum ordinals should index through this
     /// table rather than duplicating the order.
@@ -1152,7 +1150,7 @@ impl EquipmentSlot {
         Self::Saddle,
     ];
 
-    /// Returns the slot for a vanilla `EquipmentSlot` ordinal.
+    /// Returns the slot for its wire ordinal.
     #[must_use]
     pub const fn from_ordinal(ordinal: u8) -> Option<Self> {
         match ordinal {
@@ -1168,12 +1166,11 @@ impl EquipmentSlot {
         }
     }
 
-    /// Returns this slot's canonical vanilla name, as `minecraft:equippable`
+    /// Returns this slot's canonical name, as `minecraft:equippable`
     /// spells it.
     ///
-    /// Note `Body` and `Saddle` are **not** humanoid armour: vanilla gates
-    /// wearable-by-a-player on `EquipmentSlot.Type.HUMANOID_ARMOR`, which covers
-    /// only feet/legs/chest/head. A consumer that folds `"body"` into `"chest"`
+    /// Note `Body` and `Saddle` are **not** humanoid armour: the game gates
+    /// wearable-by-a-player armour to feet/legs/chest/head only. A consumer that folds `"body"` into `"chest"`
     /// lets wolf and horse armour into a player's chestplate slot.
     #[must_use]
     pub const fn name(self) -> &'static str {
@@ -1189,7 +1186,7 @@ impl EquipmentSlot {
         }
     }
 
-    /// The slot for a canonical vanilla name — the exact inverse of
+    /// The slot for its canonical name — the exact inverse of
     /// [`name`](Self::name).
     ///
     /// Added for the game -> model lowering: `lodestone_game`'s opaque
@@ -1216,7 +1213,7 @@ impl EquipmentSlot {
         }
     }
 
-    /// Returns this slot's vanilla `EquipmentSlot` ordinal.
+    /// Returns this slot's wire ordinal.
     #[must_use]
     pub const fn ordinal(self) -> u8 {
         match self {
@@ -1309,9 +1306,10 @@ pub struct ChatSessionInfo {
     /// DER-encoded (X.509 `SubjectPublicKeyInfo`) RSA public key, verbatim —
     /// what `lodestone_auth::verify_signature` parses.
     pub public_key: Vec<u8>,
-    /// Public-key expiry, epoch milliseconds (`ProfilePublicKey.Data.expiresAt`).
-    /// Not enforced by anything here yet — see `ChatTrustLevel.evaluate`'s
-    /// `hasExpiredClient` clause in vanilla for the check this would feed.
+    /// Public-key expiry, epoch milliseconds.
+    /// Not enforced by anything here yet — the real client's own chat-trust
+    /// evaluation checks this same expiry against the wall clock, which is
+    /// the check this field would feed.
     pub expires_at: i64,
 }
 
@@ -1368,7 +1366,7 @@ pub enum SoundCategory {
 }
 
 impl SoundCategory {
-    /// Categories in vanilla `SoundSource` declaration order.
+    /// Categories in the wire's own ordinal order.
     ///
     /// Protocol adapters that decode raw enum ordinals should index through this
     /// table rather than duplicating the order.
@@ -1386,7 +1384,7 @@ impl SoundCategory {
         Self::Ui,
     ];
 
-    /// Returns the category for a vanilla `SoundSource` ordinal.
+    /// Returns the category for its wire ordinal.
     #[must_use]
     pub const fn from_ordinal(ordinal: u8) -> Option<Self> {
         match ordinal {
@@ -1405,7 +1403,7 @@ impl SoundCategory {
         }
     }
 
-    /// Returns this category's vanilla `SoundSource` ordinal.
+    /// Returns this category's wire ordinal.
     #[must_use]
     pub const fn ordinal(self) -> u8 {
         match self {
@@ -1783,7 +1781,7 @@ pub enum ParticleOptions {
     /// block's own texture.
     BlockState {
         /// The block state, by **block-state** network id — the index into
-        /// vanilla's `Block.BLOCK_STATE_REGISTRY`, not a block id and not an
+        /// the game's own block-state registry, not a block id and not an
         /// item id. The same numbering `lodestone_data::block_states` uses and
         /// that `lodestone_particle::SpriteSource::BlockState` resolves
         /// against, so it can be handed straight to a particle.
@@ -2123,10 +2121,9 @@ pub enum ClientEvent {
     /// One variant carrying two different wire shapes, deliberately: every
     /// client protocol family from v47 (1.8.9) through v735 (1.16.5) sends
     /// `packet_explosion`'s own list of removed-block offsets on this same
-    /// packet, while 26.2's `ClientboundExplodePacket` dropped that list in
+    /// packet, while 26.2's explosion packet dropped that list in
     /// favour of a bare block **count** used only to scale cosmetic particle
-    /// spawning (`ClientPacketListener::handleExplosion` ->
-    /// `Level::trackExplosionEffects`) — the real removals now arrive as
+    /// spawning — the real removals now arrive as
     /// ordinary block-update events instead. See [`Self::affected_blocks`]'s
     /// own doc for what an empty list means on each family, rather than
     /// giving 26.2 a second variant for what is, model-side, the same event:
@@ -2143,7 +2140,8 @@ pub enum ClientEvent {
         /// directly on this packet.
         ///
         /// **Always empty on a 26.2 (`v770`) connection.**
-        /// `ClientboundExplodePacket` carries only `blockCount: i32` there —
+        /// The explosion packet on that version carries only a block count
+        /// there —
         /// no positions at all — because the real removals now arrive as
         /// separate block-update events. A fold reading this field for
         /// "which blocks did this explosion remove" must treat an empty list
@@ -2168,17 +2166,17 @@ pub enum ClientEvent {
         /// Whether the particles should be visible at long distance.
         long_distance: bool,
         /// Whether the particles survive the **Minimal** particle setting —
-        /// `ClientboundLevelParticlesPacket`'s `alwaysShow`, which
-        /// `ClientLevel.calculateParticleLevel` turns into a one-in-ten
+        /// the level particles packet's `alwaysShow`, which
+        /// the client's particle-level calculation turns into a one-in-ten
         /// reprieve rather than an exemption.
         ///
         /// Distinct from `long_distance`, which is the *distance* cutoff, and
         /// the two are independent on the wire. **`false` on every legacy
         /// family**, and honestly so rather than by omission: the field does
         /// not exist on the pre-26.2 particle packets at all (1.12's
-        /// `WORLD_PARTICLES` carries `longDistance` and nothing else), so
-        /// there is no value to carry and `false` is what vanilla's own
-        /// `addParticle` overload passes.
+        /// particle packet carries only the distance flag and nothing else), so
+        /// there is no value to carry and `false` is what the corresponding
+        /// unconditional-particle call passes.
         always_show: bool,
         /// Particle origin.
         pos: Vec3,
@@ -2583,7 +2581,7 @@ pub enum ClientEvent {
         locked: bool,
     },
     /// The server instructed the local player to rotate to (or by) a specific
-    /// yaw/pitch, from `ClientboundPlayerRotationPacket`.
+    /// yaw/pitch, from the player rotation packet.
     PlayerRotationSet {
         /// New (or delta) body yaw, in degrees.
         y_rot: f32,
@@ -2595,19 +2593,19 @@ pub enum ClientEvent {
         relative_x: bool,
     },
     /// The client's camera was attached to (or detached from) an entity, from
-    /// `ClientboundSetCameraPacket`.
+    /// the set camera packet.
     CameraSet {
         /// The entity id the camera now follows. Vanilla sends the local
         /// player's own id to reset the camera to the first-person view.
         entity_id: i32,
     },
-    /// A written book screen should open, from `ClientboundOpenBookPacket`.
+    /// A written book screen should open, from the open book packet.
     BookOpened {
         /// `true` for the main hand, `false` for the off hand.
         main_hand: bool,
     },
     /// A sound (or sounds) should stop playing, from
-    /// `ClientboundStopSoundPacket`. Absent fields are wildcards: `sound: None`
+    /// the stop sound packet. Absent fields are wildcards: `sound: None`
     /// stops every sound in `category` (or all sounds if `category` is also
     /// `None`), not "no sound".
     SoundStopped {
@@ -2617,7 +2615,7 @@ pub enum ClientEvent {
         category: Option<SoundCategory>,
     },
     /// The player list header/footer text changed, from
-    /// `ClientboundTabListPacket`.
+    /// the tab list packet.
     TabListChanged {
         /// Header text shown above the player list.
         header: Text,
@@ -2625,11 +2623,11 @@ pub enum ClientEvent {
         footer: Text,
     },
     /// The server's stored per-book recipe-book UI state, from
-    /// `ClientboundRecipeBookSettingsPacket`.
+    /// the recipe-book-settings packet.
     ///
-    /// Four books in vanilla's own fixed order, each carrying two booleans — the
-    /// wire form is exactly eight bytes with no length prefix and no discriminator
-    /// (`RecipeBookSettings.STREAM_CODEC`). Named fields rather than a `Vec`
+    /// Four books in the game's own fixed order, each carrying two booleans — the
+    /// wire form is exactly eight bytes with no length prefix and no discriminator.
+    /// Named fields rather than a `Vec`
     /// deliberately: the shape is fixed, so a collection would admit a length this
     /// packet cannot have.
     ///
@@ -2648,7 +2646,7 @@ pub enum ClientEvent {
         smoker: RecipeBookTypeSettings,
     },
     /// The world border's center moved, from
-    /// `ClientboundSetBorderCenterPacket`.
+    /// the set border center packet.
     WorldBorderCenterChanged {
         /// New center X coordinate.
         x: f64,
@@ -2656,7 +2654,7 @@ pub enum ClientEvent {
         z: f64,
     },
     /// The world border began (or continued) smoothly resizing, from
-    /// `ClientboundSetBorderLerpSizePacket`.
+    /// the set border lerp size packet.
     WorldBorderSizeLerping {
         /// Size (diameter, in blocks) the border is resizing from.
         old_size: f64,
@@ -2666,25 +2664,25 @@ pub enum ClientEvent {
         lerp_time_ms: i64,
     },
     /// The world border's size changed instantly (no interpolation), from
-    /// `ClientboundSetBorderSizePacket`.
+    /// the set border size packet.
     WorldBorderSizeChanged {
         /// New size (diameter, in blocks).
         size: f64,
     },
     /// The world border's warning delay changed, from
-    /// `ClientboundSetBorderWarningDelayPacket`.
+    /// the set border warning delay packet.
     WorldBorderWarningDelayChanged {
         /// New warning delay, in seconds, before the border starts closing in.
         warning_time: i32,
     },
     /// The world border's warning distance changed, from
-    /// `ClientboundSetBorderWarningDistancePacket`.
+    /// the set border warning distance packet.
     WorldBorderWarningDistanceChanged {
         /// New distance, in blocks, at which the warning effect appears.
         warning_blocks: i32,
     },
     /// The world border was fully (re)initialized, from
-    /// `ClientboundInitializeBorderPacket` — sent on join/respawn instead of
+    /// the initialize border packet — sent on join/respawn instead of
     /// the incremental variants above.
     WorldBorderInitialized {
         /// New center X coordinate.
@@ -2705,16 +2703,16 @@ pub enum ClientEvent {
         warning_time: i32,
     },
     /// Combat tracking began for the local player, from
-    /// `ClientboundPlayerCombatEnterPacket` (no payload).
+    /// the player combat enter packet (no payload).
     PlayerCombatEntered,
     /// Combat tracking ended for the local player, from
-    /// `ClientboundPlayerCombatEndPacket`.
+    /// the player combat end packet.
     PlayerCombatEnded {
         /// Duration of the combat encounter, in ticks.
         duration_ticks: i32,
     },
     /// The server opened a sign-editing UI, from
-    /// `ClientboundOpenSignEditorPacket`.
+    /// the open sign editor packet.
     SignEditorOpened {
         /// Block position of the sign.
         pos: BlockPos,
@@ -2722,13 +2720,13 @@ pub enum ClientEvent {
         is_front_text: bool,
     },
     /// The advancements screen should switch to a given tab, from
-    /// `ClientboundSelectAdvancementsTabPacket`.
+    /// the select advancements tab packet.
     AdvancementsTabSelected {
         /// Tab identifier, or `None` to close/deselect the tab.
         tab: Option<Identifier>,
     },
     /// A projectile's acceleration power changed (e.g. a charged crossbow
-    /// bolt), from `ClientboundProjectilePowerPacket`.
+    /// bolt), from the projectile power packet.
     ProjectilePowerChanged {
         /// Projectile entity id.
         entity_id: i32,
@@ -2736,7 +2734,7 @@ pub enum ClientEvent {
         acceleration_power: f64,
     },
     /// A ridden entity's (e.g. horse, llama) inventory screen was opened,
-    /// from `ClientboundMountScreenOpenPacket`.
+    /// from the mount screen open packet.
     MountScreenOpened {
         /// Window/container id.
         container_id: i32,
@@ -2747,13 +2745,13 @@ pub enum ClientEvent {
         entity_id: i32,
     },
     /// The server's game rule values, from
-    /// `ClientboundGameRuleValuesPacket`.
+    /// the game rule values packet.
     GameRulesChanged {
         /// Game rule identifier and its raw string value, in wire order.
         values: Vec<(Identifier, String)>,
     },
     /// The server asked the client to reconnect to a different address, from
-    /// `ClientboundTransferPacket`.
+    /// the transfer packet.
     TransferRequested {
         /// Target server host.
         host: String,
@@ -2761,13 +2759,13 @@ pub enum ClientEvent {
         port: i32,
     },
     /// The server requested a previously stored cookie, from
-    /// `ClientboundCookieRequestPacket`.
+    /// the cookie request packet.
     CookieRequested {
         /// Cookie key.
         key: Identifier,
     },
     /// The server asked the client to persist an opaque cookie, from
-    /// `ClientboundStoreCookiePacket`.
+    /// the store cookie packet.
     CookieStored {
         /// Cookie key.
         key: Identifier,
@@ -2775,7 +2773,7 @@ pub enum ClientEvent {
         payload: Vec<u8>,
     },
     /// The server offered a resource pack, from
-    /// `ClientboundResourcePackPushPacket`.
+    /// the resource pack push packet.
     ResourcePackPushed {
         /// Pack id, echoed back in the client's accept/decline response.
         id: Uuid,
@@ -2789,13 +2787,13 @@ pub enum ClientEvent {
         prompt: Option<Text>,
     },
     /// The server withdrew a previously pushed resource pack, from
-    /// `ClientboundResourcePackPopPacket`.
+    /// the resource pack pop packet.
     ResourcePackPopped {
         /// Pack id to remove, or `None` to remove all packs.
         id: Option<Uuid>,
     },
     /// A plugin (custom payload) message arrived, from
-    /// `ClientboundCustomPayloadPacket`.
+    /// the custom payload packet.
     ///
     /// `data` is the raw payload bytes for `channel`, undecoded: only
     /// `minecraft:brand` is specially typed by vanilla (as a single UTF-8
@@ -2808,21 +2806,21 @@ pub enum ClientEvent {
         data: Vec<u8>,
     },
     /// Public server metadata pushed proactively during play, from
-    /// `ClientboundServerDataPacket`.
+    /// the server data packet.
     ServerDataReceived {
         /// Message of the day.
         motd: Text,
         /// Favicon PNG bytes, if the server sent one.
         icon: Option<Vec<u8>>,
     },
-    /// A play-state pong echo, from `ClientboundPongResponsePacket` (distinct
+    /// A play-state pong echo, from the pong response packet (distinct
     /// from the keep-alive-like `Ping`/`ClientAction::PongResponse` pair).
     PongReceived {
         /// Echoed time value.
         time: i64,
     },
     /// A previously sent chat message was deleted/withdrawn, from
-    /// `ClientboundDeleteChatPacket`.
+    /// the delete chat packet.
     ChatMessageDeleted {
         /// The message's signature; the adapter resolves wire-level cache
         /// references to the full 256 bytes before emitting, so this is
@@ -2830,7 +2828,7 @@ pub enum ClientEvent {
         signature: PackedMessageSignature,
     },
     /// The local player should look toward a fixed point or another entity,
-    /// from `ClientboundPlayerLookAtPacket`.
+    /// from the player look at packet.
     PlayerLookAt {
         /// Anchor point on the local player to rotate from.
         from_anchor: LookAnchor,
@@ -2842,7 +2840,7 @@ pub enum ClientEvent {
         at_entity: Option<PlayerLookAtEntity>,
     },
     /// The local player changed dimension (portal travel) or respawned after
-    /// death, from `ClientboundRespawnPacket`.
+    /// death, from the respawn packet.
     Respawned {
         /// New dimension.
         dimension: DimensionId,
@@ -3020,15 +3018,13 @@ pub enum ClientEvent {
         /// enchantments exist".
         names: Vec<String>,
     },
-    /// A win condition was signalled by the server: `ClientboundGameEventPacket`'s
+    /// A win condition was signalled by the server: the game-event packet's
     /// `WIN_GAME` event (code `4`), sent when the local player exits the End
     /// through the exit portal after defeating the ender dragon.
     ///
-    /// Carries no data: vanilla's own handler ignores the packet's `param` for
-    /// this event and always opens the credits screen with `WinScreen`'s
-    /// `poem` parameter set `true`
-    /// (`ClientPacketListener.java`:
-    /// `this.minecraft.gui.setScreen(new WinScreen(true, () -> { ... }))`), so
+    /// Carries no data: the real handler ignores the packet's `param` for
+    /// this event and always opens the credits screen with the "show the poem"
+    /// flag set `true`, so
     /// there is nothing version-free left to carry — this is a pure signal,
     /// like [`Self::Respawned`] is for a plain "you are alive again" with no
     /// win-specific payload.
@@ -3064,7 +3060,7 @@ pub enum ClientEvent {
         /// The suggested replacement strings.
         suggestions: Vec<CommandSuggestionEntry>,
     },
-    /// A filled map's contents changed, from `ClientboundMapItemDataPacket`.
+    /// A filled map's contents changed, from the map item data packet.
     ///
     /// Keyed on the **map id**, not on an entity: one map item can be held by
     /// several players and hung in several item frames at once, so this is
@@ -3090,7 +3086,7 @@ pub enum ClientEvent {
         color_patch: Option<MapPatch>,
     },
     /// The advancement tree and/or the local player's progress on it changed,
-    /// from `ClientboundUpdateAdvancementsPacket`.
+    /// from the update advancements packet.
     AdvancementsUpdated {
         /// `true` on the server's first packet: discard all known advancements
         /// and progress and treat `added` as the whole tree.
@@ -3119,7 +3115,7 @@ pub enum ClientEvent {
     // lands without a shell edit; a screen reads the session component when
     // someone builds one.
     /// The server awarded or resynchronised statistics
-    /// (`ClientboundAwardStatsPacket`).
+    /// (the award stats packet).
     ///
     /// Sent in full on request (vanilla's `/stats`-equivalent screen opening) and
     /// incrementally as counters move, so a fold must **overwrite per key**
@@ -3129,14 +3125,14 @@ pub enum ClientEvent {
         stats: Vec<StatAward>,
     },
     /// The server changed the extra names offered in chat tab-completion
-    /// (`ClientboundCustomChatCompletionsPacket`).
+    /// (the custom chat completions packet).
     ChatCompletionsChanged {
         /// Whether to add to, remove from, or replace the current set.
         action: ChatCompletionsAction,
         /// The names this update concerns.
         entries: Vec<String>,
     },
-    /// A per-block debug feed value (`ClientboundDebugBlockValuePacket`).
+    /// A per-block debug feed value (the debug block value packet).
     ///
     /// The server sends nothing on any debug feed until the client asks with
     /// [`crate::ClientAction::SubscribeDebug`] — this and its three siblings are
@@ -3153,7 +3149,7 @@ pub enum ClientEvent {
         /// modelling them here would be seventeen decoders for a debug overlay.
         value: Option<Vec<u8>>,
     },
-    /// A per-chunk debug feed value (`ClientboundDebugChunkValuePacket`).
+    /// A per-chunk debug feed value (the debug chunk value packet).
     DebugChunkValue {
         /// The chunk this value is about.
         chunk: ChunkPos,
@@ -3162,7 +3158,7 @@ pub enum ClientEvent {
         /// Opaque per-subscription payload; see [`Self::DebugBlockValue::value`].
         value: Option<Vec<u8>>,
     },
-    /// A per-entity debug feed value (`ClientboundDebugEntityValuePacket`).
+    /// A per-entity debug feed value (the debug entity value packet).
     ///
     /// Routed to `session`, not `ingest`, even though it names an entity: it is a
     /// debug overlay keyed by subscription with no lifetime tied to the entity's
@@ -3176,7 +3172,7 @@ pub enum ClientEvent {
         /// Opaque per-subscription payload; see [`Self::DebugBlockValue::value`].
         value: Option<Vec<u8>>,
     },
-    /// A one-shot debug feed event (`ClientboundDebugEventPacket`).
+    /// A one-shot debug feed event (the debug event packet).
     ///
     /// Unlike the three `*Value` packets this carries the payload **without** an
     /// optional wrapper — an event is always present — so there is no "clear this
@@ -3187,7 +3183,7 @@ pub enum ClientEvent {
         /// Opaque per-subscription payload; see [`Self::DebugBlockValue::value`].
         value: Vec<u8>,
     },
-    /// A batch of server performance samples (`ClientboundDebugSamplePacket`).
+    /// A batch of server performance samples (the debug sample packet).
     DebugSample {
         /// The samples, in nanoseconds for the tick-time kind.
         sample: Vec<i64>,
@@ -3195,7 +3191,7 @@ pub enum ClientEvent {
         kind: DebugSampleKind,
     },
     /// The server asked the client to highlight a game-test position
-    /// (`ClientboundGameTestHighlightPosPacket`).
+    /// (the game test highlight pos packet).
     GameTestHighlightPos {
         /// Absolute world position.
         absolute: BlockPos,
@@ -3203,18 +3199,18 @@ pub enum ClientEvent {
         relative: BlockPos,
     },
     /// The server is running low on disk space
-    /// (`ClientboundLowDiskSpaceWarningPacket`).
+    /// (the low disk space warning packet).
     ///
     /// A zero-byte packet — `StreamCodec.unit` — so this variant carries nothing,
     /// like [`Self::WinGame`].
     LowDiskSpaceWarning,
     /// The server sent crash/report metadata for the client to attach to a report
-    /// (`ClientboundCustomReportDetailsPacket`).
+    /// (the custom report details packet).
     CustomReportDetails {
         /// `(title, description)` pairs, at most 32 entries.
         details: Vec<(String, String)>,
     },
-    /// The server advertised its links (`ClientboundServerLinksPacket`).
+    /// The server advertised its links (the server links packet).
     ///
     /// Vanilla shows these on the pause and disconnect screens. Every entry is
     /// **untrusted** — the label may be an arbitrary server-authored component
@@ -3225,14 +3221,14 @@ pub enum ClientEvent {
         links: Vec<ServerLink>,
     },
     /// A tracked waypoint was added, updated or removed
-    /// (`ClientboundTrackedWaypointPacket`).
+    /// (the tracked waypoint packet).
     WaypointUpdated {
         /// Whether this is a track, untrack or update.
         operation: WaypointOperation,
         /// The waypoint.
         waypoint: TrackedWaypoint,
     },
-    /// A reply to a serverbound NBT query (`ClientboundTagQueryPacket`).
+    /// A reply to a serverbound NBT query (the tag query packet).
     ///
     /// The transaction id echoes
     /// [`crate::ClientAction::QueryEntityTag`]/[`crate::ClientAction::QueryBlockEntityTag`],
@@ -3246,7 +3242,7 @@ pub enum ClientEvent {
         tag: Option<Vec<u8>>,
     },
     /// The world's tick rate or freeze state changed
-    /// (`ClientboundTickingStatePacket`) — vanilla's `/tick rate` and
+    /// (the ticking state packet) — vanilla's `/tick rate` and
     /// `/tick freeze`.
     TickingStateChanged {
         /// Ticks per second the server is targeting.
@@ -3255,13 +3251,13 @@ pub enum ClientEvent {
         frozen: bool,
     },
     /// The server is stepping a frozen world forward
-    /// (`ClientboundTickingStepPacket`) — vanilla's `/tick step`.
+    /// (the ticking step packet) — vanilla's `/tick step`.
     TickingStepped {
         /// How many ticks remain to run while frozen.
         tick_steps: i32,
     },
     /// A test instance block reported its status
-    /// (`ClientboundTestInstanceBlockStatus`).
+    /// (the test-instance-block-status packet).
     TestInstanceBlockStatus {
         /// Human-readable status line.
         status: Text,
@@ -3269,7 +3265,7 @@ pub enum ClientEvent {
         size: Option<(i32, i32, i32)>,
     },
     /// The server asked the client to open a dialog
-    /// (`ClientboundShowDialogPacket`).
+    /// (the show dialog packet).
     ///
     /// The wire is a `Holder<Dialog>`: either a registry id, or an inline dialog
     /// as a network-NBT blob. `Dialog` is an NBT `Codec` union of six types with
@@ -3283,7 +3279,7 @@ pub enum ClientEvent {
         /// Exactly one of this and `registry_id` is `Some`.
         inline: Option<Vec<u8>>,
     },
-    /// The server closed any open dialog (`ClientboundClearDialogPacket`).
+    /// The server closed any open dialog (the clear dialog packet).
     ///
     /// Another zero-byte `StreamCodec.unit` packet.
     DialogCleared,
@@ -3299,7 +3295,7 @@ pub enum ClientEvent {
     // walked only because they must be consumed to reach it. Modelling the whole
     // tree would be a second recipe representation next to
     // `lodestone_game::recipe`, which already has one.
-    /// The server unlocked recipes (`ClientboundRecipeBookAddPacket`).
+    /// The server unlocked recipes (the recipe book add packet).
     ///
     /// `replace` is the server's first-sync flag: discard the known set and treat
     /// `entries` as the whole book. **It sits after the entry list on the wire**,
@@ -3310,14 +3306,14 @@ pub enum ClientEvent {
         /// Whether this replaces the known set rather than adding to it.
         replace: bool,
     },
-    /// The server un-learned recipes (`ClientboundRecipeBookRemovePacket`),
+    /// The server un-learned recipes (the recipe book remove packet),
     /// e.g. after a datapack reload.
     RecipeBookRemoved {
         /// `RecipeDisplayId`s to forget.
         display_ids: Vec<i32>,
     },
     /// The server is showing a ghost recipe in an open crafting grid
-    /// (`ClientboundPlaceGhostRecipePacket`) — the faded preview after clicking a
+    /// (the place ghost recipe packet) — the faded preview after clicking a
     /// recipe in the book.
     GhostRecipeShown {
         /// The container the ghost belongs to.
@@ -3326,7 +3322,7 @@ pub enum ClientEvent {
         result_items: Vec<i32>,
     },
     /// The server's recipe *property sets* changed
-    /// (`ClientboundUpdateRecipesPacket`).
+    /// (the update recipes packet).
     ///
     /// Not the recipe corpus: these are the "which items are valid in this slot"
     /// sets vanilla's screens use to grey out an input (fuel, smithing template,
@@ -3338,7 +3334,7 @@ pub enum ClientEvent {
         stonecutter_results: Vec<Vec<i32>>,
     },
     /// A villager or wandering trader opened its trade list
-    /// (`ClientboundMerchantOffersPacket`).
+    /// (the merchant offers packet).
     MerchantOffersReceived {
         /// The trade container's window id.
         window_id: i32,
@@ -3355,7 +3351,7 @@ pub enum ClientEvent {
     },
 }
 
-/// One unlocked recipe, from `ClientboundRecipeBookAddPacket`.
+/// One unlocked recipe, from the recipe book add packet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecipeBookEntry {
     /// The server's `RecipeDisplayId` — the handle
@@ -3378,7 +3374,7 @@ pub struct RecipeBookEntry {
     pub highlight: bool,
 }
 
-/// One villager trade, from `ClientboundMerchantOffersPacket`.
+/// One villager trade, from the merchant offers packet.
 ///
 /// Note the arithmetic fields are **big-endian `i32`s on the wire, not VarInts** —
 /// `MerchantOffer`'s codec uses `writeInt` for `uses`, `maxUses`, `xp`,
@@ -3408,13 +3404,13 @@ pub struct MerchantOffer {
     pub demand: i32,
 }
 
-/// One statistic the server reported, from `ClientboundAwardStatsPacket`.
+/// One statistic the server reported, from the award-stats packet.
 ///
 /// The wire carries two registry ids — a `stat_type` and a value id whose
-/// registry *depends on that type* (`Stat.STREAM_CODEC` dispatches on it). The
+/// registry *depends on that type*. The
 /// adapter resolves both, and `value` is `None` when the value registry is one
 /// this build has no table for. That is not an error: the count is still usable
-/// and a screen keyed on `stat_type` alone (vanilla's "General" tab is entirely
+/// and a screen keyed on `stat_type` alone (the game's "General" tab is entirely
 /// `minecraft:custom`) does not need it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatAward {
@@ -3441,11 +3437,11 @@ pub enum ChatCompletionsAction {
 /// Which server sample series a `debug_sample` batch belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DebugSampleKind {
-    /// `RemoteDebugSampleType.TICK_TIME` — the only kind 26.2 defines.
+    /// Tick-time sampling — the only kind 26.2 defines.
     TickTime,
 }
 
-/// One entry of `ClientboundServerLinksPacket`.
+/// One entry of the server-links packet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ServerLink {
     /// What kind of link this is.
@@ -3479,7 +3475,7 @@ pub enum WaypointOperation {
     Update,
 }
 
-/// One tracked waypoint, from `ClientboundTrackedWaypointPacket`.
+/// One tracked waypoint, from the tracked waypoint packet.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrackedWaypoint {
     /// The waypoint's identity: a player's UUID, or a free-form string for a
@@ -3872,7 +3868,7 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::ProjectileOwner { .. }
         // Per-entity despite carrying no entity id, and the distinction is worth
         // stating because "no id" reads as a local-player scalar. The server sends
-        // `ClientboundMoveVehiclePacket` only to *reject* a position the
+        // the move vehicle packet only to *reject* a position the
         // client-authoritative rider reported, and what it changes is the
         // vehicle's own `Position`/`Rotation` — components `ingest` already owns
         // the sole writer of. The subject comes from `session::Riding`, exactly as

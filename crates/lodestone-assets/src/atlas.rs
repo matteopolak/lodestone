@@ -345,7 +345,7 @@ pub struct Atlas {
 /// Diagnostic emitted when a sprite's dimensions force the whole atlas to fewer
 /// mip levels than were requested.
 ///
-/// This mirrors vanilla's `SpriteLoader`, which logs *"Texture ... with size
+/// This mirrors vanilla's own atlas builder, which logs *"Texture ... with size
 /// ... limits mip level from ... to ..."* for the offending sprite. A silent cap
 /// otherwise resurfaces weeks later as "why are my distant textures blurry", so
 /// the builder surfaces the offender rather than swallowing it.
@@ -476,12 +476,12 @@ impl AtlasBuilder {
     /// Sets a gutter of `padding` pixels around every sprite, filled by
     /// extruding each sprite's edge pixels outward (edge-clamp).
     ///
-    /// This is how vanilla 26.2 prevents mip bleed: `TextureAtlasSprite` computes
-    /// its UV rect from `(x + padding)` (see the decompiled source), so the sprite
+    /// This is how vanilla 26.2 prevents mip bleed: vanilla computes each
+    /// sprite's UV rect from `(x + padding)`, so the sprite
     /// occupies the *interior* of its cell and box-filter mip levels sample the
     /// replicated gutter — same-sprite pixels — instead of the neighbouring
-    /// sprite. It replaces the older per-quad `uvShrinkRatio` inset, which no
-    /// longer exists in 26.2. Prefer this over [`BakeOptions::uv_inset_texels`]
+    /// sprite. It replaces an older per-quad UV-shrink inset from an earlier
+    /// vanilla version, which no longer exists in 26.2. Prefer this over [`BakeOptions::uv_inset_texels`]
     /// when the renderer generates mips: it is size-correct for mixed sprite
     /// resolutions and keeps a sprite's full texel range addressable. A padding
     /// of `1 << max_mip_level` fully contains the deepest mip a renderer samples.

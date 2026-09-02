@@ -8,51 +8,51 @@
 //!
 //! # Where every number here comes from
 //!
-//! Read out of `.cache/mc/26.2/{client-src,src}` at the paths named per item.
-//! The load-bearing ones:
+//! Read out of the real client's own decompiled source (behavioural reference
+//! only — no identifiers transcribed, per `CLAUDE.md`'s citation rule). The
+//! load-bearing ones:
 //!
-//! | quantity | value | source |
+//! | quantity | value | where it lives |
 //! |---|---|---|
-//! | rain/snow table size | 32 × 32, centred at 16 | `WeatherEffectRenderer.java:43-44` |
-//! | rain column speed | `3.0 + rand` | `WeatherEffectRenderer.java:168` |
-//! | rain texture scroll | `-(ticks + offset + partial) / 32 * speed`, wrapped at 32 | `:169-170` |
-//! | snow V drift | `-((ticks & 511) + partial) / 512` | `:181` |
-//! | per-column seed | `x*x*3121 + x*45238971 ^ z*z*418711 + z*13761` | `:80` |
-//! | rain max alpha | `1.0` | `:133` |
-//! | snow max alpha | `0.8` | `:134` |
-//! | distance alpha | `lerp(min(d²/r², 1), max_alpha, 0.5) * intensity` | `:201` |
-//! | V from height | `y * 0.25 + v_offset` | `:214-215` |
-//! | snow light boost | `(l * 3 + 15) / 4` per half | `:182` |
-//! | rain→snow threshold | temperature `>= 0.15` is rain | `Biome.java:175-176` |
-//! | `getThunderLevel` | `thunder * rain` | `Level.java:918-919` |
-//! | `isRaining` | `rain > 0.2` | `Level.java:947` |
-//! | `isThundering` | `thunder > 0.9` | `Level.java:943` |
-//! | sky rain darken | `×(1 - r·0.5, 1 - r·0.5, 1 - r·0.4)` | `AtmosphericFogEnvironment.java:51-54` |
-//! | sky thunder darken | `×(1 - t·0.5)` all three | `:57-59` |
-//! | sky-light floor | `0.24`, alpha `0.3125` rain / `0.52734375` thunder | `WeatherAttributes.java:19,30` |
-//! | lightning flash colour | `(204, 204, 255)` at `0.22` | `ClientLevel.java:264-266` |
-//! | lightning flash light | `SKY_LIGHT_FACTOR` forced to `1.0` | `ClientLevel.java:268` |
-//! | rain sound cadence | `rand(3) < rainSoundTime++` | `ClientLevel.java:384` |
-//! | rain sound volumes | `0.2 @ 1.0` normal, `0.1 @ 0.5` from above | `ClientLevel.java:388-390` |
+//! | rain/snow table size | 32 × 32, centred at 16 | the weather-effect renderer's own offset table |
+//! | rain column speed | `3.0 + rand` | the weather-effect renderer's rain-column builder |
+//! | rain texture scroll | `-(ticks + offset + partial) / 32 * speed`, wrapped at 32 | same rain-column builder |
+//! | snow V drift | `-((ticks & 511) + partial) / 512` | the weather-effect renderer's snow-column builder |
+//! | per-column seed | `x*x*3121 + x*45238971 ^ z*z*418711 + z*13761` | the weather-effect renderer's per-column seed |
+//! | rain max alpha | `1.0` | the weather-effect renderer's instance builder |
+//! | snow max alpha | `0.8` | same instance builder |
+//! | distance alpha | `lerp(min(d²/r², 1), max_alpha, 0.5) * intensity` | same instance builder |
+//! | V from height | `y * 0.25 + v_offset` | same instance builder |
+//! | snow light boost | `(l * 3 + 15) / 4` per half | the snow-column builder |
+//! | rain→snow threshold | temperature `>= 0.15` is rain | the biome climate check |
+//! | composed thunder level | `thunder * rain` | world weather state |
+//! | is-raining gate | `rain > 0.2` | world weather state |
+//! | is-thundering gate | `thunder > 0.9` | world weather state |
+//! | sky rain darken | `×(1 - r·0.5, 1 - r·0.5, 1 - r·0.4)` | the atmospheric fog environment layer |
+//! | sky thunder darken | `×(1 - t·0.5)` all three | same fog environment layer |
+//! | sky-light floor | `0.24`, alpha `0.3125` rain / `0.52734375` thunder | the weather attribute layers |
+//! | lightning flash colour | `(204, 204, 255)` at `0.22` | the client's own sky-flash tint |
+//! | lightning flash light | the sky-light factor forced to `1.0` | same sky-flash logic |
+//! | rain sound cadence | `rand(3) < rainSoundTime++` | the client's own weather-tick sound cadence |
+//! | rain sound volumes | `0.2 @ 1.0` normal, `0.1 @ 0.5` from above | same weather-tick sound cadence |
 //!
 //! # How to change it, and the gotchas
 //!
 //! * **`START_RAINING` sets the rain level to `0.0` and `STOP_RAINING` sets it to
-//!   `1.0`.** That is not a transcription slip — it is vanilla's own inversion at
-//!   `ClientPacketListener.java:1542-1545`, and [`WeatherState::apply_raining`]
-//!   reproduces it deliberately. It is invisible in practice because
-//!   `ServerLevel.java:783-791` sends a `RAIN_LEVEL_CHANGE` with the true level
-//!   immediately after every start/stop, and another every tick while the level
-//!   ramps by ±0.01 (`ServerLevel.java:762-768`). Do **not** "fix" it to the
-//!   intuitive polarity without also deciding what happens on a server with
-//!   `doWeatherCycle false`, where vanilla itself shows no rain after a bare
-//!   `/weather rain`.
+//!   `1.0`.** That is not a transcription slip — it is the real client's own
+//!   inversion on receiving that game event, and [`WeatherState::apply_raining`]
+//!   reproduces it deliberately. It is invisible in practice because the real
+//!   server sends a rain-level-change packet with the true level immediately
+//!   after every start/stop, and another every tick while the level ramps by
+//!   ±0.01. Do **not** "fix" it to the intuitive polarity without also deciding
+//!   what happens on a server with its weather cycle disabled, where vanilla
+//!   itself shows no rain after a bare `/weather rain`.
 //! * **Thunder is multiplied by rain, always.** [`WeatherState::thunder_level`]
 //!   is the *composed* value; the raw wire field is
 //!   [`WeatherState::raw_thunder_level`]. Reading the raw one into a darkening
 //!   term produces a black sky in clear weather the moment a server sends a
-//!   stale non-zero thunder level, which it does on join
-//!   (`PlayerList.java:654-656` sends all three unconditionally).
+//!   stale non-zero thunder level, which it does on join — the real server
+//!   sends all three weather fields unconditionally to every joining player.
 //! * **Rain versus snow is decided per column, and today every column answers
 //!   `Rain`.** The predicate ([`precipitation_for_temperature`]) is vanilla's and
 //!   is exercised by unit tests, but its *input* — the biome's `temperature` and
@@ -74,21 +74,22 @@ pub enum Precipitation {
     Snow,
 }
 
-/// One edge of the perpendicular-offset lookup table (`WeatherEffectRenderer.java:43`).
+/// One edge of the perpendicular-offset lookup table, from the real client's
+/// own rain/snow column builder.
 pub const RAIN_TABLE_SIZE: i32 = 32;
 
-/// The table's centre, i.e. the camera's own column (`:44`).
+/// The table's centre, i.e. the camera's own column.
 pub const HALF_RAIN_TABLE_SIZE: i32 = 16;
 
-/// Vanilla's `Biome.warmEnoughToRain` threshold (`Biome.java:175-176`).
+/// The real client's own warm-enough-to-rain threshold.
 ///
 /// A **height-adjusted** temperature at or above this is rain; below it is snow.
-/// `Biome.getHeightAdjustedTemperature` subtracts from the base temperature above
-/// sea level, which is why a mountain peak in a plains biome snows.
+/// The height adjustment subtracts from the base temperature above sea level,
+/// which is why a mountain peak in a plains biome snows.
 pub const WARM_ENOUGH_TO_RAIN: f32 = 0.15;
 
-/// Vanilla's `getPrecipitationAt` decision, given a biome's climate at a
-/// position (`Biome.java:104-108`).
+/// The real client's own precipitation-at-position decision, given a biome's
+/// climate at a position.
 ///
 /// `temperature` must already be height-adjusted; see [`height_adjusted_temperature`].
 #[must_use]
@@ -102,13 +103,13 @@ pub fn precipitation_for_temperature(has_precipitation: bool, temperature: f32) 
     }
 }
 
-/// Vanilla's `Biome.getHeightAdjustedTemperature` (`Biome.java:110-121`): above
-/// sea level the temperature falls off with height, so a peak snows while the
-/// valley below it rains.
+/// The real client's own height-adjusted temperature: above sea level the
+/// temperature falls off with height, so a peak snows while the valley below it
+/// rains.
 ///
-/// Vanilla's expression is
+/// The expression is
 /// `temperature - (y - seaLevel) * 0.05 / 40` seeded through a fixed noise
-/// offset; the noise term is a per-position `BiomeManager` sample this client has
+/// offset; the noise term is a per-position biome-manager sample this client has
 /// no generator for, so only the deterministic height falloff is reproduced. The
 /// omission moves the rain/snow line by at most the noise amplitude (±0.05 °,
 /// i.e. one block of altitude), never the branch itself.
@@ -130,7 +131,7 @@ pub fn height_adjusted_temperature(base_temperature: f32, y: i32, sea_level: i32
 pub struct WeatherState {
     rain: f32,
     thunder: f32,
-    /// Ticks of lightning flash left, vanilla's `ClientLevel.skyFlashTime`.
+    /// Ticks of lightning flash left, the real client's own sky-flash countdown.
     flash_ticks: u32,
 }
 
@@ -148,33 +149,29 @@ impl Default for WeatherState {
 
 /// Ticks a single lightning bolt holds the sky flash for.
 ///
-/// Vanilla's client sets `skyFlashTime = 2` on **every** tick a `LightningBolt`
-/// has `life >= 0` (`LightningBolt.java:139-141`), and `life` starts at `2`
-/// (`:45`), so one flash covers ticks 0, 1, 2 plus the 2-tick decay — five ticks
-/// from the spawn. A bolt also re-flashes `flashes = rand(3) + 1` times by
-/// resetting `life = 1` (`:47`, `:131-134`), which needs the bolt's own per-tick
-/// state; this client only sees the spawn, so it flashes **once**. Documented as
-/// a known shortfall rather than padded to hide it.
+/// The real client sets its sky-flash countdown to 2 on **every** tick a
+/// lightning bolt is still alive, and that bolt's own lifetime starts at 2, so
+/// one flash covers ticks 0, 1, 2 plus the 2-tick decay — five ticks from the
+/// spawn. A bolt also re-flashes a random 1-3 additional times by resetting its
+/// lifetime, which needs the bolt's own per-tick state; this client only sees
+/// the spawn, so it flashes **once**. Documented as a known shortfall rather
+/// than padded to hide it.
 pub const LIGHTNING_FLASH_TICKS: u32 = 5;
 
-/// Vanilla's lightning-flash sky tint, `ARGB.color(204, 204, 255)`
-/// (`ClientLevel.java:264`).
+/// The real client's own lightning-flash sky tint, packed as an RGB colour.
 pub const LIGHTNING_FLASH_COLOR: [f32; 3] = [204.0 / 255.0, 204.0 / 255.0, 255.0 / 255.0];
 
-/// How far toward [`LIGHTNING_FLASH_COLOR`] the sky lerps during a flash
-/// (`ClientLevel.java:266`).
+/// How far toward [`LIGHTNING_FLASH_COLOR`] the sky lerps during a flash.
 pub const LIGHTNING_FLASH_MIX: f32 = 0.22;
 
-/// The floor `SKY_LIGHT_FACTOR` is blended toward under rain and thunder
-/// (`WeatherAttributes.java:19` and `:30` — the same `0.24` in both).
+/// The floor the sky-light factor is blended toward under rain and thunder —
+/// the same `0.24` for both weather kinds.
 pub const WEATHER_SKY_LIGHT_FLOOR: f32 = 0.24;
 
-/// Rain's blend weight toward [`WEATHER_SKY_LIGHT_FLOOR`]
-/// (`WeatherAttributes.java:19`, `FloatWithAlpha(0.24, 0.3125)`).
+/// Rain's blend weight toward [`WEATHER_SKY_LIGHT_FLOOR`].
 pub const RAIN_SKY_LIGHT_ALPHA: f32 = 0.3125;
 
-/// Thunder's blend weight toward [`WEATHER_SKY_LIGHT_FLOOR`]
-/// (`WeatherAttributes.java:30`, `FloatWithAlpha(0.24, 0.52734375)`).
+/// Thunder's blend weight toward [`WEATHER_SKY_LIGHT_FLOOR`].
 pub const THUNDER_SKY_LIGHT_ALPHA: f32 = 0.527_343_75;
 
 impl WeatherState {
@@ -184,23 +181,23 @@ impl WeatherState {
         Self::default()
     }
 
-    /// Apply a `GAME_EVENT` `START_RAINING` (`true`) / `STOP_RAINING` (`false`).
+    /// Apply a game-event `START_RAINING` (`true`) / `STOP_RAINING` (`false`).
     ///
-    /// **This looks backwards and is not.** `ClientPacketListener.java:1542-1545`
-    /// sets the level to `0.0` on start and `1.0` on stop; see the module doc for
-    /// why reproducing it is correct rather than a bug being copied.
+    /// **This looks backwards and is not.** The real client sets the level to
+    /// `0.0` on start and `1.0` on stop; see the module doc for why reproducing
+    /// it is correct rather than a bug being copied.
     pub fn apply_raining(&mut self, raining: bool) {
         self.rain = if raining { 0.0 } else { 1.0 };
     }
 
-    /// Apply a `RAIN_LEVEL_CHANGE`. Clamped as `Level.setRainLevel` clamps
-    /// (`Level.java:932-936`).
+    /// Apply a `RAIN_LEVEL_CHANGE`. Clamped exactly as the real client's own
+    /// rain-level setter clamps.
     pub fn apply_rain_level(&mut self, level: f32) {
         self.rain = clamp01(level);
     }
 
-    /// Apply a `THUNDER_LEVEL_CHANGE`. Clamped as `Level.setThunderLevel` clamps
-    /// (`Level.java:921-925`).
+    /// Apply a `THUNDER_LEVEL_CHANGE`. Clamped exactly as the real client's own
+    /// thunder-level setter clamps.
     pub fn apply_thunder_level(&mut self, level: f32) {
         self.thunder = clamp01(level);
     }
@@ -210,7 +207,7 @@ impl WeatherState {
         self.flash_ticks = LIGHTNING_FLASH_TICKS;
     }
 
-    /// Count one tick of the flash down, as `ClientLevel.java:303-305` does.
+    /// Count one tick of the flash down, exactly as the real client does.
     pub fn tick_flash(&mut self) {
         self.flash_ticks = self.flash_ticks.saturating_sub(1);
     }
@@ -221,18 +218,18 @@ impl WeatherState {
         self.flash_ticks > 0
     }
 
-    /// `Level.getRainLevel` (`Level.java:928-930`), already clamped.
+    /// The real client's own rain-level getter, already clamped.
     ///
-    /// No `oRainLevel`/`rainLevel` interpolation pair: vanilla's `setRainLevel`
-    /// assigns *both*, so its own `Mth.lerp(a, o, n)` is a no-op on any
-    /// server-driven change — the smoothness comes from the server's ±0.01/tick
-    /// ramp (`ServerLevel.java:762-768`), not from client interpolation.
+    /// No old-value/new-value interpolation pair: the real client's own
+    /// rain-level setter assigns *both* fields at once, so its own lerp is a
+    /// no-op on any server-driven change — the smoothness comes from the
+    /// server's ±0.01/tick ramp, not from client interpolation.
     #[must_use]
     pub const fn rain_level(&self) -> f32 {
         self.rain
     }
 
-    /// `Level.getThunderLevel` (`Level.java:918-920`) — the raw level **times**
+    /// The real client's own thunder-level getter — the raw level **times**
     /// the rain level, which is the value every consumer wants.
     #[must_use]
     pub fn thunder_level(&self) -> f32 {
@@ -246,20 +243,20 @@ impl WeatherState {
         self.thunder
     }
 
-    /// `Level.isRaining` (`Level.java:946-948`): the gate vanilla uses for
-    /// "should anything actually be falling", `rain > 0.2`.
+    /// The real client's own "is it raining" gate: "should anything actually be
+    /// falling", `rain > 0.2`.
     ///
-    /// Note this is **not** the gate the renderer uses. `WeatherEffectRenderer`
-    /// extracts on `intensity > 0.0` (`:64`), so the first 20 ticks of a ramp draw
-    /// faint rain before `isRaining` flips; the two thresholds are genuinely
+    /// Note this is **not** the gate the renderer uses. The weather-effect
+    /// renderer extracts on `intensity > 0.0`, so the first 20 ticks of a ramp
+    /// draw faint rain before this gate flips; the two thresholds are genuinely
     /// different and conflating them makes rain pop in.
     #[must_use]
     pub fn is_raining(&self) -> bool {
         self.rain > 0.2
     }
 
-    /// Whether the weather pass has anything to draw at all — vanilla's own
-    /// extraction gate (`WeatherEffectRenderer.java:64`).
+    /// Whether the weather pass has anything to draw at all — the real
+    /// client's own extraction gate.
     #[must_use]
     pub fn any_precipitation(&self) -> bool {
         self.rain > 0.0
@@ -270,12 +267,12 @@ fn clamp01(v: f32) -> f32 {
     if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
 }
 
-/// Vanilla's `applyWeatherDarken` (`AtmosphericFogEnvironment.java:50-62`),
-/// applied to a **gamma-space** sRGB triple in `0.0..=1.0`.
+/// The real client's own weather-darken step, applied to a **gamma-space**
+/// sRGB triple in `0.0..=1.0`.
 ///
-/// Gamma space is not an approximation here: vanilla's `ARGB.scaleRGB` multiplies
-/// the 0..255 byte channels directly (`ARGB.java:108-115`), and its framebuffer
-/// is not colour-managed. Callers holding linear colour must round-trip
+/// Gamma space is not an approximation here: the real client's own RGB scaling
+/// multiplies the 0..255 byte channels directly, and its framebuffer is not
+/// colour-managed. Callers holding linear colour must round-trip
 /// (`srgb_to_linear(darken(linear_to_srgb(c), …))`) — the same discipline
 /// `model.wgsl` documents for tint and shade.
 ///
@@ -301,15 +298,14 @@ pub fn weather_darken_srgb(color: [f32; 3], rain_level: f32, thunder_level: f32)
     out
 }
 
-/// The lightning-flash sky lerp (`ClientLevel.java:264-266`), in gamma space for
-/// the same reason as [`weather_darken_srgb`] — vanilla's `ARGB.srgbLerp`
-/// interpolates the byte channels (`ARGB.java:155-161`).
+/// The lightning-flash sky lerp, in gamma space for the same reason as
+/// [`weather_darken_srgb`] — the real client's own colour-lerp interpolates
+/// the byte channels.
 ///
-/// Applied **before** the weather darkening in vanilla's layer order: the flash
-/// layer is added by `ClientLevel.addEnvironmentAttributeLayers` and the weather
-/// layers by `WeatherAttributes.addBuiltinLayers`, both onto `SKY_COLOR`, with the
-/// weather layers registered later (`ClientLevel.java:258` builds on
-/// `addDefaultLayers`, which is where the weather layers live).
+/// Applied **before** the weather darkening in the real client's own layer
+/// order: the flash layer is registered onto the sky colour before the
+/// weather layers are, so the weather darkening always sees the
+/// already-flashed colour.
 #[must_use]
 pub fn lightning_flash_srgb(color: [f32; 3], flashing: bool) -> [f32; 3] {
     if !flashing {
@@ -332,8 +328,8 @@ pub fn lightning_flash_srgb(color: [f32; 3], flashing: bool) -> [f32; 3] {
 /// pull both scale factors toward 1.0 and produce a rainy sky that is barely
 /// darker than a clear one — a "it got darker" gate would still pass.
 ///
-/// The two vanilla `scaleRGB` calls are folded into one multiply, which is exact
-/// up to vanilla's own byte rounding between them.
+/// The two real-client colour-scale steps are folded into one multiply, which
+/// is exact up to the real client's own byte rounding between them.
 #[must_use]
 pub fn weather_darken_linear(linear: [f32; 3], rain_level: f32, thunder_level: f32) -> [f32; 3] {
     if rain_level <= 0.0 && thunder_level <= 0.0 {
@@ -347,8 +343,8 @@ pub fn weather_darken_linear(linear: [f32; 3], rain_level: f32, thunder_level: f
 }
 
 /// [`lightning_flash_srgb`] for a caller holding **linear** RGB. Same reason as
-/// [`weather_darken_linear`]: vanilla's `ARGB.srgbLerp` interpolates gamma bytes,
-/// so lerping in linear light lands somewhere else.
+/// [`weather_darken_linear`]: the real client's own colour-lerp interpolates
+/// gamma bytes, so lerping in linear light lands somewhere else.
 #[must_use]
 pub fn lightning_flash_linear(linear: [f32; 3], flashing: bool) -> [f32; 3] {
     if !flashing {
@@ -367,19 +363,18 @@ pub fn lightning_flash_linear(linear: [f32; 3], flashing: bool) -> [f32; 3] {
     ]
 }
 
-/// The `SKY_LIGHT_FACTOR` a `sky_darken` becomes under this weather —
-/// `WeatherAttributes`' two `FloatModifier.ALPHA_BLEND` layers, applied in
-/// vanilla's own order (`WeatherAttributes.java:43-63`).
+/// The sky-light factor a `sky_darken` becomes under this weather — the real
+/// client's own two alpha-blend layers, applied in its own order.
 ///
 /// The layering is subtler than "blend twice", and the subtlety is load-bearing:
-/// vanilla splits the two weights so they do **not** double-count, taking
-/// `thunder = thunderLevel` and `rain = rainLevel - thunderLevel`
-/// (`WeatherAttributes.java:49-50`). At full thunder the rain weight is therefore
-/// `0`, and only the thunder layer applies — otherwise a full storm would be
-/// darkened twice and undershoot the floor.
+/// the real client splits the two weights so they do **not** double-count,
+/// taking `thunder = thunderLevel` and `rain = rainLevel - thunderLevel`. At
+/// full thunder the rain weight is therefore `0`, and only the thunder layer
+/// applies — otherwise a full storm would be darkened twice and undershoot the
+/// floor.
 ///
-/// A flash overrides everything to `1.0` (`ClientLevel.java:268`), which is what
-/// makes lightning read as a *brightening* of the world and not just of the sky.
+/// A flash overrides everything to `1.0`, which is what makes lightning read
+/// as a *brightening* of the world and not just of the sky.
 ///
 /// Returns a factor in `[WEATHER_SKY_LIGHT_FLOOR, 1.0]` for any `sky_darken` in
 /// that range, so the result is safe to hand straight to
@@ -393,8 +388,8 @@ pub fn weather_sky_light_factor(sky_darken: f32, weather: &WeatherState) -> f32 
     let rain = (weather.rain_level() - thunder).max(0.0);
     let mut factor = sky_darken;
     if rain > 0.0 {
-        // `FloatModifier.ALPHA_BLEND` toward the modifier's own value at the
-        // modifier's alpha, then the *state* lerp by how much rain there is.
+        // Blend toward the modifier's own value at the modifier's alpha, then
+        // the *state* lerp by how much rain there is.
         let modified = blend(factor, WEATHER_SKY_LIGHT_FLOOR, RAIN_SKY_LIGHT_ALPHA);
         factor += (modified - factor) * rain;
     }
@@ -405,14 +400,13 @@ pub fn weather_sky_light_factor(sky_darken: f32, weather: &WeatherState) -> f32 
     factor
 }
 
-/// `FloatModifier.ALPHA_BLEND`: `from` toward `to` by `alpha`.
+/// The real client's alpha-blend primitive: `from` toward `to` by `alpha`.
 fn blend(from: f32, to: f32, alpha: f32) -> f32 {
     from + (to - from) * alpha
 }
 
-/// The perpendicular half-offsets every column's quad is built from
-/// (`WeatherEffectRenderer.java:50-60`), indexed `z * 32 + x` over the camera's
-/// own 32×32 neighbourhood.
+/// The perpendicular half-offsets every column's quad is built from, indexed
+/// `z * 32 + x` over the camera's own 32×32 neighbourhood.
 ///
 /// Each entry is the unit vector **perpendicular** to the camera→column direction
 /// in the XZ plane, so the quad faces the camera without any per-column
@@ -442,9 +436,9 @@ pub fn column_offset_table() -> Vec<[f32; 2]> {
 
 /// One column of falling precipitation, before it is turned into a quad.
 ///
-/// This is vanilla's `WeatherEffectRenderer.ColumnInstance` (`:232`) with the
-/// packed light byte resolved to a scalar term — see [`WeatherProbe::light`] for
-/// why the resolve happens on the CPU rather than by binding a lightmap texture.
+/// This is the real client's own per-column render state with the packed
+/// light byte resolved to a scalar term — see [`WeatherProbe::light`] for why
+/// the resolve happens on the CPU rather than by binding a lightmap texture.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WeatherColumn {
     /// Block X of the column.
@@ -475,10 +469,10 @@ pub trait WeatherProbe {
     /// non-passable block from the top, i.e. where rain lands.
     ///
     /// `None` means "unknown" (an unloaded chunk, or a client with no heightmap
-    /// plumbing). Vanilla clamps the drawn span to
-    /// `max(camera_y ± radius, terrain_height)` (`WeatherEffectRenderer.java:74-76`);
-    /// an unknown height falls back to the unclamped `camera_y ± radius` span,
-    /// which draws rain below ground too. That is not visible — the pass is
+    /// plumbing). The real client clamps the drawn span to
+    /// `max(camera_y ± radius, terrain_height)`; an unknown height falls back
+    /// to the unclamped `camera_y ± radius` span, which draws rain below
+    /// ground too. That is not visible — the pass is
     /// depth-tested against terrain, so sub-surface fragments are occluded — but
     /// it does cost vertices, and it is the reason [`precipitation`] gets a
     /// sky-visibility say as well.
@@ -486,9 +480,9 @@ pub trait WeatherProbe {
     /// [`precipitation`]: WeatherProbe::precipitation
     fn column_top(&self, x: i32, z: i32) -> Option<i32>;
 
-    /// What falls at `(x, y, z)`: vanilla's `ClientLevel.getPrecipitationAt`
-    /// (`ClientLevel.java:396-…`), which is the conjunction of three things —
-    /// the chunk being loaded, the position seeing sky, and the biome's climate.
+    /// What falls at `(x, y, z)`: the real client's own precipitation-at-position
+    /// decision, which is the conjunction of three things — the chunk being
+    /// loaded, the position seeing sky, and the biome's climate.
     ///
     /// # The biome half is not reachable in this client, and that is the honest gap
     ///

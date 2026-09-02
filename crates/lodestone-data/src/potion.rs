@@ -285,18 +285,17 @@ pub struct AttributeModifierEntry {
     /// `attribute.modifier.plus.*`, negative under `attribute.modifier.take.*`
     /// (with the sign stripped for display — the template supplies the `+`/`-`).
     pub amount: f64,
-    /// `true` for `AttributeModifier::Operation::ADD_MULTIPLIED_TOTAL` (vanilla
-    /// multiplies the display amount by 100 and suffixes `%`); `false` for
-    /// `ADD_VALUE` (the raw amount, no suffix). No potion effect in this build's
-    /// registry uses `ADD_MULTIPLIED_BASE`, so that third operation is not modelled.
+    /// `true` for a percentage-scaled modifier (vanilla multiplies the display amount
+    /// by 100 and suffixes `%`); `false` for a flat additive modifier (the raw amount,
+    /// no suffix). No potion effect in this build's registry uses the third operation
+    /// kind (multiply-by-base), so it is not modelled here.
     pub percent: bool,
 }
 
-/// `MobEffect.attributeModifiers` (`MobEffects.java`'s `.addAttributeModifier(...)`
-/// chain) for exactly the effects a potion in this build's registry can carry.
-/// `(mob_effect_index, attribute_name, base_amount, percent)`; `base_amount` is the
-/// *unscaled* `AttributeModifier` constructor argument, scaled per-instance by
-/// [`potion_attribute_modifiers`].
+/// Each mob effect's attribute-modifier declarations, for exactly the effects a
+/// potion in this build's registry can carry. `(mob_effect_index, attribute_name,
+/// base_amount, percent)`; `base_amount` is the *unscaled* declared amount, scaled
+/// per-instance by [`potion_attribute_modifiers`].
 const EFFECT_ATTRIBUTE_MODIFIERS: &[(usize, &str, f64, bool)] = &[
     (0, "Speed", 0.2, true),                    // speed
     (1, "Speed", -0.15, true),                  // slowness
@@ -307,10 +306,10 @@ const EFFECT_ATTRIBUTE_MODIFIERS: &[(usize, &str, f64, bool)] = &[
     (25, "Luck", 1.0, false),                    // luck
 ];
 
-/// `MobEffect.createModifiers` for one potion registry entry's built-in effect
-/// list — the `"When Applied:"` section `PotionContents.addPotionTooltip` appends
-/// after the effect lines, when at least one effect carries an attribute modifier.
-/// Empty when none of the potion's effects modify an attribute (most of them: only
+/// The resolved attribute modifiers for one potion registry entry's built-in effect
+/// list — the `"When Applied:"` section the tooltip appends after the effect lines,
+/// when at least one effect carries an attribute modifier. Empty when none of the
+/// potion's effects modify an attribute (most of them: only
 /// `speed`/`slowness`/`strength`/`weakness`/`luck`/`jump_boost`/`invisibility` do).
 #[must_use]
 pub fn potion_attribute_modifiers(id: i32) -> Vec<AttributeModifierEntry> {
@@ -347,7 +346,7 @@ mod tests {
         assert_eq!(potion_id("minecraft:not_a_potion"), None);
     }
 
-    /// `PotionContents.BASE_POTION_COLOR = -13083194`, cross-checked the same way
+    /// The base potion colour constant is `-13083194`, cross-checked the same way
     /// `lodestone_assets::item_tint::defaults::POTION_BASE` is.
     #[test]
     fn base_potion_color_matches_the_jar_constant() {
@@ -355,10 +354,10 @@ mod tests {
     }
 
     /// A water bottle: `potion: Some(water)`, no custom color, no custom effects.
-    /// `water`'s own `Potion("water")` constructor takes no `MobEffectInstance`, so
-    /// `getAllEffects()` is empty and `getColorOptional` returns `OptionalInt.empty()`
-    /// — the *control*: it legitimately resolves to the base colour, proving the gate
-    /// below is not simply asserting "not the default" for everything.
+    /// `water` carries no built-in effect at all, so the effect list is empty and the
+    /// colour mix legitimately has nothing to average — the *control*: it resolves to
+    /// the base colour, proving the gate below is not simply asserting "not the
+    /// default" for everything.
     #[test]
     fn water_bottle_is_the_base_colour_control() {
         let water = potion_id("minecraft:water").unwrap();
@@ -366,8 +365,8 @@ mod tests {
     }
 
     /// Two potions whose expected colours are computed independently, straight from
-    /// `MobEffects.java`'s own constants, and land far apart from each other and from
-    /// the base colour — the discriminating pair. `swiftness` is a single `speed`
+    /// vanilla's own per-effect colour constants, and land far apart from each other
+    /// and from the base colour — the discriminating pair. `swiftness` is a single `speed`
     /// effect at amplifier 0, so its colour is `speed`'s own `0x3402751`. `strong_
     /// harming` is a single `instant_damage` effect at amplifier 1, so its colour is
     /// `instant_damage`'s own `0xA9656A` unweighted-averaged against nothing else (one
@@ -380,8 +379,8 @@ mod tests {
         let swiftness_color = potion_color(Some(swiftness), None, &[]);
         let harming_color = potion_color(Some(strong_harming), None, &[]);
 
-        assert_eq!(swiftness_color, opaque(0x33_EBFF), "MobEffects.SPEED's own colour");
-        assert_eq!(harming_color, opaque(0xA9_656A), "MobEffects.INSTANT_DAMAGE's own colour");
+        assert_eq!(swiftness_color, opaque(0x33_EBFF), "the speed effect's own colour");
+        assert_eq!(harming_color, opaque(0xA9_656A), "the instant-damage effect's own colour");
 
         // Both must differ from each other and from the water-bottle control by more
         // than a rounding error — the *magnitude* check, not just a sign.
@@ -472,9 +471,9 @@ mod tests {
     }
 
     /// `long_swiftness`/`strong_swiftness` must resolve to the exact same item name
-    /// as plain `swiftness` — vanilla's `Potion.name()` collapses every duration and
-    /// potency variant onto one key, so the title never carries a Roman numeral or a
-    /// "Long" qualifier; only the tooltip's effect line does.
+    /// as plain `swiftness` — vanilla's effect-key resolution collapses every duration
+    /// and potency variant onto one key, so the title never carries a Roman numeral or
+    /// a "Long" qualifier; only the tooltip's effect line does.
     #[test]
     fn duration_and_potency_variants_share_one_item_name() {
         let base = potion_item_display_name("potion", potion_id("minecraft:swiftness").unwrap());
@@ -529,7 +528,7 @@ mod tests {
 
     /// `strong_slowness` and `strong_turtle_master`'s `slowness` component are the two
     /// highest amplifiers present in this build's registry (3 and 5) — cross-checked
-    /// against `Potions.java`'s own constructor arguments rather than guessed.
+    /// against the registry's own declared arguments rather than guessed.
     #[test]
     fn high_amplifiers_are_carried_through_unmodified() {
         let strong_slowness = potion_id("minecraft:strong_slowness").unwrap();

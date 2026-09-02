@@ -509,13 +509,13 @@ pub fn sky_disc_indices() -> Vec<u32> {
 // Sun / moon
 // ---------------------------------------------------------------------------
 
-/// Sun billboard half-size in blocks (vanilla `SkyRenderer.SUN_SIZE`).
+/// Sun billboard half-size in blocks (vanilla's own constant).
 pub const SUN_SIZE: f32 = 30.0;
-/// Sun billboard distance in blocks (vanilla `SkyRenderer.SUN_HEIGHT`).
+/// Sun billboard distance in blocks (vanilla's own constant).
 pub const SUN_HEIGHT: f32 = 100.0;
-/// Moon billboard half-size in blocks (vanilla `SkyRenderer.MOON_SIZE`).
+/// Moon billboard half-size in blocks (vanilla's own constant).
 pub const MOON_SIZE: f32 = 20.0;
-/// Moon billboard distance in blocks (vanilla `SkyRenderer.MOON_HEIGHT`).
+/// Moon billboard distance in blocks (vanilla's own constant).
 pub const MOON_HEIGHT: f32 = 100.0;
 
 /// The rotation vanilla's pose stack accumulates before placing a celestial
@@ -530,11 +530,11 @@ pub fn celestial_rotation_matrix(angle_rad: f32) -> Mat4 {
 }
 
 /// Camera-relative positions of a celestial billboard quad (sun or moon),
-/// vertex order matching vanilla's `buildCelestialQuad`/`buildMoonPhases`:
+/// vertex order matching vanilla's own sun/moon quad builders:
 /// `(-1,-1), (1,-1), (1,1), (-1,1)` in the quad's own `(u, v)` before the
 /// transform. Composes [`celestial_rotation_matrix`] with the translate-then-
-/// scale vanilla applies per billboard (`translate(0, height, 0)` then
-/// `scale(size, 1, size)`).
+/// scale vanilla applies per billboard (translate by `height`, then scale by
+/// `size` in the two in-plane axes).
 #[must_use]
 pub fn celestial_quad_positions(angle_rad: f32, height: f32, size: f32) -> [[f32; 3]; 4] {
     let m = celestial_rotation_matrix(angle_rad)
@@ -552,8 +552,8 @@ pub fn celestial_quad_positions(angle_rad: f32, height: f32, size: f32) -> [[f32
 /// UVs for a celestial quad's 4 corners (same winding as
 /// [`celestial_quad_positions`]) into atlas rect `[u0, v0, u1, v1]`.
 ///
-/// `mirrored` swaps the rect corners the way vanilla's `buildMoonPhases` does
-/// relative to `buildSunQuad` (the moon texture is authored mirrored relative
+/// `mirrored` swaps the rect corners the way vanilla's moon-quad builder does
+/// relative to the sun's (the moon texture is authored mirrored relative
 /// to the sun): sun corner 0 samples `(u0, v0)`, moon corner 0 samples
 /// `(u1, v1)`.
 #[must_use]
@@ -577,23 +577,24 @@ pub const fn quad_indices() -> [u32; 6] {
 // Sunrise / sunset horizon band
 // ---------------------------------------------------------------------------
 
-/// Perimeter steps in the sunrise/sunset fan (vanilla `SkyRenderer.SUNRISE_STEPS`).
+/// Perimeter steps in the sunrise/sunset fan (vanilla's own constant).
 pub const SUNRISE_STEPS: usize = 16;
 /// Vertices in the sunrise/sunset fan: one centre plus `SUNRISE_STEPS + 1`
 /// perimeter points (the last repeats the first to close the fan) — vanilla's
-/// own `int vertices = 18`.
+/// own vertex count of 18.
 pub const SUNRISE_FAN_VERTICES: usize = SUNRISE_STEPS + 2;
 /// Distance from the eye to the fan's bright centre, in blocks
-/// (`buildSunriseFan`'s `addVertex(0, 100, 0)`).
+/// (vanilla's own fan-builder places the centre vertex at `(0, 100, 0)`).
 pub const SUNRISE_FAN_HEIGHT: f32 = 100.0;
-/// The fan's perimeter radius, in blocks (`sinAngle * 120`).
+/// The fan's perimeter radius, in blocks (`sin(angle) * 120` in vanilla's builder).
 pub const SUNRISE_FAN_RADIUS: f32 = 120.0;
-/// The fan's out-of-plane bow, in blocks (`-cosAngle * 40`); scaled by the
-/// band's alpha at draw time, which is what makes the band flatten as it fades.
+/// The fan's out-of-plane bow, in blocks (`-cos(angle) * 40` in vanilla's builder);
+/// scaled by the band's alpha at draw time, which is what makes the band
+/// flatten as it fades.
 pub const SUNRISE_FAN_BOW: f32 = 40.0;
 
 /// Camera-relative, **untransformed** positions of the sunrise/sunset fan
-/// (vanilla `SkyRenderer.buildSunriseFan`): a centre vertex at
+/// (vanilla's own fan builder): a centre vertex at
 /// `(0, SUNRISE_FAN_HEIGHT, 0)` followed by 17 perimeter vertices at
 /// `(sin(a) * 120, cos(a) * 120, -cos(a) * 40)` for `a = i * 2π/16`, `i` in
 /// `0..=16`.
@@ -618,15 +619,15 @@ pub fn sunrise_fan_positions() -> [[f32; 3]; SUNRISE_FAN_VERTICES] {
 }
 
 /// Per-vertex alpha for [`sunrise_fan_positions`]: `1.0` at the centre, `0.0`
-/// at every perimeter vertex (`ARGB.white(1.0F)` / `ARGB.white(0.0F)` in
-/// `buildSunriseFan`).
+/// at every perimeter vertex (vanilla's fan builder writes opaque white at the
+/// centre and fully transparent white at the rim).
 ///
-/// The *colour* is white in the buffer; the band's actual hue arrives as
-/// `ColorModulator` — `core/position_color.fsh` computes
-/// `vertexColor * ColorModulator`, so the effective fragment is
-/// `sunrise_rgb` with alpha `vertex_alpha * sunrise_alpha`. Both factors are
-/// folded into the vertex colour on the CPU here, exactly as the sky disc's
-/// per-frame colour already is.
+/// The *colour* is white in the buffer; the band's actual hue arrives as a
+/// separate per-draw colour modulator that vanilla's fragment shader multiplies
+/// against the vertex colour, so the effective fragment is `sunrise_rgb` with
+/// alpha `vertex_alpha * sunrise_alpha`. Both factors are folded into the
+/// vertex colour on the CPU here, exactly as the sky disc's per-frame colour
+/// already is.
 #[must_use]
 pub fn sunrise_fan_vertex_alphas() -> [f32; SUNRISE_FAN_VERTICES] {
     let mut out = [0.0f32; SUNRISE_FAN_VERTICES];
@@ -650,24 +651,19 @@ pub fn sunrise_fan_indices() -> Vec<u32> {
 /// The transform that places the sunrise/sunset fan on the horizon, on the
 /// correct side of the sky, squashed by the band's own `alpha`.
 ///
-/// A literal reading of `SkyRenderer.renderSunriseAndSunset`, which builds
-/// `poseStack` from **identity** (`LevelRenderer.addSkyPass` hands it a fresh
-/// `new PoseStack()`, unlike `renderSunMoonAndStars` which adds its own
-/// `Axis.YP.rotationDegrees(-90)`):
+/// A literal reading of vanilla's own sunrise/sunset draw routine, which builds
+/// its pose stack from **identity** (the enclosing sky-pass call hands it a
+/// fresh, unrotated stack, unlike the sun/moon/star draw which adds its own
+/// `-90`-degree turn about `+Y` first): the routine rotates 90 degrees about
+/// `+X`, then rotates about `+Z` by `90 + flip` degrees (where `flip` is `180`
+/// when the sun angle's sine is negative, else `0`), then multiplies that pose
+/// into the model-view stack and scales it by `(1, 1, alpha)`.
 ///
-/// ```java
-/// poseStack.mulPose(Axis.XP.rotationDegrees(90.0F));
-/// float angle = Mth.sin(sunAngle) < 0.0F ? 180.0F : 0.0F;
-/// poseStack.mulPose(Axis.ZP.rotationDegrees(angle + 90.0F));
-/// modelViewStack.mul(poseStack.last().pose());
-/// modelViewStack.scale(1.0F, 1.0F, alpha);
-/// ```
-///
-/// `mulPose` *post*-multiplies, so the composed matrix is
-/// `Rx(90°) · Rz(90° + flip) · S(1, 1, alpha)` and a vertex is scaled first,
-/// then Z-rotated, then X-rotated — getting that order backwards puts the band
-/// 90° away from the sun, in the middle of nowhere, still looking like a
-/// plausible horizon glow in a screenshot.
+/// Each of vanilla's pose-stack multiplications *post*-multiplies, so the
+/// composed matrix is `Rx(90°) · Rz(90° + flip) · S(1, 1, alpha)` and a vertex
+/// is scaled first, then Z-rotated, then X-rotated — getting that order
+/// backwards puts the band 90° away from the sun, in the middle of nowhere,
+/// still looking like a plausible horizon glow in a screenshot.
 ///
 /// Working the centre vertex through it: `(0, 100, 0)` → `Rz(90°)` →
 /// `(-100, 0, 0)` → `Rx(90°)` → `(-100, 0, 0)`. So the band centres on the
@@ -693,18 +689,17 @@ pub fn sunrise_fan_transform(sun_angle_rad: f32, alpha: f32) -> Mat4 {
         * Mat4::from_scale(Vec3::new(1.0, 1.0, alpha))
 }
 
-/// The alpha below which vanilla skips the sunrise/sunset draw entirely
-/// (`renderSunriseAndSunset`'s `if (!(alpha <= 0.001F))`).
+/// The alpha below which vanilla skips the sunrise/sunset draw entirely.
 pub const SUNRISE_MIN_ALPHA: f32 = 0.001;
 
 // ---------------------------------------------------------------------------
 // Star field
 // ---------------------------------------------------------------------------
 
-/// Star count (vanilla `SkyRenderer.STAR_COUNT`). The *iteration* count, not
+/// Star count (vanilla's own constant). The *iteration* count, not
 /// the guaranteed output count — see [`build_star_field`].
 pub const STAR_COUNT: usize = 1500;
-/// Star field distance in blocks (vanilla `SkyRenderer`'s star `starDistance`).
+/// Star field distance in blocks (vanilla's own star distance constant).
 pub const STAR_DISTANCE: f32 = 100.0;
 /// The seed this module uses for its own deterministic star field. **Not**
 /// vanilla's seed in any meaningful sense — see [`build_star_field`]'s docs.
@@ -712,10 +707,11 @@ pub const STAR_FIELD_SEED: u64 = 10842;
 
 /// A small, dependency-free splitmix64 PRNG, seeded once.
 ///
-/// Deliberately not vanilla's Java `RandomSource`: reproducing that generator
-/// bit-for-bit is not attempted here (the star field is a visual feature, not
-/// a decode-parity gate — nothing anywhere compares it against captured server
-/// bytes). This generator is chosen only for being small, dependency-free, and
+/// Deliberately not vanilla's own random-number generator: reproducing that
+/// generator bit-for-bit is not attempted here (the star field is a visual
+/// feature, not a decode-parity gate — nothing anywhere compares it against
+/// captured server bytes). This generator is chosen only for being small,
+/// dependency-free, and
 /// *platform-and-run deterministic*, which is what makes [`build_star_field`]
 /// reproducible and testable at all; the resulting star positions will not
 /// match a real vanilla client's.
@@ -763,15 +759,15 @@ pub fn star_field_builds() -> u64 {
 
 /// Builds the star field's quads (unrotated — apply [`celestial_rotation_matrix`]
 /// per frame to place them, matching how vanilla rotates the static star
-/// buffer by `starAngle` rather than rebuilding it).
+/// buffer by the star angle rather than rebuilding it).
 ///
-/// Ports vanilla's `SkyRenderer.buildStars` algorithm: reject-sample a point in
+/// Ports vanilla's own star-field builder algorithm: reject-sample a point in
 /// the shell `0.1 <= |p| < 1.0` inside the unit cube, place a billboard quad of
 /// random size at that point normalized to [`STAR_DISTANCE`], oriented to face
 /// outward (tangent to the sphere) with a random in-plane rotation. [`STAR_COUNT`]
 /// is the *iteration* count exactly as in vanilla — rejected samples are
 /// skipped, not retried, so the returned `Vec` is shorter than `STAR_COUNT`
-/// (vanilla's own `starIndexCount` is likewise runtime-derived, not a
+/// (vanilla's own star index count is likewise runtime-derived, not a
 /// constant, for the same reason).
 ///
 /// See the struct docs on [`SplitMix64`] for why this does not reproduce
@@ -822,19 +818,18 @@ pub fn build_star_field(seed: u64) -> Vec<[[f32; 3]; 4]> {
 // Clouds
 // ---------------------------------------------------------------------------
 
-/// Cloud plane height in blocks: the overworld's
-/// `EnvironmentAttributes.CLOUD_HEIGHT`, which `DimensionTypes.java:38` sets to
-/// `192.33F` — the same value as the attribute's registered default
-/// (`EnvironmentAttributes.java:52-54`). This was a rounded `192.0`.
+/// Cloud plane height in blocks: the overworld dimension's own cloud-height
+/// attribute, which the dimension type sets to `192.33` — the same value as
+/// the attribute's registered default. This was a rounded `192.0`.
 pub const CLOUD_HEIGHT: f32 = 192.33;
-/// Blocks per cloud-texture cell (vanilla `CloudRenderer.CELL_SIZE_IN_BLOCKS`).
+/// Blocks per cloud-texture cell (vanilla's own cell-size constant).
 pub const CLOUD_CELL_BLOCKS: f32 = 12.0;
 
-/// The overworld's `EnvironmentAttributes.CLOUD_COLOR`, as **linear** RGB.
+/// The overworld dimension's own cloud-colour attribute, as **linear** RGB.
 ///
-/// `DimensionTypes.java:37` sets it to `ARGB.white(0.8F)`, and `ARGB.white`
-/// (`ARGB.java:188`) is `as8BitChannel(alpha) << 24 | 16777215` — so the RGB is
-/// `0xFFFFFF`, **pure white**, and only the alpha is `0.8`. Vanilla's clouds are
+/// The dimension type sets it to opaque white at `0.8` alpha, encoded as a
+/// packed colour whose RGB channels are `0xFFFFFF` — so the RGB is
+/// **pure white**, and only the alpha is `0.8`. Vanilla's clouds are
 /// white geometry at 80% opacity, tinted per-tick by [`CLOUD_COLOR_TRACK`]'s
 /// `multiply` modifier (`#FFFFFF` by day, `#191926` at night).
 ///

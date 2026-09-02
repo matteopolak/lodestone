@@ -1,5 +1,4 @@
-//! Armour trims — the `minecraft:trim` decal layer
-//! (`net.minecraft.world.item.equipment.trim.ArmorTrim`).
+//! Armour trims — the `minecraft:trim` decal layer.
 //!
 //! ## What it is
 //!
@@ -13,7 +12,7 @@
 //!
 //! ## How it works
 //!
-//! `ArmorTrim.layerAssetId(layerAssetPrefix, equipmentAsset)` is:
+//! Vanilla's own sprite-id composition is:
 //!
 //! ```text
 //! suffix = material.assets().assetId(equipmentAsset).suffix()   // wearer-aware
@@ -22,7 +21,7 @@
 //! ```
 //!
 //! `layerAssetPrefix` is `"trims/entity/" + layerType.id` (`humanoid` or
-//! `humanoid_leggings`). The interesting part is `MaterialAssetGroup.assetId`:
+//! `humanoid_leggings`). The interesting part is the suffix resolution:
 //! a material's suffix is normally its own
 //! id, but five materials declare a **wearer-keyed override**, each
 //! overriding exactly the armour material that matches their own name —
@@ -47,8 +46,8 @@
 //!
 //! [`TRIM_PATTERNS`]/[`TRIM_MATERIALS`] are the only two hand-transcribed
 //! tables here (registry content with no generic-atlas-descriptor
-//! equivalent: `decal` and the override map are Java statics, not resource
-//! files) — everything else this module needs (which sprites exist, their
+//! equivalent: `decal` and the override map are hand-authored constants, not
+//! resource files) — everything else this module needs (which sprites exist, their
 //! pixels) is discovered from the real `armor_trims.json` descriptor plus the
 //! real palette/pattern PNGs, per this crate's own "discovered, not
 //! hand-listed" rule (see `banner_pattern_atlas`'s module docs for the fuller
@@ -59,11 +58,12 @@
 //! **Gotcha**: `decal` selects a *pipeline*, not a texture. Every one of the
 //! 18 patterns in 26.2 has `"decal": false` (checked directly against every
 //! `data/minecraft/trim_pattern/*.json` in `client.jar` — see [`TRIM_PATTERNS`]),
-//! so the `decal: true` branch (vanilla's `ARMOR_DECAL_CUTOUT_NO_CULL`,
-//! `lodestone_render`'s `EntityPipeline::trim_decal_pipeline`) is exercised by
-//! no real vanilla trim today. It still has to exist and be selected
-//! correctly — a resource pack, or a future vanilla release, can set it, and
-//! `Sheets.armorTrimsSheet(decal)`'s branch is a real fork, not a vanilla
+//! so the `decal: true` branch (a separate vanilla render-pipeline variant
+//! for decal-based trims, and `lodestone_render`'s
+//! `EntityPipeline::trim_decal_pipeline`) is exercised by no real vanilla
+//! trim today. It still has to exist and be selected correctly — a resource
+//! pack, or a future vanilla release, can set it, and vanilla's own trim-sheet
+//! selection genuinely forks on this flag: it is a real fork, not a vanilla
 //! implementation detail this crate is free to collapse.
 
 use std::collections::HashMap;
@@ -90,9 +90,9 @@ pub const ARMOR_TRIMS_ATLAS_PATH: &str = "assets/minecraft/atlases/armor_trims.j
 pub struct TrimPattern {
     /// The registry name / `assetId` path segment, e.g. `"sentry"`.
     pub id: &'static str,
-    /// `TrimPattern.decal` — selects `Sheets.armorTrimsSheet`'s pipeline
-    /// branch (`ARMOR_CUTOUT_NO_CULL` when `false`, `ARMOR_DECAL_CUTOUT_NO_CULL`
-    /// when `true`). See this module's "Gotcha" note: every 26.2 pattern is
+    /// Selects which vanilla render-pipeline variant this pattern's sprite
+    /// draws through: a plain cutout pipeline when `false`, a decal variant
+    /// when `true`. See this module's "Gotcha" note: every 26.2 pattern is
     /// `false`.
     pub decal: bool,
 }
@@ -121,20 +121,20 @@ pub const TRIM_PATTERNS: &[TrimPattern] = &[
     TrimPattern { id: "wild", decal: false },
 ];
 
-/// One `(wearer armour asset id, override suffix)` pair —
-/// `MaterialAssetGroup`'s `override_armor_assets` map, one entry at a time.
+/// One `(wearer armour asset id, override suffix)` pair — one entry at a
+/// time from vanilla's own per-material wearer-keyed override map.
 pub type MaterialOverride = (&'static str, &'static str);
 
 /// One `trim_material` registry entry
-/// (`data/minecraft/trim_material/*.json`), transcribed from
-/// `MaterialAssetGroup.java`'s eleven static instances.
+/// (`data/minecraft/trim_material/*.json`), transcribed from vanilla's own
+/// eleven built-in material definitions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrimMaterial {
     /// The registry name, e.g. `"iron"`.
     pub id: &'static str,
     /// The suffix used when [`Self::suffix_for`] finds no override —
-    /// identical to `id` for every 26.2 material (`MaterialAssetGroup.create`
-    /// always seeds `base` from the same string as the material's own name).
+    /// identical to `id` for every 26.2 material (vanilla always seeds the
+    /// base suffix from the material's own name).
     pub base_suffix: &'static str,
     /// Wearer-armour-asset-id-keyed overrides. Only five materials declare
     /// any (iron, netherite, copper, gold, diamond), and each declares
@@ -143,7 +143,7 @@ pub struct TrimMaterial {
 }
 
 impl TrimMaterial {
-    /// `MaterialAssetGroup.assetId(equipmentAssetId)` — the suffix to append
+    /// Resolves the suffix to append
     /// to the pattern's path when this material trims a piece whose own
     /// armour material is `wearer_asset_id` (an [`crate::equipment::ArmourAsset::id`],
     /// e.g. `"diamond"`).
@@ -164,11 +164,9 @@ impl TrimMaterial {
     }
 }
 
-/// Every `trim_material` in 26.2, transcribed from `MaterialAssetGroup.java`'s
-/// static instances (`QUARTZ`, `IRON`, `NETHERITE`, `REDSTONE`, `COPPER`,
-/// `GOLD`, `EMERALD`, `DIAMOND`, `LAPIS`, `AMETHYST`, `RESIN`) and
-/// cross-checked against every `data/minecraft/trim_material/*.json` in
-/// `client.jar`.
+/// Every `trim_material` in 26.2, transcribed from vanilla's own eleven
+/// built-in material definitions and cross-checked against every
+/// `data/minecraft/trim_material/*.json` in `client.jar`.
 pub const TRIM_MATERIALS: &[TrimMaterial] = &[
     TrimMaterial { id: "quartz", base_suffix: "quartz", overrides: &[] },
     TrimMaterial {
@@ -215,7 +213,7 @@ pub fn trim_material(id: &str) -> Option<&'static TrimMaterial> {
     TRIM_MATERIALS.iter().find(|m| m.id == id)
 }
 
-/// `ArmorTrim.layerAssetId` — the sprite id a `(pattern, material)` pair
+/// The sprite id a `(pattern, material)` pair
 /// resolves to for a given layer type and wearer armour asset, e.g.
 /// `minecraft:trims/entity/humanoid/sentry_iron_darker`. This is exactly the
 /// key [`palette_bake::bake_paletted_permutations`] produces (base texture id
@@ -281,7 +279,8 @@ impl TrimAtlas {
         // Stacked, not single-winner: a server pack shipping its own
         // `armor_trims.json` must extend the jar's `paletted_permutations`
         // source, not replace it outright (`AtlasDefinition::load_stacked`'s
-        // own doc — `SpriteSourceList.load`'s `getResourceStack`).
+        // own doc — this mirrors vanilla's own resource-stacking behaviour
+        // for sprite sources).
         let definition = AtlasDefinition::load_stacked(manager, ARMOR_TRIMS_ATLAS_PATH)
             .ok_or_else(|| TrimAtlasError::DescriptorMissing {
                 path: ARMOR_TRIMS_ATLAS_PATH.to_string(),
@@ -393,7 +392,7 @@ mod tests {
     }
 
     #[test]
-    fn trim_sprite_id_matches_armor_trim_layer_asset_id() {
+    fn trim_sprite_id_composes_layer_type_pattern_and_material_suffix() {
         let sentry = trim_pattern("sentry").expect("sentry exists");
         let iron = trim_material("iron").expect("iron exists");
         let id = trim_sprite_id(sentry, iron, ArmourLayerType::Humanoid, "diamond")

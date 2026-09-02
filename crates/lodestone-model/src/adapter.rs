@@ -69,8 +69,7 @@ pub enum Directive {
     Disconnect(Text),
     /// A `minecraft:bundle_delimiter` boundary.
     ///
-    /// Vanilla's own pipeline (`BundlerInfo.java`) never gives this packet a
-    /// body — it exists purely as a toggle: the first delimiter after a run of
+    /// This packet never carries a body — it exists purely as a toggle: the first delimiter after a run of
     /// ordinary packets opens a bundle, the next one closes it, and everything
     /// decoded in between is meant to apply to the client in one atomic step
     /// rather than packet-by-packet. The adapter only recognises the
@@ -363,10 +362,9 @@ impl From<&ClientAction> for ClientActionKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct EntityBaseDimensions {
     /// Standing bounding-box width, in blocks (the box is `width` on both
-    /// horizontal axes). Vanilla `EntityDimensions.width()` at scale 1.
+    /// horizontal axes), at scale 1.
     pub width: f32,
-    /// Standing bounding-box height, in blocks. Vanilla
-    /// `EntityDimensions.height()` at scale 1.
+    /// Standing bounding-box height, in blocks, at scale 1.
     pub height: f32,
 }
 
@@ -387,36 +385,35 @@ pub struct EntityFacts {
     /// [`EntityBaseDimensions`] on the `SCALE`/`STEP_HEIGHT` folds being the
     /// caller's.
     pub dimensions: EntityBaseDimensions,
-    /// Whether an entity of this type can shove the local player through
-    /// vanilla `LivingEntity.pushEntities()`.
+    /// Whether an entity of this type can shove the local player as part of
+    /// the ordinary per-tick crowd-pushing pass that every living entity runs.
     ///
     /// # This is a *type*-level capability, and default-**deny**
     ///
-    /// `Entity.isPushable()` is `false` and only `LivingEntity` overrides it to
-    /// `true`; more to the point, `LivingEntity.aiStep` is the only caller of
-    /// `pushEntities()` in the whole vanilla tree, so a non-living entity never
-    /// runs the crowd pass at all. A version that does not know a type therefore
-    /// reports "no", never "probably". The inverse — assuming an unknown type
-    /// can push — makes dropped items nudge the player around the floor.
+    /// Pushability defaults to off, and only living entities turn it on; more
+    /// to the point, only a living entity's own per-tick update ever runs the
+    /// crowd pass at all, so a non-living entity never participates. A version
+    /// that does not know a type therefore reports "no", never "probably". The
+    /// inverse — assuming an unknown type can push — makes dropped items nudge
+    /// the player around the floor.
     ///
     /// `true` means "can, in some runtime state", not "always does". The
-    /// per-instance refinements vanilla layers on top (`isAlive()`,
-    /// `isSpectator()`, `onClimbable()`, a horse's `!isVehicle()`, a warden's
-    /// `!isDiggingOrEmerging()`) are entity *state*, not per-type data, and stay
-    /// the consumer's to apply where it has them.
+    /// per-instance refinements layered on top elsewhere (aliveness,
+    /// spectator mode, standing on a climbable, a horse not being ridden, a
+    /// warden not mid-dig-or-emerge) are entity *state*, not per-type data, and
+    /// stay the consumer's to apply where it has them.
     ///
     /// # What this does **not** cover
     ///
-    /// Only the `LivingEntity.pushEntities()` mechanism, because that is the one
-    /// `lodestone-physics`'s crowd pass models. Vanilla boats and rideable
-    /// minecarts also push players, but from their own tick through
-    /// `AbstractBoat.push(Entity)` and `NewMinecartBehavior.pushEntities(AABB)`,
-    /// which use a differently-inflated query box and extra conditions. A
-    /// version reports `false` for those families rather than approximating them
-    /// into the wrong pass.
+    /// Only the living-entity crowd-pushing mechanism, because that is the one
+    /// `lodestone-physics`'s crowd pass models. Boats and rideable minecarts
+    /// also push players, but from their own per-tick update, using a
+    /// differently-inflated query box and extra conditions. A version reports
+    /// `false` for those families rather than approximating them into the
+    /// wrong pass.
     pub pushes_players: bool,
     /// Whether another entity's movement sweep may treat this entity as a hard
-    /// collider through `Entity.canBeCollidedWith`.
+    /// collider.
     ///
     /// This is deliberately separate from [`Self::pushes_players`]. Boats are
     /// hard colliders but do not run the living-entity crowd pass; ordinary mobs
@@ -436,18 +433,18 @@ pub struct EntityFacts {
 ///
 /// # `max` is **not** capped at 1.0
 ///
-/// Fences, walls and fence gates reach `y = 1.5` in vanilla, which is why the
+/// Fences, walls and fence gates reach `y = 1.5`, which is why the
 /// 0.6-block auto-step cannot mount them. Clamping a box to the unit cube would
 /// make a fence look step-able; the uncapped value is load-bearing (see
 /// `CollisionView::collision_top` in `lodestone-physics`).
 ///
 /// # Why `f32`
 ///
-/// Vanilla's shapes are `double`, but every distinct coordinate value a real
-/// block state uses is exactly representable in `f32` (asserted by the version
-/// crate's drift test against the JVM oracle dump), so the narrow form is
-/// lossless and halves the rodata a 32k-state table costs. `f32 -> f64` widening
-/// at the physics seam is exact.
+/// The real shapes are double-precision, but every distinct coordinate value a
+/// real block state uses is exactly representable in `f32` (asserted by the
+/// version crate's drift test against the JVM oracle dump), so the narrow form
+/// is lossless and halves the rodata a 32k-state table costs. `f32 -> f64`
+/// widening at the physics seam is exact.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockAabb {
     /// Minimum corner `[x, y, z]`, block-local.
@@ -456,22 +453,21 @@ pub struct BlockAabb {
     pub max: [f32; 3],
 }
 
-/// A block state's break-time inputs: vanilla `destroySpeed` (hardness) and
-/// whether the correct tool is required for drops.
+/// A block state's break-time inputs: hardness and whether the correct tool
+/// is required for drops.
 ///
 /// This is the [`VersionAdapter::block_hardness`] seam's return type. Both
-/// fields are read straight off the version's `BlockState` census, so they mean
-/// exactly what vanilla means by them — see the warning below before feeding
-/// either one into break-time math.
+/// fields are read straight off the version's block-state census, so they mean
+/// exactly what the real game means by them — see the warning below before
+/// feeding either one into break-time math.
 ///
 /// # Trap: `requires_correct_tool` is **not** "the player has the right tool"
 ///
-/// `requires_correct_tool` mirrors `BlockState.requiresCorrectToolForDrops` — a
-/// property of the *block*, answering "does this block drop nothing unless mined
-/// with a suitable tool?". A break-time calculation instead needs
-/// `Player.hasCorrectToolForDrops` — a property of the *player's held item vs.
-/// the block* — which is what `lodestone-game`'s `BreakInputs.correct_tool`
-/// means, and which selects vanilla's `30` vs `100` speed divider.
+/// `requires_correct_tool` is a property of the *block*, answering "does this
+/// block drop nothing unless mined with a suitable tool?". A break-time
+/// calculation instead needs a property of the *player's held item vs. the
+/// block* — which is what `lodestone-game`'s `BreakInputs.correct_tool`
+/// means, and which selects the `30` vs `100` speed divider.
 ///
 /// The two are near-opposites bare-handed: with an empty hand,
 /// `correct_tool == !requires_correct_tool`. Assigning this field straight into
@@ -482,12 +478,11 @@ pub struct BlockAabb {
 /// bare-handed, from `!requires_correct_tool`), never from this field as-is.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockHardness {
-    /// `BlockState.getDestroySpeed` (vanilla's field name for hardness).
-    /// `-1.0` marks an unbreakable block (bedrock, barrier, ...).
+    /// Break-time hardness. `-1.0` marks an unbreakable block (bedrock,
+    /// barrier, ...).
     pub hardness: f32,
-    /// `BlockState.requiresCorrectToolForDrops`: whether the *block* demands a
-    /// suitable tool for drops. **Not** the player's tool-match flag — see the
-    /// type-level warning above.
+    /// Whether the *block* demands a suitable tool for drops. **Not** the
+    /// player's tool-match flag — see the type-level warning above.
     pub requires_correct_tool: bool,
 }
 
@@ -500,22 +495,24 @@ pub struct BlockHardness {
 /// docs, and the warning on [`BlockHardness`] for what deriving it wrong costs.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ToolMining {
-    /// `ItemStack.getDestroySpeed(state)` → `BreakInputs::tool_speed`. `1.0`
-    /// bare-handed, and `1.0` for a tool whose rules do not match this block.
+    /// The held item's mining speed against this block state, feeding
+    /// `BreakInputs::tool_speed`. `1.0` bare-handed, and `1.0` for a tool whose
+    /// rules do not match this block.
     pub speed: f32,
-    /// `Player.hasCorrectToolForDrops(state)` → `BreakInputs::correct_tool`,
-    /// which selects vanilla's `30` vs `100` divider.
+    /// Whether the held item counts as correct for this block's drops,
+    /// feeding `BreakInputs::correct_tool`, which selects the `30` vs `100`
+    /// divider.
     ///
-    /// **Already folded, do not re-derive.** This is
-    /// `!state.requiresCorrectToolForDrops() || item.isCorrectToolForDrops(state)`,
-    /// i.e. it *includes* the bare-hand inversion of
-    /// [`BlockHardness::requires_correct_tool`]. Assign it straight into
-    /// `BreakInputs::correct_tool`; combining it with `requires_correct_tool`
-    /// again re-introduces the 3.4x-too-fast bug that field warns about.
+    /// **Already folded, do not re-derive.** This already includes the
+    /// bare-hand inversion of [`BlockHardness::requires_correct_tool`] — the
+    /// block requires no tool, or the held item satisfies it. Assign it
+    /// straight into `BreakInputs::correct_tool`; combining it with
+    /// `requires_correct_tool` again re-introduces the 3.4x-too-fast bug that
+    /// field warns about.
     pub correct_tool: bool,
-    /// `Tool.damagePerBlock`: durability the held item spends per block broken.
-    /// `0` when the held item has no tool component (a bare hand, or a
-    /// non-tool), matching vanilla's "no `minecraft:tool`, no durability cost".
+    /// Durability the held item spends per block broken. `0` when the held
+    /// item has no tool component (a bare hand, or a non-tool), matching the
+    /// rule that only a `minecraft:tool` item costs durability.
     pub damage_per_block: u32,
 }
 
@@ -531,30 +528,28 @@ pub struct ToolMining {
 pub struct ItemPrototype {
     /// Effective `minecraft:max_stack_size`, `1..=99`.
     ///
-    /// Vanilla's `COMMON_ITEM_COMPONENTS` sets `64` and individual items
-    /// override it, so this is present for every registered item; the census
-    /// records the resolved value rather than the override. `64` is *not* a safe
-    /// default: every shulker box, bucket and tool is `1`, and eggs are `16`.
+    /// The common default is `64` and individual items override it, so this is
+    /// present for every registered item; the census records the resolved
+    /// value rather than the override. `64` is *not* a safe default: every
+    /// shulker box, bucket and tool is `1`, and eggs are `16`.
     pub max_stack_size: u32,
     /// Effective `minecraft:max_damage`, or `None` for an item with no
     /// durability at all.
     ///
-    /// `Some(_)` is what makes vanilla `ItemStack.isDamageableItem` true and
-    /// therefore `ItemStack.isStackable` false for a damaged tool.
+    /// `Some(_)` is what makes a stack damageable and therefore unstackable
+    /// once it has taken damage.
     pub max_damage: Option<u32>,
     /// The slot `minecraft:equippable` names, or `None` for an item that is not
     /// equippable.
     ///
     /// [`EquipmentSlot::Body`] (animal armour) and [`EquipmentSlot::Saddle`] are
-    /// *not* player armour: vanilla's humanoid-armour gate is
-    /// `EquipmentSlot.Type.HUMANOID_ARMOR`, covering only
+    /// *not* player armour: the humanoid-armour gate covers only
     /// [`Feet`](EquipmentSlot::Feet)/[`Legs`](EquipmentSlot::Legs)/[`Chest`](EquipmentSlot::Chest)/[`Head`](EquipmentSlot::Head).
     pub equip_slot: Option<EquipmentSlot>,
-    /// Whether `minecraft:equippable`'s `allowedEntities` is empty, i.e. any
-    /// entity may wear it (vanilla `Equippable.canBeEquippedBy` returns `true`
-    /// unconditionally). `false` means the item is restricted to a specific
-    /// entity set — `minecraft:wolf_armor` to wolves, `minecraft:saddle` to
-    /// `#minecraft:can_equip_saddle` — which this seam deliberately does not
+    /// Whether `minecraft:equippable`'s allowed-entities list is empty, i.e.
+    /// any entity may wear it. `false` means the item is restricted to a
+    /// specific entity set — `minecraft:wolf_armor` to wolves, `minecraft:saddle`
+    /// to `#minecraft:can_equip_saddle` — which this seam deliberately does not
     /// enumerate, because in 26.2 every restricted item is already in a
     /// non-humanoid [`equip_slot`](Self::equip_slot) and so is excluded by the
     /// slot check alone.
@@ -564,9 +559,9 @@ pub struct ItemPrototype {
     pub equippable_by_any_entity: bool,
 }
 
-/// The per-block **movement constants** vanilla stores as
-/// `BlockBehaviour.Properties` fields and tag memberships rather than as
-/// geometry, keyed by the block's canonical `minecraft:*` name.
+/// The per-block **movement constants** stored as block-property fields and
+/// tag memberships rather than as geometry, keyed by the block's canonical
+/// `minecraft:*` name.
 ///
 /// Returned by [`block_physics`]. Every field is what the physics integrator
 /// (`lodestone_physics::CollisionView`) asks for by the same name, and every one
@@ -577,7 +572,7 @@ pub struct ItemPrototype {
 /// # Why this is not behind [`VersionAdapter`]
 ///
 /// The rest of the block data in this module ([`BlockAabb`], [`BlockHardness`])
-/// is keyed by **block-state id**, which vanilla renumbers every version — so it
+/// is keyed by **block-state id**, which gets renumbered every version — so it
 /// has to be reached through a version adapter. These six are keyed by block
 /// *name*, which is stable across versions: `minecraft:ice` has been `0.98`
 /// friction since 1.0. Putting a name-keyed table behind the version seam would
@@ -591,18 +586,18 @@ pub struct ItemPrototype {
 /// that point is a per-version override — not a silent edit here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BlockPhysics {
-    /// `Block.getFriction` — vanilla `Properties.friction`, default `0.6`.
+    /// Surface friction, default `0.6`.
     ///
     /// Only five blocks differ in 26.2: ice, packed ice and frosted ice `0.98`,
     /// blue ice `0.989`, slime block `0.8`.
     pub friction: f32,
-    /// `Block.getSpeedFactor` — default `1.0`. Soul sand and honey block `0.4`.
+    /// Horizontal speed multiplier while inside/on the block — default `1.0`.
+    /// Soul sand and honey block `0.4`.
     pub speed_factor: f32,
-    /// `Block.getJumpFactor` — default `1.0`. Honey block `0.5`, alone.
+    /// Jump-height multiplier — default `1.0`. Honey block `0.5`, alone.
     pub jump_factor: f32,
-    /// `Block.getBounceRestitution`, **already net of**
-    /// `BlockTags.SUPPRESSES_BOUNCE` — default `0.0`. Slime block `1.0`, every
-    /// dyed bed `0.75`.
+    /// Bounce restitution, **already net of** the tag that suppresses bounce
+    /// entirely — default `0.0`. Slime block `1.0`, every dyed bed `0.75`.
     ///
     /// Do not subtract the tag again. In 26.2 its only member is
     /// `minecraft:honey_block`, which sets no restitution, so tag-aware and
@@ -610,18 +605,17 @@ pub struct BlockPhysics {
     /// a future bouncy suppressor would break it *silently*, which is why the
     /// version crate's gate pins the tag's membership.
     pub bounce_restitution: f32,
-    /// `Block.entityInside` → `Entity.makeStuckInBlock`: the per-axis speed
-    /// multiplier of the three blocks that grab you, or `None` for everything
-    /// else.
+    /// The per-axis speed multiplier of the three blocks that grab you as you
+    /// move through them, or `None` for everything else.
     ///
     /// **The one field here that is not a dumped property.** The vector is
-    /// constructed in imperative code inside each block's `entityInside`
-    /// override, so there is nothing on a `Properties` object to read. What the
+    /// constructed in imperative per-block logic rather than read off a shared
+    /// properties object, so there is nothing generic to read. What the
     /// version crate's gate *can* establish is completeness: the JVM oracle
-    /// enumerates every block whose class overrides `entityInside` (61 of them in
-    /// 26.2) and asserts that all three rows below are in that set, so no fourth
-    /// grabbing block can appear without the gate noticing the candidate set
-    /// changed.
+    /// enumerates every block with this kind of per-tick "entity inside" logic
+    /// (61 of them in 26.2) and asserts that all three rows below are in that
+    /// set, so no fourth grabbing block can appear without the gate noticing
+    /// the candidate set changed.
     ///
     /// Per-entity overrides are deliberately not modelled: cobweb gives a
     /// `WEAVING` mob `(0.5, 0.25, 0.5)` instead, and sweet berry bush exempts
@@ -665,45 +659,39 @@ pub const DEFAULT_BLOCK_PHYSICS: BlockPhysics = BlockPhysics {
 ///
 /// Every row is a value read out of the real 26.2 server, not out of the
 /// decompiled source by hand — see [`BlockPhysics`] for where the gate lives and
-/// what it covers. The `Blocks.java` line numbers below are cross-references for
-/// a reader, not the source of the numbers.
+/// what it covers.
 #[must_use]
 pub fn block_physics(block_name: &str) -> BlockPhysics {
     BlockPhysics {
         friction: match block_name {
-            // `Blocks.java`, for ice, packed ice and frosted ice alike.
+            // Ice, packed ice and frosted ice all share the same low friction.
             "minecraft:ice" | "minecraft:packed_ice" | "minecraft:frosted_ice" => 0.98,
-            // `Blocks.java`.
+            // Blue ice is slipperier still.
             "minecraft:blue_ice" => 0.989,
-            // `Blocks.java`.
             "minecraft:slime_block" => 0.8,
             _ => DEFAULT_BLOCK_PHYSICS.friction,
         },
-        // `Blocks.java`, for soul sand and honey block alike.
+        // Soul sand and honey block both slow movement to the same degree.
         speed_factor: match block_name {
             "minecraft:soul_sand" | "minecraft:honey_block" => 0.4,
             _ => DEFAULT_BLOCK_PHYSICS.speed_factor,
         },
-        // `Blocks.java` — honey block is the only block in 26.2 that sets it.
+        // Honey block is the only block in 26.2 that reduces jump height.
         jump_factor: match block_name {
             "minecraft:honey_block" => 0.5,
             _ => DEFAULT_BLOCK_PHYSICS.jump_factor,
         },
         bounce_restitution: match block_name {
-            // `Blocks.java`.
             "minecraft:slime_block" => 1.0,
-            // `Blocks.java`, via the `BED` `ColorCollection` — all 16 dyed
-            // beds share one `Properties` builder. Matched by suffix *within the
-            // vanilla namespace only*, so a modded `_bed` does not inherit it.
+            // All 16 dyed beds share one restitution value. Matched by suffix
+            // *within the vanilla namespace only*, so a modded `_bed` does not
+            // inherit it.
             name if name.starts_with("minecraft:") && name.ends_with("_bed") => 0.75,
             _ => DEFAULT_BLOCK_PHYSICS.bounce_restitution,
         },
         stuck_multiplier: match block_name {
-            // `WebBlock.java`.
             "minecraft:cobweb" => Some([0.25, 0.05, 0.25]),
-            // `PowderSnowBlock.java`.
             "minecraft:powder_snow" => Some([0.9, 1.5, 0.9]),
-            // `SweetBerryBushBlock.java`.
             "minecraft:sweet_berry_bush" => Some([0.8, 0.75, 0.8]),
             _ => DEFAULT_BLOCK_PHYSICS.stuck_multiplier,
         },
@@ -901,8 +889,8 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         None
     }
 
-    /// Resolves a block state's break-time inputs — vanilla `destroySpeed` and
-    /// the block's correct-tool-for-drops requirement — from its **block-state
+    /// Resolves a block state's break-time inputs — hardness and the block's
+    /// correct-tool-for-drops requirement — from its **block-state
     /// id** (the id chunk sections and `block_update` carry), if this version
     /// knows the state.
     ///
@@ -918,7 +906,7 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     ///
     /// **Before wiring this into break-time math, read the warning on
     /// [`BlockHardness`]:** `requires_correct_tool` is the *block's* requirement,
-    /// not `Player.hasCorrectToolForDrops`. Passing it straight through as
+    /// not the player's tool-match flag. Passing it straight through as
     /// `BreakInputs.correct_tool` makes stone break 3.4x too fast.
     fn block_hardness(&self, state_id: u32) -> Option<BlockHardness> {
         let _ = state_id;
@@ -926,9 +914,8 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     }
 
     /// Resolves the held item's break-time contribution for a block state —
-    /// vanilla `ItemStack.getDestroySpeed` and `Player.hasCorrectToolForDrops`
-    /// — from the stack and the **block-state id**, if this version knows the
-    /// state.
+    /// mining speed and correct-tool-for-drops — from the stack and the
+    /// **block-state id**, if this version knows the state.
     ///
     /// `held` is the item in the main hand; `None` (or a stack with no tool
     /// component) is the bare hand.
@@ -937,8 +924,8 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     ///
     /// The `minecraft:tool` component is only *sometimes* on the wire. A
     /// clientbound stack carries a `DataComponentPatch` — the delta from the
-    /// item's built-in prototype — and vanilla puts a pickaxe's
-    /// `minecraft:tool` in that prototype, so an ordinary pickaxe arrives with
+    /// item's built-in prototype — and a pickaxe's `minecraft:tool` lives in
+    /// that prototype, so an ordinary pickaxe arrives with
     /// an empty patch and [`ItemComponents::tool`] is
     /// [`ToolPatch::Inherited`](crate::ToolPatch::Inherited). The prototype is
     /// version data. Even when a tool *is* on the wire, its rules name blocks by
@@ -958,8 +945,7 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         None
     }
 
-    /// The **collision** geometry of a block state — vanilla
-    /// `BlockState.getCollisionShape(...).toAabbs()` — as block-local
+    /// The **collision** geometry of a block state as block-local
     /// [`BlockAabb`]s, or `None` if this version does not know the state.
     ///
     /// An empty slice is a *meaningful* answer, distinct from `None`: the state
@@ -967,18 +953,18 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     ///
     /// # Why this must be a version seam and not derived
     ///
-    /// Collision geometry is **code**-defined in vanilla, not property-derived:
-    /// `blocks.json` carries no shapes at all, and `Block.getCollisionShape` is
+    /// Collision geometry is **code**-defined, not property-derived: no block
+    /// data file carries shapes at all, and the real rule is
     /// neighbour-state-dependent for stairs, fences, walls and panes. The only
-    /// authoritative source is the game itself (boot the server, walk
-    /// `Block.BLOCK_STATE_REGISTRY`), and the resulting table is keyed by
+    /// authoritative source is the game itself (boot the server, walk its
+    /// block-state registry), and the resulting table is keyed by
     /// block-state ids that are renumbered every version — so a version-free
     /// consumer (the shell's `CollisionView`, a pathfinder) reaches it here, the
     /// same way it reaches [`block_hardness`](VersionAdapter::block_hardness).
     ///
     /// # This is collision, **not** the outline or interaction shape
     ///
-    /// Three different vanilla shapes answer three different questions, and they
+    /// Three different shapes answer three different questions, and they
     /// genuinely disagree: a fluid has a full collision-less cell *and* an empty
     /// outline; kelp has an outline (so it can be targeted and broken) and **no**
     /// collision; a soul-sand block collides to `y = 0.875` but outlines to `1.0`.
@@ -1000,14 +986,15 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     /// this version does not know the state.
     ///
     /// Deliberately the *block* name with no property values: this is the key for
-    /// the handful of per-block physics constants that vanilla stores as
-    /// `BlockBehaviour.Properties` rather than as geometry, and which therefore
+    /// the handful of per-block physics constants that are stored as block
+    /// properties rather than as geometry, and which therefore
     /// cannot be recovered from [`block_collision`](VersionAdapter::block_collision):
-    /// `friction` (ice 0.98, slime 0.8), `speedFactor` (soul sand and honey 0.4),
-    /// `jumpFactor` (honey 0.5), `bounceRestitution` (slime 1.0, bed 0.75),
-    /// `makeStuckInBlock` (cobweb, powder snow, sweet berry bush) and membership
-    /// of `BlockTags.CLIMBABLE`. A consumer keys those off *names*, which are
-    /// stable across versions in a way state ids are not.
+    /// `friction` (ice 0.98, slime 0.8), `speed_factor` (soul sand and honey
+    /// 0.4), `jump_factor` (honey 0.5), `bounce_restitution` (slime 1.0, bed
+    /// 0.75), the grabbing-block speed multiplier (cobweb, powder snow, sweet
+    /// berry bush) and membership in the climbable tag. A consumer keys those
+    /// off *names*, which are stable across versions in a way state ids are
+    /// not.
     ///
     /// A consumer wanting properties too should not reach for this — that is
     /// [`BlockStateRegistry`](crate::BlockStateRegistry), whose borrowing shape
@@ -1020,21 +1007,21 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         None
     }
 
-    /// The **outline** geometry of a block state — vanilla
-    /// `BlockStateBase.getShape(...).toAabbs()` — as block-local [`BlockAabb`]s,
-    /// or `None` if this version does not know the state.
+    /// The **outline** geometry of a block state as block-local
+    /// [`BlockAabb`]s, or `None` if this version does not know the state.
     ///
     /// This is the shape **block selection** uses, and it is a third thing,
-    /// neither collision nor fluid presence. `Entity.pick` clips with
-    /// `ClipContext.Block.OUTLINE` and `ClipContext.Fluid.NONE`, and
-    /// `ClipContext.Block.OUTLINE` *is* `BlockStateBase::getShape`. So:
+    /// neither collision nor fluid presence. The real ray-pick clips against
+    /// blocks using exactly this outline shape (and against fluids
+    /// separately, which this seam does not cover). So:
     ///
-    /// * `LiquidBlock.getShape` is `Shapes.empty()` → open water and lava are
-    ///   never targeted, which is why picking cannot be "the cell is not empty";
-    /// * kelp's is `Block.column(16, 0, 9)` and seagrass's `Block.column(12, 0, 12)`
-    ///   → **non-empty**, so both are targetable and breakable, even though their
-    ///   *collision* shape is empty and their `getFluidState` is water. Picking
-    ///   is therefore not `!is_water` either;
+    /// * an open water or lava cell's outline is empty → open water and lava
+    ///   are never targeted, which is why picking cannot be "the cell is not
+    ///   empty";
+    /// * kelp's and seagrass's outlines are each a short vertical column →
+    ///   **non-empty**, so both are targetable and breakable, even though their
+    ///   *collision* shape is empty and they report as water for fluid
+    ///   purposes. Picking is therefore not `!is_water` either;
     /// * cobweb's outline is a full unit cube while its collision is empty.
     ///
     /// Half of all block states in 26.2 have an outline that differs from their
@@ -1044,11 +1031,12 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     ///
     /// # Two shapes here are context-dependent and resolve to their default form
     ///
-    /// Vanilla's `getShape` takes a `CollisionContext`; the census dumps it with
-    /// `CollisionContext.empty()`, the same thing vanilla's own shape cache does.
-    /// Two consequences worth knowing: `minecraft:light` outlines to
-    /// `Shapes.empty()` here because its shape is
-    /// `context.isHoldingItem(Items.LIGHT) ? Shapes.block() : Shapes.empty()`, and
+    /// The real shape function takes a context describing the querying
+    /// entity's held item and collision box; the census dumps it with an empty
+    /// context, the same one the game's own shape cache uses. Two consequences
+    /// worth knowing: `minecraft:light` outlines empty here because its real
+    /// shape is conditional on the querying entity holding a light-emitting
+    /// item, which the empty context never satisfies, and
     /// `minecraft:scaffolding` reports its standing rather than its descending
     /// shape.
     ///
@@ -1060,24 +1048,23 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         None
     }
 
-    /// The **interaction** geometry of a block state — vanilla
-    /// `BlockStateBase.getInteractionShape(...).toAabbs()` — as block-local
+    /// The **interaction** geometry of a block state as block-local
     /// [`BlockAabb`]s, or `None` if this version does not know the state.
     ///
-    /// Almost always an *empty* slice: `BlockBehaviour.getInteractionShape`
-    /// defaults to `Shapes.empty()` and only the cauldron family, hoppers,
-    /// scaffolding and composters override it in 26.2.
+    /// Almost always an *empty* slice: it defaults to empty and only the
+    /// cauldron family, hoppers, scaffolding and composters override it in
+    /// 26.2.
     ///
     /// # It refines the hit *face*, it does not add a hit
     ///
-    /// The one caller is `BlockGetter.clipWithInteractionOverride`, which clips
-    /// the outline first and only then, **if the outline already hit**, clips the
-    /// interaction shape and — when that hit is nearer — replaces the resulting
-    /// hit's `Direction` while keeping the outline's hit location. So this can
-    /// never make an unpickable block pickable, and never moves the hit point. It
-    /// is what makes a hopper's funnel and a cauldron's inner walls report the
-    /// face you visually clicked rather than the outer bounding face. Treating it
-    /// as a second, independent clip target is the misreading to avoid.
+    /// The real ray-pick clips the outline first and only then, **if the
+    /// outline already hit**, clips the interaction shape and — when that hit
+    /// is nearer — replaces the resulting hit's face while keeping the
+    /// outline's hit location. So this can never make an unpickable block
+    /// pickable, and never moves the hit point. It is what makes a hopper's
+    /// funnel and a cauldron's inner walls report the face you visually
+    /// clicked rather than the outer bounding face. Treating it as a second,
+    /// independent clip target is the misreading to avoid.
     ///
     /// The default returns `None`.
     fn block_interaction(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
@@ -1091,19 +1078,20 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     ///
     /// # Why this cannot be read off the wire
     ///
-    /// A clientbound `ItemStack` is an item id plus a `DataComponentPatch` — the
-    /// *delta* from the item's built-in prototype component map. Three components
-    /// gameplay needs live only in that prototype, so no packet ever mentions
-    /// them and no wire decoder can produce them:
+    /// A clientbound `ItemStack` is an item id plus a component-value patch —
+    /// the *delta* from the item's built-in prototype component map. Three
+    /// components gameplay needs live only in that prototype, so no packet
+    /// ever mentions them and no wire decoder can produce them:
     ///
     /// * `minecraft:max_stack_size` — without it every stack looks like 64, so a
     ///   drag distributing buckets or shulker boxes over-fills the prediction and
     ///   is corrected by the server;
-    /// * `minecraft:max_damage` — without it `isDamageableItem` is false, so
-    ///   `isStackable` is true and two identically-componented swords merge;
-    /// * `minecraft:equippable` — without it `ArmorSlot.mayPlace` (which is
-    ///   `slot == equippable.slot() && …`) is false for every item, so **no
-    ///   armour can be equipped by any click type**.
+    /// * `minecraft:max_damage` — without it the stack looks undamageable, so
+    ///   it also looks stackable, and two identically-componented swords merge;
+    /// * `minecraft:equippable` — without it the armour-slot placement check,
+    ///   which requires the slot to match the component's declared slot, is
+    ///   false for every item, so **no armour can be equipped by any click
+    ///   type**.
     ///
     /// This is the same shape of problem as `minecraft:tool`, which
     /// [`tool_mining`](VersionAdapter::tool_mining) exists for: the prototype is
@@ -1122,24 +1110,21 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         None
     }
 
-    /// Whether a block state **blocks motion** — vanilla
-    /// `BlockState.blocksMotion()` — or `None` if this version does not know the
-    /// state.
+    /// Whether a block state **blocks motion**, or `None` if this version does
+    /// not know the state.
     ///
     /// # Why this cannot be derived from [`block_collision`](VersionAdapter::block_collision)
     ///
-    /// `blocksMotion()` is
-    /// `block != COBWEB && block != BAMBOO_SAPLING && isSolid()`, and `isSolid()`
-    /// reads a cached `legacySolid` flag computed once per state by
-    /// `BlockBehaviour.BlockStateBase.calculateSolid()`. Only the **last** of that
-    /// method's five branches is geometry:
+    /// "Blocks motion" excludes cobweb and bamboo sapling unconditionally, and
+    /// otherwise reads a cached solidity flag computed once per state from a
+    /// five-branch rule. Only the **last** of those branches is geometry:
     ///
     /// ```text
-    /// forceSolidOn  -> true          // 237 blocks in 26.2, no getter, not in blocks.json
-    /// forceSolidOff -> false         //   8 blocks
-    /// cache == null -> false         //  23 `dynamicShape()` blocks
-    /// shape empty   -> false
-    /// else mean bbox extent >= 0.7291666666666666 || Ysize >= 1.0
+    /// forced solid       -> true     // 237 blocks in 26.2, no getter, not in blocks.json
+    /// forced non-solid   -> false    //   8 blocks
+    /// shape is dynamic   -> false    //  23 blocks with a per-neighbour shape
+    /// shape empty        -> false
+    /// else mean bbox extent >= 0.7291666666666666 || y-size >= 1.0
     /// ```
     ///
     /// Deriving the answer from a shape table alone therefore gets **2,618 of
@@ -1152,8 +1137,9 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     ///
     /// `0.7291666666666666` is exactly `(1 + 1 + 3/16) / 3` — the mean extent of a
     /// ladder's collision box. The threshold has that value *because* a ladder
-    /// lands on it, and `Blocks.LADDER` calls `forceSolidOff()` precisely because
-    /// landing on it produces the wrong answer.
+    /// lands on it, and the ladder block is one of the 8 forced non-solid blocks
+    /// above precisely because landing on the general rule produces the wrong
+    /// answer for it.
     ///
     /// The default returns `None`: a version with no solidity census reports
     /// "unknown". A consumer falling back to the geometry derivation should say so
@@ -1163,7 +1149,7 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
         None
     }
 
-    /// `BubbleColumnBlock`'s `DRAG_DOWN` property for `state_id`, or `None` when the
+    /// The bubble column's drag property for `state_id`, or `None` when the
     /// state is not a bubble column (which is every state but two).
     ///
     /// `Some(true)` is the magma-block drain, `Some(false)` the soul-sand lift. The
@@ -1178,8 +1164,8 @@ pub trait VersionAdapter: Send + Sync + std::fmt::Debug {
     /// property, and the property is the entire payload. `drag=true` versus
     /// `drag=false` is the difference between an elevator and a drowning trap.
     ///
-    /// Vanilla resolves the base block (soul sand versus magma) into this boolean
-    /// **once, at block-update time**, in `BubbleColumnBlock.getColumnState`. The
+    /// The base block (soul sand versus magma) is resolved into this boolean
+    /// **once, at block-update time**. The
     /// entity-side code reads only the boolean and never looks below the column, so a
     /// consumer needs nothing else — in particular there is no "doubled for magma"
     /// term, despite that being a natural guess.

@@ -85,18 +85,10 @@ pub struct ClientboundChat {
     pub sender: Uuid,
 }
 
-/// Serverbound `chat` packet.
-///
-/// Wire layout: a single string (max 100 chars). A message beginning with `/`
-/// is treated by the server as a command; 1.8 has no separate command packet.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:chat", state = Play, bound = Server)]
-pub struct ServerboundChat {
-    /// Message text (or `/command`), at most 256 characters (1.11+ raised this
-    /// from the 100-character 1.8 limit).
-    #[mc(max = 256)]
-    pub message: String,
-}
+// `ServerboundChat` is byte-identical to v340's (measured), shared via
+// `lodestone-protocol-common` ranged 340..=754 -- v47/1.8 capped the message
+// at 100 characters, not 256. See `packets::chat`'s module docs.
+pub use lodestone_protocol_common::packets::chat::ServerboundChat;
 
 /// Clientbound `position` (player position and look) packet.
 ///
@@ -220,19 +212,10 @@ pub use lodestone_protocol_common::packets::movement::{
     ServerboundLook, ServerboundPosition, ServerboundPositionLook,
 };
 
-/// Serverbound `arm_animation` (swing arm) packet.
-///
-/// Unlike 1.8 (protocol 47), where this packet is empty, 1.9+ carries which
-/// hand swung as a VarInt (`0` = main, `1` = off). This per-version divergence
-/// is why the swing encoding lives in each version crate rather than a shared
-/// one.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:arm_animation", state = Play, bound = Server)]
-pub struct ServerboundArmAnimation {
-    /// Hand that swung: `0` = main hand, `1` = off hand.
-    #[mc(varint)]
-    pub hand: i32,
-}
+// `ServerboundArmAnimation` is byte-identical to v340's (measured), shared
+// via `lodestone-protocol-common` ranged 340..=754 -- 1.8 has no hand field
+// at all. See `packets::chat`'s module docs.
+pub use lodestone_protocol_common::packets::chat::ServerboundArmAnimation;
 
 pub use lodestone_protocol_common::packets::movement::ServerboundFlying;
 

@@ -1,5 +1,5 @@
-//! GPU-free mipmap generation, a faithful port of vanilla 26.2's
-//! `MipmapGenerator` and `TextureUtil.solidify`.
+//! GPU-free mipmap generation, a faithful port of vanilla 26.2's own
+//! mipmap-generation and solidify (transparent-edge fill) algorithms.
 //!
 //! # Why this lives here (and not on the GPU)
 //!

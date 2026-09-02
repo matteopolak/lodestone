@@ -867,25 +867,25 @@ pub fn bell_texture_stems() -> Vec<&'static str> {
     vec![BELL_TEXTURE_STEM]
 }
 
-/// A bell's shake direction — `BellModel.State.shakeDirection`, the four
-/// horizontal directions a player (or projectile) can hit a bell from.
-/// `Option<BellShakeDirection>` (not a fifth "none" variant) mirrors the
-/// jar's own `@Nullable Direction`, and matches how [`BellSpawn::shake`]
-/// spells "at rest".
+/// A bell's shake direction — vanilla's own per-instance shake-direction
+/// field, the four horizontal directions a player (or projectile) can hit a
+/// bell from. `Option<BellShakeDirection>` (not a fifth "none" variant)
+/// mirrors the jar's own nullable direction field, and matches how
+/// [`BellSpawn::shake`] spells "at rest".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BellShakeDirection {
-    /// `Direction.NORTH`.
+    /// North.
     North,
-    /// `Direction.SOUTH`.
+    /// South.
     South,
-    /// `Direction.EAST`.
+    /// East.
     East,
-    /// `Direction.WEST`.
+    /// West.
     West,
 }
 
 /// The bell body's `(x_rot, z_rot)` in radians for a shake in progress —
-/// `BellModel.setupAnim`:
+/// vanilla's own model pose:
 ///
 /// ```text
 /// baseRot = sin(ticks / PI) / (4 + ticks / 3)
@@ -894,17 +894,16 @@ pub enum BellShakeDirection {
 /// ```
 ///
 /// `direction = None` returns `(0.0, 0.0)` without evaluating `base_rot` at
-/// all, mirroring `BellModel.setupAnim`'s own `if (state.shakeDirection !=
-/// null)` guard rather than computing the ratio and multiplying by a zero
+/// all, mirroring vanilla's own model pose function's null-direction guard
+/// rather than computing the ratio and multiplying by a zero
 /// that never appears in the real formula — there is no direction to carry a
 /// sign for a bell at rest, so a literal port has nothing to multiply.
 ///
-/// `ticks` is vanilla's raw tick counter (`BellBlockEntity.ticks`, `0..50`,
-/// **not** eased or clamped here) plus partial tick, exactly as
-/// `BellRenderer.extractRenderState` passes it — unlike
-/// [`chest_lid_openness`], there is only one transform here because vanilla
-/// itself has only one; `setupAnim` computes the angle directly from ticks
-/// with no separate easing pass.
+/// `ticks` is vanilla's raw per-block tick counter (`0..50`, **not** eased or
+/// clamped here) plus partial tick, exactly as vanilla's own per-frame
+/// render-state extraction passes it — unlike [`chest_lid_openness`], there is
+/// only one transform here because vanilla itself has only one; its model
+/// pose computes the angle directly from ticks with no separate easing pass.
 #[must_use]
 pub fn bell_shake_angle(direction: Option<BellShakeDirection>, ticks: f32) -> (f32, f32) {
     let Some(direction) = direction else {
@@ -923,8 +922,8 @@ pub fn bell_shake_angle(direction: Option<BellShakeDirection>, ticks: f32) -> (f
 pub const BANNER_BODY: &str = "banner_body";
 /// Model name of a standing banner's flag.
 pub const BANNER_FLAG: &str = "banner_flag";
-/// Model name of a **wall** banner's bar — `createBodyLayer(false)`, which has no
-/// pole at all.
+/// Model name of a **wall** banner's bar — vanilla's own wall-body-layer
+/// construction, which has no pole at all.
 pub const BANNER_WALL_BODY: &str = "banner_wall_body";
 /// Model name of a **wall** banner's flag — the same cube as [`BANNER_FLAG`]'s at
 /// a different rest pose.
@@ -937,40 +936,42 @@ pub const BANNER_WALL_FLAG: &str = "banner_wall_flag";
 /// carry *different data* (a 16-way rotation segment against a four-way facing),
 /// so a shared `angle: f32` field would let a caller hand a wall banner a segment
 /// and get a plausible eighth-turn error. Unlike a skull, both forms here also
-/// select a different **mesh**, since `createBodyLayer(false)` drops the pole.
+/// select a different **mesh**, since vanilla's own wall-body-layer
+/// construction drops the pole.
 ///
 /// No `Eq`/`Hash`, unlike [`SkullOrientation`]: the wall arm carries a yaw as an
 /// `f32`, matching every other placement input in this module rather than
 /// re-encoding four directions as an enum only this type would use.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BannerAttachment {
-    /// A standing banner: `BannerBlock`, with the `ROTATION` property.
+    /// A standing banner, with the `ROTATION` property.
     Ground {
-        /// The `ROTATION` block-state property, `0..16` — vanilla's
-        /// `RotationSegment`, segment `0` being north.
+        /// The `ROTATION` block-state property, `0..16` — vanilla's own
+        /// 16-step rotation segment, segment `0` being north.
         rotation_segment: u8,
     },
-    /// A wall banner: `WallBannerBlock`, with `FACING`.
+    /// A wall banner, with `FACING`.
     Wall {
-        /// `Direction.toYRot()` of `WallBannerBlock.FACING` (south `0`, west `90`,
-        /// north `180`, east `270`) — [`horizontal_facing_yaw`]'s convention.
+        /// Vanilla's own facing-to-yaw mapping of the wall banner's `FACING`
+        /// property (south `0`, west `90`, north `180`, east `270`) —
+        /// [`horizontal_facing_yaw`]'s convention.
         facing_yaw_deg: f32,
     },
 }
 
 /// The jar sheet a banner's *body* (pole/bar) and *flag* both draw with for
-/// their opaque pass — `Sheets.BANNER_BASE` (`Sheets.java:52`), i.e.
-/// `Sheets.BANNER_MAPPER.defaultNamespaceApply("banner_base")` ->
-/// `entity/banner/banner_base`. This is the plain wood/cloth texture, never a
-/// pattern mask: `BannerRenderer.submitBanner` passes this one `SpriteId` to
-/// *both* `submitModel` calls (model and flagModel) before `submitPatterns`
-/// draws anything coloured over the flag a second time.
+/// their opaque pass — vanilla's own banner-base sprite constant, resolved
+/// to `entity/banner/banner_base`. This is the plain wood/cloth texture,
+/// never a pattern mask: vanilla's own banner-submission function passes
+/// this one sprite id to *both* the body and flag model draws before its
+/// pattern pass draws anything coloured over the flag a second time.
 pub const BANNER_BASE_TEXTURE_STEM: &str = "entity/banner/banner_base";
 
 /// The one banner sheet stem, for [`block_entity_texture_stems`] — mirrors
 /// [`bell_texture_stems`]'s shape: one stem shared by all four banner models
-/// (standing and wall, body and flag), because `submitBanner` passes the same
-/// `Sheets.BANNER_BASE` to every one of them.
+/// (standing and wall, body and flag), because vanilla's own
+/// banner-submission function passes the same base sprite to every one of
+/// them.
 #[must_use]
 pub fn banner_texture_stems() -> Vec<&'static str> {
     vec![BANNER_BASE_TEXTURE_STEM]
@@ -981,20 +982,22 @@ pub fn banner_texture_stems() -> Vec<&'static str> {
 /// shield, unlike a banner, has only one mesh, reused for every draw.
 pub const SHIELD: &str = "shield";
 
-/// `Sheets.SHIELD_BASE_NO_PATTERN` — `entity/shield/shield_base_nopattern`,
+/// Vanilla's own no-pattern shield-base sprite constant —
+/// `entity/shield/shield_base_nopattern`,
 /// the plain wood-and-iron sheet every shield with no `minecraft:base_color`
 /// and no stored `minecraft:banner_patterns` layer draws (the common case,
 /// straight off a crafting table).
 pub const SHIELD_BASE_NO_PATTERN_TEXTURE_STEM: &str = "entity/shield/shield_base_nopattern";
 
-/// `Sheets.SHIELD_BASE` — `entity/shield/shield_base`, the sheet a shield
-/// with a base colour or at least one loom pattern draws its **opaque** pass
+/// Vanilla's own shield-base sprite constant — `entity/shield/shield_base`,
+/// the sheet a shield with a base colour or at least one loom pattern draws
+/// its **opaque** pass
 /// with (a plain grey canvas the translucent pattern layers tint and mask
 /// over, mirroring [`BANNER_BASE_TEXTURE_STEM`]'s role for a banner).
 pub const SHIELD_BASE_TEXTURE_STEM: &str = "entity/shield/shield_base";
 
 /// Whether a shield stack's translucent pattern pass draws at all —
-/// vanilla's own `hasPatterns` (`ShieldSpecialRenderer.submit`): `true` when
+/// vanilla's own has-patterns check: `true` when
 /// the stack carries a `minecraft:base_color` **or** at least one stored
 /// `minecraft:banner_patterns` layer. `false` is the common case (a shield
 /// straight off a crafting table), which draws only the opaque
@@ -1039,9 +1042,8 @@ pub fn shield_texture_stems() -> Vec<&'static str> {
 /// Model name of a shulker box's shell (lid + base).
 pub const SHULKER_BOX: &str = "shulker_box";
 
-/// Vanilla's sixteen dye colours, in `DyeColor` **ordinal** order — which is
-/// what `Sheets.getShulkerBoxSprite(color)` indexes
-/// (`SHULKER_TEXTURE_LOCATION.get(color.getId())`, `Sheets.java:48,89`).
+/// Vanilla's sixteen dye colours, in vanilla's own dye-colour **ordinal**
+/// order — which is what its own shulker-box sprite lookup indexes.
 ///
 /// The order is load-bearing and is *not* alphabetical: reading it off the
 /// texture directory listing gives `black, blue, brown, …` and shifts every
@@ -1066,12 +1068,12 @@ pub const SHULKER_COLOURS: [&str; 16] = [
     "black",
 ];
 
-/// `Sheets.DEFAULT_SHULKER_TEXTURE_LOCATION` — the undyed box's sheet
-/// (`Sheets.SHULKER_MAPPER.defaultNamespaceApply("shulker")`, `Sheets.java:47`).
+/// Vanilla's own default shulker-texture location — the undyed box's sheet,
+/// resolved from `"shulker"`.
 pub const SHULKER_DEFAULT_TEXTURE_STEM: &str = "entity/shulker/shulker";
 
 /// The sheet stem for one shulker box, by dye colour name, or the undyed sheet
-/// for `None` — `ShulkerBoxRenderer.submit`'s own `color == null` fork.
+/// for `None` — vanilla's own renderer's null-colour fork.
 ///
 /// An **unrecognised** colour name also falls back to the undyed sheet rather
 /// than being dropped: the caller derives it from a block id, and a plain
@@ -1130,8 +1132,7 @@ pub fn shulker_texture_stems() -> Vec<&'static str> {
 }
 
 /// The world placement transform for a shulker box facing `facing` —
-/// `ShulkerBoxRenderer.createModelTransform`
-/// (`ShulkerBoxRenderer.java:110-121`):
+/// vanilla's own model-transform construction:
 ///
 /// ```text
 /// translation(0.5, 0.5, 0.5) · scale(0.9995) · rotate(facing.getRotation())
@@ -1141,11 +1142,11 @@ pub fn shulker_texture_stems() -> Vec<&'static str> {
 /// **This is not [`block_entity_placement_matrix`] with a yaw.** Three things
 /// differ and each is visible: the pivot is the block's *centre* `(0.5, 0.5,
 /// 0.5)` rather than its floor `(0.5, 0, 0.5)`; a shulker box can face **up or
-/// down**, so the rotation is a full `Direction.getRotation()` quaternion and not
-/// a Y yaw; and it carries the `scale(1, -1, -1)` entity flip and the `-1` lift
-/// that `SkullBlockRenderer` also has and `ChestRenderer` does not. Reusing the
-/// chest matrix draws an upside-down box on the floor for `facing=up`, which is
-/// the common case.
+/// down**, so the rotation is a full direction-to-rotation quaternion (vanilla's
+/// own six-way mapping) and not a Y yaw; and it carries the `scale(1, -1, -1)`
+/// entity flip and the `-1` lift that vanilla's own skull renderer also has and
+/// its chest renderer does not. Reusing the chest matrix draws an upside-down
+/// box on the floor for `facing=up`, which is the common case.
 ///
 /// The `0.9995` shrink is vanilla's own z-fighting guard against a neighbouring
 /// full block, not a rounding artefact — keep it.
