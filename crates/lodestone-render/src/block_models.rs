@@ -339,17 +339,17 @@ fn fluid_state_from_level(level: u8) -> FluidState {
     }
 }
 
-/// Blocks whose `getFluidState` returns a water **source unconditionally**, with
-/// no `waterlogged` property to key off.
+/// Blocks whose own fluid-state accessor returns a water **source
+/// unconditionally**, with no `waterlogged` property to key off.
 ///
 /// Extracted from the decompiled 26.2 server by scanning every
 /// fluid-state override across the block registry whose body
-/// returns `Fluids.WATER` without consulting `WATERLOGGED`. That scan yields
+/// returns a water source without consulting `WATERLOGGED`. That scan yields
 /// exactly these five block registrations and no others:
 ///
-/// * kelp / kelp plant → `Fluids.WATER.getSource(false)`
-/// * seagrass / tall seagrass → `Fluids.WATER.getSource(false)`
-/// * bubble column → `Fluids.WATER.getSource(false)`
+/// * kelp / kelp plant → a water source, unfalling
+/// * seagrass / tall seagrass → a water source, unfalling
+/// * bubble column → a water source, unfalling
 ///
 /// A name list in a version-free crate is only acceptable because it is derived
 /// from the jar rather than guessed, and because the alternative — inferring
@@ -367,8 +367,8 @@ const UNCONDITIONAL_WATER_BLOCKS: [&str; 5] = [
 ///
 /// `minecraft:water`/`minecraft:lava` carry the fluid directly (via their `level`
 /// property); any other block with `waterlogged=true` (stairs, slabs, fences…)
-/// carries a water **source**, as do the handful of blocks that hardcode a water
-/// `getFluidState` with no such property ([`UNCONDITIONAL_WATER_BLOCKS`]).
+/// carries a water **source**, as do the handful of blocks that hardcode their
+/// own fluid-state accessor with no such property ([`UNCONDITIONAL_WATER_BLOCKS`]).
 /// Everything else is `None`. Pure over the resolved block path + properties, so
 /// it is unit-tested without a jar.
 fn classify_fluid(block_path: &str, props: &BTreeMap<String, String>) -> Option<FluidCell> {
@@ -489,7 +489,7 @@ fn is_fluid_overlay_neighbor(block_path: &str) -> bool {
 }
 
 /// The number of progressive crack-overlay stages (`destroy_stage_0..=9`),
-/// matching vanilla's `getDestroyStage` range.
+/// matching vanilla's own destroy-stage range.
 pub const CRACK_STAGE_COUNT: usize = 10;
 
 /// The `block/destroy_stage_<stage>` crack-overlay sprite location. `stage` is
@@ -509,7 +509,7 @@ pub const ITEM_FRAME_SLOTS: usize = 4;
 ///
 /// Vanilla has no *block* called `item_frame`, so there is no state id to key
 /// this on: vanilla's fake-item-frame-state builder function builds a throwaway
-/// `StateDefinition` carrying only `BlockStateProperties.MAP`, and picks the
+/// state definition carrying only the MAP property, and picks the
 /// plain or glowing definition by entity type. The jar nonetheless ships real
 /// `blockstates/item_frame.json` and `blockstates/glow_item_frame.json` files
 /// (each a two-way `map=false`/`map=true` variant switch), which is what lets
@@ -588,8 +588,9 @@ pub struct StateModel {
     /// for why this cannot be derived from `quads`.
     pub particle_uv: Option<[f32; 4]>,
     /// The linear-ish `[r, g, b]` multiplier a break/hit particle of this state
-    /// applies on top of its `#particle` sprite — vanilla's
-    /// `TerrainParticle`'s `rCol *= tintSource.colorAsTerrainParticle(…)`.
+    /// applies on top of its `#particle` sprite — vanilla's own terrain
+    /// particle's colour multiply against the tint source's own
+    /// terrain-particle colour.
     /// `None` for an untinted state (the overwhelming majority).
     ///
     /// This is **not** derivable from the quads' `tint_index` values, for two
@@ -666,8 +667,8 @@ impl StateModel {
 }
 
 /// `0xRRGGBB` -> `[r, g, b]` in `0..=1`, the form a particle's colour
-/// multiplier takes. Vanilla does the same division by 255 inline in
-/// `TerrainParticle`'s constructor.
+/// multiplier takes. Vanilla does the same division by 255 inline in its own
+/// terrain particle's constructor.
 fn unpack_rgb(rgb: u32) -> [f32; 3] {
     [
         ((rgb >> 16) & 0xFF) as f32 / 255.0,
@@ -823,8 +824,8 @@ pub struct SpecialItemForm {
     /// `special` node, outermost first (translation plus a `left_rotation`/
     /// `right_rotation` quaternion pair each), composed by vanilla *underneath*
     /// the display-context transform above — vanilla's transformation-record
-    /// compose function (`Transformation.compose(parent,
-    /// this.transformation)`), threaded through `bake` by every node type and
+    /// compose function (composing the parent transform with this node's own),
+    /// threaded through the bake step by every node type and
     /// not just the unbaked special-model-wrapper node. Empty when nothing on the path
     /// carries one. A caller folds it as `existing_outer_placement * m[0] *
     /// m[1] * …` — [`crate::compose_special_node_transform`] is that fold; see
@@ -872,7 +873,7 @@ impl ItemVariants {
     /// The fallback is load-bearing rather than defensive: a context can legally
     /// resolve to a `special` node (a trident in the hand does) or to a model that
     /// baked nothing, and drawing the inventory form is what vanilla's own
-    /// `MissingItemModel` degradation amounts to — strictly better than the item
+    /// missing-item-model degradation amounts to — strictly better than the item
     /// vanishing from the hand.
     ///
     /// A `composite` resolution yields several outputs; the **first** bakeable one
@@ -1307,7 +1308,7 @@ impl SideDirection {
 /// Whether texel `(x, y)` of physical frame `frame` is fully transparent, reading
 /// the sprite's pixels back out of the **stitched atlas**.
 ///
-/// Vanilla's sprite-contents transparency check is `ARGB.alpha(pixel) == 0` — strictly
+/// Vanilla's sprite-contents transparency check is `alpha(pixel) == 0` — strictly
 /// zero, not a cutout threshold — and out-of-bounds counts as transparent, which
 /// is what closes the outline at the sprite border.
 fn sprite_texel_transparent(atlas: &Atlas, sprite: &AtlasSprite, frame: u32, x: i32, y: i32) -> bool {
@@ -1486,7 +1487,7 @@ fn sprite_layer_elements(atlas: &Atlas, sprite: &AtlasSprite) -> Vec<Element> {
 /// Bake the extruded slab for a whole layer stack into quads against `atlas`.
 ///
 /// Returns `None` when no layer resolves to an atlas sprite, which is the same
-/// "renders nothing" outcome vanilla's `QuadCollection.EMPTY` produces.
+/// "renders nothing" outcome vanilla's own empty quad-collection constant produces.
 ///
 /// # Tint
 ///
@@ -2057,7 +2058,7 @@ impl BlockModels {
                 ItemGeometry {
                     quads,
                     // `item/generated` declares no `display.gui`, so vanilla poses a
-                    // flat item with `ItemTransform.NO_TRANSFORM`: the identity. The
+                    // flat item with its own no-transform constant: the identity. The
                     // 0..16 slab then maps exactly onto the 16 px slot, which is why
                     // a flat inventory icon fills its cell edge to edge while a
                     // block item (scale 0.625) does not.
@@ -2424,8 +2425,9 @@ impl BlockModels {
     /// is exactly why the interior faces of a wall of glass or ice are not
     /// culled by the ordinary occlusion test and need this second, family-keyed
     /// one instead (vanilla's face-render test's two independent early-outs:
-    /// `neighborState.getFaceOcclusionShape(..) == Shapes.block()`, then
-    /// `state.skipRendering(neighborState, direction)`).
+    /// whether the neighbour's face-occlusion shape is a full block, then
+    /// whether the state's own skip-rendering check against the neighbour and
+    /// direction fires).
     ///
     /// Ice, blue ice and frosted ice are three different `Some` values
     /// (`"ice"`, `"blue_ice"`, `"frosted_ice"`, per vanilla's frosted-ice
@@ -2805,8 +2807,8 @@ fn block_layer(sprite_layers: &[RenderLayer], quads: &[BakedQuad]) -> RenderLaye
 ///   decal dragged the whole block to `Cutout` → `layer != Solid`.
 ///
 /// Vanilla does not derive occlusion from textures at all: its base block-behaviour
-/// cache-init function sets `occlusionShape = canOcclude ? getOcclusionShape(...) :
-/// Shapes.empty()`, and `canOcclude` is a `Properties` flag cleared only by
+/// cache-init function sets `occlusion_shape = can_occlude ? occlusion_shape(...) :
+/// empty()`, and `can_occlude` is a properties flag cleared only by
 /// `noOcclusion()`/`noCollision()`. `GRASS_BLOCK`'s properties call neither, so
 /// vanilla occludes; leaves, glass, ice, slime, honey, spawners, grates and
 /// `powder_snow` all call `noOcclusion()`. That flag is Java, not data — it is in
@@ -3051,7 +3053,7 @@ mod tests {
     #[test]
     fn underwater_plants_carry_water_without_a_waterlogged_property() {
         // Kelp, seagrass and bubble columns have **no** `waterlogged` property:
-        // vanilla hardcodes `getFluidState -> Fluids.WATER.getSource(false)` in
+        // vanilla hardcodes their own fluid-state accessor to a water source in
         // its kelp/kelp-plant/seagrass/tall-seagrass/bubble-column block
         // registrations. Classifying them off `waterlogged` alone leaves an
         // air pocket around every plant in the ocean.
@@ -3269,7 +3271,7 @@ mod live_item_tint_tests {
     fn dye_source() -> lodestone_assets::TintSource {
         lodestone_assets::TintSource {
             kind: "minecraft:dye".to_string(),
-            // `DyedItemColor.LEATHER_COLOR`.
+            // Vanilla's own default leather-dye colour.
             default: Some(-6_265_536),
             grass: None,
             index: 0,
@@ -3279,7 +3281,7 @@ mod live_item_tint_tests {
     fn potion_source() -> lodestone_assets::TintSource {
         lodestone_assets::TintSource {
             kind: "minecraft:potion".to_string(),
-            // `PotionContents.BASE_POTION_COLOR`.
+            // Vanilla's own default base-potion colour.
             default: Some(-13_083_194),
             grass: None,
             index: 0,
@@ -3340,7 +3342,7 @@ mod live_item_tint_tests {
     }
 
     /// The water-bottle control: no `potion_contents` at all still resolves to
-    /// `PotionContents.BASE_POTION_COLOR` — proving this isn't merely "not the
+    /// vanilla's own default base-potion colour — proving this isn't merely "not the
     /// wrong colour", it pins the *specific* vanilla default, mirroring
     /// `item_icon`'s own `water_bottle_control` case.
     #[test]
@@ -3357,8 +3359,8 @@ mod live_item_tint_tests {
         }
     }
 
-    /// The dye control: an undyed item resolves to `DyedItemColor.LEATHER_COLOR`
-    /// — vanilla's own definition default, not a zero/black placeholder.
+    /// The dye control: an undyed item resolves to vanilla's own default
+    /// leather-dye colour — vanilla's own definition default, not a zero/black placeholder.
     #[test]
     fn an_undyed_item_stamps_the_real_leather_default() {
         let quads = vec![quad(Some(3))];
