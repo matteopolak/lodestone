@@ -1,4 +1,4 @@
-//! Per-node permission gating (issue #122): the [`PermissionFilter`] seam and
+//! Per-node permission gating: the [`PermissionFilter`] seam and
 //! the two behaviours vanilla and Bukkit give a gated node.
 //!
 //! This crate cannot resolve a permission — it has no dependencies and no idea
@@ -8,22 +8,19 @@
 //!
 //! # Subtree pruning is vanilla's actual semantics, not a shortcut
 //!
-//! From 26.2's `Commands.fillUsableCommands`
-//! (`.cache/mc/26.2/src/net/minecraft/commands/Commands.java:421`):
+//! Vanilla's own usable-command-tree builder walks each node's children and,
+//! for every child the permission filter allows, adds it to the output tree
+//! and then — **only inside that same allowed branch** — recurses into that
+//! child's own children:
 //!
 //! ```text
-//! for (CommandNode<S> child : source.getChildren()) {
-//!    if (child.canUse(commandFilter)) {
-//!       ...
-//!       target.addChild(node);
-//!       if (!child.getChildren().isEmpty()) {
-//!          fillUsableCommands(child, node, commandFilter, converted);
-//!       }
-//!    }
-//! }
+//! for each child of the source node:
+//!    if the filter allows this child:
+//!       add it to the output tree
+//!       if it has children, recurse into them
 //! ```
 //!
-//! The recursion into a child's own children sits **inside** the `canUse`
+//! The recursion into a child's own children sits **inside** the allowed
 //! branch. So a permitted node under a denied parent is never reached and
 //! never sent — the whole branch disappears from the tree the client is given,
 //! which is why a gated branch simply does not appear in tab completion. This
@@ -32,7 +29,7 @@
 //!
 //! # Execution and suggestion are gated *differently*, on purpose
 //!
-//! Issue #122 asks for both halves, and they are not the same behaviour:
+//! Permission gating needs both halves, and they are not the same behaviour:
 //!
 //! | operation | a denied node is... | why |
 //! |---|---|---|

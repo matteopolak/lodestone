@@ -15,12 +15,12 @@
 //! ## This crate is no longer an island
 //!
 //! It was landed deliberately ahead of its wiring, with three named expected
-//! consumers. **One of them now exists:** `lodestone_ecs::commands` (issue
-//! #118) builds its trees here, and `lodestone_ecs::permissions` resolves the
-//! permissions this crate's [`filter`] seam asks about (#122). The other two
+//! consumers. **One of them now exists:** `lodestone_ecs::commands`
+//! builds its trees here, and `lodestone_ecs::permissions` resolves the
+//! permissions this crate's [`filter`] seam asks about. The other two
 //! remain open and unchanged:
 //!
-//! - **#48** — the server-side Brigadier dispatcher. **This one now exists
+//! - **The server-side Brigadier dispatcher.** **This one now exists
 //!   too:** `lodestone_server::commands` defines the `CommandSource`, the
 //!   executor and *modifier* tables, and the fork-aware dispatch walk, all
 //!   still *outside* this crate's arena — `executable` remains a bare flag
@@ -28,10 +28,10 @@
 //!   table so two dispatchers over one tree library cannot disagree about
 //!   where a callback lives. The one thing that dispatcher needed *from* this
 //!   crate is [`ParsedValue::Dyn`], added for it.
-//! - **#46** — the client command UX. `CommandTree::suggest` exists for it, but
-//!   #46 shipped against `lodestone_model::command_tree` instead; see issue
-//!   #435 and `docs/plugin-commands.md` for why that duplication is the right
-//!   call and what was collapsed instead.
+//! - **The client command UX.** `CommandTree::suggest` exists for it, but
+//!   the client command UX shipped against `lodestone_model::command_tree`
+//!   instead; see `docs/plugin-commands.md` for why that duplication is the
+//!   right call and what was collapsed instead.
 //!
 //! ## The `permission` field, and its corrected type
 //!
@@ -62,15 +62,16 @@
 //!   (`crates/protocol/v770/src/generated/packet_ids.rs`). Both packets have
 //!   **zero decode** in every protocol family in this workspace today. This
 //!   crate does not add any — that is explicitly someone else's question
-//!   (issue #46, and the agent currently working `chat.rs`/`lodestone-client`
-//!   owns it), and reaching into `crates/protocol/**` was out of scope here
+//!   (owned by whoever is currently working `chat.rs`/`lodestone-client`),
+//!   and reaching into `crates/protocol/**` was out of scope here
 //!   regardless.
-//! - **No ECS registry, no dispatcher, no plugin API.** Those are #118, #48
-//!   and the client-input-interception work respectively; this crate is the
-//!   argument-tree substrate underneath all three, not any of them.
+//! - **No ECS registry, no dispatcher, no plugin API.** Those are separate
+//!   tracked work items, plus the client-input-interception work; this
+//!   crate is the argument-tree substrate underneath all three, not any of
+//!   them.
 //! - **Minecraft-flavoured argument types** (player name, block id, entity
-//!   selector, `BlockPos`, ...) are not built in. Issue #119 lists them as
-//!   depending on this substrate; [`ArgumentTypeRegistry`] is exactly the
+//!   selector, `BlockPos`, ...) are not built in. They depend on this
+//!   substrate; [`ArgumentTypeRegistry`] is exactly the
 //!   extension point for them.
 //!
 //! ## Known simplifications versus real Brigadier
@@ -102,7 +103,7 @@
 //!   that would land on a `(node, cursor)` pair already visited on the
 //!   current path. This is not needed to stop an ordinary Brigadier-shaped
 //!   cycle (the consumption gate already does that) — it exists because a
-//!   custom [`ArgumentType`] (issue #119's own extension point) receives
+//!   custom [`ArgumentType`] (the plugin extension point) receives
 //!   `&mut StringReader` and nothing stops a buggy or adversarial one from
 //!   moving the cursor *backward*, defeating the consumption-gate's
 //!   guarantee from outside this module. `tests/brigadier_spec.rs` exercises

@@ -9,7 +9,7 @@ repository.workspace = true
 workspace = true
 
 # Deliberately dependency-free: this crate is a standalone Brigadier
-# argument-tree library (issue #118's substrate), not wired into the ECS, the
+# argument-tree library, not wired into the ECS, the
 # network protocol, or any version family. See `src/lib.rs` for the module
 # doc explaining why it currently has no consumer.
 [dependencies]

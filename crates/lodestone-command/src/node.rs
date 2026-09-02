@@ -65,9 +65,9 @@ impl<T: std::any::Any + Send + Sync + std::fmt::Debug> AnyValue for T {
 /// rather than `Box<dyn Any>` so the common case stays cheap.
 ///
 /// [`ParsedValue::Dyn`] is the richer payload this enum's earlier doc comment
-/// anticipated ("a future consumer that needs a richer payload — issue #48's
+/// anticipated (a future consumer that needs a richer payload — a
 /// dispatcher, most likely, for something like a resolved player UUID — can
-/// widen this enum without touching the parser/reader logic"). That consumer
+/// widen this enum without touching the parser/reader logic). That consumer
 /// now exists: `lodestone_server::commands` keys typed `ArgKey<T>` handles off
 /// argument nodes and downcasts out of this variant, and `lodestone-command-mc`'s
 /// entity selectors and item inputs are the values that travel in it.
@@ -181,9 +181,9 @@ pub struct Node {
     pub(crate) executable: bool,
     pub(crate) redirect: Option<NodeId>,
     /// The permission node required to *see or use* this node and everything
-    /// beneath it (issue #122). `None` means unrestricted.
+    /// beneath it. `None` means unrestricted.
     ///
-    /// # This field's type changed when #122 was built
+    /// # This field's type changed when permission gating was built
     ///
     /// It was reserved as `Option<NodeId>` — a handle into *this tree's own
     /// arena*, which is a command-tree node, not a permission. A permission
@@ -387,8 +387,8 @@ impl CommandTree {
         self.node_mut(id).redirect = Some(target);
     }
 
-    /// Require a permission node to see or use `id` and its whole subtree
-    /// (issue #122). This is Bukkit's `.permission("node")`.
+    /// Require a permission node to see or use `id` and its whole subtree.
+    /// This is Bukkit's `.permission("node")`.
     ///
     /// Gating is **not** applied here — this only records the requirement.
     /// [`CommandTree::parse_filtered`] and [`CommandTree::suggest_filtered`]

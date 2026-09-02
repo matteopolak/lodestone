@@ -231,7 +231,7 @@ fn bool_argument_suggests_only_the_matching_literal() {
 // "known simplifications" section) — every redirect hop must consume at
 // least one character before recursing again, so depth is always bounded by
 // the input length. What the (node, cursor) guard actually earns its keep
-// against is a *custom* `ArgumentType` (issue #119's extension point) that
+// against is a *custom* `ArgumentType` (the plugin extension point) that
 // moves the cursor backward, defeating that bound from outside `parse`'s own
 // control. This section demonstrates exactly that, plus a control proving
 // the guard doesn't misfire on an ordinary, well-behaved repeated redirect.
@@ -308,8 +308,8 @@ fn control_well_behaved_repeated_redirect_to_root_is_not_treated_as_a_cycle() {
 }
 
 // ---------------------------------------------------------------------------
-// Custom argument type registration (issue #119's "a way for a plugin to
-// register a custom ArgumentType with the same two functions").
+// Custom argument type registration — a way for a plugin to
+// register a custom ArgumentType with the same two functions.
 // ---------------------------------------------------------------------------
 
 struct UpperCaseWord;

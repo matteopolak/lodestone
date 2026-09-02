@@ -5,7 +5,7 @@
 //! `LongArgumentType`, `FloatArgumentType`, `DoubleArgumentType`,
 //! `BoolArgumentType`, `StringArgumentType`. Minecraft-flavoured types
 //! (player name, block id, entity selector, ...) are deliberately **not**
-//! here — issue #119 lists them as depending on this substrate, not part of
+//! here — they depend on this substrate, not part of
 //! it, and building one would mean guessing at a wire format nobody has
 //! decoded yet (see the crate doc for `COMMANDS`/`COMMAND_SUGGESTIONS`).
 
@@ -21,7 +21,7 @@ use crate::reader::StringReader;
 ///
 /// Object-safe by design — nodes hold `Arc<dyn ArgumentType>`, and
 /// [`ArgumentTypeRegistry`] is exactly this trait's "register a custom type"
-/// half of issue #119's scope: a plugin builds one, hands it to `register`,
+/// half of the plugin extension point: a plugin builds one, hands it to `register`,
 /// and any tree built from that registry's `get()` can use it exactly like a
 /// built-in.
 pub trait ArgumentType: Send + Sync {
@@ -303,7 +303,8 @@ where
 }
 
 /// A string argument whose completions come from a [`SuggestionProvider`] —
-/// issue #119's "player name, block id" shape, without this crate having to
+/// the "player name, block id" shape the plugin layer will need, without
+/// this crate having to
 /// know what a player or a block is.
 ///
 /// Parsing is a plain unquoted word (`StringReader::readUnquotedString`), so
@@ -365,7 +366,7 @@ impl ArgumentType for ChoicesArgument {
             // `InvalidBool`-style "found this, expected one of" is the closest
             // built-in shape; a dedicated variant would be nicer but this crate
             // keeps `ParseErrorKind` aligned with Brigadier's own set plus the
-            // one addition #122 forced (`NoPermission`).
+            // one addition permission gating forced (`NoPermission`).
             return Err(ParseError::new(
                 start,
                 ParseErrorKind::InvalidBool(value),
@@ -384,9 +385,9 @@ impl ArgumentType for ChoicesArgument {
 }
 
 /// A lookup table a plugin populates with its own [`ArgumentType`]
-/// implementations, keyed by name — issue #119's "a way for a plugin to
-/// register a custom `ArgumentType` with the same two functions [parse and
-/// suggest]". This is a convenience for *sharing* named types across a
+/// implementations, keyed by name — a way for a plugin to
+/// register a custom `ArgumentType` with the same two functions (parse and
+/// suggest). This is a convenience for *sharing* named types across a
 /// plugin's own command declarations; a tree never needs one, since
 /// [`crate::node::CommandTree::add_argument`] takes an `Arc<dyn ArgumentType>`
 /// directly.
