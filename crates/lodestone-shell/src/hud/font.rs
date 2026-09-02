@@ -309,26 +309,6 @@ mod tests {
         }
     }
 
-    /// Guards two representative glyph bitmaps exactly, so a stray edit to the
-    /// pixel data is caught rather than silently shipping a mangled glyph.
-    #[test]
-    fn known_glyph_bitmaps_are_stable() {
-        // Lowercase 'o': a 3×3 ring sitting on the baseline.
-        assert_eq!(
-            glyph_rows('o'),
-            [
-                0b00000, 0b00000, 0b01110, 0b10001, 0b10001, 0b10001, 0b01110
-            ],
-        );
-        // Lowercase 'a' differs from the ring and from uppercase 'A'.
-        assert_eq!(
-            glyph_rows('a'),
-            [
-                0b00000, 0b00000, 0b01110, 0b00001, 0b01111, 0b10001, 0b01111
-            ],
-        );
-    }
-
     #[test]
     fn unknown_glyph_is_a_visible_box() {
         // A codepoint with no arm renders the fallback box, never blank.

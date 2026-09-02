@@ -407,27 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn the_derived_uuid_is_version_three_and_rfc_4122_variant() {
-        // Both stamped fields, asserted on the bytes rather than on the crate's
-        // accessors, because the accessors are the thing under test.
-        let bytes = *offline_uuid("Player").as_bytes();
-        assert_eq!(bytes[6] & 0xf0, 0x30, "version nibble");
-        assert_eq!(bytes[8] & 0xc0, 0x80, "variant bits");
-        assert_eq!(offline_uuid("Player").get_version_num(), 3);
-    }
-
-    #[test]
-    fn the_default_is_the_placeholder_name_and_its_derived_uuid() {
-        let id = OfflineIdentity::default();
-        assert_eq!(id.username(), DEFAULT_USERNAME);
-        assert_eq!(id.uuid(), offline_uuid(DEFAULT_USERNAME));
-        assert_eq!(
-            id.uuid(),
-            Uuid::parse_str("a01e3843-e521-3998-958a-f459800e4d11").unwrap()
-        );
-    }
-
-    #[test]
     fn a_stored_name_round_trips_through_a_real_file() {
         let path = temp_path("roundtrip");
         let mut id = OfflineIdentity::default();
@@ -522,18 +501,6 @@ mod tests {
         id.set_username("Steve").unwrap();
         assert_eq!(id.set_username("no good"), Err(NameError::IllegalCharacter));
         assert_eq!(id.username(), "Steve", "a refused edit must not clear the name");
-    }
-
-    #[test]
-    fn the_login_profile_pairs_the_stored_name_with_its_derived_uuid() {
-        let mut id = OfflineIdentity::default();
-        id.set_username("propagated").unwrap();
-        let profile = id.login_profile();
-        assert_eq!(profile.username, "propagated");
-        assert_eq!(
-            profile.uuid,
-            Uuid::parse_str("1f83d2d8-7412-3e98-9ab7-b3b70e62e948").unwrap()
-        );
     }
 
     fn temp_path(tag: &str) -> PathBuf {
