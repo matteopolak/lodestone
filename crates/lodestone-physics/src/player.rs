@@ -1510,7 +1510,7 @@ fn jump_from_ground(state: &mut PlayerState, view: &dyn CollisionView, profile: 
     }
 }
 
-/// `LivingEntity.getJumpBoostPower()` — `0.1F * (amp + 1)` as a `float`, or `0`.
+/// Vanilla's own jump-boost power: `0.1F * (amp + 1)` as a `float`, or `0`.
 fn jump_boost_power(jump_boost: Option<u32>) -> f32 {
     match jump_boost {
         Some(amp) => 0.1f32 * (amp as f32 + 1.0f32),
@@ -1518,8 +1518,9 @@ fn jump_boost_power(jump_boost: Option<u32>) -> f32 {
     }
 }
 
-/// `Entity.getBlockJumpFactor()`: the jump factor of the block at the feet, or
-/// the block below when the feet block is neutral (`== 1.0`). Honey is `0.5`.
+/// Vanilla's own block-jump-factor lookup: the jump factor of the block at
+/// the feet, or the block below when the feet block is neutral (`== 1.0`).
+/// Honey is `0.5`.
 fn block_jump_factor(position: Vec3d, view: &dyn CollisionView) -> f32 {
     let here_x = mth::floor(position.x);
     let here_y = mth::floor(position.y);
@@ -1533,13 +1534,12 @@ fn block_jump_factor(position: Vec3d, view: &dyn CollisionView) -> f32 {
     }
 }
 
-/// `LocalPlayer.canAutoJump()` (`LocalPlayer.java:1117-1125`) — the gate before
-/// any auto-jump detection.
+/// Vanilla's own auto-jump gate, checked before any auto-jump detection.
 ///
-/// `isStayingOnGroundSurface()` is just `isShiftKeyDown()`
-/// (`Player.java:300-302`), so a sneaking player never auto-jumps. `isMoving()`
-/// reads the *input* move-vector, not the actual movement — the detector still
-/// fires for a standing player pressing forward into a step. This engine has no
+/// The "staying on ground surface" check is just the raw shift key, so a
+/// sneaking player never auto-jumps. The "is moving" check reads the
+/// *input* move-vector, not the actual movement — the detector still fires
+/// for a standing player pressing forward into a step. This engine has no
 /// riding state, so the `!isPassenger()` conjunct is vacuous.
 fn can_auto_jump(state: &PlayerState, input: MovementInput, view: &dyn CollisionView) -> bool {
     let (mv_x, mv_y) = normalized_move_vector(input);
@@ -1551,16 +1551,16 @@ fn can_auto_jump(state: &PlayerState, input: MovementInput, view: &dyn Collision
         && block_jump_factor(state.position, view) >= 1.0
 }
 
-/// `LocalPlayer.updateAutoJump(float, float)` (`LocalPlayer.java:1001-1097`) —
-/// the client-side auto-jump detector. Called at the end of `move()` with the
-/// **actual** x/z deltas the sweep produced (post-collision, cast to `float`).
+/// Vanilla's own client-side auto-jump detector. Called at the end of its
+/// move step with the **actual** x/z deltas the sweep produced
+/// (post-collision, cast to `float`).
 ///
 /// When it decides the player is about to walk into a stepable obstacle (rise
 /// strictly greater than `0.5` and at most the jump height, clear headroom, and
 /// the movement generally facing the player) it arms
 /// [`PlayerState::auto_jump_time`], which the next tick's prologue spends as a
-/// forced jump — the one-tick deferral `LocalPlayer` spells
-/// `this.input.makeJump()` (`LocalPlayer.java:784-789`).
+/// forced jump — the one-tick deferral vanilla's own client spells as a
+/// synthetic jump-key input.
 ///
 /// This is **client-only** steering: the server never sees the detector, only
 /// the resulting jump, so an exact port matters for *feel* (and for the
@@ -1586,8 +1586,8 @@ fn update_auto_jump(
     let mut move_dist_sq = move_diff.length_sqr() as f32;
 
     // The player barely moved this tick (standing still, or fully blocked): fall
-    // back to the *intended* input vector — `input.getMoveVector()` (the
-    // normalised strafe/forward) rotated into world space by the yaw.
+    // back to the *intended* input vector — vanilla's own normalised
+    // strafe/forward move vector, rotated into world space by the yaw.
     if move_dist_sq <= 0.001 {
         let (mv_x, mv_y) = normalized_move_vector(input);
         let input_xa = current_speed * mv_x;
@@ -1606,20 +1606,19 @@ fn update_auto_jump(
         }
     }
 
-    // `Mth.invSqrt(moveDistSq)` — JOML's fast inverse sqrt, not `1/sqrt`.
+    // Vanilla's own fast inverse-sqrt approximation, not a plain `1/sqrt`.
     let move_dist_inverted = mth::inv_sqrt_f32(move_dist_sq);
     let move_dir = move_diff.scale(f64::from(move_dist_inverted));
 
-    // `Entity.getForward()` — `Vec3.directionFromRotation(xRot, yRot)`
-    // (`Entity.java:2603-2605`, `Vec3.java:267-273`).
+    // Vanilla's own "forward" vector: direction-from-rotation(pitch, yaw).
     let facing = forward_direction(state.pitch, state.yaw);
     let facing_dot = (facing.x * move_dir.x + facing.z * move_dir.z) as f32;
     if facing_dot < -0.15 {
         return;
     }
 
-    // `BlockPos.containing(getX(), boundingBox.maxY, getZ())` and the cell one
-    // above: both must be free of collision for the jump to have headroom.
+    // The block at the box's top and the cell one above: both must be free
+    // of collision for the jump to have headroom.
     let bb = state.bounding_box(profile);
     let cx = mth::floor(state.position.x);
     let cz = mth::floor(state.position.z);
@@ -1636,8 +1635,8 @@ fn update_auto_jump(
         jump_height += (amp as f32 + 1.0) * 0.75;
     }
 
-    // `Math.max(currentSpeed * 7.0F, 1.0F / moveDistInverted)` — both floats
-    // widened to double for the max; the result stays a double.
+    // Vanilla's own max of (currentSpeed * 7.0F) and (1.0F / moveDistInverted)
+    // — both floats widened to double for the max; the result stays a double.
     let look_ahead_dist =
         f64::from(current_speed * 7.0f32).max(f64::from(1.0f32 / move_dist_inverted));
 
@@ -1647,8 +1646,9 @@ fn update_auto_jump(
     let player_width = dims.width;
     let player_height = dims.height;
 
-    // `new AABB(segBegin, segEnd + (0, playerHeight, 0)).inflate(playerWidth, 0, playerWidth)`
-    // — the constructor normalises min/max per coordinate (`AABB.java:22-29`).
+    // Vanilla's own box construction: from segBegin to segEnd offset by
+    // player height, inflated by player width on X/Z — the constructor
+    // normalises min/max per coordinate.
     let far = seg_end.add(Vec3d::new(0.0, f64::from(player_height), 0.0));
     let test_box = Aabb::new(
         move_begin.x.min(far.x) - f64::from(player_width),
@@ -1672,10 +1672,9 @@ fn update_auto_jump(
     let right_begin = seg_begin.add(right_offset);
     let right_end = seg_end.add(right_offset);
 
-    // `level().getCollisions(this, testBox)` — every block collision box the
-    // swept box touches, over `BlockCollisions`' cursor range
-    // (`Mth.floor(box ± 1.0E-7) ∓ 1 .. floor(box ± 1.0E-7) ± 1`,
-    // `BlockCollisions.java:51-58`). A box only counts if it intersects either
+    // Vanilla's own collision-gathering step: every block collision box the
+    // swept box touches, over its own cursor range (`floor(box ± 1.0E-7) ∓ 1
+    // .. floor(box ± 1.0E-7) ± 1`). A box only counts if it intersects either
     // probe segment.
     let mut boxes: Vec<Aabb> = Vec::new();
     let x0 = mth::floor(test_box.min_x - 1.0e-7) - 1;
