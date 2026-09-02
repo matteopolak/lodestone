@@ -52,7 +52,8 @@ impl ArgumentType for SwizzleArg {
     }
 
     fn suggest(&self, _partial: &str) -> Vec<String> {
-        // `SwizzleArgument` has no `listSuggestions` override — vanilla itself
+        // Vanilla's own axis-swizzle argument type has no suggestion override —
+        // vanilla itself
         // offers zero completions for this parser (see `ArgumentParser::Swizzle`'s
         // own doc comment in `lodestone-model`).
         Vec::new()

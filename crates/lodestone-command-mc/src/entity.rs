@@ -203,16 +203,18 @@ pub struct SelectorPosition {
 /// fields that are closures over world state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntitySelector {
-    /// `maxResults`. `usize::MAX` means unbounded (`@a`, `@e`).
+    /// Vanilla's own max-results field. `usize::MAX` means unbounded (`@a`, `@e`).
     pub max_results: usize,
-    /// `includesEntities`: `false` restricts the result to players. `@a`, `@p`
+    /// Vanilla's own "includes entities" flag: `false` restricts the result
+    /// to players. `@a`, `@p`
     /// and `@r` set it false by construction; `gamemode=` and `level=` also
     /// force it false.
     pub includes_entities: bool,
-    /// `worldLimited` — set by any positional option. Carried for parity; this
+    /// Vanilla's own "world limited" flag — set by any positional option.
+    /// Carried for parity; this
     /// server has one dimension of players, so nothing reads it yet.
     pub world_limited: bool,
-    /// `currentEntity` — `@s`. The caller itself, subject to the predicates.
+    /// Vanilla's own "current entity" flag — `@s`. The caller itself, subject to the predicates.
     pub current_entity: bool,
     /// A bare player name rather than a selector (`/gamemode creative Steve`).
     pub player_name: Option<String>,
@@ -231,7 +233,7 @@ pub struct EntitySelector {
     /// uuid. Vanilla's own selector parser refuses to even recognise `@`
     /// syntax when the command source lacks the entity-selector permission
     /// (vanilla's own entity-argument parser constructs the parser with
-    /// the source's own permission check as an `allowSelectors` flag).
+    /// the source's own permission check as an "allow selectors" flag).
     /// Computed and set here, but genuinely unenforced: `ArgumentType::parse`
     /// (`lodestone_command`'s trait this crate's [`EntityArg`] implements) has
     /// no execution-context/permission parameter at all, so nothing in this
@@ -778,9 +780,9 @@ mod tests {
         parse(EntityArg::players(), text).unwrap_or_else(|e| panic!("{text:?}: {e}"))
     }
 
-    /// The six selector kinds, against `parseSelector`'s own switch read this
-    /// session. Predicted values, not "it parsed": `max_results`,
-    /// `includes_entities`, the order, and whether the implicit `isAlive`
+    /// The six selector kinds, against vanilla's own per-kind selector setup.
+    /// Predicted values, not "it parsed": `max_results`,
+    /// `includes_entities`, the order, and whether the implicit "still alive"
     /// predicate is added all differ per kind and all three have been got wrong
     /// in ports of this switch.
     #[test]
@@ -790,7 +792,7 @@ mod tests {
         assert!(!all.includes_entities);
         assert_eq!(all.order, SelectorOrder::Arbitrary);
         assert_eq!(all.limit_to_type.as_deref(), Some(PLAYER_TYPE));
-        assert!(all.predicates.is_empty(), "@a adds no isAlive predicate");
+        assert!(all.predicates.is_empty(), "@a adds no still-alive predicate");
 
         let nearest = players("@p");
         assert_eq!(nearest.max_results, 1);
@@ -804,7 +806,7 @@ mod tests {
         assert!(me.current_entity);
         assert!(me.includes_entities, "@s does not restrict to players");
         assert_eq!(me.max_results, 1);
-        assert!(me.predicates.is_empty(), "@s adds no isAlive predicate");
+        assert!(me.predicates.is_empty(), "@s adds no still-alive predicate");
 
         let entities = parse(EntityArg::entities(), "@e").expect("@e is legal for entities()");
         assert_eq!(entities.max_results, usize::MAX);
@@ -812,7 +814,7 @@ mod tests {
         assert_eq!(
             entities.predicates,
             [SelectorPredicate::Alive],
-            "@e adds Entity::isAlive"
+            "@e adds vanilla's own still-alive predicate"
         );
 
         let nearest_entity = parse(EntityArg::entity(), "@n").expect("@n is legal for entity()");
@@ -861,7 +863,8 @@ mod tests {
         assert_eq!(by_uuid.entity_uuid, Some(uuid.parse().unwrap()));
         assert!(by_uuid.includes_entities);
 
-        // A 17-character name is refused (`parseNameOrUUID`'s `length() > 16`).
+        // A 17-character name is refused (vanilla's own name-or-uuid parser
+        // caps it at 16).
         assert!(parse(EntityArg::players(), "AbcdefghijklmnopQ").is_err());
         assert!(parse(EntityArg::players(), "Abcdefghijklmnop").is_ok(), "16 is legal");
     }
@@ -875,7 +878,8 @@ mod tests {
         let s = players("@a[distance=2..4.5]");
         assert_eq!(s.distance, Some(Bounds { min: Some(2.0), max: Some(4.5) }));
 
-        // An exact value sets *both* ends — `fromReader`'s `max = min` branch.
+        // An exact value sets *both* ends — vanilla's own range-reader sets
+        // `max = min` for a single value.
         let s = players("@a[distance=3]");
         assert_eq!(s.distance, Some(Bounds { min: Some(3.0), max: Some(3.0) }));
 

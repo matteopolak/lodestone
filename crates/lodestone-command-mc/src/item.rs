@@ -131,7 +131,7 @@ impl ArgumentType for ItemArg {
         // unfiltered.
         //
         // Both the namespaced and bare forms, because vanilla's own
-        // `suggestResource` offers `minecraft:stone` *and* `stone` for the
+        // resource-suggestion helper offers `minecraft:stone` *and* `stone` for the
         // default namespace, and a player who types `sto` expects a hit.
         let mut out = Vec::with_capacity(lodestone_data::items::ITEM_COUNT as usize * 2);
         for id in 0..i32::try_from(lodestone_data::items::ITEM_COUNT).unwrap_or(i32::MAX) {

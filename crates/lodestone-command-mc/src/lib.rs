@@ -152,7 +152,7 @@ pub trait McArg: ArgumentType + Sized + 'static {
     /// (`crates/protocol/v770/tests/fixtures/command_tree_creative.hex`) has no
     /// suggestion provider on any node of `/gamemode` or `/give` — vanilla
     /// leaves `minecraft:gamemode`, `minecraft:entity` and
-    /// `minecraft:item_stack` to their own client-side `listSuggestions`.
+    /// `minecraft:item_stack` to their own client-side default suggestions.
     fn suggestion_provider(&self) -> Option<ResourceKey> {
         None
     }

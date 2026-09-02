@@ -237,7 +237,8 @@ fn read_typed_array(reader: &mut StringReader, kind: char) -> Result<SnbtValue, 
         // A typed array's own elements may carry the matching suffix
         // (`1b`) or not (`1`) — vanilla accepts both; the suffix, if
         // present, must agree with the array's own kind or vanilla itself
-        // refuses (`TagParser`'s own `createTypedArray` type check). Kept
+        // refuses (vanilla's own NBT-text-parser type check on a typed
+        // array). Kept
         // simple: consume an optional matching suffix, otherwise none.
         let suffix = reader.peek();
         let consumed_suffix = match (kind, suffix) {
