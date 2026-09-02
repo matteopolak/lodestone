@@ -1177,7 +1177,7 @@ struct ViewTracker {
     /// The largest radius this connection is **permitted** to reach, and the
     /// ceiling [`set_view_radius`](Self::set_view_radius) clamps a client
     /// request to — vanilla's own chunk-map clamp,
-    /// `Mth.clamp(player.requestedViewDistance(), 2, this.serverViewDistance)`.
+    /// vanilla's own `clamp(player.requestedViewDistance(), 2, this.serverViewDistance)`.
     ///
     /// **Issue #545: this is a second field precisely because it is a second
     /// question.** `radius` above is where the connection *starts*; this is how
@@ -5817,7 +5817,7 @@ fn collect_nearby_orbs(
     })
 }
 
-/// Vanilla's own `Direction.fromYRot` restricted to the
+/// Vanilla's own yaw-to-direction conversion restricted to the
 /// four horizontal directions, from a player yaw in degrees.
 ///
 /// The 2d-data layout is `south=0, west=1, north=2, east=3`
@@ -6235,7 +6235,7 @@ where
     Ok(())
 }
 
-/// Vanilla's own `SlabBlock.canBeReplaced` for the clicked block:
+/// Vanilla's own slab-block can-be-replaced check for the clicked block:
 /// `true` when placing `held` onto `clicked` should turn it into a double slab
 /// rather than start a new one in the next cell.
 ///
@@ -6720,7 +6720,7 @@ fn apply_composter_use(
 ///
 /// Whether writing `state` at `target` would intersect the placer's own
 /// bounding box — vanilla's own item-can-place check refusing when
-/// `Level.isUnobstructed(state, pos, CollisionContext.empty())` is false,
+/// vanilla's own `isUnobstructed(state, pos, <empty collision context>)` is false,
 /// narrowed to the one entity this server can currently name
 /// at a placement site: the placer, from `player_pos`. A full
 /// `isUnobstructed` tests *every* entity's bounding box in the cell and
@@ -7506,7 +7506,7 @@ where
     let placed = held_item
         .as_deref()
         .and_then(|item| block_items::block_for_item(item).map(|block| (item, block)));
-    // Vanilla's own `SlabBlock.canBeReplaced` is the one
+    // Vanilla's own slab-block can-be-replaced check is the one
     // `canBeReplaced` override a hand placement can hit, and without it a slab
     // clicked onto a matching half-slab lands in the cell *above* instead of
     // doubling. Every other block reaches the plain air-or-fluid test.
@@ -7587,7 +7587,7 @@ where
                 .and_then(lodestone_data::block_entity_types::block_entity_type)
                 .and_then(lodestone_data::block_entity_types::block_entity_type_name)
             {
-                // Vanilla's own `LevelChunk.setBlockState` creates a block entity
+                // Vanilla's own chunk set-block-state routine creates a block entity
                 // from the *state* alone (`state.hasBlockEntity()`), for every
                 // block-entity type — not only the dozen `block_entity_for_item`
                 // simulates real behaviour for. A skull, banner, jukebox, … placed
@@ -9169,7 +9169,7 @@ fn apply_rename_item<P: ServerProtocol>(
 /// must be a `minecraft:writable_book` — vanilla's `carried.has(DataComponents
 /// .WRITABLE_BOOK_CONTENT)` gate, which is always true for that item because
 /// vanilla's own item registration for writable books registers the component as a **prototype default**
-/// (`WritableBookContent.EMPTY`), not only after a first edit. This crate has
+/// (vanilla's own writable-book-content empty default), not only after a first edit. This crate has
 /// no general item-prototype default-component census to reproduce that
 /// distinction (see `ItemComponents`'s own doc on *effective* vs. *patch*
 /// fields), so the item's own canonical key stands in for it here — every
@@ -9953,7 +9953,7 @@ fn apply_use_item(
         return UseItemOutcome::Nothing;
     }
 
-    // Arm 1: `DataComponents.CONSUMABLE` → `Consumable.startConsuming`, whose
+    // Arm 1: vanilla's own consumable data component → its own start-consuming routine, whose
     // own `canConsume` is vanilla's own can-eat check. A refusal is vanilla's `FAIL` — no use
     // starts, so a full player's right-click on steak does nothing at all, which
     // is the behaviour whose absence is most visible.
@@ -9970,7 +9970,7 @@ fn apply_use_item(
         });
     }
 
-    // Arm 2: `DataComponents.EQUIPPABLE` gated on `swappable()`. Instantaneous,
+    // Arm 2: vanilla's own equippable data component gated on `swappable()`. Instantaneous,
     // and it is behind arm 1 for the reason `crate::item_use`'s doc gives — an
     // item that is both eats rather than equips.
     if let Some(swap) = crate::item_use::swap_with_equipment_slot(
@@ -10730,7 +10730,7 @@ where
     Ok(())
 }
 
-/// Vanilla's own `PermissionLevel.GAMEMASTERS` — the level `Permissions
+/// Vanilla's own `GAMEMASTERS` permission level — the level `Permissions
 /// .COMMANDS_GAMEMASTER` requires, and the gate `handleChangeDifficulty`/
 /// `handleLockDifficulty`/`handleSetGameRule`/`handleSetCommandBlock`/
 /// `handleChangeGameMode` all share. The built-in `/gamemode`/`/gamerule`/
@@ -11309,7 +11309,7 @@ where
             // (issue #268); it is real now the model does.
             //
             // A **locked** world separately refuses the change, which vanilla
-            // enforces in `MinecraftServer.setDifficulty`. The confirmation
+            // enforces in vanilla's own set-difficulty routine. The confirmation
             // below is sent either way and carries the value that is actually
             // stored, so a refused request (either reason) corrects the
             // client's own UI rather than leaving it wrong — vanilla itself
@@ -12058,7 +12058,7 @@ where
                 }
                 // Vanilla consumes through `usePlayerItem`, a no-op in creative
                 // (vanilla's own has-infinite-materials check). A sit toggle is
-                // vanilla's own `SUCCESS.withoutItem()` interaction result and consumes nothing,
+                // vanilla's own success-without-item interaction result and consumes nothing,
                 // which `InteractOutcome::consumes_item` already encodes.
                 //
                 // `consume_one` handles the creative case itself, so the game mode
@@ -13968,7 +13968,7 @@ where
                 }
                 if pending_keep_alive.is_some() {
                     // Issue #279: tell the client *why* before hanging up.
-                    // Vanilla sends `Component.translatable("disconnect.timeout")`
+                    // Vanilla sends its own translatable disconnect-timeout component
                     // on exactly this path (its own common packet-listener)
                     // — up to now we closed the socket silently and
                     // a real client showed a generic "connection lost".
@@ -14005,7 +14005,7 @@ where
                 keep_alive_sent_at = crate::tick::PlayTimerInstant::now();
                 watch.clear_unserviced();
                 apply(conn, &mut state, proto.encode_keep_alive(next_keep_alive_id)).await?;
-                // Issue #297/#619: vanilla's own `Ready.keepAlive()`, run from this
+                // Issue #297/#619: vanilla's own ready-keep-alive routine, run from this
                 // connection's own keep-alive timer rather than from the world
                 // tick loop (`tick.rs` is off-limits to this arrangement, and the
                 // ticket graph's own read-driven check-in means there is no
@@ -14848,7 +14848,7 @@ where
                             // Vanilla's own end-dimension fight controller's
                             // dragon-killed routine's own
                             // `level.getHeightmapPos(MOTION_BLOCKING,
-                            // EndPodiumFeature.getLocation(origin))` — the
+                            // its own end-podium-feature location getter (origin))` — the
                             // highest solid block in the podium's own
                             // column. Scanned for real (rather than assumed
                             // to be the bedrock pole's own top) by walking
@@ -18648,7 +18648,7 @@ mod tests {
     /// `slotsChanged` refills between rounds.
     ///
     /// Expected value from outside this code: `chest.json` is eight `#minecraft:planks`
-    /// around an empty centre, and `ResultSlot.onTake` removes **one** per occupied
+    /// around an empty centre, and vanilla's own result-slot on-take routine removes **one** per occupied
     /// cell per craft, so eight planks per cell is exactly eight chests — not one (the
     /// old single-shot behaviour) and not sixty-four.
     #[test]
@@ -18708,7 +18708,7 @@ mod tests {
     /// **Control**, and the third reported symptom: shift-clicking an *input* out of
     /// the grid moves that item to the inventory and withdraws the result. It must
     /// never craft — `quickMoveStack`'s grid-cell branch has no `onTake` on the result
-    /// container, and `ResultSlot.onTake` is reachable only through slot 0.
+    /// container, and vanilla's own result-slot on-take routine is reachable only through slot 0.
     #[test]
     fn shift_clicking_a_grid_input_moves_it_out_without_crafting() {
         let mut inventory = PlayerInventory::new();
@@ -19250,7 +19250,7 @@ mod tests {
     }
 
     /// **Control**: a non-compostable item on a *ready* composter also extracts
-    /// — vanilla's item offer fails the `COMPOSTABLES.containsKey` guard and
+    /// — vanilla's item offer fails vanilla's own compostables-table containment guard and
     /// the `useWithoutItem` half runs, without consuming the hand.
     #[test]
     fn extracting_a_ready_composter_works_for_a_non_compostable_item_too() {
@@ -19403,7 +19403,7 @@ mod tests {
         assert!(join_view_rings(i32::MIN).is_empty());
     }
 
-    /// The yaw → horizontal-facing map is vanilla's `Direction.fromYRot`
+    /// The yaw → horizontal-facing map is vanilla's own yaw-to-direction conversion
     /// (vanilla's own per-variant direction field table): yaw 0 = south, 90 = west, ±180 = north,
     /// -90 = east, split at the 45° midpoints (the value at which
     /// `floor(yaw / 90 + 0.5) & 3` rolls over). This is the facing a placed
@@ -19439,7 +19439,7 @@ mod tests {
     //
     // Worth recording rather than silently dropping: the deleted test asserted
     // that `gamemode c` and `gamemode 1` parse as creative. **26.2 accepts
-    // neither.** `GameType.byName` is an exact match against the four
+    // neither.** vanilla's own game-type name lookup is an exact match against the four
     // `getSerializedName` values, so the old parser — and the test that pinned
     // it — were *more* permissive than vanilla. No test could have caught that,
     // because the failure only ever made a command work that should have failed.
@@ -19447,7 +19447,7 @@ mod tests {
     /// The three redstone families keep the full property set the signal model
     /// reads, and everything else falls through to `crate::block_placement`
     /// (whose own tests cover the per-block conventions). The observer is
-    /// deliberately **not** inverted: `ObserverBlock.getStateForPlacement`
+    /// deliberately **not** inverted: vanilla's own observer-block placement-state getter
     /// applies `.getOpposite()` twice (vanilla's own observer-block placement state),
     /// so it
     /// watches in the player's look direction — unlike the diodes' single
@@ -19497,7 +19497,7 @@ mod tests {
 
     // -----------------------------------------------------------------
     // `placement_obstructs_placer` — the server-side half of
-    // `BlockItem.canPlace` → `Level.isUnobstructed`. `apply_use_item_on` had
+    // Vanilla's own item can-place → level unobstructed check. `apply_use_item_on` had
     // no obstruction test of any kind before this: the only legality gate was
     // "is the target cell air or a fluid", so a full block could be placed
     // through a standing player. These test the pure geometry directly rather
