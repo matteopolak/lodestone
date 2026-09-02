@@ -2,10 +2,10 @@
 //!
 //! [`entity`](crate::entity) places a whole mob with one matrix, which is
 //! correct for a statue and wrong for anything alive. Vanilla animates by
-//! adjusting each `ModelPart`'s `PartPose` before rendering (`Model.setupAnim`),
+//! adjusting each model part's [`PartPose`] before rendering, per model class,
 //! then walking the part hierarchy composing transforms. This module does the
 //! same thing over [`BakedPart`]s: it copies the rest poses, applies a family's
-//! `setupAnim`, and composes the chain into one matrix per part.
+//! pose-setup step, and composes the chain into one matrix per part.
 //!
 //! # Why per-part matrices rather than re-baking vertices
 //!
@@ -35,8 +35,8 @@
 //! chicken wing flap speed — are deliberately absent rather than guessed. They
 //! slot into the same functions when the state arrives.
 //!
-//! One `setupAnim` **override** is ported rather than just the base classes:
-//! `AbstractZombieModel`'s raised arms ([`HumanoidArms::Zombie`]). It is not a
+//! One pose-setup **override** is ported rather than just the base families:
+//! the zombie family's raised arms ([`HumanoidArms::Zombie`]). It is not a
 //! state gap — the pose is unconditional, so leaving it out drew every zombie,
 //! husk and drowned with its arms hanging at its sides.
 //!
@@ -44,14 +44,14 @@
 //!
 //! A creeper's pre-detonation swell ([`creeper_swell_scale`],
 //! [`Skeleton::pose_swelling`]) is a **whole-model scale**, not a joint rotation.
-//! In 26.2 it lives in `CreeperRenderer.scale` — a `PoseStack` op wrapped around
-//! the model — and `CreeperModel.setupAnim` knows nothing about it. It is
-//! implemented here anyway because this is the module that owns the part
-//! matrices, and folding a scale into them is how a caller that only knows about
-//! [`Skeleton`] can get it.
+//! In 26.2 it is applied by the renderer as a transform-stack op wrapped around
+//! the model, separately from the model's own pose-setup step, which knows
+//! nothing about it. It is implemented here anyway because this is the module
+//! that owns the part matrices, and folding a scale into them is how a caller
+//! that only knows about [`Skeleton`] can get it.
 //!
 //! Trigonometry here uses `f32::sin`/`cos` rather than vanilla's 65536-entry
-//! `Mth` lookup table. That is a deliberate exception to the project's
+//! quantised lookup table. That is a deliberate exception to the project's
 //! bit-exactness rule: limb angles are never sent to a server and never feed
 //! physics, so a sub-degree difference is invisible and unobservable. Anything
 //! that *is* transmitted must still use the parity table.
@@ -61,37 +61,38 @@ use lodestone_assets::entity::{Affine, BakedPart, PartPose};
 
 /// Radians per degree.
 const DEG: f32 = std::f32::consts::PI / 180.0;
-/// Vanilla's walk-cycle frequency multiplier (`walkAnimationPos * 0.6662`).
+/// Vanilla's walk-cycle frequency multiplier, applied to the accumulated
+/// walk-distance counter that drives limb phase.
 const WALK_FREQ: f32 = 0.6662;
 
 /// Which arm rig a [`AnimFamily::Humanoid`] model animates with.
 ///
-/// Vanilla expresses this by subclassing: `HumanoidModel.setupAnim` swings the
-/// arms with the walk cycle, and `AbstractZombieModel.setupAnim` calls
-/// `super.setupAnim` and then **overwrites** both arms via
-/// `AnimationUtils.animateZombieArms`. A zombie's part hierarchy is identical to
-/// a player's, so — unlike [`AnimFamily`] — this cannot be classified
-/// structurally; the caller supplies it from the model name (see
+/// Vanilla expresses this by subclassing: the base humanoid pose-setup swings
+/// the arms with the walk cycle, and the zombie family's pose-setup calls that
+/// base behaviour and then **overwrites** both arms with a separate, shared
+/// raised-arms routine. A zombie's part hierarchy is identical to a player's,
+/// so — unlike [`AnimFamily`] — this cannot be classified structurally; the
+/// caller supplies it from the model name (see
 /// [`humanoid_arms_for`](crate::entity::humanoid_arms_for)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HumanoidArms {
-    /// `HumanoidModel`: arms swing opposite the legs, plus the idle bob.
+    /// The base humanoid pose: arms swing opposite the legs, plus the idle bob.
     #[default]
     Swinging,
-    /// `AbstractZombieModel`: both arms held out in front, walk swing discarded.
+    /// The zombie family's pose: both arms held out in front, walk swing discarded.
     Zombie,
 }
 
-/// Which of vanilla's per-model overrides of `HumanoidModel.translateToHand`
-/// applies. Selected by the caller from the model name (see
+/// Which of vanilla's per-model overrides of the base humanoid's
+/// hand-attachment-point transform applies. Selected by the caller from the model name (see
 /// [`hand_pose_override_for`](crate::entity::hand_pose_override_for)), the same
 /// pattern [`HumanoidArms`] uses and for the same reason: a model class is not
 /// visible to us, only the parts it declares and the name it was ported under.
 ///
 /// # Why this cannot be a correction applied to `part_transforms[arm]`
 ///
-/// Every one of these overrides is scoped to `translateToHand` alone — the
-/// arm's *own* mesh keeps rendering through its unmodified pivot; only the
+/// Every one of these overrides is scoped to the hand-attachment point alone —
+/// the arm's *own* mesh keeps rendering through its unmodified pivot; only the
 /// point a held item hangs from moves. `part_transforms[arm]` is the matrix the
 /// whole-body instanced draw uses to place the arm's visible geometry
 /// ([`crate::entity::plan_entities`]), so folding an override in there would
@@ -101,45 +102,43 @@ pub enum HumanoidArms {
 ///
 /// The two pivot-shift cases below additionally cannot be expressed as a pre-
 /// or post-multiplication of the arm's *already-composed* matrix: vanilla
-/// shifts the arm's own pivot **before** its rotation is applied
-/// (`part.x += offset; part.translateAndRotate(poseStack); part.x -= offset;`),
-/// and `T(pivot) · R(rot)` does not commute, so the shift has to be folded in
+/// shifts the arm's own pivot **before** its rotation is applied (offsetting
+/// the pivot, composing the transform, then undoing the offset), and
+/// `T(pivot) · R(rot)` does not commute, so the shift has to be folded in
 /// while the pivot and the rotation are still two separate values — i.e. from
 /// the posed [`PartPose`], not from the [`Mat4`] that already fused them.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum HandPoseOverride {
-    /// `HumanoidModel.translateToHand` / `IllagerModel` / `ArmorStandModel`:
-    /// `root.translateAndRotate(); getArm(arm).translateAndRotate();` — exactly
+    /// Most humanoid-family and armour-stand rigs, plus a golem whose arms hang
+    /// off the body part rather than the root: `root · [body ·] arm` — exactly
     /// the ordinary composed chain, so this is the same value
-    /// `part_transforms[arm]` already holds. Also correct, unmodified, for a
-    /// model whose arms hang off `body` rather than `root` (`CopperGolemModel`)
-    /// — the composed chain already includes the whole parent hierarchy.
+    /// `part_transforms[arm]` already holds; the composed chain already
+    /// includes the whole parent hierarchy either way.
     #[default]
     Structural,
-    /// `SkeletonModel`/`StrayModel`/`WitherSkeletonModel.translateToHand`: the
-    /// arm's pivot `x` is shifted by `±1.0` texel before its own rotation
-    /// (`+1` for the right arm, `-1` for the left — vanilla's
-    /// `arm == RIGHT ? 1.0F : -1.0F`). `PlayerModel`'s slim variant is the
-    /// identical shift at `±0.5` texels. The `f32` is the magnitude in texels;
-    /// the sign is derived from the arm at call time.
+    /// The skeleton family: the arm's pivot `x` is shifted by `±1.0` texel
+    /// before its own rotation (`+1` for the right arm, `-1` for the left).
+    /// The slim player variant uses the identical shift at `±0.5` texels. The
+    /// `f32` is the magnitude in texels; the sign is derived from the arm at
+    /// call time.
     PivotShiftTexels(f32),
-    /// `VexModel.translateToHand`: `root · body · arm`, then `scale(0.55)`,
-    /// then `translate(±0.046875, -0.15625, 0.078125)` (sign by arm). Vex's
-    /// arms hang off `body`, not `root`, which the ordinary chain already
-    /// handles — the override is the trailing scale-and-translate vanilla adds
-    /// *after* the arm's own transform.
+    /// The vex rig: `root · body · arm`, then `scale(0.55)`, then
+    /// `translate(±0.046875, -0.15625, 0.078125)` (sign by arm). Its arms hang
+    /// off `body`, not `root`, which the ordinary chain already handles — the
+    /// override is the trailing scale-and-translate vanilla adds *after* the
+    /// arm's own transform.
     Vex,
-    /// `AllayModel.translateToHand`: a wholly different chain that never calls
-    /// `getArm(arm).translateAndRotate()` at all — `root · body`, then
+    /// The allay rig: a wholly different chain that never composes the arm's
+    /// own rotation into the chain at all — `root · body`, then
     /// `T(0, 1/16, 3/16) · Rx(right_arm.xRot) · S(0.7) · T(1/16, 0, 0)`.
-    /// Vanilla does not branch on `arm` anywhere in this override, not even the
-    /// translate's sign, so an off-hand item on an allay is posed identically
-    /// to a main-hand one — read from source, not a guess: see
-    /// `AllayModel.java`'s `translateToHand`.
+    /// Vanilla does not branch on which arm anywhere in this override, not
+    /// even the translate's sign, so an off-hand item on an allay is posed
+    /// identically to a main-hand one — read from the decompiled source, not
+    /// a guess.
     Allay,
 }
 
-/// `AnimationUtils.animateZombieArms`'s resting arm elevation,
+/// Vanilla's shared raised-arms routine's resting arm elevation,
 /// `-PI / (isAggressive ? 1.5 : 2.25)` radians about X. Negative raises the arm
 /// forward in the Y-down model frame, which is the "arms out in front" pose.
 #[must_use]
@@ -147,14 +146,15 @@ fn zombie_arm_x_rest(aggressive: bool) -> f32 {
     -std::f32::consts::PI / if aggressive { 1.5 } else { 2.25 }
 }
 
-/// `animateZombieArms`'s resting arm splay: `rightArm.yRot = -0.1`,
-/// `leftArm.yRot = 0.1` when not mid-swing.
+/// The same routine's resting arm splay: the right arm's yaw at `-0.1`,
+/// the left arm's at `0.1`, when not mid-swing.
 const ZOMBIE_ARM_Y_REST: f32 = 0.1;
 
-/// The largest value `Creeper.getSwelling` can return: `30 / (30 - 2)`.
+/// The largest value vanilla's creeper-swelling accessor can return: `30 / (30 - 2)`.
 ///
-/// Vanilla computes `Mth.lerp(partialTick, oldSwell, swell) / (maxSwell - 2)`
-/// with `swell` capped at `maxSwell` and `maxSwell` defaulting to `30`. The
+/// Vanilla computes a linear interpolation between the previous and current
+/// swell over the frame, divided by `maxSwell - 2`, with `swell` capped at
+/// `maxSwell` and `maxSwell` defaulting to `30`. The
 /// divisor is `28`, not `30`, so the parameter overshoots `1.0` by ~7% at the
 /// instant of detonation — which is *deliberate*, not a rounding artefact: it is
 /// what makes the creeper still be growing when it explodes rather than easing
@@ -180,20 +180,20 @@ pub const MAX_SWELL: f32 = 30.0 / (30.0 - 2.0);
 /// [`EntityMesh::local_min`]: crate::entity::EntityMesh::local_min
 pub const MAX_SWELL_SCALE: f32 = 1.4 * (1.0 + MAX_SWELL * 0.01);
 
-/// `CreeperRenderer.scale`: the per-axis model scale for a creeper `swelling`
+/// Vanilla's per-axis model scale applied to a creeper for a given `swelling`
 /// fraction, as `[x, y, z]`.
 ///
 /// Transcribed from the decompiled 26.2 client:
 ///
 /// ```text
-///   float g = state.swelling;
-///   float wobble = 1.0F + Mth.sin(g * 100.0F) * g * 0.01F;
-///   g = Mth.clamp(g, 0.0F, 1.0F);
-///   g *= g;
-///   g *= g;
-///   float s  = (1.0F + g * 0.4F) * wobble;
-///   float hs = (1.0F + g * 0.1F) / wobble;
-///   poseStack.scale(s, hs, s);
+///   g = swelling
+///   wobble = 1.0 + sin(g * 100.0) * g * 0.01
+///   g = clamp(g, 0.0, 1.0)
+///   g *= g
+///   g *= g
+///   s  = (1.0 + g * 0.4) * wobble
+///   hs = (1.0 + g * 0.1) / wobble
+///   scale(s, hs, s)
 /// ```
 ///
 /// Two details that a summary of this animation usually loses, and that are the
@@ -209,8 +209,8 @@ pub const MAX_SWELL_SCALE: f32 = 1.4 * (1.0 + MAX_SWELL * 0.01);
 /// * Horizontal and vertical are *reciprocal* in `wobble` — the creeper
 ///   squashes as it widens, conserving its apparent bulk while it shudders.
 ///
-/// The sine is `f32::sin` rather than vanilla's `Mth` table, per the module
-/// note: this feeds a scale, never the wire.
+/// The sine is `f32::sin` rather than vanilla's quantised lookup table, per
+/// the module note: this feeds a scale, never the wire.
 #[must_use]
 pub fn creeper_swell_scale(swell: f32) -> [f32; 3] {
     let wobble = 1.0 + (swell * 100.0).sin() * swell * 0.01;
@@ -222,33 +222,34 @@ pub fn creeper_swell_scale(swell: f32) -> [f32; 3] {
     [horizontal, vertical, horizontal]
 }
 
-/// `LivingEntityRenderer.getFlipDegrees`: how far a dead entity ends up rotated.
+/// How far a dead entity ends up rotated, in vanilla's base rendering rule.
 ///
-/// The base `LivingEntityRenderer` returns a flat `90.0F` — a mob lies flat on its
-/// side — and this is a named constant rather than an inline 90 so the subclasses
-/// that override it (a spider's rig, notably) have somewhere to hang off later.
+/// The base rule returns a flat `90.0F` — a mob lies flat on its
+/// side — and this is a named constant rather than an inline 90 so the per-model
+/// overrides (a spider's rig, notably) have somewhere to hang off later.
 pub const FLIP_DEGREES: f32 = 90.0;
 
-/// `LivingEntityRenderer.setupRotations`' death fall-over, in **degrees** about the
-/// entity's Z axis, for a `death_time` of `deathTime + partialTicks` ticks.
+/// Vanilla's death fall-over, in **degrees** about the
+/// entity's Z axis, for a `death_time` equal to vanilla's integer death timer
+/// plus the frame's interpolation fraction, in ticks.
 ///
 /// Transcribed from the decompiled 26.2 client:
 ///
 /// ```text
-///   if (state.deathTime > 0.0F) {
-///      float fall = (state.deathTime - 1.0F) / 20.0F * 1.6F;
-///      fall = Mth.sqrt(fall);
-///      if (fall > 1.0F) {
-///         fall = 1.0F;
+///   if (death_time > 0.0) {
+///      fall = (death_time - 1.0) / 20.0 * 1.6;
+///      fall = sqrt(fall);
+///      if (fall > 1.0) {
+///         fall = 1.0;
 ///      }
-///      poseStack.mulPose(Axis.ZP.rotationDegrees(fall * this.getFlipDegrees()));
+///      rotate_z(fall * FLIP_DEGREES);
 ///   }
 /// ```
 ///
-/// # It is not linear in `deathTime`, and "90° over 20 ticks" is the wrong answer
+/// # It is not linear in `death_time`, and "90° over 20 ticks" is the wrong answer
 ///
 /// Two terms make the plausible reading wrong in opposite directions, and they
-/// nearly cancel at `deathTime == 20`, which is exactly the input someone would
+/// nearly cancel at `death_time == 20`, which is exactly the input someone would
 /// reach for to check it:
 ///
 /// * The `sqrt` front-loads the motion. The mob is already **halfway over by tick
@@ -256,25 +257,25 @@ pub const FLIP_DEGREES: f32 = 90.0;
 ///   That is the whole character of the animation — a body dropping and settling,
 ///   not a hand sweeping round a dial.
 /// * The `1.6` factor drives the argument past 1 before the count does, so `fall`
-///   saturates at `deathTime == 13.5`, not 20. The mob is flat on its side for the
+///   saturates at `death_time == 13.5`, not 20. The mob is flat on its side for the
 ///   last ~6.5 ticks of vanilla's 20-tick death, which is what makes it *lie there*
 ///   before the server removes it.
 ///
-/// At `deathTime == 20` both readings give 90°, so a gate written there measures
+/// At `death_time == 20` both readings give 90°, so a gate written there measures
 /// only that the function runs. The discriminating ticks are the early ones and
 /// anything in `1 < t < 13.5`.
 ///
-/// # `deathTime == 0` is alive, and the subtraction is why zero is returned twice
+/// # `death_time == 0` is alive, and the subtraction is why zero is returned twice
 ///
-/// The vanilla `if` gates on `deathTime > 0.0`, and `deathTime == 1` independently
+/// The vanilla check gates on `death_time > 0.0`, and `death_time == 1` independently
 /// makes the expression exactly `0`. Both are returned as `0.0` here — but the
-/// guard is load-bearing rather than redundant: without it `deathTime == 0` would
+/// guard is load-bearing rather than redundant: without it `death_time == 0` would
 /// evaluate `sqrt(-0.08)`, and **`f32::sqrt` of a negative is `NaN`**, which
 /// propagates silently through a rotation matrix into vertices that vanish. A
 /// living entity is the common case, so that NaN would be the *default* path.
 ///
-/// `f32::sqrt` rather than vanilla's `Mth.sqrt` table, per the module note: this
-/// feeds a rotation, never the wire.
+/// `f32::sqrt` rather than vanilla's quantised lookup table, per the module note:
+/// this feeds a rotation, never the wire.
 #[must_use]
 pub fn death_fall_over_degrees(death_time: f32) -> f32 {
     if death_time <= 0.0 {
@@ -284,14 +285,13 @@ pub fn death_fall_over_degrees(death_time: f32) -> f32 {
     fall.min(1.0) * FLIP_DEGREES
 }
 
-/// `CreeperRenderer.getWhiteOverlayProgress`: the white-flash overlay strength
-/// for a given swell, `0.0..=1.0`.
+/// Vanilla's white-flash overlay strength for a given swell, `0.0..=1.0`.
 ///
 /// Transcribed from the decompiled 26.2 client:
 ///
 /// ```text
-///   float step = state.swelling;
-///   return (int)(step * 10.0F) % 2 == 0 ? 0.0F : Mth.clamp(step, 0.5F, 1.0F);
+///   step = swelling;
+///   return (int)(step * 10.0) % 2 == 0 ? 0.0 : clamp(step, 0.5, 1.0);
 /// ```
 ///
 /// # This is a **blink**, not a ramp
@@ -308,16 +308,16 @@ pub fn death_fall_over_degrees(death_time: f32) -> f32 {
 ///
 /// # Overlay progress vs. overlay alpha
 ///
-/// This returns vanilla's `whiteOverlayProgress`, the same value
-/// `OverlayTexture.pack(progress, redOverlay)` takes — it is **not** the
-/// blend alpha yet. `OverlayTexture`'s white row quantises `progress` to
-/// `u = floor(progress * 15)` and derives alpha as
-/// `(1 - u/15 * 0.75) * 255`; see
+/// This returns vanilla's white-overlay progress, the same value its
+/// overlay-texture lookup takes alongside the separate hurt/death red
+/// overlay flag — it is **not** the blend alpha yet. The overlay texture's
+/// white row quantises `progress` to `u = floor(progress * 15)` and derives
+/// alpha as `(1 - u/15 * 0.75) * 255`; see
 /// [`crate::entity_pipeline::creeper_overlay_alpha_from_progress`] for that
 /// second step, which a caller applies only when the hurt/death red overlay
-/// is *not* also active — vanilla's texture has red and white on mutually
-/// exclusive rows (`v == 3` for red ignores `u` entirely), so red always wins
-/// when both are true.
+/// is *not* also active — vanilla's overlay texture has red and white on
+/// mutually exclusive rows (the red row ignores the white quantisation
+/// entirely), so red always wins when both are true.
 #[must_use]
 pub fn creeper_white_overlay_progress(swelling: f32) -> f32 {
     let step = swelling;
@@ -333,11 +333,11 @@ pub fn creeper_white_overlay_progress(swelling: f32) -> f32 {
 ///
 /// # Why this is a scale about the feet and not about the model origin
 ///
-/// `LivingEntityRenderer.render` orders the ops:
+/// Vanilla's base entity-rendering rule orders the ops:
 ///
 /// ```text
 ///   scale(-1, -1, 1)          // into the Y-down model frame
-///   this.scale(state, stack)  // CreeperRenderer's swell
+///   apply_swell_scale(state)  // the creeper's swell
 ///   translate(0, -1.501, 0)   // lift the feet to the ground plane
 /// ```
 ///
@@ -364,7 +364,7 @@ fn swell_root_affine(swell: f32) -> Affine {
     }
 }
 
-/// Which of vanilla's `setupAnim` implementations a model animates with.
+/// Which of vanilla's per-model pose-setup implementations a model animates with.
 ///
 /// Derived from a model's part names by [`AnimFamily::classify`]; see the module
 /// docs for why this is structural rather than a mob-name table.
@@ -376,15 +376,15 @@ pub enum AnimFamily {
     /// Has a head but no recognised limb set: the head tracks, nothing else
     /// moves (shulker, allay, bat, squid).
     HeadOnly,
-    /// Four legs in hind/front pairs — `QuadrupedModel`.
+    /// Four legs in hind/front pairs.
     Quadruped,
-    /// Eight legs in hind/middle-hind/middle-front/front pairs — `SpiderModel`.
+    /// Eight legs in hind/middle-hind/middle-front/front pairs.
     Spider,
-    /// Arms and legs — `HumanoidModel`.
+    /// Arms and legs.
     Humanoid,
-    /// Fused `arms` part plus legs — `VillagerModel`.
+    /// Fused `arms` part plus legs.
     Villager,
-    /// Wings plus legs — `ChickenModel`.
+    /// Wings plus legs.
     Chicken,
 }
 
@@ -427,8 +427,8 @@ impl AnimFamily {
     }
 }
 
-/// A `VehicleEntity`'s rocking state, interpolated for this frame — vanilla's
-/// `BoatRenderState.hurtTime`/`hurtDir`/`damageTime`.
+/// A boat or minecart's rocking state, interpolated for this frame — vanilla's
+/// per-frame hurt-clock, hurt-direction and damage-amplitude trio.
 ///
 /// Lives on [`AnimInput`] rather than on the draw record for the same reason
 /// every other render-state scalar here does: it is per-entity, per-frame state
@@ -441,15 +441,15 @@ impl AnimFamily {
 /// already-baked matrices.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct BoatHurt {
-    /// `getHurtTime() - partialTicks` — counts down from `10`. Zero or below is
+    /// Vanilla's interpolated hurt clock — counts down from `10`. Zero or below is
     /// "not hurt", and the boat draws level.
     pub time: f32,
-    /// `getHurtDir()` — `+1` or `-1`. It **multiplies** the whole roll, so a
+    /// Vanilla's hurt direction — `+1` or `-1`. It **multiplies** the whole roll, so a
     /// `0.0` here silences the animation completely; vanilla's registered
     /// default is `1`, which is why [`Self::REST`] uses that and not zero.
     pub dir: f32,
-    /// `max(getDamage() - partialTicks, 0)` — accumulated damage x 10, the
-    /// amplitude of the roll.
+    /// Vanilla's interpolated accumulated damage, floored at `0` — accumulated
+    /// damage x 10, the amplitude of the roll.
     pub damage: f32,
 }
 

@@ -36,21 +36,22 @@
 //! 1. **World light**, one packed sky/block byte per *instance*. Vanilla samples
 //!    the lightmap once per entity at its block position, so a mob is uniformly
 //!    lit by the block it stands in; this shader reproduces terrain's light term
-//!    (vanilla's `lightmap.fsh` curve — see [`crate::light`]) from that byte.
-//!    Without it a mob renders full-bright and out-shines the terrain around it
-//!    by up to an order of magnitude at night — the reported "mobs are super
-//!    bright, blocks are dark" defect, in which nothing was wrong with the
+//!    (the same lightmap-curve term terrain uses — see [`crate::light`]) from
+//!    that byte. Without it a mob renders full-bright and out-shines the terrain
+//!    around it by up to an order of magnitude at night — the reported "mobs are
+//!    super bright, blocks are dark" defect, in which nothing was wrong with the
 //!    blocks.
 //! 2. **Direction.** [`ModelVertex`] carries no normal, so the fragment shader
 //!    reconstructs a face normal from screen-space derivatives of the
 //!    interpolated world position (`-cross(dpdx, dpdy)`, negated to point at the
 //!    eye) and applies **vanilla's two-light diffuse**: `min(1, (max(0, n·L0) +
-//!    max(0, n·L1)) * 0.6 + 0.4)` with `L0/L1` from
-//!    `blaze3d.platform.Lighting.DIFFUSE_LIGHT_0/1`. The negation is what makes
-//!    the double-sided raster state below safe — entity meshes are drawn without
+//!    max(0, n·L1)) * 0.6 + 0.4)` with `L0/L1` two fixed directions from
+//!    vanilla's static diffuse-lighting rig. The negation is what makes the
+//!    double-sided raster state below safe — entity meshes are drawn without
 //!    back-face culling (robust visibility while per-model winding parity is
-//!    still being pixel-verified), and taking the eye-facing side is exactly what
-//!    vanilla's front/back pair in `entity.vsh` resolves to.
+//!    still being pixel-verified), and taking the eye-facing side is exactly
+//!    what vanilla's own front/back handling resolves to in its equivalent
+//!    shader stage.
 //!
 //!    This was **one** light and an `abs()` until issue #383. That formula lights
 //!    a face pointing away from the light as brightly as one pointing into it
@@ -97,9 +98,8 @@ use crate::models::ModelVertex;
 /// could only ever say one thing for all mobs of that kind. Vanilla's own
 /// lightmap sample is per entity, so this is also the faithful granularity. The
 /// tint rides here for the same reason and at the same granularity: vanilla's
-/// `submitModel(model, state, pose, renderType, light, overlay, color, …)` takes
-/// one `color` per submitted model, and dyed leather armour is the case that
-/// needs it.
+/// own per-model submit call takes one colour argument per submitted model,
+/// and dyed leather armour is the case that needs it.
 ///
 /// # Why the instance buffer and not a fifth bind group
 ///
@@ -141,17 +141,17 @@ pub struct EntityInstanceRaw {
     /// unused today), `0` when absent. This is a **separate** attribute from
     /// [`tint`](Self::tint)'s hurt-overlay byte rather than a third meaning
     /// packed into the same word, because the two are genuinely independent
-    /// channels on vanilla's own `OverlayTexture`: the red (hurt) row and the
-    /// white (flash) row are different `v` coordinates into the same lookup
-    /// texture, selected by `hasRedOverlay`, and `tint`'s spare byte was
-    /// already fully claimed by the boolean red gate. See
+    /// channels on vanilla's own overlay lookup texture: the red (hurt) row and
+    /// the white (flash) row are different `v` coordinates into the same
+    /// lookup texture, selected by the hurt-overlay flag, and `tint`'s spare
+    /// byte was already fully claimed by the boolean red gate. See
     /// [`crate::entity_anim::creeper_white_overlay_progress`] for the value
     /// this is derived from and
     /// [`creeper_overlay_alpha_from_progress`] for the derivation.
     ///
     /// **Mutually exclusive with the red overlay, and the shader enforces
-    /// it**: vanilla's `OverlayTexture` puts red and white on different rows
-    /// of one lookup (`y < 8` is always flat red regardless of `u`), so a
+    /// it**: vanilla's overlay lookup texture puts red and white on different
+    /// rows of one lookup (`y < 8` is always flat red regardless of `u`), so a
     /// creeper that is somehow both hurt and swelling in the same frame shows
     /// red, never a blend of the two — exactly `entity.wgsl`'s priority order.
     pub white_overlay: u32,
@@ -162,23 +162,20 @@ pub const NO_TINT: u32 = 0x00FF_FFFF;
 
 /// The hurt/death overlay's alpha byte, packed into `tint`'s bits 24–31.
 ///
-/// Vanilla's `OverlayTexture` (`net/minecraft/client/renderer/texture/
-/// OverlayTexture.java`) bakes a 16×16 lookup texture whose `y < 8` (red) row is
-/// a flat `ARGB.color(...)` of `-1291911168` for every `x` — i.e. `(178, 255, 0,
-/// 0)` — sampled whenever `LivingEntityRenderer.java:281` sets
-/// `state.hasRedOverlay = entity.hurtTime > 0 || entity.deathTime > 0`. `178` is
-/// that overlay's alpha byte; `255, 0, 0` is pure red, which is why the blend
-/// below mixes against a literal `vec3(1.0, 0.0, 0.0)` rather than reading a
-/// colour out of this word.
+/// Vanilla bakes a 16×16 lookup texture for this overlay, whose `y < 8` (red)
+/// row is a flat packed colour of `-1291911168` for every `x` — i.e. `(178,
+/// 255, 0, 0)` — sampled whenever vanilla flags an entity as freshly hurt or
+/// dying. `178` is that overlay's alpha byte; `255, 0, 0` is pure red, which is
+/// why the blend below mixes against a literal `vec3(1.0, 0.0, 0.0)` rather
+/// than reading a colour out of this word.
 ///
 /// **`178` is how much of the entity's own colour survives, not how much red is
-/// added.** Vanilla's `entity.fsh:57` is
-/// `mix(overlayColor.rgb, color.rgb, overlayColor.a)`, so the alpha is the weight
-/// on `color`, giving roughly 30% red. This comment previously described the
-/// constant correctly and its *role* not at all, and the shader below was written
-/// with the arguments the other way round — 70% red (issue #371). If you are
-/// tempted to tune this number because the flash looks wrong, check the argument
-/// order first.
+/// added.** Vanilla's blend is `mix(overlayColor.rgb, color.rgb, overlayColor.a)`,
+/// so the alpha is the weight on `color`, giving roughly 30% red. This comment
+/// previously described the constant correctly and its *role* not at all, and
+/// the shader below was written with the arguments the other way round — 70%
+/// red. If you are tempted to tune this number because the flash looks wrong,
+/// check the argument order first.
 pub const HURT_OVERLAY_ALPHA_BYTE: u32 = 178;
 
 impl EntityInstanceRaw {
@@ -219,12 +216,12 @@ impl EntityInstanceRaw {
 
     /// Set or clear the hurt/death red overlay (bits 24–31 of `tint`).
     ///
-    /// Vanilla's gate is boolean, not a fade: `hasRedOverlay = entity.hurtTime
-    /// > 0 || entity.deathTime > 0` (`LivingEntityRenderer.java:281`) — no
-    /// interpolation by how much of `hurtTime` remains, so this takes a `bool`
-    /// rather than a `0.0..=1.0` strength. Builder-style, like [`with_tint`],
-    /// so a caller that also dyes leather can chain both without either
-    /// clobbering the other's bits.
+    /// Vanilla's gate is boolean, not a fade: it flags this whenever the
+    /// entity's hurt timer or death timer is running, with no interpolation by
+    /// how much of that timer remains, so this takes a `bool` rather than a
+    /// `0.0..=1.0` strength. Builder-style, like [`with_tint`], so a caller
+    /// that also dyes leather can chain both without either clobbering the
+    /// other's bits.
     ///
     /// [`with_tint`]: Self::with_tint
     #[must_use]
@@ -235,7 +232,7 @@ impl EntityInstanceRaw {
     }
 
     /// Set or clear the creeper white-flash overlay (see [`Self::white_overlay`]).
-    /// `alpha_byte` is vanilla's `OverlayTexture` alpha — `0` clears it; a
+    /// `alpha_byte` is vanilla's overlay-lookup alpha — `0` clears it; a
     /// non-zero byte is what [`creeper_overlay_alpha_from_progress`] returns for
     /// an active blink. Builder-style, like [`with_tint`]/[`with_hurt_overlay`].
     ///
@@ -301,24 +298,22 @@ impl EntityInstanceRaw {
 // Mob fire (issue #434 — player report: "mobs dont show flames yet")
 // ---------------------------------------------------------------------------
 
-/// The mob-fire billboard's geometry, derived from vanilla's
-/// `FlameFeatureRenderer.prepare`
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/feature/
-/// FlameFeatureRenderer.java:29-66`) — **modelled**, not transliterated: this
-/// is a clean re-derivation of the same rule in idiomatic Rust, with every
-/// constant cited back to the line it comes from.
+/// The mob-fire billboard's geometry, modelled from vanilla's own fire-overlay
+/// feature rather than transliterated: this is a clean re-derivation of the
+/// same rule in idiomatic Rust, with every constant stated next to what it
+/// controls.
 ///
 /// # The rule
 ///
 /// One camera-yaw-billboarded column of quads, stacked from the entity's feet
 /// upward, shrinking and receding as it rises:
 ///
-/// * `s = width * 1.4` (`:32`) is the whole billboard's scale. **It is not
-///   folded into the geometry here.** Every position [`flame_quads`] emits is
-///   in vanilla's *pre-scale* local units, exactly as they are written in
-///   `prepare` before `pose.scale(s, s, s)` runs, and the caller applies `s` as
-///   a uniform scale in the instance matrix — [`flame_instance_matrix`] is the
-///   one place that happens.
+/// * `s = width * 1.4` is the whole billboard's scale. **It is not folded
+///   into the geometry here.** Every position [`flame_quads`] emits is in
+///   vanilla's *pre-scale* local units, exactly as vanilla computes them
+///   before applying that scale, and the caller applies `s` as a uniform
+///   scale in the instance matrix — [`flame_instance_matrix`] is the one
+///   place that happens.
 ///
 ///   That split is deliberate and it is what makes one baked mesh per entity
 ///   *type* correct: the mesh's shape depends only on the ratio
@@ -327,22 +322,22 @@ impl EntityInstanceRaw {
 ///   `s`. An earlier version of this doc claimed the scale was multiplied
 ///   through "at the end" and it never was, which left every flame `1/s` times
 ///   too large — worst on a wide mob, where `s` is furthest from `1`.
-/// * `h = height / s` (`:36`) is how many scaled units tall the stack has to
-///   fill; the loop below runs once per `0.45`-unit slice of it (`:60`),
-///   which is [`FLAME_QUAD_HEIGHT`]'s value.
-/// * Quad `ss` (0-indexed, `:41`, `:64`) has half-width `r`, starting at `0.5`
-///   (`:34`) and shrinking by `×0.9` per quad (`:62`) — [`FLAME_WIDTH_DECAY`].
-/// * Quad `ss`'s vertical span is `[-yo, 1.4-yo]` (`:56-59`), with `yo`
-///   decreasing by `0.45` per quad (`:61`) — the same `0.45` as the height
-///   step, so consecutive quads overlap by `1.4 - 0.45 = 0.95` scaled units
-///   rather than tiling edge-to-edge.
+/// * `h = height / s` is how many scaled units tall the stack has to fill;
+///   the loop below runs once per `0.45`-unit slice of it, which is
+///   [`FLAME_QUAD_HEIGHT`]'s value.
+/// * Quad `ss` (0-indexed) has half-width `r`, starting at `0.5` and
+///   shrinking by `×0.9` per quad — [`FLAME_WIDTH_DECAY`].
+/// * Quad `ss`'s vertical span is `[-yo, 1.4-yo]`, with `yo` decreasing by
+///   `0.45` per quad — the same `0.45` as the height step, so consecutive
+///   quads overlap by `1.4 - 0.45 = 0.95` scaled units rather than tiling
+///   edge-to-edge.
 /// * Quad `ss`'s local Z is a constant pose-level push-back,
-///   `0.3 - i32(h_initial) * 0.02` (`:39`), plus a further `-0.03` per quad
-///   (`:63`) — so later, smaller quads sit measurably behind earlier ones,
-///   which is what keeps the stack from z-fighting itself.
-/// * Quad `ss` alternates texture (`ss % 2 == 0` → `fire_0`, else `fire_1`,
-///   `:45`) and flips its U mapping every *other pair* of quads
-///   (`ss / 2 % 2 == 0`, `:50-54`).
+///   `0.3 - i32(h_initial) * 0.02`, plus a further `-0.03` per quad — so
+///   later, smaller quads sit measurably behind earlier ones, which is what
+///   keeps the stack from z-fighting itself.
+/// * Quad `ss` alternates texture (`ss % 2 == 0` → `fire_0`, else `fire_1`)
+///   and flips its U mapping every *other pair* of quads
+///   (`ss / 2 % 2 == 0`).
 ///
 /// # What this does not model
 ///

@@ -20,8 +20,8 @@
 //!
 //! # One formula is duplicated from `entity.rs`, not imported — and it is now one, not two
 //!
-//! [`celestial_angle_for_time_of_day`] is the *same* vanilla `celestialAngle`
-//! math [`crate::entity::sky_darken_for_time_of_day`] computes as a private
+//! [`celestial_angle_for_time_of_day`] is the *same* angle-of-day formula
+//! [`crate::entity::sky_darken_for_time_of_day`] computes as a private
 //! intermediate — but `entity.rs` was a held file outside this change's scope,
 //! so this is a second, independently-written copy rather than an import. If
 //! either copy changes, the other must change with it, or the sun's screen
@@ -36,12 +36,10 @@
 //!
 //! # Which formulas here are timeline-exact and which are still 1.21's (#49)
 //!
-//! 26.2 replaced the classic cosine `celestialAngle`/`getSkyDarken` with
-//! keyframed `EnvironmentAttributes` tracks on `Timelines.OVERWORLD_DAY`
-//! (`SUN_ANGLE`, `MOON_ANGLE`, `STAR_ANGLE`, `STAR_BRIGHTNESS`, `SKY_COLOR`,
-//! `FOG_COLOR`, `SUNRISE_SUNSET_COLOR`, `MOON_PHASE` — see
-//! `.cache/mc/26.2/client-src/net/minecraft/client/renderer/SkyRenderer.java`
-//! `extractRenderState`). The split as of #96:
+//! 26.2 replaced the classic cosine angle-of-day and sky-darken formulas with
+//! a keyframed timeline of tracks driving the sun/moon/star angles, the star
+//! brightness, the sky and fog colours, the sunrise/sunset colour, and the
+//! moon phase. The split as of #96:
 //!
 //! * **Timeline-exact, gated against a JVM dump of the real sampler**
 //!   ([`crate::sky_pipeline`]'s consumers of them included):
@@ -64,7 +62,7 @@
 //! `sky_darken_shape` cosine this module used to blend its sky colour with had
 //! silently become a *divergent* second opinion rather than a duplicate of a
 //! validated one. It is deleted; [`sky_color_for_time_of_day`] now reads the
-//! real `SKY_COLOR` track. That is `CLAUDE.md` rule 2 in miniature — the stale
+//! real sky-colour track. That is `CLAUDE.md` rule 2 in miniature — the stale
 //! claim looked entirely correct on inspection.
 
 use glam::{Mat4, Vec3};
@@ -77,7 +75,7 @@ use crate::fog::multiply_gamma;
 // ---------------------------------------------------------------------------
 
 /// The fraction of a full day/night rotation completed, in `[0, 1)` — vanilla's
-/// `celestialAngle`. `0.0` is noon, `0.5` is midnight (verified against the
+/// angle-of-day formula. `0.0` is noon, `0.5` is midnight (verified against the
 /// same two anchor points `entity.rs`'s `sky_darken_for_time_of_day` test
 /// asserts: this function returns `0.0` at `time_of_day = 6_000` and `0.5` at
 /// `time_of_day = 18_000`).
@@ -93,27 +91,24 @@ pub fn celestial_angle_for_time_of_day(time_of_day: i64) -> f32 {
 // Timeline colour tracks (26.2 `data/minecraft/timeline/day.json`)
 // ---------------------------------------------------------------------------
 
-/// One full rotation of `Timelines.OVERWORLD_DAY`, in ticks (`day.json`'s
-/// `period_ticks`).
+/// One full rotation of the day/night timeline, in ticks.
 pub const DAY_PERIOD_TICKS: i64 = 24_000;
 
-/// `minecraft:visual/sunrise_sunset_color`, verbatim from
-/// `.cache/mc/26.2/src/data/minecraft/timeline/day.json`, as `(tick, ARGB)`.
+/// `minecraft:visual/sunrise_sunset_color`, verbatim from the vanilla day
+/// timeline's own data, as `(tick, ARGB)`.
 ///
 /// The values are **ARGB**, not RGBA: `#feda6333` is alpha `0xfe`, red `0xda`,
 /// green `0x63`, blue `0x33` — a warm sunset orange at near-full opacity, not a
 /// green at 20% alpha. Reading the channel order off the hex string the wrong
 /// way round produces a plausible-looking but completely wrong band; the
-/// authority is `EnvironmentAttributes.SUNRISE_SUNSET_COLOR`'s declared
-/// `AttributeTypes.ARGB_COLOR` (`EnvironmentAttributes.java:46`), not the
+/// authority is the attribute's own declared channel-order encoding, not the
 /// string's appearance. Blue is a constant `0x33` across every keyframe and
 /// alpha is what animates, from `0x00` through the middle of the day to `0xfe`
 /// at peak sunset (tick 12732).
 ///
-/// The track declares no `modifier`, so it takes
-/// `AttributeModifier.override()` (`AttributeTrack.createCodec`'s
-/// `optionalFieldOf("modifier", …)` default) — the sampled keyframe value *is*
-/// the final colour, with no base to combine with.
+/// The track declares no modifier, so it defaults to a plain override rather
+/// than a combine-with-base rule — the sampled keyframe value *is* the final
+/// colour, with no base to combine with.
 const SUNRISE_SUNSET_TRACK: [(i32, u32); 32] = [
     (71, 0x5f_ef_a3_33),
     (310, 0x29_f5_ba_33),
@@ -149,17 +144,16 @@ const SUNRISE_SUNSET_TRACK: [(i32, u32); 32] = [
     (23_757, 0xb1_e7_87_33),
 ];
 
-/// `minecraft:visual/sky_color`, from the same `day.json`. `"modifier":
-/// "multiply"` (`ColorModifier.MULTIPLY_RGB = ARGB::multiply`), so these are a
-/// per-tick **multiplier** over whatever base sky colour applies — a biome's
-/// own `minecraft:visual/sky_color` in vanilla, the renderer's existing sky
-/// constant here.
+/// `minecraft:visual/sky_color`, from the same day timeline. Its modifier is
+/// a plain per-channel multiply, so these are a per-tick **multiplier** over
+/// whatever base sky colour applies — a biome's own `minecraft:visual/sky_color`
+/// in vanilla, the renderer's existing sky constant here.
 ///
 /// White through the whole day, pure black across the night: vanilla's night
 /// sky *disc* is genuinely `#000000`, and the dark-blue night sky people
 /// remember is [`FOG_COLOR_TRACK`] showing through at the horizon via the
 /// disc's own fog gradient (see [`SKY_FOG_END_DISTANCE`]). Alpha is `0xff`
-/// throughout because `AttributeTypes.RGB_COLOR`'s codec parses a 6-digit
+/// throughout because the underlying colour codec parses a 6-digit
 /// `#RRGGBB` as opaque.
 const SKY_COLOR_TRACK: [(i32, u32); 4] = [
     (133, 0xff_ff_ff_ff),
@@ -197,15 +191,14 @@ const CLOUD_COLOR_TRACK: [(i32, u32); 4] = [
     (22_330, 0xff_19_19_26),
 ];
 
-/// `Mth.lerpInt` (`.cache/mc/26.2/src/net/minecraft/util/Mth.java:541`):
-/// `p0 + floor(alpha * (p1 - p0))`. The `floor` is load-bearing — a `round`
-/// here is off by one byte on roughly half of all ticks, which the JVM gate
-/// catches immediately.
+/// Vanilla's integer lerp: `p0 + floor(alpha * (p1 - p0))`. The `floor` is
+/// load-bearing — a `round` here is off by one byte on roughly half of all
+/// ticks, which the JVM gate catches immediately.
 pub(crate) fn lerp_int(alpha: f32, p0: i32, p1: i32) -> i32 {
     p0 + (alpha * (p1 - p0) as f32).floor() as i32
 }
 
-/// `ARGB.srgbLerp` (`ARGB.java:155`): a per-channel [`lerp_int`] over the raw
+/// Vanilla's byte-wise sRGB lerp: a per-channel [`lerp_int`] over the raw
 /// **bytes**, i.e. interpolation in gamma space, not linear light. Alpha is
 /// interpolated exactly like the colour channels.
 fn srgb_lerp(alpha: f32, from: u32, to: u32) -> u32 {
@@ -218,26 +211,25 @@ fn srgb_lerp(alpha: f32, from: u32, to: u32) -> u32 {
 }
 
 /// Samples a periodic ARGB keyframe track at `time_of_day`, reproducing
-/// `KeyframeTrackSampler` (`.cache/mc/26.2/src/net/minecraft/util/KeyframeTrackSampler.java`)
-/// for a **linear**-eased track.
+/// vanilla's own keyframe-track sampler for a **linear**-eased track.
 ///
-/// Three details of that class are easy to lose and all three are checked by
+/// Three details of that sampler are easy to lose and all three are checked by
 /// the JVM gate:
 ///
-/// * `bakeSegments` prepends a wraparound segment
+/// * Baking the segment list prepends a wraparound segment
 ///   `(last, last.ticks - period) -> (first, first.ticks)` and appends
 ///   `(last, last.ticks) -> (first, first.ticks + period)`. So a tick before the
 ///   *first* keyframe is not clamped to it — it is on the ramp coming round
 ///   from the last keyframe through the tick-0 seam.
-/// * `getSegmentAt` picks the first segment with `t < segment.toTicks`, a
+/// * Segment lookup picks the first segment with `t < segment.toTicks`, a
 ///   strict `<`, so a tick landing exactly on a keyframe belongs to the segment
-///   *ending* there and `sample`'s `t >= toTicks` branch returns that
-///   keyframe's value exactly.
-/// * the easing is **linear**. `KeyframeTrack.Builder` defaults to
-///   `EasingType.LINEAR` and none of the three tracks in this module declares
-///   an `ease` in `day.json` — only the neighbouring `sun_angle`/`moon_angle`/
-///   `star_angle` tracks opt into a cubic bezier. Issue #49's own text once
-///   said these were bezier-eased; that was a transcription error.
+///   *ending* there and the `t >= toTicks` branch returns that keyframe's
+///   value exactly.
+/// * the easing is **linear**. The track builder defaults to linear easing and
+///   none of the three tracks in this module declares an `ease` in the day
+///   timeline's own data — only the neighbouring sun-angle/moon-angle/star-angle
+///   tracks opt into a cubic bezier. Issue #49's own text once said these were
+///   bezier-eased; that was a transcription error.
 fn sample_argb_track(track: &[(i32, u32)], time_of_day: i64) -> u32 {
     debug_assert!(track.len() >= 2, "a periodic track needs at least two keyframes");
     let period = DAY_PERIOD_TICKS as i32;
@@ -245,7 +237,7 @@ fn sample_argb_track(track: &[(i32, u32)], time_of_day: i64) -> u32 {
     let &(first_ticks, first_value) = track.first().expect("non-empty track");
     let &(last_ticks, last_value) = track.last().expect("non-empty track");
 
-    // Segment selection, in `getSegmentAt`'s own order: the leading wrap
+    // Segment selection, in vanilla's own order: the leading wrap
     // segment first, then each consecutive pair, then the trailing wrap
     // segment as the fallback.
     let (from_ticks, from_value, to_ticks, to_value) = if tick < first_ticks {
@@ -269,13 +261,12 @@ fn sample_argb_track(track: &[(i32, u32)], time_of_day: i64) -> u32 {
     srgb_lerp(alpha, from_value, to_value)
 }
 
-/// Vanilla's `EnvironmentAttributes.SUNRISE_SUNSET_COLOR` at `time_of_day`, as
+/// The sunrise/sunset colour attribute at `time_of_day`, as
 /// `[r, g, b, a]` sRGB bytes (reordered from the track's packed ARGB for a
 /// Rust-natural call site).
 ///
 /// `a == 0` for the whole middle of the day and the deep middle of the night —
-/// vanilla skips the draw entirely when `alpha <= 0.001`
-/// (`SkyRenderer.renderSunriseAndSunset`), and so does
+/// vanilla skips the draw entirely when `alpha <= 0.001`, and so does
 /// [`crate::sky_pipeline::SkyRenderer::render`]. Measured from the JVM dump,
 /// alpha is non-zero only on ticks `0..=702`, `11302..=14175` and
 /// `21825..=23999`: one dusk band and one dawn band, the dawn one wrapping the
@@ -291,9 +282,9 @@ pub fn sunrise_sunset_color_for_time_of_day(time_of_day: i64) -> [u8; 4] {
     ]
 }
 
-/// The `SKY_COLOR` track's per-tick multiplier, as sRGB bytes — white at noon,
+/// The sky-colour track's per-tick multiplier, as sRGB bytes — white at noon,
 /// black at night. Multiply a base sky colour by this in **gamma** space
-/// ([`crate::fog::multiply_gamma`]), which is what `ARGB.multiply` does.
+/// ([`crate::fog::multiply_gamma`]), which is what vanilla's own multiply does.
 #[must_use]
 pub fn sky_color_multiplier_for_time_of_day(time_of_day: i64) -> [u8; 3] {
     let argb = sample_argb_track(&SKY_COLOR_TRACK, time_of_day);
@@ -304,7 +295,7 @@ pub fn sky_color_multiplier_for_time_of_day(time_of_day: i64) -> [u8; 3] {
     ]
 }
 
-/// The `FOG_COLOR` track's per-tick multiplier, as sRGB bytes. See
+/// The fog-colour track's per-tick multiplier, as sRGB bytes. See
 /// [`sky_color_multiplier_for_time_of_day`]; this one bottoms out at
 /// `#0c0c16`/`#161616` rather than black.
 #[must_use]
@@ -317,7 +308,7 @@ pub fn fog_color_multiplier_for_time_of_day(time_of_day: i64) -> [u8; 3] {
     ]
 }
 
-/// The `CLOUD_COLOR` track's per-tick multiplier, as sRGB bytes. See
+/// The cloud-colour track's per-tick multiplier, as sRGB bytes. See
 /// [`CLOUD_COLOR_TRACK`] on why the cloud tint has its own track rather than
 /// reusing the sky's.
 #[must_use]
@@ -331,7 +322,7 @@ pub fn cloud_color_multiplier_for_time_of_day(time_of_day: i64) -> [u8; 3] {
 }
 
 /// The cloud tint at `time_of_day`: a **linear** `day_cloud` base multiplied by
-/// the real `CLOUD_COLOR` track in gamma space.
+/// the real cloud-colour track in gamma space.
 #[must_use]
 pub fn cloud_color_for_time_of_day(time_of_day: i64, day_cloud: [f32; 3]) -> [f32; 3] {
     let m = cloud_color_multiplier_for_time_of_day(time_of_day);
@@ -340,7 +331,7 @@ pub fn cloud_color_for_time_of_day(time_of_day: i64, day_cloud: [f32; 3]) -> [f3
 
 /// The sky-dome colour at `time_of_day`: `day_color` (a **linear** RGB base —
 /// pass the renderer's clear/sky colour, or a biome's `visual/sky_color` once
-/// one is reachable) multiplied by the real `SKY_COLOR` track in gamma space.
+/// one is reachable) multiplied by the real sky-colour track in gamma space.
 ///
 /// This replaced a hand-rolled blend toward a fixed dark-navy `NIGHT` constant.
 /// Two things changed measurably: night is now exactly black rather than
@@ -356,7 +347,7 @@ pub fn sky_color_for_time_of_day(time_of_day: i64, day_color: [f32; 3]) -> [f32;
 }
 
 /// The fog colour at `time_of_day`: a **linear** `day_fog` base multiplied by
-/// the real `FOG_COLOR` track in gamma space, exactly as
+/// the real fog-colour track in gamma space, exactly as
 /// [`sky_color_for_time_of_day`] does for the sky.
 #[must_use]
 pub fn fog_color_for_time_of_day(time_of_day: i64, day_fog: [f32; 3]) -> [f32; 3] {
@@ -364,7 +355,7 @@ pub fn fog_color_for_time_of_day(time_of_day: i64, day_fog: [f32; 3]) -> [f32; 3
     multiply_gamma(day_fog, m.map(|c| f32::from(c) / 255.0))
 }
 
-/// Vanilla's legacy `getStarBrightness`: `0.0` for most of the day, ramping up
+/// Vanilla's legacy star-brightness formula: `0.0` for most of the day, ramping up
 /// around dusk to a `0.5` plateau at night. Ported literally rather than
 /// re-derived from the sky-darken curve's different constants, since it is
 /// vanilla's own distinct formula — and note that curve is now the timeline port
@@ -379,8 +370,7 @@ pub fn star_brightness_for_time_of_day(time_of_day: i64) -> f32 {
 }
 
 /// The active moon phase, `0..8`, in [`lodestone_assets::MOON_PHASE_NAMES`]
-/// order. Vanilla's `MoonPhase.startTick() == index() * 24000`
-/// (`.cache/mc/26.2/client-src/net/minecraft/world/level/MoonPhase.java`) fixes
+/// order. Vanilla fixes each phase's start tick to `index * 24000`, which fixes
 /// the mapping: the phase active on world-day `d` (`d = time_of_day / 24000`)
 /// is enum index `d % 8`. This is a per-day integer cycle, not a continuous
 /// keyframe track, so unlike the ramp-shaped formulas above it is not subject
@@ -394,29 +384,22 @@ pub fn moon_phase_index_for_time_of_day(time_of_day: i64) -> u8 {
 // Sky disc
 // ---------------------------------------------------------------------------
 
-/// Sky-disc radius in blocks (vanilla `SkyRenderer.SKY_DISC_RADIUS`).
+/// Sky-disc radius in blocks (vanilla's own sky-disc radius constant).
 pub const SKY_DISC_RADIUS: f32 = 512.0;
 
 /// The **upper bound** on the distance at which the sky disc has faded entirely
-/// into the fog colour, in blocks — `EnvironmentAttributes.SKY_FOG_END_DISTANCE`'s
-/// registered default (`512.0`, `EnvironmentAttributes.java:25-28`).
+/// into the fog colour, in blocks — the sky-fog-end attribute's registered
+/// default.
 ///
 /// # This is a ceiling, not the value. Use [`sky_fog_end_for_render_distance`]
 ///
 /// It was a plain constant here until issue #399, and that was wrong for every
 /// render distance below 32 chunks: vanilla clamps the attribute to the render
-/// distance before the shader ever sees it —
-///
-/// ```java
-/// fog.skyEnd = Math.min(renderDistance, camera.attributeProbe().getValue(EnvironmentAttributes.SKY_FOG_END_DISTANCE, partialTicks));
-/// ```
-///
-/// (`AtmosphericFogEnvironment.java:73`, where `renderDistance` is the
-/// `renderDistanceInBlocks = renderDistanceInChunks * 16` that
-/// `FogRenderer.setupFog` passes in at `FogRenderer.java:185`/`:193` — *blocks*,
-/// not chunks; the `/ 16.0F` at `AtmosphericFogEnvironment.java:44` is a
-/// different, chunk-space use of the same attribute for the fog/sky colour mix
-/// and is not this.)
+/// distance (in *blocks*, not chunks — converted from the render-distance-in-
+/// chunks setting before the shader ever sees it) before the shader ever sees
+/// it, taking the minimum of the two. A second, unrelated use of the same
+/// attribute divides it back down to chunk-space for the fog/sky colour mix,
+/// and is not this.
 ///
 /// So this constant is the value only at render distance 32 and above. At the
 /// common default of 8 chunks vanilla's gradient completes at **128** blocks,
@@ -427,15 +410,8 @@ pub const SKY_DISC_RADIUS: f32 = 512.0;
 /// # This is where vanilla's horizon-to-zenith gradient comes from
 ///
 /// The gradient is not baked into the disc's vertex colours; the disc is drawn a
-/// single flat colour and then *fogged*. `assets/minecraft/shaders/core/sky.fsh`
-/// is one line:
-///
-/// ```glsl
-/// fragColor = apply_fog(ColorModulator, sphericalVertexDistance, cylindricalVertexDistance,
-///                       0.0, FogSkyEnd, FogSkyEnd, FogSkyEnd, FogColor);
-/// ```
-///
-/// so with `include/fog.glsl`'s definitions the disc's colour is
+/// single flat colour and then *fogged*, by vanilla's standard fog-application
+/// formula: the disc's colour is
 /// `mix(sky_color, fog_color, clamp(dist / sky_end, 0, 1))` where `dist` is the
 /// camera-relative distance of the point being shaded and `sky_end` is
 /// [`sky_fog_end_for_render_distance`]. The disc sits at `y = 16` with radius
@@ -448,31 +424,29 @@ pub const SKY_DISC_RADIUS: f32 = 512.0;
 /// 128 blocks, i.e. below `asin(16/128) = 7.2` degrees of elevation rather than
 /// vanilla-at-RD-32's `1.79`.
 ///
-/// The second `apply_fog` term is provably dead for this geometry and is not
-/// implemented: `total_fog_value` takes the `max` of the spherical ramp and
-/// `linear_fog_value(cylindrical, SkyEnd, SkyEnd)` — a step at `SkyEnd` on
-/// `max(|xz|, |y|)`. Since `sqrt(x²+y²+z²) >= max(sqrt(x²+z²), |y|)` for every
-/// point, any fragment where the step fires already has spherical distance
-/// `>= SkyEnd`, where the first term is already `1.0`. The `max` can therefore
-/// never raise the result.
+/// Vanilla's fog formula also takes the `max` of this spherical ramp and a
+/// second, cylindrical ramp gated the same way; that second term is provably
+/// dead for this geometry and is not implemented. Since
+/// `sqrt(x²+y²+z²) >= max(sqrt(x²+z²), |y|)` for every point, any fragment
+/// where the cylindrical step fires already has spherical distance `>= sky_end`,
+/// where the first term is already `1.0`. The `max` can therefore never raise
+/// the result.
 ///
 /// # Why ours is smoother than vanilla's, deliberately
 ///
-/// `RenderPipelines.SKY` computes `sphericalVertexDistance` in the **vertex**
-/// shader (`sky.vsh`) over a 10-vertex, 8-triangle fan whose triangles are
-/// hundreds of blocks across, so vanilla interpolates the fog *factor*
-/// barycentrically and the ramp shows as flat-shaded wedges — the banding in
-/// issue #96's title. `SKY_DISC_WGSL` interpolates the camera-relative
-/// *position* instead and takes `length()` per fragment, which costs one
-/// `sqrt` per pixel and removes the banding entirely. It is a closer
-/// approximation of the radial gradient vanilla is describing, not a departure
-/// from it.
+/// Vanilla computes the spherical distance in the **vertex** shader, over a
+/// 10-vertex, 8-triangle fan whose triangles are hundreds of blocks across, so
+/// it interpolates the fog *factor* barycentrically and the ramp shows as
+/// flat-shaded wedges — the banding in issue #96's title. `SKY_DISC_WGSL`
+/// interpolates the camera-relative *position* instead and takes `length()`
+/// per fragment, which costs one `sqrt` per pixel and removes the banding
+/// entirely. It is a closer approximation of the radial gradient vanilla is
+/// describing, not a departure from it.
 pub const SKY_FOG_END_DISTANCE: f32 = 512.0;
 
 /// Where the sky disc's gradient actually ends, in blocks, for a render distance
-/// of `render_distance_chunks`: vanilla's
-/// `Math.min(renderDistanceInBlocks, SKY_FOG_END_DISTANCE)`
-/// (`AtmosphericFogEnvironment.java:73`).
+/// of `render_distance_chunks`: vanilla's own clamp of the render distance (in
+/// blocks) to the sky-fog-end attribute's default.
 ///
 /// Worked values, so the curve is legible without running it: RD 2 → 32; RD 4 →
 /// 64; RD 8 → **128**; RD 16 → 256; RD 32 → 512; RD 48 → 512 (clamped). The
@@ -491,9 +465,9 @@ pub fn sky_fog_end_for_render_distance(render_distance_chunks: u32) -> f32 {
 }
 
 /// [`sky_fog_end_for_render_distance`] for a view distance already expressed in
-/// **blocks** — vanilla's own parameter, since `FogRenderer.setupFog` converts to
-/// blocks (`renderDistanceInChunks * 16`, `FogRenderer.java:185`) before handing
-/// the value to the fog environment.
+/// **blocks** — vanilla's own parameter, since its fog setup converts to
+/// blocks (`render_distance_chunks * 16`) before handing the value to the fog
+/// environment.
 ///
 /// Negative inputs are floored at zero; nothing upstream produces one, but the
 /// alternative is propagating a negative divisor into the shader.
@@ -503,8 +477,8 @@ pub fn sky_fog_end_for_render_distance_blocks(render_distance_blocks: f32) -> f3
 }
 
 /// Camera-relative sky-disc triangle-fan positions: the centre plus 9
-/// perimeter points across `-180..=180` degrees in 45-degree steps (vanilla
-/// `SkyRenderer.buildSkyDisc`, `SKY_VERTICES = 10`). Pass a positive `y` for
+/// perimeter points across `-180..=180` degrees in 45-degree steps (vanilla's
+/// own sky-disc builder, 10 vertices total). Pass a positive `y` for
 /// the overhead sky disc, negative for the below-horizon "dark disc".
 #[must_use]
 pub fn sky_disc_positions(y: f32) -> [[f32; 3]; 10] {
