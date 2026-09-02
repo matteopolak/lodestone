@@ -2,8 +2,8 @@
 //!
 //! # What it is
 //!
-//! [`BurnState`] is vanilla's `Entity.remainingFireTicks` plus the `baseTick` block
-//! that consumes it. A pure value type with a [`tick`](BurnState::tick) step reporting
+//! [`BurnState`] is vanilla's own remaining-fire-ticks counter plus the base-tick
+//! block that consumes it. A pure value type with a [`tick`](BurnState::tick) step reporting
 //! a [`BurnTick`], the same split [`crate::food`] and [`crate::mob_effects`] draw — so
 //! [`crate::vitals::PlayerVitals`] stays the single owner of health.
 //!
@@ -15,20 +15,10 @@
 //!
 //! ## The burn tick, and the lava guard that stops double-damage
 //!
-//! `Entity.baseTick`, verbatim:
-//!
-//! ```java
-//! if (this.remainingFireTicks > 0) {
-//!    if (this.fireImmune()) {
-//!       this.clearFire();
-//!    } else {
-//!       if (this.remainingFireTicks % 20 == 0 && !this.isInLava()) {
-//!          this.hurtServer(serverLevel, this.damageSources().onFire(), 1.0F);
-//!       }
-//!       this.setRemainingFireTicks(this.remainingFireTicks - 1);
-//!    }
-//! }
-//! ```
+//! The real base-tick rule, restated: while the remaining-fire-ticks counter is
+//! positive, a fire-immune entity simply clears it; otherwise, if the counter is a
+//! multiple of 20 and the entity is not currently in lava, the on-fire damage
+//! source deals `1.0` damage, and the counter always decrements by one.
 //!
 //! Three details, each of which changes a number:
 //!
@@ -37,74 +27,58 @@
 //!   **exactly 8**, one per second, and none at 0 because the outer `> 0` fails
 //!   first. Counting *up* from zero lands on the same cadence only when the duration
 //!   is a multiple of 20.
-//! * **`&& !this.isInLava()`.** While actually standing in lava the burn deals **no**
-//!   damage of its own: lava's own `lavaHurt` (4.0 per tick) is the damage, and
-//!   without this guard an entity in lava takes both. The burn counter still ticks
-//!   down, so leaving lava leaves the remainder burning.
-//! * **`fireImmune()` calls `clearFire()`, which is `min(0, remaining)` — not `0`.**
+//! * **The "not currently in lava" guard.** While actually standing in lava the
+//!   burn deals **no** damage of its own: lava's own contact damage (4.0 per tick) is
+//!   the damage, and without this guard an entity in lava takes both. The burn
+//!   counter still ticks down, so leaving lava leaves the remainder burning.
+//! * **Clearing fire on an immune entity is `min(0, remaining)` — not `0`.**
 //!   A *negative* counter is meaningful (see below), so zeroing it would discard the
-//!   grace period. `clearFire` on a positive counter gives 0; on a negative one it
-//!   leaves the negative value alone.
+//!   grace period. Clearing a positive counter gives 0; a negative one it
+//!   leaves alone.
 //!
 //! ## Ignition only ever raises the counter
 //!
-//! ```java
-//! public void igniteForTicks(final int numberOfTicks) {
-//!    if (this.remainingFireTicks < numberOfTicks) {
-//!       this.setRemainingFireTicks(numberOfTicks);
-//!    }
-//! }
-//! ```
+//! The real ignite-for-ticks rule only overwrites the counter when the new duration
+//! is *longer* than what remains — it never shortens.
 //!
 //! So stepping out of lava (300 ticks) into fire (160) does **not** shorten the burn
 //! to 160. A plain assignment would, and "walking through a campfire puts out your
 //! lava burn" is exactly the kind of wrong that looks like nothing.
 //!
-//! `igniteForSeconds` is `floor(seconds * 20)`, so the seconds figure is the one to
-//! quote and the tick count is derived.
+//! The real ignite-for-seconds rule is `floor(seconds * 20)`, so the seconds figure
+//! is the one to quote and the tick count is derived.
 //!
-//! | source | vanilla call | ticks |
+//! | source | ignition | ticks |
 //! |---|---|---|
-//! | fire / soul fire block | `BaseFireBlock.fireIgnite` → `igniteForSeconds(8.0F)` | 160 |
-//! | lava | `Entity.lavaIgnite` → `igniteForSeconds(15.0F)` | 300 |
+//! | fire / soul fire block | 8.0 seconds | 160 |
+//! | lava | 15.0 seconds | 300 |
 //!
-//! And the *contact* damage is per-block, not shared: `FireBlock` passes `1.0F` to
-//! `BaseFireBlock`'s constructor and `SoulFireBlock` passes **`2.0F`**. Lava's contact
-//! damage is `4.0F` per tick, an order of magnitude above either.
+//! And the *contact* damage is per-block, not shared: ordinary fire deals `1.0F`
+//! and soul fire deals **`2.0F`**. Lava's contact damage is `4.0F` per tick, an
+//! order of magnitude above either.
 //!
 //! ## The negative counter is a grace period, and it is player-only
 //!
-//! `BaseFireBlock.fireIgnite`:
+//! The real fire-block-contact rule, restated: for a non-immune entity, a negative
+//! counter is nudged one step toward zero; otherwise, for a real player only, the
+//! counter is bumped by a random 1 or 2. Only once the counter is non-negative does
+//! it apply the full 8-second ignition.
 //!
-//! ```java
-//! if (!entity.fireImmune()) {
-//!    if (entity.getRemainingFireTicks() < 0) {
-//!       entity.setRemainingFireTicks(entity.getRemainingFireTicks() + 1);
-//!    } else if (entity instanceof ServerPlayer) {
-//!       int addedFireTicks = entity.level().getRandom().nextInt(1, 3);
-//!       entity.setRemainingFireTicks(entity.getRemainingFireTicks() + addedFireTicks);
-//!    }
-//!    if (entity.getRemainingFireTicks() >= 0) {
-//!       entity.igniteForSeconds(8.0F);
-//!    }
-//! }
-//! ```
-//!
-//! A **player** does not ignite on the first contact tick: the counter ramps by
-//! `nextInt(1, 3)` (i.e. 1 or 2) per tick and only once it is non-negative does the
+//! A **player** does not ignite on the first contact tick: the counter ramps by a
+//! random draw of 1 or 2 per tick and only once it is non-negative does the
 //! 8-second ignition land. That is why running across a single fire block can leave
-//! you unburnt while standing still cannot. The `else if` matters: a non-player entity
-//! with a non-negative counter takes the ignition **immediately**.
+//! you unburnt while standing still cannot. The "otherwise" branch matters: a
+//! non-player entity with a non-negative counter takes the ignition **immediately**.
 //!
-//! The negative branch is where a fire-immunity grace period lands
-//! (`setRemainingFireTicks(-getFireImmuneTicks())`); `Entity.getFireImmuneTicks` is
-//! `0` by default and only a few entities override it, so a plain player starts at 0
-//! and one contact tick's ramp is enough.
+//! The negative branch is where a fire-immunity grace period lands — the counter is
+//! set to the negative of the entity's fire-immune-ticks value, which is `0` by
+//! default and only a few entities override it, so a plain player starts at 0 and
+//! one contact tick's ramp is enough.
 //!
 //! ## Fire Resistance is a damage-source check, not a burn-counter check
 //!
-//! `LivingEntity.hurt`: `if (source.is(DamageTypeTags.IS_FIRE) && this.hasEffect(MobEffects.FIRE_RESISTANCE))`
-//! → immune. So the counter **still runs** and the entity still visibly burns; the
+//! The real hurt rule checks whether the damage source is fire-tagged *and* the
+//! entity currently has Fire Resistance → immune. So the counter **still runs** and the entity still visibly burns; the
 //! *damage* is refused. Clearing the counter instead would put the fire out, which is
 //! a visible divergence and also loses the burn when the effect expires.
 //!
@@ -116,7 +90,7 @@
 //!
 //! # What is not here
 //!
-//! * **Lightning.** `LightningBolt` is an entity with target selection, a `nextInt`
+//! * **Lightning.** A lightning strike is an entity with target selection, a random
 //!   draw over a weather-eligible column, direct-hit damage and the
 //!   creeper→charged / villager→witch transformations. It needs an entity type
 //!   `MobSim` does not have, and the transformations need a per-species table; the
@@ -134,8 +108,8 @@
 //!   encodes the shared-flags metadata bit a client would render a fire overlay
 //!   from — the wire encoder lives in the version crate, outside this module's
 //!   reach. The damage is real; the client-side visual is not yet wired.
-//! * **Rain does not extinguish anything**, mob or player. `Entity.baseTick`'s
-//!   water block calls `clearFire()`; wiring rain needs a weather read this
+//! * **Rain does not extinguish anything**, mob or player. The real base-tick rule's
+//!   water-block check clears fire; wiring rain needs a weather read this
 //!   module is not given.
 //!
 //! # Dependencies
@@ -143,33 +117,33 @@
 //! None beyond `std`. The caller supplies what block the entity is standing in and
 //! whether it has Fire Resistance.
 
-/// `Entity.igniteForSeconds`' factor.
+/// The real ignite-for-seconds rule's ticks-per-second factor.
 const TICKS_PER_SECOND: f32 = 20.0;
 
-/// The interval `baseTick` deals burn damage on — `remainingFireTicks % 20 == 0`.
+/// The interval the base-tick rule deals burn damage on — every 20 remaining ticks.
 pub const BURN_DAMAGE_INTERVAL: i32 = 20;
 
-/// The burn tick's own damage — `hurtServer(damageSources().onFire(), 1.0F)`.
+/// The burn tick's own damage — the on-fire damage source's `1.0F`.
 pub const BURN_DAMAGE: f32 = 1.0;
 
-/// `BaseFireBlock.fireIgnite`'s `igniteForSeconds(8.0F)`, in ticks.
+/// The real fire-block-contact rule's 8-second ignition, in ticks.
 pub const FIRE_IGNITE_TICKS: i32 = 160;
 
-/// `Entity.lavaIgnite`'s `igniteForSeconds(15.0F)`, in ticks — nearly twice a fire
-/// block's, which is why stepping from lava into fire must not shorten the burn.
+/// The real lava-contact ignition's 15-second duration, in ticks — nearly twice a
+/// fire block's, which is why stepping from lava into fire must not shorten the burn.
 pub const LAVA_IGNITE_TICKS: i32 = 300;
 
-/// `FireBlock`'s `fireDamage`, the contact hit for standing in it.
+/// Ordinary fire's contact damage, the hit for standing in it.
 pub const FIRE_CONTACT_DAMAGE: f32 = 1.0;
 
-/// `SoulFireBlock`'s `fireDamage` — **twice** ordinary fire's. Read off its own
-/// `super(properties, 2.0F)` call rather than assumed equal.
+/// Soul fire's contact damage — **twice** ordinary fire's. Read off its own
+/// registration rather than assumed equal.
 pub const SOUL_FIRE_CONTACT_DAMAGE: f32 = 2.0;
 
-/// `Entity.lavaHurt`'s `4.0F`, applied **every tick** an entity is in lava.
+/// Lava's contact damage, applied **every tick** an entity is in lava.
 pub const LAVA_CONTACT_DAMAGE: f32 = 4.0;
 
-/// `Entity.igniteForSeconds` — `Mth.floor(seconds * 20.0F)`.
+/// The real ignite-for-seconds rule — floor of `seconds * 20.0F`.
 #[must_use]
 pub fn ignite_ticks_for_seconds(seconds: f32) -> i32 {
     (seconds * TICKS_PER_SECOND).floor() as i32
@@ -207,8 +181,8 @@ impl BurnSource {
     #[must_use]
     pub fn ignite_ticks(self) -> i32 {
         match self {
-            // Both fire blocks go through `BaseFireBlock.fireIgnite`, so they share
-            // the duration and differ only in contact damage.
+            // Both fire blocks go through the same fire-block-contact rule, so they
+            // share the duration and differ only in contact damage.
             Self::Fire | Self::SoulFire => FIRE_IGNITE_TICKS,
             Self::Lava => LAVA_IGNITE_TICKS,
         }
@@ -252,10 +226,10 @@ impl BurnTick {
     }
 }
 
-/// One entity's burn counter — vanilla's `remainingFireTicks`.
+/// One entity's burn counter — vanilla's own remaining-fire-ticks value.
 ///
 /// A negative value is a *grace period*, not "not burning": see this module's doc on
-/// `fireIgnite`. `0` is the ordinary not-burning value.
+/// the fire-block-contact rule. `0` is the ordinary not-burning value.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BurnState {
     remaining: i32,
@@ -274,14 +248,14 @@ impl BurnState {
         self.remaining
     }
 
-    /// Whether the entity is visibly on fire — `Entity.isOnFire`'s
-    /// `remainingFireTicks > 0` half.
+    /// Whether the entity is visibly on fire — the real is-on-fire rule's
+    /// "counter is positive" half.
     #[must_use]
     pub fn is_on_fire(&self) -> bool {
         self.remaining > 0
     }
 
-    /// `Entity.igniteForTicks` — **only ever raises** the counter.
+    /// The real ignite-for-ticks rule — **only ever raises** the counter.
     ///
     /// This is the guard that stops a short ignition cutting a long burn short. A
     /// plain assignment makes walking through fire extinguish a lava burn.
@@ -291,12 +265,12 @@ impl BurnState {
         }
     }
 
-    /// `Entity.igniteForSeconds`.
+    /// The real ignite-for-seconds rule.
     pub fn ignite_for_seconds(&mut self, seconds: f32) {
         self.ignite_for_ticks(ignite_ticks_for_seconds(seconds));
     }
 
-    /// `Entity.clearFire` — `min(0, remaining)`, **not** `0`.
+    /// The real clear-fire rule — `min(0, remaining)`, **not** `0`.
     ///
     /// A negative grace period survives; a positive burn is put out. Zeroing instead
     /// would discard the grace, so a fire-immune entity re-entering fire would ignite
@@ -305,16 +279,15 @@ impl BurnState {
         self.remaining = self.remaining.min(0);
     }
 
-    /// `BaseFireBlock.fireIgnite` — contact with a fire block, which for a **player**
-    /// ramps a negative counter rather than igniting immediately.
+    /// The real fire-block-contact rule — contact with a fire block, which for a
+    /// **player** ramps a negative counter rather than igniting immediately.
     ///
-    /// `ramp` is the `nextInt(1, 3)` draw (1 or 2), supplied by the caller because
-    /// this type owns no RNG; it is consumed **only** on the non-negative player
-    /// branch, and the draw count is part of the specification.
+    /// `ramp` is the random draw of 1 or 2, supplied by the caller because this type
+    /// owns no RNG; it is consumed **only** on the non-negative player branch, and
+    /// the draw count is part of the specification.
     ///
-    /// `is_player` selects vanilla's `else if (entity instanceof ServerPlayer)`: a
-    /// non-player entity with a non-negative counter skips the ramp and ignites at
-    /// once.
+    /// `is_player` selects the real rule's player-only branch: a non-player entity
+    /// with a non-negative counter skips the ramp and ignites at once.
     pub fn fire_ignite(&mut self, is_player: bool, ramp: i32) {
         if self.remaining < 0 {
             // The grace period burns off one tick at a time, whoever the entity is.
@@ -327,13 +300,13 @@ impl BurnState {
         }
     }
 
-    /// Advances the burn by one tick and reports the damage — `Entity.baseTick`'s
-    /// fire block, plus the contact damage the block itself applies.
+    /// Advances the burn by one tick and reports the damage — the real base-tick
+    /// rule's fire block, plus the contact damage the block itself applies.
     ///
     /// * `standing_in` is what the entity's cell holds, or `None` for anything that
-    ///   does not burn. It supplies both the contact damage and vanilla's
-    ///   `isInLava()` for the burn-tick guard.
-    /// * `fire_immune` is the entity type's own `fireImmune()` — a blaze, not an
+    ///   does not burn. It supplies both the contact damage and the "is in lava"
+    ///   read for the burn-tick guard.
+    /// * `fire_immune` is the entity type's own fire-immunity flag — a blaze, not an
     ///   effect. It **clears the fire** rather than merely refusing damage.
     /// * `fire_resistance` is the Fire Resistance *effect*. It refuses the damage and
     ///   leaves the counter running, because vanilla's check is on the damage source
@@ -353,9 +326,10 @@ impl BurnState {
         let mut out = BurnTick::default();
         let was_on_fire = self.is_on_fire();
 
-        // The block's own per-tick contact hit (`entityInside` → `hurt`, and
-        // `lavaHurt` for lava). Independent of the burn counter: a fire-immune entity
-        // takes neither, but Fire Resistance is what refuses it for everyone else.
+        // The block's own per-tick contact hit (the entity-inside-block damage,
+        // including lava's separate contact damage). Independent of the burn
+        // counter: a fire-immune entity takes neither, but Fire Resistance is what
+        // refuses it for everyone else.
         if let Some(source) = standing_in
             && !fire_immune
             && !fire_resistance
@@ -365,11 +339,11 @@ impl BurnState {
 
         if self.remaining > 0 {
             if fire_immune {
-                // `clearFire()`, not `= 0` — see that method's doc.
+                // The real clear-fire rule, not a flat `= 0` — see that method's doc.
                 self.clear();
             } else {
-                // `remainingFireTicks % 20 == 0 && !isInLava()`. The lava guard is
-                // what stops an entity in lava taking 4.0 + 1.0 in one tick.
+                // Counter divisible by 20, and not currently in lava. The lava guard
+                // is what stops an entity in lava taking 4.0 + 1.0 in one tick.
                 if self.remaining % BURN_DAMAGE_INTERVAL == 0
                     && !standing_in.is_some_and(BurnSource::is_lava)
                     && !fire_resistance
@@ -401,8 +375,8 @@ impl BurnState {
 mod tests {
     use super::*;
 
-    /// The durations come from `igniteForSeconds`' own floor, and fire and lava are
-    /// **different**: 160 against 300.
+    /// The durations come from the real ignite-for-seconds rule's own floor, and
+    /// fire and lava are **different**: 160 against 300.
     #[test]
     fn the_two_ignition_durations_are_eight_and_fifteen_seconds() {
         assert_eq!(ignite_ticks_for_seconds(8.0), 160);
@@ -553,11 +527,11 @@ mod tests {
         burn.ignite_for_ticks(FIRE_IGNITE_TICKS);
         let out = burn.tick(Some(BurnSource::Lava), true, false);
         assert_eq!(out.damage, 0.0, "immune to the contact hit too");
-        assert_eq!(burn.remaining(), 0, "clearFire on a positive counter gives 0");
+        assert_eq!(burn.remaining(), 0, "clearing fire on a positive counter gives 0");
         assert!(!burn.is_on_fire());
     }
 
-    /// **`clearFire` is `min(0, remaining)`, not `0`** — so a negative grace period
+    /// **Clearing fire is `min(0, remaining)`, not `0`** — so a negative grace period
     /// survives being cleared. Zeroing it would let a fire-immune entity ignite a tick
     /// sooner than vanilla's on re-entry.
     #[test]
