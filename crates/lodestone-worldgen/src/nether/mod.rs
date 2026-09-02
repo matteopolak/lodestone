@@ -23,8 +23,8 @@
 //! |---|---|---|
 //! | RNG family | xoroshiro | **legacy** (`legacy_random_source: true`) |
 //! | climate channels | 6 real | temperature + vegetation; the other four are `0.0` constants in the router |
-//! | biome noises | `master.fromHashOf(id)` | **`LegacyRandomSource(seed+0)` / `(seed+1)`**, legacy-init `NormalNoise` |
-//! | aquifer | `NoiseBasedAquifer` | **disabled** — global fluid picker only |
+//! | biome noises | positional factory forked from a hash of the noise id | **`LegacyRandomSource(seed+0)` / `(seed+1)`**, legacy-init `NormalNoise` |
+//! | aquifer | vanilla's own noise-based aquifer | **disabled** — global fluid picker only |
 //! | fluid | water at y<63 | **lava at y<32** |
 //! | vertical extent | `min_y -64`, height 384 | `min_y 0`, height 128 |
 //! | carver | `cave`, `canyon` | **`nether_cave`** |
@@ -67,14 +67,14 @@
 //!
 //! | need | the Nether's answer |
 //! |---|---|
-//! | which structure sets exist here | [`StructureRegistry::new_for_biomes`] over the parameter table's own biome names — vanilla's `hasBiomesForStructureSet`, so a Nether registry loads `bastion`'s pools and no village's |
+//! | which structure sets exist here | [`StructureRegistry::new_for_biomes`] over the parameter table's own biome names — vanilla's own "has biomes for structure set" check, so a Nether registry loads `bastion`'s pools and no village's |
 //! | the height probe | a *disabled* aquifer over the Nether's `final_density`, `min_y 0`, height 128 — not an Overworld-shaped column, and never `sea_level 63` |
 //! | the biome the filter reads | [`Self::biome_quarts`]' own sampler at `y = 0`, because this dimension's climate is y-invariant |
 //! | memoisation of the 17×17 starts walk | a bounded pure-function memo on this generator, not the Overworld's staged store (which is keyed by that generator's own stage set) |
 //!
 //! **The bedrock roof and floor are surface-rule products and the height probe
 //! does not see them.** `first_occupied_height` reads the *pre-surface* fill,
-//! exactly as vanilla's `getBaseHeight` does, so a structure sited near y 127 is
+//! exactly as vanilla's own base-height lookup does, so a structure sited near y 127 is
 //! sited against noise rather than against the roof it will be buried under. That
 //! is vanilla's behaviour and not a gap; it is written down because the opposite
 //! assumption is the natural one.
@@ -94,7 +94,7 @@
 //!   run over the *post-surface* column, so a carver that exposes netherrack sees
 //!   the surface rules' output, not the raw fill. Structures are written *after*
 //!   carving, which is where `surface_structures` (step 4) sits.
-//! * **`min_gen_y + 31` in `NetherWorldCarver.carveBlock` is not `sea_level`.**
+//! * **`min_gen_y + 31` in vanilla's own nether-world-carver carve-block step is not `sea_level`.**
 //!   It is hardcoded, and at `min_y 0` it means "lava at y ≤ 31" — one below the
 //!   `sea_level 32` the fill uses. Do not unify them.
 //! * A biome name this generator can produce must have its carver list resolved
@@ -343,7 +343,7 @@ impl NetherGenerator {
         }
 
         let mut carvers_by_biome = HashMap::new();
-        // `MultiNoiseBiomeSource.possibleBiomes()` for this dimension, derived from
+        // Vanilla's own multi-noise biome source's "possible biomes" for this dimension, derived from
         // the parameter table rather than written down: a hardcoded list of the
         // Nether's five would be a second copy of the data, and a datapack that
         // added a sixth would silently lose its structures.
@@ -429,7 +429,7 @@ impl NetherGenerator {
         }
     }
 
-    /// `Aquifer.createDisabled` bound to this chunk — the Nether's whole fill
+    /// Vanilla's own disabled-aquifer constructor bound to this chunk — the Nether's whole fill
     /// decision. See [`AquiferSystem::disabled`].
     fn build_fill(&self, cx: i32, cz: i32) -> AquiferSystem {
         AquiferSystem::disabled(
@@ -474,8 +474,8 @@ impl NetherGenerator {
         crate::compose::solid_top_heights(field, self.min_y, self.height, self.sea_level)
     }
 
-    /// One climate sample per horizontal quart, `Climate.Sampler.sample(quartX,
-    /// quartY, quartZ)` → `QuartPos.toBlock` → the parameter list's nearest row.
+    /// One climate sample per horizontal quart, vanilla's own climate sampler at
+    /// `(quartX, quartY, quartZ)` → its own quart-to-block conversion → the parameter list's nearest row.
     ///
     /// `quartY` is passed as 0 because the Nether's climate is y-invariant (module
     /// doc); the gate that keeps this honest is
@@ -540,7 +540,7 @@ impl NetherGenerator {
         };
         let heightmap = |lx: i32, lz: i32| -> i32 { heights[(lz * 16 + lx) as usize] };
         // `cold_enough_to_snow` is false for every Nether biome (they all declare
-        // `temperature: 2.0`), and nothing in `SurfaceRuleData.nether()` reads it
+        // `temperature: 2.0`), and nothing in vanilla's own bundled Nether surface-rule data reads it
         // — there is no `temperature` condition in the Nether rule tree.
         let biome_at = |lx: i32, lz: i32| -> (&str, bool) {
             (
@@ -576,9 +576,10 @@ impl NetherGenerator {
         )
     }
 
-    /// `applyCarvers` over the post-surface column.
+    /// Vanilla's own carve-application step over the post-surface column.
     ///
-    /// `top_material` is a constant `None`: `NetherWorldCarver.carveBlock` never
+    /// `top_material` is a constant `None`: vanilla's own nether-world-carver
+    /// carve-block step never
     /// calls it (nor the aquifer, nor the grass tracking) — see
     /// [`crate::carver::CaveConfig::nether`].
     fn carve_stage(
@@ -645,13 +646,13 @@ impl NetherStartSampler<'_> {
 }
 
 impl StartContext for NetherStartSampler<'_> {
-    /// `NoiseBasedChunkGenerator.getFirstOccupiedHeight` — the Y of the topmost
+    /// Vanilla's own first-occupied-height lookup — the Y of the topmost
     /// block satisfying the heightmap predicate, or `minY - 1` for a column that
     /// never matches.
     ///
     /// **This reads the pre-surface fill, so it never sees the bedrock roof.** The
     /// Nether's `y 123..=127` bedrock is a `vertical_gradient` surface rule, and
-    /// vanilla's own `getBaseHeight` runs against a fresh `NoiseChunk` too — so a
+    /// vanilla's own base-height lookup runs against a fresh noise-chunk sampler too — so a
     /// `WORLD_SURFACE_WG` probe here answers "topmost non-air *noise*", which is
     /// exactly the number vanilla's structure placement uses. The Nether's noise is
     /// solid near the roof over most of the dimension, so this is usually a large
@@ -678,7 +679,7 @@ impl StartContext for NetherStartSampler<'_> {
         generator.min_y - 1
     }
 
-    /// `MultiNoiseBiomeSource.getNoiseBiome(qx, qy, qz)`, written with the real
+    /// Vanilla's own multi-noise biome lookup at `(qx, qy, qz)`, written with the real
     /// `qy` rather than the constant 0 [`NetherGenerator::biome_quarts`] uses.
     ///
     /// The two agree by the y-invariance `nether_biomes_do_not_vary_with_y` pins
@@ -766,12 +767,12 @@ impl NetherGenerator {
         computed
     }
 
-    /// Stage 0b: `createReferences`' 17×17 walk, keeping the starts whose adjusted
+    /// Stage 0b: vanilla's own structure-reference-gathering 17×17 walk, keeping the starts whose adjusted
     /// box comes within [`BEARD_REACH`] blocks of this chunk.
     ///
     /// Identical in shape to the Overworld's — the widened reach is the
-    /// beardifier's own (`Beardifier.forStructuresInChunk`'s
-    /// `isCloseToChunk(chunkPos, 12)`), and
+    /// beardifier's own ("beardifier for structures in chunk"'s
+    /// own "close to chunk" test at distance 12), and
     /// [`StructureRefs::packed_by_structure`] re-narrows to vanilla's exact
     /// chunk-box test for the persistence view.
     ///
@@ -836,7 +837,7 @@ impl NetherGenerator {
                 continue;
             }
             // One `referencePos` per start, from its **first** piece's box, before
-            // the per-piece loop — `StructureStart.placeInChunk`'s own derivation. It
+            // the per-piece loop — vanilla's own structure-start place-in-chunk step's own derivation. It
             // is not a per-piece value and it is not the chunk.
             let reference = crate::structure::jigsaw::reference_position(&start.pieces);
             for piece in &start.pieces {
@@ -860,7 +861,7 @@ impl NetherGenerator {
                     .template
                     .place(origin, &placement.settings, &mut world);
                 // A `list_pool_element` writes several templates at one position, in
-                // document order — `ListPoolElement.place`'s own loop.
+                // document order — vanilla's own list-pool-element place's own loop.
                 for extra in &piece.extra_placements {
                     let origin = crate::structure::template::PlaceOrigin {
                         position: extra.position,

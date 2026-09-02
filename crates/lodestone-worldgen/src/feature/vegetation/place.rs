@@ -34,7 +34,7 @@ pub(super) fn place_simple_block<R: RandomSource>(
         census_bump(|c| c.simple_block_no_state += 1);
         return;
     };
-    // `VegetationBlock.canSurvive`: the block below must support vegetation
+    // Vanilla's own vegetation-block "can survive": the block below must support vegetation
     // — see module doc on why this is applied uniformly.
     //
     // This is the single most-executed rejection in the whole engine —
@@ -55,14 +55,14 @@ thread_local! {
     /// rather than borrowed across the body so a future nested placement would get
     /// a correct (merely allocating) fresh buffer instead of a panic.
     static LAYER_HEIGHTS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
-    /// Reusable scratch for one tree's trunk positions — the
-    /// `TreeFeature.place` `trunks` set that seeds `update_leaf_distances`' BFS.
+    /// Reusable scratch for one tree's trunk positions — vanilla's own
+    /// tree-feature place's `trunks` set that seeds `update_leaf_distances`' BFS.
     static TRUNKS: RefCell<Vec<BlockPos>> = const { RefCell::new(Vec::new()) };
     /// Reusable scratch for one tree's foliage attachments.
     static ATTACHMENTS: RefCell<Vec<Attachment>> = const { RefCell::new(Vec::new()) };
     /// Reusable scratch for one tree's placed foliage positions — this
-    /// module's stand-in for real vanilla's `FoliageSetter.isSet`
-    /// (`TreeFeature.place`'s `foliage` `Set<BlockPos>`), which
+    /// module's stand-in for real vanilla's own foliage-setter "is set" check
+    /// (its own tree-feature place's `foliage` `Set<BlockPos>`), which
     /// [`FoliagePlacerCfg::Cherry`](super::tree::FoliagePlacerCfg::Cherry)'s
     /// hanging-leaves-below rows query. Cleared once per [`place_tree`] call
     /// (scoped to the WHOLE tree, matching vanilla — not per attachment).
@@ -71,7 +71,7 @@ thread_local! {
     static ROOT_POSITIONS: RefCell<Vec<BlockPos>> = const { RefCell::new(Vec::new()) };
 }
 
-/// `BlockColumnFeature.place`: samples every layer's height up front (so the
+/// Vanilla's own block-column feature's place: samples every layer's height up front (so the
 /// RNG draw order is fixed regardless of how far the column actually
 /// reaches), then walks `direction` from `origin` checking `allowed_placement`
 /// at each *next* position (`origin` itself is never checked — only used as
@@ -135,7 +135,7 @@ pub(super) fn place_block_column<R: RandomSource>(
     LAYER_HEIGHTS.set(layer_heights);
 }
 
-/// `BlockColumnFeature.truncate`: removes `total_height - new_height` blocks
+/// Vanilla's own block-column feature's truncate: removes `total_height - new_height` blocks
 /// total, walking layers tip-first (`prioritize_tip`) or base-first
 /// (everything else) — matching vanilla's own iteration-order choice exactly.
 pub(super) fn truncate_layers(layer_heights: &mut [i32], total_height: i32, new_height: i32, prioritize_tip: bool) {
@@ -156,7 +156,7 @@ pub(super) fn truncate_layers(layer_heights: &mut [i32], total_height: i32, new_
     }
 }
 
-/// `RootPlacer.getPotentiallyWaterloggedState` + the write itself: rewrites
+/// Vanilla's own root-placer "get potentially waterlogged state" + the write itself: rewrites
 /// `state`'s `waterlogged` property (if it has one) from the CURRENT grid
 /// content at `pos` before overwriting it, exactly like [`super::tree::try_place_leaf`]'s
 /// own fix-up.
@@ -169,7 +169,8 @@ fn write_potentially_waterlogged_state(grid: &mut VegGrid, tags: &VegTags, pos: 
     grid.set_id_if_in_bounds(pos.x, pos.y, pos.z, state);
 }
 
-/// `MangroveRootPlacer.placeRoot` (overriding `RootPlacer.placeRoot`
+/// Vanilla's own mangrove-root-placer place-root (overriding its own base
+/// root-placer place-root
 /// entirely — see this function's own doc on why no `canPlaceRoot` recheck
 /// happens here). If the CURRENT block at `pos` is one of `muddy_roots_in`
 /// (`minecraft:mud`/`minecraft:muddy_mangrove_roots`), write the muddy-roots
@@ -177,9 +178,9 @@ fn write_potentially_waterlogged_state(grid: &mut VegGrid, tags: &VegTags, pos: 
 /// placement entirely; otherwise draw `root_provider` and, on success, roll
 /// `above_root_placement`.
 ///
-/// **No `canPlaceRoot` recheck**: real `MangroveRootPlacer.placeRoot`
+/// **No `canPlaceRoot` recheck**: real vanilla's mangrove-root-placer place-root
 /// overrides the base method, and its own "not muddy" branch calls
-/// `super.placeRoot`, whose `canPlaceRoot` gate DOES run again in Java — but
+/// the base method, whose `canPlaceRoot` gate DOES run again in Java — but
 /// every position reaching this function already passed the identical,
 /// side-effect-free predicate during [`place_roots`]'s simulation phase
 /// against an unchanged grid, so the recheck can only ever re-confirm the
@@ -219,13 +220,13 @@ fn place_root<R: RandomSource>(
     }
 }
 
-/// `MangroveRootPlacer.placeRoots`. Returns `false` — writing NOTHING, since
+/// Vanilla's own mangrove-root-placer place-roots. Returns `false` — writing NOTHING, since
 /// every write below only happens after the whole simulation across all four
 /// directions succeeds — the moment either the trunk-to-origin column is
 /// blocked or [`simulate_roots`] aborts in any direction (hitting
 /// `max_root_length` — see that function's own doc). The caller
 /// ([`place_tree`]) must treat a `false` return as "place nothing at all for
-/// this tree", matching `TreeFeature.doPlace`'s own
+/// this tree", matching vanilla's own tree-feature inner place step's own
 /// `if (... && !placeRoots(...)) return false;`.
 pub(super) fn place_roots<R: RandomSource>(
     random: &mut R,
@@ -297,28 +298,29 @@ pub(super) fn place_tree<R: RandomSource>(
     let trunk_len = tree_height - foliage_height;
     let leaf_radius = cfg.foliage_placer.foliage_radius(random, trunk_len);
 
-    // `BlockPos trunkOrigin = config.rootPlacer.map(rootPlacer ->
-    // rootPlacer.getTrunkOrigin(origin, random)).orElse(origin)` — every
+    // Vanilla's own trunk-origin derivation: when the config has a root
+    // placer, ask it for the trunk origin (a real draw); otherwise the trunk
+    // origin is just the tree's origin. Every
     // species except mangrove has no `root_placer` at all, so `trunk_origin
-    // == origin` and this draws nothing; mangrove's `MangroveRootPlacer
-    // .trunkOffsetY` is the first real user of this indirection.
+    // == origin` and this draws nothing; mangrove's own root-placer
+    // trunk-y-offset is the first real user of this indirection.
     let trunk_origin = match &cfg.root_placer {
         Some(rp) => rp.get_trunk_origin(origin, random),
         None => origin,
     };
 
-    // `int minY = Math.min(origin.getY(), trunkOrigin.getY()); int maxY =
-    // Math.max(origin.getY(), trunkOrigin.getY()) + treeHeight + 1`.
+    // Vanilla's own min/max Y span: the lower of the two origins' Y, and the
+    // higher of the two plus the tree height plus one.
     let min_y = origin.y.min(trunk_origin.y);
     let max_y = origin.y.max(trunk_origin.y) + tree_height + 1;
     if min_y < grid.min_y + 1 || max_y > grid.min_y + grid.height + 1 {
         return;
     }
 
-    // `getMaxFreeTreeHeight`: scan the tree's own footprint (anchored at
+    // Vanilla's own max-free-tree-height: scan the tree's own footprint (anchored at
     // `trunk_origin`, not `origin` — real vanilla passes `trunkOrigin` here
     // too) for anything that isn't air/replaceable-by-trees/a log (a log
-    // counts as "free" — `TrunkPlacer.isFree` — so an already-placed
+    // counts as "free" — vanilla's own trunk-placer "is free" check — so an already-placed
     // neighbour trunk doesn't block this one). `ignore_vines` is `true` for
     // every species here, so the vine half of vanilla's check never applies.
     let mut clipped = tree_height;
@@ -345,7 +347,7 @@ pub(super) fn place_tree<R: RandomSource>(
             }
         }
     }
-    // `TreeFeature.doPlace`'s own accept gate: `clippedTreeHeight >=
+    // Vanilla's own tree-feature inner place step's own accept gate: `clippedTreeHeight >=
     // treeHeight` (no obstruction at all — every species this module shipped
     // before this change's fancy-oak increment) OR (a `min_clipped_height` is
     // configured AND the clip didn't cut below it) — `fancy_oak`'s own `4`
@@ -358,7 +360,7 @@ pub(super) fn place_tree<R: RandomSource>(
         return;
     }
     // `clippedTreeHeight` — real vanilla passes THIS, not the original
-    // `treeHeight`, to `trunkPlacer.placeTrunk` (`foliageHeight`/`leafRadius`
+    // `treeHeight`, to its own trunk-placer place-trunk (`foliageHeight`/`leafRadius`
     // above already used the original, pre-clip `treeHeight`, matching
     // vanilla's own evaluation order). For every species other than fancy
     // oak, `clipped == tree_height` is the only way `accepted` can be true,
@@ -555,10 +557,10 @@ pub(super) fn place_tree<R: RandomSource>(
     // the single call it replaces from before the savanna/acacia increment
     // — no draw-count change for
     // oak/birch/spruce/pine.
-    // `foliage_positions` is this module's stand-in for real vanilla's
-    // `FoliageSetter.isSet` — see [`FOLIAGE_POS`]'s own doc. Scoped to the
+    // `foliage_positions` is this module's stand-in for real vanilla's own
+    // foliage-setter "is set" check — see [`FOLIAGE_POS`]'s own doc. Scoped to the
     // WHOLE tree (cleared here, read/written across every attachment's
-    // `create_foliage` call), matching `TreeFeature.place`'s single `foliage`
+    // `create_foliage` call), matching vanilla's own tree-feature place's single `foliage`
     // set shared by every `foliageAttachment`.
     let mut foliage_positions = FOLIAGE_POS.take();
     foliage_positions.clear();
@@ -611,20 +613,20 @@ pub(super) fn place_tree<R: RandomSource>(
         }
     }
 
-    // `TreeFeature.place`'s own final step, AFTER decorators — this change's
+    // Vanilla's own tree-feature place's final step, AFTER decorators — this change's
     // fix for the `distance=7`-forever gap named in
     // `update_leaf_distances`'s own doc comment. Draws no RNG (a pure grid
     // post-process), so it is safe to run unconditionally here regardless
     // of which branch above produced `trunk_positions`. The bbox is exactly
-    // `BoundingBox.encapsulatingPositions(roots ∪ trunks ∪ foliage ∪
-    // decorations)` — every absolute position this ONE tree call wrote, from
+    // vanilla's own encapsulating-positions bound over roots ∪ trunks ∪ foliage ∪
+    // decorations — every absolute position this ONE tree call wrote, from
     // `dirty_start` (captured right before root placement began) to now
     // (right after decorators ran). Root positions are not part of
     // `update_leaf_distances`'s own BFS seed (only `trunk_positions` is —
-    // matching vanilla, whose `toCheck.get(0)` seeds from `logs` alone, never
-    // `rootPositions`), but they are still part of the bbox this loop derives
-    // from `grid`'s own dirty range, exactly as vanilla's
-    // `BoundingBox.encapsulatingPositions` includes them.
+    // matching vanilla, whose own BFS seed list is built from logs alone, never
+    // root positions), but they are still part of the bbox this loop derives
+    // from `grid`'s own dirty range, exactly as vanilla's own
+    // encapsulating-positions bound includes them.
     // `dirty_cell_ids`, not `dirty_cells`: the latter resolves every position's
     // state to a `&'static str` through the interner's read guard, and this loop
     // discards the state entirely — it only wants the coordinates. Unit 8.
@@ -651,7 +653,7 @@ pub(super) fn place_tree<R: RandomSource>(
     ATTACHMENTS.set(attachments);
 }
 
-/// `net.minecraft.world.level.levelgen.feature.treedecorators.BeehiveDecorator`,
+/// Vanilla's own beehive tree-decorator,
 /// approximated — see module doc's "Approximations, named" section. The
 /// **log**-row half (`logs.getFirst()`/`getLast()`, i.e. the lowest/highest
 /// log Y) is exact for this engine's straight trunks: exactly one log per Y
@@ -689,7 +691,7 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
     let mut candidates: [(i32, i32, i32); SPAWN_DIRECTIONS.len()] =
         SPAWN_DIRECTIONS.map(|(dx, dz)| (origin.x + dx, hive_y, origin.z + dz));
 
-    // `Util.shuffle` on a fixed 3-element list — a Fisher-Yates pass draws
+    // Vanilla's own list-shuffle on a fixed 3-element list — a Fisher-Yates pass draws
     // exactly 2 `nextInt` calls regardless of list contents, so the RNG-draw
     // *count* here is exact even though the resulting order need not match
     // vanilla's own (which starts from a differently-ordered candidate list
@@ -714,16 +716,17 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
     // a draw but to start using one.
     let bee_count = 2 + random.next_int_bounded(2);
     // **`nextInt(599)` per bee is a NEW draw**, and that is the one behavioural
-    // risk in this change: `BeehiveDecorator.place` really does call
-    // `Occupant.create(random.nextInt(599))` in a loop
-    // (`BeehiveDecorator.java:59`), so omitting it left this engine's stream
+    // risk in this change: vanilla's own beehive tree-decorator place really does call
+    // its own bee-occupant constructor over a bounded random draw over `[0, 599)` in a loop,
+    // so omitting it left this engine's stream
     // 2-3 draws *short* of vanilla's after every hive. Adding them moves this
     // engine toward vanilla and moves every later feature in the same step; the
     // JVM parity fixtures are what arbitrate whether that landed correctly.
     let bees = (0..bee_count)
         .map(|_| crate::overworld::block_entities::BeeOccupant {
             ticks_in_hive: random.next_int_bounded(599),
-            // `Occupant.create`'s constant. See that type's own doc for why it is
+            // Vanilla's own bee-occupant constructor's constant. See that
+            // type's own doc for why it is
             // carried rather than implied.
             min_ticks_in_hive: 600,
         })
@@ -736,27 +739,25 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
     });
 }
 
-/// Both [`TreeDecorator`]-family functions below share one input shape with
-/// real vanilla's `TreeDecorator.Context`: `context.logs()` is built from a
+/// Both tree-decorator-family functions below share one input shape with
+/// real vanilla's own tree-decorator context: `context.logs()` is built from a
 /// `Set<BlockPos>` (this module's own insertion-order approximation of the
 /// same ambiguous-iteration-order ground the beehive decorator above already
 /// names) and then SORTED BY Y ascending — a real, non-approximated step
-/// (`Comparator.comparingInt(Vec3i::getY)`, a stable sort). For a fallen
+/// (vanilla's own ascending-Y comparator, a stable sort). For a fallen
 /// tree's own horizontal log that sort is a no-op (every position shares one
 /// Y), but a straight vertical trunk (`jungle_tree`/`mega_jungle_tree`'s own
 /// `trunk_vine` decorator) has one Y per level, so the sort is load-bearing
-/// there. Both functions below sort a **copy**, matching `Context`'s own
-/// `new ObjectArrayList<>(set)` — the caller's `trunk_positions`/log buffer
+/// there. Both functions below sort a **copy**, matching vanilla's own
+/// context's own array-list-from-set construction — the caller's `trunk_positions`/log buffer
 /// is untouched.
-///
-/// [`TreeDecorator`]: net.minecraft.world.level.levelgen.feature.treedecorators.TreeDecorator
 fn y_sorted(logs: &[BlockPos]) -> Vec<BlockPos> {
     let mut sorted = logs.to_vec();
     sorted.sort_by_key(|p| p.y);
     sorted
 }
 
-/// `TrunkVineDecorator.place` — a hanging vine on each of `logs`' four
+/// Vanilla's own trunk-vine decorator's place — a hanging vine on each of `logs`' four
 /// horizontal neighbours (west, east, north, south, in that exact order),
 /// each gated by its OWN independent `random.nextInt(3) > 0` coin flip.
 /// Every draw happens regardless of outcome (Java evaluates `nextInt(3)`
@@ -784,9 +785,9 @@ pub(super) fn place_trunk_vine_decorator<R: RandomSource>(
     }
 }
 
-/// `AttachedToLogsDecorator.place` — one block (a mushroom, for every
+/// Vanilla's own attached-to-logs decorator's place — one block (a mushroom, for every
 /// shipped `fallen_*_tree` config) on a random direction off a random log.
-/// `Util.shuffledCopy` is a real Fisher-Yates pass over the Y-sorted log
+/// Vanilla's own shuffled-copy is a real Fisher-Yates pass over the Y-sorted log
 /// list (`i` from `logs.len()` down to `2`, `logs.len() - 1` draws total —
 /// zero for a one-log stump, matching real vanilla exactly), THEN, per log
 /// in the shuffled order: one direction draw, one probability draw (always,

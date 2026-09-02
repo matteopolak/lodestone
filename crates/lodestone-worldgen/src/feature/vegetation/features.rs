@@ -82,9 +82,9 @@ fn water_at(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
     base_at(grid, x, y, z) == "minecraft:water"
 }
 
-/// The six `Direction.values()` offsets, in vanilla's own declaration order
+/// The six direction offsets, in vanilla's own declaration order
 /// (DOWN, UP, NORTH, SOUTH, WEST, EAST) — several features below iterate
-/// `Direction.values()` and stop at the first hit, so the order is not cosmetic.
+/// vanilla's own all-directions order and stop at the first hit, so the order is not cosmetic.
 const DIRECTIONS: [(i32, i32, i32); 6] = [
     (0, -1, 0),
     (0, 1, 0),
@@ -221,12 +221,12 @@ pub struct SculkPatchCfg {
     pub catalyst_chance: f32,
 }
 
-/// `FallenTreeConfiguration` — `FallenTreeFeature`'s own
+/// Vanilla's own fallen-tree-configuration — its own fallen-tree feature's own
 /// config. Distinct from [`super::config::TreeConfig`]: no trunk/foliage
 /// placer, no `minimum_size`. `stump_decorators`/`log_decorators` reuse
-/// [`super::config::Decorator`] — the same `TreeDecorator` hierarchy
-/// `TreeConfig.decorators` already parses through, since vanilla's
-/// `TrunkVineDecorator`/`AttachedToLogsDecorator` are shared, not specific
+/// [`super::config::Decorator`] — the same tree-decorator hierarchy
+/// `TreeConfig.decorators` already parses through, since vanilla's own
+/// trunk-vine decorator / attached-to-logs decorator are shared, not specific
 /// to either feature type.
 #[derive(Clone, Debug)]
 pub struct FallenTreeCfg {
@@ -240,7 +240,7 @@ pub struct FallenTreeCfg {
 // Bodies
 // ---------------------------------------------------------------------------
 
-/// `SpringFeature.place` — the single most common absentee in the bundle (6
+/// Vanilla's own spring feature's place — the single most common absentee in the bundle (6
 /// configured features, 112 step-8 entries across the 66 biomes).
 ///
 /// `scheduleTick` is dropped: the fluid block lands, its flow does not run at
@@ -280,7 +280,7 @@ pub(super) fn place_spring(pos: BlockPos, cfg: &SpringCfg, grid: &mut VegGrid) {
     }
 }
 
-/// `DiskFeature.place` — one `radius` draw, then a column walk per in-circle cell.
+/// Vanilla's own disk feature's place — one `radius` draw, then a column walk per in-circle cell.
 pub(super) fn place_disk<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -315,8 +315,8 @@ pub(super) fn place_disk<R: RandomSource>(
     }
 }
 
-/// `BlockPileFeature.place`. The per-cell `nextFloat()` pair is drawn for every
-/// cell in the box, in vanilla's `betweenClosed` (x outer, y, z inner) order.
+/// Vanilla's own block-pile feature's place. The per-cell `nextFloat()` pair is drawn for every
+/// cell in the box, in vanilla's own inclusive-range walk (x outer, y, z inner) order.
 pub(super) fn place_block_pile<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -372,7 +372,7 @@ fn try_place_pile_block<R: RandomSource>(
     }
 }
 
-/// `NetherForestVegetationFeature.place`. Nylium membership is matched by base
+/// Vanilla's own nether-forest-vegetation feature's place. Nylium membership is matched by base
 /// id — the bundled `#minecraft:nylium` tag has exactly two members.
 pub(super) fn place_nether_forest_vegetation<R: RandomSource>(
     random: &mut R,
@@ -409,7 +409,7 @@ pub(super) fn place_nether_forest_vegetation<R: RandomSource>(
     }
 }
 
-/// `BlockBlobFeature.place` — three overlapping ellipsoids, each walking down to
+/// Vanilla's own block-blob feature's place — three overlapping ellipsoids, each walking down to
 /// find its own base.
 pub(super) fn place_block_blob<R: RandomSource>(
     random: &mut R,
@@ -458,7 +458,7 @@ pub(super) fn place_block_blob<R: RandomSource>(
     }
 }
 
-/// `ReplaceBlobsFeature.place` — Manhattan-ball replacement of one target block.
+/// Vanilla's own replace-blobs feature's place — Manhattan-ball replacement of one target block.
 pub(super) fn place_replace_blobs<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -494,7 +494,7 @@ pub(super) fn place_replace_blobs<R: RandomSource>(
     }
 }
 
-/// `GlowstoneFeature.place` — 1500 attempts, each requiring exactly one glowstone
+/// Vanilla's own glowstone feature's place — 1500 attempts, each requiring exactly one glowstone
 /// neighbour.
 pub(super) fn place_glowstone_blob<R: RandomSource>(
     random: &mut R,
@@ -532,7 +532,7 @@ pub(super) fn place_glowstone_blob<R: RandomSource>(
     }
 }
 
-/// `BasaltPillarFeature.place`.
+/// Vanilla's own basalt-pillar feature's place.
 pub(super) fn place_basalt_pillar<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -596,7 +596,7 @@ pub(super) fn place_basalt_pillar<R: RandomSource>(
 /// Vanilla's own desert-well feature. The suspicious-sand block entity's
 /// loot table is
 /// dropped — the blocks themselves are placed, and the two
-/// `Util.getRandom` draws stay so the stream matches.
+/// vanilla pick-a-random-list-element draws stay so the stream matches.
 pub(super) fn place_desert_well<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -664,7 +664,7 @@ pub(super) fn place_desert_well<R: RandomSource>(
             set(grid, dx, oy, dz, SANDSTONE);
         }
     }
-    // `Util.getRandom(list, random)` is one `nextInt(5)` per call, twice.
+    // Vanilla's own pick-a-random-list-element helper is one `nextInt(5)` per call, twice.
     let picks = [(0, 0), (1, 0), (0, 1), (-1, 0), (0, -1)];
     for depth in 1..=2 {
         let (dx, dz) = picks[random.next_int_bounded(5) as usize];
@@ -672,7 +672,7 @@ pub(super) fn place_desert_well<R: RandomSource>(
     }
 }
 
-/// `BlueIceFeature.place`.
+/// Vanilla's own blue-ice feature's place.
 pub(super) fn place_blue_ice<R: RandomSource>(random: &mut R, pos: BlockPos, grid: &mut VegGrid) {
     const BLUE_ICE: &str = "minecraft:blue_ice";
     if pos.y > SEA_LEVEL - 1 {
@@ -724,7 +724,7 @@ pub(super) fn place_blue_ice<R: RandomSource>(random: &mut R, pos: BlockPos, gri
     }
 }
 
-/// `KelpFeature.place`.
+/// Vanilla's own kelp feature's place.
 pub(super) fn place_kelp<R: RandomSource>(random: &mut R, pos: BlockPos, grid: &mut VegGrid) {
     let y = grid.height_ocean_floor(pos.x, pos.z);
     let (x, z) = (pos.x, pos.z);
@@ -753,7 +753,7 @@ pub(super) fn place_kelp<R: RandomSource>(random: &mut R, pos: BlockPos, grid: &
     }
 }
 
-/// `SeaPickleFeature.place`.
+/// Vanilla's own sea-pickle feature's place.
 pub(super) fn place_sea_pickle<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -778,7 +778,7 @@ pub(super) fn place_sea_pickle<R: RandomSource>(
     }
 }
 
-/// `SeagrassFeature.place`.
+/// Vanilla's own seagrass feature's place.
 pub(super) fn place_seagrass<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -806,12 +806,12 @@ pub(super) fn place_seagrass<R: RandomSource>(
     }
 }
 
-/// `VinesFeature.place` — one vine face against the first acceptable neighbour.
+/// Vanilla's own vines feature's place — one vine face against the first acceptable neighbour.
 pub(super) fn place_vines(pos: BlockPos, grid: &mut VegGrid) {
     if !air_at(grid, pos.x, pos.y, pos.z) {
         return;
     }
-    // `VineBlock.isAcceptableNeighbour` is a full-face-sturdy test; narrowed here.
+    // Vanilla's own vine-block "is acceptable neighbour" is a full-face-sturdy test; narrowed here.
     // Property names are vanilla's own: north/east/south/west/up.
     for ((dx, dy, dz), prop) in DIRECTIONS.into_iter().zip([
         "down", "up", "north", "south", "west", "east",
@@ -826,7 +826,7 @@ pub(super) fn place_vines(pos: BlockPos, grid: &mut VegGrid) {
     }
 }
 
-/// `TwistingVinesFeature.place`.
+/// Vanilla's own twisting-vines feature's place.
 pub(super) fn place_twisting_vines<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -881,7 +881,7 @@ fn find_first_air_above_ground(grid: &VegGrid, pos: &mut BlockPos) -> bool {
     true
 }
 
-/// The shared `placeWeepingVinesColumn` used by both vine features. `upwards`
+/// The shared "place weeping-vines column" step used by both vine features. `upwards`
 /// selects twisting (grows up, `h` starts at 1) from weeping (grows down, `h`
 /// starts at 0) — the two really do differ in their loop bounds.
 fn place_growing_column<R: RandomSource>(
@@ -913,7 +913,7 @@ fn place_growing_column<R: RandomSource>(
     }
 }
 
-/// `WeepingVinesFeature.place` — nether wart roof blob plus hanging vines.
+/// Vanilla's own weeping-vines feature's place — nether wart roof blob plus hanging vines.
 pub(super) fn place_weeping_vines<R: RandomSource>(
     random: &mut R,
     pos: BlockPos,
@@ -971,12 +971,12 @@ pub(super) fn place_weeping_vines<R: RandomSource>(
     }
 }
 
-/// `MultifaceGrowthFeature.place` — glow lichen and sculk vein.
+/// Vanilla's own multiface-growth feature's place — glow lichen and sculk vein.
 ///
 /// Faithful including the search loop and every draw, with **one** named
-/// narrowing: `MultifaceSpreader`'s recursive spread is not modelled, so a patch
+/// narrowing: vanilla's own multiface-spreader's recursive spread is not modelled, so a patch
 /// that vanilla would grow outward from stays a single block. The spread's own
-/// draws *are* consumed (`chance_of_spreading`, then `Direction.allShuffled`'s
+/// draws *are* consumed (`chance_of_spreading`, then the all-directions shuffle's
 /// five), because the whole point of the search loop above is that this feature
 /// runs 100+ times per chunk and any draw-count error moves every later attempt.
 ///
@@ -1047,7 +1047,7 @@ fn valid_directions(cfg: &MultifaceGrowthCfg) -> Vec<(i32, i32, i32)> {
     out
 }
 
-/// `MultifaceGrowthFeature.placeGrowthIfPossible` — the first direction whose
+/// Vanilla's own multiface-growth feature's "place growth if possible" — the first direction whose
 /// neighbour is in `can_be_placed_on` wins, and a `null` state there aborts the
 /// whole call rather than trying the next direction.
 fn place_growth_if_possible<R: RandomSource>(
@@ -1066,7 +1066,7 @@ fn place_growth_if_possible<R: RandomSource>(
         }
         let existing = grid.get(pos.x, pos.y, pos.z).to_string();
         let face = face_property(dx, dy, dz);
-        // `getStateForPlacement` returns null when the growth is already there
+        // Vanilla's own "get state for placement" returns null when the growth is already there
         // with that face set, and vanilla then gives up entirely.
         if super::base_id(&existing) == cfg.block && existing.contains(&format!("{face}=true")) {
             return false;
@@ -1079,8 +1079,8 @@ fn place_growth_if_possible<R: RandomSource>(
             format!("{}[{face}=true,waterlogged={waterlogged}]", cfg.block),
         );
         if random.next_float() < cfg.chance_of_spreading {
-            // `MultifaceSpreader::spreadFromFaceTowardRandomDirection` opens with
-            // `Direction.allShuffled(random)` — five draws — and then places at
+            // Vanilla's own multiface-spreader spread-from-face-toward-random-direction opens with
+            // a shuffle over all directions — five draws — and then places at
             // most one more block, which is the part not modelled.
             let _ = shuffled_copy(random, &DIRECTIONS.to_vec());
         }
@@ -1101,7 +1101,7 @@ fn face_property(dx: i32, dy: i32, dz: i32) -> &'static str {
     }
 }
 
-/// `Util.shuffledCopy` / `Util.shuffle` — Fisher-Yates `for (i = size; i > 1; i--)
+/// Vanilla's own shuffled-copy / shuffle — Fisher-Yates `for (i = size; i > 1; i--)
 /// swap(i - 1, nextInt(i))`, so exactly `size - 1` draws. The count is what
 /// matters most here; see [`place_multiface_growth`]'s doc.
 fn shuffled_copy<R: RandomSource>(random: &mut R, input: &[(i32, i32, i32)]) -> Vec<(i32, i32, i32)> {
@@ -1115,7 +1115,7 @@ fn shuffled_copy<R: RandomSource>(random: &mut R, input: &[(i32, i32, i32)]) -> 
     out
 }
 
-/// `Mth.nextInt(random, min, max)` — inclusive both ends, one draw.
+/// Vanilla's own math-helper next-int at `(random, min, max)` — inclusive both ends, one draw.
 fn next_int_between<R: RandomSource>(random: &mut R, min: i32, max: i32) -> i32 {
     if min >= max {
         return min;
@@ -1123,7 +1123,7 @@ fn next_int_between<R: RandomSource>(random: &mut R, min: i32, max: i32) -> i32 
     random.next_int_bounded(max - min + 1) + min
 }
 
-/// `LakeFeature.place`. The 8×16×16 boolean mould, its full validity scan, the
+/// Vanilla's own lake feature's place. The 8×16×16 boolean mould, its full validity scan, the
 /// fluid/air fill and the barrier shell — all of it, because the scan is what
 /// stops a lake opening into an existing cave.
 ///
@@ -1259,7 +1259,7 @@ pub(super) fn place_lake<R: RandomSource>(
     }
 }
 
-/// `VegetationPatchFeature.place` (and its waterlogged subclass) — lush-cave
+/// Vanilla's own vegetation-patch feature's place (and its waterlogged subclass) — lush-cave
 /// moss/clay floors and the dripstone patches, plus whatever placed feature the
 /// config hangs on the resulting surface.
 pub(super) fn place_vegetation_patch<R: RandomSource>(
@@ -1386,9 +1386,9 @@ fn place_patch_ground<R: RandomSource>(
     true
 }
 
-/// `SculkPatchFeature.place`.
+/// Vanilla's own sculk-patch feature's place.
 ///
-/// **Narrowed, named:** `SculkSpreader` is a full charge-propagation simulation
+/// **Narrowed, named:** vanilla's own sculk-spreader is a full charge-propagation simulation
 /// over a live level and is not modelled. What lands instead is a sculk skin over
 /// the sturdy cells within a radius derived from the config's own charge budget,
 /// plus the catalyst and the rare shriekers, whose draws are the ones later
@@ -1435,7 +1435,7 @@ pub(super) fn place_sculk_patch<R: RandomSource>(
     }
 }
 
-/// `FallenTreeFeature.isOverSolidGround` (`isFaceSturdy(UP)` on the block
+/// Vanilla's own fallen-tree feature's "is over solid ground" (`isFaceSturdy(UP)` on the block
 /// below) — reuses [`sturdy_at`], this file's own established approximation
 /// for exactly that vanilla concept (see the module doc's table). Affects
 /// only whether the ground check passes, never the RNG stream:
@@ -1444,7 +1444,7 @@ fn is_over_solid_ground(grid: &VegGrid, x: i32, y: i32, z: i32) -> bool {
     sturdy_at(grid, x, y - 1, z)
 }
 
-/// Applies one `TreeDecorator` list (`stump_decorators`/`log_decorators`)
+/// Applies one tree-decorator list (`stump_decorators`/`log_decorators`)
 /// against `logs`, dispatching the two kinds [`super::place`] implements.
 /// `Beehive` cannot occur here — no shipped `fallen_*_tree` config carries
 /// one, and vanilla's own registry never attaches a beehive to a fallen
@@ -1476,7 +1476,7 @@ fn apply_fallen_tree_decorators<R: RandomSource>(
     }
 }
 
-/// `FallenTreeFeature.placeFallenTree` — a vertical stump plus
+/// Vanilla's own fallen-tree feature's place-fallen-tree — a vertical stump plus
 /// a horizontal fallen log, reachable from many biomes' `fallen_*_tree`
 /// `RandomSelector` branches at a small (~1-1.25%) chance each. A real,
 /// distinct feature type: `placeLogBlock` places UNCONDITIONALLY (no
@@ -1485,7 +1485,7 @@ fn apply_fallen_tree_decorators<R: RandomSource>(
 /// placement happens at all, and it draws no RNG of its own, so this
 /// function's RNG stream is fixed regardless of that check's outcome.
 ///
-/// RNG order, ported from `placeFallenTree` exactly: the stump (one
+/// RNG order, ported from vanilla's own place-fallen-tree exactly: the stump (one
 /// trunk-provider draw, plus its own `stump_decorators`), then ONE
 /// `Direction.Plane.HORIZONTAL` draw, ONE `log_length` sample, ONE
 /// `nextInt(2)` for the start-position offset — all real draws even when
@@ -1499,7 +1499,7 @@ pub(super) fn place_fallen_tree<R: RandomSource>(
     grid: &mut VegGrid,
     tags: &VegTags,
 ) {
-    // `placeStump`: `placeLogBlock` at `origin`, identity axis modifier
+    // Vanilla's own "place stump": its own place-log-block at `origin`, identity axis modifier
     // (leaves the configured — vertical — axis unchanged).
     let Some(stump_state) = cfg.trunk_provider.get_state_id(grid, tags, random, origin) else {
         return;
@@ -1507,7 +1507,7 @@ pub(super) fn place_fallen_tree<R: RandomSource>(
     grid.set_id_if_in_bounds(origin.x, origin.y, origin.z, stump_state);
     apply_fallen_tree_decorators(random, &[origin], &cfg.stump_decorators, grid, tags);
 
-    // `Direction.Plane.HORIZONTAL.getRandomDirection` — the same NORTH,
+    // Vanilla's own horizontal-plane random-direction pick — the same NORTH,
     // EAST, SOUTH, WEST index table every horizontal trunk placer in this
     // module already uses.
     const STEP: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
