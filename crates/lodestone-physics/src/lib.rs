@@ -22,17 +22,18 @@
 //! * [`player`] — the per-tick player movement pipeline (a thin caller of the
 //!   entity core).
 //! * [`pose`] — [`pose::Pose`], the per-pose hitbox/eye height, and vanilla's
-//!   fit-gated `Player.updatePlayerPose` state machine, which is what makes a
+//!   own fit-gated pose-update state machine, which is what makes a
 //!   swimmer `0.6` tall without ever clipping them into a ceiling.
 //! * [`push`] — entity-versus-entity interaction: the soft crowd push
-//!   (`Entity.push(Entity)`) and the entity half of `noCollision`. Deliberately
-//!   *not* on [`collision::CollisionView`]: that trait answers block geometry, and
-//!   entity data is a caller-owned per-tick snapshot rather than a repeatable
-//!   spatial query.
+//!   (vanilla's own entity-push step) and the entity half of vanilla's own
+//!   no-collision check. Deliberately *not* on [`collision::CollisionView`]:
+//!   that trait answers block geometry, and entity data is a caller-owned
+//!   per-tick snapshot rather than a repeatable spatial query.
 //! * [`knockback`] — [`knockback::knockback_impulse`], the melee attack
-//!   knockback velocity mechanic (`LivingEntity.knockback`). Distinct from
-//!   [`push`]'s always-on crowd nudge and from an explosion's radial knockback
-//!   (`lodestone_entity::explosion`) — three different formulas, none shared.
+//!   knockback velocity mechanic (vanilla's own knockback step). Distinct
+//!   from [`push`]'s always-on crowd nudge and from an explosion's radial
+//!   knockback (`lodestone_entity::explosion`) — three different formulas,
+//!   none shared.
 //!
 //! The crate has no runtime dependencies; the sine table is generated once and
 //! checked in as [`sin_table`].
