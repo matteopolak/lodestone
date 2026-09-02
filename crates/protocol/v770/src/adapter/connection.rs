@@ -186,7 +186,7 @@ impl V770Adapter {
 }
 
 /// The `minecraft:block` registry's wire key
-/// (`Registries.BLOCK = createRegistryKey("block")`), matching the
+/// (`vanilla's own registries's own block = createRegistryKey("block")`), matching the
 /// `minecraft:worldgen/biome` precedent in `packets/registry.rs`'s
 /// `ClientRegistries::BIOME` — the registry's own resource key, not a name we
 /// invent.
@@ -209,7 +209,7 @@ const BLOCK_REGISTRY_KEY: &str = "minecraft:block";
 /// }
 /// ```
 ///
-/// (`FriendlyByteBuf::readMap`/`TagNetworkSerialization.NetworkPayload::read`/
+/// (`FriendlyByteBuf::readMap`/`vanilla's own tag network serialization's own network payload::read`/
 /// `readIntIdList`.) Every registry's tags are consumed to stay byte-aligned
 /// through the whole packet — including ones this crate has no census for,
 /// e.g. `minecraft:item` (see `lodestone-data`'s `tool.rs` module docs: there

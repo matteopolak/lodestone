@@ -23,11 +23,11 @@ use lodestone_core::{Ctx, Decode, Reader, Result};
 pub struct ClockUpdate {
     /// Registry holder id of the world clock — a **plain** VarInt registry id.
     ///
-    /// The key codec is `ByteBufCodecs.holderRegistry(Registries.WORLD_CLOCK)`,
+    /// The key codec is `vanilla's own byte buf codecs's own holder registry(vanilla's own registries's own world clock)`,
     /// which is `registry(key, Registry::asHolderIdMap)`: a bare
-    /// `VarInt.write(id)` with **no `+1` offset and no inline-direct path**. The
+    /// `vanilla's own var int's own write(id)` with **no `+1` offset and no inline-direct path**. The
     /// `id + 1` / `0 = inline` convention belongs to the *other* codec,
-    /// `ByteBufCodecs.holder(key, directCodec)`, which `set_time` does not use.
+    /// `vanilla's own byte buf codecs's own holder(key, directCodec)`, which `set_time` does not use.
     /// (This comment previously said otherwise; the decode was always right, the
     /// record was not.)
     ///
@@ -41,7 +41,7 @@ pub struct ClockUpdate {
     /// Fractional progress into the current tick.
     pub partial_tick: f32,
     /// Rate at which the clock advances. **`0.0` when the clock is paused** —
-    /// `ServerClockManager.ClockInstance.packNetworkState` sends
+    /// `vanilla's own server clock manager's own clock instance's own pack network state` sends
     /// `paused || !advance_time ? 0.0 : rate`, so `/gamerule advanceTime false`
     /// arrives as a rate of zero rather than as a flag.
     pub rate: f32,
@@ -71,7 +71,7 @@ impl SetTime {
     /// using, essentially always:
     ///
     /// * `MinecraftServer::forceGameTimeSynchronization` broadcasts
-    ///   `SetTime(gameTime, Map.of())` — an **empty** clock map — roughly once a
+    ///   `SetTime(gameTime, an empty/literal map())` — an **empty** clock map — roughly once a
     ///   second, forever.
     /// * `ServerClockManager::modifyClock` sends a *one-entry* map only when a
     ///   clock actually changes (`/time set`, rate, pause), and

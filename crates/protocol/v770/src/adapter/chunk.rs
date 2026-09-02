@@ -1045,7 +1045,7 @@ fn decode_sound_entity(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
 /// a **client-rolled** pitch:
 ///
 /// ```text
-/// playLocalSound(center, packet.explosionSound(), SoundSource.BLOCKS, 4.0F,
+/// playLocalSound(center, packet.explosionSound(), vanilla's own sound source's own blocks, 4.0F,
 ///     (1.0F + (random.nextFloat() - random.nextFloat()) * 0.2F) * 0.7F, false)
 /// ```
 ///
@@ -1397,7 +1397,7 @@ fn decode_waypoint(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     };
     let style = parse_key(&reader.string(32767).map_err(dec_err)?, "waypoint style")?;
     let color = if reader.bool().map_err(dec_err)? {
-        // `ByteBufCodecs.RGB_COLOR` is a plain big-endian int.
+        // `vanilla's own byte buf codecs's own rgb color` is a plain big-endian int.
         #[allow(clippy::cast_sign_loss)]
         Some(reader.i32().map_err(dec_err)? as u32)
     } else {

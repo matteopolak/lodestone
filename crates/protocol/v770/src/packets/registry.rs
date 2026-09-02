@@ -654,7 +654,7 @@ fn field<'a>(fields: &'a [(String, Nbt)], name: &str) -> Option<&'a Nbt> {
 }
 
 /// Reads a required NBT boolean. Booleans are `Byte` tags; any nonzero byte is
-/// `true`, matching `Codec.BOOL` over `NbtOps`.
+/// `true`, matching `vanilla's own codec's own bool` over `NbtOps`.
 fn required_bool(fields: &[(String, Nbt)], name: &str) -> Result<bool> {
     optional_bool(fields, name)?.ok_or_else(|| missing(name))
 }

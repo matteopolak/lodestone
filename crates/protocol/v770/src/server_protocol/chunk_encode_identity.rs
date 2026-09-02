@@ -305,7 +305,7 @@ fn build_world_column_is_byte_identical_to_the_string_path() {
 /// This one never calls either resolver: for every palette entry of every real
 /// column it takes the id the column resolved and checks it against
 /// `block_name`/`properties`/`is_default_state`, which are dumps of
-/// `Block.BLOCK_STATE_REGISTRY` and `defaultBlockState()` out of the real 26.2
+/// `vanilla's own block's own block state registry` and `defaultBlockState()` out of the real 26.2
 /// server.
 ///
 /// The three claims, one per resolver tier:

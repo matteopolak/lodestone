@@ -25,12 +25,13 @@ lodestone-data = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 # `decode_explode`'s pitch: the `explode` packet carries no pitch (vanilla
-# rolls it client-side in `ClientPacketListener.handleExplosion`), so decoding
+# rolls it client-side in its own explosion handler), so decoding
 # it faithfully means rolling the same die here.
 rand = { workspace = true }
 # Promoted from a dev-dependency to a production one by issue #277: the
 # `status_response` packet's entire body is a JSON document
-# (`ByteBufCodecs.lenientJson(32767)`), so `V770ServerProtocol`'s server-list
+# (vanilla's own lenient-JSON stream codec, capped at 32767), so
+# `V770ServerProtocol`'s server-list
 # reply has to *emit* JSON, not just read it in tests. Building it with a real
 # serializer rather than `format!` is what makes a MOTD containing a quote,
 # backslash, or newline encode correctly — the same reason `lodestone-net`

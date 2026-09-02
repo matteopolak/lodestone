@@ -37,7 +37,7 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::COOLDOWN {
-            // `Identifier.STREAM_CODEC` is `STRING_UTF8.map(Identifier::parse, ...)`
+            // `vanilla's own identifier's own stream codec` is `STRING_UTF8.map(Identifier::parse, ...)`
             // — a single length-prefixed "namespace:path" string, the same shape
             // `parse_key` already expects, not a separate namespace/path pair.
             let mut reader = Reader::new(payload);
@@ -50,8 +50,8 @@ impl V770Adapter {
             })]);
         }
         if packet_id == play::clientbound::CHANGE_DIFFICULTY {
-            // `Difficulty.STREAM_CODEC` wraps out-of-range ids in vanilla
-            // (`ByIdMap.OutOfBoundsStrategy.WRAP`); this adapter instead treats an
+            // `vanilla's own difficulty's own stream codec` wraps out-of-range ids in vanilla
+            // (`vanilla's own by id map's own out of bounds strategy's own wrap`); this adapter instead treats an
             // id outside `0..=3` as an explicit decode error rather than silently
             // aliasing it to a different difficulty.
             let mut reader = Reader::new(payload);
@@ -347,7 +347,7 @@ impl V770Adapter {
     }
 }
 
-/// Reads an `EntityAnchorArgument.Anchor` ordinal (a VarInt): `0` = feet,
+/// Reads an `vanilla's own entity anchor argument's own anchor` ordinal (a VarInt): `0` = feet,
 /// `1` = eyes. Used by `ClientboundPlayerLookAtPacket`.
 fn read_look_anchor(reader: &mut Reader<'_>) -> Result<LookAnchor, AdapterError> {
     match reader.var_i32().map_err(dec_err)? {
