@@ -746,7 +746,7 @@ fn read_resource_key(reader: &mut StringReader, position: usize) -> Result<Strin
     Ok(if text.contains(':') { text } else { format!("minecraft:{text}") })
 }
 
-/// `StringReader.skipWhitespace`.
+/// Matches vanilla's own reader's whitespace-skipping method.
 fn skip_whitespace(reader: &mut StringReader) {
     while reader.peek().is_some_and(char::is_whitespace) {
         reader.skip();

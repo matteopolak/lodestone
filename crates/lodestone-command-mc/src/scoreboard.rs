@@ -275,7 +275,8 @@ pub enum ScoreHolderInput {
 /// `minecraft:score_holder`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ScoreHolderArg {
-    /// Whether more than one holder may result — `Info`'s own `multiple` bit.
+    /// Whether more than one holder may result — vanilla's own score-holder
+    /// argument info's `multiple` bit.
     pub multiple: bool,
 }
 
