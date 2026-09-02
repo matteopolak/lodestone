@@ -157,7 +157,7 @@ access to `MobSim` that doesn't exist yet.
 
 ### Breeding and aging
 
-`NavigatingMob` owns the timing state vanilla keeps on `Animal`/`AgeableMob`: `love_ticks`
+`NavigatingMob` owns the timing state vanilla keeps for every breedable/ageable animal: `love_ticks`
 (`LOVE_TICKS` = 600, decremented every tick unconditionally); `age` (negative while a baby, from
 `BABY_START_AGE` = -24,000; positive as a post-breeding cooldown, from `PARENT_AGE_AFTER_BREEDING`
 = 6,000; `is_baby()` is `age < 0`); `age_locked`; and `partner_candidate`/`parent_candidate`,
@@ -172,14 +172,14 @@ which would silently merge with a nearby existing orb).
 literal (a baby zombie is 0.49×0.98, not a halved 0.6×1.95); anything else falls back to
 `DEFAULT_BABY_AGE_SCALE` (0.5). `SimMob::set_age` detects a baby/adult boundary crossing and
 pushes the new shape/speed into the live mob, so spawn and breeding share one update point.
-`baby_speed_multiplier` carries the zombie family's `0.5` `ADD_MULTIPLIED_BASE` modifier
-(`base * 1.5`) — the only baby speed change among species this sim breeds; every breedable
-`Animal` (cow, sheep, pig, chicken, rabbit, wolf) only shrinks. `combat_defaults` deliberately did
+`baby_speed_multiplier` carries the zombie family's `0.5` multiplicative-modifier bonus
+(`base * 1.5`) — the only baby speed change among species this sim breeds; every other breedable
+animal (cow, sheep, pig, chicken, rabbit, wolf) only shrinks. `combat_defaults` deliberately did
 **not** gain an `is_baby` parameter — checked against every attribute builder, health/attack/armor
 never vary with age. `MetadataField::Baby` is pushed unconditionally, not only while true (a baby
 that grows up must tell already-connected clients), for the breedable-animal and zombie families,
-at metadata index 16 — which also carries `Creeper.DATA_SWELL_DIR`, so the guard lives in the
-producer (`SimMob::snapshot`'s species switch), not the encoder.
+at metadata index 16 — which also carries the creeper's own swell-direction field, so the guard
+lives in the producer (`SimMob::snapshot`'s species switch), not the encoder.
 
 Not modelled: a persisted "held partner" (selection is a fresh nearest-candidate search every
 tick, which can thrash with several same-species animals in love at once); XP/stat/advancement
@@ -200,24 +200,24 @@ Four taming mechanisms, transcribed per species:
 
 | species | trigger | roll | sits? |
 |---|---|---|---|
-| wolf | `Items.BONE`, not while angry | `nextInt(3) == 0` | yes |
-| cat | `#cat_food` (raw cod/salmon) | `nextInt(3) == 0` | yes |
-| parrot | `#parrot_food` (six seeds) | `nextInt(10) == 0` | no |
-| horse family | being ridden, not fed | `nextInt(getMaxTemper()) < getTemper()` | n/a |
+| wolf | a bone, not while angry | 1 in 3 | yes |
+| cat | `#cat_food` (raw cod/salmon) | 1 in 3 | yes |
+| parrot | `#parrot_food` (six seeds) | 1 in 10 | no |
+| horse family | being ridden, not fed | a roll against its current temper vs. its max | n/a |
 
 The wolf's taming item is in **none** of its own food tags, so `breeding_food` and
-`tame_mechanism`'s item sets must stay separate. `Parrot.tryToTame` uniquely omits sitting on
-tame. Whether a species must be tamed before it can breed depends on whether its taming item
-overlaps its food tag: an untamed wolf fed meat misses the bone arm and really can fall in love;
-an untamed cat fed cod always attempts a tame instead. The horse's roll is a function of a
-persisted `Temper` counter (certain to fail at 0, succeed at 100, each failure adding 5) that
+`tame_mechanism`'s item sets must stay separate. The parrot's own taming logic uniquely omits
+sitting on tame. Whether a species must be tamed before it can breed depends on whether its taming
+item overlaps its food tag: an untamed wolf fed meat misses the bone arm and really can fall in
+love; an untamed cat fed cod always attempts a tame instead. The horse's roll is a function of a
+persisted temper counter (certain to fail at 0, succeed at 100, each failure adding 5) that
 doesn't derive from `#horse_food` — `hay_block` is horse food and grants no temper, `red_mushroom`
 grants 3 without being in the tag — so `horse_temper_gain` is its own table. Horse breeding needs
 `GOLDEN_CARROT`/`GOLDEN_APPLE`/`ENCHANTED_GOLDEN_APPLE` specifically, so its `breeding_food` row is
 empty. With no passenger model here, the temper roll is attempted once per mount rather than
 behind vanilla's 1-in-50 ridden tick gate — the roll arithmetic itself is unchanged.
 
-`MobSim::interact` transcribes each species' `mobInteract` override in the **same clause order**:
+`MobSim::interact` transcribes each species' own interaction handling in the **same clause order**:
 feeding a hurt tame wolf meat must heal it before the same item can put it in love, and the sit
 toggle is the last arm, so anything above it suppresses the toggle. The love gate is `age == 0`,
 not `!is_baby()` — a parent in its post-breeding cooldown is not a baby and still cannot fall in
@@ -225,7 +225,7 @@ love.
 
 Two roster goals make ownership observable: `SitWhenOrderedToGoal` (a tame pet with no resolvable
 owner sits on its own — "pets settle when you log out") and `FollowOwnerGoal`, whose
-`(speed, startDistance, stopDistance)` are arguments because vanilla's aren't uniform (wolf
+`(speed, start_distance, stop_distance)` are arguments because vanilla's aren't uniform (wolf
 1.0/10/2, cat 1.0/10/5, parrot 1.0/5/1). The sitting *order* (persisted, NBT round-trips as
 `Sitting`) and sitting *pose* (the synced flag bit) are separate state, matching vanilla —
 collapsing them loses the order whenever the goal is preempted by a higher-priority flag holder.
@@ -260,22 +260,24 @@ define and validate a custom kind but cannot spawn one.
 
 ## How to change it
 
-* **Adding a spawn rule**: every row transcribes `SpawnPlacements.java`'s registration plus the
-  `check*SpawnRules` body it names — read the predicate, families genuinely differ (a wolf wants a
-  block tag and brightness > 8; a bat wants base stone below, `nextBoolean()`, brightness ≤
-  `nextInt(4)`; a zombified piglin has no light test at all). A species absent from the table is
-  deliberately inert, not a fallback to "no restrictions" — a fallback would spawn guardians on
-  land.
+* **Adding a spawn rule**: every row transcribes vanilla's own per-species spawn-rule registration
+  plus the placement-check predicate it names — read the predicate, families genuinely differ (a
+  wolf wants a block tag and brightness > 8; a bat wants base stone below, a coin-flip draw, and
+  its local brightness at or under a random value in `0..4`; a zombified piglin has no light test
+  at all). A species absent from the table is deliberately inert, not a fallback to "no
+  restrictions" — a fallback would spawn guardians on land.
 * **Adding a tameable species**: an arm in `tame_mechanism`, a row in `breeding_food`, and — if it
   should sit/follow — a roster entry at that species' own priorities/distances (the horse family
-  is tameable but has no roster entry, since `AbstractHorse` isn't a `TamableAnimal` at all — not a
-  gap). A new taming *mechanism* is a new `TameMechanism` variant, not a constant on an existing
-  one — the four differ in trigger, roll shape and side effects.
-* **Never derive an item set from a tag without checking the method it actually gates**, and a
-  tame or spawn chance needs a driven RNG in its gate. Three traps here are exactly a tag and a
-  Java method disagreeing (bone vs. `#wolf_food`, `hay_block` vs. `handleEating`'s temper grant,
-  `red_mushroom` vs. `#horse_food`) — read `handleEating`/`mobInteract` first, use the tag only as
-  a cross-check. A chance gate needs a seed where the two mechanisms being separated actually
+  is tameable but has no roster entry, since vanilla's own horse base class isn't part of the
+  tamable-animal hierarchy at all — not a gap). A new taming *mechanism* is a new `TameMechanism`
+  variant, not a constant on an existing one — the four differ in trigger, roll shape and side
+  effects.
+* **Never derive an item set from a tag without checking the logic it actually gates**, and a
+  tame or spawn chance needs a driven RNG in its gate. Three traps here are exactly a tag and
+  vanilla's real gating logic disagreeing (bone vs. `#wolf_food`, `hay_block` vs. the temper-grant
+  table, `red_mushroom` vs. `#horse_food`) — read vanilla's own eating and interaction handling
+  first, use the tag only as a cross-check. A chance gate needs a seed where the two mechanisms
+  being separated actually
   disagree — one chosen for `next_int(3)` proves nothing about `next_int(10)`.
 * **Entity metadata indices are not hand-countable, and RNG call order in a port must match
   exactly.** Any new per-species metadata must take its index from the entity-data-index oracle
@@ -306,8 +308,8 @@ define and validate a custom kind but cannot spawn one.
 | `LOVE_TICKS` / `BABY_START_AGE` / `PARENT_AGE_AFTER_BREEDING` | `lodestone_entity::ai` | 600 / -24,000 / 6,000 |
 | `DEFAULT_BABY_AGE_SCALE` | `lodestone_entity::ai` | 0.5 |
 
-No feature flags anywhere in this area. Spawner blocks have no analogue of vanilla's
-`isSpawnerBlockEnabled` game setting yet.
+No feature flags anywhere in this area. Spawner blocks have no analogue of vanilla's own
+spawner-enabled game setting yet.
 
 ## Dependencies
 
@@ -321,7 +323,7 @@ No feature flags anywhere in this area. Spawner blocks have no analogue of vanil
 * `crate::mob_spawn` (cap/despawn engine, `SpawnRng`), `crate::mobs` (`MobSim`/`SimMob`, the
   production host for all of the above), `crate::effects::WorldEffect` and
   `crate::tick::run_tick_loop` (taming particle burst, per-tick difficulty feed).
-* `.cache/mc/26.2/src/net/minecraft/world/entity/` — the pinned decompile every table above is
+* `.cache/mc/26.2/` — the pinned decompile every table above is
   checked against.
 * [`combat.md`](./combat.md) (the attribute-modifier fold and damage/knockback once a mob is
   live), [`mob-ai.md`](./mob-ai.md) (the goal scheduler), [`entity-rendering.md`](./entity-rendering.md)
