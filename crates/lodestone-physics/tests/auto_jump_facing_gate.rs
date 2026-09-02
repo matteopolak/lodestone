@@ -1,9 +1,9 @@
-//! `LocalPlayer.updateAutoJump`'s facing-vs-moving gate, and the option that
-//! turns the whole detector off — issue #201.
+//! Vanilla's own client-side auto-jump update's facing-vs-moving gate, and
+//! the option that turns the whole detector off.
 //!
 //! # The gate
 //!
-//! `LocalPlayer.java:1022-1023` (26.2 client source, read directly):
+//! Vanilla's own client source (26.2, read directly):
 //!
 //! ```text
 //! float facingVsMovingDotProduct2 = facingDir3.x * moveDir.x + facingDir3.z * moveDir.z;
@@ -52,8 +52,8 @@ use lodestone_physics::{
 /// A one-block-deep pit: solid floor, one-block-tall walls in all eight
 /// neighbouring columns, the player's own cell free.
 ///
-/// The pit is what engages vanilla's `moveDistSq <= 0.001` input-vector fallback
-/// (`LocalPlayer.java:1008`): once the player is pressed into a corner, the
+/// The pit is what engages vanilla's own squared-move-distance-at-or-below-0.001
+/// input-vector fallback: once the player is pressed into a corner, the
 /// *actual* delta this tick is zero and the detector reconstructs the movement
 /// direction from the input and the yaw. That is the branch whose dot product is
 /// exact arithmetic rather than a function of collision residue, which is why the
@@ -150,7 +150,7 @@ fn a_strafe_99_degrees_off_facing_does_not_auto_jump() {
 
 #[test]
 fn walking_straight_backwards_never_auto_jumps() {
-    // Matthew's question, and the vanilla answer: `moveDir` is exactly `-facing`,
+    // The vanilla answer: the move-direction vector is exactly `-facing`,
     // so the dot product is `-1.0`. Ours refusing this is *correct*, not a bug.
     let peak = peak_feet_y(
         MovementInput {
@@ -185,8 +185,8 @@ fn walking_straight_forwards_auto_jumps() {
 
 #[test]
 fn the_option_off_pins_the_player_in_the_pit() {
-    // Issue #201's actual defect, at the physics layer: the same scenario that
-    // clears the step with the option on must not clear it with the option off.
+    // The actual defect this option guards against, at the physics layer: the
+    // same scenario that clears the step with the option on must not clear it with the option off.
     // `lodestone_ecs::player::AutoJump` is what makes the shell's setting reach
     // this field; `lodestone-ecs`'s own tests gate that half.
     let on = peak_feet_y(
