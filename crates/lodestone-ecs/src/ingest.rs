@@ -524,8 +524,8 @@ pub fn tick_hurt_time(mut entities: Query<&mut HurtTime>) {
     }
 }
 
-/// Vanilla's `EntityEvent.DEATH` (`EntityEvent.java`), the per-entity status byte a
-/// server broadcasts from `LivingEntity.die()`.
+/// Vanilla's own entity-event death constant, the per-entity status byte a
+/// server broadcasts from its own living-entity death routine.
 const ENTITY_STATUS_DEATH: u8 = 3;
 
 /// `IngestSet::Apply`: `ClientEvent::EntityStatus` → [`DeathTime`].

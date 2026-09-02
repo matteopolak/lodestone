@@ -262,7 +262,7 @@ impl<T: PluginChannel> Plugin for PluginChannelPlugin<T> {
                 "PluginChannel::CHANNEL for `{}` is {:?}, which is not a valid \
                  namespaced identifier: {error}. A channel that does not parse \
                  would never match any payload, so this fails loudly at build \
-                 rather than delivering nothing forever (issue #301).",
+                 rather than delivering nothing forever.",
                 std::any::type_name::<T>(),
                 T::CHANNEL,
             )
@@ -315,7 +315,7 @@ impl<T: OutboundPluginChannel> Plugin for OutboundPluginChannelPlugin<T> {
                 "OutboundPluginChannel::CHANNEL for `{}` is {:?}, which is not a \
                  valid namespaced identifier: {error}. A channel that does not \
                  parse could never be sent on, so this fails loudly at build \
-                 rather than dropping every payload silently (issue #301).",
+                 rather than dropping every payload silently.",
                 std::any::type_name::<T>(),
                 T::CHANNEL,
             )

@@ -452,7 +452,7 @@ pub struct Abilities {
 }
 
 impl Default for Abilities {
-    /// `Abilities.java`'s field initialisers: everything off, `0.05F` flying and
+    /// Vanilla's own abilities record's field initialisers: everything off, `0.05F` flying and
     /// `0.1F` walking speed.
     ///
     /// **`flying: false` and `may_fly: false` are the load-bearing defaults**: a

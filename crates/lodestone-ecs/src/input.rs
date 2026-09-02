@@ -2,7 +2,7 @@
 //!
 //! # What it is
 //!
-//! [`PluginKeybinds`] is the registration point issue #162 asked for: a
+//! [`PluginKeybinds`] is the registration point client plugins need: a
 //! plugin claims a physical key, in [`KeyInterceptMode::Consume`] (nothing
 //! below it in the shell's precedence chain sees the key at all) or
 //! [`KeyInterceptMode::Observe`] (the plugin is told, but gameplay/chat/menu

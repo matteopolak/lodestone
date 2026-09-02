@@ -21,7 +21,7 @@
 //!
 //! - **Vanilla 26.2** has a real permission system now — it is no longer the
 //!   bare numeric op level of earlier versions. Read from the
-//!   26.2 jar at `.cache/mc/26.2/src/net/minecraft/server/permissions/`:
+//!   26.2 jar's own permissions package:
 //!   `PermissionLevel` is a five-variant enum (`ALL`=0, `MODERATORS`=1,
 //!   `GAMEMASTERS`=2, `ADMINS`=3, `OWNERS`=4) with `isEqualOrHigherThan`;
 //!   `Permission` is a sum of `Atom(Identifier)` and
@@ -140,19 +140,17 @@
 //!
 //! **Vanilla's built-in resolver denies atoms, and is stricter than "a
 //! minimal built-in resolver (op = everything, non-op = only nodes explicitly
-//! defaulted true)" would be.** Vanilla 26.2's
-//! `LevelBasedPermissionSet.hasPermission` does *not* do that — an
+//! defaulted true)" would be.** Vanilla 26.2's own level-based permission-set
+//! check does *not* do that — an
 //! `Atom` permission returns `false` for **every** level except the one
 //! hardcoded case `COMMANDS_ENTITY_SELECTORS` (which requires `GAMEMASTERS`):
 //!
 //! ```text
-//! if (permission instanceof Permission.HasCommandLevel levelCheck) {
-//!    return this.level().isEqualOrHigherThan(levelCheck.level());
-//! } else {
-//!    return permission.equals(Permissions.COMMANDS_ENTITY_SELECTORS)
-//!       ? this.level().isEqualOrHigherThan(PermissionLevel.GAMEMASTERS)
-//!       : false;
-//! }
+//! if the permission carries a required command level:
+//!    return this level >= that required level
+//! else:
+//!    return this level >= GAMEMASTERS, if the permission is
+//!       COMMANDS_ENTITY_SELECTORS, else false
 //! ```
 //!
 //! We follow **Bukkit** rather than vanilla for atoms, because the consumer is
@@ -204,14 +202,14 @@ use bevy_ecs::resource::Resource;
 use uuid::Uuid;
 
 /// Vanilla's five command levels, transliterated from 26.2's
-/// `net.minecraft.server.permissions.PermissionLevel` — same variants, same
-/// ids, same `isEqualOrHigherThan`.
+/// own permission-level enum — same variants, same
+/// ids, same equal-or-higher-than comparison.
 ///
 /// A description of "four op levels (2-4 for the built-in
 /// commands, plus the `op`/non-op boolean)" misses one. There are **five** (0 through 4),
 /// and `ALL`=0 is the level a non-op holds rather than the absence of a level;
 /// `ops.json`'s `level` field is exactly this id
-/// (`ServerOpListEntry`: `PermissionLevel.byId(object.get("level").getAsInt())`).
+/// (vanilla's own op-list-entry type reads it through its own level-by-id lookup).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub enum PermissionLevel {
     /// 0 — every player, op or not. Vanilla's `ALL`.
@@ -231,7 +229,7 @@ pub enum PermissionLevel {
 
 impl PermissionLevel {
     /// The numeric id, matching `ops.json`'s `level` field and vanilla's own
-    /// `PermissionLevel.id()`.
+    /// level-id accessor.
     pub fn id(self) -> u8 {
         match self {
             Self::All => 0,
@@ -242,7 +240,7 @@ impl PermissionLevel {
         }
     }
 
-    /// Vanilla's `PermissionLevel.getSerializedName()`.
+    /// Vanilla's own level-name accessor.
     pub fn serialized_name(self) -> &'static str {
         match self {
             Self::All => "all",
@@ -253,8 +251,9 @@ impl PermissionLevel {
         }
     }
 
-    /// Vanilla's `PermissionLevel.byId`, **including its clamping**: the
-    /// upstream is `ByIdMap.continuous(..., OutOfBoundsStrategy.CLAMP)`, so an
+    /// Vanilla's own level-by-id lookup, **including its clamping**: the
+    /// upstream is a continuous id-to-enum map with a clamping out-of-bounds
+    /// strategy, so an
     /// out-of-range id saturates rather than wrapping or failing. An
     /// `ops.json` hand-edited to `"level": 9` really does mean `OWNERS` in
     /// vanilla, and a negative id means `ALL`.
@@ -268,7 +267,7 @@ impl PermissionLevel {
         }
     }
 
-    /// Vanilla's `PermissionLevel.isEqualOrHigherThan`.
+    /// Vanilla's own equal-or-higher-than comparison.
     pub fn is_equal_or_higher_than(self, other: Self) -> bool {
         self.id() >= other.id()
     }
@@ -285,12 +284,12 @@ impl PermissionLevel {
     }
 }
 
-/// Vanilla's `net.minecraft.server.permissions.Permission` — a sum of a
+/// Vanilla's own permission sum type — a sum of a
 /// namespaced atom and a command-level requirement.
 ///
 /// Both variants exist because vanilla really does mix them in one interface:
-/// `Permissions.COMMANDS_GAMEMASTER` is a `HasCommandLevel`, while
-/// `Permissions.CHAT_SEND_COMMANDS` is an `Atom("chat/send_commands")`. A
+/// its own `COMMANDS_GAMEMASTER` constant is a `HasCommandLevel`, while
+/// its own `CHAT_SEND_COMMANDS` constant is an `Atom("chat/send_commands")`. A
 /// plugin's own nodes are always [`Permission::Atom`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Permission {
@@ -558,7 +557,7 @@ pub struct SubjectPermissions {
 
 /// Who we are asking about.
 ///
-/// [`PermissionSubject::Console`] is vanilla's `PermissionSet.ALL_PERMISSIONS`
+/// [`PermissionSubject::Console`] is vanilla's own all-permissions constant
 /// — the server console and command blocks hold everything, and short-circuit
 /// the whole resolution order rather than being modelled as an owner-level
 /// player. Modelling it as a player would need a UUID nothing assigns.
@@ -796,19 +795,20 @@ pub struct LevelBasedPermissionSet {
 }
 
 impl LevelBasedPermissionSet {
-    /// Vanilla's `LevelBasedPermissionSet.forLevel`.
+    /// Vanilla's own level-based permission-set constructor.
     pub fn for_level(level: PermissionLevel) -> Self {
         Self { level }
     }
 
     /// Vanilla's node id for the one atom its level-based set special-cases:
-    /// `Permissions.COMMANDS_ENTITY_SELECTORS = Permission.Atom.create("commands/entity_selectors")`,
+    /// its own entity-selectors permission constant, an atom of
+    /// `"commands/entity_selectors"`,
     /// which an `Identifier` with the default namespace renders as
     /// `minecraft:commands/entity_selectors`. Both spellings are accepted
     /// because vanilla's own constant omits the namespace at the call site.
     pub const COMMANDS_ENTITY_SELECTORS: &'static str = "commands/entity_selectors";
 
-    /// Vanilla's `LevelBasedPermissionSet.hasPermission`, transliterated.
+    /// Vanilla's own level-based permission-set check, transliterated.
     pub fn has_permission(&self, permission: &Permission) -> bool {
         match permission {
             Permission::HasCommandLevel(required) => self.level.is_equal_or_higher_than(*required),
@@ -826,7 +826,7 @@ impl LevelBasedPermissionSet {
     ///
     /// # A deliberate deviation from vanilla's literal code
     ///
-    /// 26.2's `LevelBasedPermissionSet.union` reads:
+    /// 26.2's own level-based permission-set union reads:
     ///
     /// ```text
     /// return this.level().isEqualOrHigherThan(otherSet.level()) ? otherSet : this;
@@ -834,7 +834,7 @@ impl LevelBasedPermissionSet {
     ///
     /// which returns the **lower**-level set when `this` is the higher one.
     /// That contradicts what `union` means everywhere else in the same file —
-    /// `PermissionSetUnion.hasPermission` returns `true` if **any** member set
+    /// vanilla's own permission-set-union check returns `true` if **any** member set
     /// holds the permission, i.e. a logical OR — so a union that *narrows* is
     /// inconsistent with its own interface. We implement the OR-consistent
     /// behaviour (keep the higher level) rather than transliterate what looks
@@ -1031,8 +1031,8 @@ mod tests {
         }
     }
 
-    /// `by_id` clamps, because vanilla's is
-    /// `ByIdMap.continuous(..., OutOfBoundsStrategy.CLAMP)`. A hand-edited
+    /// `by_id` clamps, because vanilla's own id-to-enum mapping clamps
+    /// out-of-range ids rather than rejecting them. A hand-edited
     /// `ops.json` with `"level": 99` means OWNERS upstream, and must here.
     #[test]
     fn permission_level_by_id_clamps_out_of_range() {
