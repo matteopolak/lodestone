@@ -15,7 +15,7 @@
 //!
 //! # The position
 //!
-//! `Hud.extractSelectedItemName` (`Hud.java` in the 26.2 client):
+//! `Hud.extractSelectedItemName` (`Hud`'s own decompiled source in the 26.2 client):
 //! `x = (guiWidth - strWidth) / 2`, `y = guiHeight - 59`, drawn **unscaled**
 //! (a plain `graphics.textWithBackdrop` call — no `×2`, unlike this file's
 //! debug/chat text). The expected x is derived from the vanilla font's own
@@ -23,7 +23,7 @@
 //!
 //! # Also proves italic shear reaches this same draw
 //!
-//! An item's custom name draws **italic** (`Hud.java`,
+//! An item's custom name draws **italic** (`Hud`'s own decompiled source,
 //! `.withStyle(ChatFormatting.ITALIC)` when `has(DataComponents.CUSTOM_NAME)`)
 //! — [`a_custom_named_item_draws_narrower_when_forced_upright`] proves this
 //! specific consumer actually exercises that fix's italic shear, by comparing the
@@ -165,7 +165,7 @@ fn zero_alpha_draws_no_ink() {
 }
 
 /// The subject: a populated, fully-opaque held-item name reaches real ink at
-/// vanilla's own position (`Hud.java`).
+/// vanilla's own position (`Hud`'s own decompiled source).
 #[test]
 #[ignore = "requires the vanilla client.jar"]
 fn a_selected_items_name_draws_centred_at_vanillas_anchor() {
@@ -196,7 +196,7 @@ fn a_selected_items_name_draws_centred_at_vanillas_anchor() {
     );
     assert!(
         (got.y0 - want_y0).abs() < 1.0,
-        "y must sit at guiHeight - 59 (Hud.java); want y0={want_y0:.1}, got {got}"
+        "y must sit at guiHeight - 59 (vanilla's decompiled hud source); want y0={want_y0:.1}, got {got}"
     );
     // Not scaled ×2 like the debug/chat text elsewhere in this file — the
     // exact "XP number" defect on a second piece of HUD text.

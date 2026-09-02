@@ -11,14 +11,14 @@
 //! canvas these constants are laid into is *already* vanilla's GUI pixel unit
 //! — and the legacy 2× is applied on top of it. That is a double-apply.
 //!
-//! Vanilla, all in `.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`:
+//! Vanilla, all in its decompiled HUD source (26.2):
 //!
 //! | surface | vanilla pose scale | cite |
 //! |---|---|---|
-//! | title | `scale(4.0F, 4.0F)` | `Hud.java` |
-//! | subtitle | `scale(2.0F, 2.0F)` | `Hud.java` |
-//! | action bar / overlay message | **no scale call at all** → 1.0 | `Hud.java` |
-//! | held-item name (this gate's reference) | **no scale call at all** → 1.0 | `Hud.java` |
+//! | title | `scale(4.0F, 4.0F)` | `Hud`'s own decompiled source |
+//! | subtitle | `scale(2.0F, 2.0F)` | `Hud`'s own decompiled source |
+//! | action bar / overlay message | **no scale call at all** → 1.0 | `Hud`'s own decompiled source |
+//! | held-item name (this gate's reference) | **no scale call at all** → 1.0 | `Hud`'s own decompiled source |
 //!
 //! # Why the assertions are ratios, not absolute pixel heights
 //!
@@ -115,7 +115,7 @@ fn ink_bbox(frame: &HudFrame<'_>) -> Option<(f32, f32, f32, f32)> {
 /// multiplies; the top edge is what vanilla's pose translate fixes. The fixed
 /// debug font starts a glyph's ink exactly at the `y` handed to the draw (the
 /// reference surface measures `y0 == b.h - 59.0` to the digit, matching
-/// `Hud.java`), so the top edge is directly comparable to vanilla's own
+/// `Hud`'s own decompiled source), so the top edge is directly comparable to vanilla's own
 /// expression with no baseline correction.
 fn ink_top_and_height(label: &str, frame: &HudFrame<'_>) -> (f32, f32) {
     let bbox = ink_bbox(frame)
@@ -201,7 +201,7 @@ fn title_subtitle_and_action_bar_match_vanillas_pose_scales() {
     let stats = DebugStats::default();
 
     // The reference: the held-item name, drawn at scale 1.0 exactly as vanilla
-    // draws it (`Hud.java`, no pose scale). Everything else is measured
+    // draws it (`Hud`'s own decompiled source, no pose scale). Everything else is measured
     // as a multiple of this.
     let reference = {
         let mut f = quiet(&stats);
@@ -245,14 +245,14 @@ fn title_subtitle_and_action_bar_match_vanillas_pose_scales() {
 
     // `(surface, measured, vanilla-correct ratio, double-applied ratio, cite)`
     let cases = [
-        ("title", title, 4.0_f32, 8.0_f32, "Hud.java scale(4.0F, 4.0F)"),
-        ("subtitle", subtitle, 2.0, 4.0, "Hud.java scale(2.0F, 2.0F)"),
+        ("title", title, 4.0_f32, 8.0_f32, "vanilla's decompiled hud source scale(4.0F, 4.0F)"),
+        ("subtitle", subtitle, 2.0, 4.0, "vanilla's decompiled hud source scale(2.0F, 2.0F)"),
         (
             "action bar",
             action_bar,
             1.0,
             2.0,
-            "Hud.java, no pose scale",
+            "vanilla's decompiled hud source, no pose scale",
         ),
     ];
 
@@ -285,9 +285,9 @@ fn title_subtitle_and_action_bar_match_vanillas_pose_scales() {
 }
 
 /// Vanilla's title block is positioned entirely by one pose translate to the
-/// **screen centre** (`Hud.java`), after which the title is drawn at
-/// `y = -10` inside `scale(4.0)` (`Hud.java`) and the subtitle at
-/// `y = 5` inside `scale(2.0)` (`Hud.java`). Multiplying through, the
+/// **screen centre** (`Hud`'s own decompiled source), after which the title is drawn at
+/// `y = -10` inside `scale(4.0)` (`Hud`'s own decompiled source) and the subtitle at
+/// `y = 5` inside `scale(2.0)` (`Hud`'s own decompiled source). Multiplying through, the
 /// two top edges are fixed offsets from the vertical centre:
 ///
 /// * title    `h/2 + (-10 * 4.0)` = `h/2 - 40`
@@ -331,12 +331,12 @@ fn the_title_block_sits_where_vanillas_pose_translate_puts_it() {
 
     assert!(
         (title_top - want_title).abs() < 1.0,
-        "the title's top edge must be `h/2 - 10*4` (`Hud.java`): \
+        "the title's top edge must be `h/2 - 10*4` (`Hud`'s own decompiled source): \
          predicted {want_title:.2} logical px, measured {title_top:.2}"
     );
     assert!(
         (subtitle_top - want_subtitle).abs() < 1.0,
-        "the subtitle's top edge must be `h/2 + 5*2` (`Hud.java`): \
+        "the subtitle's top edge must be `h/2 + 5*2` (`Hud`'s own decompiled source): \
          predicted {want_subtitle:.2} logical px, measured {subtitle_top:.2}"
     );
     assert!(
@@ -356,8 +356,7 @@ fn the_title_block_sits_where_vanillas_pose_translate_puts_it() {
 // `HUD_TEXT_SCALE * opts.scale`, i.e. `2.0` at the vanilla-legal default
 // `chatScale == 1.0` — the same double-apply the title/subtitle/action bar
 // above already had fixed. Vanilla's own chat pose scale
-// (`ChatComponent.getScale`, `.cache/mc/26.2/client-src/net/minecraft/client/
-// gui/components/ChatComponent.java`) is `chatScale` **alone**:
+// (`ChatComponent.getScale`, vanilla's decompiled chat-component source, 26.2) is `chatScale` **alone**:
 // `extractRenderState`'s `pose.scale(scale, scale)` where `scale =
 // (float)this.getScale()`. `chat_pose_scale` is now `opts.scale.max(0.0)`,
 // and `HUD_TEXT_SCALE`/`hud_line_h` — no longer having any caller — are
@@ -492,7 +491,7 @@ mod chat_scale {
             (x1_px - want_plate_w).abs() < 1e-2,
             "the chat plate must be vanilla's `getWidth(1.0) == {want_w}`px \
              (unscaled by chatScale — computed outside `pose.scale` in \
-             `ChatComponent.java`) plus the {CHAT_PLATE_PAD_PX}px plate pad, \
+             `ChatComponent`'s own decompiled source) plus the {CHAT_PLATE_PAD_PX}px plate pad, \
              i.e. {want_plate_w}px, got {x1_px:.2}"
         );
         // The pad is what makes the two numbers different, so a build that

@@ -296,7 +296,7 @@ fn assert_at_anchor(what: &str, got: Bbox, anchor: [f32; 2]) {
 /// constructors rather than against our own layout function, so the two cannot
 /// agree by sharing a mistake:
 ///
-/// * `ContainerScreen.java` — `super(..., 176, 114 + rowCount * 18)`
+/// * `ContainerScreen`'s own decompiled source — `super(..., 176, 114 + rowCount * 18)`
 /// * `AbstractContainerScreen`'s recipe-book subclasses — `176 x 166`
 #[test]
 fn slot_layout_height_is_vanillas_image_height() {
@@ -307,7 +307,7 @@ fn slot_layout_height_is_vanillas_image_height() {
         assert_eq!(
             got, want,
             "a {rows}-row chest's imageHeight is 114 + rows * 18 = {want} \
-             (ContainerScreen.java); slot_layout says {got}. inventoryLabelY is \
+             (vanilla's decompiled container-screen source); slot_layout says {got}. inventoryLabelY is \
              derived from this, so a wrong height moves the label."
         );
     }
@@ -323,7 +323,7 @@ fn label_anchors_match_vanillas_four_fields() {
     let big_chest = Menu::generic(54);
     let table = Menu::crafting(3, 3);
 
-    // `InventoryScreen.java` — pushed right, past the player model panel —
+    // `InventoryScreen`'s own decompiled source — pushed right, past the player model panel —
     // and `:73-75`, the `extractLabels` override that drops the second call.
     assert_eq!(
         label_layout(&player, &slot_layout(&player)),
@@ -333,7 +333,7 @@ fn label_anchors_match_vanillas_four_fields() {
             inventory: None,
         }
     );
-    // `CraftingScreen.java`. Note this one *does* keep the second label:
+    // `CraftingScreen`'s own decompiled source. Note this one *does* keep the second label:
     // `InventoryScreen` is the only `extractLabels` override in the package.
     assert_eq!(
         label_layout(&table, &slot_layout(&table)),
@@ -343,7 +343,7 @@ fn label_anchors_match_vanillas_four_fields() {
             inventory: Some([8.0, 166.0 - 94.0]),
         }
     );
-    // `AbstractContainerScreen.java`, with `imageHeight` moving under it.
+    // `AbstractContainerScreen`'s own decompiled source, with `imageHeight` moving under it.
     assert_eq!(
         label_layout(&chest, &slot_layout(&chest)),
         LabelLayout {
@@ -380,7 +380,7 @@ fn a_chest_screen_draws_both_labels_at_their_derived_anchors() {
     assert_at_anchor("title 'Chest'", title, [anchors.title_x, anchors.title_y]);
 
     let label = label_bbox(&menu, "Chest", "Inventory", Which::PlayerInventory).expect(
-        "a chest screen draws `playerInventoryTitle` — `AbstractContainerScreen.java`, \
+        "a chest screen draws `playerInventoryTitle` — `AbstractContainerScreen`'s own decompiled source, \
          which only `InventoryScreen` overrides away",
     );
     assert_at_anchor("second 'Inventory'", label, inventory_anchor);
@@ -429,7 +429,7 @@ fn a_crafting_table_draws_its_title_at_29_and_keeps_the_second_label() {
     assert_at_anchor("title", title, [anchors.title_x, anchors.title_y]);
     assert!(
         title.x0 > 20.0 && title.x0 < 40.0,
-        "CraftingScreen.java sets titleLabelX = 29; a box at x0={:.1} is either \
+        "vanilla's decompiled crafting-screen source sets titleLabelX = 29; a box at x0={:.1} is either \
          the base class's 8 or the inventory screen's 97",
         title.x0
     );
@@ -459,7 +459,7 @@ fn the_player_inventory_screen_omits_the_second_label_and_titles_at_97() {
     assert_at_anchor("title 'Crafting'", title, [anchors.title_x, anchors.title_y]);
     assert!(
         title.x0 > 90.0,
-        "InventoryScreen.java sets titleLabelX = 97, past the player model \
+        "vanilla's decompiled inventory-screen source sets titleLabelX = 97, past the player model \
          panel; a title box at x0={:.1} is the base class's 8",
         title.x0
     );
@@ -480,7 +480,7 @@ fn the_player_inventory_screen_omits_the_second_label_and_titles_at_97() {
     assert!(
         absent.is_none(),
         "InventoryScreen.extractLabels draws only the title \
-         (`InventoryScreen.java`); the player inventory screen must emit no \
+         (`InventoryScreen`'s own decompiled source); the player inventory screen must emit no \
          `playerInventoryTitle` geometry, but one was measured at {absent:?}"
     );
 }
@@ -510,7 +510,7 @@ fn a_custom_name_reaches_the_panel_verbatim_and_nothing_is_uppercased() {
         lodestone::container::player_inventory_title(&lang),
         "Crafting",
         "the player inventory screen's title is container.crafting — the 2x2 grid \
-         (InventoryScreen.java), never the word Inventory"
+         (vanilla's decompiled inventory-screen source), never the word Inventory"
     );
     assert_eq!(lodestone::container::player_inventory_label(&lang), "Inventory");
 
@@ -635,7 +635,7 @@ fn the_labels_draw_in_vanillas_dark_grey_with_no_drop_shadow() {
         assert!(
             darkest.iter().zip(VANILLA_LABEL_RGB).all(|(&got, want)| got + 12 >= want),
             "{name}: vanilla draws these labels in -12566464 == 0xFF404040 with \
-             shadow=false (AbstractContainerScreen.java). The darkest pixel \
+             shadow=false (vanilla's decompiled abstract-container-screen source). The darkest pixel \
              the labels added is {darkest:?}, darker than 0x404040 — which is what a \
              drop shadow (25% of the ink = 0x101010) looks like."
         );

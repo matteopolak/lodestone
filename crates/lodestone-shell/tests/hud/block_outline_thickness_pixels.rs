@@ -256,7 +256,7 @@ fn block_outline_is_thicker_than_one_physical_pixel() {
     // rasterizers only occasionally cover a second pixel row/column at a
     // sub-pixel edge straddle, so an honest measurement of that geometry
     // tops out at 1, rarely 2. Vanilla's real (non-debug) hit outline uses
-    // `Window.getAppropriateLineWidth` (`Window.java`,
+    // `Window.getAppropriateLineWidth` (`Window`'s own decompiled source,
     // `max(2.5, windowWidth / 1920 * 2.5)`), i.e. never thinner than 2.5
     // logical pixels. `>= 3` is comfortably above what a bare `LineList`
     // could produce and comfortably at/under vanilla's own floor, so it

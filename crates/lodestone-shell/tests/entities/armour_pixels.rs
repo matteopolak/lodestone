@@ -29,7 +29,7 @@
 //! * the **chest** part's real baked vertex extents (`EntityMesh::vertices`
 //!   sliced by its `PartRange`, from the *actual* [`EntityModelSet::load`]
 //!   corpus this test resolves "zombie" against — not a remembered
-//!   `HumanoidModel.java` box literal);
+//!   `HumanoidModel`'s own decompiled source box literal);
 //! * [`ArmourSlot::Chest::inflation`] — the same public, tested constant
 //!   `prepare_armour`'s real mesh bake reads (`OUTER_ARMOUR_INFLATION`,
 //!   vanilla's `CubeDeformation(1.0F)`).

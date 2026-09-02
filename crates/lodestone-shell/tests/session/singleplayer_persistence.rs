@@ -199,7 +199,7 @@ fn sample_columns(cx: i32, cz: i32) -> Vec<(i32, i32)> {
 /// of its 8 KiB header.
 ///
 /// The header is 1024 big-endian `u32` location entries; a nonzero entry means
-/// that column is present (`RegionFile.java`'s own emptiness test). Parsed by
+/// that column is present (`RegionFile`'s own decompiled source's own emptiness test). Parsed by
 /// hand here rather than through `lodestone-anvil`, which is not a dependency
 /// of this crate — and adding one would edit `Cargo.lock`, which this change
 /// has no business touching.
