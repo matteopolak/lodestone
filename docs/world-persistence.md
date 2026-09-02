@@ -1,193 +1,166 @@
-# World persistence: `lodestone-anvil`
+# World persistence: saving, loading, and the world's own state
 
 ## What it is
 
-`lodestone-anvil` (`crates/lodestone-anvil/`) reads and writes Minecraft's
-on-disk world formats: the Anvil region file (`.mca`, issue
-[#298](https://github.com/matteopolak/lodestone/issues/298)) and `level.dat`
-world metadata (issue [#300](https://github.com/matteopolak/lodestone/issues/300)).
-Before this crate, nothing in the workspace could save or load a world at
-all — `grep -rln 'RegionFile\|\.mca\b|region_file|Anvil\b'` across every
-`.rs` file returned nothing.
+Everything that makes a Lodestone world survive quitting and reopening: the on-disk container
+formats (Anvil region files, `level.dat`, and the world-generation-settings file that actually
+holds the seed), the server-side wiring that intercepts the chunk pipeline to load from and save
+back to those files, the world's own persisted scalars (game rules, difficulty, the clock), where a
+fresh or respawning player appears, and the separate point-of-interest index vanilla keeps for
+things like beds, workstations, and lit nether portals.
 
 ## How it works
 
-Two independent, version-free container formats, both riding on the NBT
-codec already in `lodestone-core` (`read_named_nbt`/`write_named_nbt` — the
-classic *named*-root form with an empty root name, not the nameless
-"network NBT" the protocol crates use):
+### Two layers: the container format and the chunk schema
 
-- **Region files** (`src/region.rs`): an 8 KiB header — 1024 big-endian
-  `i32` sector locations (`sectorNumber << 8 | sectorCount`) then 1024
-  timestamps, indexed by `localX + localZ*32` — followed by 4 KiB-sector-
-  addressed chunk payloads. Each payload is a 5-byte header (4-byte length +
-  1-byte compression-scheme id) then that many compressed bytes. A chunk
-  needing 256+ sectors (~1 MiB compressed) is stored externally in a
-  sibling `c.<chunkX>.<chunkZ>.mcc` file instead, with no envelope of its
-  own. `RegionFile::parse`/`read_chunk_raw`/`read_chunk_nbt_bytes` read it;
-  `build_region`/`build_region_from_nbt` write it. Deliberately generic over
-  what NBT tree a chunk holds — it parses no chunk *schema*
-  (`SerializableChunkData.java`'s territory in vanilla), only the envelope,
-  so the same code should work unchanged for entity-region storage later.
-- **`level.dat`** (`src/level_dat.rs`): a single gzip-wrapped named-NBT
-  file — unnamed root `Compound` containing a `"Data"` compound. Models the
-  envelope plus **the 26.2 world-metadata fields**: `LevelName`, `GameType`,
-  `Time`, `LastPlayed`, the `spawn` compound (`pos` as a 3-entry `IntArray`,
-  `yaw`/`pitch`, `dimension`) and `difficulty_settings`, with
-  `LevelDat::for_new_world` emitting the exact 14-field set a real 26.2 server
-  writes. Unmodelled fields survive a read/modify/write unchanged, in their
-  original order.
+`lodestone-anvil` is a version-free, dependency-light crate that knows the **container** formats —
+the Anvil region file envelope (an 8 KiB header of sector locations and timestamps, followed by
+compressed, sector-addressed chunk payloads, with very large chunks spilling into a sibling file),
+the gzip-wrapped named-NBT `level.dat` envelope, and the separate file 26.2 actually stores the
+world seed in (`level.dat` itself carries no seed field in this version, unlike older releases —
+the seed instead lives in `<world>/data/minecraft/world_gen_settings.dat`, which is why "the seed
+isn't persisted" is a trap easy to fall into by checking the wrong file). It deliberately parses no
+chunk *schema* — what NBT tree a chunk actually contains is `lodestone-server`'s problem, kept
+separate so the same container code serves region files, entity-region files, and the
+point-of-interest region files all as one instance each, and so a browser build that has no
+filesystem can still depend on `lodestone-server` without dragging in the disk-based half of it
+(`lodestone-anvil` is a non-wasm-target dependency for exactly this reason).
 
-  **What is *not* in a 26.2 `level.dat`** is the useful part, because two
-  issues have now guessed wrong about it. Read with an independent Python
-  `gzip`+`struct` parser across all six 26.2 worlds in `.cache/mc`, every file
-  carries the same 14 fields and **none** of them is a seed, weather flag or
-  day time. 26.2 moved each to its own `SavedData` file under `<world>/data/`:
+`lodestone-server`'s own chunk-NBT schema module owns the mapping between an in-memory
+`ChunkColumn` and the actual chunk NBT tree; the persistence layer sits below the chunk cache and
+above the terrain generator in the chunk-source stack, so that a cache eviction never loses an
+edit (the persistence layer is the one that retains edits permanently) and a column loaded from
+disk always wins over a freshly generated one. A block-set call on this layer deliberately does
+**not** forward down to the generator's own edit-tracking, because the generator's edit map is
+seeded by generating the column fresh — forwarding would silently regenerate and discard a
+disk-loaded edit with no error. Every mutation in the server funnels through this one call, so
+hooking persistence in cost no changes to the tick loop or the mob simulation.
 
-  | what | file | fields |
-  |---|---|---|
-  | seed | `minecraft/world_gen_settings.dat` | modelled here, see below |
-  | weather | `weather.dat` | `raining`, `rain_time`, `thundering`, `thunder_time`, `clear_weather_time` — snake_case, unlike `level.dat` |
-  | day time | `world_clocks.dat` | per-dimension `total_ticks`; `PrimaryLevelData`'s old `DayTime` is now only a datafixer input (`DayTimeToClockFix.java:18`) |
-  | game rules | `game_rules.dat` | keyed by gamerule registry id |
-  | world border | `world_border.dat` | |
+A save writes only the dirty set, not everything resident — a player standing still should not
+cost megabytes of disk writes every autosave interval — and untouched chunks inside a rewritten
+region file are re-emitted as their original compressed bytes rather than being decoded and
+re-encoded, since the region-file format has no incremental single-chunk update and always rewrites
+a whole file in one pass. Neither generation nor saving is allowed to run on the world's own tick
+thread; both are pushed onto a blocking thread pool, since a synchronous disk write there is
+exactly the same class of stall as a synchronous chunk generation would be.
 
-  So `level.dat`'s `Time` is the world's **total age in ticks**, not the sky
-  clock. Three version fields also coexist and are not interchangeable:
-  `version` (`Int`, 19133, the storage-format version validated on load),
-  `Version` (`Compound` of `Name`/`Id`/`Snapshot`/`Series`) and `DataVersion`
-  (`Int`, 4903 for 26.2).
-- **`world_gen_settings.dat`** (`src/world_gen_settings.rs`): where 26.2 keeps
-  the **world seed** — `<world>/data/minecraft/world_gen_settings.dat`, a
-  gzip-wrapped named-NBT `{ data: {…}, DataVersion: Int }`. Added for issue
-  [#468](https://github.com/matteopolak/lodestone/issues/468). **The seed is
-  not in `level.dat`** in 26.2, unlike 1.16.5 where it sits at
-  `Data.WorldGenSettings.seed`; a 26.2 `level.dat` has no seed field at all,
-  which is the trap that makes it look unpersisted. Reads and writes the seed,
-  preserving unknown fields (notably the whole `dimensions` tree) across a
-  round trip. Gated against a checked-in real vanilla file,
-  `tests/support/world_gen_settings_26_2_vanilla.dat`.
-- **Compression** (`src/compression.rs`): the scheme byte both formats use —
-  gzip (id 1), zlib/"deflate" (id 2, the default and the only scheme this
-  crate has real-file evidence for), uncompressed (id 3), and LZ4 (id 4).
-  `level.dat` is always gzip regardless of this byte (it has no scheme byte
-  of its own — `NbtIo.writeCompressed` is hardcoded to `GZIPOutputStream`).
-- **LZ4 framing** (`src/lz4_block.rs`): the third-party `net.jpountz.lz4`
-  block-stream format the `lz4` region scheme wraps each block in — not
-  Minecraft's own format, so it's documented separately from the region
-  file's own module doc, with its constants read directly out of the real
-  library's class file (see that module's doc for how, since no JVM was
-  available in this environment to run `javap`).
+### The world's own scalars: game rules, difficulty, and the clock
 
-## How to change it, and the gotchas
+A single shared, persistable store holds the world's scalar state — game rules, difficulty, and
+the world clock — reached by a cloneable handle threaded to the connection loop, the tick loop, and
+whatever persists it. The organizing rule for all three is the same: a value that is merely stored
+and broadcast, with no real reader at its actual decision point, is exactly as absent as if it had
+never been implemented at all, and every accessor here is expected to have a named production
+reader (game rules gating the natural-tick/drop/spawn/mob-griefing paths that vanilla gates the
+same way; difficulty gating peaceful-mob eviction and spawning, the starvation floor, and fire
+spread odds; the clock's own two-part rule that game time always advances while the *displayed*
+day/night time advances only when the corresponding rule allows it, matching vanilla's own
+unconditional-versus-gated tick split). Persisting these scalars reuses vanilla's own `level.dat`
+field names, so a world this server writes stays readable by a real client, and — a genuine
+vanilla-format gotcha — every game rule is stored as a **string** in that file regardless of its
+real type, because that is how vanilla's own codec represents them.
 
-- **No longer an island** (issue
-  [#437](https://github.com/matteopolak/lodestone/issues/437), landed).
-  This crate had zero production callers — a declared island on the
-  standing ledger ([#436](https://github.com/matteopolak/lodestone/issues/436))
-  — until `lodestone-server`'s `region_source` became its first. The chunk
-  *schema* that #437 had to decide lives in `lodestone-server`'s
-  `chunk_nbt`, **not here**, and the separation below still holds.
-  See [`world-save-load.md`](./world-save-load.md) for the wiring, and for
-  what remains unwired (the shell still opens worlds through the
-  non-persistent constructor).
-  Keep this crate free of a `lodestone-server` (or `lodestone-world`, or
-  any protocol crate) dependency — it is depended *on*, never depends back.
-- **The container format and the chunk NBT schema are two different
-  problems** (issue #298's own stated trap). Don't grow `region.rs` a
-  dependency on chunk internals "for convenience" — that belongs in #437's
-  wiring code, operating on the `Nbt` tree this crate hands back.
-- **An empty/nonexistent region file and a truncated one are different
-  errors, on purpose.** `RegionFile::parse(&[])` succeeds (a legal,
-  chunk-less region — matches vanilla treating "file doesn't exist yet"
-  this way); `RegionFile::parse` of anything nonzero but shorter than the
-  8192-byte header is `Err(Error::TruncatedRegionHeader)`. Getting this
-  backwards regresses real vanilla behaviour (an all-zero sector table is
-  legal, not corrupt) in one direction, or silently accepts a broken file
-  in the other.
-- **LZ4 has no real-file evidence.** None of this repo's oracles set
-  `region-file-compression: lz4` in `server.properties` (all three leave it
-  at the `deflate` default), so unlike the other three schemes, `lz4_block.rs`
-  has only ever been checked `decode(encode(x)) == x` against itself. See
-  that module's doc for exactly what *is* externally verified (the framing
-  constants, read out of the real `lz4-java` jar's class file) versus what
-  isn't (an actual `lz4`-compressed byte stream from a real server).
-- **`level.dat`'s schema stops at world metadata, and the rest is not in that
-  file to model.** Fields the server does not yet own an in-memory
-  representation for stay unmodelled — but before adding one, check the table
-  above: weather, day time, game rules and the world border are *separate
-  files* in 26.2, so "add it to `LevelDat`" is the wrong move for four of the
-  five things people reach for first. The right move is a sibling module
-  beside `world_gen_settings.rs`, which is what that file already is.
-- **Verify any schema change against a real file, in both directions.**
-  `re_encoding_a_real_vanilla_file_reproduces_mojangs_own_bytes` decodes the
-  checked-in vanilla `level.dat` and re-encodes the NBT payload, then compares
-  **byte for byte** against Mojang's own uncompressed bytes. That is the gate
-  that catches a wrong tag type, a reordered compound or a mis-framed
-  `IntArray` — none of which a round trip through our own codec can see.
-  Compressed bytes are deliberately not compared: gzip output is
-  encoder-dependent and a mismatch there says nothing about the schema.
-- **`build_region` is a single-region primitive.** It does not split a
-  mixed-region chunk set across multiple `.mca` files — callers group
-  chunks by `chunk_x >> 5, chunk_z >> 5` themselves (`region::region_and_local`
-  computes that split for one coordinate at a time).
-- **Incremental single-chunk updates to an existing file aren't
-  supported yet.** `build_region`/`build_region_from_nbt` always build a
-  complete region file from a full chunk set in one pass; there is no API
-  for "append/replace one chunk in an existing `.mca` without rebuilding
-  it". Whoever picks up #437 will likely want that.
+### World spawn
+
+A fresh player's spawn point is found the same way vanilla finds one for a brand-new world: a fixed
+spiral search outward from the origin, testing each candidate column from the top down for a
+standable surface. The standability test matters more than it looks: testing "is this a solid
+block" is the wrong question, since real generated surface cover (short grass, flowers, snow
+layers) has no collision at all and would wrongly fail that test, while some things that *do* look
+walkable are correctly treated as solid because vanilla itself would let a player stand there
+(including a treetop, which is a genuine vanilla spawn outcome, not a bug to route around). A world
+whose spawn search area is entirely unsuitable (for instance, entirely ocean) falls back to a fixed
+height a couple of blocks above sea level rather than to a hardcoded low value that would place a
+player underground or inside bedrock. A per-player bed respawn point is stored and consulted
+separately, falling back to the world spawn whenever the recorded bed is gone.
+
+### Point-of-interest storage
+
+Vanilla keeps a third, independent region-file set — `poi/`, per dimension — indexing things like
+workstations, beds, bells, and lit nether portals, each with a maximum simultaneous "claim" count
+and a live occupancy state; a claim-count field that is *absent* on disk means "no claims remain",
+not "never claimed," which is easy to misread as the opposite. Each point of interest is a fixed
+block position, so unlike a moving entity, saving one only ever needs the caller's complete state
+for a given chunk, never a separate "clear the old copy out" pass. The only current real consumer
+is the nether-portal index, whose own persistence closes a real, previously-reported gap: without
+it, a portal lit in an earlier session vanished from a fresh in-memory index on restart, and a
+distant return trip built a duplicate portal instead of reusing the original. Restoring this index
+has to scan every point-of-interest file in the world, not just a radius around spawn or around the
+currently-loaded area, because a portal can exist anywhere the player has ever walked.
+
+### Save parity against a real vanilla server
+
+A dedicated live test hands a world to a real Mojang server running in a container, lets it load
+and (optionally) save the world, and compares the result — in both directions: our writer handed to
+a real reader, and vice versa. A byte-for-byte comparison of the two directories is the wrong
+assertion and cannot ever pass, because several kinds of difference are genuinely correct vanilla
+behavior (wall-clock and tick-count fields that are supposed to advance, chunk payloads
+recompressed at a different point in the sector layout, NBT compound field order, which is never
+part of a value's identity). The real assertion is semantic identity after a structural NBT
+comparison, decoding certain packed fields down to individual cells rather than comparing packed
+bytes, since two different but equally valid packings of the same content encode to different raw
+bytes. An explicit, narrowly-scoped allowlist names every field a real vanilla server is expected to
+change and why; nothing touching actual block states, positions, or persisted structures is ever on
+that list, and a control asserts that no allowed pattern can ever match one of those fields. This
+kind of gate is the only way several real defects were ever found and are worth remembering as a
+class: a generator writing two different string spellings for what should be one identical fluid
+state, and — historically — a save path that silently flattened 3-D biome data into one value per
+column and dropped structure references outright, neither of which any purely internal round-trip
+test could ever have seen, since our own writer and reader would have shared the same mistake.
+
+## How to change it
+
+- **A new persisted scalar or rule**: add its typed accessor, forward it through the shared world
+  state handle, and find its real decision point before considering it done — an accessor with no
+  reader is exactly the kind of island this subsystem exists to avoid creating again.
+- **Persisting a new `level.dat`-adjacent field**: check whether 26.2 actually keeps it in
+  `level.dat` at all before adding it there — several concepts people reach for first (weather, the
+  day/night clock, the world border, the persisted game-rule table itself) are each their own
+  separate save file in this version, not fields inside `level.dat`.
+- **Adding a new persisted block-entity or point-of-interest kind**: prefer keeping an unrecognized
+  on-disk entry's data around unmodified (a passthrough) over silently dropping it — a real vanilla
+  world loaded and re-saved here should not come back with emptied chests for every container kind
+  this project doesn't yet simulate.
+- **Verifying any on-disk schema change**: check it against a real file in both directions, and
+  prefer an external, independently-written parser for the expected values over trusting this
+  project's own reader to grade its own writer.
+
+### Gotchas
+
+- A stored seed always wins over a requested one when reopening an existing world — regenerating an
+  already-explored world from a different seed would make it self-inconsistent exactly at the edge
+  of wherever the player had already been.
+- Packed index arrays are non-spanning (a fixed number of entries per machine word, with leftover
+  high bits left as padding, not a dense bit stream) — a test built only from small palettes cannot
+  tell this apart from a dense packing, since the two only disagree once an entry width doesn't
+  evenly divide the word size.
+- A missing heightmap on disk is fine and expected (a real client recomputes it on load); a
+  deliberately *wrong* one is trusted outright and silently corrupts what a client believes about
+  the terrain, which is why an unmodelled heightmap kind is better left absent than approximated.
+- A world-metadata field's on-disk type is often surprising in a way that is easy to get backwards
+  by analogy with a neighboring field (a numeric-looking value stored as a string, a delta stored as
+  a signed rather than unsigned quantity, a priority stored as vanilla's actual numeric value rather
+  than as an enum ordinal) — verify each one against a real written file rather than against a
+  sibling field's own shape.
+- Persistence for a subsystem that also runs in the browser build must stay behind its own
+  native-only gate even when a *caller* of that subsystem is shared with the browser build — the
+  caller still has to compile there, it just skips the disk-based half.
 
 ## Configuration
 
-None. `region-file-compression` is a **server** setting
-(`server.properties`) that only ever appears here as the compression-scheme
-byte on already-produced bytes — this crate doesn't choose it, a caller
-does (`CompressionScheme` passed into `build_region`/`build_region_from_nbt`).
+- The world directory is chosen by the world-select flow; each world is its own directory rather
+  than sharing one implicit save slot.
+- The autosave interval is a small constant, far shorter than vanilla's own default, since a save
+  here only ever costs the dirty set rather than the whole resident cache — a quiet world writes
+  almost nothing, and a clean quit does not depend on the timer anyway because shutdown always
+  flushes before the process exits.
+- Chunks are written with vanilla's own default compression scheme.
 
 ## Dependencies
 
-`lodestone-core` (the shared NBT codec) and `flate2` (gzip/zlib, already a
-workspace dependency for packet compression) via `[workspace.dependencies]`.
-Two dependencies were added directly to `crates/lodestone-anvil/Cargo.toml`
-instead, rather than editing the root manifest's dependency table: `lz4_flex`
-(raw LZ4 block compression) and `xxhash-rust` (the LZ4 block-stream
-checksum). No filesystem framework, no async runtime, no protocol crate —
-`cargo tree -p lodestone-anvil` pulls in only those and their own transitive
-dependencies.
-
-## Verification
-
-- `crates/lodestone-anvil/src/region.rs`, `src/level_dat.rs`,
-  `src/compression.rs`, `src/lz4_block.rs`: unit tests, mostly self-round-trip
-  plus a handful of corrupt-input controls (truncated header, declared
-  length exceeding its sector, an unknown compression-scheme id, an
-  externalized oversized chunk).
-- `tests/region_container.rs`: a fuller self-round-trip through an actual
-  file on disk, including a negative-region-boundary case and a file with
-  two chunks compressed under different schemes.
-- `tests/region_real_world.rs`, `tests/region_real_world_26_2.rs`,
-  `tests/level_dat_real_world.rs`: the evidence that actually matters —
-  reading real `.mca`/`level.dat` files this crate never wrote.
-  `#[ignore]`d (they need `.cache/mc/` fixtures this repo doesn't check in);
-  run with `cargo test -p lodestone-anvil -- --ignored`. See those files'
-  module docs for exactly which real files, and exactly how each expected
-  value was independently derived (an external Python `struct`/`zlib`/`gzip`
-  parse, not this crate's own code).
-  - `region_real_world.rs` reads real `.mca` files from three *older*
-    protocol versions (1.8.9, 1.12.2, 1.16.5) — the container format is
-    unchanged across all of them and 26.2 alike (it predates all four; only
-    the chunk NBT *schema* differs, which this crate doesn't parse).
-  - `region_real_world_26_2.rs` is the literal-26.2 case: this repo's own
-    `creative` oracle, booted fresh, had three known blocks placed at known
-    coordinates over RCON (`setblock`, then `save-all flush`), and this
-    crate's `RegionFile` reader recovers exactly those blocks from the real
-    files that produced — cross-checked against an independent Python NBT
-    parser that walks the post-1.18 `sections`/`block_states` palette
-    encoding by hand. Notably, this oracle's overworld region files live at
-    `world/dimensions/minecraft/overworld/region/`, not `world/region/`
-    directly (unlike the three older versions above) — observed directly
-    from the real directory listing, not cited to decompiled source, and
-    worth knowing before #437's wiring work goes looking for it.
-  - `level_dat_real_world.rs` has real 26.2 evidence too, independent of
-    the above: every one of this repo's 26.2 oracle worlds has a real
-    `level.dat`, whether or not any chunk was ever saved in it.
+- `lodestone-anvil` — the container formats (region files, `level.dat`, the world-generation-settings
+  file), native-only.
+- `lodestone-core` — the shared NBT tree and codec both layers build on.
+- The chunk store this whole layer sits beneath — see `docs/chunk-lifecycle.md`.
+- A real vanilla server running in a container, for the save-parity gate only; not required for any
+  other path described here.

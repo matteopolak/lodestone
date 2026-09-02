@@ -2,634 +2,136 @@
 
 ## What it is
 
-The F3 instrument: two columns of stats over the world in vanilla's own plate,
-pitch and font, plus the F3+B hitbox and F3+G chunk-border world overlays. The
-presentation is a port of `DebugScreenOverlay`; the *content* is curated — vanilla
-lines that describe the JVM are dropped rather than faked, and this engine's own
-counters take the slots they leave.
+The F3 instrument: two columns of engine and world stats drawn over the world in vanilla's own plate,
+pitch and font, plus two world-space overlays (F3+B entity hitboxes, F3+G chunk borders). The
+presentation — plate geometry, text metrics, column layout — is a faithful port of vanilla's
+`DebugScreenOverlay`; the *content* is curated rather than faked: lines that describe the JVM (heap
+stats, Java/CPU info, GPU-utilization percentage) are dropped outright instead of being filled with
+fabricated numbers, and this engine's own diagnostics take the slots vanilla's JVM-only lines leave
+empty.
 
 ## How it works
 
-### Presentation, and where every constant came from
+### Presentation
 
-All of it is `DebugScreenOverlay` in `.cache/mc/26.2/client-src`. There are only
-five numbers, and `extractLines` spends all of them:
+Every geometric constant — line pitch, left/right/top insets, the background plate's size relative to
+its text, ink color, text scale — is transcribed from vanilla's real overlay rather than chosen. Two
+details matter for a faithful port: the background plate is one pixel taller and wider than its text on
+each side so consecutive lines tile with no seam, and the overlay draws at scale 1.0 in the same
+GUI-scale-divided logical canvas the rest of the HUD uses — it must never pick up a HUD-wide text-scale
+multiplier (see [`hud.md`](./hud.md)), which was a real, since-fixed bug here. An empty line is a group
+separator: it's skipped when drawing but still advances the line index, which is what keeps later
+groups from creeping up to fill the gap. Both columns' plates are drawn before either column's glyphs,
+so a line's plate can never cover another line's text — slightly stronger than vanilla, which only
+guarantees that within one column.
 
-| thing | vanilla | here |
-|---|---|---|
-| line pitch | `int height = 9` | `DEBUG_LINE_H` |
-| left inset | `left = 2` when `alignLeft` | `DEBUG_MARGIN` |
-| right inset | `left = guiWidth() - 2 - font.width(line)` | `DEBUG_MARGIN`, subtracted from `w` |
-| top inset | `top = 2 + height * i` | `DEBUG_MARGIN` |
-| plate | `fill(left - 1, top - 1, left + width + 1, top + height - 1, -1873784752)` | `DEBUG_LINE_BG`, `0x90505050` |
-| ink | `text(font, line, left, top, -2039584, false)` | `DEBUG_LINE_INK`, `0xFFE0E0E0`, **no shadow** |
-| scale | `graphics` is already the GUI-scaled canvas; no pose scale | `debug_scale = 1.0` |
+### What's ported, replaced, and dropped
 
-Three of those are worth stating in prose because they are the ones a
-reimplementation gets wrong:
+Vanilla's default debug profile enables nine entries, laid out alphabetically by their registry path
+(not registration order). Each surviving line falls into one of three buckets:
 
-- **The plate is `9` tall, not `8`.** `top - 1` to `top + height - 1` spans
-  exactly `height` rows, so consecutive plates tile with no seam and no overlap,
-  and it is `2` wider than the text (`left - 1` to `left + width + 1`). Ours is
-  `rect_px(x - 1, y - 1, tw + 2, DEBUG_LINE_H, …)` — the same rectangle.
-- **The overlay draws at scale 1.0**, in the same `gui_scale`-divided logical
-  canvas the rest of the HUD lays its constants into. It must **not** pick up
-  any ad-hoc HUD-wide pitch; doing so is what "the text is way too big" was,
-  and it is the same double-apply the XP level number's own comment records
-  one screen over. That ambient pitch (`HUD_TEXT_SCALE`/`hud_line_h()`) no
-  longer exists at all — chat, its last consumer, was ported to vanilla's own
-  `chatScale` metrics too (`docs/hud-text-scale.md`) — so there is nothing left
-  for a reimplementation to pick up by mistake.
-- **Empty strings are skipped but still advance `i`.** That is what makes a `""`
-  a group separator rather than an empty plate — `Strings.isNullOrEmpty` guards
-  both of vanilla's passes and the index keeps counting.
+- **Ported verbatim** — anything with a real datum on this side: player position (world, block, chunk,
+  section-relative, facing), targeted-block position, per-section client light levels. Format strings,
+  precision and separators are copied character for character.
+- **Replaced with an equivalent** — a vanilla line whose *shape* survives but whose *value* is
+  necessarily different because this isn't a JVM: frame time in place of a framerate-limit target,
+  engine version in place of Minecraft's, session status in place of server tick/tx/rx counters, real
+  process RSS in place of JVM heap percentages, and adapter/driver info in place of Java/CPU/display
+  info.
+- **Dropped entirely** — anything with no datum to fill it: JVM-specific memory breakdowns, biome/day
+  counters, sound/mood diagnostics, and every "visualize" world overlay besides hitboxes and chunk
+  borders. A dropped line is absent, never faked with a placeholder value.
 
-Plates first, then glyphs: vanilla runs two full passes inside `extractLines` so
-a later line's plate cannot cover an earlier line's text. Ours does both columns'
-plates and then both columns' glyphs, which is the same guarantee one step
-stronger — vanilla calls `extractLines` once per column, so on a canvas narrow
-enough for the columns to overlap, a right-hand plate *can* cover left-hand text
-there and cannot here.
+A handful of lines have no vanilla counterpart at all and exist because this engine needs them: a
+fixed-timestep health ratio, a live-chunk/dropped-mesh counter (a chunk the server reports loaded that
+silently fails to mesh used to vanish with no signal at all), an occlusion-culling summary, resident
+chunk memory, and GPU mesh residency (see below) — plus a handful of conditional lines (recipes,
+world border, maps, spawn point) that only appear once their data has actually arrived from the server.
 
-The font is the real vanilla `ascii.png`-derived raster whenever one is attached
-(`HudRenderer::new` takes `VanillaFont::shared()`); `b.text_width` is the same
-measure `b.text` advances by, which is why the right column's `x` is computed from
-it rather than from a restated glyph width. With no font attached — headless
-gates, jar-less runs — both fall back to the fixed 5×7 debug font and the
-right-alignment still holds, because both sides of the subtraction change
-together.
+Two values are read fresh every frame rather than cached, deliberately: the current dimension (read off
+the local player's own dimension component, so a portal trip updates it immediately rather than only at
+login) and the hitbox/chunk-border toggle states (read from the same flags that gate whether those
+overlays actually draw, so the on-screen hint can never disagree with reality).
 
-### The text
+### Column placement follows vanilla's semantics, not a mechanical halve
 
-`DebugStats` (`crates/lodestone-shell/src/hud.rs`) owns the content in
-`left_lines()`, `right_lines()` and `profile_lines()`, with `lines()` as their
-concatenation — the property that stops a line added to one block from going
-missing from every consumer of the flat list.
-`debug_overlay_columns_carry_vanillas_spacers_and_concatenate` asserts it
-directly, and its fixture carries a `frame_profile` for exactly that reason: the
-profile block left the right column, and a block that draws but is not in
-`lines()` is the island that assertion exists to catch.
+Vanilla does not split its full line list in half — it splits within three categories (a "priority"
+bucket that fills whichever column is currently shorter, a "regular" bucket split down the middle, and
+named groups placed as whole units) and each category ends with a separator. This port reproduces that
+category-based placement, derived by running vanilla's own algorithm against vanilla's own default
+profile and reusing the resulting left/right assignment — not by running the same algorithm against this
+engine's different (smaller, non-JVM) entry set, which would put entries in different columns than
+vanilla's screen does. Adding a new line means picking which of the three categories it belongs to and
+keeping its group's separator, not choosing a column directly.
 
-**Every row is measured and broken to fit before it is placed.**
-`hud::debug_overlay::layout_columns` is the one path from lines to positioned
-rows, and it guarantees that for every row `x - 1 >= 0` and
-`x + width + 1 <= canvas_w` — the `±1` being the plate, which is two pixels wider
-than its text. `fit_line` does the breaking, preferring a `", "` boundary, then
-any space, then a hard character break; continuation rows carry a two-space
-hanging indent.
+### Reading the engine-only lines
 
-That is structural rather than cosmetic, and it was paid for. The overlay
-previously placed a right-column line at `w - margin - text_width(line)`, which
-is a faithful port of vanilla's own arithmetic and **says nothing about whether
-the line fits**. The frame profiler formats `world_encode_submit` as a base
-timing plus a bracketed breakdown of four `world.*` sub-phases and the section
-counts; measured with the fixed-advance debug font that single string is
-**1536 px**, against a logical canvas of 1280 at GUI scale 2 on a 2560-wide
-framebuffer and 853 at scale 3. Most of it, including the `world.submit` reading
-it exists to report, drew past the right edge. Note the defect is
-**scale-dependent** — at scale 1 on the same framebuffer the line fits with room
-to spare — so "it runs off the screen" and "the overlay looks fine" were both
-honest reports.
+Two of the engine-only lines are easy to misread:
 
-What the overlay draws, on a live session:
+- **The occlusion-culling line's `active`/`off` flag is the load-bearing part, not the cull count.**
+  Every failure mode of the culling graph draws *more*, never less, so a cull count of zero is
+  ambiguous between "correctly nothing to cull" (e.g. looking straight down) and "the graph silently
+  stopped walking." Only the flag distinguishes them.
+- **The section/quad counts are per-frame *drawn* counts; the mesh-VRAM figure is *residency*, and
+  conflating them is a real, previously-shipped bug.** GPU mesh memory is allocated and freed only when
+  a chunk actually arrives or unloads — never by camera movement — so a residency figure that moves when
+  the player merely turns on the spot is wrong by construction; it was previously computed from a
+  per-frame drawn-quad count and swung with every camera rotation. The residency figure is read directly
+  off real GPU buffer sizes and the mesh arena's own occupancy instead. Read the two together: the
+  drawn count naturally sawtooths with camera movement, while a flat residency figure under that
+  sawtooth is healthy; a *climbing* residency figure under a flat drawn count would indicate real
+  fragmentation and is the only shape that would justify tuning anything here.
 
-```
-0 fps (0.00 ms)                                        Lodestone 0.1.0
+### The chords, and the world overlays
 
-Client Light: 11 (4 sky, 11 block)                     local world
-Difficulty: normal                     C: 191/1042 sections, 441 columns, …
-                                                                  E: 12
-XYZ: -0.500 / 70.25000 / 88.750                        P: 40/40, 0 unresolved
-Block: -1 70 88
-Chunk: -1 4 5 [31 5 in r.-1.0.mca]                     F/T: 0.40
-Facing: west (Towards negative X) (45.0 / 12.3)        Live cols: 441, drops: 0
-minecraft:overworld                                    Occl: active, nodes: …
-Section-relative: 15 06 08
-Targeted Block: -1, 70, 87                             Mem: 512 MiB (RSS)
-                                                       World: 41984 KiB
-Debug overlays: [F3+B] Hitboxes hidden;                Mesh VRAM: 65536/…
-                [F3+G] Chunk borders hidden
-                                                       Apple M5 (Metal)
-                                                       …limits…
-```
+F3 itself no longer directly toggles the overlay on press — it arms a modifier state, and the overlay
+toggles on release only if no chord (F3+B, F3+G) fired during the hold. Toggling on press instead would
+make a single F3+B keystroke both open the overlay and flip hitboxes in one motion, which is not
+vanilla's behavior.
 
-Below the left column sits the **frame-profile block**, its own group with its
-own `Frame profile:` heading:
+The two world overlays ride the engine's existing world-space debug-line renderer rather than a
+dedicated pass: hitboxes draw one wireframe box per rendered entity (sized from the same entity-dimension
+data the nametag-anchor code uses, so a hitbox and a nametag can never disagree about an entity's height)
+plus a short look-direction ray; chunk borders draw the player's current chunk plus a ring at every
+section boundary, using the actual dimension's height range rather than a hardcoded one (so a custom or
+non-overworld height range still draws the right box).
 
-```
-Frame profile:
-setup: 0.12/0.30/0.41 ms (240/240, 0 skip)
-sim_tick: 1.84/3.10/4.02 ms (240/240, 0 skip)
-…
-world_encode_submit: 4.71/8.02/9.63 ms (240/240, 0 skip) [world.prepare_buffers:
-  0.42/0.71/0.88 ms, world.terrain_cull_draw: 3.05/5.90/7.11 ms,
-  world.other_draws: 0.71/1.02/1.30 ms, world.submit: 0.53/0.79/0.94 ms,
-  sections visited: 1284 packed + 96 model]
-hud_ui_encode_submit: 0.77/1.20/1.44 ms (240/240, 0 skip)
-present: 0.31/0.55/0.72 ms (240/240, 0 skip)
-gpu terrain: 3.90 ms
-…
-```
+## How to change it
 
-It is **left-aligned and below the left column**, not appended to the right one,
-and that is a layout decision rather than a content one. These are the widest
-lines on the screen; the right column is *right*-aligned, so a long line there
-grows leftwards across the left column and its continuation rows come out
-ragged-left, which is the hardest possible arrangement for a table of numbers.
-Left-aligned they grow rightwards into empty canvas, and `fit_line`'s comma
-preference puts one `world.*` sub-phase on each indented continuation row —
-which is what makes the block answer "where did the frame go?" at a glance.
-
-The strings themselves are **not** built by the overlay. They are
-`DebugStats::frame_profile`, formatted by `app::redraw` from `app::frame_profile`
-and the GPU timer (see `docs/frame-profiling.md`); `profile_lines()` decides only
-the heading and that it is a group. The heading names no units on purpose: the
-CPU phase lines and the `gpu …` lines below them do not share a format, so a
-heading describing the first would be wrong about the rest.
-
-The `Debug overlays:` line is one line, wrapped here only to fit the page.
-Note where the dimension sits: **between `Facing:` and `Section-relative:`**, not
-at the end of the block. That is vanilla's group insertion order —
-`DebugEntryPosition` adds five lines and `DebugEntrySectionPosition` appends its
-one to the *same* `position` group afterwards, so the section-relative triple
-comes last of the six.
-
-### Which vanilla line became what
-
-`DebugScreenEntries` registers 44 entries. `DebugScreenProfile.DEFAULT` enables
-nine of them at `IN_OVERLAY`, and `DebugScreenEntryList.rebuildCurrentList`
-sorts the enabled set with `Comparator.naturalOrder()` — `Identifier.compareTo`
-compares **path first**, so the display order is alphabetical by path, not
-registration order. The nine are `3d_crosshair`, `fps`, `game_version`, `memory`,
-`player_position`, `player_section_position`, `simple_performance_impactors`,
-`system_specs`, `tps`.
-
-Ported means the format string is vanilla's, character for character.
-
-| vanilla entry | vanilla line | verdict | ours |
-|---|---|---|---|
-| `fps` | `%d fps T: %s%s` | **replaced** | `0 fps (0.00 ms)` — the `T:` token is the framerate-limit *target* and the parenthetical is the swapchain present mode; neither is an option this shell honours, so the slot carries the frame time we do measure rather than a limit we do not enforce |
-| `game_version` | `Minecraft <ver> (<launched>/<brand>)` | **replaced** | `Lodestone <ver>`, from `CARGO_PKG_VERSION` |
-| `tps` | `"<brand>" server, %.0f tx, %.0f rx` / `Integrated server @ %.1f/%.1f ms…` | **replaced** | the session status line (`local world`, `connecting…`). No smoothed server tick time and no packet-rate counters exist to fill vanilla's shape; skipped entirely when empty, as vanilla's entry adds nothing with no connection |
-| `player_position` | `XYZ: %.3f / %.5f / %.3f` | **ported** | verbatim, including the asymmetric precision |
-| `player_position` | `Block: %d %d %d` | **ported** | verbatim |
-| `player_position` | `Chunk: %d %d %d [%d %d in r.%d.%d.mca]` | **ported** | verbatim |
-| `player_position` | `Facing: %s (%s) (%.1f / %.1f)` | **ported** | verbatim, with `Direction.toString()`'s lowercase name and `Mth.wrapDegrees` on both angles |
-| `player_position` | `<dimension> FC: <n>` | **half ported** | the identifier is real — `minecraft:the_nether`, read from the local player's `ServerDimension` component, so it follows a portal trip and not just login. The ` FC: <n>` suffix is **dropped**: `getForceLoadedChunks` is `ServerLevel`-only and printing `0` would be a number we did not measure. Absent entirely before login, as vanilla's whole position group is with no camera entity |
-| `player_section_position` | `Section-relative: %02d %02d %02d` | **ported** | verbatim |
-| `light_levels` | `Client Light: %d (%d sky, %d block)` | **ported** | verbatim. `-` when there is no data — before login, or for an unloaded section |
-| `light_levels` | `Server Light: (%d sky, %d block)` | **dropped** | behind `SharedConstants.DEBUG_SHOW_SERVER_DEBUG_VALUES`, off in a shipped build |
-| `looking_at_block_state` | `Targeted Block: <x>, <y>, <z>` | **ported** | verbatim (prefix and comma separators) |
-| `looking_at_block_state` | the block state and its properties | **dropped** | not plumbed; `DebugStats::target` carries only the position |
-| `local_difficulty` | `Local Difficulty: %.2f // %.2f` | **replaced** | `Difficulty: normal (locked)` — the world difficulty the server reported. Vanilla's is a *server*-side scalar folded from inhabited time and moon brightness; the prefix drops `Local` because ours is not that number. Names are vanilla's lowercase serialized keys |
-| `memory` | `Mem: %2d%% %03d/%03dMiB` | **replaced** | `Mem: <n> MiB (RSS)` — real process RSS. The percentage is `used / maxMemory` and there is no `-Xmx` to divide by |
-| `memory` | `Allocation rate: %03dMiB/s` | **dropped** | a JVM heap-delta-between-GCs figure |
-| `memory` | `Allocated: %2d%% %03dMiB` | **dropped** | `Runtime.totalMemory` |
-| `detailed_memory` | `Memory (heap)` / `Memory (non-heap)` | **dropped** | `MemoryMXBean`, both JVM-only |
-| `system_specs` | `Java: %s` | **dropped** | Java-specific |
-| `system_specs` | `CPU: %s` | **dropped** | `GLX._getCpuInfo()` has no portable equivalent wired up |
-| `system_specs` | `Display: %dx%d (%s)` | **dropped** | window size is not on `DebugStats` |
-| `system_specs` | device name, backend + driver | **ported in spirit** | the `adapter` block, resolved once from `wgpu::Adapter::get_info()`, plus the reported limits |
-| `chunk_render_stats` | `C: %d/%d %sD: %d, %s` | **replaced** | `C: <drawn>/<graph nodes> sections, <n> columns, <n> quads`. The occlusion graph is the closest thing here to `ViewArea.size()`; view distance and the dispatcher queue have no counterpart |
-| `entity_render_stats` | `E: %d/%d, SD: %d` | **replaced** | `E: <drawn>` — only the drawn count is tracked |
-| `particle_render_stats` | `P: %d` | **replaced** | `P: <drawn>/<alive>, <n> unresolved`. The unresolved count stays: a zero draw against a non-zero alive count is the "renders nothing, reports fine" state it exists to expose |
-| `simple_performance_impactors` | `%s%sB: %d`, `Filtering: %s` | **dropped** | improved-transparency, cloud status, biome-blend radius and texture filtering are options this shell does not have yet. When it gains them, this is a ported line, not a replaced one |
-| `gpu_utilization` | `GPU: %d%%` | **dropped** | `Minecraft.getGpuUtilization` has no wgpu equivalent |
-| `biome` | `Biome: <id>` | **dropped** | not plumbed into `DebugStats` |
-| `day_count` | `Day #%d` | **dropped** | not plumbed |
-| `heightmap`, `chunk_generation_stats`, `chunk_source_stats`, `entity_spawn_counts`, `sound_mood`, `sound_cache`, `post_effect`, `looking_at_*_tags`, `looking_at_entity*` | — | **dropped** | none of these has a datum on this side yet; all are additions rather than parity fixes |
-| `entity_hitboxes`, `chunk_borders` | `DebugEntryNoop` — world overlays | **ported** | F3+B and F3+G, below |
-| `3d_crosshair`, `chunk_section_paths`, `chunk_section_octree`, `chunk_section_visibility`, `visualize_*` (9) | `DebugEntryNoop` — world overlays | **dropped** | not built |
-| the `Debug charts:` block | `formatChart` = `[mod+key] Name visible|hidden`, joined with `; `, when the overlay is visible | **replaced** | `Debug overlays: [F3+B] Hitboxes visible; [F3+G] Chunk borders hidden` — vanilla's shape carrying the two toggles that *do* exist. None of vanilla's four charts does, so naming them would be a hint that lies |
-| the `To edit: press [F3+…]` line | points at the entry-enable screen | **dropped** | there is no such screen here, and a chord that does nothing is worse than no hint |
-
-Lines of ours with **no vanilla counterpart**, and why each stays:
-
-| ours | why |
-|---|---|
-| `F/T: <n>` | fixed-timestep health. Vanilla runs 20 ticks/s, so at 50 fps this settles near 0.4; a drift is a physics-loop bug that nothing else on screen shows |
-| `Live cols: <n>, drops: <n>` | `drops` is the silent-mesh-drop detector. A live column the server reports loaded that fails to mesh used to vanish with no signal at all; a healthy session reads `0` |
-| `Occl: active, nodes: …, cull: …, shadow: …, walks: …` | see below — the `active`/`off` token is the load-bearing one |
-| `World: <n> KiB` | heap owned by loaded chunks. The single honest world-memory number: it reads the same whether the world is locally generated or client-owned |
-| `Mesh VRAM: <live>/<reserved> KiB` | see below. Vanilla has no GPU-residency line at all |
-| `Recipes:`, `Border:`, `Maps:`, `Spawn:` | conditional folds-reached-the-client diagnostics, each drawn only once its datum has actually arrived. They live on `HudFrame` rather than `DebugStats`, so `build_inner` appends them, each opening its own spacer |
-
-### Where the two live wires come from
-
-Both of these were lines that could have read a constant, which is the whole
-reason they are wired rather than formatted:
-
-- **The dimension** is `DebugStats::dimension`, filled in `sim/step.rs`'s
-  `refresh_stats` from the local player's
-  `lodestone_ecs::session::ServerDimension` component — **inside** the
-  `refreshes_world_stats` throttle, because it takes the ECS read lock. Reading
-  that component rather than caching a shell-side value at login is load-bearing:
-  the fold updates on `Respawned` as well as `Login`, which is how portal travel
-  is reported, and a login-time cache is exactly the stale-value shape that
-  produced the too-bright Nether.
-- **The two toggle states** are `hitboxes_shown` / `chunk_borders_shown`, copied
-  every frame in `app/redraw.rs` from the same `Arc<AtomicBool>`s the world-line
-  source closure reads (`WindowApp::debug_hitboxes` / `debug_chunk_borders`,
-  flipped in `app/lifecycle.rs`, consumed by `install_debug_lines_source`). The
-  write lives in `redraw.rs` rather than in `refresh_stats` because the atomics
-  are owned by `WindowApp`, not by `Sim`. One source of truth: the line's whole
-  job is to report the state that decides whether boxes draw, so a second mirror
-  is how a hint that lies gets shipped.
-
-The chord names in `format_toggle` are **literals**, and correctly so: unlike
-vanilla's these two are not `KeyMapping`s, so there is no
-`getTranslatedKeyMessage` to ask and no unbound case to handle. **If they ever
-become rebindable this must read the binding** — otherwise the hint will keep
-naming the old key with total confidence, which is the failure the whole line was
-added to prevent.
-
-### How the column split was decided
-
-This supersedes an earlier note in `left_lines`' own doc comment, which recorded
-a deliberate refusal to follow vanilla on the grounds that "vanilla's split is
-mechanical, and a mechanical halve would reshuffle both columns every time a line
-is added". The premise was half right and the conclusion did not follow.
-`DebugScreenOverlay.extractRenderState` does not halve *lines*. It halves within
-three **categories**, and the categories are semantic:
-
-| category | how a line gets there | how it is placed |
-|---|---|---|
-| priority | `addPriorityLine` | into whichever column is currently shorter |
-| regular | `addLine` | the flat list halved at `mid = (n + 1) / 2` |
-| group | `addToGroup(id, …)` | whole named groups, halved by *group count*, insertion order |
-
-Each category block is followed by a `""`. So what decides a line's column is
-which category its entry used, and reproducing *that* is what makes the layout
-read as vanilla's — while being stable in exactly the way the old note wanted,
-because adding a line to a group cannot move any other line across columns.
-
-What is **not** reproduced is running vanilla's halve over *our* entry set. Ours
-differs (no JVM entries, several engine-only ones), and the arithmetic on it puts
-`XYZ:` in the right column — further from vanilla's screen, not closer. So the
-category→column assignment is still by hand, but it is now *derived from
-vanilla's own default-profile output* rather than chosen freely: running vanilla's
-algorithm on `DebugScreenProfile.DEFAULT` puts the fps line, the perf-impactor
-lines, the memory group and the position group **left**, and the version line, the
-tps line and the system group **right**. Ours match that placement, and the order
-*within* each column is vanilla's.
-
-The consequence worth knowing before you read the screen: **the fps line heads the
-left column and the version line heads the right one**, which looks backwards
-until you notice `addPriorityLine` fills the shorter column and both start empty.
-The gate asserts that specific asymmetry.
-
-### Reading the engine lines
-
-The `Occl` line is folded in `app/redraw.rs` from `RenderStats` (see
-[terrain culling](./terrain-culling.md)). Three things about it:
-
-- **`active`/`off` is the load-bearing token.** Every failure mode of this cull
-  draws *more*, so a `cull` of `0` cannot on its own tell an open surface from a
-  graph that refused to walk. Without the flag on screen a silently-dead graph
-  looks identical to a correct one on a clear day.
-- **`cull: 0` is often correct.** At a near-horizontal camera the frustum has
-  already removed the subsurface and the graph has nothing left to take. It shows
-  up looking steeply down or underground — measured 191 → 59 sections at pitch 75.
-- **`walks` is session-cumulative, and must not increment while you turn on the
-  spot.** That is the invalidation cadence's whole claim (8-block cell crossings,
-  frustum decoupled from reachability), and it is only readable across two frames.
-  Rising while standing still is a bug, not activity.
-
-`nodes` is deliberately larger than the drawn section count: the graph includes
-sections with no geometry, and a `nodes` that tracks the drawn count instead means
-the fully-solid sections are missing and the walk has no floor to see.
-
-**The section and quad counts on `C:` are per-frame *drawn* counts; `Mesh VRAM` is
-*residency*.** The distinction is the whole content of that line, and getting it
-wrong was a reported bug: `Mesh VRAM` used to be
-`vram_bytes(RenderStats::total_quads)`, and `total_quads` only accumulates over
-sections that survived the cull, so the VRAM figure moved every time the player
-turned on the spot. That reads as buffers being allocated and freed, and nothing
-of the kind happens — `RenderState::upload_section` and `remove_section` are the
-only two paths that touch GPU mesh storage, and both are driven by chunk
-arrival/unload, never by the camera. Rotating changes *visibility*, not residency,
-which is exactly why a rotation is the input that tells the two apart.
-
-Both figures come from `RenderState::resident_mesh_bytes` and
-`reserved_mesh_bytes`, measured off the real `wgpu::Buffer` sizes and the model
-arena's own occupancy rather than estimated from a quad count:
-
-- **live** — the spans currently handed out to resident sections.
-- **reserved** — the arena blocks the driver is holding. `ModelMeshArena`
-  allocates 32 MiB vertex + 8 MiB index blocks and **never releases one**, so this
-  is a high-water mark: walking away returns spans to the free pool for the next
-  region to reuse, and reserved stays put. That retention is the design, and it is
-  why there is no eviction budget to tune here.
-
-Read them as a pair. Live sawtoothing under a flat reserved figure is healthy
-reuse; reserved climbing while live does not is fragmentation, and is the only
-shape that would justify a byte budget. The old estimate also priced every
-live-vanilla quad at the packed path's 72 B when a `ModelVertex` quad is 152 B, so
-it under-reported real mesh VRAM by a further ~2.1× on top of the cull factor.
-`mesh_vram_is_a_function_of_residency_not_of_the_camera` (`gpu/sections.rs`,
-`#[ignore]`d, needs an adapter) pins the invariant and computes the old formula
-alongside as its own control: measured 1,853,568 → 1,365,552 bytes across a pure
-180° turn, against a byte-identical 5,777,856 for the residency figure.
-
-**KiB, not vanilla's MiB, on purpose.** The live figure's sawtooth is the signal
-and MiB granularity flattens it.
-
-### The chords
-
-`app/input.rs`. F3 no longer resolves to `ToggleDebugOverlay` — it resolves to
-`KeyOutcome::DebugModifier(pressed)` on **both** edges, and `app/lifecycle.rs`
-toggles the overlay on the release only when no chord fired
-(`self.debug_chord_used`). That is vanilla's
-`keyDebugModifier.setDown(!didDebugAction)` in `KeyboardHandler`. Toggling on the
-press, as this used to, makes F3+B both open the overlay and toggle hitboxes on
-one keystroke.
-
-`KeyGate::debug_held` carries the held state into `resolve_key`, so the precedence
-stays in the one pure function every other input decision lives in.
-
-### The world overlays
-
-Both ride the **existing** `DebugLineRenderer` channel rather than getting a pass
-of their own: they are world-space coloured segments, which is exactly what it
-draws, and it draws last in the world pass so they read over everything real.
-`app/session.rs`'s `install_debug_lines_source` closure appends:
-
-- `gpu::entity_hitbox_vertices` — one white wireframe box per `EntityDraw`, plus
-  a cyan 2-block look ray from eye height. Dimensions come from the jar-derived
-  `lodestone_data::entity_dimensions` census scaled by the draw's own `scale` —
-  the *same* source `gpu/nametag.rs` uses for the tag anchor, so a hitbox and a
-  nametag cannot disagree about an entity's height.
-- `gpu::chunk_border_vertices` — the four yellow uprights of the player's chunk
-  plus a ring at every 16-block section boundary.
-
-Toggles are `Arc<AtomicBool>` because the source closure is
-`Fn() + Send + Sync + 'static` and cannot borrow `self`.
-
-## How to change it, and the gotchas
-
-- **You do not have to make a line fit; you must not defeat the fit.** Adding a
-  line or a sub-phase needs nothing from `debug_overlay` — route it through
-  `layout_columns` like everything else and it is broken to the canvas
-  automatically. What *would* reintroduce the defect is a second draw path that
-  measures a line and positions it directly, which is exactly what the overlay
-  used to do. `debug_overlay_lines_fit_the_canvas.rs` is the guard, and its
-  control is worth reading before changing the layout: neutering `fit_line` back
-  to "return the line unbroken" fails all three of its tests, and the failure
-  names the `world.submit` line at scales 2 and 3 with the plate rect that
-  escaped.
-- **Adding a line means picking a category, not picking a column.** Decide which
-  of vanilla's three it is — priority, regular, or a named group — and put it in
-  the block that category already occupies, keeping its `""` separator. Do not
-  reach for a fresh column assignment; the whole reconciliation above is that the
-  category is what carries the meaning.
-- **Match the typography or the screen mixes two conventions.** `Key: value`,
-  sentence case for the key, lowercase for an enum (`Difficulty: normal`,
-  `Facing: west`), a space after the colon, `, ` between fields on one line. The
-  overlay used to be SHOUTED with `k=v` shorthand in places; a new line in either
-  of those styles is now the odd one out.
-- **Never `as i64` a coordinate.** `Entity.blockPosition()` is `Mth.floor`, and a
-  cast truncates toward zero: it maps `-0.5` to block `0` in chunk `0` where the
-  truth is block `-1` in chunk `-1`. Everything that divides or masks a
-  coordinate — `Block:`, `Chunk:`, `Section-relative:` — inherits the error, and
-  **it is invisible at the origin**, which is why the gate's fixture sits at
-  `[-0.5, 70.25, 88.75]` and pairs every expectation with what the truncating
-  version produces. `DebugStats::block_position` is the one place that floors.
-- **The three O(resident-world) stats are throttled to one frame in 30**
-  (`sim/step.rs`, `WORLD_STATS_PERIOD`, commit `f4e73530`). The light read went
-  *inside* that `if` for the same reason. **Anything you add that touches the
-  world or makes a syscall belongs inside it**, not next to the cheap every-frame
-  fields above.
-- **There is no light-level pie chart to port.** 26.2 registers
-  `minecraft:light_levels` as a *text* entry (`DebugEntryLight`) and the pie was
-  removed. If a pie is wanted anyway it is a new HUD primitive, not a parity item.
-- **F3+B and F3+G are not rebindable.** Vanilla declares them as real
-  `KeyMapping`s (`key.debug.showHitboxes` = 66, `key.debug.showChunkBorders` = 71,
-  `Options`); here they are hardcoded `KeyCode::KeyB`/`KeyG` behind the modifier.
-  Making them bindable means new `InputAction`s plus their labels, category and
-  GLYPH keysyms in `keybinds.rs` — a real gap, deliberately not taken, and the
-  *modifier* is likewise a `KeyGate` flag rather than vanilla's second
-  `KeyMapping` on the same keysym.
-- **The chunk-border column range is passed in, not assumed.**
-  `install_debug_lines_source` resolves `min_y`/`height` from
-  `NetClient::world_dimensions` and falls back to the overworld `(-64, 384)` only
-  when there is no session. A hardcoded `-64..320` would silently draw the wrong
-  box in the nether or a custom-height dimension. **The range is captured at
-  install time**, so a dimension change needs the source reinstalled — call
-  `install_session_render_sources` on a portal trip if that becomes visible.
-- **The debug-line vertex buffer starts at 4096 segments** and grows
-  geometrically when F3+B sees more entities, retaining the larger allocation
-  for later frames. A box is 12 segments and a 24-section chunk border is ~100
-  segments; only an input larger than the device's maximum vertex-buffer size
-  can be truncated, and that case emits a render warning instead of failing
-  silently.
-- **An entity whose type path the census cannot resolve gets no box**, rather than
-  a plausible default one. A wrong hitbox is worse than a missing one: the
-  overlay's whole value is being believed.
-- **The `Debug overlays:` line must keep reading the atomics, not a mirror.** It
-  is the only on-screen report of whether F3+B and F3+G are on, so a shell-side
-  copy that drifts turns the overlay's most trustworthy property — that it is
-  believed — into the bug. Same for the chord literals; see above.
-- **F3+B/F3+G's lines were a `PrimitiveTopology::LineList` until this fix**,
-  which rasterizes at exactly one *physical* pixel regardless of resolution or
-  DPI scale — the same failure `gpu/outline.rs`'s own module doc already names
-  for the block-highlight box. At a real gameplay resolution that reads as
-  "doesn't draw at all" rather than merely thin, even though the closure
-  feeding it (`install_debug_lines_source`) was producing correct geometry the
-  whole time. `DebugLineRenderer` (`gpu/debug_lines.rs`) now expands each
-  segment into a screen-space-thickened triangle ribbon — the identical
-  technique `OutlineRenderer` uses — with per-vertex colour threaded through
-  `debug_lines.wgsl` so a hitbox's white and a chunk border's yellow/blue
-  survive the expansion. `MIN_LINE_WIDTH_PX = 1.5` is deliberately thinner
-  than the outline pass's `2.5`: a diagnostic wireframe should read as a
-  *line*, not a highlighted edge.
-- **The ribbon that replaced the `LineList` was a bow-tie, and the owner's
-  follow-up report ("the chunk border lines are the wrong thickness, too thick
-  on the sides") is that defect.** `DebugLineRenderer::prepare` stores a `side`
-  (-1/+1) per corner and `debug_lines.wgsl` offsets along the segment's
-  screen-space normal — but that normal is derived from
-  `screen(other) - screen(this)`, which points the *opposite* way at the
-  segment's far endpoint. So the far endpoint's normal is `-n`, and its stored
-  `side` has to be negated to land on the same edge of the ribbon as the near
-  endpoint's. It was not, so the two triangles picked **opposite diagonals** of
-  the quad: the shape drawn was full width at both endpoints, pinched to half
-  width at the midpoint, and biased to one side instead of centred on the line.
-  Measured by readback at an 8192 px viewport (a 6.4 px line width): the width
-  profile along one segment ran `6 6 6 5 5 5 4 4 4 3 3 3 4 4 4 5 5 5 6 6 6`
-  before the fix and a flat `6` after, identically for a screen-vertical and a
-  screen-horizontal segment. At 1920x1080 the same change moved total coverage
-  from 3,564 px to 6,234 px for a chunk-border column and 1,307 px to 1,952 px
-  for a zombie hitbox. `tests/debug_line_ribbon_width_pixels.rs` is the gate;
-  it must be a **pixel** gate, because the CPU-side vertex list is equally
-  plausible either way and the whole defect lives in what the rasteriser does
-  with it. The control is the pre-fix run above, observed red.
-
-  **`gpu/outline.rs`'s `OutlineRenderer::prepare` carries the identical defect**
-  — the same six-entry quad list, the same shader convention in
-  `outline.wgsl` — so the block-highlight box pinches the same way at its own
-  2.5 px width. It was left alone here only because it sits outside this pass's
-  assigned files; it is the same one-line change (negate `side` on the two
-  `(cb, ca, ...)` corners) and wants the same gate.
-- **The reported "F3+B and F3+G both toggle chunk borders" crossing does not
-  exist in the tree, and the whole flag path is now gated to keep it that way.**
-  Every hop was read at the reporting sha and is correct: `resolve_key`'s two
-  chord arms, `apply_key_outcome`'s two stores, the two `Arc::clone`s in
-  `install_debug_lines_source`, and `RenderState::set_debug_lines_source`'s
-  single assignment. Both producers were also confirmed to reach real pixels
-  from the same camera (1,110 px hitbox / 31,172 px chunk border). What *was*
-  missing is that nothing reached the flag-to-producer mapping at all, so a
-  transposition there would have been invisible: the mapping now lives in
-  `gpu::f3_overlay_vertices`, and `tests/debug_line_f3_overlay.rs` drives it
-  with the two flags at **different** values (a fixture that sets two adjacent
-  `bool`s equal cannot see a transposition), with the mob twelve chunks from
-  the player so a swapped producer cannot land on coincidentally similar
-  geometry. Neutered by swapping the two `if`s: red, naming the crossing.
-
-  Worth carrying for whoever reads the report next: this client's
-  `extracted_entity_draws` excludes the local player, so in a quiet area F3+B
-  legitimately draws nothing at all, which is indistinguishable in play from
-  the overlay being broken. Vanilla has the same first-person behaviour, but if
-  the owner's session was somewhere with no nearby mobs, "F3+B does nothing and
-  the only overlay I ever get is the chunk grid" is the expected observation
-  rather than a defect.
-- **No existing pixel gate exercised `entity_hitbox_vertices`/
-  `chunk_border_vertices` specifically.** Every debug-line gate in
-  `gpu/pixel_gates.rs` installed a synthetic closure
-  (`structure_block_outline_vertices`, a bare billboard), so a break in either
-  real producer was invisible to the rest of that corpus — the
-  shared-construction-path blindness `DESIGN.md` §12 already names for a
-  render frame reached through one factory, one hop from the pipeline.
-  `entity_hitbox_and_chunk_border_vertices_draw_visible_pixels` closes that
-  gap: it feeds the real production functions through the real pipeline and
-  asserts pixels move (423 px / 828 px at 320×240 after the width fix).
-  Neutered by forcing `debug_line_count` to `0` at the draw call and confirmed
-  red before landing the fix above.
-- **The line-width fix above was real but was not the whole story: the owner
-  reported F3+B/F3+G still doing nothing after it landed, with *no chat
-  feedback at all* — not thin lines, no `[Debug] Hitboxes: shown` line
-  either, while F3+H (identical shape, `push_local_chat` call included)
-  worked. That symptom is upstream of rendering entirely, so this repo's own
-  evidence standard applies: instrument rather than reason further.**
-  `app::lifecycle::handle_keyboard_input` was split at its `match outcome`
-  boundary into `WindowApp::apply_key_outcome(outcome, pressed, code, raw)` —
-  `raw: Option<&winit::event::KeyEvent>` rather than a bare `KeyEvent`,
-  because winit's `KeyEvent` has a private `platform_specific` field and
-  cannot be constructed outside winit at all, which is exactly why no test
-  before this one drove anything past `resolve_key`'s pure `KeyOutcome`.
-  `app::tests::f3_b_and_f3_g_flip_their_atomic_and_push_chat_through_the_real_key_path`
-  drives all three chords through this real effect path (the actual
-  `Arc<AtomicBool>` stores and the actual `Sim::push_local_chat` call, not a
-  model of them) and passed: the atomics flip and all three chat lines
-  appear correctly, F3+H included, given a correctly-resolved `KeyOutcome`.
-  That rules out `apply_key_outcome`, the atomics and (under normal
-  conditions) `push_local_chat` as the cause — the two are not where the
-  report's actual defect lives.
-  `Sim::push_local_chat` (`sim/session.rs`) is hardened regardless, per the
-  owner's standing "nothing may be silently skipped" rule: every other
-  accessor of `SessionChat` on the local entity `.expect()`s its presence
-  (`LocalPlayerPlugin` inserts the whole session component set eagerly and
-  nothing ever removes it), so the `if let Some(...)`-with-no-`else` here was
-  inconsistent with the rest of the file even before this report; it now logs
-  a `tracing::warn!` on the `chat` target instead of dropping the line with
-  no trace. **This was not reproduced as the live cause** — the component was
-  never actually observed missing — but the branch is no longer silent.
-  `app::lifecycle::handle_keyboard_input` now also logs
-  `RUST_LOG=debug_keys=debug` once per real key event — the raw
-  `physical_key`, the resolved `code`/`pressed`/`debug_held`/`outcome` — at
-  exactly the seam neither test above can see: whether the *real* event for a
-  B/G press ever carries `Some(KeyCode::KeyB)` with `debug_held` true in the
-  first place. **Resolved, and the answer was above this
-  code entirely.** The owner ran with that log enabled: F3 printed
-  `Code(F3)` and H printed `Code(KeyH)`, both resolving correctly, while a
-  failing G press printed **no line at all** — not a `None` outcome, no
-  event. Since that log is unconditional for every event reaching
-  `handle_keyboard_input`, and the `WindowEvent::KeyboardInput` arm is not
-  shadowed (the two other `KeyboardInput` mentions in that function are
-  `if matches!` guards for the AFK pacer and browser audio, not match arms),
-  winit was never delivering the keypress. The cause was the **`fn`
-  modifier**: F3 on that keyboard requires holding `fn`, and `fn`+G is not a
-  combination the keyboard reports at all, so the chord never left the
-  hardware. Releasing `fn` before pressing G works. The
-  `PhysicalKey::Unidentified` hypothesis above was wrong — nothing was ever
-  unidentified — and no code defect existed. The log stays: it is what made
-  a hardware-level absence distinguishable from a resolve failure, which is
-  a distinction no test in this crate can draw.
-- **Not built**: the four debug charts, the lightmap blit, vanilla's runtime
-  entry-enable screen and its `debug-profile.json`, and the nine `visualize_*`
-  world overlays. All are additions; none is a gap in what is here. The
-  profiler pie chart **is** now built — see `docs/frame-profiling.md`'s "Pie
-  chart" section — as a deliberate beyond-vanilla addition to the
-  frame-profiling instrument, not a port of `DebugScreenOverlay`'s light-level
-  pie (which vanilla itself removed in 26.2; see the light-level bullet
-  above).
-
-## Gates
-
-`crates/lodestone-shell/tests/debug_overlay_lines_fit_the_canvas.rs` is the fit
-guard; the rest are `hud.rs` unit tests. None needs an adapter.
-
-The fit guard drives the **real** producers (`left_lines`/`right_lines`/
-`profile_lines`) through the **real** layout with the **real** measure
-(`debug_overlay::measure`, the same function `Builder::text` advances by), at GUI
-scales 1–4. What it does *not* reach is the profiler's own string: that comes
-from `app::frame_profile::PhaseSummary::line`, which is `pub(crate)` and so
-unreachable from an integration test, and the fixture transcribes its shape.
-So it verifies the **overlay's fit**, not the **profiler's formatting** — if the
-profiler's format changes, this gate keeps passing against the old shape, which
-is fine for a width assertion and would not be for a content one.
-
-Its two controls, both observed firing:
-
-- `the_unwrapped_profile_line_really_does_overflow` measures the raw fixture and
-  requires it to be too wide at GUI scales 2–4, and to *fit* at scale 1 — without
-  that, a corpus of short lines satisfies the fit assertion vacuously.
-- neutering `fit_line` to return every line unbroken fails all three tests, and
-  the fit test's message names the offending line and prints the plate rect that
-  escaped (`plate [1, 1539]` against a canvas of 1280).
-
-The rest:
-
-- `debug_overlay_plate_and_ink_match_vanillas_fill_literals` — transcribes
-  `extractLines`' two signed Java `int` colours (`-1873784752`, `-2039584`) and
-  **unpacks them in the test** rather than restating four floats, so a channel
-  swap or a dropped alpha fails. Also pins the pitch and the margin. It used to
-  additionally pin `DEBUG_LINE_H < hud_line_h()` as a negative control against
-  the ad-hoc HUD-wide pitch; that pitch was deleted outright once chat (its
-  last consumer) moved to vanilla's own metrics, so there is no longer a
-  second pitch to compare against.
-- `debug_overlay_ported_lines_match_vanillas_format_strings` — all nine ported
-  lines, character for character, at `[-0.5, 70.25, 88.75]`, yaw `405`, in
-  `minecraft:the_nether`, with hitboxes **on** and borders **off**. Each
-  expectation carries the value the superseded or unwired version produced for the
-  same input, and the gate **fails if the two coincide**. Mismatches are collected
-  and asserted on the collection, so a regression reports every wrong line rather
-  than the first. Three controls, all run:
-  - `block_position` back to `as i64` → 3 arms, 4 messages (`Block: 0 70 88`,
-    `Chunk: 0 4 5 [0 5 …]`, `Section-relative: 00 06 08`).
-  - the dimension line hardcoded to `minecraft:overworld` and the two toggle
-    booleans transposed → 2 arms, 4 messages. **The toggles are set to different
-    values precisely so the transposition is visible** — equal booleans are the
-    one input a swapped adjacent same-typed pair survives.
-  - with the collection assert satisfied, the hardcoded dimension push also fails
-    the pre-login absence check, which is the control proving that check can fire
-    rather than merely being satisfied by a broken search.
-- `debug_overlay_columns_carry_vanillas_spacers_and_concatenate` — `lines()` is
-  exactly `left_lines() ++ right_lines()`, both columns carry at least two group
-  spacers, neither ends with one (a trailing spacer draws nothing and only pads
-  the flat list), the fps line heads the left column and the version line the
-  right, and the adapter block opens with its spacer.
+- **Route a new line through the shared column-fitting layout — never measure and position a line
+  directly.** A second, ad-hoc draw path that bypasses the fitting logic is exactly the bug class this
+  overlay used to have, where a long line could escape the canvas at high GUI scale.
+- **Adding a line means choosing one of vanilla's three categories (priority, regular, named group), not
+  a column.** The category is what decides placement; picking a column directly abandons the semantics
+  documented above.
+- **Match the existing typography convention**: `Key: value`, sentence case for keys, lowercase for enum
+  values, a space after the colon, `, ` between fields on one line. A line in a different style becomes
+  the visibly odd one out.
+- **Floor a coordinate to get its block/chunk value — never truncate-toward-zero (`as i64`).** The two
+  disagree on any negative fractional coordinate, and the bug is invisible right at the origin, so a
+  regression here needs a fixture placed off-origin with a negative coordinate to catch it.
+- **Anything that reads world-resident state or makes a syscall belongs behind the existing throttle**
+  that already gates the handful of O(resident-world) stats to a periodic refresh, not the
+  every-frame-cheap fields.
+- **F3+B and F3+G are hardcoded, not rebindable** — making them real key bindings is a deliberate,
+  known gap rather than an oversight, and would need new bindable actions with their own labels and
+  glyphs.
+- **The chunk-border height range is captured at install time from the active dimension, not assumed to
+  be the overworld's.** A dimension change (e.g. a portal trip) needs the debug-line source reinstalled
+  if the visible range should follow it.
 
 ## Configuration
 
-`gui_scale` (`options.json`) scales the whole overlay through
-`menu::render::logical_canvas`, like the rest of the HUD. Nothing else — vanilla's
-`debug-profile.json` and its per-entry `ALWAYS_ON`/`IN_OVERLAY`/`NEVER` statuses
-are not implemented, so the entry set here is fixed.
+`gui_scale` (`options.json`) scales the whole overlay through the shared logical-canvas divisor, exactly
+like the rest of the HUD. There is nothing else: vanilla's per-entry enable/disable profile system is
+not implemented, so the entry set here is fixed rather than user-configurable.
 
 ## Dependencies
 
-`lodestone_data::entity_dimensions` (hitbox sizes), `crate::net`
-(`entity_light_at`, `world_dimensions`), `crate::gpu::debug_lines` (the draw),
-`crate::entities::extracted_entity_draws` (the entity list, sampled on every
-render frame so entities entering the tracked view are picked up without a
-second toggle),
-`crate::hud::vanilla_font` (the glyphs and their advances).
+- `crates/lodestone-shell/src/hud.rs` and `hud/vanilla_font.rs` — the shared plate/text draw and font
+  stack (see [`hud.md`](./hud.md)).
+- `crate::gpu::debug_lines` — the world-space line renderer both toggleable overlays ride.
+- `crate::entities` — the live entity draw list hitboxes are built from.
+- `lodestone_data::entity_dimensions` — hitbox sizing, shared with the nametag-anchor code.
+- `crate::net` — dimension height range and per-section light lookups.
+- The 26.2 jar under `.cache/mc/26.2/client-src` — behavioral reference only, never transliterated.

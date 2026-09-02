@@ -2,469 +2,149 @@
 
 ## What it is
 
-The chat box: the outbound input line (`crate::chat::ChatInput`), the received
-scrollback (`lodestone_game::chat::ChatLog`, folded into legacy `§`-coded
-strings at read time), and the HUD draw that renders both
-(`crate::hud::HudGeometry::build_inner`'s chat block, `crates/lodestone-shell/src/hud.rs`).
-This doc covers the **rendering** half — input caret, word wrap, and the
-persisted Chat Settings that shape it — not the wire path (`chat.rs`'s own
-module docs cover composing an outbound line) or the log itself
-(`lodestone-game/src/chat.rs`).
+The chat box: the outbound input line, the received scrollback, and the HUD draw that renders both,
+including in-line editing (caret, selection, history, word motion) and interactive text (clickable
+links, hover tooltips, command suggestions). This covers the client-side rendering and editing surface;
+the wire path for composing an outbound line and the log itself live in `lodestone-game`.
 
 ## How it works
 
-### Input line
+### Input line and caret
 
-`HudFrame::chat_input` carries the in-progress line, `Some` only while the
-chat box is open. The draw (`hud.rs`, just after the `chat_open` local) emits
-a translucent background strip sized to the chat box, then the typed text and a
-caret. There is **no leading `>`** — vanilla's `ChatScreen`/`EditBox` never
-draws one.
+The chat input is a real `EditBox` (see [`ui-framework.md`](./ui-framework.md) for the shared edit-box
+mechanics), not a bare string — which is what gives it a movable caret, a selection, word-wise motion,
+Home/End, and clipboard operations, all ported directly from vanilla's own text-field behavior rather
+than written bespoke for chat. There is no leading `>` glyph; vanilla's chat input never draws one.
 
-**The caret has two shapes, and which one you get is vanilla's `insert`
-predicate**: `cursorPos < value.length() || value.length() >= maxLength`. When it
-holds, the caret is `TextCursorUtils.extractInsertCursor`'s one-pixel bar
-spanning the glyph row plus a pixel either side; otherwise it is
-`extractAppendCursor`'s literal `_` character, drawn as text. `HudFrame` carries
-the caret's `char` index as `chat_cursor`, filled from `ChatInput::cursor_position`,
-and its x is vanilla's `cursorX` — the width of the text **before** the caret,
-plus the one pixel `extractWidgetRenderState` reserves after a non-empty visible
-slice, minus that pixel again in insert mode. `docs/chat-input-editing.md` carries
-the full account, including the two defects this replaced (an x measured from the
-whole line, and an unconditional `_`).
+The caret has two shapes, chosen by whether the caret sits strictly before the end of the line (or the
+line is at its length cap): a one-pixel vertical bar when inserting mid-line, or a literal drawn `_`
+character when appending at the end. Position is measured from the width of the text before the caret,
+not the whole line — measuring against the whole line (or against `{text}_` including the caret's own
+glyph) is a real, previously-shipped bug, since a trailing underscore has no width of its own in
+vanilla's model. The caret blinks at vanilla's own fixed interval, driven by wall-clock time rather than
+a tick count, matching how every other transient render flag reaches the HUD frame.
 
-The caret blinks at vanilla's real rate: `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS`
-is `300`, and `isCursorVisible(millis) == (millis / 300) % 2 == 0`
-(`TextCursorUtils.isCursorVisible`). `HudFrame::chat_caret_visible` carries that
-boolean; the caller computes it from wall-clock time (see `app.rs`'s
-`WindowApp::redraw`, right before it builds the `HudFrame`) rather than this
-module owning a clock, matching how every other transient render flag reaches
-`HudFrame`.
+An inline greyed-out autocomplete "ghost" — the top suggestion candidate — draws just before the caret,
+under three rules transcribed from vanilla: its position is measured from the text before the caret
+alone (the caret contributes no width of its own to that measurement, even though this HUD's append
+caret is a drawn character); it draws in the order text, then ghost, then caret, so the caret composites
+over the ghost's leading glyph; and it's suppressed whenever the line is at its length cap or the caret
+isn't at the very end, since a mid-line caret has no sensible completion to extend.
 
-### The inline command-suggestion "ghost"
+### Sent-line history and player-name completion
 
-`HudFrame::chat_suggestion_ghost` is the greyed-out preview of the top
-autocomplete candidate — `EditBox.extractRenderState`'s own `suggestion`
-field. Three things port from that method, in the order that matters:
+Up/Down recall previously **sent** lines, oldest to newest, capped and deduplicated against immediate
+repeats and whitespace-normalized before comparison. The history buffer belongs to the input component
+itself (not the screen), so reopening chat still walks everything sent earlier in the session; both
+ends of history clamp rather than wrap, and a partially-typed line is stashed and restored around a
+history excursion so browsing history never destroys unsent text. Recording into history only happens
+on an actual send, never on a cancelled (Escape'd) line.
 
-1. **Position is `cursorX - 1`, where `cursorX` is measured from the text
-   before the caret alone.** The caret contributes no advance of its own in
-   vanilla, because there it is a separately blinking overlay, not part of the
-   measured string. This shell's append caret *is* a drawn `_` glyph, which makes
-   it tempting to measure the pen against `{input}_` — that was a real, shipped
-   bug: it landed the ghost one whole underscore-width too far right, permanently
-   (stable across the blink, but at the wrong x either way).
-2. **Draw order is text → suggestion → cursor**, so the caret composites on
-   top of the suggestion's leading glyph rather than the other way round.
-   Drawing `{input}{caret}` as one string before the suggestion gets this
-   backwards.
-3. **Gated on `!insert`**, where vanilla's `insert = cursorPos <
-   value.length() || value.length() >= maxLength`. **Both** disjuncts are live:
-   `ChatInput` caps a line at `MAX_CHAT_LENGTH`, so a full line suppresses the
-   suggestion, and a caret moved off the end of the line does too. The first used
-   to be treated as permanently false on the grounds that the line had no caret to
-   put anywhere but the end — a claim that stopped being true when `ChatInput`
-   became an `EditBox`, and went on being coded to for a while afterwards.
+Tab-completion for an ordinary (non-command) chat line is answered entirely locally from the online
+player list — no server round trip, so it works even against a server that never sent a command tree.
+It must complete against **every** online player, not just those visible in the tab-list overlay (the
+two are different, deliberately unfiltered-vs-filtered projections over the same roster — see
+[`hud.md`](./hud.md)). Matching is "is a prefix of a segment delimited by `._/`", not a substring
+match, and word-boundary detection for both history and tab-completion breaks only on whitespace, never
+on punctuation — from the end of `say hi:there`, one backward word-skip lands right after `hi`, not
+after the colon, which is a subtly-wrong-feeling rule easy to get wrong without a fixture built
+specifically to expose it. Suggestions complete against the text up to the caret, not the whole line,
+since those can differ once the caret can move; the popup's own selection-splice logic accounts for
+this so accepting a suggestion mid-line only replaces the completed word, not the whole input.
 
-The colour is vanilla's literal `0x808080` (`SUGGESTION_GHOST`); the draw
-itself takes no font-shadow parameter here (`Builder::text`'s fixed-advance
-fallback font is never shadowed, and the vanilla-font path shadows
-everything it draws uniformly, so there is no per-call flag to honour on
-either path this shell has, unlike `EditBox`'s own `textShadow` field).
+Chat's Tab and the in-world player-list overlay's Tab share one key and cannot steal from each other:
+whichever context is open handles the key, by construction of the input-gating layer rather than by any
+special-cased binding.
 
-### Up/Down: the sent-line history
+### Word wrap and scrollback layout
 
-`ChatHistory` is vanilla's `ChatComponent.recentChat` — the deque of lines the
-player has **sent**, oldest first, capped at `RECENT_CHAT_MAX` (100) with the
-oldest dropped. It is a field of `ChatInput` rather than of the screen, which is
-the equivalent of vanilla's placement: the deque belongs to the persistent HUD
-component and the *screen* holds only a cursor into it
-(`ChatScreen.historyPos`/`historyBuffer`), so reopening chat still walks
-everything sent earlier in the session. `ChatInput` is app-lifetime for exactly
-that reason — only its `buf` is screen-scoped.
+Received lines are greedily word-wrapped against real font metrics (the same metrics the draw itself
+uses, so layout can never be computed against a different font than the one that renders), breaking on
+a space when the next word would overflow and hard-breaking a single overlong word character by
+character. A formatting code seen before a wrap point carries onto the continuation line. A wrapped
+message's rows stack with its *last* visual row nearest the bottom edge, matching vanilla.
 
-`ChatInput::history_up`/`history_down` are `ChatScreen.moveInHistory(∓1)`.
-The three behaviours worth knowing before changing anything here:
+The scrollback's bottom edge and the input box's own vertical position are two independent constants in
+vanilla, not one derived from the other — coupling them (deriving the scrollback's bottom from the
+input strip's own top edge) silently collapses a real, by-design ~26-logical-pixel gap between the
+newest message and the input box down to almost nothing, which is exactly the shape of bug this once
+shipped. Both surfaces also sit at a real vanilla horizontal text inset (4 logical pixels), independent
+of the shared HUD margin used elsewhere — and this inset has to stay in sync across four separate
+things that must never drift apart: the draw itself, the background plate (which pads a different
+amount than the text column), the suggestion popup's anchor, and the hover/click hit-test region.
+Getting only one of the four right reads as "the chat looks slightly off" rather than as a null result.
 
-- The cursor lives in `0..=history.len()`, and `len()` — one past the last entry
-  — is the **live slot**. `ChatInput::take` rewinds to it, which is how
-  `ChatScreen.init`'s `historyPos = getRecentChat().size()` is reproduced without
-  a separate open hook: every path that opens the box clears `buf` through `take`.
-- Both ends **clamp**, they do not wrap. Vanilla's `Mth.clamp` then
-  `if (newPos != historyPos)` means an arrow at either end leaves the line alone —
-  but the key is still consumed, so it must not fall through and be typed.
-- The part-typed line is stashed in `historyBuffer` on the way out of the live
-  slot and restored on the way back, so glancing at an earlier message does not
-  destroy a half-written one.
+Scrolling moves by whole logical entries (not wrapped visual rows), clamps rather than wraps, does not
+snap back to the newest message on arrival while the player has scrolled up, and resets on close — all
+matching vanilla's own scrollback behavior. The scrollbar only appears once there's more history than
+fits the visible window, and reads its position from the same scroll state the scrolling logic itself
+exposes rather than a second, independently-derived count.
 
-Recording happens in `WindowApp::handle_chat_history_key`'s Enter arm, reading the
-line *before* `handle_chat_key` consumes it with `take`. That split is
-load-bearing: `take` is on the Escape path too, and a cancelled line is not
-history — vanilla only records under
-`handleChatInput(msg, addToRecent = true)`, which Escape never reaches. The line
-is normalised first (`normalizeSpace(msg.trim())`), so `"hello    world"` is
-recalled as `"hello world"`; consecutive duplicates collapse
-(`!msg.equals(peekLast())` — the **last** entry only, not a set).
+### Chat display options
 
-### Tab: completing player names
+A handful of persisted options shape the chat surface, mirroring vanilla's own chat settings: overall
+scale (see [`hud.md`](./hud.md)'s note that this is the *entire* scale factor with no additional
+HUD-side multiplier on top), box width and height while focused/unfocused, extra line spacing, text and
+background opacity, and whether legacy color codes are stripped. At every option's default value the
+draw is byte-identical to having no options system at all. Message-visibility filtering (system vs.
+chat-only) and arrival rate limiting are deliberately not modelled — the former needs a per-message
+source tag the log currently discards before it reaches the HUD, and the latter isn't a rendering
+concern at all.
 
-Tab forks on the *line*, not the key. `CommandSuggestions.updateCommandInfo`
-computes `isCommand = commandsOnly || startsWithSlash`; an ordinary chat line
-takes the `else if (!command.isBlank())` branch and is answered **locally** from
-`ClientSuggestionProvider.getCustomTabSuggestions()`, with no server round trip.
-So this works on any server, including one that has sent us no
-`minecraft:commands`.
+### Interactive text: links, hover tooltips, and click actions
 
-`ChatInput::set_online_players` is how the names get in — a plain `Vec<String>`
-the caller refreshes per keystroke from `Sim::tab_list`, which keeps `chat.rs`
-free of a client handle as its own header requires. Pass **every** entry, listed
-or not: vanilla's provider reads `getOnlinePlayers()`, not
-`getListedOnlinePlayers()`, so a player hidden from the tab overlay is still
-completable.
+A chat message's click and hover events (open a URL, run or suggest a command, copy text, show an
+item/entity tooltip) decode correctly off the wire and were never the problem — the gap was that the
+one function this HUD flattens every message through for drawing had no field to carry either through,
+so they were silently dropped downstream of a perfectly correct decode. The fix threads them through as
+an additional, inheriting property of each text span (exactly how color and formatting already
+inherit down a text tree, including across a legacy-code split), and hit-testing reuses the exact same
+wrapping and layout functions the draw itself calls, so a resize or an options change can never leave a
+click or hover target aimed at stale geometry.
 
-Two rules that are easy to get wrong:
-
-- The replaced span starts at `last_word_index`, which is
-  `CommandSuggestions.getLastWordIndex`: the offset just past the **last**
-  whitespace *run*, not the position of the last space.
-- Matching is `SharedSuggestionProvider.matchesSubStr`, which is "prefix of a
-  segment delimited by `._/`" — **not** `contains`. `Notch_The_Second` matches
-  `the`; `Another` does not, despite containing it. Ordering then composes
-  brigadier's case-insensitive sort with `sortSuggestions`'s partition, which
-  moves literal prefix matches ahead of splitter matches.
-
-**Tab is shared with the in-world player-list overlay and the two must not steal
-each other.** They cannot: `app::input::resolve_key` short-circuits on
-`gate.chat_open` and returns `KeyOutcome::Chat` for every key, so the overlay's
-`KeyOutcome::PlayerList` is only ever reached with the chat box shut — vanilla's
-own context fork, arrived at through the gate rather than through a binding.
-`handle_chat_history_key` deliberately does **not** consume Tab; it only refreshes
-the name list and lets the existing Tab arm run, so there is one Tab
-implementation rather than two that can drift.
-
-### Word wrap
-
-`hud.rs`'s `wrap_legacy_with` (a free function; `Builder::wrap_legacy` binds it
-to the Builder's own font) greedily wraps a legacy-coded line into rows that
-fit a pixel width, mirroring vanilla's `GuiMessage.splitLines`
-(`ChatComponent.addMessageToDisplayQueue`):
-break on a space when the next word would overflow, and hard-break a single
-word character-by-character when it alone exceeds the width. A `§`
-colour/format code seen before a break is carried onto the continuation line
-(a code fully resets formatting to itself —
-`from_legacy`, `lodestone-model/src/text.rs` — so tracking only the most recent one
-is sufficient).
-
-Widths come from `Builder::legacy_width`, which is real vanilla proportional
-glyph advances when a `VanillaFont` is attached (jar present) and the fixed
-5×7 advance otherwise (`hud/font.rs`) — the **same** metric the draw call
-itself uses, so a layout can never be computed against a font other than the
-one that draws.
-
-Each logical `(line, age)` chat entry can now expand into several visual rows,
-all sharing that entry's age/alpha. Vanilla stacks a wrapped message's *last*
-split line nearest the bottom edge and its earlier lines above it
-(`ChatComponent.extractRenderState`/`ChatComponent.addMessageToDisplayQueue`); the draw reproduces that by reversing
-each entry's own wrapped rows before stacking them bottom-up.
-
-### Scrolling the scrollback
-
-`crate::chat::ChatScroll` (a field of `ChatInput`) is vanilla's
-`ChatComponent.chatScrollbarPos`/`newMessageSinceScroll`
-(`ChatComponent.java`), reachable by mouse wheel while the chat box is open
-(`app/lifecycle.rs`'s `WindowEvent::MouseWheel` arm, falling through to it
-only when the pointer is *not* over the command-suggestion popup — vanilla's
-own `commandSuggestions.mouseScrolled` first refusal). Vanilla's constants,
-read straight from the decompile rather than invented:
-
-- **History cap**: `ChatComponent`'s own `trimmedMessages`/`allMessages` cap
-  at **100**, matching this crate's pre-existing
-  `lodestone_game::chat::ChatFeed::DEFAULT_CHAT_CAPACITY` (already 100, no
-  change needed) — scrolling can never reach further back than the feed
-  already retains.
-- **Wheel step**: `ChatScreen.mouseScrolled` clamps the raw notch to
-  `±1.0`, then multiplies by `7.0` unless Shift is held (`hasShiftDown()`) —
-  so an ordinary wheel click moves 7 lines, Shift+wheel moves 1.
-- **Clamp**: `ChatComponent.scrollChat` — `chatScrollbarPos += dir`, then
-  clamped above at `total - linesPerPage` and below at `0`, in that order
-  (the upper clamp can go negative when everything already fits on screen;
-  the lower clamp is what actually pins it there, not a saturating
-  subtraction).
-- **No jump on a new message while scrolled**:
-  `addMessageToDisplayQueue`'s `if (chatting && chatScrollbarPos > 0) {
-  newMessageSinceScroll = true; scrollChat(1); }` — the currently-visible
-  window stays put instead of snapping to the newest message.
-- **Reset on close**: `ChatScreen.removed()` calls `resetChatScroll()`.
-
-**Two deliberate departures from vanilla, both named in `ChatScroll`'s own
-doc comment:**
-
-1. **Granularity is one *logical entry*, not one *wrapped visual row*.**
-   Vanilla scrolls through already-wrapped `GuiMessage.Line`s, which needs
-   real font metrics this crate's `chat.rs` deliberately has none of (see
-   this file's own module doc on why `highlight`/`complete` return byte
-   spans rather than pixel runs, for the same reason). Entry granularity is
-   the exact one-line-per-entry case of vanilla's scheme, and is wrong only
-   for a message that wraps into more than one row.
-2. **The no-jump compensation runs once per frame (`ChatScroll::sync`), not
-   once per push.** The received log
-   (`lodestone_game::chat::ChatLog`) is version- and UI-free by design and
-   holds no notion of "is chat open" to check against, so `sync` is called
-   every frame with the box's current open state and its full history, and
-   detects every arrival since the last call by finding where last frame's
-   newest line now sits (`chat.rs`'s private `new_arrivals`). This is exact,
-   not approximate, whenever the box stayed open across the gap:
-   `scrollChat`'s clamp is linear in both the position and the total, so `k`
-   sequential single-line increments and one increment of `k` land on the
-   same clamped result. `sync(false, ..)` also **is** the reset-on-close
-   path — called unconditionally every frame regardless of screen state, it
-   collapses "closed" to "reset" directly rather than needing a hook into
-   every place the screen can close (Escape, sending without
-   `closeOnSubmit`, a disconnect).
-
-The scrollbar (`crate::hud::ChatScrollbar`, drawn in `hud.rs` right after the
-scrollback entries) tracks the same three numbers `ChatScroll` exposes
-(`scrolled`, `total`, `new_message_since_scroll`) — never a second, re-derived
-count — and only appears once there is more history than fits on screen,
-matching vanilla's own `virtualHeight != chatHeight` gate. Vanilla's alpha
-(`y > 0 ? 170 : 96`) is simplified to a fixed `170/255`: the sign check is on
-an internal value that is essentially never positive in practice (it would
-need a chat box taller than the canvas itself), so branching on it added risk
-without a way to verify the branch here — a named simplification, not a
-guessed one.
-
-### Vertical layout: the scrollback's own anchor
-
-The scrollback's bottom edge (`crate::hud::chat_bottom`) and the input box's
-own placement (`crate::hud::chat_input_top`) are **two independent literals in
-vanilla**, not one derived from the other:
-`ChatComponent.extractRenderState`'s `chatBottom = Mth.floor((screenHeight -
-40) / scale)` is computed once, before that method ever branches on open vs.
-closed, and has no reference anywhere to where the `EditBox` sits
-(`this.height - 12`, a different literal in a different class,
-`ChatScreen.init`). At the vanilla-default `chatScale` of `1.0` this is simply
-`canvas_h - 40.0` — a real, fixed ~26 logical-canvas-pixel gap between the
-newest message and the input box, by design.
-
-This HUD used to compute `chat_bottom` as `input_y - INPUT_STRIP_PAD *
-chat_pose_scale` while the box was open — literally the input strip's own top
-edge — which coupled the scrollback to the input box and erased that gap
-(measured: ~1px instead of vanilla's ~26px). Reported by the owner as "a gap
-between the bottom of the chat and the bar where I type stuff"; fixed by
-porting `chatBottom`'s real expression as `crate::hud::chat_bottom`, used
-unconditionally (open or closed), same as vanilla. See
-`crates/lodestone-shell/tests/chat_input_gap.rs` for the regression gate,
-which rasterises `HudGeometry::build` and measures the two background bands'
-actual pixel positions rather than asserting on the formula alone.
-
-### Horizontal layout: the text inset, the plate, and the scrollbar
-
-Both chat surfaces sit **four scaled pixels** in from the left edge of the
-screen, not at the shared `hud::HUD_MARGIN` of six. `hud::CHAT_TEXT_INSET` is
-the constant, and it is derived from vanilla two ways that agree:
-
-- the scrollback's own pose is `pose.scale(scale, scale)` followed by
-  `pose.translate(4.0F, 0.0F)` in `ChatComponent.extractRenderState`, so the
-  translate lands *inside* the scaled space and text drawn at local `x = 0`
-  appears at screen `4 * scale`;
-- the input box is `new EditBox(font, 4, height - 12, width - 4, 12, …)` with
-  `setBordered(false)` in `ChatScreen.init`, and `EditBox`'s own
-  `textX = getX() + (bordered ? 4 : 0)` therefore resolves to a flat `4`.
-
-Vanilla's input is a plain `Screen` widget and so is *not* chat-scaled; this
-shell does draw the input at the chat pose scale (see `hud::chat_input_top`), so
-it scales that inset too — which keeps the input's first glyph in the same
-column as the scrollback's. At the default `chatScale` of `1.0` the two readings
-coincide at four.
-
-Two consequences that were wrong alongside the inset, and are wrong in a way
-that the inset alone does not explain:
-
-- **The plate is not the text column.** Vanilla fills it from local `-4` to
-  `maxWidth + 4 + 4`, i.e. screen `0` to `getWidth() + 12 * scale`: four scaled
-  pixels of padding on the left of the text and eight on the right.
-  `hud::CHAT_PLATE_PAD_PX` is that `12`. Ours used to be exactly the text
-  column's width starting at `0`, so a wrapped line at the configured box width
-  overhung its own background by the whole inset.
-- **The scroll indicator sits clear of the widest line.** Vanilla's
-  `scrollBarStartX = maxWidth + 4` resolves to screen `getWidth() + 8 * scale`
-  (`hud::CHAT_SCROLLBAR_GAP`); ours was `+ 2 * scale`, which lands on the last
-  glyphs of a full-width row.
-
-The owner's report was *"all of the text in the chat window (and my own chat
-bar) are offset to the right … theres a bigger gap than there should be on the
-left, which sometimes pushes text to render off the end"*. Both surfaces were
-wrong together because both read one wrong constant — not because two mistakes
-coincided — and the same constant reached two derived sites that must agree with
-the draw or they drift from what the player sees: `hud::suggestion_layout`'s
-anchor (whose own comment already *said* "the input is at x=4" while the code
-used six) and `hud::chat_interaction_at`'s hit-test origin, whose horizontal
-bound also stopped at the column width rather than at `inset + width`, leaving
-the last few pixels of every row dead to hover and clicks.
-
-If you change the inset, change all four together — draw, plate, popup anchor,
-hit-test — and note that `chat_interaction_at` deliberately keeps `HUD_MARGIN`
-for its *vertical* top clip, which is a genuinely different quantity that
-happens to have lived under the same name.
-
-### Chat Settings
-
-`crate::hud::ChatDisplayOptions` (a small `Copy` struct on `HudFrame`) carries
-the subset of vanilla's `net.minecraft.client.Options` chat fields
-(`Options.chatScale`/`Options.chatWidth`/`Options.chatHeightUnfocused`/
-`Options.chatHeightFocused`/`Options.chatLineSpacing`/`Options.chatOpacity`/
-`Options.textBackgroundOpacity`/`Options.chatColors`)
-that this renderer actually consumes:
-
-| field | vanilla option | default | effect |
-|---|---|---|---|
-| `scale` | `options.chat.scale` | `1.0` | `chat_pose_scale`'s **entire** value — vanilla's `ChatComponent.getScale`, with no HUD-side multiplier on top (see `docs/hud-text-scale.md`; the old "2× legibility factor" this row used to describe was fixed there) |
-| `width_pct` | `options.chat.width` | `1.0` | box width, via `chat_width_px` (vanilla's `ChatComponent.getWidth`) |
-| `height_pct_unfocused` | `options.chat.height.unfocused` | `70.0/160.0` | box height (and row cap) while closed |
-| `height_pct_focused` | `options.chat.height.focused` | `1.0` | box height (and row cap) while open |
-| `line_spacing` | `options.chat.line_spacing` | `0.0` | extra fraction of a line inserted between rows |
-| `text_opacity` | `options.chat.opacity` | `1.0` | text alpha, as `text_opacity * 0.9 + 0.1` |
-| `background_opacity` | `options.accessibility.text_background_opacity` | `0.5` | per-row background fill alpha |
-| `colors` | `options.chat.color` | `true` | `false` strips every legacy `§` code before drawing |
-
-At every field's default, the draw is byte-identical to the pre-options
-behaviour — an untouched install looks exactly as it did before these fields
-existed.
-
-These are persisted on `crate::config::Options` (`chat_scale`, `chat_width`,
-`chat_height_unfocused`, `chat_height_focused`, `chat_line_spacing`,
-`chat_opacity`, `chat_background_opacity`, `chat_colors`), following the same
-`0.0..=1.0`-degrade-to-default / write-only-if-non-default convention as
-`mouse_wheel_sensitivity` and `view_bobbing`. The shell (`app.rs`) reads
-`self.nav.options()` and folds them into `HudFrame::chat_options` once per
-frame.
-
-**Deliberately not landed**: vanilla's `chatVisibility` (System/Hidden
-filtering) needs a per-line message-source tag that
-`lodestone_game::chat::ChatLog::recent` currently flattens away before it
-reaches the HUD; `chatDelay` is a message-arrival rate limit, not a render
-concern. `chatLinks`/`chatLinksPrompt` also remain unpersisted, but for a
-different reason: every server-supplied `open_url` now always takes the
-untrusted confirmation path, so there is no silent-open mode for an option to
-select yet.
-
-### Interactivity: `click_event`/`hover_event`
-
-**The wire and the tree were never the problem.** A `click_event`/
-`hover_event` decodes correctly off both JSON and NBT into
-`Text::click`/`Text::hover` — has since before this section existed — and
-`lodestone_game::text::resolve` (used ahead of every flatten this HUD does)
-already documented passing them through untouched. The gap was
-`Text::to_spans`, the one function this whole HUD flattens a `Text` tree
-through for drawing: its `TextSpan` output has no field for either, so a
-message with a real link or a real tooltip had nowhere for either to reach
-by the time a draw call saw it — the model discarding a field
-*downstream* of a correct decode, not at the decode itself.
-
-The fix is additive on both sides of the crate boundary, and lives in two
-places:
-
-- `lodestone_model::Text::to_interactive_spans` / `InteractiveTextSpan` —
-  `to_spans`'s sibling, in the model crate that owns `Text` itself.
-  `click`/`hover`/`insertion` inherit down the tree exactly the way
-  `TextStyle` does (vanilla's own `Style.applyTo` treats them as ordinary
-  inheriting `Style` fields, not a separate mechanism), including across a
-  legacy `§` split, where every piece a run explodes into keeps the
-  enclosing component's already-resolved `click`/`hover`.
-- `lodestone_game::text::{InteractiveSpan, interactive_spans}` — this
-  crate's own thinner version (no `insertion` yet — nothing downstream reads
-  it), which resolves `translate` nodes first (the same `resolve` every
-  other projection here already runs) and then lowers onto the model
-  function above. `lodestone_game::chat::ChatLog::recent_interactive` /
-  `recent_ages_interactive` are `recent_spans`/`recent_ages_spans`'s
-  siblings built on it; `Sim::recent_chat_interactive` (`sim/session.rs`) is
-  the shell's one reader into it, mirroring `recent_chat_spans` field for
-  field.
-
-**Hit-testing reuses the chat draw's own geometry, not a second copy of it.**
-`crate::hud::chat_interaction_at` (a free function) and
-`HudRenderer::chat_interaction_at` (the renderer-side wrapper that supplies
-the attached font's measure closure, the same relationship
-`HudRenderer::suggestion_layout` has to the free `suggestion_layout`) walk
-the visible scrollback's current `ChatScroll::scrolled` window newest-first,
-with the *exact* free functions the draw
-itself calls — `chat_width_px`/`chat_height_px`/`chat_pose_scale`/
-`chat_line_h`/`chat_bottom` — so a resize or an options edit cannot leave a
-hit-test aiming at either stale pixels or the hidden live-bottom page.
-`wrap_interactive_with` is
-`wrap_spans_with`'s sibling, extended to carry each character's `click`/
-`hover` through the same word-break algorithm; `interactive_span_at` walks
-one already-wrapped row measuring each character's own run style, exactly
-the way the draw's glyph advance would.
-
-**Click dispatch is real and reaches the wire.** `WindowApp::dispatch_click_action`
-(`app/menus.rs`), wired into the existing chat-open `MouseInput` handler in
-`app/lifecycle.rs` (behind the suggestion popup, which still gets first
-refusal): `run_command` sends through `Sim::send_chat` exactly as if it had
-been typed and Enter pressed; `suggest_command` fills `ChatInput` without
-sending; `copy_to_clipboard` goes through the now test-safe
-`crate::menu::accounts::copy_to_clipboard`. `open_url` enters the existing
-untrusted-link confirmation overlay and opens the browser only after Yes;
-No/Escape restore Chat. `open_file` stays unsupported and is surfaced as a
-local line rather than touching the filesystem.
-
-**Hover reaches the tooltip layer.** While chat is open, `app/redraw.rs`
-queries the same hit-test used for clicks and supplies the hovered event's
-span-preserving `Text` value to `HudFrame::chat_hover_tooltip`. The HUD draws
-it last, like vanilla's deferred tooltip layer. `show_text`, `show_item`, and
-`show_entity` therefore all present the model's faithfully retained text
-payload; item/entity-specific widget rendering remains outside this raw-text
-model boundary.
+Every server-supplied "open URL" click goes through an untrusted-link confirmation prompt before ever
+opening a browser; there is no silent-open path. A "run command" click sends exactly as if the player
+had typed it and pressed Enter; "suggest command" only fills the input without sending; "copy to
+clipboard" and "open file" are supported and explicitly unsupported respectively, with the latter
+surfaced as a local message rather than touching the filesystem.
 
 ## How to change it
 
-- **Add a Chat Settings row**: add the field to `crate::config::Options`
-  (`config.rs`), thread it into `crate::hud::ChatDisplayOptions` at the
-  `app.rs` call site that builds the `HudFrame`, and make the draw in
-  `hud.rs`'s chat block actually read it. Do the last step first if you can —
-  an option nothing reads is the failure mode to avoid.
-- **Change the wrap algorithm**: `wrap_legacy_with` in `hud.rs`. It is a free
-  function taking a width-measuring closure specifically so it can be
-  unit-tested against a hand-specified width table (see
-  `wrap_uses_real_per_glyph_widths_not_a_flat_character_count`) without a GPU,
-  an atlas, or a loaded jar.
-- **The wrap result is cached** (`hud::ChatWrapCache`). Vanilla
-  splits once, on arrival — `GuiMessage.splitLines` from
-  `ChatComponent.addMessageToDisplayQueue` — and this is the equivalent: the
-  cache is owned by `WindowApp::chat_wrap` (the `HudFrame` is rebuilt every
-  frame and can hold no state), keyed by the display text plus the box width
-  and pose scale, and cleared wholesale when either changes.
-  **Gotcha: if the wrap starts depending on a new input, that input must join
-  the key** — otherwise the cache serves a stale layout, which looks like a
-  wrap bug rather than a cache bug. A `chat_wrap: None` frame (every hermetic
-  test) wraps from scratch, so a test never observes the cache unless it
-  attaches one.
-- **Gotcha (stale, kept for the shape of the mistake)**: `chat_pose_scale` used
-  to be `HUD_TEXT_SCALE * chat_options.scale`, folding an ad-hoc HUD-wide 2×
-  pitch into the option. Fixed: `chat_pose_scale(opts)` is `opts.scale` alone
-  now (`crate::hud::chat_pose_scale`), matching vanilla's
-  `ChatComponent.getScale` with nothing layered on top — see
-  `docs/hud-text-scale.md` for the fuller history. The lesson survives the
-  fix: a *shared* ambient scale constant is exactly what lets an unrelated
-  surface's correction silently move this one, or vice versa — prefer a
-  surface's own named constant over reaching for one already in scope.
-- **Gotcha**: the logical canvas (`b.w`/`b.h`) is already in vanilla's
-  `guiScaledWidth`/`Height` units (see `logical_canvas`'s own doc), which is
-  why `chat_width_px`/`chat_height_px` need no unit conversion against it.
+- **Add a new editing operation to the shared `EditBox`, not to the chat input directly.** A second,
+  chat-specific implementation beside the shared one is worse than not having the feature.
+- **A key producer must distinguish "consumed" from "edited."** A key that only moved the caret must
+  not fall through to plain text insertion, and must not trigger a fresh suggestion request either —
+  folding those two outcomes into one boolean gets one of them wrong.
+- **The platform edit-shortcut modifier (Cmd on macOS, Ctrl elsewhere) is resolved once, centrally** —
+  never hardcode Ctrl for copy/cut/paste/select-all, and never fold the platform modifier onto the
+  generic "control" bit, since that would also turn an ordinary Ctrl+arrow into a word-skip on macOS,
+  which vanilla does not do.
+- **If you change the horizontal text inset, change it in all four places it appears** — the draw, the
+  background plate's own (different) padding, the suggestion popup's anchor, and the click/hover
+  hit-test bound — or the surfaces silently drift apart.
+- **The scrollback's bottom-edge constant and the input box's top-edge constant are independent** —
+  never derive one from the other.
+- **Selection highlighting and the caret draw must derive their pixel positions from the same width
+  measurement the glyph draw uses**, clamped to both the string and the visible input strip, so a stale
+  or out-of-range selection can never emit an invalid fill.
 
 ## Configuration
 
-`options.json` (next to `servers.json`, see `crate::config::options_path`):
-`chat_scale`, `chat_width`, `chat_height_unfocused`, `chat_height_focused`,
-`chat_line_spacing`, `chat_opacity`, `chat_background_opacity`, `chat_colors`.
-All optional; a missing, malformed, or out-of-`0.0..=1.0`-range value degrades
-to vanilla's own default (`chat_colors` degrades to `true`, matching vanilla).
+Chat display options (scale, width, height while focused/unfocused, line spacing, text/background
+opacity, color-code stripping) are persisted alongside other non-default settings, degrading silently to
+vanilla defaults when unset. The input length cap (256 characters) is a fixed constant, matching
+vanilla's own chat box.
 
 ## Dependencies
 
-- `lodestone_client::ClientAction` — the outbound seam `chat.rs`'s
-  `compose_chat_action` lowers a typed line onto.
-- `lodestone_game::chat::ChatLog` — the received scrollback, folded to legacy
-  strings at read time; owned by the sim, not this module.
-- `crate::hud::vanilla_font::VanillaFont` — real proportional glyph metrics,
-  when a jar is present.
+- `crates/lodestone-shell/src/chat.rs` — the input model, history, tab-completion and suggestion state.
+- `crates/lodestone-shell/src/hud.rs` — the chat block of the shared HUD draw (layout, wrap, scrollback,
+  caret, selection).
+- `lodestone-game::chat` — the received message log this renders from.
+- `lodestone-model::text` — the styled-text tree, including the click/hover event fields threaded
+  through interactive spans.
+- `crate::menu::edit_box::EditBox`, `crate::menu::focus` — the shared text-editing and key-translation
+  machinery every other text field in the shell also uses (see [`ui-framework.md`](./ui-framework.md)).
+- `crate::platform::clipboard` — copy/cut/paste; degrades gracefully (empty read, fire-and-forget write)
+  on platforms without a synchronous clipboard API.
+- The 26.2 jar under `.cache/mc/26.2/client-src` — behavioral reference only, never transliterated.

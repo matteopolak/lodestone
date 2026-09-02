@@ -2,394 +2,262 @@
 
 ## What it is
 
-The plan of record for vanilla-faithful **menu** screens: a widget type, layout containers, a
-`Screen`-level input layer, and the three target screens — the multiplayer server list, world select
-with creation disabled, and the full settings tree with every real button present and the
-unsupported ones greyed out.
+The shared substrate every out-of-world (and paused-in-world) menu screen is built from: a `Widget`
+type with a vanilla-faithful disabled state, layout containers that arrange those widgets, a
+`Screen`-level focus/tab/click dispatch layer, list chrome and a pixel-accurate scrollable list, the
+overlay-vs-full-frame distinction that lets a screen draw over a live world, and the spinning
+panorama backdrop behind the title and other menu screens. All of it is a port of vanilla's
+`gui/layouts`, `gui/components`, `gui/navigation` and `Screen`/`Hud` background packages, kept
+faithful to the jar rather than redesigned.
 
-This is research, not implementation. The tracker is **#392** with children #393–#398 plus the
-existing settings branch at #55. Everything below was measured against the 26.2 jar under
-`.cache/mc/26.2/client-src` and against this tree; the point of writing it down is that four
-separate agents each re-derived a piece of one Java class in a single day, and nothing on record
-would have stopped a fifth.
+## How it works
 
-## Why: one class, discovered four times
+### Screens and the widget lifecycle
 
-`AbstractContainerScreen` is 587 lines inherited by **23 concrete container screens** (17 direct
-`extends`, 10 more through `AbstractRecipeBookScreen`, `ItemCombinerScreen`,
-`AbstractMountInventoryScreen` and `AbstractFurnaceScreen`; 27 files in the hierarchy, 4 abstract).
+A menu screen is built in three phases, mirroring vanilla exactly:
 
-| issue | what it re-derived | ACS member |
+1. **Build.** The screen creates `Widget`s and containers, wrapping each child with a
+   `LayoutSettings` (four paddings plus an `x`/`y` alignment in `0.0..=1.0`).
+2. **Arrange.** One `arrange_elements()` pass walks the tree bottom-up — nested containers size
+   themselves from their own children first — and writes absolute positions into the leaves.
+3. **Visit.** `visit_widgets` hands the arranged leaves to the screen for drawing and hit-testing.
+   This is the only route from a tree to a draw, which is why a spacer element's `visit_widgets` is a
+   deliberate no-op: it takes part in every measurement and is never drawn.
+
+Most rows here are still rebuilt fresh every frame (cheap, and correct for anything without
+persistent state); a container is arranged once and cached, since arranging is canvas-independent —
+only the final placement in the screen depends on the current size.
+
+Vanilla's own render side went through the same split this codebase already had: `Renderable` is a
+one-method interface that appends render-state records into a list, and a later pass walks and draws
+them, matching this shell's extract/frame separation. Treat a screen's `extract`-shaped step and its
+`frame`/draw-shaped step as two different passes for the same reason vanilla does.
+
+### Layout containers
+
+Four containers cover real usage: `LinearLayout` (a single row or column, wrapping a one-axis
+`GridLayout`), `GridLayout` (row/column counts are *derived* from the highest occupied row/column,
+never declared), `FrameLayout` (children default to centre alignment, sized to
+`max(min size, largest padded child)`), and `HeaderAndFooterLayout` (pins a header at the top, a
+footer at the screen bottom, and clamps the content band so it can never overlap the footer). A
+container screen (inventories, chests) uses none of this — its slot geometry comes from the
+game-logic menu classes as constructor arithmetic, not from a layout tree, and that boundary should
+stay: arranging a container screen with these containers would invent geometry vanilla never had.
+
+The alignment formula is not `(available - width) / 2`; it is a padding-aware lerp between the
+leading and trailing padding. `x` truncates and `y` rounds — a real, asymmetric vanilla quirk, not a
+bug to "fix" — so a child centred in an odd-sized cell can land off by a pixel on one axis and not
+the other. A spanning grid cell splits its size with Mojang's integer `Divisor` (Bresenham-style, so
+the parts always sum back exactly) and only ever *grows* a row/column that is smaller than the span
+needs.
+
+Using a hand-arithmetic layout instead of a container is legitimate vanilla, too — the title screen,
+for one, hand-centres rather than using any layout class. Whether a screen is layout-driven or
+hand-placed is a per-screen choice, not a rule.
+
+### Focus, tab order, and input dispatch
+
+Every screen keeps three separate registries of its widgets, and which one a widget lands in decides
+what it can do:
+
+| registered with | drawn | receives input |
 |---|---|---|
-| #370 | container title text, colour, shadow, placement | `extractLabels` — `AbstractContainerScreen` |
-| #376 | slot highlight back/front pair | `extractSlotHighlightBack`, `…Front` |
-| #377 | carried-stack layering | `extractCarriedItem`, `extractFloatingItem` |
-| #378 | number-key swap, and its ordering vs the hotbar keys | `checkHotbarKeyPressed` |
+| the interactive list (draw + input) | yes | yes |
+| the input-only list | no | yes |
+| the render-only list | yes | no |
 
-Each was correct work done well. The failure is not in any of them — it is that the shared mechanism
-was never on record, so each rediscovery looked like new work. Porting the class once closes it.
+A widget in the wrong list compiles, is unit-testable, and is simply unclickable or invisible with
+nothing failing loudly — this is the most common way a new widget silently does nothing.
 
-The draw order is the specific thing that keeps getting rediscovered, and it is stated plainly in
-`AbstractContainerScreen.extractContents`:
+`Screen`-level key handling has a strict order: Escape is answered first (if the screen closes on
+it), then the **currently focused child alone** gets the key — dispatch never iterates the whole
+child list — and only if that returns unhandled does Tab or an arrow key become a focus-navigation
+event. This ordering is also what lets a text field coexist with arrow-key focus navigation with no
+special-case rule: horizontal-arrow handling is claimed by the field itself and never reaches step
+three, while vertical arrows are declined by the field and fall through to navigate focus.
 
-```
-super.extractRenderState → extractLabels → extractSlotHighlightBack
-                         → extractSlots → extractSlotHighlightFront
-```
+Tab does not wrap by walking off the end of the list and reading a wrapped index — the walk simply
+returns "no next child," and a **retry one layer up** clears focus and searches again from the start.
+Two consequences: arrow-key navigation is not retried this way, so it does not wrap at all (focus
+just stays put at the edge), and because the retry clears focus first, a single-focusable-child
+screen re-lands on that same child rather than doing nothing. Tab order itself is stable-sorted
+insertion order unless a widget declares an explicit order group.
 
-then `extractCarriedItem` and `extractTooltip` from `AbstractContainerScreen.extractRenderState`.
+Arrow navigation is geometric, in two passes: a strict pass keeps only candidates that overlap the
+focused widget on the cross axis and lie further along the travel axis, and only if nothing qualifies
+does a vaguer pass drop the overlap requirement and pick the nearest candidate by squared distance.
+Shipping only the strict pass reads as "Tab works, arrows die at the end of a column" — a real trap
+if a new widget layout is added without the vague fallback. `getChildAt`/hit-testing resolves to the
+**first** match in registration order, not the topmost by z — two overlapping widgets means the
+older one always wins the click, so widgets here (as in vanilla) simply should not overlap.
 
-## The port is closer than it looks
+Because focus paths in vanilla hold live object references, and that shape does not translate
+directly, focus here is tracked as a tree of **ids** resolved through a small lookup trait rather than
+back-references — a structural difference from vanilla with no behavioural consequence, but worth
+knowing before assuming a focus path can be walked as pointers.
 
-26.2 has already made the split this codebase made. There is no immediate-mode
-`render(GuiGraphics, …)` any more:
+### The widget catalogue
 
-- `Renderable` is a **one-method interface** — `components/Renderable.java`:
-  `void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float a)`.
-- `GuiGraphicsExtractor` (`gui/GuiGraphicsExtractor.java`, 1453 lines) looks immediate-mode but
-  is not: it appends `GuiElementRenderState` records into a `GuiRenderState`
-  (`renderer/state/gui/GuiRenderState.java`) — `BlitRenderState`, `ColoredRectangleRenderState`,
-  `GuiTextRenderState`, `GuiItemRenderState`, `PictureInPictureRenderState`.
-- A later pass walks `forEachElement` / `forEachItem` / `forEachText` and draws.
+`Widget` owns a control's bounds, message and state (`active` / `visible` / `hovered` / `focused`)
+and answers the two things every screen otherwise re-derives: which background sprite to draw and
+what colour the label is. There is **no separate disabled widget type** — `active = false` is the
+entire API, and inventing a second type for it is the mistake this exists to prevent. Setting it
+inactive does exactly three things: the background sprite swaps to its disabled variant, the label
+turns the flat vanilla grey, and keyboard focus skips the widget entirely (it becomes unreachable by
+Tab, not merely unclickable). A disabled control that explains itself with a tooltip — a greyed-out
+button under a cursor still showing *why* it's inactive — is vanilla's own idiom for "unsupported but
+present," worth copying wherever a feature is intentionally stubbed out.
 
-That is our `ExtractSet`/`FrameSet` split, with the same shape and the same reason. The layering
-primitive matches too: `Screen.extractRenderStateWithTooltipAndSubtitles` (`screens/Screen.java`)
-brackets passes with `graphics.nextStratum()`, which is the same device as the stratum markers the
-carried-stack work added, and `GuiRenderState.nextStratum` / `blurBeforeThisStratum` are the vanilla
-side of it.
+Sprite selection is a small four-state record (`enabled`, `disabled`, `enabled_focused`,
+`disabled_focused`), built through one of three collapsing constructors depending on how much distinct
+art a widget has: a single sprite for every state, a two-state form that only distinguishes focus
+(this is `EditBox`'s shape), or the full four-state form most buttons use. The predicate feeding the
+"focused" side is **not uniform across widget kinds** — a button treats hover and keyboard focus as
+the same highlighted state (`hovered || focused`), while a text field's highlighted sprite is driven
+by keyboard focus alone; hovering a field does not draw its highlighted background. Checkboxes,
+sliders and edit-box borders each have their own small quirks (a checkbox and a slider pick between
+two sprites by hand rather than through the four-state record at all; one particular disabled button
+sprite has a different nine-slice border width than its siblings) that are easy to silently
+"normalize away" if a widget is re-derived from a sibling instead of read from its own art.
 
-**Consequence for the port:** vanilla's `extract*` methods can be ported *as* extract methods,
-one-to-one, rather than being rewritten into a different rendering model. This is the single
-strongest argument for doing the work now rather than later — the structural distance is the
-smallest it has ever been.
+`EditBox` is the one widget with real internal state: a caret, a selection, horizontal scroll and a
+length cap (32 characters by default). Its uneditable text colour is keyed on whether the field is
+*editable*, not whether it is *active* — a field can be focusable and clickable while still refusing
+text input, and that is a different flag than the disabled-widget mechanism above. Because typing
+holds state that must survive a frame, a screen with a live text field cannot rebuild its widgets from
+scratch every frame the way a row of buttons can; it must reposition the existing widget instead.
+Platform matters here too: the "clipboard/select-all" modifier is the platform shortcut key (Cmd on
+macOS, Ctrl elsewhere), not a hardcoded Ctrl — every cut/copy/paste/select-all check needs to go
+through that platform switch or it silently only works on some machines.
 
-## Vanilla → us mapping
+### List chrome
 
-| vanilla | file | ours today | issue |
-|---|---|---|---|
-| `AbstractWidget`, `Button`, `AbstractButton` | `gui/components/` | nothing — buttons declared and hit-tested per screen in `menu/render.rs`, `menu/nav.rs` | #393 |
-| `WidgetSprites.get(enabled, focused)` | `gui/components/WidgetSprites.java` | nothing | #393 |
-| `AbstractWidget.WithInactiveMessage`, grey `-6250336` | `gui/components/AbstractWidget.java` | nothing | #393 |
-| `LinearLayout`, `GridLayout`, `FrameLayout`, `HeaderAndFooterLayout` | `gui/layouts/` | nothing — per-screen arithmetic | #394 |
-| `LayoutSettings`, `LayoutElement`, `AbstractLayout`, `SpacerElement` | `gui/layouts/` | nothing | #394 |
-| `Screen` focus, `ComponentPath`, `FocusNavigationEvent`, `TabOrderedElement` | `screens/Screen.java` | nothing | #395 |
-| `addRenderableWidget` / `addWidget` / `addRenderableOnly` | `screens/Screen.java` | nothing | #395 |
-| `EditBox` | `gui/components/EditBox.java` | chat only — `chat.rs`'s `ChatInput`, not a widget | #395 |
-| `AbstractSelectionList`, `ObjectSelectionList` | `gui/components/` | nothing reusable | #396, #397 |
-| `Tooltip`, `WidgetTooltipHolder` | `gui/components/` | nothing | #393 |
-| `GuiSpriteScaling` `Stretch`/`Tile`/`NineSlice{border}` | assets `.mcmeta` | **done** — `lodestone-assets/src/gui.rs`'s `GuiScaling` enum | — |
-| nine-slice decomposition | vanilla `blitNineSlicedSprite` | **done** — `GuiScaling::geometry`, `GuiAtlas::geometry` | — |
-| GUI sprite atlas | `GuiSpriteManager` | **done** — `GuiAtlas::build`, 466 sprites | — |
-| `Renderable.extractRenderState` → `GuiRenderState` | `gui/`, `renderer/state/gui/` | **done in spirit** — `ExtractSet`/`FrameSet` | — |
-| `JoinMultiplayerScreen` + `ServerSelectionList` + `ServerStatusPinger` | `screens/multiplayer/` | **partly** — `menu/servers.rs`, `menu/status.rs` | #396 |
-| `SelectWorldScreen` + `WorldSelectionList` | `screens/worldselection/` | **nothing** | #397 |
-| `OptionsScreen` tree, `OptionInstance`, `OptionsList` | `screens/options/`, `client/` | **all 13 of 13 screens built** (Language, Telemetry, Resource Packs are the last three) — `menu/options.rs`, 143 `OptionsList` controls, 28-or-29 live depending on `in_world` (7 of 93 options persisted, up from 2 previously; see below) — plus Key Binds, Language, Telemetry and Resource Packs (each their own count, see [`language-screen.md`](./language-screen.md)/[`telemetry-screen.md`](./telemetry-screen.md)/[`resource-packs-screen.md`](./resource-packs-screen.md)), none an `OptionsList` page so none is part of the 143 | #55 |
-| `AbstractContainerScreen` | `screens/inventory/` | bespoke per screen | #398 |
+A scrolling menu list draws three things behind and around its rows, in a fixed order: a translucent
+band tint drawn *before* the rows (so the rows paint over it), then a light-over-dark separator bar
+above the band and its mirrored dark-over-light counterpart below it, both drawn *after* the rows so
+they cleanly cap a row that scrolls flush to the band's edge. The tinted rect spans the **whole
+canvas width**, not just the narrower column the rows themselves occupy — a settings list's rows sit
+in a centred column, but the background and bars behind them reach the screen edges, and tinting only
+the row column would leave the canvas margins looking wrong. A list that is genuinely narrower than
+the canvas (two side-by-side lists sharing one clip and one scrollbar, for instance) opts out of this
+whole-canvas chrome rather than trying to force the shared model to draw two separate bands.
 
-## What is already done, and must not be re-filed
+The chrome's colours and geometry are all decoded directly from the game's own textures rather than
+picked by eye, and every one of them is a flat single colour per texture row — there is nothing to
+tile, so a flat quad per row is exact, not an approximation.
 
-Sprite/nine-slice reachability was the obvious first work item. It is not one — the mechanism is
-complete **and reaches pixels**:
+### The scrollable list
 
-- `crates/lodestone-assets/src/gui.rs`'s `GuiScaling` enum parses `GuiScaling::{Stretch, Tile, NineSlice { border: Border }}`
-  from the sibling `.mcmeta`; `GuiScaling::geometry` decomposes to quads.
-- `crates/lodestone-render/src/gui_atlas.rs`'s `GuiAtlas::geometry(id, x, y, w, h)` applies it.
-- `GuiAtlas::build` stitches **466** `gui/sprites/**` PNGs. Verified against the jar itself:
-  `unzip -l .cache/mc/26.2/client.jar | /usr/bin/grep -c 'gui/sprites/.*\.png$'` = 466.
-- It is reachable through exactly **two** production call sites —
-  `crates/lodestone-render/src/gui_atlas.rs::GuiAtlas::geometry` (menu side in `menu/render.rs::draw`,
-  hud side in `hud.rs`). Every other `.geometry(` caller is a test.
-- An early startup log once said `sprites=468`. That resolves exactly: 466 + the two `TITLE_TEXTURES`
-  extras in `resources.rs`.
+The shared list mechanism tracks a scroll offset **in pixels**, not in whole rows — this is the one
+representation choice the whole thing hinges on. A row-index offset structurally cannot express a
+partial scroll (one wheel notch is half a row's height, not a whole row), and no amount of animation
+on top of a row counter can produce that intermediate position, because the information simply is not
+there. Vanilla itself has no scroll animation at all — smoothness is entirely a side effect of the
+offset being pixel-granular — so nothing here should add easing on top of it.
 
-So the residue is **breadth of use**, not plumbing: nothing widget-shaped consumes the helper, so
-every screen writes its own blits. That is a widget problem, not a sprite issue.
+Hover and selection are two genuinely separate pieces of state: hover is recomputed from the mouse
+every frame and only ever *read*, never written back into what's selected; selection only moves on a
+click, a keyboard press, or an explicit focus change. Conflating the two — letting a hover write the
+"selected" field — silently lets moving the mouse re-aim a Select/Remove-style action pointed at
+whatever the model calls "selected."
 
-### The one genuinely unreachable set — and it is correct
+Because the render pipeline underneath has no GPU scissor rect, every clip here (list rows, sprites,
+text) is done on the CPU by intersecting geometry against the visible band before upload, rather than
+issuing a hardware scissor per range. That decision is what let the scroll offset move to pixels in
+the first place — a row that only partially fits the band gets partially drawn instead of skipped
+whole.
 
-`GuiAtlas::build` globs `gui/sprites/**` and **structurally cannot see** the **89** GUI textures
-outside it: every `container/*.png` background, `advancements/window.png`, `book.png`, the
-hanging-sign sheets. `resources.rs`'s `load_gui_atlas` doc comment already documents this and
-`container.rs::background::ContainerBackground` already
-works around it deliberately — vanilla blits hand-placed sub-rects of those 256×256 sheets at native
-size (`ContainerScreen.extractBackground` draws the chest as *two* blits), and `GuiScaling` has no variant
-for an arbitrary sub-rect.
+Clipping the *draw* is only half the picture — the **hit-test** has to reject clicks and hover outside
+a list's own band the same way vanilla's list widgets bound the cursor against the list box before
+ever walking its entries. A screen that puts click-handling geometry into the same flat list as its
+list rows without asking "is this actually inside the list's band" lets an overhanging list row steal
+clicks (and hover) meant for whatever sits below the list, footer buttons included. Every screen that
+adopts the shared list declares a small canvas-independent spec — row height, top offset, footer
+height, entry count, and how its row column relates to the canvas width (centred at a fixed width, or
+full-width with an explicit inset) — and that one declaration is what both the scrollbar/wheel input
+and the pixel draw read, so a screen cannot have a working scrollbar without also getting the correct
+click bound, or vice versa.
 
-**Do not "fix" this by widening the glob.** Forcing the three-mode abstraction to express a sub-rect
-blit is the wrong shape, and the workaround is the considered answer.
+### Overlay screens and the panorama backdrop
 
-## The disabled path
+Not every menu screen owns the whole frame. A screen shown over a live world — the pause menu, the
+death screen, a command-block editor opened in-world — is drawn as a **backdrop-aware overlay**
+rather than a full standalone frame: it composites over the game world (dimmed, not covered by the
+panorama) instead of replacing it. This is a three-way choice per screen (panorama backdrop, a dim
+overlay over the world, or nothing) rather than a single boolean, because a screen can legitimately
+want a translucent wash drawn **over** the live game world without suppressing everything else that a
+full-frame screen gets — canvas scale, cursor/hover state, the list chrome above, and so on.
 
-The requirement — every real button present, unsupported ones greyed out — maps onto one small
-vanilla mechanism. There is **no disabled widget type**; `active = false` is the whole API.
+That "everything else" is the load-bearing rule: **every screen's frame must be built through one
+shared function that stamps the canvas facts onto it**, the same one full-frame screens use, rather
+than being assembled by hand at the draw site. A screen that skips this and builds its frame raw
+still compiles and looks plausible, but silently loses hover, tooltips, the correct backdrop, and list
+chrome, because each of those is a field on the shared frame stamp rather than something the draw call
+derives itself. When adding a new overlay-style screen, build its frame through that one shared
+stamping function and have both the draw path and the hit-test path call it — never assemble a frame
+inline at either call site.
 
-- **Sprite**: `WidgetSprites.get(enabled, focused)` is a 4-state record — `enabled`, `disabled`,
-  `enabledFocused`, `disabledFocused`.
-- **Label**: `AbstractWidget.WithInactiveMessage` swaps the message to grey **`-6250336`**.
-- **No disabled sprite at all** for `Checkbox`, `EditBox`, `AbstractSliderButton` — grey label plus
-  blocked input only. Inventing disabled art for these is a deviation that reads as correct in
-  review.
+The panorama itself is vanilla's spinning cubemap sky, shown full-strength (undimmed) only on the
+title screen and dimmed under the translucent menu-background wash everywhere else out of a world; it
+is not drawn at all over a live world. It spins at a fixed, slow rate (a multi-minute revolution), so
+"the sky looks static" over a short observation is expected, not broken. One thing worth knowing
+before debugging a flat grey sky: the six cubemap face textures are **not** shipped as real art in the
+game's own jar — the jar deliberately carries 1×1 grey placeholder stubs, and the real 1024²-pixel
+faces are delivered through the separate asset object store the game's asset index points at. A grey,
+non-varying panorama does not mean the loader is broken; it means the object store wasn't populated,
+and the fix is fetching those objects, not touching the panorama code. The dim wash over the panorama
+is applied as a single blend factor rather than a second quad — cheaper, and correct only because the
+dim happens to be equivalent to a straight multiply in either linear or gamma target space.
 
-Vanilla disables its own controls for exactly our reason, so these are patterns to copy rather than
-design:
+## How to change it
 
-| site | what and why |
-|---|---|
-| `OptionsSubScreen.addContents` | narrator, `active = minecraft.getNarrator().isActive()` |
-| `VideoSettingsScreen.tick` | anisotropy slider, `active = textureFiltering == ANISOTROPIC` |
-| `TitleScreen.createNormalMenuOptions` | multiplayer, `.active = multiplayerAllowed`, with an explaining tooltip |
-| `OptionsScreen.init` | telemetry, plus `TELEMETRY_DISABLED_TOOLTIP` |
-
-The last two are the important precedent: **a disabled button carrying a tooltip that says why** is
-vanilla's own idiom. It is what makes "unsupported, greyed out" read as honest rather than broken.
-
-Measured detail worth keeping: **`button_disabled`'s nine-slice border width is 1**,
-unlike its siblings. Read it from the `.mcmeta` at runtime; do not encode any of them.
-
-## Layout: real, widely used, and not universal
-
-`net/minecraft/client/gui/layouts/` — `AbstractLayout`, `CommonLayouts`, `EqualSpacingLayout`,
-`FrameLayout`, `GridLayout`, `HeaderAndFooterLayout`, `Layout`, `LayoutElement`, `LayoutSettings`,
-`LinearLayout`, `SpacerElement`.
-
-Two-phase: add children with per-cell `LayoutSettings` (padding + alignment), then one
-`arrangeElements()` pass assigns absolute bounds, then `visitWidgets` hands them to the screen.
-`OptionsSubScreen.init` is the canonical shape:
-
-```java
-this.addTitle();
-this.addContents();
-this.addFooter();
-this.layout.visitWidgets(x$0 -> this.addRenderableWidget(x$0));
-this.repositionElements();     // -> this.layout.arrangeElements()
-```
-
-Usage under `client/gui/screens/` — **57 files reference a layout class, 47 of them `Screen`
-subclasses** (68 files across the whole client tree):
-
-| class | files under `screens/` |
-|---|---|
-| `LinearLayout` | 46 |
-| `HeaderAndFooterLayout` | 27 |
-| `FrameLayout` | 17 |
-| `GridLayout` | 10 |
-| `EqualSpacingLayout` | 1 |
-
-`HeaderAndFooterLayout` matters most: it is the base of `OptionsSubScreen` (its `layout` field), so **every**
-settings sub-screen inherits it, and both target list screens use it. Landing order by leverage:
-`LinearLayout` → `HeaderAndFooterLayout` → `FrameLayout` → `GridLayout`; skip `EqualSpacingLayout`
-until something needs it.
-
-Two counts bound it in the other direction:
-
-- **`screens/inventory/` uses it zero times, across all 59 files.** `AbstractContainerScreen.init`
-  hand-centres via `leftPos`/`topPos`; slot positions come from the *menu* classes as
-  constructor arithmetic — `ChestMenu.addChestGrid`,
-  `this.addSlot(new Slot(container, x + y * 9, left + x * 18, top + y * 18))` — which is shared
-  server/client code, not client UI code.
-- **`TitleScreen` uses zero layout classes**, hand-centring on `this.width / 2 - 100`.
-
-So "vanilla uses layouts" is not universal, and a hand-arithmetic screen is legitimate vanilla.
-
-## The settings census
-
-Vanilla models an option as an `OptionInstance` (`client/OptionInstance.java`, 644 lines).
-`Options.java` declares **94 private `OptionInstance` fields** with **93 public accessors**.
-`ValueSet` implementations: `Enum`, `LazyEnum`, `AltEnum`, `IntRange`,
-`ClampingLazyMaxIntRange`, `UnitDouble`, `SliderableEnum`, over the
-`CycleableValueSet` / `SliderableValueSet` / `SliderableOrCyclableValueSet`
-interfaces. `createButton` dispatches to a `CycleButton` or an `OptionInstance.OptionInstanceSliderButton`.
-
-Every sub-screen extends `OptionsSubScreen` = `HeaderAndFooterLayout` + `OptionsList` +
-abstract `addOptions()` + Done footer. `OptionsList` offers `addBig` (full-width row), `addSmall`
-(two per row), `addHeader`. **The census is therefore the `addBig`/`addSmall` call sites** — a
-settings screen is a list of options, not bespoke geometry.
-
-| screen | controls | notes |
-|---|---|---|
-| `OptionsScreen` (root) | 15 | FOV; World Options*; Online*; 9 nav buttons; Credits; Done |
-| `VideoSettingsScreen` | 31 | 3 headers; fullscreen-resolution built inline in `addOptions`; display 8 in `displayOptions`; quality `graphicsPreset` + 17 in `qualityOptions`; preferences 4 in `preferenceOptions` |
-| `KeyBindsScreen` | 59 | 57 `KeyMapping`s over 8 categories, + Reset All + Done |
-| `AccessibilityOptionsScreen` | 25 | 24 options in `options` + Controls link in `addOptions`; footer help link in `addFooter` |
-| `ChatOptionsScreen` | 18 | its `options` method |
-| `SoundOptionsScreen` | 16 | master + 10 other `SoundSource`s, `soundDevice`, subtitles, directional, `musicFrequency`, `musicToast`, all in `addOptions` |
-| `ControlsScreen` | 9 | 2 nav + 7 toggles in `options` |
-| `SkinCustomizationScreen` | 8 | 7 `PlayerModelPart`s + `mainHand` in `addOptions` |
-| `MouseSettingsScreen` | 7 | 6 in `options` + `rawMouseInput`* |
-| `OnlineOptionsScreen` | 7 | **built** — `SettingsPage::Online`, all seven decorative. 3 headers; friends, requests, notifications, presence, Xbox link, `allowServerListing`, `realmsNotifications` |
-| `FontOptionsScreen` | 2 | `forceUnicodeFont`, `japaneseGlyphVariants` in `options` — present-and-inactive on the built `LanguageSelectScreen`'s footer, not yet its own page |
-| `LanguageSelectScreen` | list | **built** — `SettingsPage::Language`, the third list-widget kind (`ObjectSelectionList`); see [`language-screen.md`](./language-screen.md) |
-| `TelemetryInfoScreen` | info | **built** — `SettingsPage::Telemetry`, an honest prose screen (no event log, no opt-in state — this client collects no telemetry); see [`telemetry-screen.md`](./telemetry-screen.md) |
-| `PackSelectionScreen` | list | **built, deliberately reduced** — `SettingsPage::ResourcePacks`: one always-empty list, one always-one-entry list, no drag-between transfer controls (nothing for them to do); see [`resource-packs-screen.md`](./resource-packs-screen.md) |
-
-**~198 distinct interactive controls**, of which 57 are keybind rows — **141 excluding keybinds**.
-Counted as focusable/clickable widgets, excluding per-screen Done/Cancel except where noted; headers
-not counted. Numbers marked `*` are conditional at runtime.
-
-Options the informal earlier list omitted, worth naming so they are not discovered late:
-`prioritizeChunkUpdates`, `cloudRange`, `cutoutLeaves`, `improvedTransparency`, `textureFiltering`,
-`maxAnisotropyBit`, `weatherRadius`, `inactivityFpsLimit`, `exclusiveFullscreen`,
-`preferredGraphicsBackend`, `chunkSectionFadeInTime`, `vignette`, `saveChatDrafts`,
-`onlyShowSecureChat`, `hideMatchedNames`, `reducedDebugInfo`, `musicFrequency`, `musicToast`,
-`allowCursorChanges`, `rotateWithMinecart`, `highContrastBlockOutline`, `narratorHotkey`,
-`hideSplashTexts`, `notificationDisplayTime`, `backgroundForChatOnly`, `sprintWindow`,
-`toggleAttack`, `toggleUse`, `japaneseGlyphVariants`.
-
-### What we persist
-
-**Two of 93, not four — this section said four and was wrong.** The error is
-`CLAUDE.md` rule 2's shape exactly: it was produced by counting `config.rs`'s public fields, and
-`config.rs` holds **two** structs.
-
-- `config::Options` is the *persisted* one (`options.json`) and has three fields: `gui_scale`,
-  `keybinds`, `view_bobbing`. Only two of those are vanilla `OptionInstance`s.
-- `config::Config` is *argv*, and its own doc comment says it is "parsed fresh from argv every run
-  and never written back". `render_distance` and `sensitivity` live **there**, so a settings row that
-  appeared to set either would be fabricated persistence — honoured for the session by accident of
-  the CLI default and lost on restart.
-
-So the live pair is `gui_scale` and `view_bobbing`, and the settings tree renders `renderDistance` and
-`sensitivity` inactive with the rest. Making them live is real work: a field on `Options`, a JSON
-key, and a consumer in `app.rs` that prefers it over the flag — and `sensitivity` additionally
-cannot be an `f32` without `Options` losing its `Eq`.
-
-**2 of 93 at first landing, 7 of 93 now.** That ratio is the argument for building the tree from an
-option *model* rather than screen by screen: most rows will be present-and-disabled for a long time,
-and that is the intended end state, not a shortfall. The settings tree first landed 135 controls of
-which 18 worked; a later pass made five more Controls/Mouse rows live without changing the
-135-control census, so 23 worked after that pass. The Online settings page (`task_036bd7b9`) then added a ninth page —
-`OnlineOptionsScreen` above, all seven of its own controls decorative — bringing the census to
-**143** and, for the first time, making the live count context-dependent: the root's Online button
-is a tenth live row outside a world (**25**) and stays the inactive World Options placeholder inside
-one (**24**), because `WorldOptionsScreen` itself is still not built. See
-[`settings-screen.md`](./settings-screen.md) for the exact split and the tests that hold both
-numbers.
-
-## What already exists on our side
-
-Re-verified rather than assumed — `CLAUDE.md` rule 2, and it changed the plan twice.
-
-- **The server list is not absent.** `Screen::ServerList` and `Screen::ServerEdit` are live variants
-  of the `menu.rs` `Screen` enum, and `render.rs` references `Screen::ServerList` in 5 places. `menu/servers.rs`
-  (528 lines) has `ServerEntry`/`ServerList` with `split_host_port`, `effective_port`, JSON
-  persistence and `servers_path()`. `menu/status.rs` (470 lines) has `StatusCache` with a real
-  `net_probe`, `pump()` and pending states. This is a **fidelity pass**, not a build.
-- **World select is genuinely absent.**
-  `/usr/bin/grep -ric 'worldselect\|world_select\|WorldList\|LevelSummary'` over
-  `crates/lodestone-shell/src/` returns no non-zero count, and the `Screen` enum has no variant.
-  It is the only target screen that is new construction.
-- **The settings tree already had an umbrella**, with a keybinds screen and other work beneath it.
-  It was not re-filed; the census above was added there as a comment.
-- `crates/lodestone-shell/tests/menu_button_pixels.rs` is the established GUI pixel-gate pattern and
-  the model for every new gate here.
-- Text entry exists, but it is **chat's** — `chat.rs`'s `ChatInput`, rendered in `hud.rs`.
-  This is a trap to watch: do not disturb it while adding `EditBox`.
-
-## The boundary: what not to build
-
-This framework is for **menu screens**. Two neighbours are explicitly out.
-
-**The HUD.** Driven by live game state every frame, with its own layout logic in `hud.rs`, anchored
-to a *moving* cluster origin that already burned one gate (`CLAUDE.md`'s `sprite_vitals` entry: a
-gate measured ~20 logical pixels above a row that was drawing perfectly). It is not a widget tree and
-must not be retrofitted into one. Hearts, hunger, bubbles, XP, hotbar, chat overlay, boss bars, and
-the F3 overlay are all out.
-
-**Container screens.** Driven by live `Menu` state, with slot geometry inherited from the *menu*
-classes rather than any layout container — the 0-of-59 count above is the evidence. They get their
-own pass, last.
-
-What crosses the boundary and what does not:
-
-- **Primitives cross**: the font stack, `GuiAtlas`, the nine-slice helper, and any widget the
-  container pass wants to reuse.
-- **Layout does not**: a container screen must never be arranged by `HeaderAndFooterLayout`, because
-  vanilla does not do that and copying it would invent geometry vanilla never had.
-
-Also out: world **creation** (the target screen renders the button disabled and stops), Realms, and the
-account screens, which are ours rather than vanilla's.
-
-## Sequencing, and why it changed
-
-The plan started as: sprite/nine-slice reachability → layout → widgets → `Screen` dispatch → the
-three screens → `AbstractContainerScreen`. Two changes, both from measurement:
-
-1. **Sprite reachability is deleted, not scheduled.** It is already done and already reaching pixels
-   (above). What looked like a plumbing gap is a breadth-of-use gap, which is the widget issue.
-2. **Widgets move ahead of layout.** Vanilla's `AbstractLayout` arranges `LayoutElement`s — there is
-   nothing to arrange until a widget type exists. And `TitleScreen` proves a widget is perfectly
-   usable with hand-placed bounds in the meantime, so nothing is blocked by deferring layout. The
-   disabled path is also the immediate requirement and the smallest piece, which makes it the right
-   first landing on its own.
-
-| # | issue | what consumes it |
-|---|---|---|
-| 1 | #393 widgets + disabled path | converting the existing title and pause button rows |
-| 2 | #394 layout primitives | re-expressing title, pause, settings, server list — pixels unmoved |
-| 3 | #395 focus, tab, dispatch, `EditBox` | converting `Screen::ServerEdit`'s address fields |
-| 4 | #396 server list fidelity | already reachable from the title screen |
-| 5 | #397 world select, creation disabled | wiring the title screen's Singleplayer button, same PR |
-| 6 | #55 settings tree (+#15, #32, #195) | the Options button on title and pause |
-| 7 | #398 `AbstractContainerScreen` | refactoring inventory + chest onto it; absorbs the slot-highlight work |
-
-## How to change this
-
-- **Every child issue must name its consumer.** The dominant defect here is the island — sixteen
-  confirmed, most recently a view bob whose mechanism landed with a passing pixel gate while its
-  consumer sat uncommitted for two hours. A widget type with no converted screen is an island;
-  reject it on that basis rather than merging and following up.
-- **Layout gates assert widget rects against vanilla's computed positions**, not screenshots.
-  Hand-derive the expected `(x, y, w, h)` from `arrangeElements`' own lines, or dump from a JVM
-  oracle. Per `CLAUDE.md`, the expected value must originate **outside the code under test** — do not
-  snapshot our own output as a fixture, because `decode(encode(x)) == x` is satisfied by two
-  symmetric misunderstandings.
-- **Predict the value, do not assert the sign.** The disabled label must land on `-6250336`
-  specifically, not merely "darker than enabled". That is the *magnitude* species of vacuous test:
-  the hurt-overlay gate asserted direction and passed at 3440/3440 while rendering ~70% red where
-  vanilla renders ~30%.
-- **Report a bounding box, never a percentage.** A gate reporting only a fraction cannot tell a
-  uniform-but-wrong frame from a localised blob.
-- **Derive geometry from the same expression the draw uses.** Ask the widget or the layout for its
-  bounds; do not restate a constant.
-- **Every absence assertion needs a control watched failing** — and before believing the control,
-  ask *what else already paints here*. The precedent in this exact area is
-  `container_screen.rs`'s "nothing else draws at the test cursor position", which broke when the dim
-  gradient landed; the right fix was a `skip_verts` parameter passed `dim_vertex_count`, restoring
-  the question the control asked rather than loosening the assertion.
-- **For a hover or highlight, the discriminator is *position*.** Move the cursor and assert the
-  thing moves with it. A gate proving "something drew in a slot" passes on a highlight nailed to
-  slot 0.
-- **Use `/usr/bin/grep`, never `rtk grep`,** for any claim in this document. It strips the matched
-  pattern and everything before it on the line, so a symbol that exists reads as absent — and this
-  document is mostly absence claims. A truncated search is not a negative result either: use
-  `grep -c` or narrow the path.
+- **A new widget or screen: pick the right registry.** Draw-and-input, input-only, and draw-only are
+  three different lists; the wrong one compiles and renders correctly in isolation while silently
+  never receiving a click or never drawing.
+- **A new disabled state: never invent a second widget type.** Toggle `active`, and if the widget has
+  no dedicated disabled art (checkboxes, sliders), let it fall back to the grey label plus blocked
+  input — do not invent art vanilla never had.
+- **A widget with any internal state (a text field, a scroll position) cannot be rebuilt from scratch
+  every frame.** Reposition the existing instance instead, or its state resets every frame it's drawn.
+- **Do not add scroll animation or a GPU scissor to the list.** Neither exists in vanilla; the
+  pixel-granular offset already produces the "smooth" feel, and CPU clipping is what makes partial rows
+  and clipped text both work without a second mechanism.
+- **A list's hit-test bound and its draw clip must come from the same declaration.** If a screen's
+  list rows are hit-tested through anything other than the shared band declaration, an overhanging row
+  will steal clicks from whatever sits below the list.
+- **An overlay-style screen's frame must go through the same canvas-stamping function every full-frame
+  screen uses.** Assembling a frame by hand at the draw site is the single most common way an overlay
+  screen quietly loses hover, tooltips, chrome, or the correct backdrop.
+- **Read the real arrange/layout logic before trusting a screen that merely uses it.** A screen whose
+  padding happens to leave no room for alignment to matter cannot tell you what the alignment formula
+  actually does.
+- **Sort out platform key modifiers explicitly.** Clipboard-style shortcuts use the platform's own
+  modifier key, not a hardcoded one; getting this wrong only breaks on the platforms nobody tested on.
 
 ## Configuration
 
-- `crates/lodestone-shell/src/config.rs` — the persisted `Options` (`options.json`). **Two** vanilla
-  options today (`gui_scale`, `view_bobbing`) plus the `keybinds` map, which is its own separate
-  concern rather than an option row. `render_distance` and `sensitivity` are *not* here — they live
-  on `config::Config`, which is argv-only and never written back — so the settings tree renders them
-  inactive. See the census under [What we persist](#what-we-persist); the "four" this line used to
-  claim came from counting both structs.
-- `crates/lodestone-shell/src/resources.rs` — `load_gui_atlas()` (HUD) and `load_menu_gui_atlas()`
-  (menu, `build_with_extras` + `TITLE_TEXTURES`). Two stitches deliberately; `load_menu_gui_atlas`'s
-  own doc comment explains why, and notes the tidier end state is one shared atlas handed to both renderers.
+- `crates/lodestone-shell/src/config.rs` — `gui_scale` sets the logical canvas every layout and widget
+  bound is expressed in.
+- `crates/lodestone-shell/src/resources.rs` — loads the menu GUI sprite atlas (widget/list-chrome
+  sprites) and the panorama faces; both are fail-open, so a missing pack asset degrades to a flat
+  fallback rather than failing startup.
+- The asset object store (resolved alongside the game's normal asset root) is where the real panorama
+  faces live; an unpopulated store is a soft failure, not an error.
 
 ## Dependencies
 
-- `lodestone-assets` — `gui.rs`: `.mcmeta` parsing, `GuiScaling`, `Border`, quad decomposition.
-- `lodestone-render` — `gui_atlas.rs`: `GuiAtlas`, `GuiSpriteQuad`, `geometry()`.
-- `lodestone-shell` — `menu/{render,nav,servers,status,accounts}.rs`, `menu.rs`, `hud/{font,vanilla_font,item_icon}.rs`,
-  `container.rs`, `config.rs`.
-- The 26.2 jar at `.cache/mc/26.2/{client-src,client.jar}` — behavioural reference only, never
-  transliterated.
+- `lodestone-assets` — `.mcmeta`/nine-slice parsing for widget and list sprites, and the plain image
+  loader the panorama faces use.
+- `lodestone-render` — the GUI sprite atlas and its nine-slice geometry decomposition.
+- `lodestone-shell::menu` — the widget, layout, focus, list, and panorama modules themselves, plus the
+  screen-specific code that declares each screen's layout and list spec.
+- The decompiled game client source — behavioural reference only, never transliterated; every ported
+  constant here traces back to a real vanilla class rather than to a sibling port.
 
 ## See also
 
-- [Main menu](./main-menu.md) — the screen state machine, the persisted server list, status pings.
-- [Pause menu](./pause-menu.md) — the Escape stack and why `Screen::Paused` stays out of `owns_frame`.
-- [Container screen](./container-screen.md), [Container clicks](./container-clicks.md),
-  [GUI item icons](./gui-item-icons.md) — the container side, and the two-run colour stream the
-  `AbstractContainerScreen` port must preserve.
-- [Keybindings](./keybindings.md) — the action → input table, and why Escape is not rebindable.
+- [Menu screens](./menu-screens.md) — the screen catalogue built from these primitives.
+- [Container screens](./container-screens.md) — the neighbouring subsystem that deliberately does
+  not use these layout containers.
+- [Keybindings](./keybindings.md) — the action/input table behind the key events this dispatch layer
+  consumes.
