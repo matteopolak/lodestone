@@ -300,6 +300,18 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   Two independent halves, one per side of the client/server split, both giving a
   native plugin the Bukkit-class `World.spawnEntity(loc,
   type)`/`Entity.remove()`/free-modification surface:
+- [Server-side plugin capability parity](./plugin-server-capabilities.md) — A survey
+  of what a server-side plugin can actually do today, set against the client's
+  five-clause intent doctrine (`docs/plugin-api.md`), and a design for what a
+  *general* server-side capability surface should look like once the server's own
+  `bevy_ecs::World` (`crate::ecs` in `lodestone-server`) grows past Phase 0. The
+  client has one coherent doctrine covering every player-verb seam; the server has
+  five independently-shipped capability clusters, each answering its own issue, each
+  choosing its own subset of that doctrine — some choosing none of it. This document
+  names which is which, by symbol, and proposes the one addition (a general
+  veto/adjudicate layer riding the substrate's own `TickSet::Adjudicate`) that would
+  make the pattern the crafting hooks already discovered available to everything else,
+  instead of being reinvented per feature.
 - [Plugin worldgen API — custom generators, custom dimensions, structure placement](./plugin-worldgen-api.md) —
   The plugin-facing seam that answers three issues Paper's own API covers —
   `ChunkGenerator`/ `BiomeProvider` (#132), per-world dimension creation (#134), and
