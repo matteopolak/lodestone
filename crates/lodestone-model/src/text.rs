@@ -794,6 +794,38 @@ impl Text {
     /// on purpose: this function is putting `§` codes *back*, so a code already
     /// literal in the tree's content is passed through unchanged rather than
     /// expanded and re-emitted.
+    ///
+    /// # What this is for (issue #656)
+    ///
+    /// Two call shapes are legitimate; a third is a bug.
+    ///
+    /// 1. **Serialising into an actual legacy-string wire field** — a
+    ///    protocol whose own packet definition carries a `§`-coded string,
+    ///    e.g. `v47`/`v340`'s pre-1.13 `SCOREBOARD_TEAM` prefix/suffix
+    ///    (verified in both adapters' own decode arms), where the flattening
+    ///    is the wire format's own lossiness, not a bug we introduced. No
+    ///    encoder in this workspace constructs such a field today —
+    ///    `v47`/`v340` only ever *decode* one (`Text::from_legacy`, the
+    ///    reverse direction), because neither implements `ServerProtocol` and
+    ///    so never emits a clientbound `SCOREBOARD_TEAM` of its own. Keep
+    ///    this method for when one does.
+    /// 2. **A colour-blind, non-drawing use** — box-width measurement through
+    ///    a `§`-aware `font.width`, or an identity/equality comparison that
+    ///    only needs a stable content key — where the flattened string is
+    ///    never itself painted to the screen, so a dropped hex colour changes
+    ///    nothing about the result.
+    ///
+    /// Anything **draw-adjacent** — building the string a renderer actually
+    /// puts on screen — is a bug: hex colours (`TextColor::Rgb`, added in
+    /// 1.16) have no legacy code and silently vanish. Use
+    /// [`to_spans`](Self::to_spans) and draw the spans instead. This was the
+    /// shape of two now-fixed production bugs (`styled_hover_name`'s tooltip
+    /// title/held-item draw sites, `ChatLog::recent`'s HUD draw path) and is
+    /// the shape of one still-open one (`v735`'s `TAB_COMPLETE` tooltip
+    /// decode flattens straight into `CommandSuggestionEntry::tooltip:
+    /// Option<String>`, which has no span-carrying representation to flatten
+    /// into instead — fixing it needs that field's type widened and every
+    /// protocol crate's construction site updated to match).
     #[must_use]
     pub fn to_legacy_string(&self) -> String {
         let mut out = String::new();
