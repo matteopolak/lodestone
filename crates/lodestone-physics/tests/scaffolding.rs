@@ -1,13 +1,13 @@
-//! Scaffolding's climb/descend behaviour vs. a ladder's — issue #210.
+//! Scaffolding's climb/descend behaviour vs. a ladder's.
 //!
-//! Both blocks are `BlockTags.CLIMBABLE`, so `CollisionView::is_climbable` is
-//! identical for them; the one difference vanilla codes is in
-//! `LivingEntity.handleOnClimbable`'s sneak-to-hold clamp
-//! (`LivingEntity.java:2693-2703`):
+//! Both blocks are tagged as vanilla's own climbable set, so
+//! `CollisionView::is_climbable` is identical for them; the one difference
+//! vanilla codes is in its own "handle on climbable" step's sneak-to-hold
+//! clamp:
 //!
 //! ```text
 //! yd = max(delta.y, -0.15);
-//! if (yd < 0.0 && !inBlockState.is(SCAFFOLDING) && isSuppressingSlidingDownLadder())
+//! if (yd < 0.0 && not standing in scaffolding && suppressing sliding down ladder)
 //!     yd = 0.0;
 //! ```
 //!
@@ -19,8 +19,8 @@
 
 use lodestone_physics::{Aabb, CollisionView, MovementInput, PhysicsProfile, PlayerState, Vec3d, tick};
 
-/// `Mth.clamp(delta.y, -0.15F, 0.15F)`'s bound, widened `f32 -> f64` exactly as
-/// `handle_on_climbable` does — `0.15` is not exact in `f32`, so the settled
+/// Vanilla's own clamp of `delta.y` to `[-0.15F, 0.15F]`'s bound, widened
+/// `f32 -> f64` exactly as `handle_on_climbable` does — `0.15` is not exact in `f32`, so the settled
 /// descent rate is `-0.150000005960464...`, not the decimal literal `-0.15`.
 const CLIMB_CAP: f64 = 0.15f32 as f64;
 

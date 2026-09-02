@@ -1,8 +1,8 @@
-//! `LivingEntity.pushEntities` at the pipeline level: where in the tick the push
-//! lands, and the proof that an empty neighbour slice is the pre-change behaviour
-//! bit for bit.
+//! Vanilla's own entity-push pass at the pipeline level: where in the tick the
+//! push lands, and the proof that an empty neighbour slice is the pre-change
+//! behaviour bit for bit.
 //!
-//! The rule's own arithmetic (the `sqrt(absMax)` normaliser, the widened `0.01f`
+//! The rule's own arithmetic (the `sqrt(abs_max)` normaliser, the widened `0.01f`
 //! floor and `0.05f` scale, the near-contact clamp, the vehicle/ladder/spectator
 //! vetoes) is unit-tested inside `lodestone_physics::push`. The bit-exact
 //! trajectory comparison against the independent Python oracle is `golden.rs`'s
@@ -53,7 +53,7 @@ impl CollisionView for Floor {
     }
 }
 
-/// A ladder in every cell — `LivingEntity.isPushable()` vetoes on `onClimbable()`.
+/// A ladder in every cell — vanilla's own "is pushable" check vetoes on its own "on climbable" check.
 struct Ladders(Floor);
 
 impl CollisionView for Ladders {
@@ -80,8 +80,8 @@ fn neighbour_at(x: f64, y: f64, z: f64) -> NearbyEntity {
 
 #[test]
 fn the_push_lands_on_velocity_after_the_move_not_on_this_tick_s_position() {
-    // Vanilla runs `pushEntities` at the end of `aiStep` (`LivingEntity.java:3163`),
-    // *after* `travel` (`:3130`). So on the tick a neighbour first overlaps, the
+    // Vanilla runs its own entity-push pass at the end of its own AI step,
+    // *after* the travel step. So on the tick a neighbour first overlaps, the
     // position must be exactly what an unpushed tick would give, and only the
     // velocity differs. A "clamp/nudge the position" or "push before travel" port
     // gets tick 1 wrong and then agrees from tick 2 — a one-tick divergence that
@@ -178,8 +178,8 @@ fn tick_among_entities_with_no_neighbours_is_tick_bit_for_bit() {
 
 #[test]
 fn a_ladder_holds_you_against_a_crowd_and_the_control_shows_the_crowd_would_move_you() {
-    // `LivingEntity.isPushable()` = `isAlive() && !isSpectator() && !onClimbable()`,
-    // so the same crowd that shoves a standing player cannot budge one on a ladder.
+    // Vanilla's own "is pushable" check is "is alive and not spectator and
+    // not on climbable", so the same crowd that shoves a standing player cannot budge one on a ladder.
     // Both halves run here because "no motion" alone is satisfied by a broken push.
     let profile = PhysicsProfile::mc_1_21();
     let crowd: Vec<NearbyEntity> = [(0.65, 0.5), (0.35, 0.5), (0.5, 0.65), (0.5, 0.35)]
@@ -221,13 +221,13 @@ fn a_ladder_holds_you_against_a_crowd_and_the_control_shows_the_crowd_would_move
     }
     assert_eq!(
         climbing.position.x, 0.5,
-        "onClimbable must veto the push entirely"
+        "the on-climbable check must veto the push entirely"
     );
     assert_eq!(climbing.position.z, 0.5);
 }
 
-/// The team gate (`EntitySelector.pushableBy`'s `CollisionRule` half, ported at
-/// `lodestone_physics::push::team_allows_push`) run through the real pipeline
+/// The team gate (vanilla's own pushable-by selector's team-rule half, ported
+/// at `lodestone_physics::push::team_allows_push`) run through the real pipeline
 /// entry point, [`tick_among_entities`] — not through `team_allows_push` or
 /// `pair_admitted` directly, which is all `push`'s own unit tests exercise.
 ///
@@ -259,42 +259,42 @@ fn the_team_gate_reaches_the_pipeline_entry_point_not_only_push_own_unit_tests()
             expect_pushed: true,
         },
         Case {
-            label: "neighbour's NEVER vetoes an otherwise-open pusher",
+            label: "neighbour's never rule vetoes an otherwise-open pusher",
             self_rule: CollisionRule::Always,
             neighbour_rule: CollisionRule::Never,
             allied: false,
             expect_pushed: false,
         },
         Case {
-            label: "our own NEVER vetoes an otherwise-open neighbour",
+            label: "our own never rule vetoes an otherwise-open neighbour",
             self_rule: CollisionRule::Never,
             neighbour_rule: CollisionRule::Always,
             allied: false,
             expect_pushed: false,
         },
         Case {
-            label: "PUSH_OWN_TEAM vetoes an allied pair",
+            label: "push-own-team vetoes an allied pair",
             self_rule: CollisionRule::PushOwnTeam,
             neighbour_rule: CollisionRule::Always,
             allied: true,
             expect_pushed: false,
         },
         Case {
-            label: "PUSH_OWN_TEAM admits a non-allied pair",
+            label: "push-own-team admits a non-allied pair",
             self_rule: CollisionRule::PushOwnTeam,
             neighbour_rule: CollisionRule::Always,
             allied: false,
             expect_pushed: true,
         },
         Case {
-            label: "PUSH_OTHER_TEAMS vetoes a non-allied pair",
+            label: "push-other-teams vetoes a non-allied pair",
             self_rule: CollisionRule::PushOtherTeams,
             neighbour_rule: CollisionRule::Always,
             allied: false,
             expect_pushed: false,
         },
         Case {
-            label: "PUSH_OTHER_TEAMS admits an allied pair",
+            label: "push-other-teams admits an allied pair",
             self_rule: CollisionRule::PushOtherTeams,
             neighbour_rule: CollisionRule::Always,
             allied: true,

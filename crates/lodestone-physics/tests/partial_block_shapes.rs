@@ -37,20 +37,21 @@ use lodestone_physics::{
 };
 
 /// One block-local box, `[min_x, min_y, min_z, max_x, max_y, max_z]`, in the same
-/// `0..1`-per-axis space vanilla's `VoxelShape.toAabbs()` uses — except `max_y`,
-/// which is uncapped (a fence is `1.5`).
+/// `0..1`-per-axis space vanilla's own shape-to-boxes conversion uses — except
+/// `max_y`, which is uncapped (a fence is `1.5`).
 type LocalBox = [f64; 6];
 
 /// A full block.
 const CUBE: &[LocalBox] = &[[0.0, 0.0, 0.0, 1.0, 1.0, 1.0]];
-/// `SlabBlock` bottom half: `Block.box(0, 0, 0, 16, 8, 16)`.
+/// A bottom slab's lower half — vanilla's own box helper: `box(0, 0, 0, 16, 8, 16)`.
 const BOTTOM_SLAB: &[LocalBox] = &[[0.0, 0.0, 0.0, 1.0, 0.5, 1.0]];
-/// `SoulSandBlock.SHAPE`: `Block.box(0, 0, 0, 16, 14, 16)` — 14/16 = 0.875, the
-/// reason you sink slightly into soul sand.
+/// Soul sand's own shape — vanilla's own box helper: `box(0, 0, 0, 16, 14, 16)`
+/// — 14/16 = 0.875, the reason you sink slightly into soul sand.
 const SOUL_SAND: &[LocalBox] = &[[0.0, 0.0, 0.0, 1.0, 0.875, 1.0]];
-/// A free-standing fence: the post only, `Block.box(6, 0, 6, 10, 24, 10)`. The
-/// `24` is the point — **1.5 blocks tall**, which is why a fence cannot be
-/// step-mounted even though it looks one block high.
+/// A free-standing fence: the post only, vanilla's own box helper:
+/// `box(6, 0, 6, 10, 24, 10)`. The `24` is the point — **1.5 blocks tall**,
+/// which is why a fence cannot be step-mounted even though it looks one
+/// block high.
 const FENCE_POST: &[LocalBox] = &[[0.375, 0.0, 0.375, 0.625, 1.5, 0.625]];
 
 /// Which shape a cell holds. `Air` is the absence of a cell entirely.
