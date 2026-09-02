@@ -10,7 +10,8 @@
 //!
 //! Careful reading of the reference source shows the version-varying pieces that
 //! *can* be expressed as profile scalars are limited to defaults such as the
-//! sneak speed factor (`0.3` via `SNEAKING_SPEED`). The core arithmetic constants
+//! sneak speed factor (`0.3` via vanilla's own sneaking-speed attribute
+//! default). The core arithmetic constants
 //! do not change.
 //!
 //! # What is per-*entity*, not per-version (moved out)
@@ -34,12 +35,13 @@
 //! profile to declare which algorithm it wants, and the 1.8 arms currently
 //! `unimplemented!()` so the gap is loud, not silent:
 //!
-//! * **The client input pipeline.** Modern clients apply
-//!   `modifyInputSpeedForSquareMovement` (a per-direction unit-square projection)
-//!   inside `LocalPlayer.modifyInput`; 1.8's `moveFlying` normalised the raw
-//!   input by `max(1, magnitude)` instead. This changes the *shape* of the input
+//! * **The client input pipeline.** Modern clients apply vanilla's own
+//!   "modify input speed for square movement" step (a per-direction
+//!   unit-square projection) inside its own client-side input-modify step;
+//!   1.8's own "move flying" step normalised the raw input by
+//!   `max(1, magnitude)` instead. This changes the *shape* of the input
 //!   transform, not a coefficient — see [`InputModel`].
-//! * **Fluid movement.** `getFluidFallingAdjustedMovement` (the `-0.003`
+//! * **Fluid movement.** Vanilla's own falling-adjusted fluid movement step (the `-0.003`
 //!   slow-descent clamp) and the whole swimming/pose system are modern additions
 //!   with no 1.8 analogue. Water physics is a different algorithm, not a retuned
 //!   one — see [`FluidModel`]. The modern submerged path is implemented in
@@ -55,11 +57,11 @@
 /// and look fully configured while being wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputModel {
-    /// 1.9+ pipeline: `LocalPlayer.modifyInput` →
-    /// `modifyInputSpeedForSquareMovement`, projecting the input onto a unit
-    /// square per direction. This is the validated path.
+    /// 1.9+ pipeline: vanilla's own client-side input-modify step → its own
+    /// "modify input speed for square movement" step, projecting the input
+    /// onto a unit square per direction. This is the validated path.
     UnitSquareProjection,
-    /// 1.8 pipeline: `EntityLivingBase.moveFlying` normalised the raw
+    /// 1.8 pipeline: vanilla's own "move flying" step normalised the raw
     /// strafe/forward by `max(1, magnitude)` with **no** unit-square projection.
     /// Not yet implemented or bit-validated — it is deliberately left as an
     /// explicit branch (blocked on the restructured 1.8 client and a 1.8 JVM
@@ -68,13 +70,13 @@ pub enum InputModel {
 }
 
 /// Selects the **fluid-movement algorithm**. Also structural: modern Minecraft
-/// has swimming poses, `getFluidFallingAdjustedMovement`, and separate
+/// has swimming poses, its own falling-adjusted fluid movement step, and separate
 /// water/lava travel branches that 1.8 lacks entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FluidModel {
-    /// Modern `travelInWater`/`travelInLava` with the falling-adjusted clamp and
-    /// sprint/efficiency terms. This is the path [`crate::player::tick_water`]
-    /// implements and validates.
+    /// Vanilla's own modern in-water/in-lava travel steps with the
+    /// falling-adjusted clamp and sprint/efficiency terms. This is the path
+    /// [`crate::player::tick_water`] implements and validates.
     Modern,
     /// 1.8 in-fluid handling (a simpler single branch). Not yet implemented or
     /// validated; present so the seam is type-level rather than a hidden
@@ -85,21 +87,22 @@ pub enum FluidModel {
 /// Numeric knobs for the movement core. All fields carry vanilla's exact widths.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhysicsProfile {
-    /// Base `MOVEMENT_SPEED` attribute (`0.1F`).
+    /// Base movement-speed attribute (`0.1F`).
     pub base_movement_speed: f32,
-    /// Sprint `ADD_MULTIPLIED_TOTAL` modifier amount (`0.3F`).
+    /// Sprint modifier amount (`0.3F`), applied as vanilla's own "add
+    /// multiplied total" modifier.
     pub sprint_speed_modifier: f32,
-    /// `SNEAKING_SPEED` default (`0.3`).
+    /// Vanilla's own sneaking-speed attribute default (`0.3`).
     pub sneaking_speed: f32,
-    /// Base gravity (`DEFAULT_BASE_GRAVITY = 0.08`).
+    /// Base gravity (vanilla's own default-base-gravity constant, `0.08`).
     pub gravity: f32,
     /// Horizontal air-drag base (`0.91F`), multiplied by block friction.
     pub air_drag: f32,
     /// Vertical air-drag base (`0.98F`).
     pub vertical_air_drag: f32,
-    /// `AIR_DRAG_MODIFIER` attribute default (`1.0`).
+    /// Vanilla's own air-drag-modifier attribute default (`1.0`).
     pub air_drag_modifier: f32,
-    /// `FRICTION_MODIFIER` attribute default (`1.0`).
+    /// Vanilla's own friction-modifier attribute default (`1.0`).
     pub friction_modifier: f32,
     /// Ground-acceleration constant (`0.21600002F`).
     pub ground_accel: f32,
@@ -137,20 +140,21 @@ pub struct PhysicsProfile {
     /// Sprint-jump horizontal boost magnitude (`0.2`).
     ///
     /// This is an `f64` because vanilla writes it as the `double` literal `0.2`
-    /// (`Mth.cos(angle) * 0.2`), not `0.2F`. Storing it as `f32` and widening
+    /// (vanilla's own quantized cosine times `0.2`), not `0.2F`. Storing it as `f32` and widening
     /// gives `0.20000000298…` and drifts the reported Z by ~3e-9 per jump.
     pub sprint_jump_boost: f64,
     /// Water horizontal slow-down when not sprinting (`0.8F`).
     pub water_slow_down: f32,
     /// Water horizontal slow-down when sprinting (`0.9F`).
     pub water_sprint_slow_down: f32,
-    /// Base input speed used by `moveRelative` in fluids (`0.02F`).
+    /// Base input speed used by vanilla's own relative-move step in fluids (`0.02F`).
     pub fluid_input_speed: f32,
-    /// Water flow-current push scale (`Entity.updateFluidInteraction`, the
-    /// `0.014` `double` applied to the accumulated current in water).
+    /// Water flow-current push scale (vanilla's own fluid-interaction update
+    /// step, the `0.014` `double` applied to the accumulated current in water).
     pub water_push_scale: f64,
     /// Lava flow-current push scale — the overworld value
-    /// (`0.0023333333333333335`). The nether uses `0.007` (`FAST_LAVA`), an
+    /// (`0.0023333333333333335`). The nether uses `0.007` (vanilla's own
+    /// "fast lava" constant), an
     /// *environment* attribute rather than a version difference, so a caller in
     /// the nether passes `0.007` explicitly to [`crate::fluid::apply_fluid_push`].
     pub lava_push_scale: f64,

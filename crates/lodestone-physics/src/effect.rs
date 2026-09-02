@@ -8,18 +8,20 @@
 //!
 //! 1. **Direct-read effects** — Levitation, Slow Falling, Dolphin's Grace and
 //!    Jump Boost are read straight out of the effect map by the movement
-//!    integrator (`travel`/`getJumpPower`/…), *not* through the attribute system.
-//!    These fold into [`StatusEffects`] via [`StatusEffects::apply`] /
-//!    [`StatusEffects::remove`] and are consumed by [`crate::player::tick`].
-//! 2. **`MOVEMENT_SPEED` attribute modifiers** — Speed (`+0.2F`) and Slowness
-//!    (`-0.15F`) are `ADD_MULTIPLIED_TOTAL` modifiers on the `MOVEMENT_SPEED`
-//!    attribute (`MobEffects.SPEED`/`SLOWNESS`). They do **not** live in
-//!    [`StatusEffects`]; the entity layer must add them to its
-//!    `MOVEMENT_SPEED` `AttributeInstance`, whose folded value then reaches
+//!    integrator (vanilla's own travel step / jump-power accessor / …), *not*
+//!    through the attribute system. These fold into [`StatusEffects`] via
+//!    [`StatusEffects::apply`] / [`StatusEffects::remove`] and are consumed by
+//!    [`crate::player::tick`].
+//! 2. **Movement-speed attribute modifiers** — Speed (`+0.2F`) and Slowness
+//!    (`-0.15F`) are "add multiplied total" modifiers on the movement-speed
+//!    attribute (vanilla's own speed/slowness mob-effect definitions). They do
+//!    **not** live in [`StatusEffects`]; the entity layer must add them to its
+//!    own movement-speed attribute instance, whose folded value then reaches
 //!    physics via [`PlayerState::movement_speed`]. [`movement_speed_modifier`]
 //!    hands back the exact modifier amount so the entity layer never re-derives
-//!    the constant, but physics deliberately does not perform the attribute fold
-//!    (`calculateValue`) itself — that boundary is owned by `lodestone-entity`.
+//!    the constant, but physics deliberately does not perform the attribute
+//!    fold (vanilla's own attribute-value-calculation step) itself — that
+//!    boundary is owned by `lodestone-entity`.
 //!
 //! This module is the single authoritative classifier so that a decoded packet
 //! can never terminate one crate short of the integrator: [`classify`] answers
@@ -38,7 +40,7 @@ use crate::player::StatusEffects;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DirectEffect {
     /// `minecraft:levitation` — replaces gravity with a pull toward
-    /// `0.05 * (amp + 1)` in `travelInAir`.
+    /// `0.05 * (amp + 1)` in vanilla's own airborne travel step.
     Levitation(u32),
     /// `minecraft:slow_falling` — caps effective gravity at `0.01` while falling.
     SlowFalling,
@@ -54,23 +56,25 @@ pub enum DirectEffect {
 pub enum MovementEffect {
     /// A direct-read effect; fold it into [`StatusEffects`].
     Direct(DirectEffect),
-    /// A `MOVEMENT_SPEED` attribute modifier with operation
-    /// `ADD_MULTIPLIED_TOTAL`. `amount` is `base * (amplifier + 1)` in `f64`,
-    /// with `base` the widened `float` literal (`0.2F` for Speed, `-0.15F` for
-    /// Slowness) — matching `AttributeModifier.create` in vanilla. The entity
-    /// layer adds this to its `MOVEMENT_SPEED` attribute; physics does not fold
-    /// it here.
+    /// A movement-speed attribute modifier with vanilla's own "add
+    /// multiplied total" operation. `amount` is `base * (amplifier + 1)` in
+    /// `f64`, with `base` the widened `float` literal (`0.2F` for Speed,
+    /// `-0.15F` for Slowness) — matching vanilla's own attribute-modifier
+    /// construction. The entity layer adds this to its own movement-speed
+    /// attribute; physics does not fold it here.
     MovementSpeed { amount: f64 },
     /// The effect does not affect movement.
     None,
 }
 
-/// `MobEffects.SPEED`: `MOVEMENT_SPEED` `+0.2F`, `ADD_MULTIPLIED_TOTAL`.
+/// Vanilla's own speed mob-effect definition: movement-speed `+0.2F`, added
+/// as an "add multiplied total" modifier.
 ///
 /// Stored as a `float` literal in the source and widened to `double` in the
 /// modifier's `amount` field, so the widening is reproduced with `f64::from`.
 const SPEED_MOVEMENT_SPEED_BASE: f32 = 0.2;
-/// `MobEffects.SLOWNESS`: `MOVEMENT_SPEED` `-0.15F`, `ADD_MULTIPLIED_TOTAL`.
+/// Vanilla's own slowness mob-effect definition: movement-speed `-0.15F`,
+/// added as an "add multiplied total" modifier.
 const SLOWNESS_MOVEMENT_SPEED_BASE: f32 = -0.15;
 
 /// Strips an optional `minecraft:` namespace, so both the canonical
@@ -103,14 +107,14 @@ pub fn classify(effect_id: &str, amplifier: u32) -> MovementEffect {
     }
 }
 
-/// The `MOVEMENT_SPEED` attribute modifier amount a mob effect contributes, if
-/// any (operation is always `ADD_MULTIPLIED_TOTAL`).
+/// The movement-speed attribute modifier amount a mob effect contributes, if
+/// any (operation is always "add multiplied total").
 ///
 /// `amount` is `base * (amplifier + 1)` in `f64`, with `base` the widened
-/// `float` literal, matching vanilla's `AttributeModifier.create`. Returns
-/// `None` for effects that do not modify `MOVEMENT_SPEED` (including the
-/// direct-read effects). The entity layer adds the returned amount to its
-/// `MOVEMENT_SPEED` `AttributeInstance`; physics never folds it.
+/// `float` literal, matching vanilla's own attribute-modifier construction.
+/// Returns `None` for effects that do not modify movement speed (including
+/// the direct-read effects). The entity layer adds the returned amount to
+/// its own movement-speed attribute instance; physics never folds it.
 #[must_use]
 pub fn movement_speed_modifier(effect_id: &str, amplifier: u32) -> Option<f64> {
     match classify(effect_id, amplifier) {
@@ -125,7 +129,7 @@ impl StatusEffects {
     ///
     /// Only the four direct-read movement effects (Levitation, Slow Falling,
     /// Dolphin's Grace, Jump Boost) are recognised. Everything else — including
-    /// Speed / Slowness, which are `MOVEMENT_SPEED` attribute modifiers handled
+    /// Speed / Slowness, which are movement-speed attribute modifiers handled
     /// by [`movement_speed_modifier`] — leaves `self` unchanged. Returns `true`
     /// iff a direct-read field changed as a result.
     pub fn apply(&mut self, effect_id: &str, amplifier: u32) -> bool {
@@ -209,9 +213,9 @@ mod tests {
 
     #[test]
     fn speed_modifier_is_widened_float_times_level() {
-        // Vanilla: AttributeModifier.create → amount * (amplifier + 1), with
-        // amount the double-widened float literal 0.2F. The widening is
-        // observable: 0.2f64 != f64::from(0.2f32).
+        // Vanilla's own attribute-modifier construction: amount *
+        // (amplifier + 1), with amount the double-widened float literal
+        // 0.2F. The widening is observable: 0.2f64 != f64::from(0.2f32).
         let amp0 = movement_speed_modifier("minecraft:speed", 0).unwrap();
         assert_eq!(amp0.to_bits(), f64::from(0.2f32).to_bits());
         assert_ne!(amp0.to_bits(), 0.2f64.to_bits());
@@ -281,8 +285,8 @@ mod tests {
     }
 
     /// End-to-end seam proof for the attribute path: folding a Speed modifier
-    /// into `MOVEMENT_SPEED` (as the entity layer would, via a single
-    /// `ADD_MULTIPLIED_TOTAL` step: `base * (1 + amount)`) and handing the result
+    /// into the movement-speed attribute (as the entity layer would, via a
+    /// single "add multiplied total" step: `base * (1 + amount)`) and handing the result
     /// to [`PlayerState::with_movement_speed`] yields more horizontal travel than
     /// the unmodified base — demonstrating the modifier reaches the integrator.
     #[test]
@@ -313,7 +317,7 @@ mod tests {
         };
 
         let amount = movement_speed_modifier("minecraft:speed", 0).unwrap();
-        let boosted = base_speed * (1.0 + amount); // ADD_MULTIPLIED_TOTAL fold
+        let boosted = base_speed * (1.0 + amount); // "add multiplied total" fold
         let plain_dist = walk(base_speed);
         let boosted_dist = walk(boosted);
         assert!(
