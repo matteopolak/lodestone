@@ -2040,12 +2040,12 @@ pub(crate) fn handle_on_climbable(delta: Vec3d, sneaking: bool) -> Vec3d {
     Vec3d::new(xd, yd, zd)
 }
 
-/// `LivingEntity.getEffectiveGravity()` — Slow Falling reduces gravity to
+/// Vanilla's own effective-gravity check — Slow Falling reduces gravity to
 /// `min(gravity, 0.01)` while descending; otherwise it is the base gravity.
 ///
 /// The `0.01` is a `double` literal and `min` uses the pre-move delta-Y sign
-/// (`getDeltaMovement().y <= 0.0`). In fluids this is what makes the `-0.003`
-/// clamp reachable: it shifts `baseGravity/16` off the `0.005` that makes the
+/// (velocity Y `<= 0.0`). In fluids this is what makes the `-0.003` clamp
+/// reachable: it shifts `baseGravity/16` off the `0.005` that makes the
 /// clamp dead at default gravity.
 #[must_use]
 pub(crate) fn effective_gravity(base_gravity: f64, falling: bool, slow_falling: bool) -> f64 {
@@ -2056,7 +2056,7 @@ pub(crate) fn effective_gravity(base_gravity: f64, falling: bool, slow_falling: 
     }
 }
 
-/// `LivingEntity.getFluidFallingAdjustedMovement(gravity, falling, movement)`.
+/// Vanilla's own fluid-falling adjusted-movement step.
 ///
 /// Applies the buoyant slow-descent: normally `y - baseGravity/16`, but when
 /// already sinking near terminal it clamps to `-0.003` (the famous slow-sink).
@@ -2084,22 +2084,22 @@ fn fluid_falling_adjusted_movement(
     }
 }
 
-/// `Entity.getFluidJumpThreshold()` (`Entity.java:3692-3694`) —
-/// `getEyeHeight() < 0.4 ? 0.0 : 0.4`.
+/// Vanilla's own fluid-jump threshold — `getEyeHeight() < 0.4 ? 0.0 : 0.4`.
 ///
 /// The pose feeds back into movement here: the swimming pose's eye height is
-/// **exactly** `0.4` (`Avatar.java:28`), and `0.4 < 0.4` is false, so a swimming
-/// player keeps the `0.4` threshold. Only a pose shorter than that (no vanilla
-/// player pose is) collapses the threshold to zero.
+/// **exactly** `0.4`, and `0.4 < 0.4` is false, so a swimming player keeps
+/// the `0.4` threshold. Only a pose shorter than that (no vanilla player
+/// pose is) collapses the threshold to zero.
 #[must_use]
 fn fluid_jump_threshold(eye_height: f32) -> f64 {
     if eye_height < 0.4 { 0.0 } else { 0.4 }
 }
 
-/// `LivingEntity.onClimbable()` reduced to the block test this engine models: the
-/// CLIMBABLE tag on the block at the feet block position.
-/// `Player.onClimbable()` is `abilities.flying ? false : super.onClimbable()`
-/// (`Player.java:2025`) — flight detaches the player from ladders and vines.
+/// Vanilla's own "on climbable" check, reduced to the block test this
+/// engine models: the CLIMBABLE tag on the block at the feet block
+/// position. Vanilla's own player override is `abilities.flying ? false :
+/// super.onClimbable()` — flight detaches the player from ladders and
+/// vines.
 fn on_climbable(state: &PlayerState, view: &dyn CollisionView) -> bool {
     !state.flying && on_climbable_here(state, view)
 }
@@ -2113,20 +2113,19 @@ fn on_climbable_here(state: &PlayerState, view: &dyn CollisionView) -> bool {
     )
 }
 
-/// `Entity.checkFallDamage(ya, onGround, onState, pos)`, restricted to the
-/// accumulation and the grounded reset — `LivingEntity`'s override
-/// (`LivingEntity.java:363-394`) adds only landing particles and a
-/// server/`onChangedBlock` call before delegating to this via `super`
-/// (`LivingEntity.java:390`), neither of which affects position or
-/// `fallDistance` itself.
+/// Vanilla's own fall-damage bookkeeping, restricted to the accumulation
+/// and the grounded reset — the living-entity override adds only landing
+/// particles and a server/on-changed-block call before delegating to this
+/// via the base implementation, neither of which affects position or the
+/// fall-distance accumulator itself.
 ///
-/// `ya` is `movement.y` from vanilla's `Entity.move()` (`Entity.java:783-784`):
-/// the actual Y position delta this move achieved, *not* the pre-move velocity.
-/// Callers pass `state.position.y - old_y`, captured immediately before the move.
+/// `ya` is the actual Y position delta vanilla's own move step achieved,
+/// *not* the pre-move velocity. Callers pass `state.position.y - old_y`,
+/// captured immediately before the move.
 ///
-/// `in_water` is vanilla's `isInWater()` (`wasTouchingWater`) — callers pass a
-/// constant matching which travel path they are in (only [`tick_water`] can have
-/// it `true`; the dispatch in [`travel_and_check_inside_blocks`] guarantees the
+/// `in_water` is vanilla's own "in water" flag — callers pass a constant
+/// matching which travel path they are in (only [`tick_water`] can have it
+/// `true`; the dispatch in [`travel_and_check_inside_blocks`] guarantees the
 /// other three paths are only reached when it is `false`).
 ///
 /// **That constant is an approximation, and this is the subsystem's one known
