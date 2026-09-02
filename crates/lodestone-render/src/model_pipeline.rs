@@ -1333,14 +1333,6 @@ mod tests {
     }
 
     #[test]
-    fn empty_model_mesh_uploads_to_none() {
-        // The empty check short-circuits before any GPU call, so this needs no
-        // device.
-        let mesh = ModelMesh::default();
-        assert!(mesh.indices.is_empty());
-    }
-
-    #[test]
     fn model_vertex_layout_is_32_bytes_over_four_attributes_no_location_4() {
         // `vertex_layout` (not `_with_biome_tint`) is the one `crate::
         // entity_pipeline` builds its instance-buffer attributes on top of,

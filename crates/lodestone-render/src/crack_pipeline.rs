@@ -287,10 +287,4 @@ mod tests {
         assert_eq!(layout.array_stride, 20);
         assert_eq!(layout.attributes.len(), 2);
     }
-
-    #[test]
-    fn empty_crack_mesh_uploads_to_none() {
-        let mesh = CrackMesh::default();
-        assert!(mesh.is_empty());
-    }
 }

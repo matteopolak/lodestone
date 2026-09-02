@@ -499,12 +499,4 @@ mod tests {
         // 64 bytes matrix + 16 bytes origin.
         assert_eq!(core::mem::size_of::<CameraUniform>(), 80);
     }
-
-    #[test]
-    fn empty_mesh_uploads_to_none() {
-        // No device needed: the empty check short-circuits before any GPU call.
-        let mesh = Mesh::default();
-        assert!(mesh.indices.is_empty());
-        // (GpuMesh::upload would return None; exercised in the GPU test.)
-    }
 }

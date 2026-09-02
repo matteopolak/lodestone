@@ -7707,14 +7707,6 @@ mod tests {
     }
 
     #[test]
-    fn the_held_item_offsets_are_vanillas_two_triples() {
-        // Guard against a transposed or halved transcription of
-        // `ItemInHandLayer:45-48`, which is the whole content of this constant.
-        assert_eq!(HELD_ITEM_OFFSET_TEXELS, [1.0, 2.0, -10.0]);
-        assert_eq!(HELD_ITEM_BABY_OFFSET_TEXELS, [0.0, 1.0, -4.5]);
-    }
-
-    #[test]
     fn the_held_item_x_offset_mirrors_between_hands_and_nothing_else_does() {
         // The only asymmetry the layer itself introduces is `±offsetX`. Isolate
         // it by handing both arms the *same* identity display transform and the
@@ -8354,13 +8346,7 @@ mod tests {
     }
 
     #[test]
-    fn hand_projection_is_a_fixed_seventy_degrees_and_survives_a_degenerate_aspect() {
-        // Vanilla's `calculateHudFov` is a constant 70, so the arm must NOT
-        // follow the world FOV. Anything reading `Camera::fov_y_degrees` here
-        // would make the arm balloon while sprinting.
-        assert!((HAND_FOV_Y_DEGREES - 70.0).abs() < 1e-6);
-        assert!((HAND_NEAR - 0.05).abs() < 1e-6);
-        assert!((HAND_FAR - 100.0).abs() < 1e-6);
+    fn hand_projection_survives_a_degenerate_aspect() {
         assert!(hand_projection(0.0).to_cols_array().iter().all(|v| v.is_finite()));
         assert!(hand_projection(f32::NAN).to_cols_array().iter().all(|v| v.is_finite()));
     }

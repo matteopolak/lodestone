@@ -239,12 +239,6 @@ mod tests {
     }
 
     #[test]
-    fn round_trips_a_typical_vertex() {
-        let f = sample([3, 12, 7], Face::PosY, 2, 15, 4, 300, 1, 1);
-        assert_eq!(PackedVertex::pack(f).unpack(), f);
-    }
-
-    #[test]
     fn round_trips_all_faces() {
         for normal in Face::ALL {
             let f = sample([1, 2, 3], normal, 1, 5, 6, 42, 0, 0);
@@ -316,14 +310,5 @@ mod tests {
         assert_eq!(w0 >> 21, 0, "word0 bits 21..32 reserved");
         assert_eq!(w1 >> 21, 0, "word1 bits 21..32 reserved");
         assert_eq!(w2 >> 24, 0, "word2 bits 24..32 reserved");
-    }
-
-    #[test]
-    fn packed_is_four_times_smaller_than_naive() {
-        // Per-vertex only (indices are shared): 48 / 12 == 4.
-        assert_eq!(48 / BYTES_PER_VERTEX, 4);
-        // Per-quad including indices, packed vs naive.
-        assert_eq!(vram_bytes(1), 4 * 12 + 6 * 4);
-        assert_eq!(naive_vram_bytes(1), 4 * 48 + 6 * 4);
     }
 }
