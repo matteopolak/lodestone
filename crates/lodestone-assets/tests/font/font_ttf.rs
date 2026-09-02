@@ -413,7 +413,7 @@ fn fixture(with_ttf_bytes: bool) -> ResourceManager {
     src.insert("assets/minecraft/font/default.json", font_json().into_bytes());
     src.insert("assets/minecraft/textures/font/sheet.png", sheet_png());
     if with_ttf_bytes {
-        // `TrueTypeGlyphProviderDefinition.load`: `resourceManager.open(this.location.withPrefix("font/"))`
+        // Vanilla's own true-type-glyph-provider-definition load step: `resourceManager.open(this.location.withPrefix("font/"))`
         // — the `file` field itself carries no `font/` prefix, unlike `unihex`'s `hex_file`.
         src.insert("assets/minecraft/font/fixture.ttf", fixture_font_bytes());
     }
@@ -438,8 +438,9 @@ fn load_raster() -> RasterFont {
 
 /// Independent oracle: `hmtx` advance (read by `ttf-parser`, not `fontdue`)
 /// scaled by the OpenType spec's own `px / unitsPerEm`, then divided by
-/// oversample — the same arithmetic `TrueTypeGlyphProvider`'s Java does with
-/// FreeType's `scaledAdvance`, just performed by hand here.
+/// oversample — the same arithmetic vanilla's own true-type-glyph-provider Java
+/// does with
+/// FreeType's own scaled-advance value, just performed by hand here.
 fn expected_advance(ch: char) -> f32 {
     let bytes = fixture_font_bytes();
     let face = ttf_parser::Face::parse(&bytes, 0).expect("ttf-parser parses the fixture");

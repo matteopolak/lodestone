@@ -280,7 +280,7 @@ fn an_ancestor_nodes_transformation_reaches_the_special_node_under_it() {
     let m = ItemModel::parse(json).unwrap();
 
     // Both branches inherit it — the accumulation is static, exactly as
-    // vanilla's `bake` passes one composed matrix to `onTrue` and `onFalse`.
+    // vanilla's own bake step passes one composed matrix to both branches.
     let ctx = Ctx::default();
     let resolved = m.resolve(&ctx);
     let [ItemModelOutput::Special { transformation, .. }] = resolved.as_slice() else {
@@ -311,7 +311,7 @@ fn an_ancestor_nodes_transformation_reaches_the_special_node_under_it() {
 /// A node's own `"transformation"` composes **after** its ancestors', so the
 /// chain is ordered outermost-first — the order
 /// `compose_special_node_transform` folds it in, and the one vanilla's
-/// repeated `Transformation.compose(parent, this.transformation)` produces.
+/// repeated transformation-compose step (`compose(parent, this.transformation)`) produces.
 ///
 /// No shipped 26.2 item nests two (measured: 77 `special` nodes with exactly
 /// one on the path, 14 with none, zero with two), so this is the case only a
@@ -359,8 +359,8 @@ fn nested_transformations_accumulate_outermost_first() {
 /// chain** rather than to a one-entry chain holding `Transformation::default()`
 /// — the caller must be able to tell "compose nothing" from "compose the
 /// identity", even though the two matrices are equal, because only the empty
-/// case matches vanilla's `Optional::isEmpty` short-circuit in
-/// `Transformation.compose`.
+/// case matches vanilla's own empty-optional short-circuit in
+/// its own transformation-compose step.
 #[test]
 fn special_node_with_no_transformation_field_parses_to_an_empty_chain() {
     let json = br#"{"model":{"type":"minecraft:special",

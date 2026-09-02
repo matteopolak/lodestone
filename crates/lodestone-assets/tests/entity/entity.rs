@@ -1,9 +1,9 @@
 //! Tests for the code-defined entity model geometry primitive.
 //!
-//! Entity models in vanilla are Java code (`LayerDefinition`/`MeshDefinition`/
-//! `PartDefinition`/`CubeDefinition`), not JSON, so these fixtures are built by
-//! hand and the expected vertices/UVs are computed directly from the vanilla
-//! `ModelPart.Cube` unwrap so a transposed axis or a flipped V is caught.
+//! Entity models in vanilla are Java code (a layer-definition/mesh-definition/
+//! part-definition/cube-definition class hierarchy), not JSON, so these fixtures are built by
+//! hand and the expected vertices/UVs are computed directly from vanilla's own
+//! model-part cube-unwrap step so a transposed axis or a flipped V is caught.
 
 use lodestone_assets::Direction;
 use lodestone_assets::entity::{

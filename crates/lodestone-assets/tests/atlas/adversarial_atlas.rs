@@ -72,7 +72,8 @@ fn read_region(rgba: &[u8], atlas_w: u32, x: u32, y: u32, w: u32, h: u32) -> Vec
     out
 }
 
-/// Vanilla `SpriteLoader.stitch` mip-level rule, transcribed straight from the
+/// Vanilla's own sprite-loader stitch step's mip-level rule, transcribed
+/// straight from the
 /// decompiled source and computed only from sprite dimensions — an authority
 /// independent of `atlas.rs`:
 ///   lowestOneBit(x) = 1 << trailing_zeros(x)
