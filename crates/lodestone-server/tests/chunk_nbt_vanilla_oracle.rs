@@ -17,8 +17,7 @@
 //!    indexing, bit unpacking, section-Y mapping or block ordering is wrong,
 //!    the block grid we reconstruct disagrees with a number vanilla wrote down.
 //!
-//! Its semantics are transcribed from vanilla's own source rather than assumed
-//! (`.cache/mc/26.2/src/net/minecraft/world/level/levelgen/Heightmap.java`):
+//! Its semantics are transcribed from vanilla's own `Heightmap` type rather than assumed:
 //!
 //! | fact | source |
 //! |---|---|

@@ -17,8 +17,8 @@
 //!   overdue writes a negative one, which is 1,584 of the 133,051 entries in
 //!   the real vanilla worlds `chunk_extras_vanilla_oracle.rs` reads.
 //!
-//! Both expected values come from `TickPriority.java:6-12` and
-//! `SavedTick.java:52` respectively, not from this crate.
+//! Both expected values come from vanilla's own `TickPriority` and
+//! `SavedTick` types respectively, not from this crate.
 //!
 //! The complementary direction — that *Mojang's* bytes decode correctly — is
 //! `tests/chunk_extras_vanilla_oracle.rs`. Neither file is sufficient alone.

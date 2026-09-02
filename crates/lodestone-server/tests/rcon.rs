@@ -231,8 +231,8 @@ async fn a_wrong_password_is_refused() {
 }
 
 /// A command sent before any authentication is refused with request id `-1`
-/// and packet type 2, exactly vanilla's `sendAuthFailure`
-/// (`RconClient.java:121-123`). Sent as a raw frame because every
+/// and packet type 2, exactly vanilla's own `sendAuthFailure`.
+/// Sent as a raw frame because every
 /// `AsyncRconClient` authenticates on connect.
 #[tokio::test]
 async fn a_command_before_authentication_is_refused() {

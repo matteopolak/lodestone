@@ -872,8 +872,8 @@ fn spawn_species_only_the_hostile_species_can_ever_land_a_melee_hit() {
 
 /// The `ignite()` path: vanilla's `readAdditionalSaveData` calls this when a
 /// summoned creeper carries NBT `ignited:1b`
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/monster/Creeper.java:120-122`),
-/// and `Creeper.java:129-131` then forces `swellDir = 1` every tick regardless
+/// (vanilla's own `Creeper` entity),
+/// and its own aiStep then forces `swellDir = 1` every tick regardless
 /// of proximity. Predicts the exact tick-29 value (not merely "increased" —
 /// see CLAUDE.md's *magnitude* vacuous-test species) and the exact tick the
 /// blast reaches a mob standing one block away.
@@ -922,7 +922,7 @@ fn ignited_creeper_climbs_by_exactly_one_per_tick_and_detonates_at_tick_30() {
 }
 
 /// A creeper given a stationary attack target within `SwellGoal`'s 3-block
-/// start range (`SwellGoal.java:20`) must prime from proximity alone, with no
+/// start range (vanilla's own `SwellGoal`) must prime from proximity alone, with no
 /// `ignite()` call — the actual bug report ("creepers never prime near a
 /// player"). Same exact-tick prediction as the ignited case.
 #[test]
@@ -1007,8 +1007,7 @@ fn breeding_pen() -> ChunkWorld {
     world
 }
 
-/// Vanilla `Animal.PARENT_AGE_AFTER_BREEDING`
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/animal/Animal.java:44`).
+/// Vanilla's own `Animal.PARENT_AGE_AFTER_BREEDING`.
 const PARENT_AGE_AFTER_BREEDING: i32 = 6000;
 
 #[test]
@@ -1025,13 +1024,13 @@ fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
     let mut sim = MobSim::new(&world);
 
     // Two blocks apart: inside `BreedGoal`'s 8.0 partner search
-    // (`ai/goal/BreedGoal.java:11`) *and* inside the 9.0 squared distance at
+    // (vanilla's own `BreedGoal`) *and* inside the 9.0 squared distance at
     // which the child actually spawns (`:57`).
     let a = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
     let b = sim.spawn_species(rk("minecraft:cow"), Vec3::new(2.0, 0.0, 0.0)).id();
 
     // Vanilla `BreedGoal` is not installed by the current roster, so install it
-    // at vanilla's own cow priority 2 (`animal/cow/AbstractCow.java:41-48`).
+    // at vanilla's own cow priority 2 (its own cow goal registration).
     // Installing the goal is the roster's job (plan unit B2); what this gate
     // proves is that once installed it can *act*, which is A1/A2's job.
     for id in [a, b] {
@@ -1043,7 +1042,7 @@ fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
 
     assert_eq!(sim.len(), 2, "precondition: exactly the two parents");
 
-    // `BreedGoal` needs 60 ticks of proximity (`ai/goal/BreedGoal.java:57`,
+    // `BreedGoal` needs 60 ticks of proximity (vanilla's own `BreedGoal`,
     // `loveTime >= adjustedTickDelay(60)`); 200 is generous headroom without
     // outliving `LOVE_TICKS` (600).
     let mut ticks = 0;
@@ -1078,7 +1077,7 @@ fn two_cows_in_love_produce_a_real_baby_and_both_parents_take_the_cooldown() {
     );
 
     // Both parents take the cooldown and leave love mode
-    // (`animal/Animal.java:225-228`). The age counts *down* one per tick from
+    // (vanilla's own `Animal`). The age counts *down* one per tick from
     // 6000, so allow for the ticks elapsed since the birth rather than
     // asserting an exact 6000 the timer has already moved off.
     for id in [a, b] {
@@ -1101,7 +1100,7 @@ fn cows_beyond_breed_range_never_produce_a_child() {
     // The negative control the population assertion above needs: identical
     // setup, identical goal, identical tick budget — only the *distance*
     // changed, to just outside `BreedGoal`'s 8.0 partner search
-    // (`ai/goal/BreedGoal.java:11`). The population must not grow.
+    // (vanilla's own `BreedGoal`). The population must not grow.
     //
     // Without this, "a third mob appeared" is satisfied by any code path that
     // spawns something per tick.
@@ -1141,8 +1140,7 @@ fn a_baby_cow_is_fed_its_parent_and_an_orphan_is_not() {
     // `parent_candidate` had no writer anywhere in the crate.
     //
     // Vanilla searches `getBoundingBox().inflate(8.0, 4.0, 8.0)` for a
-    // same-class animal with `getAge() >= 0` (`ai/goal/FollowParentGoal.java:29`
-    // and `:34`).
+    // same-class animal with `getAge() >= 0` (vanilla's own `FollowParentGoal`).
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
 
@@ -1162,7 +1160,7 @@ fn a_baby_cow_is_fed_its_parent_and_an_orphan_is_not() {
     );
 
     // Control 1: the adult is not a baby, so it must be fed no parent at all —
-    // vanilla returns early on `getAge() >= 0` (`FollowParentGoal.java:23`).
+    // vanilla returns early on `getAge() >= 0` (vanilla's own `FollowParentGoal`).
     assert_eq!(
         sim.get(adult).expect("alive").parent_candidate(),
         None,
@@ -1311,7 +1309,7 @@ fn no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record() {
     // *permissive* direction: `SimMob` has always incremented `no_action_time`,
     // but only on its own record — it never crossed the `MobController` seam,
     // so `RandomStrollGoal`'s idle suppression
-    // (`ai/goal/RandomStrollGoal.java:43`, `>= 100`) read the trait default `0`
+    // (vanilla's own `RandomStrollGoal`, `>= 100`) read the trait default `0`
     // and never fired. No dead-code warning could ever have shown this.
     let world = breeding_pen();
     let mut sim = MobSim::new(&world);
@@ -1367,8 +1365,8 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
     let mut sim = MobSim::new(&world);
     let id = sim.spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0)).id();
     // Vanilla's cow registers `LookAtPlayerGoal(Player, 6.0F)` at priority 6
-    // (`animal/cow/AbstractCow.java:41-48`). Probability 1.0 rather than
-    // vanilla's 0.02F default (`ai/goal/LookAtPlayerGoal.java:26`) so the
+    // (its own cow goal registration). Probability 1.0 rather than
+    // vanilla's 0.02F default (its own `LookAtPlayerGoal`) so the
     // pre-roll cannot make this flaky — the roll is not what is under test.
     sim.get_mut(id).expect("just spawned").add_goal(
         6,
@@ -1383,7 +1381,7 @@ fn a_cow_turns_to_face_a_nearby_player_and_ignores_a_distant_one() {
     // This control used to assert `facing() == None`, and that premise stopped
     // being true when the per-species roster landed: a cow now gets vanilla's
     // real goal set, including `RandomLookAroundGoal` at priority 7
-    // (`animal/cow/AbstractCow.java:48`), which idly writes a look *direction*
+    // (vanilla's own cow goal registration), which idly writes a look *direction*
     // through `look_toward`. A blanket `None` therefore fails on a cow that is
     // behaving correctly — the classic false-premise control, where the thing
     // painting into the observable is not the thing under test. Asserting the
@@ -1457,7 +1455,7 @@ fn a_pig_follows_a_player_holding_a_potato_and_ignores_an_empty_hand() {
     let mut sim = MobSim::new(&world);
     let id = sim.spawn_species(rk("minecraft:pig"), Vec3::new(0.0, 0.0, 0.0)).id();
     // Vanilla pig: `TemptGoal(1.2, PIG_FOOD)` at priority 4
-    // (`animal/pig/Pig.java:81-89`).
+    // (vanilla's own pig goal registration).
     sim.get_mut(id)
         .expect("just spawned")
         .add_goal(4, Box::new(lodestone_entity::ai::goals::TemptGoal::new(1.2)));
