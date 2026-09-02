@@ -271,7 +271,7 @@ game rule. All constants below live in `crates/lodestone-server/src/mobs/mod.rs`
 | constant | value | transcribed? |
 |---|---|---|
 | `JOB_SEARCH_INTERVAL_TICKS`/`BED_SEARCH_INTERVAL_TICKS`/`BELL_SEARCH_INTERVAL_TICKS` | 100 ticks each | scope choice |
-| `villager::SEARCH_RADIUS` | 16 blocks | scope choice — vanilla's real `PoiManager` search is ~48 blocks and spatially indexed |
+| `villager::SEARCH_RADIUS` | 16 blocks | scope choice — vanilla's real POI search is ~48 blocks and spatially indexed |
 | `GOSSIP_SPREAD_INTERVAL_TICKS` / `GOSSIP_SPREAD_RADIUS_SQR` / `VILLAGER_KILLED_WITNESS_RADIUS_SQR` | 100 ticks / 8 blocks | scope choice |
 | `RESTOCK_COOLDOWN_TICKS` / `HALF_DAY_TICKS` / `MAX_RESTOCKS_PER_DAY` | 2400 / 12000 / 2 | vanilla |
 | `CONVERSION_WAIT_MIN`/`MAX`, `MAX_SPECIAL_BLOCKS_COUNT`, `SPECIAL_BLOCK_RADIUS` | 3600–6000 ticks | vanilla |

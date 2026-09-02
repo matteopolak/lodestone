@@ -45,8 +45,8 @@ A density function graph (`Density`, compiled by `engine::graph::Program`) is va
 - **Block field** (`engine::field`, driven through `NoiseChunkSampler`) — fills a whole chunk,
   pre-computing a 4×8×4 cell's eight corners once and trilinearly interpolating the rest.
 
-**The interpolation order is bit-significant.** Vanilla's `NoiseChunk` pre-fills its cell array with
-`Mth.lerp3` (X-inner nesting) via an in-code `cache_all_in_cell` marker that never appears in any
+**The interpolation order is bit-significant.** Vanilla's own noise-chunk sampler pre-fills its cell array with
+its own plain-trilinear lerp (X-inner nesting) via an in-code `cache_all_in_cell` marker that never appears in any
 `noise_settings` JSON — a census of the data alone will not find it. The alternative, Y-inner
 incremental nesting vanilla's driver loop *looks* like it uses, differs at the last ULP and is
 wrong; `interpolation_order` tests assert the two orders still disagree, inverted so a future change

@@ -200,7 +200,7 @@ mode: when enabled, `tick` calls
 becomes a `BrainMob` method fed from `WorldState` through `MobSim` (the same route
 `NaturalSpawner::set_day_time` already takes).
 
-### 3.2 POI substrate: a derived index with villager-held claims — not a PoiManager port
+### 3.2 POI substrate: a derived index with villager-held claims — not a port of vanilla's own POI manager
 
 **Decision: a new `PoiIndex` in `lodestone-server` (`poi.rs`), maintained from block state, with
 claim *ownership* living on the claiming villager and persisted through the villager's NBT. The
@@ -507,7 +507,7 @@ Unit-specific:
   building a trigger simulator nothing else uses. It lands inside V10 as the victory payoff, priced
   through V5/V6's existing hooks — honouring #246's "separately-triggered, don't fold into the base
   formula" in the opposite direction.
-- **A `PoiManager`-faithful persistence layer** — §3.2.
+- **A persistence layer faithful to vanilla's own POI manager** — §3.2.
 
 ---
 
