@@ -30,7 +30,7 @@
 //! oracle's `FULL3X3` mode.
 //!
 //! [`apply_vegetal_decoration_step`] (the single-source primitive this
-//! module shipped with originally, this change) still exists and is still
+//! module shipped with originally) still exists and is still
 //! correct on its own terms — it is simply no longer what
 //! `crate::overworld::OverworldGenerator::vegetation_stage` calls in
 //! production. A write whose final position lands outside whatever
@@ -116,7 +116,7 @@
 //!   `PineFoliagePlacer` — **implemented**, see below) and
 //!   `fallen_spruce_tree` (0.83%) — with pine supported, only the fallen
 //!   branch is a gap, so taiga is ~99.2% supported.
-//! - **acacia/savanna** (`trees_savanna`, this change): `acacia_checked`
+//! - **acacia/savanna** (`trees_savanna`): `acacia_checked`
 //!   (80%, [`TrunkPlacerCfg::Forking`]+[`FoliagePlacerCfg::Acacia`] —
 //!   **implemented**) and the default `oak_checked` branch (~19.75%, the
 //!   same straight-trunk oak every other biome already supports) leave only
@@ -129,8 +129,8 @@
 //! is a small, self-contained addition ([`FoliagePlacerCfg::Pine`]) that
 //! turns taiga's honest coverage from ~66% to ~99%, in contrast to oak's
 //! `fancy_oak`/`FallenTreeFeature`, which are structurally different
-//! trunk/foliage/feature families and were out of scope for this change's
-//! landing. Acacia (`TrunkPlacerCfg::Forking`) is this change's own addition
+//! trunk/foliage/feature families and were out of scope for that initial
+//! landing. Acacia (`TrunkPlacerCfg::Forking`) was a later addition
 //! in that same spirit — a real, separate trunk/foliage family (leaning
 //! column + branch, not oak's straight-trunk-plus-variant shape), landed
 //! because savanna is a common, visible biome and `ForkingTrunkPlacer` is
@@ -153,7 +153,8 @@
 //! `"mega_pine_foliage_placer"`), and `jungle_bush`'s foliage
 //! (`FoliagePlacerCfg::Bush`, `"bush_foliage_placer"`, paired with the
 //! already-implemented `Straight` trunk) landed in a later pass of the
-//! savanna/acacia increment. `MegaJungleTrunkPlacer extends GiantTrunkPlacer` in real vanilla
+//! savanna/acacia increment. Vanilla's own mega-jungle trunk placer is built
+//! on top of its giant-trunk placer's logic
 //! ([`place_mega_jungle_trunk`] literally calls [`place_giant_trunk`] first,
 //! then adds its own radial branches), so porting `Giant` bought
 //! old_growth_spruce_taiga/old_growth_pine_taiga's `mega_spruce`/`mega_pine`
@@ -162,7 +163,7 @@
 //! `trees_jungle`'s own `RandomSelector` is `jungle_bush` 50% +
 //! `mega_jungle_tree_checked` 33.3% + `fancy_oak_checked` 10% +
 //! `fallen_jungle_tree` 1.25% + the default `jungle_tree` branch (already
-//! `Straight`+`Blob`, supported since this change) — so this pass closes the
+//! `Straight`+`Blob`, already supported) — so this pass closes the
 //! 50%+33.3% majority of jungle/sparse_jungle/bamboo_jungle's own tree gap,
 //! leaving only `fancy_oak_checked` (10%, shared with every other biome's
 //! `"tree: unsupported..."` reason) and `fallen_jungle_tree` (1.25%,
@@ -1303,8 +1304,8 @@ mod tests {
         );
     }
 
-    /// `GiantTrunkPlacer`+`MegaPineFoliagePlacer` (mega_spruce/mega_pine's
-    /// real placers, this change) over flat open ground: the base level
+    /// Vanilla's own giant-trunk placer paired with its mega-pine foliage
+    /// placer (mega_spruce/mega_pine's real placers) over flat open ground: the base level
     /// (dy=0) must be a full 2×2 log footprint, the TOP level (dy=height-1,
     /// `hh < treeHeight - 1` false) must be a single log — the shape
     /// `Straight`/`Forking` cannot produce and [`place_dark_oak_trunk`]'s own
@@ -1371,8 +1372,8 @@ mod tests {
         assert!(leaf_count > 0, "a placed giant/mega-pine trunk must carry at least one leaf block");
     }
 
-    /// `MegaJungleTrunkPlacer`+`MegaJungleFoliagePlacer` (mega_jungle_tree's
-    /// real placers, this change): the shared `Giant` 2×2 base must still
+    /// Vanilla's own mega-jungle trunk and foliage placers (mega_jungle_tree's
+    /// real placers): the shared `Giant` 2×2 base must still
     /// place, AND — with a tree tall enough that `branch_height = tree_height
     /// - 2 - nextInt(4)` is guaranteed `> tree_height / 2` on its first draw
     /// (worst case `nextInt(4) == 3`: `20 - 2 - 3 = 15 > 10`) — at least one
@@ -1440,7 +1441,7 @@ mod tests {
         assert!(branch_log_found, "a 20-tall mega jungle tree must place at least one branch log outside the 2×2 base");
     }
 
-    /// `BushFoliagePlacer` (jungle_bush's real foliage, this change) paired
+    /// Vanilla's own bush foliage placer (jungle_bush's real foliage) paired
     /// with the plain `Straight` trunk placer jungle_bush actually uses
     /// (`base_height: 1, height_rand_a: 0, height_rand_b: 0` — a 1-tall
     /// "trunk"). Must still reach at least one leaf.
@@ -2196,7 +2197,7 @@ mod tests {
 
     /// A mangrove `root_placer` shifts the REAL trunk `trunk_offset_y`
     /// blocks above `origin` — [`super::place::place_tree`]'s `trunk_origin`
-    /// wiring, this change's mangrove increment. The wrong hypothesis
+    /// wiring. The wrong hypothesis
     /// (`root_placer` parsed but never consulted, so `trunk_origin ==
     /// origin`) places the first trunk log at `origin.y`; the correct one
     /// places it at `origin.y + trunk_offset_y` and nothing at `origin.y`

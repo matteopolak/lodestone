@@ -93,7 +93,7 @@
 //! against a real
 //! vanilla JVM.
 //!
-//! # Performance (this change's Job 2), and an honest miss
+//! # Performance work, and an honest miss
 //!
 //! **A correctness bug this refactor introduced, found and fixed before
 //! landing.** A [`crate::dense_grid::DenseBlockGrid`]'s palette is built
@@ -112,7 +112,7 @@
 //! (added as a permanent regression control, no threading involved) after
 //! it was first surfaced by `lodestone-server`'s own
 //! `chunk::tests::parallel_generation_is_deterministic_and_matches_serial`
-//! (this change, a different agent's concurrently-landed feature — confirmed
+//! (added by a different agent's concurrently-landed feature — confirmed
 //! via an isolated `git worktree` at the commit *before* this crate's ore
 //! composition that the failure did not exist there, ruling out a
 //! threading bug in that test's own new code before spending time on it).
@@ -170,7 +170,7 @@
 //! that engine's own signature to a dense grid too is further work, also
 //! not attempted in this pass.
 //!
-//! # Badlands (this change's carried-over gap, now closed)
+//! # Badlands (a carried-over gap, now closed)
 //!
 //! `minecraft:badlands`/`eroded_badlands`/`wooded_badlands` used to be
 //! excluded from the searchable biome table
@@ -444,7 +444,8 @@ pub struct OverworldGenerator {
     default_lava_pre: crate::surface::PreState,
     /// The biome (and its "cold enough to snow" answer) used for every column
     /// when [`Self::dynamic_biome`] is `None` — i.e. exactly the whole-world
-    /// behaviour this generator had before this change, kept as the fallback
+    /// behaviour this generator had before biome sampling became per-column,
+    /// kept as the fallback
     /// a [`Resolver`] with no biome data still gets.
     fallback_biome: String,
     fallback_cold_enough_to_snow: bool,
@@ -939,8 +940,8 @@ impl OverworldGenerator {
         // the property that makes eviction view-scoped instead of a capacity
         // guess. Dropped at the end of the call.
         //
-        // [`STRUCTURE_CLOSURE_RADIUS`], not [`COLUMN_CLOSURE_RADIUS`]: since
-        // this change the closure is 21×21, and pinning the inner 5×5 of it left
+        // [`STRUCTURE_CLOSURE_RADIUS`], not [`COLUMN_CLOSURE_RADIUS`]: with
+        // this radius the closure is 21×21, and pinning the inner 5×5 of it left
         // the request's own structure-start entries evictable *by the request
         // itself*. See that constant for the measured cost.
         let _view = self.store.open_view((cx, cz), STRUCTURE_CLOSURE_RADIUS);

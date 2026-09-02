@@ -279,7 +279,7 @@ impl CarverConfig {
 /// Carvers read the current block (to test replaceability) and overwrite it
 /// with air/water/lava.
 ///
-/// Backed by [`crate::dense_grid::DenseBlockGrid`] (this change's Job 2) — a
+/// Backed by [`crate::dense_grid::DenseBlockGrid`] — a
 /// flat, palette-indexed array instead of a `HashMap<(i32,i32,i32), String>`.
 /// The measured regression this replaces: composing carvers over the old
 /// `HashMap`-keyed shape (designed for parity-harness fixtures, not a

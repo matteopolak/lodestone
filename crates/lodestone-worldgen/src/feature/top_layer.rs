@@ -423,7 +423,7 @@ pub fn build_snow_support(resolver: &dyn crate::density::Resolver) -> SnowSuppor
 /// **No new resolver method is needed for climate**: vanilla's own
 /// `worldgen/biome/*.json` carries all three fields, the embedded assets are
 /// verbatim copies of them, and `biome_document` already returns the whole
-/// document (this change added it for `carvers` and the per-step `features`
+/// document (added for `carvers` and the per-step `features`
 /// lists). This crate's pre-existing
 /// [`Resolver::biome_temperatures`](crate::density::Resolver::biome_temperatures)
 /// carries `temperature` alone and is deliberately left to its own caller —

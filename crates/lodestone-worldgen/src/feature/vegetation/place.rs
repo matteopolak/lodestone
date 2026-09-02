@@ -349,7 +349,7 @@ pub(super) fn place_tree<R: RandomSource>(
     }
     // Vanilla's own tree-feature inner place step's own accept gate: `clippedTreeHeight >=
     // treeHeight` (no obstruction at all — every species this module shipped
-    // before this change's fancy-oak increment) OR (a `min_clipped_height` is
+    // before fancy-oak was added) OR (a `min_clipped_height` is
     // configured AND the clip didn't cut below it) — `fancy_oak`'s own `4`
     // is the only shipped config that sets this, so this second arm is new
     // territory: every earlier species can still ONLY pass via the first.
@@ -389,13 +389,13 @@ pub(super) fn place_tree<R: RandomSource>(
     }
 
     // Dispatch trunk placement by placer kind — `Straight`'s own
-    // `placeBelowTrunkBlock` + single-column loop stayed inline here (this
-    // module's original shape, unchanged); `Forking`
-    // delegates to `place_forking_trunk`, which does its own
-    // `placeBelowTrunkBlock` call internally, matching `ForkingTrunkPlacer
-    // .placeTrunk`'s own real structure. Both branches produce the same
+    // Vanilla's own place-below-trunk-block step plus a single-column loop
+    // stayed inline here (this module's original shape, unchanged); `Forking`
+    // delegates to `place_forking_trunk`, which does its own place-below-
+    // trunk-block call internally, matching vanilla's own forking trunk
+    // placer structure. Both branches produce the same
     // `(Vec<Attachment>, Vec<BlockPos>, placed_log)` shape — the third being
-    // every position `trunkSetter` actually fired at (this change's
+    // every position the trunk-setter callback actually fired at (the
     // `update_leaf_distances` BFS seed, see that function's doc comment) —
     // so the foliage loop below is written once, not once per trunk kind.
     // Unit 8: both buffers are reused thread-local scratch rather than a fresh
@@ -613,7 +613,7 @@ pub(super) fn place_tree<R: RandomSource>(
         }
     }
 
-    // Vanilla's own tree-feature place's final step, AFTER decorators — this change's
+    // Vanilla's own tree-feature place's final step, AFTER decorators — the
     // fix for the `distance=7`-forever gap named in
     // `update_leaf_distances`'s own doc comment. Draws no RNG (a pure grid
     // post-process), so it is safe to run unconditionally here regardless
@@ -716,7 +716,7 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
     // a draw but to start using one.
     let bee_count = 2 + random.next_int_bounded(2);
     // **`nextInt(599)` per bee is a NEW draw**, and that is the one behavioural
-    // risk in this change: vanilla's own beehive tree-decorator place really does call
+    // risk here: vanilla's own beehive tree-decorator place really does call
     // its own bee-occupant constructor over a bounded random draw over `[0, 599)` in a loop,
     // so omitting it left this engine's stream
     // 2-3 draws *short* of vanilla's after every hive. Adding them moves this

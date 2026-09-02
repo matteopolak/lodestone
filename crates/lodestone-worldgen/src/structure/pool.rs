@@ -1,5 +1,4 @@
-//! Jigsaw **template pools** and processor lists — the data half of this change's
-//! S4.
+//! Jigsaw **template pools** and processor lists — the data half of S4.
 //!
 //! # What it is
 //!

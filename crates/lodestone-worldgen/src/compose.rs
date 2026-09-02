@@ -1,4 +1,4 @@
-//! Version-free composition glue for this change: resolves per-biome carver
+//! Version-free composition glue: resolves per-biome carver
 //! lists, per-biome ore-feature lists, and block-tag closures from a
 //! [`Resolver`], for [`crate::overworld::OverworldGenerator`] to consume when
 //! composing carvers/features into the served chunk. Holds no data of its
@@ -128,7 +128,7 @@ pub fn build_biome_ores(resolver: &dyn Resolver, biome: &str) -> Vec<PlacedOre> 
 }
 
 /// Resolves one biome's `VEGETAL_DECORATION` decoration step
-/// (`features[`[`crate::feature::STEP_VEGETAL_DECORATION`]`]`, this change)
+/// (`features[`[`crate::feature::STEP_VEGETAL_DECORATION`]`]`)
 /// into `(raw step index, resolved PlacedRef)` pairs — the same "preserve
 /// the raw position" convention [`build_biome_ores`] establishes, so
 /// [`crate::feature::vegetation::apply_vegetal_decoration_step`]'s

@@ -284,7 +284,7 @@ fn the_coded_structures_s5_models_are_not_on_the_ledger() {
         // transition this pair of loops exists to make visible.
         "minecraft:mineshaft",
         "minecraft:mineshaft_mesa",
-        // `StrongholdPieces` places real blocks now (this change's remaining piece
+        // `StrongholdPieces` places real blocks now (the remaining piece
         // generator); the `stronghold:` and `coded:worldgen_entities` rows below
         // are its named deviations, the same "absent -> present with deviations"
         // transition as the mineshaft pair above.

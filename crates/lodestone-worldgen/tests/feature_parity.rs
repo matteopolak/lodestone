@@ -18,9 +18,9 @@
 //! residual). This models vanilla's real one-chunk-into-neighbours ore spill
 //! from a neighbour chunk's own decoration into the centre — a prior version of
 //! this oracle ran only the centre's own ore features against an empty
-//! neighbourhood and answered every `getHeight` probe by wrapping it back into
-//! the centre chunk, which this replaces (see this change's ore-oracle-parity
-//! increment and `docs/worldgen-parity.md`'s "known gap" section). Earlier
+//! neighbourhood and answered every height probe by wrapping it back into
+//! the centre chunk, which this replaces (see `docs/worldgen-parity.md`'s
+//! "known gap" section). Earlier
 //! feature steps that precede ores (lakes/springs) are still not modelled — both
 //! sides start from the same post-carve field and run only `UNDERGROUND_ORES`.
 //!
