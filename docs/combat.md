@@ -12,8 +12,8 @@ tags how a hit is reduced.
 
 ### Swing, targeting and sending the attack
 
-`Sim::begin_attack` (`crates/lodestone-shell/src/sim.rs`) mirrors vanilla's
-`Minecraft.startAttack`: a three-way switch on the ray hit that swings the
+`Sim::begin_attack` (`crates/lodestone-shell/src/sim.rs`) mirrors vanilla's own
+attack-start entry point: a three-way switch on the ray hit that swings the
 arm unconditionally on every branch — `ENTITY` sends the attack packet then
 swings, `BLOCK` arms the hold-to-mine loop, `MISS` just swings. Entity
 targeting (`Sim::update_entity_target`, `EntityRayTarget` in `interact.rs`)
@@ -35,8 +35,8 @@ there's no interaction model (taming/feeding/mounting) to consume it yet.
 
 ### Knockback
 
-Vanilla's `Entity.lerpMotion` is an unconditional **replace**, not a lerp,
-and `LocalPlayer` takes no override — so a `ClientboundSetEntityMotionPacket`
+Vanilla's own motion-lerp setter is an unconditional **replace**, not a lerp,
+and `LocalPlayer` takes no override — so a set-entity-motion packet
 naming the local player overwrites `PhysicsState.velocity` directly (the
 field `player_physics` integrates) instead of the generic `Velocity`
 component nothing reads for the local player. Remote entities still get the
@@ -129,12 +129,12 @@ use packet when boarding a vehicle — smaller than the shield/bow being dead.
 ### Crit particles and the sweep-attack particle
 
 Crit is real client-side dual simulation matching vanilla's own client copy
-of `Player.attack`: the wire packet carries no crit flag, so this prediction
+of its player-attack routine: the wire packet carries no crit flag, so this prediction
 can't disagree with the server about anything that matters. Condition:
 full-strength attack (ticker scale `> 0.9` at partial-tick `0.5`, not the
 indicator's `0.0`), airborne, not sprinting, not on ground/climbable/in
 water, target is a living entity. One tick's worth of the 16-candidate
-unit-sphere burst is spawned (vanilla's `TrackingEmitter` runs 3 ticks; this
+unit-sphere burst is spawned (vanilla's own tracking-emitter type runs 3 ticks; this
 particle system has no persistent per-attack emitter, a disclosed
 simplification rather than an approximation of the physics).
 
@@ -172,7 +172,7 @@ Gotchas:
   material.attackDamageBonus`** — a diamond sword is `3.0 + 3.0`, not `3.0`.
   Trident (`8.0`) and mace (`5.0`) are flat literals, not tier-derived.
 - **The player's `attack_damage` base is `1.0`, not the registry default
-  `2.0`** — `Player.createAttributes` overrides it.
+  `2.0`** — vanilla's own player attribute registration overrides it.
 - Not modelled: enchantment protection/effectiveness (`Defenses` fields stay
   at neutral defaults — accurate, not a stub), and shield blocking (needs an
   item-data model, `BlocksAttacks`, this workspace doesn't have). Mob
