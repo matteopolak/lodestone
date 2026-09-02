@@ -7130,8 +7130,8 @@ where
     }
 
     // Issue #329: right-clicking a bed sets the player's per-player respawn
-    // point (vanilla `BedBlock.useWithoutItem` → `ServerPlayer.startSleepInBed`
-    // → `setRespawnPosition`). A bed click is an *interaction*, not a
+    // point (vanilla's own bed-block empty-hand-use → start-sleep-in-bed
+    // → `setRespawnPosition` chain). A bed click is an *interaction*, not a
     // placement — it must not fall through to the inventory-placement logic
     // below (a bed is itself placeable, and the click target's cell may well
     // be air-adjacent). The legality gate is issue #329's own requirement
@@ -7150,7 +7150,7 @@ where
     // honest equivalent is a plain system-chat line.
     if is_bed_block(&source.block_state(pos.x, pos.y, pos.z)) {
         // Issue #325: a bed click registers this connection's player in the
-        // night-skip vote. Vanilla's `ServerPlayer.startSleepInBed` calls
+        // night-skip vote. Vanilla's own start-sleep-in-bed routine calls
         // `sleepStatus.setSleeping` — this arm is this
         // crate's stand-in for that call (see `crate::sleep`'s module doc for
         // the disclosed gap: bed-entry *gates* — day/night, monsters nearby,
@@ -7168,8 +7168,8 @@ where
     }
 
     // Issue #532: `useWithoutItem`. **Ahead of the placement branch**, exactly like
-    // vanilla, whose `Player.useItemOn` tries `state.useItemOn`/`useWithoutItem`
-    // before `BlockItem.place` — otherwise right-clicking a door while holding a
+    // vanilla, whose own use-item-on routine tries `state.useItemOn`/`useWithoutItem`
+    // before its own block-item place routine — otherwise right-clicking a door while holding a
     // block would build instead of opening it. See `crate::hand_use` for the five
     // families and the rules each comes from.
     //
@@ -7251,7 +7251,7 @@ where
 
     let neighbour = relative(pos, face);
     let clicked = source.block_state(pos.x, pos.y, pos.z);
-    // Which native slot this click reads from. Vanilla's `Player.useItemOn`
+    // Which native slot this click reads from. Vanilla's own use-item-on routine
     // uses `player.getItemInHand(hand)` for the spawn-egg, flint-and-steel
     // and block-placement branches below — all three share this one
     // resolution point via `held_item`, so an item held only in the off hand
@@ -7263,14 +7263,14 @@ where
     };
     let held_item = inventory.native(hand_native).map(|stack| stack.item.to_string());
 
-    // `SpawnEggItem.useOn`. Between the block's own `useWithoutItem` above and
-    // `BlockItem.place` below, which is vanilla's order in `Player.useItemOn` —
+    // Vanilla's own spawn-egg-item use-on routine. Between the block's own `useWithoutItem` above and
+    // its own block-item place routine below, which is vanilla's order in its own use-item-on routine —
     // ahead of the placement branch, or an egg held over air would place a block;
     // behind the `hand_use` arm, or a click on a lever would eat the egg. See
     // `crate::spawn_egg` for the placement rule and `docs/spawn-eggs.md` for why
     // the item-to-entity mapping is a checked derivation rather than a table.
     //
-    // `block_entities` is consulted first because `SpawnEggItem.useOn` tests
+    // `block_entities` is consulted first because vanilla's own spawn-egg-item use-on routine tests
     // `getBlockEntity(pos) instanceof Spawner` before anything else, and that
     // branch re-keys the spawner instead of spawning. Nothing is modelled for a
     // spawner yet, so the guard is "there is a spawner here, do nothing" rather
@@ -7303,7 +7303,7 @@ where
                     // update so the held count visibly drops.
                     //
                     // Routed through `consume_one` rather than shrinking inline, so
-                    // `ItemStack.consume`'s own `!hasInfiniteMaterials()` gate
+                    // vanilla's own item-stack consume routine's `!hasInfiniteMaterials()` gate
                     // applies: a creative player's eggs are not used up, which is
                     // vanilla and was not true of the inline shrink this replaces.
                     let native = hand_native;
@@ -7324,7 +7324,7 @@ where
         }
     }
 
-    // `MinecartItem.useOn` — a rail-targeted placement, checked ahead of the
+    // Vanilla's own minecart-item use-on routine — a rail-targeted placement, checked ahead of the
     // generic block-placement branch below for the same reason the spawn-egg
     // arm above is: a minecart item is not a `BlockItem`, so that branch could
     // never place one anyway, and vanilla's own `useOn` returns `FAIL` (not
@@ -7360,8 +7360,8 @@ where
     // reason the `hand_use` block above is: `flint_and_steel` is not a block item,
     // so the placement branch below cannot reach it at all.
     //
-    // Vanilla's route is `FlintAndSteelItem.useOn` → `level.setBlock(fire)` →
-    // `BaseFireBlock.onPlace`, whose portal branch runs the frame search **from the
+    // Vanilla's route is its own flint-and-steel-item use-on routine → `level.setBlock(fire)` →
+    // its own fire-block on-place routine, whose portal branch runs the frame search **from the
     // cell the fire went in**, not from the block that was clicked — so the search
     // origin is `relative(pos, face)`. Clicking the top face of a frame's bottom
     // obsidian therefore searches from the lowest interior cell, which is what makes
@@ -7450,13 +7450,13 @@ where
             return Ok(());
         }
     }
-    // `EnderEyeItem.useOn`: an eye of ender placed into an unfired
+    // Vanilla's own ender-eye-item use-on routine: an eye of ender placed into an unfired
     // `end_portal_frame`. Also ahead of the placement branch — `ender_eye` is
     // not a block item, so the census below cannot reach it at all.
     //
     // `crate::portal::ignite_end_portal_frame` is the pure decision (its own
     // doc derives the ring's "every rim frame faces the centre" rule from
-    // vanilla's `BlockPattern`, rather than porting that generic engine); this
+    // vanilla's own block-pattern engine, rather than porting that generic engine); this
     // call site owns every write, the same split `ignite` above uses. Vanilla
     // always writes `eye=true` and consumes the eye on any unfired frame,
     // whether or not a ring completes; the 3x3 `end_portal` fill only follows
@@ -7482,7 +7482,7 @@ where
                     .await?;
                 }
             }
-            // `ItemStack.shrink(1)`, unconditional in vanilla rather than
+            // Vanilla's own item-stack shrink(1), unconditional in vanilla rather than
             // routed through `consume(1, user)` — but `consume_one`'s
             // creative no-op is still the right behaviour either way.
             if consume_one(inventory, hand_native, game_mode) && game_mode != GameMode::Creative {
@@ -7552,7 +7552,7 @@ where
                     Some(placed) => (placed.state, placed.extra),
                     None => (block_name.to_string(), Vec::new()),
                 };
-            // `BlockItem.canPlace` → `Level.isUnobstructed`: a placement that
+            // Vanilla's own block-item can-place → level unobstructed check: a placement that
             // would collide with the placer's own body is refused, not
             // written — see `placement_obstructs_placer`'s own doc for what
             // this does and does not cover yet. `player_pos` is `None` until
@@ -7573,7 +7573,7 @@ where
                     entity_block, block_name,
                     "block-entity table and item census disagree on {item}"
                 );
-                // `SignItem.useOn` → `SignBlock.openTextEdit` →
+                // Vanilla's own sign-item use-on → sign-block open-text-edit →
                 // `setAllowedPlayerEditor(player.getUUID())`: the placer is
                 // granted edit permission on the sign they just placed, the
                 // one grant site this crate models (see `SignData::editor`'s
@@ -7587,7 +7587,7 @@ where
                 .and_then(lodestone_data::block_entity_types::block_entity_type)
                 .and_then(lodestone_data::block_entity_types::block_entity_type_name)
             {
-                // Vanilla's `LevelChunk.setBlockState` creates a block entity
+                // Vanilla's own `LevelChunk.setBlockState` creates a block entity
                 // from the *state* alone (`state.hasBlockEntity()`), for every
                 // block-entity type — not only the dozen `block_entity_for_item`
                 // simulates real behaviour for. A skull, banner, jukebox, … placed
@@ -7612,7 +7612,7 @@ where
                 });
             }
             source.set_block(target.x, target.y, target.z, &state);
-            // `BlockItem.place`'s own `level.playSound(player, …)`
+            // Vanilla's own block-item place routine's own `level.playSound(player, …)`
             // — the placer is vanilla's `except` argument,
             // and here it must be, because the shell predicts its own place
             // sound. `roll` stands in for vanilla's per-play `nextLong()`: it is
@@ -7631,13 +7631,13 @@ where
                 changed.push((*p, s.clone()));
             }
             // Issue #239: a placed carved pumpkin or jack o'lantern may
-            // complete a snow- or iron-golem block pattern — vanilla
-            // `CarvedPumpkinBlock.setPlacedBy` → `trySpawnGolem`.
+            // complete a snow- or iron-golem block pattern — vanilla's
+            // own carved-pumpkin-block set-placed-by → try-spawn-golem chain.
             // `MobSim::try_construct_golem` is a pure detection query with no
             // block-write authority of its own (see its own doc comment), so
             // this is the caller that owns clearing the consumed pattern
-            // cells to air, exactly as `CarvedPumpkinBlock.clearPatternBlocks`
-            // does.
+            // cells to air, exactly as vanilla's own carved-pumpkin-block
+            // clear-pattern-blocks routine does.
             if block_name == "minecraft:carved_pumpkin" || block_name == "minecraft:jack_o_lantern"
             {
                 let construction = mobs.with(|sim| {
@@ -7696,7 +7696,7 @@ where
             // reason: a block placed into a flow, or beside a source, has to
             // start it re-evaluating. See `crate::fluid::ticks_after_edit`.
             block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(target));
-            // `FallingBlock.onPlace`: a placed sand or gravel block owes itself a
+            // Vanilla's own falling-block on-place routine: a placed sand or gravel block owes itself a
             // gravity check two ticks out. Same shape and same call site as the
             // fluid seeding above, and empty for every other block, so no guard.
             //
@@ -7709,12 +7709,12 @@ where
             // block state.
             block_ticks
                 .request_scheduled_ticks(crate::gravity_tick::ticks_after_place(target, &state));
-            // `BlockItem.place`'s own tail: `itemStack.consume(1, player)`. Nothing
+            // Vanilla's own block-item place routine's own tail: `itemStack.consume(1, player)`. Nothing
             // in this crate did it, so **every placement was free** — the block was
             // written, the client predicted its own hotbar and the server never
             // agreed, so the stack came back on the next window sync.
             //
-            // `ItemStack.consume` is
+            // Vanilla's own item-stack consume routine is
             // `if (entity == null || !entity.hasInfiniteMaterials()) shrink(count)`,
             // so a creative placement consumes nothing and "placing does not use up
             // the block" is *correct* there. The gate is explicit rather than
