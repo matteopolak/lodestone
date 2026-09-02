@@ -1,9 +1,10 @@
-//! Version-free port of vanilla's `Aquifer.NoiseBasedAquifer` and the
-//! `NoiseBasedChunkGenerator` fill step (`doFill`).
+//! Version-free port of vanilla's own noise-based aquifer and the
+//! chunk-generator fill step.
 //!
-//! This is the stage *below* surface rules. Vanilla's `NoiseChunk` produces an
-//! interpolated `final_density` field; `doFill` then asks the aquifer, for every
-//! block, `computeSubstance(context, density)`, which decides whether the block
+//! This is the stage *below* surface rules. Vanilla's own per-chunk noise
+//! field produces an
+//! interpolated `final_density` field; the fill step then asks the aquifer, for every
+//! block, its own compute-substance call, which decides whether the block
 //! is solid (the default block, stone), a fluid (water/lava), or air. The result
 //! is the **pre-surface column** that [`crate::surface::SurfaceSystem`] consumes.
 //!
@@ -26,7 +27,7 @@
 //! # Parity discipline (plan §11)
 //!
 //! No Mojang source is transliterated: this is written from the documented
-//! algorithm and checked against the running server's own `doFill` output
+//! algorithm and checked against the running server's own fill-step output
 //! (`scripts/worldgen-oracle/SurfaceOracle.java` dumps the `pre.*` column). The
 //! test compares block-for-block over a whole chunk column and names the
 //! divergent `x,y,z`.
@@ -46,8 +47,8 @@ pub use crate::rng::AnyPositionalFactory;
 const CELL_WIDTH: i32 = 4;
 const CELL_HEIGHT: i32 = 8;
 
-/// `NoiseSettings`'s derived cell size — `QuartPos.toBlock(size_horizontal)` and
-/// `toBlock(size_vertical)`, i.e. `size * 4` (`NoiseSettings.java:46-52`).
+/// Vanilla's own noise-settings derived cell size — its own quart-to-block
+/// conversion applied to `size_horizontal` and `size_vertical`, i.e. `size * 4`.
 ///
 /// **Not the same for every dimension.** The Overworld and the Nether are
 /// `1, 2` → 4 wide / 8 tall (the [`CELL_WIDTH`]/[`CELL_HEIGHT`] this file's
@@ -62,7 +63,7 @@ pub fn cell_geometry(settings: &Value) -> (i32, i32) {
     (horizontal * 4, vertical * 4)
 }
 
-/// `DimensionType.WAY_BELOW_MIN_Y` for the standard 1.18+ height (`MIN_Y << 4`,
+/// Vanilla's own "way below min Y" sentinel for the standard 1.18+ height (`MIN_Y << 4`,
 /// `MIN_Y = -2032`). Used as the "no fluid here" sentinel level.
 const WAY_BELOW_MIN_Y: i32 = -2032 << 4;
 
@@ -75,7 +76,7 @@ const WAY_BELOW_MIN_Y: i32 = -2032 << 4;
 pub enum BlockKind {
     /// A solid block — vanilla writes the settings' `default_block` (stone).
     Stone,
-    /// Air (`computeSubstance` returned an air fluid state).
+    /// Air (vanilla's own compute-substance call returned an air fluid state).
     Air,
     /// The default fluid (overworld: water).
     Water,
@@ -219,8 +220,8 @@ pub struct AquiferSystem {
 
     positional: AnyPositionalFactory,
     sea_level: i32,
-    /// `settings.defaultFluid()` — the fluid the *global* picker's sea status
-    /// carries (`NoiseBasedChunkGenerator.java:70-71`).
+    /// Vanilla's own default-fluid query — the fluid the *global* picker's sea status
+    /// carries.
     ///
     /// Was hardcoded to water, which is right for the Overworld and wrong for
     /// the Nether: `noise_settings/nether.json` says `minecraft:lava` with
@@ -231,7 +232,7 @@ pub struct AquiferSystem {
     default_fluid: Fluid,
     /// `false` when the settings say `aquifers_enabled: false` — the Nether and
     /// the End. Vanilla swaps the whole implementation
-    /// (`NoiseChunk.java:145-152` picks `Aquifer.createDisabled`), so this is a
+    /// (its own per-chunk field constructor picks a disabled aquifer), so this is a
     /// bypass in [`Self::compute_substance`] rather than a tuning parameter, and
     /// every noise field and grid cache below is left empty in that mode.
     enabled: bool,
@@ -259,7 +260,7 @@ impl AquiferSystem {
         let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
         let sea_level = settings["sea_level"].as_i64().unwrap_or(63) as i32;
 
-        // `NoiseChunk.java:145-152`. A dimension with `aquifers_enabled: false`
+        // Vanilla's own per-chunk field constructor. A dimension with `aquifers_enabled: false`
         // gets a *different implementation*, not a tuned one, and none of the
         // four aquifer noise fields is instantiated for it — so this branch is
         // taken before any of the `builder.build` calls below.
@@ -290,7 +291,7 @@ impl AquiferSystem {
         let lava = Arc::new(builder.build(&router["lava"]));
         let prelim = Arc::new(builder.build(&router["preliminary_surface_level"]));
 
-        // `randomState.aquiferRandom()` = random.fromHashOf("minecraft:aquifer").forkPositional().
+        // vanilla's own aquifer-random query = random.fromHashOf("minecraft:aquifer").forkPositional().
         let mut aquifer_src = builder
             .positional_factory()
             .from_hash_of("minecraft:aquifer");
@@ -366,7 +367,7 @@ impl AquiferSystem {
         // region" contract `NoiseChunkSampler::new_bounded` documents for the
         // shape stage's own `DenseShape`. Swapping this one sampler to the
         // dense/bounded cache avoids a `HashMap`-backed `CornerCache` on the
-        // single hottest per-block call in the composed pipeline (issue #295
+        // single hottest per-block call in the composed pipeline (this change
         // architecture review). `erosion`/`depth` stay on the hashed
         // `new` — they're queried from `is_deep_dark_region` at aquifer-grid
         // locations that legitimately range outside this chunk's own bounds
@@ -436,12 +437,12 @@ impl AquiferSystem {
         system
     }
 
-    /// `Aquifer.createDisabled(globalFluidPicker)` — the whole aquifer for a
+    /// Vanilla's own disabled-aquifer constructor — the whole aquifer for a
     /// dimension whose settings say `aquifers_enabled: false`, which is the
-    /// Nether and the End (`Aquifer.java:30-41`).
+    /// Nether and the End.
     ///
     /// ```text
-    /// density > 0.0 ? null : fluidRule.computeFluid(x, y, z).at(y)
+    /// density > 0.0 ? none : fluid_rule.compute_fluid(x, y, z).at(y)
     /// ```
     ///
     /// So: solid where the interpolated density is positive, otherwise the
@@ -496,7 +497,8 @@ impl AquiferSystem {
             spread: stub(),
             lava: stub(),
             prelim: stub(),
-            // `createDisabled` takes no `PositionalRandomFactory` at all; this
+            // Vanilla's own disabled-aquifer constructor takes no
+            // `PositionalRandomFactory` at all; this
             // is the cheapest inert stand-in and is never sampled.
             positional: crate::rng::Algorithm::Legacy.root_positional(0),
             sea_level,
@@ -522,15 +524,16 @@ impl AquiferSystem {
         }
     }
 
-    /// The pre-surface block at world coordinates — vanilla `doFill`'s decision:
-    /// `computeSubstance(context, final_density(x,y,z))`, mapped to a
+    /// The pre-surface block at world coordinates — vanilla's own fill
+    /// step's decision:
+    /// its own compute-substance call over `final_density(x,y,z)`, mapped to a
     /// [`BlockKind`] (`None` → the default block, stone).
     ///
     /// **No beard.** This is the spelling every caller outside the fill loop
-    /// wants, and it is vanilla's too: `NoiseBasedChunkGenerator` passes
-    /// `BeardifierMarker.INSTANCE` (a constant `0.0`) at both of its non-fill call
-    /// sites (`NoiseBasedChunkGenerator.java:145,230` — `getBaseColumn` and
-    /// `getBaseHeight`), which is exactly why a structure's *own* height probe
+    /// wants, and it is vanilla's too: vanilla's own chunk generator passes
+    /// a constant `0.0` beardifier marker at both of its non-fill call
+    /// sites (its own base-column and base-height queries), which is exactly
+    /// why a structure's *own* height probe
     /// does not see the terrain its own beard is about to create.
     #[must_use]
     pub fn block_at(&self, x: i32, y: i32, z: i32) -> BlockKind {
@@ -540,7 +543,7 @@ impl AquiferSystem {
     /// [`block_at`](Self::block_at) with a beardifier term added to the density —
     /// vanilla's `add(finalDensity, beardifier)` (`NoiseChunk.java:157`).
     ///
-    /// The `+ beard` is the whole of issue #514's S3 at this layer, and the
+    /// The `+ beard` is the whole of this change's S3 at this layer, and the
     /// **operand order is the specification**: `Ap2(ADD)` evaluates
     /// `argument1.compute(ctx) + argument2.compute(ctx)`, so the interpolated
     /// density comes first. See
@@ -778,7 +781,7 @@ impl AquiferSystem {
             }
         }
 
-        // `shouldScheduleFluidUpdate` is a fluid-tick side effect and does not
+        // Vanilla's own "should schedule fluid update" is a fluid-tick side effect and does not
         // change the block placed, so the flow branches below it are omitted.
         Some(fluid_state)
     }
