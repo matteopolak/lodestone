@@ -4,12 +4,12 @@
 //! mutually-exclusive flags, the Brain system coordinates behaviours through
 //! **memory**. A behaviour declares which memories it needs present or absent to
 //! run, produces or consumes values, and the emergent mutual exclusion (only one
-//! behaviour writes `WALK_TARGET` at a time, and `MoveToTargetSink` refuses to
-//! start while a path exists) replaces the flag machinery entirely.
+//! behaviour writes `WALK_TARGET` at a time, and the behaviour that walks toward
+//! a computed path refuses to start a new one while a path already exists)
+//! replaces the flag machinery entirely.
 //!
-//! This is a faithful reproduction of vanilla's `MemorySlot` /
-//! `MemoryModuleType` / `MemoryStatus`, including the two details that are easy
-//! to get wrong:
+//! This is a faithful reproduction of vanilla's own memory-slot / module-type /
+//! presence-status model, including the two details that are easy to get wrong:
 //!
 //! * A memory can only be *set* if it was first **registered** (vanilla
 //!   registers a slot for every memory any behaviour requires). Setting an
@@ -23,7 +23,7 @@ use std::collections::HashMap;
 
 /// A version-free key identifying a kind of memory.
 ///
-/// Vanilla's `MemoryModuleType<T>` is a registry entry carrying its value type;
+/// Vanilla's own memory-module-type is a registry entry carrying its value type;
 /// here the key is a stable string and the value type is enforced dynamically by
 /// [`MemoryValue`]. The core vanilla modules are provided as associated
 /// constants; a version crate may mint additional keys with [`MemoryModuleType::new`].
@@ -58,65 +58,59 @@ impl MemoryModuleType {
     /// The position of whatever last hurt the mob.
     pub const HURT_BY: Self = Self("hurt_by");
     /// The nearest hostile entity's id, from
-    /// [`super::sensor::NearestHostileSensor`] — vanilla's `NEAREST_HOSTILE`,
-    /// what `VillagerPanicTrigger.hasHostile` (and, more generally, any
-    /// target-acquisition behaviour that needs "what is the closest thing I
-    /// should be worried about") reads.
+    /// [`super::sensor::NearestHostileSensor`] — what a villager's panic-trigger
+    /// check (and, more generally, any target-acquisition behaviour that needs
+    /// "what is the closest thing I should be worried about") reads.
     pub const NEAREST_HOSTILE: Self = Self("nearest_hostile");
-    /// Registered-but-usually-empty marker used by `MoveToTargetSink` to record
-    /// how long a walk target has been unreachable.
+    /// Registered-but-usually-empty marker used by the walk-to-target behaviour
+    /// to record how long a walk target has been unreachable.
     pub const CANT_REACH_WALK_TARGET_SINCE: Self = Self("cant_reach_walk_target_since");
     /// Present while the mob holds a computed path (a marker here).
     pub const PATH: Self = Self("path");
-    /// The point a goat's ram-attack charges toward — `GoatAi.RAM`'s
-    /// `RamTarget`/`PrepareRamNearestTarget` share this exact memory, the
-    /// former reading it as its walk destination and the latter writing it
+    /// The point a goat's ram-attack charges toward — vanilla's goat-ram goal
+    /// pair share this exact memory, the one that prepares the charge reading
+    /// it as its walk destination and the one that finds a target writing it
     /// once the prepare timer elapses.
     pub const RAM_TARGET: Self = Self("ram_target");
     /// A presence-only marker (with a TTL) blocking a new ram attempt —
-    /// vanilla's `RAM_COOLDOWN_TICKS`, an `Integer` counted down every tick by
-    /// a `CountDownCooldownTicks` core behaviour there. This crate's
-    /// [`Memories`] TTL mechanism ([`Memories::set_with_expiry`]) already
-    /// performs that countdown-and-auto-clear, so no separate ticking
-    /// behaviour is needed to reproduce it.
+    /// vanilla counts this down every tick with a small reusable
+    /// countdown-and-clear behaviour. This crate's [`Memories`] TTL mechanism
+    /// ([`Memories::set_with_expiry`]) already performs that countdown-and-
+    /// auto-clear, so no separate ticking behaviour is needed to reproduce it.
     pub const RAM_COOLDOWN_TICKS: Self = Self("ram_cooldown_ticks");
-    /// The claimed workstation position — vanilla's `MemoryModuleType.JOB_SITE`
-    /// (a `GlobalPos`, narrowed here to the position half; this crate has no
-    /// dimension concept at the brain seam). Villager `WORK` requires this
-    /// present (`Villager.java`'s own `ActivityData.create(Activity.WORK, …,
-    /// ImmutableSet.of(Pair.of(MemoryModuleType.JOB_SITE, VALUE_PRESENT)))`).
+    /// The claimed workstation position (narrowed here to the position half of
+    /// vanilla's dimension-qualified global position; this crate has no
+    /// dimension concept at the brain seam). A villager's work activity
+    /// requires this present.
     pub const JOB_SITE: Self = Self("job_site");
-    /// The claimed bed position — vanilla's `MemoryModuleType.HOME`.
+    /// The claimed bed position.
     pub const HOME: Self = Self("home");
-    /// The claimed bell position — vanilla's `MemoryModuleType.MEETING_POINT`.
-    /// Villager `MEET` requires this present, the same shape as `JOB_SITE`
-    /// above.
+    /// The claimed bell position. A villager's meet activity requires this
+    /// present, the same shape as `JOB_SITE` above.
     pub const MEETING_POINT: Self = Self("meeting_point");
-    /// The nearest visible zombified piglin's position — vanilla
-    /// `MemoryModuleType.NEAREST_VISIBLE_ZOMBIFIED`, part of
-    /// `PiglinSpecificSensor`'s output in the jar. Feeds a piglin's `AVOID`
-    /// activity through [`super::behaviors::CopyMemoryWithExpiry`].
+    /// The nearest visible zombified piglin's position — part of a piglin-
+    /// specific sensor's output in vanilla. Feeds a piglin's avoid activity
+    /// through [`super::behaviors::CopyMemoryWithExpiry`].
     pub const NEAREST_VISIBLE_ZOMBIFIED: Self = Self("nearest_visible_zombified");
-    /// The entity a piglin is currently fleeing — vanilla
-    /// `MemoryModuleType.AVOID_TARGET`, a `LivingEntity` there; narrowed here
-    /// to a position, the same simplification `HURT_BY`/`NEAREST_VISIBLE_PLAYER`
-    /// already make (see [`MemoryValue::Pos`]'s own doc).
+    /// The entity a piglin is currently fleeing — a living entity in vanilla;
+    /// narrowed here to a position, the same simplification `HURT_BY`/
+    /// `NEAREST_VISIBLE_PLAYER` already make (see [`MemoryValue::Pos`]'s own
+    /// doc).
     pub const AVOID_TARGET: Self = Self("avoid_target");
     /// The position of whoever this mob holds a persistent grudge against —
     /// [`super::mob::BrainMob::angry_target`], the Brain-system read of the
     /// exact same [`MobController::angry_target`](crate::ai::MobController::angry_target)
-    /// field the goal system's anger-gated species already use (issue #458).
-    /// Not a vanilla `MemoryModuleType` — the warden's own
-    /// `WardenAi`/`Warden.increaseAngerAt` machinery keeps its anger and
-    /// target entirely off the `Brain`, on the entity itself, so there is no
-    /// jar memory key to match here; this crate's Brain architecture has no
-    /// other seam for "walk toward a host-resolved position", so it borrows
-    /// the shape [`RAM_TARGET`] already established rather than inventing a
-    /// second one.
+    /// field the goal system's anger-gated species already use.
+    /// Not a vanilla memory module — the warden's own anger-and-target
+    /// machinery keeps its anger and target entirely off its brain, on the
+    /// entity itself, so there is no equivalent memory key to match here;
+    /// this crate's Brain architecture has no other seam for "walk toward a
+    /// host-resolved position", so it borrows the shape [`RAM_TARGET`] already
+    /// established rather than inventing a second one.
     pub const ANGER_TARGET: Self = Self("anger_target");
     /// The nearest eligible tongue-attack prey's position — a narrowed
-    /// stand-in for vanilla's `MemoryModuleType.NEAREST_ATTACKABLE`
-    /// (`FrogAttackablesSensor`'s own output, a `LivingEntity`). This crate's
+    /// stand-in for vanilla's own nearest-attackable memory (a frog-specific
+    /// sensor's output, a living entity there). This crate's
     /// [`super::mob::BrainMob`] seam resolves the species/liveness filter
     /// host-side and hands back only a position — the same
     /// [`NEAREST_VISIBLE_ZOMBIFIED`] shape, and the same reason: no entity
@@ -126,36 +120,33 @@ impl MemoryModuleType {
     /// see that type's own doc.
     pub const NEAREST_ATTACKABLE_FOOD: Self = Self("nearest_attackable_food");
     /// Where an allay carrying picked-up items should fly to drop them — a
-    /// narrowed stand-in for vanilla's own two-step
-    /// `AllayAi::getItemDepositPosition` (a `PositionTracker`, resolved from
-    /// `MemoryModuleType.LIKED_NOTEBLOCK_POSITION`/`LIKED_PLAYER`). This
-    /// crate's host resolves the whole eligibility chain
-    /// (`shouldDepositItemsAtLikedNoteblock`'s cooldown/distance/still-a-
-    /// note-block checks) and hands back only the answer, the same
-    /// [`NEAREST_VISIBLE_ZOMBIFIED`] shape used everywhere else a sensor
-    /// would need same-tick census data this crate's `BrainMob` seam does
-    /// not carry. **Disclosed narrowing**: only the note-block half of
-    /// `getItemDepositPosition` is modelled — the `LIKED_PLAYER` fallback
-    /// this crate's host does not resolve.
+    /// narrowed stand-in for vanilla's own two-step item-deposit-position
+    /// resolution (a tracked position, resolved from a liked-note-block memory
+    /// with a liked-player fallback). This crate's host resolves the whole
+    /// eligibility chain (the cooldown/distance/still-a-note-block checks) and
+    /// hands back only the answer, the same [`NEAREST_VISIBLE_ZOMBIFIED`]
+    /// shape used everywhere else a sensor would need same-tick census data
+    /// this crate's `BrainMob` seam does not carry. **Disclosed narrowing**:
+    /// only the note-block half of that resolution is modelled — the
+    /// liked-player fallback this crate's host does not resolve.
     pub const DELIVERY_TARGET: Self = Self("delivery_target");
     /// A host-resolved candidate dig position — a narrowed stand-in for
-    /// vanilla's own `MemoryModuleType.SNIFFER_SNIFFING_TARGET` (a
-    /// `BlockPos`, written once `Sniffer.calculateDigPosition` succeeds).
-    /// This crate's Brain seam has no block-tag or navigation-reachability
-    /// read of its own — the same [`DELIVERY_TARGET`] "host resolves the
-    /// whole eligibility chain and hands back only the answer" shape — so
-    /// the host (`lodestone_server::mobs::sniffer`) does the candidate
-    /// search and [`super::behaviors::WalkToPoi`] just walks toward
-    /// whatever this holds. Real vanilla's `SNIFFER_DIGGING`/
-    /// `SNIFFER_SNIFFING_TARGET` split (one marks "walking there", the
-    /// other "now digging") collapses to this single memory plus the
-    /// host's own `SimMob::sniffer_state` — see that type's own doc.
+    /// vanilla's own sniffing-target memory (a block position, written once a
+    /// sniffer's own dig-position search succeeds). This crate's Brain seam
+    /// has no block-tag or navigation-reachability read of its own — the same
+    /// [`DELIVERY_TARGET`] "host resolves the whole eligibility chain and
+    /// hands back only the answer" shape — so the host
+    /// (`lodestone_server::mobs::sniffer`) does the candidate search and
+    /// [`super::behaviors::WalkToPoi`] just walks toward whatever this holds.
+    /// Real vanilla's separate "walking there" / "now digging" memory split
+    /// collapses to this single memory plus the host's own
+    /// `SimMob::sniffer_state` — see that type's own doc.
     pub const SNIFFER_DIG_TARGET: Self = Self("sniffer_dig_target");
 }
 
 /// The presence requirement a behaviour places on a memory.
 ///
-/// Faithful to vanilla `MemoryStatus`. Note that *all* checks are `false` when
+/// Faithful to vanilla's own presence-status model. Note that *all* checks are `false` when
 /// the slot is unregistered, so even `ValueAbsent` requires the slot to exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryStatus {
@@ -169,7 +160,7 @@ pub enum MemoryStatus {
 
 /// A concrete value stored in a memory slot.
 ///
-/// Vanilla's memory map is heterogeneous (`MemoryModuleType<T> -> T`); Rust has
+/// Vanilla's memory map is heterogeneous, keyed by a typed module-type; Rust has
 /// no such map, so the value types a brain actually uses are enumerated here.
 /// This keeps memory fully inspectable and comparable in tests — which the
 /// project's testing philosophy prizes over an opaque `Any`.
@@ -188,7 +179,7 @@ pub enum MemoryValue {
     /// A walk destination with a speed and stop distance.
     WalkTarget(WalkTarget),
     /// A list of entity ids (`NEAREST_VISIBLE_LIVING_ENTITIES`). An empty list
-    /// is treated as no value, matching vanilla's `isEmptyCollection`.
+    /// is treated as no value, matching vanilla's own empty-collection coercion.
     Entities(Vec<i32>),
 }
 
@@ -304,7 +295,7 @@ impl Memories {
     }
 
     /// Sets `ty` to `value` with no expiry. **No-op if `ty` is unregistered**,
-    /// exactly as vanilla's `setMemoryInternal`. An empty-collection value
+    /// exactly as vanilla's own internal memory-set. An empty-collection value
     /// clears the slot.
     pub fn set(&mut self, ty: MemoryModuleType, value: MemoryValue) {
         self.set_with_expiry_opt(ty, value, MemorySlot::NEVER);
@@ -327,7 +318,7 @@ impl Memories {
     }
 
     /// Sets `ty` from an optional value, clearing it when `None` (vanilla's
-    /// `setOrErase`). No-op if unregistered.
+    /// own set-or-erase). No-op if unregistered.
     pub fn set_or_erase(&mut self, ty: MemoryModuleType, value: Option<MemoryValue>) {
         match value {
             Some(v) => self.set(ty, v),
@@ -376,8 +367,8 @@ impl Memories {
         }
     }
 
-    /// Advances every slot's expiry by one tick (vanilla's
-    /// `forgetOutdatedMemories`). Run first, before sensors and behaviours.
+    /// Advances every slot's expiry by one tick (vanilla's own outdated-memory
+    /// forgetting pass). Run first, before sensors and behaviours.
     pub fn tick(&mut self) {
         for slot in self.slots.values_mut() {
             slot.tick();
