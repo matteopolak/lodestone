@@ -2,10 +2,10 @@
 //!
 //! # What this is
 //!
-//! A port of `net/minecraft/world/level/material/{FlowingFluid,WaterFluid,LavaFluid}.java`
-//! plus the two pieces of `net/minecraft/world/level/block/LiquidBlock.java` that
-//! drive them (`shouldSpreadLiquid`, and the `onPlace`/`neighborChanged`
-//! scheduling), read out of `.cache/mc/26.2/src` as record definitions.
+//! A port of the real flowing-fluid engine and its water/lava specializations,
+//! plus the two pieces of the real liquid block that
+//! drive them (the should-spread-liquid check, and the place/neighbor-changed
+//! scheduling), read out of the pinned 26.2 decompile as record definitions.
 //!
 //! Before this landed, nothing in this crate ticked a fluid at all. The
 //! *classification* side was well covered — [`crate::chunk::is_water`],
@@ -14,44 +14,44 @@
 //! `crate::tick::run_tick_loop`'s `fluid_ticks.drain_due` loop had an empty body
 //! with a comment saying so.
 //!
-//! # The algorithm, in the order vanilla evaluates it
+//! # The algorithm, in the order the real engine evaluates it
 //!
-//! [`run_scheduled_tick`] is `FlowingFluid.tick` (`FlowingFluid.java:427-444`):
+//! [`run_scheduled_tick`] is the real flowing-fluid tick:
 //!
 //! 1. if the cell is **not** a source, recompute what it *should* be with
-//!    [`new_liquid`] (`getNewLiquid`, `:157-193`) and rewrite it — to air if the
+//!    [`new_liquid`] (the real "new liquid" derivation) and rewrite it — to air if the
 //!    answer is empty, otherwise to the new level plus a fresh scheduled tick;
-//! 2. then [`spread`] (`:117-137`) — try **down** first, and only fall back to
+//! 2. then [`spread`] (the real spread step) — try **down** first, and only fall back to
 //!    the four horizontal directions when down is blocked (or when this is a
 //!    source, or when the cell below is not a hole);
-//! 3. `spreadToSides` (`:139-155`) consults [`spread_targets`] (`getSpread`,
-//!    `:363-403`), which is the slope-finding: every horizontal direction is
-//!    scored by [`slope_distance`] (`getSlopeDistance`, `:279-303`) — how many
+//! 3. the real spread-to-sides step consults [`spread_targets`] (the real "get spread"
+//!    derivation), which is the slope-finding: every horizontal direction is
+//!    scored by [`slope_distance`] (the real slope-distance query) — how many
 //!    steps until a hole — and only the **joint minimum** directions receive
 //!    fluid. That is why water on flat ground spreads outward evenly but water
 //!    beside a one-block pit flows *only* toward the pit.
 //!
 //! Nothing here draws from an RNG, and that is a property of the algorithm
-//! rather than of this port: fluid spread in vanilla is fully deterministic.
+//! rather than of this port: fluid spread in the real engine is fully deterministic.
 //! There is exactly one RNG consumer in the whole family and it is a *delay*,
 //! not a decision — see "the named gaps" below.
 //!
 //! # The numbers, which are per-fluid and per-dimension
 //!
-//! | | `getDropOff` | `getSlopeFindDistance` | `getTickDelay` |
+//! | | drop-off | slope-find distance | tick delay |
 //! |---|---|---|---|
-//! | water (`WaterFluid.java:106,90,110`) | 1 | 4 | 5 |
-//! | lava, overworld (`LavaFluid.java:163,146,171`) | 2 | 2 | 30 |
+//! | water | 1 | 4 | 5 |
+//! | lava, overworld | 2 | 2 | 30 |
 //! | lava, nether (`fast_lava`) | 1 | 4 | 10 |
 //!
-//! `getDropOff` is what fixes the reach: a source has `amount = 8`, each step
-//! horizontally costs `dropOff`, and an amount of `0` is empty. So **water
+//! The drop-off is what fixes the reach: a source has `amount = 8`, each step
+//! horizontally costs the drop-off, and an amount of `0` is empty. So **water
 //! reaches 7 cells** from a source on flat ground (amounts 7,6,5,4,3,2,1) and
 //! **overworld lava reaches 3** (amounts 6,4,2). Those two counts are the whole
 //! visible signature of this module and `flat_ground_water_spread_matches_vanilla_drop_off`
 //! predicts them from the table above rather than from our own output.
 //!
-//! `fast_lava` is `EnvironmentAttributes.FAST_LAVA`, a dimension attribute — not
+//! `fast_lava` is the real fast-lava dimension attribute — not
 //! a gamerule and not a difficulty. This crate hosts the overworld only
 //! ([`FluidEnv::OVERWORLD`]); [`FluidEnv::NETHER`] exists so the arithmetic is
 //! written down once rather than rediscovered when a second dimension lands.
@@ -59,9 +59,9 @@
 //! # The level encoding, which is the easiest thing here to get backwards
 //!
 //! The *block* carries `level` in `0..=15`; the *fluid* carries `amount` in
-//! `1..=8` plus a `falling` flag. `FlowingFluid.getLegacyLevel` (`:446-448`) and
-//! `LiquidBlock`'s `stateCache` (`LiquidBlock.java:67-77`, read back by
-//! `getFluidState`, `:120-124`) are the two halves of the mapping:
+//! `1..=8` plus a `falling` flag. The real legacy-level derivation and the real
+//! liquid block's own state cache (read back by its fluid-state query) are the
+//! two halves of the mapping:
 //!
 //! | block `level` | fluid |
 //! |---|---|
@@ -70,53 +70,55 @@
 //! | `8..=15` | **falling**, `amount = 8` |
 //!
 //! So `level` counts *down* from a full source, and `level=1` is the wettest
-//! flowing state rather than the driest. `getFluidState` clamps with
-//! `Math.min(level, 8)`, which is why `9..=15` are all the same falling state.
+//! flowing state rather than the driest. The real fluid-state query clamps
+//! `level` to `8`, which is why `9..=15` are all the same falling state.
 //!
 //! # The named gaps
 //!
 //! Each of these is a deliberate reduction, not an oversight, and each is chosen
 //! so the error direction is inert rather than plausible-looking:
 //!
-//! * **`LavaFluid.getSpreadDelay`'s RNG quadrupling** (`LavaFluid.java:174-185`)
+//! * **The real lava spread-delay's RNG quadrupling**
 //!   is not modelled. It multiplies the delay by 4 with probability 3/4 when a
 //!   *non-falling* lava cell's height **rises**, and this crate's fluid tick has
 //!   no RNG in scope (the tick loop's lives inside `RandomTickScheduler`). It
 //!   affects lava's timing while deepening and never the final pattern, so the
-//!   consequence is lava that settles slightly faster than vanilla, not lava
+//!   consequence is lava that settles slightly faster than the real engine, not lava
 //!   that settles somewhere else.
-//! * **`beforeDestroyingBlock`** is a plain overwrite here. Vanilla drops the
-//!   destroyed block's loot for water (`WaterFluid.java:80-83`) and plays the
-//!   `1501` fizz level-event for lava (`LavaFluid.java:186-188`). We destroy the
+//! * **The real pre-destroy hook** is a plain overwrite here. The real engine
+//!   drops the destroyed block's loot for water and plays a
+//!   fizz level-event for lava. We destroy the
 //!   block correctly and emit neither the drop nor the sound.
-//! * **`shouldSpreadLiquid` runs at tick time, not at edit time.** Vanilla calls
-//!   it from `LiquidBlock.onPlace`/`neighborChanged`; [`run_scheduled_tick`]
+//! * **The real should-spread-liquid check runs at tick time, not at edit time.**
+//!   The real engine calls
+//!   it from the liquid block's place/neighbor-changed hooks; [`run_scheduled_tick`]
 //!   evaluates it as its own first step instead. Same outcome, one scheduled-tick
 //!   delay later, and it keeps the whole family reachable through one entry
 //!   point.
-//! * **Bubble columns** (`LiquidBlock.tick`, `shouldBubbleColumnOccupy`) are not
-//!   modelled at all — this crate has no `BubbleColumnBlock`.
+//! * **Bubble columns** are not
+//!   modelled at all — this crate has no bubble-column block.
 //! * **A waterlogged block does not originate a spread here.**
 //!   [`run_scheduled_tick`] returns early unless the block is
 //!   `minecraft:water`/`minecraft:lava`, so a waterlogged slab is a source for
 //!   *reading* ([`fluid_state_of`], and so for every neighbour's
-//!   [`new_liquid`]) but never runs [`spread`] itself. Vanilla does: `FlowingFluid.tick`
-//!   takes a position rather than a `LiquidBlock`, `SimpleWaterloggedBlock.placeLiquid`
-//!   schedules a tick at the container's own position, and 50 waterloggable block
-//!   classes schedule `Fluids.WATER` there from `updateShape`. The consequence is
-//!   water reaching *fewer* cells than vanilla past a waterlogged block, never
+//!   [`new_liquid`]) but never runs [`spread`] itself. The real engine does: the
+//!   real fluid tick
+//!   takes a position rather than a liquid block, and every waterloggable block
+//!   schedules a water tick at the container's own position from its own
+//!   shape-update hook, across roughly 50 block classes. The consequence is
+//!   water reaching *fewer* cells than the real engine past a waterlogged block, never
 //!   more — chosen so the error is inert rather than a flood.
 //!
 //! # How to change it
 //!
 //! The geometry predicates are the part most likely to need work, and they are
 //! the part that is a *reduction* rather than a transliteration:
-//! [`can_pass_through_wall`] is `Shapes.mergedFaceOccludes` evaluated over
+//! [`can_pass_through_wall`] is the real merged-face-occlusion check evaluated over
 //! `lodestone_data::collision_shapes`' axis-aligned box lists with an exact
-//! coordinate-sweep coverage test, because those boxes are all vanilla's own
-//! `toAabbs()` output. It is exact for a static shape and **wrong for a
+//! coordinate-sweep coverage test, because those boxes are all the real
+//! per-shape box decomposition's own output. It is exact for a static shape and **wrong for a
 //! neighbour-dependent one** (stairs, fences, walls, panes): our census is keyed
-//! by block state, and vanilla's `getCollisionShape` for those consults the
+//! by block state, and the real collision-shape query for those consults the
 //! neighbours. Water flowing against a fence corner may therefore disagree.
 //!
 //! Do not "fix" that by loosening the predicate — it fails toward *not*
@@ -134,27 +136,27 @@ use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue, TickPriority};
 /// The scheduled-tick `kind` string every fluid tick carries, the way
 /// `crate::redstone::TICK_TORCH` and friends key the block queue.
 ///
-/// One kind for both fluids deliberately. Vanilla keys `fluidTicks` by the
-/// `Fluid` *instance*, so water and lava at one position could in principle hold
+/// One kind for both fluids deliberately. The real engine keys its per-chunk
+/// pending-tick table by the
+/// fluid *instance*, so water and lava at one position could in principle hold
 /// two independent pending ticks — but they cannot both occupy one block, so the
 /// distinction is unobservable, and collapsing it means
 /// [`ScheduledTickQueue::has_scheduled`]'s `(pos, kind)` dedup does exactly what
-/// `LevelChunkTicks.ticksPerPosition` does.
+/// the real per-position tick tracking does.
 pub const TICK_FLUID: &str = "lodestone:fluid";
 
-/// Vanilla's own horizontal iteration order, `Direction.Plane.HORIZONTAL`
-/// (`Direction.java:577`): **north, east, south, west**.
+/// The real horizontal iteration order: **north, east, south, west**.
 ///
 /// Not load-bearing for any result here and written down anyway. Every
-/// horizontal loop in `FlowingFluid` accumulates a `max` ([`new_liquid`]), a
+/// horizontal loop in the real flowing-fluid engine accumulates a `max` ([`new_liquid`]), a
 /// `min` ([`slope_distance`]) or a `<=`-keeps-ties set ([`spread_targets`]), all
 /// three of which are order-independent — so a wrong order would be invisible,
 /// which is exactly why it is worth pinning rather than guessing.
 const HORIZONTAL: [Direction; 4] =
     [Direction::North, Direction::East, Direction::South, Direction::West];
 
-/// `LiquidBlock.POSSIBLE_FLOW_DIRECTIONS` (`LiquidBlock.java:56-58`), the set
-/// `shouldSpreadLiquid` walks: **down, south, north, east, west** — no `up`.
+/// The real liquid block's possible-flow-directions set, the set
+/// the should-spread-liquid check walks: **down, south, north, east, west** — no `up`.
 ///
 /// It reads each direction's *opposite*, so the cells actually probed are up,
 /// north, south, west, east: a lava cell is quenched by water above or beside it
@@ -167,8 +169,9 @@ const POSSIBLE_FLOW_DIRECTIONS: [Direction; 5] = [
     Direction::West,
 ];
 
-/// Which fluid a cell holds. `EMPTY` is `Option::None` at every call site rather
-/// than a third variant, matching how `FluidState.isEmpty` reads in practice.
+/// Which fluid a cell holds. The real empty-fluid sentinel is `Option::None`
+/// at every call site rather
+/// than a third variant, matching how the real fluid-state "is empty" check reads in practice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FluidKind {
     /// `minecraft:water` / `minecraft:flowing_water`, and the fluid state of any
@@ -192,24 +195,24 @@ impl FluidKind {
     }
 }
 
-/// One entry of vanilla's **fluid registry** — the distinction [`FluidKind`]
+/// One entry of the real **fluid registry** — the distinction [`FluidKind`]
 /// deliberately collapses. `minecraft:water` and `minecraft:flowing_water` are
-/// two different `Fluid` *instances* (`WaterFluid.getSource`/`getFlowing`), and
-/// `Fluid.isSame` is what treats them as one family.
+/// two different fluid *instances* in the real registry, and
+/// the real "is same fluid" check is what treats them as one family.
 ///
 /// It exists for exactly one predicate, and that predicate is load-bearing:
-/// `SimpleWaterloggedBlock.canPlaceLiquid` is `type == Fluids.WATER`, an
-/// instance comparison, so **no flowing state can ever waterlog a container**.
+/// the real can-place-liquid check for a waterloggable block is an exact
+/// instance comparison against the water fluid, so **no flowing state can ever waterlog a container**.
 /// Passing a `FluidKind` there instead loses the distinction and waterlogs on
 /// every flow — and because [`fluid_state_of`] correctly reports a
 /// `waterlogged=true` block as a *source*, each newly waterlogged block then
 /// feeds its neighbours at `amount = 8`. The level never decrements, so the
-/// spread has no bound at all: the reach stops being `8 / getDropOff` cells and
+/// spread has no bound at all: the reach stops being `8 / drop_off` cells and
 /// becomes the size of the waterloggable terrain, at one block write and one
 /// scheduled tick per cell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FluidType {
-    /// Which family — `Fluid.isSame`'s equivalence class.
+    /// Which family — the real "is same fluid" equivalence class.
     pub kind: FluidKind,
     /// `true` for `minecraft:water`/`minecraft:lava`, `false` for
     /// `minecraft:flowing_water`/`minecraft:flowing_lava`.
@@ -217,51 +220,52 @@ pub struct FluidType {
 }
 
 impl FluidType {
-    /// `WaterFluid.getSource` / `LavaFluid.getSource`.
+    /// The real per-fluid "get source" query.
     #[must_use]
     pub const fn source(kind: FluidKind) -> FluidType {
         FluidType { kind, source: true }
     }
 
-    /// `WaterFluid.getFlowing` / `LavaFluid.getFlowing`.
+    /// The real per-fluid "get flowing" query.
     #[must_use]
     pub const fn flowing(kind: FluidKind) -> FluidType {
         FluidType { kind, source: false }
     }
 }
 
-/// One cell's fluid state — `net.minecraft.world.level.material.FluidState`
+/// One cell's fluid state — the real fluid-state record
 /// reduced to the two properties that decide spreading.
 ///
-/// `amount` is `1..=8` (vanilla's `getAmount`); `8` with `falling == false` is a
+/// `amount` is `1..=8` (the real amount query); `8` with `falling == false` is a
 /// source. See this module's own doc comment for the `level` ⇄ `(amount,
 /// falling)` mapping, which is the easiest thing here to invert by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FluidState {
     /// Which fluid.
     pub kind: FluidKind,
-    /// `1..=8`. Vanilla's `FluidState.getAmount`.
+    /// `1..=8`. The real amount query.
     pub amount: u8,
-    /// `FlowingFluid.FALLING` — set on a cell fed from directly above, which
+    /// The real "falling" flag — set on a cell fed from directly above, which
     /// makes it spread sideways at the full `7` regardless of its own amount
-    /// (`spreadToSides`, `FlowingFluid.java:140-143`).
+    /// (the real spread-to-sides step).
     pub falling: bool,
 }
 
 impl FluidState {
     /// A source: `amount == 8` and not falling.
     ///
-    /// The `!falling` half is not redundant. `getFlowing(8, true)` — the state a
-    /// cell directly under a fluid takes — also has `amount == 8`, and it is
-    /// **not** a source: `WaterFluid.Flowing.isSource` returns `false`
-    /// unconditionally (`WaterFluid.java:143-146`). Treating it as one would
+    /// The `!falling` half is not redundant. The falling-flowing state a
+    /// cell directly under a fluid takes also has `amount == 8`, and it is
+    /// **not** a source: the real flowing water's falling variant reports
+    /// "is source" as `false`
+    /// unconditionally. Treating it as one would
     /// make a waterfall's column self-sustaining and it would never drain.
     #[must_use]
     pub fn is_source(self) -> bool {
         self.amount == 8 && !self.falling
     }
 
-    /// `FluidState.getType` — which fluid-registry instance this state belongs
+    /// The real "get type" query — which fluid-registry instance this state belongs
     /// to, source or flowing.
     ///
     /// Derived from [`is_source`](Self::is_source), so `getFlowing(8, true)`
@@ -277,14 +281,13 @@ impl FluidState {
         }
     }
 
-    /// `FluidState.isFull` — `amount == 8`, falling included
-    /// (`FluidState.java:57-59`).
+    /// The real "is full" query — `amount == 8`, falling included.
     #[must_use]
     pub fn is_full(self) -> bool {
         self.amount == 8
     }
 
-    /// `Fluid.getOwnHeight` — `amount / 9.0` (`FlowingFluid.java:497-499`).
+    /// The real "own height" query — `amount / 9.0`.
     /// Note the divisor is **9**, not 8, so even a full non-stacked fluid is
     /// `0.888…` tall rather than `1.0`.
     #[must_use]
@@ -292,7 +295,7 @@ impl FluidState {
         f32::from(self.amount) / 9.0
     }
 
-    /// `FlowingFluid.getLegacyLevel` (`FlowingFluid.java:446-448`) — the
+    /// The real legacy-level derivation — the
     /// `level` property value this state is stored as.
     #[must_use]
     pub fn legacy_level(self) -> u32 {
@@ -304,28 +307,28 @@ impl FluidState {
     }
 
     /// The canonical block-state string [`crate::chunk::ChunkColumn`] stores for
-    /// this fluid — `createLegacyBlock` (`WaterFluid.java:97-99`).
+    /// this fluid — the real "create legacy block" derivation.
     #[must_use]
     pub fn block_state(self) -> String {
         format!("{}[level={}]", self.kind.block_name(), self.legacy_level())
     }
 }
 
-/// The two dimension-dependent constants `FlowingFluid` reads off the level, and
-/// the two gamerules `canConvertToSource` reads.
+/// The two dimension-dependent constants the real flowing-fluid engine reads off the level, and
+/// the two gamerules the real can-convert-to-source check reads.
 ///
-/// `fast_lava` is `EnvironmentAttributes.FAST_LAVA` (`LavaFluid.java:265-267`),
+/// `fast_lava` is the real fast-lava dimension attribute,
 /// a **dimension attribute** — nether lava is four times cheaper to cross and
-/// three times faster. The two conversion flags are `GameRules`
+/// three times faster. The two conversion flags are the real
 /// `water_source_conversion` (default `true`) and `lava_source_conversion`
-/// (default `false`), verified in `gamerules/GameRules.java:92,47`.
+/// (default `false`) gamerules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FluidEnv {
-    /// `EnvironmentAttributes.FAST_LAVA`.
+    /// The real fast-lava dimension attribute.
     pub fast_lava: bool,
-    /// `GameRules.WATER_SOURCE_CONVERSION`, vanilla default `true`.
+    /// The real `water_source_conversion` gamerule, default `true`.
     pub water_source_conversion: bool,
-    /// `GameRules.LAVA_SOURCE_CONVERSION`, vanilla default `false`.
+    /// The real `lava_source_conversion` gamerule, default `false`.
     pub lava_source_conversion: bool,
     /// Lowest world `y` that exists — the dimension's build-height floor.
     ///
@@ -334,8 +337,8 @@ pub struct FluidEnv {
     /// world asks for `min_y - 1`. `ChunkColumn::block_state` indexes unguarded
     /// and **panics** there, and the panic would land on the world tick thread.
     /// [`block_at`] answers air outside these bounds instead, which is also
-    /// vanilla's own behaviour (`Level.getBlockState` returns `VOID_AIR` when
-    /// `isOutsideBuildHeight`).
+    /// the real behaviour: the real block-state query returns void air when
+    /// the position is outside build height.
     pub min_y: i32,
     /// Number of block rows above [`min_y`](Self::min_y).
     pub height: i32,
@@ -381,15 +384,14 @@ impl FluidEnv {
         }
     }
 
-    /// `true` iff `y` is inside this dimension's build height — vanilla's
-    /// `LevelHeightAccessor.isInsideBuildHeight`.
+    /// `true` iff `y` is inside this dimension's build height — the real
+    /// inside-build-height query.
     #[must_use]
     const fn contains_y(self, y: i32) -> bool {
         y >= self.min_y && y < self.min_y + self.height
     }
 
-    /// `getDropOff` — how much `amount` one horizontal step costs
-    /// (`WaterFluid.java:104-107`, `LavaFluid.java:161-164`).
+    /// The real drop-off query — how much `amount` one horizontal step costs.
     #[must_use]
     pub fn drop_off(self, kind: FluidKind) -> u8 {
         match kind {
@@ -404,8 +406,7 @@ impl FluidEnv {
         }
     }
 
-    /// `getSlopeFindDistance` — how far [`slope_distance`] looks for a hole
-    /// (`WaterFluid.java:88-91`, `LavaFluid.java:144-147`).
+    /// The real slope-find-distance query — how far [`slope_distance`] looks for a hole.
     #[must_use]
     pub fn slope_find_distance(self, kind: FluidKind) -> u32 {
         match kind {
@@ -420,8 +421,7 @@ impl FluidEnv {
         }
     }
 
-    /// `getTickDelay`, in game ticks (`WaterFluid.java:108-111`,
-    /// `LavaFluid.java:169-172`).
+    /// The real tick-delay query, in game ticks.
     #[must_use]
     pub fn tick_delay(self, kind: FluidKind) -> u64 {
         match kind {
@@ -436,8 +436,7 @@ impl FluidEnv {
         }
     }
 
-    /// `canConvertToSource` — whether two adjacent sources make a third
-    /// (`WaterFluid.java:75-78`, `LavaFluid.java:190-193`).
+    /// The real can-convert-to-source query — whether two adjacent sources make a third.
     #[must_use]
     pub fn can_convert_to_source(self, kind: FluidKind) -> bool {
         match kind {
@@ -452,8 +451,8 @@ impl FluidEnv {
 // ---------------------------------------------------------------------------
 
 /// The block state at `pos`, or air when `pos` is outside the dimension's build
-/// height — vanilla's `Level.getBlockState`, whose own first line is
-/// `isOutsideBuildHeight(pos) ? Blocks.VOID_AIR.defaultBlockState() : …`.
+/// height — the real block-state query, whose own first line checks whether the
+/// position is outside build height and returns void air's default state if so.
 ///
 /// **Every world read in this module goes through here**, and that is a hard
 /// invariant rather than a style preference: the spread reads the cell below
@@ -484,11 +483,11 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
     })
 }
 
-/// `BlockState.getFluidState` — the fluid a block state holds, or `None` for a
+/// The real "get fluid state" query — the fluid a block state holds, or `None` for a
 /// block with no fluid.
 ///
-/// Three producers, matching `LiquidBlock.getFluidState` (`LiquidBlock.java:120-124`)
-/// and `SimpleWaterloggedBlock`:
+/// Three producers, matching the real liquid block's own fluid-state query
+/// and the real waterloggable-block interface:
 ///
 /// * `minecraft:water`/`minecraft:lava`, whose `level` decodes per this module's
 ///   own table (an absent `level` is the default state, `0`, a source);
@@ -508,7 +507,7 @@ pub fn fluid_state_of(state: &str) -> Option<FluidState> {
             });
         }
     };
-    // `LiquidBlock.getFluidState`'s `Math.min(level, 8)` is why 9..=15 all read
+    // The real fluid-state query's clamp to 8 is why 9..=15 all read
     // as the one falling state rather than as ever-thinner flows.
     let level = property_of(state, "level")
         .and_then(|value| value.parse::<u8>().ok())
@@ -533,13 +532,13 @@ pub fn fluid_state_of(state: &str) -> Option<FluidState> {
     })
 }
 
-/// `true` iff `state`'s fluid is `kind` — `Fluid.isSame`
-/// (`WaterFluid.java:101-103`), which treats a fluid and its flowing twin as one.
+/// `true` iff `state`'s fluid is `kind` — the real "is same fluid" check,
+/// which treats a fluid and its flowing twin as one.
 fn is_same_fluid(state: &str, kind: FluidKind) -> bool {
     fluid_state_of(state).is_some_and(|fluid| fluid.kind == kind)
 }
 
-/// `FlowingFluid.isSourceBlockOfThisType` (`FlowingFluid.java:341-343`).
+/// The real "is source block of this type" check.
 fn is_source_of_type(state: &str, kind: FluidKind) -> bool {
     fluid_state_of(state).is_some_and(|fluid| fluid.kind == kind && fluid.is_source())
 }
@@ -554,12 +553,12 @@ fn is_source_of_type(state: &str, kind: FluidKind) -> bool {
 // with fluid placement).
 // ---------------------------------------------------------------------------
 
-/// `DispensibleContainerItem.emptyContents`'s target check, reduced to the
-/// case this crate can answer without a `canBeReplaced`/`Material` model: the
-/// three air variants. Vanilla additionally empties onto any block whose
-/// `canBeReplaced` is `true` for the fluid (a torch, tall grass, a flower,
+/// The real "empty contents" target check, reduced to the
+/// case this crate can answer without a full replaceability model: the
+/// three air variants. The real engine additionally empties onto any block
+/// that is replaceable by the fluid (a torch, tall grass, a flower,
 /// …); refusing those here **under**-empties rather than over-empties —
-/// naming a target as fillable that vanilla would refuse is the direction
+/// naming a target as fillable that the real engine would refuse is the direction
 /// that would be a real bug (griefing a block that should have survived),
 /// and this cannot do that.
 #[must_use]
@@ -593,10 +592,10 @@ pub fn bucket_empty_state(kind: FluidKind) -> &'static str {
     }
 }
 
-/// `BucketPickup.pickupBlock`'s water/lava half: the fluid kind at
-/// `target_state`, if it is a **source** (`FlowingFluid.pickupBlock` refuses
+/// The real bucket-pickup water/lava half: the fluid kind at
+/// `target_state`, if it is a **source** (the real pickup refuses
 /// a flowing, non-source cell — an empty bucket dipped in a stream's middle
-/// comes back empty, matching vanilla exactly).
+/// comes back empty, matching the real engine exactly).
 #[must_use]
 pub fn bucket_pickup_kind(target_state: &str) -> Option<FluidKind> {
     let fluid = fluid_state_of(target_state)?;
@@ -612,8 +611,8 @@ pub fn filled_bucket_item(kind: FluidKind) -> &'static str {
     }
 }
 
-/// `FluidState.getHeight` — `hasSameAbove ? 1.0 : ownHeight`
-/// (`FlowingFluid.java:488-495`). Only lava's `canBeReplacedWith` needs it.
+/// The real "get height" query — `hasSameAbove ? 1.0 : ownHeight`.
+/// Only lava's can-be-replaced-with check needs it.
 fn fluid_height(fluid: FluidState, above_state: &str) -> f32 {
     if is_same_fluid(above_state, fluid.kind) {
         1.0
@@ -626,11 +625,11 @@ fn fluid_height(fluid: FluidState, above_state: &str) -> f32 {
 // Geometry: what a fluid may occupy, and what it may pass through
 // ---------------------------------------------------------------------------
 
-/// `FlowingFluid.canHoldAnyFluid`'s explicit block list
-/// (`FlowingFluid.java:404-421`). Every one of these has no collision box, so
-/// the `blocksMotion` test would let fluid in; vanilla names them individually.
+/// The real can-hold-any-fluid check's explicit block list. Every one of
+/// these has no collision box, so
+/// the blocks-motion test would let fluid in; the real engine names them individually.
 ///
-/// `DoorBlock` and `BlockTags.SIGNS` are matched by suffix rather than listed,
+/// Doors and the real sign tag are matched by suffix rather than listed,
 /// because both are per-wood families of a dozen-plus blocks.
 const NEVER_HOLDS_FLUID: [&str; 6] = [
     "minecraft:ladder",
@@ -649,7 +648,7 @@ fn state_id(state: &str) -> u32 {
     crate::chunk::resolve_palette_state_id(state)
 }
 
-/// `BlockState.blocksMotion`, out of `lodestone_data`'s jar-derived census.
+/// The real blocks-motion query, out of `lodestone_data`'s jar-derived census.
 ///
 /// `None` from the census means the state is not in the table, and the safe
 /// answer is **yes it blocks** — a gap must stop fluid rather than let it
@@ -658,15 +657,16 @@ fn blocks_motion(state: &str) -> bool {
     lodestone_data::block_solidity::blocks_motion(state_id(state)).unwrap_or(true)
 }
 
-/// `true` iff this block is a `LiquidBlockContainer` — in 26.2 that is
-/// `SimpleWaterloggedBlock`, i.e. anything with a `waterlogged` property.
+/// `true` iff this block is a real liquid-block-container — in 26.2 that is
+/// anything implementing the waterloggable-block interface, i.e. anything
+/// with a `waterlogged` property.
 fn is_waterloggable(state: &str) -> bool {
     property_of(state, "waterlogged").is_some()
 }
 
-/// `FlowingFluid.canHoldAnyFluid` (`FlowingFluid.java:404-421`).
+/// The real can-hold-any-fluid check.
 ///
-/// Order matters and is vanilla's: the `LiquidBlockContainer` test comes
+/// Order matters and is the real engine's: the liquid-block-container test comes
 /// **first**, so a waterloggable slab qualifies even though it very much blocks
 /// motion.
 fn can_hold_any_fluid(state: &str) -> bool {
@@ -680,26 +680,28 @@ fn can_hold_any_fluid(state: &str) -> bool {
     if NEVER_HOLDS_FLUID.contains(&name) || name == "minecraft:structure_void" {
         return false;
     }
-    // `DoorBlock` and `BlockTags.SIGNS`, both per-wood families.
+    // Doors and the real sign tag, both per-wood families.
     !(name.ends_with("_door")
         || name.ends_with("_sign")
         || name.ends_with("_hanging_sign")
         || name.ends_with("_wall_sign"))
 }
 
-/// `FlowingFluid.canHoldSpecificFluid` → `LiquidBlockContainer.canPlaceLiquid`,
-/// whose one 26.2 implementation is `SimpleWaterloggedBlock` and whose entire
-/// body is `type == Fluids.WATER`.
+/// The real can-hold-specific-fluid check, which delegates to the real
+/// can-place-liquid check on the waterloggable-block interface — whose one
+/// 26.2 implementation's entire body is an instance comparison against the
+/// water fluid.
 ///
 /// **That is an instance comparison against the *source*, not a family test**,
 /// and it is the only thing in the whole family stopping flowing water from
 /// waterlogging every slab, fence and stair it reaches — see [`FluidType`].
-/// `Fluid.isSame` would answer `true` for the flowing twin; `==` does not.
+/// The real "is same fluid" check would answer `true` for the flowing twin; `==` does not.
 ///
-/// Vanilla's `canPlaceLiquid` deliberately says nothing about the block being
-/// waterlogged *already*; that clause lives in `placeLiquid`, and so lives in
+/// The real can-place-liquid check deliberately says nothing about the block being
+/// waterlogged *already*; that clause lives in the real place-liquid step, and so lives in
 /// [`spread_to`] here. Putting it in this predicate instead is inert (an
-/// already-waterlogged block reads as a source, so `canMaybePassThrough`
+/// already-waterlogged block reads as a source, so the real
+/// can-maybe-pass-through check
 /// excludes it first) but it misplaces the rule, and the rule that matters is
 /// the one above.
 fn can_hold_specific_fluid(state: &str, fluid: FluidType) -> bool {
@@ -709,23 +711,23 @@ fn can_hold_specific_fluid(state: &str, fluid: FluidType) -> bool {
     fluid == FluidType::source(FluidKind::Water)
 }
 
-/// `FlowingFluid.canHoldFluid` (`FlowingFluid.java:423-425`).
+/// The real can-hold-fluid check.
 fn can_hold_fluid(state: &str, fluid: FluidType) -> bool {
     can_hold_any_fluid(state) && can_hold_specific_fluid(state, fluid)
 }
 
-/// `FluidState.canBeReplacedWith` — whether the fluid **already** at a cell
+/// The real can-be-replaced-with check — whether the fluid **already** at a cell
 /// yields to `incoming` arriving from `direction`.
 ///
 /// The two implementations disagree in an important way and neither is
 /// symmetric:
 ///
-/// * empty (`EmptyFluid.java:21-24`) — always yields;
-/// * water (`WaterFluid.java:112-115`) — `direction == DOWN && !incoming.is(WATER)`,
+/// * empty — always yields;
+/// * water — `direction == DOWN && !incoming.is(WATER)`,
 ///   so standing water yields **only** to lava falling into it, never to more
 ///   water. That single clause is what stops a fluid tick rewriting a cell with
 ///   the state it already holds, forever;
-/// * lava (`LavaFluid.java:165-168`) — `height >= 0.4444 && incoming.is(WATER)`,
+/// * lava — `height >= 0.4444 && incoming.is(WATER)`,
 ///   i.e. lava at least four ninths deep yields to water from any direction.
 fn can_be_replaced_with(
     existing: Option<FluidState>,
@@ -747,10 +749,10 @@ fn can_be_replaced_with(
 /// A 2D rectangle in the face plane, in the two axes other than the interface's.
 type FaceRect = (f32, f32, f32, f32);
 
-/// `Shapes.mergedFaceOccludes(sourceShape, targetShape, direction)`
-/// (`Shapes.java:263-285`), evaluated over `lodestone_data::collision_shapes`.
+/// The real merged-face-occlusion check, evaluated over
+/// `lodestone_data::collision_shapes`.
 ///
-/// # What vanilla actually computes, and how this reproduces it
+/// # What the real check actually computes, and how this reproduces it
 ///
 /// Take the interface plane between the two cells. The shape on the *negative*
 /// side contributes its cross-section at its own `max` on the axis, but **only
@@ -845,7 +847,7 @@ fn covers_unit_square(rects: &[FaceRect]) -> bool {
 }
 
 /// `true` iff the state's collision shape is exactly the full cube —
-/// vanilla's `shape == Shapes.block()` identity test.
+/// the real full-block-shape identity test.
 fn is_full_cube(state: &str) -> bool {
     let boxes =
         lodestone_data::collision_shapes::collision_boxes(state_id(state)).unwrap_or(&[]);
@@ -854,10 +856,10 @@ fn is_full_cube(state: &str) -> bool {
         && boxes[0].max.iter().all(|&c| (c - 1.0).abs() <= 1.0e-7)
 }
 
-/// `FlowingFluid.canPassThroughWall` (`FlowingFluid.java:195-250`), minus the
-/// two `SharedConstants.DEBUG_*` guards and the thread-local occlusion cache.
+/// The real can-pass-through-wall check, minus the
+/// two debug-only guards and the thread-local occlusion cache.
 ///
-/// The three early exits are vanilla's own and they are the whole hot path: a
+/// The three early exits are the real check's own and they are the whole hot path: a
 /// full-cube target or source blocks unconditionally, and two empty shapes pass
 /// unconditionally. Only the mixed case reaches the face merge.
 fn can_pass_through_wall(direction: Direction, source_state: &str, target_state: &str) -> bool {
@@ -874,7 +876,7 @@ fn can_pass_through_wall(direction: Direction, source_state: &str, target_state:
     !merged_face_occludes(source_state, target_state, direction)
 }
 
-/// `FlowingFluid.canMaybePassThrough` (`FlowingFluid.java:330-339`).
+/// The real can-maybe-pass-through check.
 fn can_maybe_pass_through(
     kind: FluidKind,
     direction: Direction,
@@ -886,12 +888,13 @@ fn can_maybe_pass_through(
         && can_pass_through_wall(direction, source_state, target_state)
 }
 
-/// `FlowingFluid.canPassThrough` (`FlowingFluid.java:318-328`) — the
+/// The real can-pass-through check — the
 /// [`can_maybe_pass_through`] test plus the fluid-specific holdability the
 /// slope search needs.
 ///
-/// The fluid it asks about is **always the flowing instance**: `getSlopeDistance`
-/// is the only caller and it passes `this.getFlowing()`. The slope search is
+/// The fluid it asks about is **always the flowing instance**: the real
+/// slope-distance query
+/// is the only caller and it always passes the flowing form. The slope search is
 /// asking whether a *flow* could continue through the cell, so it must not route
 /// through a container that a flow cannot enter.
 fn can_pass_through(
@@ -908,12 +911,13 @@ fn can_pass_through(
 // The spread algorithm
 // ---------------------------------------------------------------------------
 
-/// `FlowingFluid.SpreadContext` (`FlowingFluid.java:519-536`) — the per-call
+/// The real spread-context record — the per-call
 /// state and hole caches the slope search shares.
 ///
-/// Keyed by horizontal offset from the origin only, exactly like vanilla's
-/// `getCacheKey`, because [`slope_distance`] never changes `y`. The `isHole`
-/// cache reads the cell *below* uncached, which is also vanilla.
+/// Keyed by horizontal offset from the origin only, exactly like the real
+/// cache-key derivation, because [`slope_distance`] never changes `y`. The
+/// is-hole cache reads the cell *below* uncached, which the real
+/// implementation does too.
 struct SpreadContext {
     origin: BlockPos,
     kind: FluidKind,
@@ -960,7 +964,7 @@ impl SpreadContext {
     }
 }
 
-/// `FlowingFluid.isWaterHole` (`FlowingFluid.java:305-316`) — "would fluid at
+/// The real "is water hole" check — "would fluid at
 /// `top` fall out the bottom?".
 ///
 /// Despite the name it is fluid-agnostic; lava uses it too.
@@ -968,27 +972,28 @@ fn is_water_hole(top_state: &str, bottom_state: &str, kind: FluidKind) -> bool {
     if !can_pass_through_wall(Direction::Down, top_state, bottom_state) {
         return false;
     }
-    // `canHoldFluid(level, bottomPos, bottomState, this.getFlowing())` — the
-    // flowing instance, so a dry slab underneath is **not** a hole even though
+    // The real can-hold-fluid check against the flowing instance — so a dry
+    // slab underneath is **not** a hole even though
     // it is waterloggable.
     is_same_fluid(bottom_state, kind) || can_hold_fluid(bottom_state, FluidType::flowing(kind))
 }
 
-/// `FlowingFluid.getNewLiquid` (`FlowingFluid.java:157-193`) — what the fluid at
+/// The real "get new liquid" derivation — what the fluid at
 /// `pos` *should* be, derived only from its neighbours.
 ///
 /// This is the function that makes the whole system converge. Three rules, in
-/// vanilla's order:
+/// the real engine's order:
 ///
 /// 1. **two or more adjacent sources** (plus a solid or same-fluid floor, plus
 ///    the dimension's conversion gamerule) make this cell a source — the
 ///    infinite-water-pool rule;
-/// 2. **fluid directly above** makes this cell `getFlowing(8, true)`, a full
+/// 2. **fluid directly above** makes this cell the flowing form at amount 8,
+///    falling, a full
 ///    falling cell, regardless of what is beside it;
-/// 3. otherwise `highestNeighbour - dropOff`, and `<= 0` is empty.
+/// 3. otherwise `highest_neighbour - drop_off`, and `<= 0` is empty.
 ///
 /// Note rule 3 reads the highest neighbour that this cell can be reached
-/// *from* — `canPassThroughWall` is consulted per direction, so a wall between
+/// *from* — [`can_pass_through_wall`] is consulted per direction, so a wall between
 /// two cells stops the level being inherited through it.
 fn new_liquid<S: ChunkSource + ?Sized>(
     world: &S,
@@ -1020,7 +1025,7 @@ fn new_liquid<S: ChunkSource + ?Sized>(
     if neighbour_sources >= 2 && env.can_convert_to_source(kind) {
         let below = Direction::Down.relative(pos);
         let below_state = block_at(world, env, below);
-        // `belowState.isSolid()` — vanilla's `isSolid` is "the collision shape
+        // The real "is solid" check is "the collision shape
         // is a full cube", which is what stops a source forming over a hole.
         if is_full_cube(&below_state) || is_source_of_type(&below_state, kind) {
             return Some(FluidState {
@@ -1051,10 +1056,11 @@ fn new_liquid<S: ChunkSource + ?Sized>(
     })
 }
 
-/// `FlowingFluid.getSlopeDistance` (`FlowingFluid.java:279-303`) — how many
-/// horizontal steps from `pos` until a hole, capped at `getSlopeFindDistance`.
+/// The real "get slope distance" query — how many
+/// horizontal steps from `pos` until a hole, capped at the real
+/// slope-find-distance query.
 ///
-/// Returns `1000` (vanilla's own sentinel) when no hole is within reach. The
+/// Returns `1000` (the real implementation's own sentinel) when no hole is within reach. The
 /// recursion never revisits the direction it came from, so it explores a tree
 /// rather than a graph and terminates on depth alone.
 fn slope_distance<S: ChunkSource + ?Sized>(
@@ -1097,7 +1103,7 @@ fn slope_distance<S: ChunkSource + ?Sized>(
     lowest
 }
 
-/// `FlowingFluid.getSpread` (`FlowingFluid.java:363-403`) — which horizontal
+/// The real "get spread" query — which horizontal
 /// directions receive fluid, and at what level.
 ///
 /// The tie rule is what shapes every visible flow: score each candidate by
@@ -1125,9 +1131,9 @@ fn spread_targets<S: ChunkSource + ?Sized>(
         let Some(new_fluid) = new_liquid(world, env, test_pos, &test_state, kind) else {
             continue;
         };
-        // `canHoldSpecificFluid(level, testPos, testState, newFluid.getType())`
-        // — the *new liquid's own* instance, which is what makes a waterloggable
-        // neighbour a candidate only when this cell's `getNewLiquid` answered
+        // The real can-hold-specific-fluid check against the *new liquid's
+        // own* instance, which is what makes a waterloggable
+        // neighbour a candidate only when this cell's new-liquid derivation answered
         // with a source.
         if !can_hold_specific_fluid(&test_state, new_fluid.fluid_type()) {
             continue;
@@ -1167,18 +1173,19 @@ fn spread_targets<S: ChunkSource + ?Sized>(
     result
 }
 
-/// `FlowingFluid.spreadTo` (`FlowingFluid.java:264-274`) plus
-/// `LavaFluid.spreadTo`'s override (`LavaFluid.java:195-208`).
+/// The real "spread to" step plus
+/// lava's own override of it.
 ///
 /// Two behaviours worth naming:
 ///
-/// * a `LiquidBlockContainer` target is **waterlogged rather than replaced**, and
-///   only ever for a water **source** — `SimpleWaterloggedBlock.placeLiquid`'s
-///   own guard is `!waterlogged && fluidState.is(Fluids.WATER)`, where
-///   `TypedInstance.is` is instance identity, so a flowing state fails it. Note
-///   both branches `return`: vanilla's `spreadTo` never falls through to
-///   `setBlock` for a container, so a slab is never overwritten by water and a
-///   refused `placeLiquid` writes **nothing at all**;
+/// * a liquid-block-container target is **waterlogged rather than replaced**, and
+///   only ever for a water **source** — the real place-liquid step's
+///   own guard is an instance identity check against the water source, so a
+///   flowing state fails it. Note
+///   both branches `return`: the real "spread to" step never falls through to
+///   an ordinary block write for a container, so a slab is never overwritten
+///   by water and a
+///   refused place-liquid writes **nothing at all**;
 /// * lava spreading **down** into water becomes `minecraft:stone`. That is the
 ///   only stone-generation path in the family; the obsidian/cobblestone one is
 ///   [`quench_lava`], from a different callback.
@@ -1211,7 +1218,7 @@ fn spread_to<S: ChunkSource + ?Sized>(
     write_block(world, env, pos, &fluid.block_state(), changes);
 }
 
-/// `FlowingFluid.sourceNeighborCount` (`FlowingFluid.java:345-357`).
+/// The real "source neighbor count" query.
 fn source_neighbour_count<S: ChunkSource + ?Sized>(
     world: &S,
     env: FluidEnv,
@@ -1227,7 +1234,7 @@ fn source_neighbour_count<S: ChunkSource + ?Sized>(
         .count() as u32
 }
 
-/// `FlowingFluid.spreadToSides` (`FlowingFluid.java:139-155`).
+/// The real "spread to sides" step.
 ///
 /// The `falling` override is the load-bearing line: a falling cell spreads at
 /// `7` no matter what its own amount is, which is why a waterfall spreads a full
@@ -1255,7 +1262,7 @@ fn spread_to_sides<S: ChunkSource + ?Sized>(
     }
 }
 
-/// `FlowingFluid.spread` (`FlowingFluid.java:117-137`) — down first, sides
+/// The real "spread" step — down first, sides
 /// second.
 ///
 /// The `sourceNeighborCount >= 3` clause is easy to miss and very visible: a
@@ -1305,7 +1312,7 @@ fn spread<S: ChunkSource + ?Sized>(
     }
 }
 
-/// `LiquidBlock.shouldSpreadLiquid` (`LiquidBlock.java:212-236`), inverted to
+/// The real should-spread-liquid check, inverted to
 /// return the block a quenched lava cell becomes.
 ///
 /// `Some(block)` means the lava was quenched and **must not tick**; `None` means
@@ -1349,8 +1356,8 @@ fn quench_lava<S: ChunkSource + ?Sized>(
 
 /// Writes one cell through the world and records it for the wire.
 ///
-/// Both halves, always: `spread` reads the world back as it mutates (vanilla's
-/// `setBlock` is immediate and `getNewLiquid` re-reads), so a version that only
+/// Both halves, always: `spread` reads the world back as it mutates (the real
+/// block write is immediate and the real new-liquid derivation re-reads), so a version that only
 /// collected changes and applied them afterwards would compute the *second*
 /// cell of a flow against pre-flow terrain.
 fn write_block<S: ChunkSource + ?Sized>(
@@ -1360,8 +1367,9 @@ fn write_block<S: ChunkSource + ?Sized>(
     state: &str,
     changes: &mut Vec<(BlockPos, String)>,
 ) {
-    // Vanilla's `Level.setBlock` opens with the same guard and returns `false`
-    // without doing anything (`isOutsideBuildHeight`). Silently dropping the
+    // The real block-write function opens with the same guard and returns
+    // `false`
+    // without doing anything, for a position outside build height. Silently dropping the
     // write is therefore faithful, and it is also the only safe answer:
     // `ChunkColumn::set_block` indexes unguarded.
     if !env.contains_y(pos.y) {
@@ -1371,8 +1379,8 @@ fn write_block<S: ChunkSource + ?Sized>(
     changes.push((pos, state.to_owned()));
 }
 
-/// One due fluid tick — `FlowingFluid.tick` (`FlowingFluid.java:427-444`) with
-/// `LiquidBlock.shouldSpreadLiquid` folded in front of it.
+/// One due fluid tick — the real flowing-fluid tick with
+/// the real should-spread-liquid check folded in front of it.
 ///
 /// A position holding no fluid is a **silent no-op**, and that is deliberate:
 /// [`ticks_after_edit`] over-schedules on purpose (it schedules the edited cell
@@ -1397,17 +1405,18 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
     };
     // A waterlogged block reads as a water source and is skipped here, so it
     // never *originates* a spread. **That is a deliberate reduction and not
-    // vanilla** — see this module's "named gaps". `FlowingFluid.tick` takes a
-    // position, not a `LiquidBlock`, and 26.2 really does schedule ticks at a
-    // container's own position from two places: `SimpleWaterloggedBlock.placeLiquid`
-    // ends with `level.scheduleTick(pos, fluidState.getType(), …)`, and 50
-    // waterloggable block classes (`SlabBlock.updateShape`, `StairBlock`,
-    // `WallBlock`, …) schedule `Fluids.WATER` at their own position while
-    // `WATERLOGGED`. So vanilla spreads *out of* a waterlogged slab as a source
+    // real behaviour** — see this module's "named gaps". The real fluid tick
+    // takes a
+    // position, not a liquid block, and 26.2 really does schedule ticks at a
+    // container's own position from two places: the real place-liquid step
+    // ends with a scheduled tick for its own fluid type, and 50
+    // waterloggable block classes schedule a water tick at their own position
+    // while waterlogged, from their own shape-update hook. So the real engine
+    // spreads *out of* a waterlogged slab as a source
     // and we do not.
     //
     // Left as-is because the error direction is inert: water reaches fewer cells
-    // than vanilla, never more, and removing this line without a gate on the
+    // than the real engine, never more, and removing this line without a gate on the
     // spread it unlocks would trade a measured behaviour for an unmeasured one.
     if !matches!(base_name(&state), "minecraft:water" | "minecraft:lava") {
         return;
@@ -1431,7 +1440,8 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
         match new_liquid(world, env, pos, &state, fluid.kind) {
             None => {
                 write_block(world, env, pos, crate::chunk::AIR, changes);
-                // Vanilla falls through to `spread` with an *empty* fluid state
+                // The real engine falls through to `spread` with an *empty*
+                // fluid state
                 // and `spread`'s own first line rejects it; this flag is that
                 // rejection, hoisted so the notify loop below is still reached.
                 still_fluid = false;
@@ -1457,41 +1467,45 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
 
     // Every cell this wrote, **and every neighbour of one**, owes itself a tick.
     //
-    // This is `Level.setBlock`'s flag-`2` half — `updateNeighborsAt` →
-    // `LiquidBlock.neighborChanged` → `level.scheduleTick(pos, fluid,
-    // getTickDelay)` (`LiquidBlock.java:190-200`). This crate has no
+    // This is the real "on block set" neighbor-update half — a chain that ends
+    // in the real liquid block's own neighbor-changed hook scheduling a fluid
+    // tick. This crate has no
     // block-lifecycle callback, so the write list is the equivalent hook.
     //
     // **The neighbour half is not an optimisation, it is the only thing that
     // makes a flow drain.** Water never replaces water horizontally
-    // (`WaterFluid.canBeReplacedWith` is `direction == DOWN && !other.is(WATER)`),
+    // (the real water can-be-replaced-with check only yields to lava falling
+    // in from directly above),
     // so a receding flow cannot be pushed back by the cell behind it — each cell
-    // has to re-evaluate its *own* `getNewLiquid` and shrink. Measured while
+    // has to re-evaluate its *own* new-liquid derivation and shrink. Measured while
     // building this: with only the written cells rescheduled, removing a source
     // left the ramp frozen at `level=3` forever, because nothing ever ticked the
     // cells the shrinking one no longer wrote to.
     //
-    // The delay is the *ticking* fluid's, not each neighbour's own. Vanilla reads
-    // `this.fluid` — the neighbour's block — and we would have to read the
+    // The delay is the *ticking* fluid's, not each neighbour's own. The real
+    // engine reads
+    // the neighbour's own block, and we would have to read the
     // neighbour to know it. The only case that differs is water and lava
     // adjacent, where a lava cell gets water's 5 instead of its own 30, so it
     // reacts sooner; `run_scheduled_tick` reschedules with the correct delay from
     // then on. `ScheduledTickQueue::schedule`'s `(pos, kind)` dedup absorbs the
     // overlap between neighbourhoods.
     // **A neighbour is only scheduled when it already holds a fluid**, and that
-    // condition is the whole difference between vanilla's flow rate and twice it.
+    // condition is the whole difference between the real flow rate and twice it.
     //
-    // `neighborChanged` is a method **on `LiquidBlock`** — the block at the
-    // notified position — so vanilla only reaches
-    // `level.scheduleTick(pos, …, getTickDelay)` when that position is itself a
-    // liquid. An **air** cell's `neighborChanged` is `Block`'s default and
+    // The real neighbor-changed hook is a method **on the liquid block** — the
+    // block at the
+    // notified position — so the real engine only schedules a fluid tick when
+    // that position is itself a
+    // liquid. An **air** cell's neighbor-changed hook is the generic block
+    // default and
     // schedules no fluid tick at all.
     //
-    // Scheduling air too made a falling column advance two cells per
-    // `getTickDelay` instead of one. When a source spread down, the notify loop
+    // Scheduling air too made a falling column advance two cells per tick delay
+    // instead of one. When a source spread down, the notify loop
     // handed the cell *below the newly written one* — the air the flow was about
     // to enter — a tick at the same `delay`. Both fell due in the same drain, and
-    // `DRAIN_ORDER` puts the written cell first, so it spread into the air cell
+    // the drain order puts the written cell first, so it spread into the air cell
     // and then the air cell, now liquid, spread one further inside that same
     // pass. Every constant was right, which is why reading `tick_delay` could not
     // find this: `FluidEnv::tick_delay` really is 5/30/10 and the queue really is
@@ -1499,10 +1513,13 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
     //
     // The receding case the unconditional form existed for is untouched: water
     // never replaces water horizontally, so a shrinking ramp drains only because
-    // each cell re-evaluates its own `getNewLiquid`, and every one of those cells
-    // *is* a fluid. It is exactly the air neighbours that were never vanilla's to
+    // each cell re-evaluates its own new-liquid derivation, and every one of
+    // those cells
+    // *is* a fluid. It is exactly the air neighbours that were never the real
+    // engine's to
     // schedule. `changed` itself stays unconditional — that is
-    // `LiquidBlock.onPlace`'s own `scheduleTick`, and on a receding write it is
+    // the real liquid block's own on-place scheduled tick, and on a receding
+    // write it is
     // air, where a drain is a documented no-op rather than a runaway.
     let delay = current_tick + env.tick_delay(fluid.kind);
     let touched: Vec<BlockPos> = changes.iter().map(|(pos, _)| *pos).collect();
@@ -1537,21 +1554,21 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
 /// **relative** delays [`crate::tick::run_tick_loop`] rebases onto its own
 /// counter.
 ///
-/// This is the seeding hook, and it stands in for vanilla's
-/// `LiquidBlock.onPlace`/`neighborChanged`/`updateShape`, none of which this
+/// This is the seeding hook, and it stands in for the real liquid block's
+/// on-place, neighbor-changed and shape-update hooks, none of which this
 /// crate has a block-lifecycle equivalent for. Breaking the block under an ocean
-/// floor, or beside a spring, is exactly the `neighborChanged` case: the water
+/// floor, or beside a spring, is exactly the neighbor-changed case: the water
 /// itself did not change, so only a notification can start it moving.
 ///
 /// **It reads nothing and filters nothing**, which is the deliberate part.
-/// Vanilla decides at schedule time whether the position holds a liquid;
+/// The real engine decides at schedule time whether the position holds a liquid;
 /// [`run_scheduled_tick`] decides at run time instead. That costs up to seven
 /// no-op drains per edit and buys a seeding path that works across a chunk
 /// border without loading the neighbouring column — and a no-op drain schedules
 /// nothing, so there is no runaway.
 ///
-/// The delay is `1`, not the fluid's own `getTickDelay`. Vanilla's
-/// `neighborChanged` passes `this.fluid.getTickDelay(level)`; using `1` here
+/// The delay is `1`, not the fluid's own tick delay. The real
+/// neighbor-changed hook passes the fluid's own tick delay; using `1` here
 /// makes the *first* reaction to a player's edit prompt and every subsequent
 /// step pay the real delay, because [`run_scheduled_tick`] reschedules with
 /// [`FluidEnv::tick_delay`]. The visible difference is one cell of flow starting
@@ -1728,8 +1745,8 @@ mod tests {
     ///
     /// # Where the expected values come from
     ///
-    /// Arithmetic over vanilla's own constant, not over our output.
-    /// `WaterFluid.getTickDelay` is `5`. [`ticks_after_edit`] seeds the source
+    /// Arithmetic over the real implementation's own constant, not over our output.
+    /// The real water tick-delay is `5`. [`ticks_after_edit`] seeds the source
     /// **and its six neighbours** at delay `1`, so tick 1 reaches depth **2**,
     /// not 1: the source spreads into the cell below, and that cell already had a
     /// tick due in the same pass, so it spreads once more. That is the seed
@@ -1746,7 +1763,8 @@ mod tests {
     ///
     /// Because the two hypotheses differ there. Scheduling the **air** cell below
     /// a freshly written one — which is what this code did before, and which
-    /// vanilla never does, since `neighborChanged` is a method on `LiquidBlock`
+    /// the real engine never does, since the neighbor-changed hook is a method on
+    /// the liquid block
     /// and air's default schedules nothing — let the front advance twice per
     /// delay: `1 + 2 * (T - 1) / 5`. At `T = 1` both predict depth 1, so a gate
     /// there would measure only that the code runs; from `T = 6` on they diverge
@@ -1828,8 +1846,8 @@ mod tests {
     }
 
     /// The `level` ⇄ `(amount, falling)` mapping, both directions, against the
-    /// two jar functions that define it — `FlowingFluid.getLegacyLevel` and
-    /// `LiquidBlock`'s `stateCache`.
+    /// two real functions that define it — the real legacy-level derivation and
+    /// the real liquid block's own state cache.
     #[test]
     fn block_level_round_trips_through_amount_and_falling() {
         // Source: level 0, amount 8, not falling. A bare name is the default.
@@ -1891,13 +1909,13 @@ mod tests {
     }
 
     /// **The headline gate.** A water source on flat ground must settle into the
-    /// exact level ramp `getDropOff` predicts, and stop at the exact distance.
+    /// exact level ramp the real drop-off predicts, and stop at the exact distance.
     ///
     /// The expected values come from outside this code: `amount` starts at `8`
-    /// (`WaterFluid.Source.getAmount`), each horizontal step costs
-    /// `getDropOff() == 1` (`WaterFluid.java:104-107`), `amount <= 0` is empty
-    /// (`getNewLiquid`'s last line), and the block stores `8 - amount`
-    /// (`getLegacyLevel`). So the ramp along any axis is `level = 1..=7` and cell
+    /// (the real source's own amount), each horizontal step costs
+    /// the real drop-off, `1` for water, `amount <= 0` is empty
+    /// (the real new-liquid derivation's last line), and the block stores `8 - amount`
+    /// (the real legacy-level derivation). So the ramp along any axis is `level = 1..=7` and cell
     /// 8 is air — the seven-block reach every player knows, derived rather than
     /// remembered.
     ///
@@ -2014,15 +2032,16 @@ mod tests {
 
     /// Water must fall, and its base must spread the full seven cells because
     /// the falling cell spreads at `7` rather than at its own amount minus the
-    /// drop-off (`spreadToSides`' `FALLING` override).
+    /// drop-off (the real spread-to-sides step's own falling override).
     ///
     /// The source sits in a **walled shaft**, and that is not scene-dressing.
-    /// `spread`'s fall-through is `if (fluidState.isSource() || !isWaterHole(...))
-    /// spreadToSides` — so once the column below a source is established, the
+    /// `spread`'s fall-through is "if this is a source, or the cell below is not
+    /// a water hole, spread to sides" — so once the column below a source is
+    /// established, the
     /// down branch is refused (water never replaces water) and the source spreads
     /// sideways *at its own level*, making a seven-wide sheet that then falls in
-    /// seven places. That is correct vanilla behaviour and it is what this rig
-    /// measured before the shaft was added; it just is not a test of the `FALLING`
+    /// seven places. That is correct real behaviour and it is what this rig
+    /// measured before the shaft was added; it just is not a test of the falling
     /// override. Walling the shaft isolates the one column.
     #[test]
     fn a_falling_column_spreads_seven_cells_at_its_base() {
@@ -2061,7 +2080,7 @@ mod tests {
     /// The slope search: water one cell from a pit must flow **only** toward the
     /// pit, not evenly in four directions.
     ///
-    /// This is the assertion `getSpread`'s tie rule exists for, and it is the
+    /// This is the assertion the real "get spread" tie rule exists for, and it is the
     /// one a naive "spread to every direction that can hold fluid" port passes
     /// nothing of. The negative half — the other three directions stay dry — is
     /// what makes it a real test of the tie rule rather than of spreading.
@@ -2140,7 +2159,7 @@ mod tests {
         }
     }
 
-    /// Lava beside water is quenched — `LiquidBlock.shouldSpreadLiquid`. A
+    /// Lava beside water is quenched — the real should-spread-liquid check. A
     /// *source* becomes obsidian, a *flowing* cell becomes cobblestone, and the
     /// two must not be swapped (they are the single easiest pair here to invert).
     #[test]
@@ -2171,8 +2190,8 @@ mod tests {
         }
     }
 
-    /// Lava spreading **down** into water becomes stone — `LavaFluid.spreadTo`'s
-    /// override, a different rule from the obsidian/cobblestone one above and
+    /// Lava spreading **down** into water becomes stone — lava's own
+    /// override of the real "spread to" step, a different rule from the obsidian/cobblestone one above and
     /// reached from a different callback.
     #[test]
     fn lava_falling_into_water_becomes_stone() {
@@ -2329,7 +2348,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Waterlogging: `SimpleWaterloggedBlock` accepts the *source* fluid only
+    // Waterlogging: the real waterloggable-block interface accepts the *source* fluid only
     // -----------------------------------------------------------------------
 
     const SLAB_DRY: &str = "minecraft:oak_slab[type=bottom,waterlogged=false]";
@@ -2357,7 +2376,7 @@ mod tests {
     /// The confinement is what makes the reach gate below a *prediction* rather
     /// than a shape: in the open, four directions tie on
     /// [`slope_distance`] and the flow is a 2D disc whose footprint nobody can
-    /// state from `getDropOff` alone. Walls at `y` only, never at `y + 1` — a
+    /// state from the real drop-off alone. Walls at `y` only, never at `y + 1` — a
     /// roofed cell would make the flow `falling`, which spreads at 7 regardless
     /// of its own amount and would mask exactly the arithmetic under test.
     fn trench(rig: &Rig, y: i32, from_x: i32, to_x: i32) {
@@ -2373,7 +2392,7 @@ mod tests {
     /// position written, sorted.
     ///
     /// The footprint is the counter the cascade needs: a flood is visible as a
-    /// set of positions whose size can be predicted from `getDropOff`, where
+    /// set of positions whose size can be predicted from the real drop-off, where
     /// "the water went too far" is a judgement about a screenshot.
     fn settle_footprint(rig: &Rig, seeds: &[BlockPos], max_ticks: u64) -> Vec<(i32, i32, i32)> {
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
@@ -2404,21 +2423,24 @@ mod tests {
     /// **The headline waterlog gate.** A *flowing* water state reaching a
     /// waterloggable block must leave it dry, and must therefore stop there.
     ///
-    /// The rule is one instance comparison in vanilla and it is easy to read past:
-    /// `SimpleWaterloggedBlock.canPlaceLiquid` is `type == Fluids.WATER`, and a
-    /// flowing state's `getType()` is `Fluids.FLOWING_WATER` — a **different**
-    /// `Fluid` instance (`WaterFluid.getFlowing`/`getSource`). So
-    /// `FlowingFluid.canHoldSpecificFluid` is false for every flowing state, the
-    /// direction never enters `getSpread`'s map, and `placeLiquid`'s own
-    /// `fluidState.is(Fluids.WATER)` refuses it a second time.
+    /// The rule is one instance comparison in the real engine and it is easy to
+    /// read past:
+    /// the real can-place-liquid check is an exact instance comparison against
+    /// the water source, and a
+    /// flowing state's own type is the flowing-water instance — a **different**
+    /// fluid instance. So
+    /// the real can-hold-specific-fluid check is false for every flowing state, the
+    /// direction never enters the real "get spread" map, and the real place-liquid
+    /// step's own
+    /// instance check refuses it a second time.
     ///
-    /// **A source arm cannot see this**: vanilla waterlogs a container when the
+    /// **A source arm cannot see this**: the real engine waterlogs a container when the
     /// new liquid *is* a source, so both hypotheses agree there — see
     /// [`a_source_spreading_into_a_container_still_waterlogs_it`], which is the
     /// same rig with the discriminating input removed.
     ///
     /// Both hypotheses are computed from outside constants. The slab sits four
-    /// cells east of the source, so with `getDropOff() == 1` the flow arrives
+    /// cells east of the source, so with a real drop-off of `1` the flow arrives
     /// there at `amount = 5` and the two answers differ at `x = 3` and `x = 4`:
     ///
     /// | | `x = 3` | `x = 4` | footprint |
@@ -2437,13 +2459,13 @@ mod tests {
     /// relay needs a cell that already holds fluid, because
     /// [`run_scheduled_tick`]'s notify loop schedules a neighbour only when it
     /// does — east of the slab is air, which is never scheduled and so never
-    /// evaluates its own `getNewLiquid`. In open terrain, where the flow wraps
+    /// evaluates its own new-liquid derivation. In open terrain, where the flow wraps
     /// around the container and arrives on its far side as real water, that limit
     /// does not apply and the refill continues outward; the trench isolates the
     /// arithmetic instead.
     ///
     /// The west half is unobstructed in both, and pins the reach at the seven
-    /// cells `getDropOff` predicts — so a failure that shortened *every* flow
+    /// cells the real drop-off predicts — so a failure that shortened *every* flow
     /// could not pass by shortening the east one.
     #[test]
     fn flowing_water_must_not_waterlog_a_container() {
@@ -2456,7 +2478,7 @@ mod tests {
 
         let footprint = settle_footprint(&rig, &[source], 600);
 
-        // Expected cells, built from `getDropOff() == 1` and the instance
+        // Expected cells, built from a real drop-off of `1` and the instance
         // comparison above rather than from this module's output.
         let mut expected: Vec<(i32, String)> = vec![(0, "minecraft:water level 0".to_owned())];
         for d in 1..=3 {
@@ -2514,11 +2536,12 @@ mod tests {
     /// The other half of the same rule, and the arm that stops the fix
     /// over-correcting into "waterlogging never happens".
     ///
-    /// Vanilla really does waterlog a container from the spread path — what
-    /// decides it is `getNewLiquid`'s answer **at the target**, not what the flow
+    /// The real engine really does waterlog a container from the spread path — what
+    /// decides it is the new-liquid derivation's answer **at the target**, not
+    /// what the flow
     /// started as. Two adjacent sources over a solid floor make the cell between
-    /// them a source (`getNewLiquid`'s first rule), that source *is*
-    /// `Fluids.WATER`, and `placeLiquid` accepts it.
+    /// them a source (the new-liquid derivation's first rule), that source *is*
+    /// the water instance, and the real place-liquid step accepts it.
     ///
     /// Both hypotheses agree here — which is the point. This input cannot see the
     /// bug, and is exactly why it shipped.
@@ -2539,14 +2562,16 @@ mod tests {
             "a container whose own `getNewLiquid` is a source must still be \
              waterlogged — the slab is still a slab, never replaced by water"
         );
-        // And the block survives: `spreadTo` must not fall through to `setBlock`
+        // And the block survives: the real "spread to" step must not fall
+        // through to an ordinary block write
         // for a container, in either branch.
         assert_eq!(base_name(&rig.block_state(1, y, 0)), "minecraft:oak_slab");
     }
 
     /// A waterlogged block must keep reading as a water **source** for its
-    /// neighbours' `getNewLiquid` — `SimpleWaterloggedBlock`'s own
-    /// `getFluidState` is `Fluids.WATER.getSource(false)`.
+    /// neighbours' new-liquid derivation — the real waterloggable-block
+    /// interface's own
+    /// fluid-state query returns the water source.
     ///
     /// This is the arm a fix that removed waterlogging from
     /// [`fluid_state_of`] would fail. A thin flowing cell beside a waterlogged
