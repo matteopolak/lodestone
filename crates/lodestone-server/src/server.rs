@@ -14117,7 +14117,7 @@ where
                     }
                 }
 
-                // `LivingEntity.updateUsingItem`: a consume ends on the server's
+                // Vanilla's own update-using-item routine: a consume ends on the server's
                 // own clock, not on a packet — the client sends nothing when a
                 // steak finishes, so without this arm every bite starts and none
                 // ever lands. Read against `MobSim`'s tick counter because that is
@@ -14127,11 +14127,11 @@ where
                 if let Some(started) = item_in_use.clone() {
                     let now = mobs.with(|sim| sim.tick_count());
                     // The periodic eating/drinking sound —
-                    // `ItemStack.onUseTick` → `Consumable.emitParticlesAndSounds`.
+                    // vanilla's own on-use-tick → emit-particles-and-sounds chain.
                     // **Sound only**: the crumbs are the client's own prediction,
-                    // because `ServerLevel.addParticle` is a no-op in vanilla, and
+                    // because vanilla's own server-level add-particle routine is a no-op, and
                     // the sound is *only* the server's, because
-                    // `ClientLevel.playSeededSound` drops a `playSound(null, …)`.
+                    // vanilla's own client-level play-seeded-sound routine drops a `playSound(null, …)`.
                     // Splitting a single vanilla call across the two sides looks like
                     // an omission on each of them; it is the whole mechanism.
                     if now < started.finish_tick
@@ -14156,7 +14156,7 @@ where
                                 roll,
                                 seed,
                             ) {
-                                // No exclusion: vanilla's `Entity.playSound` passes
+                                // No exclusion: vanilla's own entity play-sound routine passes
                                 // `null`, so the eater hears it too — and *only*
                                 // through this broadcast.
                                 block_ticks.publish_effect(effect);
@@ -14174,7 +14174,7 @@ where
                         if let Some((native, remainder)) =
                             finish_consuming(&mut inventory, &mut vitals, &started, game_mode)
                         {
-                            // `FoodProperties.onConsume`: the consumable sound again,
+                            // Vanilla's own food-properties on-consume routine: the consumable sound again,
                             // louder and on `NEUTRAL`, plus the burp. Both are on the
                             // **food** component, so they are published here — inside
                             // the `finish_consuming` success arm, which already
@@ -14226,7 +14226,7 @@ where
                             )
                             .await?;
 
-                            // `Consumable.onConsume`'s `onConsumeEffects.forEach` —
+                            // Vanilla's own consumable on-consume routine's `onConsumeEffects.forEach` —
                             // issue #690's golden-apple/pufferfish/rotten-flesh/
                             // spider-eye/poisonous-potato/chicken/honey-bottle gap.
                             // Runs after the food-bar packet above rather than
@@ -14316,7 +14316,7 @@ where
                                 )
                                 .await?;
                             }
-                            // `PotionContents.applyToLivingEntity`'s own split: an
+                            // Vanilla's own potion-contents apply-to-living-entity routine's own split: an
                             // instantaneous effect heals/damages immediately (no
                             // `MobEffectInstance` is ever stored for one, so no
                             // `update_mob_effect` follows — only the health bar
