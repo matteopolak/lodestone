@@ -207,13 +207,13 @@ const WIDE_W: f32 = widget::BIG_WIDTH;
 /// pause screen's 8 px one below.
 const TITLE_HALF_W: f32 = 98.0;
 /// Vertical pitch between the title screen's rows — `init`'s `spacing`
-/// (`TitleScreen.java`, passed at `:117`).
+/// (vanilla's own title-screen rendering, passed at `:117`).
 const TITLE_PITCH: f32 = 24.0;
-/// Side of an icon-only button on either screen (`TitleScreen.java`,
-/// `PauseScreen.java`).
+/// Side of an icon-only button on either screen (vanilla's own title-screen
+/// and pause-screen rendering).
 const ICON_BTN: f32 = 20.0;
 /// The sprite drawn inside an icon button — 15×15 in every vanilla call site
-/// (`CommonButtons.java`, `PauseScreen.java`).
+/// (its own common-buttons helper, its own pause-screen rendering).
 const ICON_SPRITE: f32 = 15.0;
 
 /// Logo destination width — `LogoRenderer.LOGO_WIDTH`.
@@ -272,7 +272,7 @@ const PAUSE_BUTTON_FULL_W: f32 = 204.0;
 /// `.width(98)` (`:266-268`).
 const PAUSE_BUTTON_HALF_W: f32 = 98.0;
 /// The gap between the pause screen's four icon buttons —
-/// `LinearLayout.horizontal().spacing(4)` (`:101`).
+/// vanilla's own horizontal linear layout at spacing 4 (`:101`).
 const PAUSE_ICON_SPACING: i32 = 4;
 /// Vanilla's font line height, used to centre a label in its widget
 /// (`ActiveTextCollector`).
@@ -287,8 +287,8 @@ const PAUSE_TITLE_Y: f32 = 40.0;
 /// `height - 10`.
 const CORNER_TEXT_Y: f32 = -10.0;
 
-/// An active button's label colour: plain white, `ARGB.white(alpha)`
-/// (`AbstractButton.java` tints the sprite; the label itself is the
+/// An active button's label colour: plain white, vanilla's own ARGB-white helper applied to `alpha`
+/// (vanilla's own abstract-button base tints the sprite; the label itself is the
 /// component's own default).
 ///
 /// Also the tint every *sprite* on this pass is drawn with, which is why it
@@ -327,7 +327,8 @@ const OVERLAY_BG: [f32; 4] = [0.0, 0.0, 0.0, 64.0 / 255.0];
 
 /// The death screen's own backdrop, decoded rather than eyeballed —
 /// `DeathScreen.extractDeathBackground` calls
-/// `GuiGraphicsExtractor.fillGradient(0, 0, width, height, 1615855616, -1602211792)`,
+/// vanilla's own gui-graphics extractor's fill-gradient helper applied to
+/// `(0, 0, width, height, 1615855616, -1602211792)`,
 /// and `fillGradient`'s two ints are ARGB colours for the top and bottom edges
 /// respectively (`innerFill` -> `ColoredRectangleRenderState`, whose two colours
 /// are the start and end of the interpolation top-to-bottom).
