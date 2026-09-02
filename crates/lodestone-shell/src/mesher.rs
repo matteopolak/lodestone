@@ -107,7 +107,7 @@ impl SectionKey {
 /// This is the fact that decides what an *absent* horizontal neighbour column
 /// means, and nothing downstream of [`snapshot_section_in`] can derive it: an
 /// empty slot looks identical either way. Getting it wrong in the `Streaming`
-/// direction is issue #389 (a seam baked against air that never heals); getting
+/// direction is the seam-baked-against-air defect (a seam baked against air that never heals); getting
 /// it wrong in the `Complete` direction would blank the outer ring of a world
 /// whose outer ring is genuinely final.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,7 +120,8 @@ pub enum ColumnSource {
     Complete,
     /// Columns stream in from a server, in an order nothing here controls. An
     /// absent neighbour column has simply not arrived; air across that seam is a
-    /// **guess**, and the wrong one often enough to be the whole of issue #389.
+    /// **guess**, and the wrong one often enough to be the whole of the
+    /// seam-baked-against-air defect.
     Streaming,
 }
 
@@ -324,15 +325,15 @@ pub fn snapshot_section(world: &World, key: SectionKey) -> Option<SectionSnapsho
 /// What [`snapshot_section_in`] found: geometry to mesh now, nothing to mesh, or
 /// geometry that must **not** be meshed yet.
 ///
-/// The third arm is issue #389. A section whose horizontal neighbourhood is
+/// The third arm is the seam-baked-against-air defect. A section whose horizontal neighbourhood is
 /// incomplete can be meshed — the code will happily do it — but every face on
 /// the incomplete seam is decided against air the neighbour has not had a chance
 /// to contradict. For water that is a full-height translucent side quad on each
 /// side of the seam, drawn twice with no depth conflict to give it away; for
 /// everything else it is wrong ambient occlusion, wrong smooth-light corners and
 /// stray uncalled faces. Vanilla refuses the same build for the same reason —
-/// `LevelExtractor` only compiles a never-compiled section when
-/// `SectionUpdateTracker.hasAllNeighbors` reports all eight horizontal
+/// vanilla's own level-extractor only compiles a never-compiled section when
+/// its own section-update tracker's has-all-neighbors check reports all eight horizontal
 /// neighbour columns loaded.
 #[derive(Debug)]
 pub enum SnapshotOutcome {
@@ -412,7 +413,7 @@ impl SnapshotOutcome {
 ///   [`sky_default_for_dimension`].
 /// * `columns` — whether an absent *horizontal neighbour column* is the edge of
 ///   the world or a chunk still in flight. See [`ColumnSource`]; this is the
-///   third session fact, added for issue #389, and it is the one the store
+///   third session fact, added for the seam-baked-against-air defect, and it is the one the store
 ///   provably cannot answer (an absent column looks the same either way).
 ///
 /// # One behaviour change, stated because it is not a refactor
@@ -465,8 +466,8 @@ pub fn snapshot_section_in(
     let mut lights: Vec<Option<SectionLightData>> = vec![None; 27];
     // Set by any column that has not arrived. The centre column is present by
     // construction (checked above), so this can only be raised by one of the
-    // eight horizontal neighbours — the same eight vanilla's
-    // `SectionUpdateTracker.hasAllNeighbors` checks.
+    // eight horizontal neighbours — the same eight vanilla's own
+    // section-update tracker's has-all-neighbors check checks.
     let mut awaiting_columns = false;
     for dx in -1..=1 {
         for dz in -1..=1 {
@@ -619,7 +620,7 @@ pub fn snapshot_section_live(
 /// off the Configuration `registry_data` packet and carried on
 /// `PlayerSnapshot::dimension_type`. When it is present its `has_skylight` **is**
 /// the answer, and the level name is not consulted at all — which is what closes
-/// issue #34: a data pack pointing a level called `mypack:mine` at the vanilla
+/// the gap where a data pack pointing a level called `mypack:mine` at the vanilla
 /// overworld type used to fall through to `SkyDefault::None` and render its
 /// terrain dark, and the reverse (a custom 1024-tall type on
 /// `minecraft:overworld`) used to be assumed lit.
@@ -1045,8 +1046,8 @@ fn biome_name_at(snapshot: &SectionSnapshot, pos: BlockPos) -> Option<&'static s
         return None;
     }
     let id = snapshot.at(dx, dy, dz).biome_at_block(lx, ly, lz) as usize;
-    // The live registry order wins whenever one is known (issue #96's
-    // follow-up): `snapshot.biome_names` is only ever non-empty when
+    // The live registry order wins whenever one is known (a follow-up
+    // fix): `snapshot.biome_names` is only ever non-empty when
     // `TerrainMesh::mesh_column`/`mesh_section` attached a real `Login`-time
     // `registry_data` sync via `with_biome_names` — see that method's doc.
     // Empty (no connection yet, an offline/demo world, a version/server that
@@ -1078,7 +1079,7 @@ impl ModelSectionView for SnapshotModelView<'_> {
     /// geometry it was baked alongside.
     ///
     /// Note this is only the model-flag third of
-    /// `ModelBlockRenderer.java`'s predicate; the `getLightEmission() == 0`
+    /// vanilla's own model-block-renderer predicate; the `getLightEmission() == 0`
     /// clause has no data source in this codebase yet — see
     /// `docs/model-smooth-lighting.md`.
     fn ambient_occlusion_at(&self, x: usize, y: usize, z: usize) -> bool {
@@ -1103,8 +1104,8 @@ impl ModelSectionView for SnapshotModelView<'_> {
     /// walls of the ice blocks even when theyre beside other ice so it looks
     /// like a grid". `occludes_at` above is correctly `false` for ice (it is a
     /// vanilla `noOcclusion()` block), so nothing culled its interior faces —
-    /// this is the missing second half of `Block.shouldRenderFace`,
-    /// `BlockBehaviour.skipRendering`. Mirrors `occludes_at`'s split/bounds
+    /// this is the missing second half of vanilla's own should-render-face check,
+    /// its own skip-rendering hook. Mirrors `occludes_at`'s split/bounds
     /// logic for the neighbour; the block being meshed (`x, y, z`) is always
     /// section-local, matching every other per-cell lookup on this view.
     fn skips_rendering_against(&self, x: i32, y: i32, z: i32, nx: i32, ny: i32, nz: i32) -> bool {
@@ -1223,7 +1224,7 @@ impl ModelSectionView for SnapshotModelView<'_> {
 
     /// The real, position-blended biome colour for a grass/foliage/
     /// dry-foliage/water quad — the live consumer of [`biome_name_at`] +
-    /// [`BlendedTintCursor`], and the whole reason issue #171/#174's
+    /// [`BlendedTintCursor`], and the whole reason
     /// `BiomeTint` trait now has an implementor outside a test mock. `slot`
     /// tells us *which* of the four kinds this quad is
     /// ([`biome_tint_kind_for_slot`]); `None` when it's not one of them (no
@@ -1362,7 +1363,7 @@ pub fn mesh_snapshot_models_layers(
 /// Reads the **centre** section only, through the same
 /// `BlockModels::occludes` predicate `SnapshotModelView::occludes_at` uses for
 /// face culling — vanilla's `isSolidRender` family, which is what feeds its own
-/// `VisGraph.setOpaque`. A block this answers "not opaque" for only ever
+/// visibility-graph opaque-flag setter. A block this answers "not opaque" for only ever
 /// *connects* more faces, i.e. draws more, which is the safe direction.
 #[must_use]
 pub fn snapshot_visibility(
@@ -1515,7 +1516,7 @@ impl FluidSectionView for SnapshotFluidView<'_> {
     /// `partial_occluder_y_range_at`'s single-box reduction would have declined.
     ///
     /// Cheap for ordinary water: `minecraft:water`'s own outline shape is empty
-    /// (`LiquidBlock.getShape` is `Shapes.empty()`) *and* its layer is
+    /// (vanilla's own liquid-block shape getter is `Shapes.empty()`) *and* its layer is
     /// `Translucent`, so an open ocean's cells leave on the first branch.
     fn self_occlusion_at(&self, x: i32, y: i32, z: i32) -> lodestone_assets::fluid::SelfOcclusion {
         use lodestone_assets::fluid::SelfOcclusion;
@@ -1928,7 +1929,7 @@ impl MeshScheduler {
     /// Deriving it here rather than taking a fourth argument keeps the two from
     /// ever being set inconsistently, which is the failure this would otherwise
     /// invite: a `Streaming` demo world blanks its outer ring forever, a
-    /// `Complete` live world is issue #389 unfixed.
+    /// `Complete` live world is the seam-baked-against-air defect unfixed.
     ///
     /// The one non-obvious case is the fallback session — vanilla assets failed
     /// to load, so a live connection meshes under `Demo`. `Complete` is still
@@ -2827,7 +2828,7 @@ impl TerrainMesh {
     /// or hold it back. Returns whether anything was submitted.
     ///
     /// **Vanilla's rule, and the reason it has two halves.**
-    /// `LevelExtractor.extract` compiles a dirty section when
+    /// Vanilla's own level-extractor extract routine compiles a dirty section when
     /// `section.sectionMesh.get() != CompiledSectionMesh.UNCOMPILED ||
     /// sectionUpdateTracker.hasAllNeighbors(level, node)`. The first clause is
     /// what stops the deferral from being a *regression*: a section already on
@@ -3095,7 +3096,7 @@ impl TerrainMesh {
     /// responsiveness; the neighbours coalesce.
     ///
     /// This is the same eight columns vanilla's
-    /// `ClientPacketListener.enableChunkLight` dirties on chunk arrival
+    /// own enable-chunk-light routine dirties on chunk arrival
     /// (`setSectionRangeDirty(x-1, minSectionY, z-1, x+1, maxSectionY, z+1)` —
     /// the 3×3 column footprint over the whole vertical range), and it is *also*
     /// the mechanism that un-defers: a section held back by
@@ -3437,10 +3438,10 @@ impl lodestone_world::LightProperties for VanillaLightProps {
 /// `Update` / [`FrameSet::Terrain`]: run the client's own light engine over the block
 /// changes applied since last frame, then re-mesh what that changed.
 ///
-/// **This is vanilla's `ClientLevel.tick` calling `pollLightUpdates` and
-/// `getLightEngine().runLightUpdates()`**, and without it a block broken on a real
+/// **This is vanilla's own client-level tick calling its own poll-light-updates and
+/// run-light-updates routines**, and without it a block broken on a real
 /// vanilla server leaves a pitch-black hole — permanently, because
-/// `ChunkHolder.broadcastChanges` sends `ClientboundLightUpdatePacket` only to
+/// vanilla's own broadcast-changes routine sends its own light-update packet only to
 /// `getPlayers(pos, true)`, the players for whom that chunk is on the *outer ring* of
 /// their loaded area. The breaker is never on their own chunk's border, so no light
 /// packet is coming. See [`lodestone_world::relight`] for the full argument.
@@ -3452,8 +3453,8 @@ impl lodestone_world::LightProperties for VanillaLightProps {
 /// around the changed cell, but a relight reaches further (up to
 /// [`lodestone_world::relight::AFFECTED_RADIUS`]) and, more importantly, runs a frame
 /// *after* that dirty signal was serviced. So the sections the relight itself reports
-/// are re-meshed here, budgeted, which is vanilla's
-/// `LevelRenderer.setSectionDirtyWithNeighbors` on the light path.
+/// are re-meshed here, budgeted, which is vanilla's own
+/// set-section-dirty-with-neighbors routine on the light path.
 ///
 /// # Why `Option<Res<ChunkWorldWrite>>`
 ///
@@ -3521,7 +3522,7 @@ pub fn relight_changed_blocks(
             has_skylight,
             // Server light corrections applied since the previous drain, and queued
             // relights they cancelled. Vanilla sends the breaker no light packet for
-            // their own break (`ChunkHolder.broadcastChanges` restricts it to players
+            // their own break (vanilla's own broadcast-changes routine restricts it to players
             // for whom the chunk is on the outer ring of their loaded area), so
             // `merged = 0` beside a relight is the expected reading — and a non-zero
             // one means the server *did* correct us and the result is still wrong,
