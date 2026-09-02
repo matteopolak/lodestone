@@ -1,10 +1,10 @@
-//! **Stronghold** — `StrongholdStructure` + all of `StrongholdPieces`, the
+//! **Stronghold** — the piece-placement engine plus its whole piece tree, the
 //! recursive piece tree that ends in the end-portal room.
 //!
 //! # What it is
 //!
-//! A port of vanilla's oldest piece-placement engine: not jigsaw (a pool graph
-//! with junctions), but the original `StructurePiece`/`StructurePiecesBuilder`
+//! An implementation of the oldest reference piece-placement engine: not jigsaw (a pool graph
+//! with junctions), but the original piece/piece-builder
 //! scheme — a weighted table of eleven piece classes, a shared *pending* queue
 //! drained in random order, and a depth cap. `minecraft:mineshaft` (S7) is the
 //! only other structure in this crate built the same way, and this module
@@ -12,8 +12,8 @@
 //! resolved second) rather than anything in [`super::jigsaw`].
 //!
 //! Unlike a mineshaft, a stronghold's pieces need **no shared block canvas**:
-//! no `StrongholdPieces` piece ever calls `getBlock` on another piece's
-//! territory (`canBeReplaced` is never overridden, so it is vanilla's default
+//! no stronghold piece ever reads another piece's
+//! territory (the replaceability override is never applied, so it defaults to
 //! `true`), so every piece's block list is a pure function of its own box,
 //! orientation and random draws. That is what keeps this module free of
 //! [`super::mineshaft::View`]'s shared-overlay machinery.
@@ -22,74 +22,74 @@
 //!
 //! ```text
 //! loop tries = 0, 1, 2, … :
-//!     random = setLargeFeatureSeed(seed + tries, cx, cz)
-//!     reset the eleven PieceWeights (fresh placeCount, fresh currentPieces)
+//!     random = set_large_feature_seed(seed + tries, cx, cz)
+//!     reset the eleven PieceWeights (fresh place_count, fresh current_pieces)
 //!     start = StairsDown{ is_source: true } at (cx*16+2, 64, cz*16+2), a
-//!         random horizontal orientation (one nextInt(4))
-//!     start.addChildren  →  imposedPiece = FiveCrossing, then one forward
+//!         random horizontal orientation (one draw bounded by 4)
+//!     start.addChildren  →  imposed_piece = FiveCrossing, then one forward
 //!         door child (always a FiveCrossing on attempt one, box permitting)
 //!     while pending queue not empty:
 //!         pick a random pending index, remove it (Vec::remove, not swap —
-//!         order of what remains matters to nothing here, but Java's
-//!         `ArrayList.remove` is the literal operation being ported)
+//!         order of what remains matters to nothing here, but the reference
+//!         list-removal operation is what is being ported)
 //!         that piece's addChildren may enqueue more children
-//!     moveBelowSeaLevel(seaLevel, minY, random, 10)
+//!     move_below_sea_level(sea_level, min_y, random, 10)
 //! until the tree is non-empty AND a PortalRoom got placed
 //! ```
 //!
-//! The retry loop is not defensive — it is vanilla's own guarantee that
+//! The retry loop is not defensive — it is the reference engine's own guarantee that
 //! **every stronghold contains a portal room**, which is exactly the property
-//! End reachability needs. `StartPiece::portalRoomPiece` is
-//! set the moment `PortalRoom::addChildren` runs (a leaf: it registers itself
+//! End reachability needs. The start piece's own portal-room-piece link is
+//! set the moment the portal room's own children growth runs (a leaf: it registers itself
 //! and generates no children of its own), and nothing here bounds the retry
-//! count, matching `StrongholdStructure.generatePieces`'s unbounded
+//! count, matching the reference generator's unbounded
 //! `do…while`.
 //!
 //! # How to change it
 //!
-//! * **The RNG order is the specification.** `generatePieceFromSmallDoor`'s
-//!   weighted pick is a `nextInt(totalWeight)` draw, then a **cascade**: if
-//!   the selected [`PieceType`]'s box collides or fails `isOkBox`, the loop
+//! * **The RNG order is the specification.** The small-door piece generator's
+//!   weighted pick is a draw bounded by the total weight, then a **cascade**: if
+//!   the selected [`PieceType`]'s box collides or fails its ok-box check, the loop
 //!   falls through to every *remaining* entry in table order — without
 //!   redrawing — before the outer loop retries with a fresh draw (five
 //!   attempts). [`generate_piece_from_small_door`] preserves this exactly;
 //!   collapsing it to "redraw on any failure" changes the stream from the
 //!   second rejected piece on.
 //! * **A piece's own random draws happen only once its box is accepted.**
-//!   `BoundingBox.orientBox` costs no RNG; `isOkBox` and the collision test
-//!   cost none either. Every piece's constructor (`entryDoor`, and whatever
-//!   else it draws) runs strictly after both checks pass — see vanilla's
-//!   ternaries (`isOkBox(box) && collides == null ? new Piece(...) : null`),
-//!   which short-circuit the `new` entirely on rejection.
+//!   Orienting the box costs no RNG; the ok-box check and the collision test
+//!   cost none either. Every piece's constructor (its entry door, and whatever
+//!   else it draws) runs strictly after both checks pass — see a faithful
+//!   implementation's own conditional construction, which short-circuits
+//!   building the piece entirely on rejection.
 //! * **`Library` and `PortalRoom` are leaves.** Neither overrides
-//!   `addChildren`, so both inherit `StructurePiece`'s no-op — they generate
+//!   its own children growth, so both inherit the no-op default — they generate
 //!   no children. `FillerCorridor` is the same: it exists only as the
 //!   five-attempts-exhausted fallback in [`generate_piece_from_small_door`].
-//! * **`doPlace`'s depth gate is the *child's* depth**, not the parent's:
+//! * **The depth gate is the *child's* depth**, not the parent's:
 //!   `Library` needs `depth > 4` and `PortalRoom` needs `depth > 5`, checked
 //!   against the depth the *new* piece would carry (parent depth + 1), which
 //!   is why [`generate_and_add_piece`] increments before calling
 //!   [`generate_piece_from_small_door`].
-//! * **`previousPiece` is Java reference identity** to a `PieceWeight`
+//! * **The previous-piece marker is reference identity** to a `PieceWeight`
 //!   instance, which survives even after that entry is removed from
-//!   `currentPieces` (once `isValid()` goes false). [`PieceType`] stands in
+//!   the current-pieces table (once its own validity check goes false). [`PieceType`] stands in
 //!   for identity here because the eleven types are pairwise distinct and
 //!   never duplicated in the table, so equality on the enum is equality on
-//!   Java's object reference.
+//!   the reference's own object identity.
 //!
 //! # Deviations
 //!
-//! * **`skipAir` on every `generateBox`/`generateMaybeBox` call is not
-//!   honoured.** Vanilla's flag means "only overwrite a block that is not
+//! * **The "only overwrite non-air" flag on every box-generation call is not
+//!   honoured.** A faithful implementation's flag means "only overwrite a block that is not
 //!   already air", read from the real generated terrain a stronghold is
-//!   dug into — meaningful *because* `postProcess` runs after NOISE/SURFACE
-//!   in vanilla's own pipeline. Every coded piece in this crate resolves its
+//!   dug into — meaningful *because* the block-writing pass runs after noise and surface generation
+//!   in a full pipeline. Every coded piece in this crate resolves its
 //!   blocks eagerly at start time (`StartContext`'s pre-surface shape, see
 //!   [`super::coded`]'s module doc), before there is any terrain to read, so
 //!   the predicate has nothing to consult and every write here is
 //!   unconditional. Ledgered as `stronghold:skip_air_shell`.
-//! * **The portal room's spawner carries no `SpawnData`.** `minecraft:spawner`
-//!   is placed as a bare block; `SpawnerBlockEntity::setEntityId` needs an
+//! * **The portal room's spawner carries no spawn-entry payload.** `minecraft:spawner`
+//!   is placed as a bare block; assigning its entity type needs an
 //!   entity-spawning layer this crate does not have yet, the same gap
 //!   `mineshaft`'s cave-spider spawner is ledgered under
 //!   (`coded:worldgen_entities`).
@@ -108,18 +108,18 @@ use super::coded::Facing;
 use super::template::{BlockState, Mirror, Rotation};
 use super::{BoundingBox, CodedBlock, CodedLoot, StartContext, StructurePiece};
 
-/// `StrongholdPieces.MAX_DEPTH`.
+/// The deepest a child piece may recurse.
 const MAX_DEPTH: i32 = 50;
-/// `StrongholdPieces.LOWEST_Y_POSITION` — `isOkBox`'s floor.
+/// The ok-box check's floor.
 const LOWEST_Y_POSITION: i32 = 10;
-/// `StrongholdPieces.MAGIC_START_Y` — the start piece's fixed floor before
-/// `moveBelowSeaLevel` moves everything.
+/// The start piece's fixed floor before
+/// the vertical move-below-sea-level step moves everything.
 const MAGIC_START_Y: i32 = 64;
-/// `StrongholdPieces.generateAndAddPiece`'s `Math.abs(... ) <= 112` spread
+/// The absolute-distance spread
 /// bound, measured against the start piece's own box.
 const MAX_SPREAD: i32 = 112;
 
-/// `StrongholdPieces.StrongholdPiece.SmallDoorType`.
+/// A small-door piece's door type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SmallDoorType {
     Opening,
@@ -129,9 +129,8 @@ enum SmallDoorType {
 }
 
 impl SmallDoorType {
-    /// `randomSmallDoor` — one `nextInt(5)`, with values 0 and 1 both mapping
-    /// to `OPENING` (the `default` arm of the Java `switch` falls through
-    /// case 1 as well as anything unmatched).
+    /// A uniform door-type pick — one draw bounded by 5, with values 0 and 1 both mapping
+    /// to [`Self::Opening`] (the fallback arm covers case 1 as well as anything unmatched).
     fn random<R: RandomSource>(random: &mut R) -> Self {
         match random.next_int_bounded(5) {
             2 => Self::WoodDoor,
@@ -142,8 +141,8 @@ impl SmallDoorType {
     }
 }
 
-/// The eleven weighted piece classes `StrongholdPieces` can select, plus the
-/// two that are never weighted (`StartPiece` is a fixed `StairsDown`,
+/// The eleven weighted piece classes the stronghold's piece generator can select, plus the
+/// two that are never weighted (the start piece is a fixed `StairsDown`,
 /// `FillerCorridor` is the exhausted-attempts fallback).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PieceType {
@@ -160,17 +159,17 @@ enum PieceType {
     PortalRoom,
 }
 
-/// `StrongholdPieces.PieceWeight`.
+/// One weighted piece table entry.
 #[derive(Debug, Clone, Copy)]
 struct PieceWeight {
     piece: PieceType,
     weight: i32,
-    /// `maxPlaceCount`; `0` means unlimited.
+    /// The maximum number of times this piece may be placed; `0` means unlimited.
     max_place_count: i32,
     place_count: i32,
 }
 
-/// `StrongholdPieces.STRONGHOLD_PIECE_WEIGHTS`, transcribed in table order —
+/// The reference piece-weight table, transcribed in table order —
 /// the order the cascade in [`generate_piece_from_small_door`] falls through.
 /// Weights sum to 145 (40+5+20+20+10+5+5+5+5+10+20), re-derived from this
 /// table rather than asserted from memory.
@@ -200,8 +199,8 @@ fn initial_weights() -> Vec<PieceWeight> {
     ]
 }
 
-/// `PieceWeight.doPlace(depth)` — the base formula, plus the two anonymous
-/// subclass overrides (`Library`: `depth > 4`; `PortalRoom`: `depth > 5`).
+/// Whether this piece weight may still place a piece at `depth` — the base formula, plus the two piece-specific
+/// overrides (`Library`: `depth > 4`; `PortalRoom`: `depth > 5`).
 fn do_place(pw: &PieceWeight, depth: i32) -> bool {
     let base = pw.max_place_count == 0 || pw.place_count < pw.max_place_count;
     match pw.piece {
@@ -211,13 +210,13 @@ fn do_place(pw: &PieceWeight, depth: i32) -> bool {
     }
 }
 
-/// `PieceWeight.isValid()` — never overridden, unlike `doPlace`.
+/// Whether this piece weight has capacity left — never overridden per piece, unlike [`do_place`].
 fn is_valid(pw: &PieceWeight) -> bool {
     pw.max_place_count == 0 || pw.place_count < pw.max_place_count
 }
 
 /// Per-piece facts fixed at creation time — the union of every
-/// `StrongholdPieces` subclass's own fields.
+/// stronghold piece kind's own fields.
 #[derive(Debug, Clone)]
 enum Kind {
     Straight {
@@ -269,7 +268,7 @@ enum Kind {
 #[derive(Debug, Clone)]
 struct Node {
     box_: BoundingBox,
-    /// Every stronghold piece calls `setOrientation`, unlike a mineshaft room
+    /// Every stronghold piece sets its own orientation, unlike a mineshaft room
     /// or crossing, so this is never `None`.
     orientation: Facing,
     gen_depth: i32,
@@ -277,10 +276,9 @@ struct Node {
 }
 
 impl Node {
-    /// `getWorldX/Y/Z`, transcribed from `StructurePiece`'s own switch (see
+    /// The local-to-world position transform (see
     /// [`super::mineshaft::Node::world_pos`] for the identical formula ported
-    /// a second time because `StructurePiece`'s helpers are `protected`, not
-    /// shared).
+    /// a second time, since neither shares an implementation with the other).
     fn world_pos(&self, x: i32, y: i32, z: i32) -> [i32; 3] {
         let wx = match self.orientation {
             Facing::North | Facing::South => self.box_.min[0] + x,
@@ -295,7 +293,7 @@ impl Node {
         [wx, y + self.box_.min[1], wz]
     }
 
-    /// `setOrientation`'s `(mirror, rotation)` table.
+    /// The orientation's `(mirror, rotation)` table.
     fn transform(&self) -> (Mirror, Rotation) {
         match self.orientation {
             Facing::South => (Mirror::LeftRight, Rotation::None),
@@ -305,7 +303,7 @@ impl Node {
         }
     }
 
-    /// `StructurePieceType`'s registered (lowercased) id string.
+    /// The piece type's registered (lowercased) id string.
     fn piece_id(&self) -> &'static str {
         match self.kind {
             Kind::ChestCorridor { .. } => "minecraft:shcc",
@@ -325,8 +323,7 @@ impl Node {
     }
 }
 
-/// `BoundingBox.orientBox(footX, footY, footZ, offX, offY, offZ, width,
-/// height, depth, direction)`.
+/// Orients a box from a foot position, an offset and a size along `direction`.
 fn orient_box(foot: [i32; 3], off: [i32; 3], size: [i32; 3], direction: Facing) -> BoundingBox {
     let [fx, fy, fz] = foot;
     let [ox, oy, oz] = off;
@@ -351,14 +348,14 @@ fn orient_box(foot: [i32; 3], off: [i32; 3], size: [i32; 3], direction: Facing) 
     }
 }
 
-/// `StrongholdPieces.StrongholdPiece.isOkBox`.
+/// Whether a candidate box sits deep enough to place.
 fn is_ok_box(box_: BoundingBox) -> bool {
     box_.min[1] > LOWEST_Y_POSITION
 }
 
 /// The whole generation-time state: the tree so far, the shared pending
 /// queue, the piece-weight table and its two pieces of cross-call memory
-/// (`imposedPiece`, `previousPiece`), and the start box the spread bound is
+/// (`imposed_piece`, `previous_piece`), and the start box the spread bound is
 /// measured against.
 struct Tree {
     pieces: Vec<Node>,
@@ -372,7 +369,8 @@ struct Tree {
 }
 
 impl Tree {
-    /// `StructurePieceAccessor.findCollisionPiece(box) == null`, inverted.
+    /// Whether `candidate` collides with any placed piece — a collision-piece
+    /// search, inverted.
     fn collides(&self, candidate: BoundingBox) -> bool {
         self.pieces.iter().any(|p| p.box_.intersects(candidate))
     }
@@ -387,7 +385,7 @@ impl Tree {
         index
     }
 
-    /// `StructurePiecesBuilder.getBoundingBox()` — the union over every piece.
+    /// The union over every piece's own box.
     fn bounding_box(&self) -> BoundingBox {
         self.pieces
             .iter()
@@ -403,9 +401,9 @@ impl Tree {
         }
     }
 
-    /// `StructurePiecesBuilder.moveBelowSeaLevel(seaLevel, minY, random, 10)`
-    /// — identical formula to [`super::mineshaft::Shaft::move_below_sea_level`]
-    /// (both structures share the base class method); reimplemented rather
+    /// Moves the whole tree's box below sea level, offset by 10 —
+    /// identical formula to [`super::mineshaft::Shaft::move_below_sea_level`]
+    /// (both structures share the same reference behaviour); reimplemented rather
     /// than shared because the two live on unrelated tree types.
     fn move_below_sea_level<R: RandomSource>(&mut self, sea_level: i32, min_y: i32, random: &mut R) {
         let offset = 10;
@@ -421,8 +419,8 @@ impl Tree {
 }
 
 /// The box-offset/size table for every weighted piece type plus the start
-/// piece, i.e. `BoundingBox.orientBox`'s `(offX, offY, offZ, width, height,
-/// depth)` argument tuple per `createPiece`. `Library`'s tall attempt is
+/// piece, i.e. each piece kind's own `(offX, offY, offZ, width, height,
+/// depth)` argument tuple fed to [`orient_box`]. `Library`'s tall attempt is
 /// listed; its short fallback is handled separately since it retries with a
 /// different height on the same offsets.
 fn box_shape(piece: PieceType) -> ([i32; 3], [i32; 3]) {
@@ -440,10 +438,11 @@ fn box_shape(piece: PieceType) -> ([i32; 3], [i32; 3]) {
     }
 }
 
-/// `findAndCreatePieceFactory` + each piece's own `createPiece`: computes the
-/// box (no RNG), checks `isOkBox` and collision, and only on success draws
+/// Picks and builds one piece kind's factory: computes the
+/// box (no RNG), checks the ok-box test and collision, and only on success draws
 /// the piece's own random fields and builds the [`Node`]. Returns `None`
-/// exactly where vanilla's ternary would have evaluated to `null` — no RNG is
+/// exactly where a faithful implementation's conditional construction would have
+/// evaluated to null — no RNG is
 /// consumed on that path.
 fn try_create_piece<R: RandomSource>(
     piece: PieceType,
@@ -454,7 +453,7 @@ fn try_create_piece<R: RandomSource>(
     random: &mut R,
 ) -> Option<Node> {
     if piece == PieceType::Library {
-        // Two box attempts, tall then short — see `Library.createPiece`.
+        // Two box attempts, tall then short — the library's own factory.
         // Neither attempt costs RNG; only the eventual constructor does.
         let (off, tall_size) = box_shape(PieceType::Library);
         let tall = orient_box(foot, off, tall_size, direction);
@@ -525,7 +524,7 @@ fn try_create_piece<R: RandomSource>(
         PieceType::ChestCorridor => Kind::ChestCorridor {
             door: SmallDoorType::random(random),
         },
-        // `PortalRoom.createPiece` takes no `RandomSource` at all.
+        // The portal room's own factory takes no random source at all.
         PieceType::PortalRoom => Kind::PortalRoom,
         PieceType::Library => unreachable!("handled above"),
     };
@@ -537,8 +536,8 @@ fn try_create_piece<R: RandomSource>(
     })
 }
 
-/// `StrongholdPieces.FillerCorridor.findPieceBox` — pure geometry, no RNG
-/// despite taking a `random` parameter in vanilla (unused in its body).
+/// The filler corridor's own box search — pure geometry, no RNG
+/// despite taking a `random` parameter in a faithful implementation (unused in its body).
 fn filler_corridor_box(tree: &Tree, foot: [i32; 3], direction: Facing) -> Option<BoundingBox> {
     let candidate = orient_box(foot, [-1, -1, 0], [5, 5, 4], direction);
     let collision = tree.pieces.iter().find(|p| p.box_.intersects(candidate))?;
@@ -554,10 +553,10 @@ fn filler_corridor_box(tree: &Tree, foot: [i32; 3], direction: Facing) -> Option
     None
 }
 
-/// `updatePieceWeight` — sets `total_weight` and reports whether any
-/// *limited*-count entry still has room. An unlimited entry (`maxPlaceCount
-/// == 0`, i.e. `Straight`/`LeftTurn`/`RightTurn`) never counts toward this,
-/// which is the real vanilla quirk that eventually forces every branch to
+/// Refreshes the piece-weight table — sets `total_weight` and reports whether any
+/// *limited*-count entry still has room. An unlimited entry (max place count
+/// `0`, i.e. `Straight`/`LeftTurn`/`RightTurn`) never counts toward this,
+/// which is the real quirk that eventually forces every branch to
 /// terminate: once every limited piece is exhausted, generation stops
 /// regardless of the three unlimited ones still being legal.
 fn update_piece_weight(tree: &mut Tree) -> bool {
@@ -573,7 +572,7 @@ fn update_piece_weight(tree: &mut Tree) -> bool {
     has_any
 }
 
-/// `generatePieceFromSmallDoor` — the weighted pick, its imposed-piece
+/// The small-door piece generator — the weighted pick, its imposed-piece
 /// override, the five-attempt cascade, and the `FillerCorridor` fallback.
 fn generate_piece_from_small_door<R: RandomSource>(
     tree: &mut Tree,
@@ -590,7 +589,7 @@ fn generate_piece_from_small_door<R: RandomSource>(
             return Some(node);
         }
         // Falls through to the weighted cascade below, imposed already
-        // cleared — matches vanilla exactly (no retry of the imposed piece).
+        // cleared — matches the reference exactly (no retry of the imposed piece).
     }
     for _attempt in 0..5 {
         let mut weight_selection = random.next_int_bounded(tree.total_weight);
@@ -634,7 +633,7 @@ fn generate_piece_from_small_door<R: RandomSource>(
     }
 }
 
-/// `generateAndAddPiece` — the depth cap and spread bound, then the child's
+/// Generates and adds one piece — the depth cap and spread bound, then the child's
 /// own selection, then registration into both the tree and the pending
 /// queue (never immediate recursion, unlike a mineshaft).
 fn generate_and_add_piece<R: RandomSource>(
@@ -658,7 +657,7 @@ fn generate_and_add_piece<R: RandomSource>(
     Some(index)
 }
 
-/// `generateSmallDoorChildForward(startPiece, accessor, random, xOff, yOff)`.
+/// A forward small-door child, offset by `(x_off, y_off)`.
 fn child_forward<R: RandomSource>(tree: &mut Tree, from: &Node, x_off: i32, y_off: i32, random: &mut R) {
     let b = from.box_;
     let (foot, dir) = match from.orientation {
@@ -670,7 +669,7 @@ fn child_forward<R: RandomSource>(tree: &mut Tree, from: &Node, x_off: i32, y_of
     generate_and_add_piece(tree, foot, dir, from.gen_depth, random);
 }
 
-/// `generateSmallDoorChildLeft(startPiece, accessor, random, yOff, zOff)`.
+/// A left small-door child, offset by `(y_off, z_off)`.
 fn child_left<R: RandomSource>(tree: &mut Tree, from: &Node, y_off: i32, z_off: i32, random: &mut R) {
     let b = from.box_;
     let (foot, dir) = match from.orientation {
@@ -686,7 +685,7 @@ fn child_left<R: RandomSource>(tree: &mut Tree, from: &Node, y_off: i32, z_off: 
     generate_and_add_piece(tree, foot, dir, from.gen_depth, random);
 }
 
-/// `generateSmallDoorChildRight(startPiece, accessor, random, yOff, zOff)`.
+/// A right small-door child, offset by `(y_off, z_off)`.
 fn child_right<R: RandomSource>(tree: &mut Tree, from: &Node, y_off: i32, z_off: i32, random: &mut R) {
     let b = from.box_;
     let (foot, dir) = match from.orientation {
@@ -702,7 +701,7 @@ fn child_right<R: RandomSource>(tree: &mut Tree, from: &Node, y_off: i32, z_off:
     generate_and_add_piece(tree, foot, dir, from.gen_depth, random);
 }
 
-/// `StructurePiece.addChildren`, dispatched per piece kind. `Library`,
+/// Grows a piece's children, dispatched per piece kind. `Library`,
 /// `PortalRoom` (besides registering itself) and `FillerCorridor` are not
 /// matched here because none of the three ever enqueues a child — see the
 /// module doc.
@@ -783,14 +782,14 @@ fn add_children<R: RandomSource>(tree: &mut Tree, index: usize, random: &mut R) 
     }
 }
 
-/// `StrongholdStructure.generatePieces` — the whole retry loop.
+/// The stronghold's piece generator — the whole retry loop.
 ///
 /// Returns the finished piece list. Never returns an empty list: the loop
 /// does not terminate until a portal room has been placed, exactly as
-/// vanilla's `do…while (builder.isEmpty() || startRoom.portalRoomPiece ==
-/// null)` — `builder.isEmpty()` is checked here too even though it can never
-/// be true (the start piece is always added), for the same reason vanilla
-/// checks it: there is no cheaper way to state "a tree exists".
+/// a faithful implementation's own `do…while (tree is empty || no portal
+/// room placed yet)` — the empty check is performed here too even though it can never
+/// be true (the start piece is always added), for the same reason a faithful
+/// implementation checks it: there is no cheaper way to state "a tree exists".
 #[must_use]
 pub fn generate(cx: i32, cz: i32, seed: i64, ctx: &dyn StartContext) -> Vec<StructurePiece> {
     let mut tries: i64 = 0;
@@ -801,8 +800,8 @@ pub fn generate(cx: i32, cz: i32, seed: i64, ctx: &dyn StartContext) -> Vec<Stru
         let west = cx * 16 + 2;
         let north = cz * 16 + 2;
         let direction = Facing::random(&mut random);
-        // `makeBoundingBox(west, MAGIC_START_Y, north, direction, 5, 11, 5)`.
-        // Width and depth are both 5, so the X/Z axis swap `makeBoundingBox`
+        // The start piece's own box construction.
+        // Width and depth are both 5, so the X/Z axis swap box construction
         // performs for a non-Z orientation (see `super::coded::Builder::new`)
         // is inert here — the box is the same square footprint either way.
         let start_box = BoundingBox {
@@ -897,8 +896,8 @@ struct Place<'a> {
 }
 
 impl Place<'_> {
-    /// `placeBlock` — mirror, then rotate, then record. `canBeReplaced` is
-    /// never overridden for a stronghold piece, so it is vanilla's default
+    /// Places one block — mirror, then rotate, then record. The replaceability check is
+    /// never overridden for a stronghold piece, so it defaults to
     /// `true` and every write is unconditional.
     fn place(&mut self, state: &BlockState, x: i32, y: i32, z: i32) {
         let pos = self.node.world_pos(x, y, z);
@@ -909,7 +908,7 @@ impl Place<'_> {
         });
     }
 
-    /// `generateBox(..., edge, fill, skipAir)` — `skipAir` not honoured, see
+    /// Generates a hollow-or-solid box — the "only overwrite non-air" flag not honoured, see
     /// the module doc's `stronghold:skip_air_shell` deviation.
     #[allow(clippy::too_many_arguments)]
     fn generate_box(&mut self, x0: i32, y0: i32, z0: i32, x1: i32, y1: i32, z1: i32, edge: &BlockState, fill: &BlockState) {
@@ -923,7 +922,7 @@ impl Place<'_> {
         }
     }
 
-    /// `generateBox(..., skipAir, random, SMOOTH_STONE_SELECTOR)` — the
+    /// A selector-driven box using the smooth-stone selector — the
     /// shell every room-shaped piece opens with: `cave_air` inside, a
     /// randomised stone-brick variant on every face.
     #[allow(clippy::too_many_arguments)]
@@ -934,7 +933,7 @@ impl Place<'_> {
                 for z in z0..=z1 {
                     let is_edge = y == y0 || y == y1 || x == x0 || x == x1 || z == z0 || z == z1;
                     if is_edge {
-                        // `SmoothStoneSelector.next`.
+                        // The smooth-stone selector's own float draw.
                         let selection = random.next_float();
                         let state = if selection < 0.2 {
                             BlockState::of("minecraft:cracked_stone_bricks")
@@ -954,9 +953,9 @@ impl Place<'_> {
         }
     }
 
-    /// `generateMaybeBox(..., hasToBeInside = false)` — every stronghold call
-    /// site passes `false`, so the `isInterior` branch never applies and is
-    /// not ported.
+    /// A probabilistic hollow-or-solid box, `has_to_be_inside = false` always — every stronghold call
+    /// site passes `false`, so the interior-check branch never applies and is
+    /// not implemented here.
     #[allow(clippy::too_many_arguments)]
     fn generate_maybe_box<R: RandomSource>(
         &mut self,
@@ -984,15 +983,15 @@ impl Place<'_> {
         }
     }
 
-    /// `maybeGenerateBlock` — one draw, `nextFloat() < probability`.
+    /// Places one block with probability `probability` — one draw.
     fn maybe_generate_block<R: RandomSource>(&mut self, random: &mut R, probability: f32, x: i32, y: i32, z: i32, state: &BlockState) {
         if random.next_float() < probability {
             self.place(state, x, y, z);
         }
     }
 
-    /// `StrongholdPiece.generateSmallDoor` — the four door-type shells.
-    /// Draws no RNG in any arm — vanilla's own `generateSmallDoor` takes a
+    /// A stronghold piece's small-door shell — the four door-type shells.
+    /// Draws no RNG in any arm — a faithful implementation's own equivalent takes a
     /// `random` parameter it never reads either, kept here only so every call
     /// site has one signature.
     fn generate_small_door<R: RandomSource>(&mut self, _random: &mut R, door: SmallDoorType, fx: i32, fy: i32, fz: i32) {
@@ -1083,9 +1082,9 @@ impl Place<'_> {
         }
     }
 
-    /// `StructurePiece.createChest` — raw write (no mirror/rotate, matching
-    /// [`super::coded::Builder::create_chest`]'s own citation of the same
-    /// vanilla method), plus a `random.nextLong()` loot-seed draw.
+    /// A stronghold piece's own chest placement — raw write (no mirror/rotate, matching
+    /// [`super::coded::Builder::create_chest`]'s own behaviour),
+    /// plus a 64-bit loot-seed draw.
     fn create_chest<R: RandomSource>(&mut self, random: &mut R, x: i32, y: i32, z: i32, table: &str) {
         let pos = self.node.world_pos(x, y, z);
         self.blocks.push(CodedBlock {
@@ -1478,12 +1477,12 @@ fn post_process<R: RandomSource>(p: &mut Place<'_>, random: &mut R) {
                 p.place(&stair, x, 2, 5);
                 p.place(&stair, x, 3, 6);
             }
-            // The end-portal frame ring — twelve frames, each `FACING` toward
+            // The end-portal frame ring — twelve frames, each facing toward
             // the outside of the portal on the north/south rows and toward
-            // the *centre* on the west/east columns (`EndPortalFrameBlock`'s
-            // own convention, transcribed exactly from
-            // `PortalRoom.postProcess`, not derived — see the module doc's
-            // warning about getting this rotation right).
+            // the *centre* on the west/east columns (the end-portal frame
+            // block's own convention, transcribed exactly from
+            // the portal room's reference block-writing walk, not derived —
+            // see the module doc's warning about getting this rotation right).
             let mut eyes = [false; 12];
             let mut all_eyes = true;
             for eye in &mut eyes {
@@ -1570,7 +1569,7 @@ mod tests {
     }
 
     /// Every generated stronghold must contain exactly one portal room, and
-    /// its ring must be the twelve frames vanilla's `PortalRoom.postProcess`
+    /// its ring must be the twelve frames a faithful implementation
     /// places, each facing the direction the record names — not derived from
     /// intuition about "facing the centre".
     #[test]
@@ -1610,11 +1609,11 @@ mod tests {
     /// own "Absent from the generated area" note).
     ///
     /// `FillerCorridor` (`minecraft:shfc`) is excluded on purpose: its own
-    /// `findPieceBox` (`filler_corridor_box`) only re-checks the *one* piece
-    /// `findCollisionPiece` happens to find first, exactly as vanilla's
-    /// `StructurePiece.findCollisionPiece` is a first-match linear scan — so
+    /// box search ([`filler_corridor_box`]) only re-checks the *one* piece
+    /// its own collision search happens to find first, exactly as a
+    /// faithful collision search is a first-match linear scan — so
     /// a filler can legitimately overlap a *different* piece further down
-    /// the list. That is vanilla's own behaviour, not a bug in this port;
+    /// the list. That is the reference behaviour, not a bug in this port;
     /// collected mismatches (not an `assert!` inside the loop) below would
     /// show every instance if this stopped holding for the eleven weighted
     /// types.
@@ -1653,8 +1652,8 @@ mod tests {
         }
     }
 
-    /// No piece's generation depth exceeds vanilla's cap — a child's depth is
-    /// `parent + 1` and `generateAndAddPiece` refuses once the *parent* is
+    /// No piece's generation depth exceeds the reference cap — a child's depth is
+    /// `parent + 1` and [`generate_and_add_piece`] refuses once the *parent* is
     /// already past 50, so 51 is the highest depth reachable.
     #[test]
     fn depth_never_exceeds_the_cap() {
