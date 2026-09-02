@@ -44,8 +44,8 @@
 //!
 //! In a parent event, an entry of `type: event` contributes the **referenced
 //! event's total weight** to the parent's selection sum — not its own declared
-//! `weight` — because vanilla's delegating `Weighted` reports the target's
-//! summed weight. When a caller flattens an event's entries into the `&[u32]`
+//! `weight` — because vanilla's own delegating weighted-entry type reports the
+//! target's summed weight. When a caller flattens an event's entries into the `&[u32]`
 //! passed here, an event-ref entry's slot must therefore hold the referenced
 //! event's total weight. Selecting that slot then delegates to a *fresh* draw
 //! within the referenced event (a second `roll`), exactly as vanilla recurses.

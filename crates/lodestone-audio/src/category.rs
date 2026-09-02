@@ -6,11 +6,11 @@
 //! decompiled client:
 //!
 //! * Vanilla's sound-source enum lists the buses. In 26.2 there are
-//!   **eleven**: `MASTER, MUSIC, RECORDS("record"), WEATHER, BLOCKS("block"),
-//!   HOSTILE, NEUTRAL, PLAYERS("player"), AMBIENT, VOICE, UI`.
+//!   **eleven**: master, music, records, weather, blocks, hostile, neutral,
+//!   players, ambient, voice and UI.
 //! * The final-source-volume formula:
 //!   ```text
-//!   MASTER            -> masterVolume
+//!   master bus        -> masterVolume
 //!   any other source  -> sourceVolume * masterVolume
 //!   ```
 //! * The volume-calculation formula:
@@ -21,9 +21,9 @@
 //!   where the runtime gain is a per-bus value (defaults to `1.0`, used for
 //!   ducking/fades). We model it as [`CategoryVolumes::runtime_gain`].
 //!
-//! Note the asymmetry that a naive implementation gets wrong: `MASTER` is **not**
-//! multiplied by itself. A sound on the `MASTER` bus is scaled by master volume
-//! once, not squared.
+//! Note the asymmetry that a naive implementation gets wrong: the master bus is
+//! **not** multiplied by itself. A sound on the master bus is scaled by master
+//! volume once, not squared.
 
 /// A sound-category volume bus. These correspond one-to-one to vanilla's
 /// sound-source enum, but the enum is a pure mixer-bus identity: mapping a protocol

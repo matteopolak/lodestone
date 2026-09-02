@@ -10,7 +10,7 @@
 //! # Mono vs stereo (an OpenAL rule vanilla inherits)
 //!
 //! OpenAL only spatialises **mono** sources. Vanilla decodes assets at their
-//! native channel count and never downmixes (`JOrbisAudioStream`), so a mono
+//! native channel count and never downmixes, so a mono
 //! `.ogg` is attenuated and panned while a stereo `.ogg` (music, records) plays
 //! flat: channel 0 → left, channel 1 → right, gain only. [`Voice::render_into`]
 //! reproduces exactly this split.
