@@ -2883,10 +2883,10 @@ fn a_second_lan_publish_reports_a_chat_error_without_ending_the_session() {
          healthy session — this is the discriminating assertion, not the \
          chat line below"
     );
-    let chat = sim.recent_chat(10);
+    let chat = sim.recent_chat_spans(10);
     assert!(
         chat.iter()
-            .any(|(line, _)| line.contains("already published")),
+            .any(|(spans, _)| crate::overlay::spans_text(spans).contains("already published")),
         "the failure must still reach the player, through the ordinary chat \
          path: {chat:?}"
     );
@@ -2942,7 +2942,7 @@ fn end_session_tears_down_and_a_fresh_connect_afterward_starts_clean() {
     );
     sim.poll_net();
     assert!(
-        !sim.recent_chat(10).is_empty(),
+        !sim.recent_chat_spans(10).is_empty(),
         "setup: chat must be populated before the teardown can be observed clearing it"
     );
     assert_eq!(sim.health(), Some(12.0), "setup: health must be populated");
@@ -2961,7 +2961,7 @@ fn end_session_tears_down_and_a_fresh_connect_afterward_starts_clean() {
 
     assert!(sim.net().is_none(), "the connection must be dropped");
     assert_eq!(sim.session_phase(), SessionPhase::LocalOnly);
-    assert!(sim.recent_chat(10).is_empty(), "chat log must clear");
+    assert!(sim.recent_chat_spans(10).is_empty(), "chat log must clear");
     assert_eq!(sim.health(), None, "health must clear");
     assert_eq!(sim.food(), None, "food must clear");
     assert_eq!(
@@ -2990,7 +2990,7 @@ fn end_session_tears_down_and_a_fresh_connect_afterward_starts_clean() {
     assert_eq!(sim.session_phase(), SessionPhase::Connected);
     assert_eq!(sim.server_entity_id(), Some(9));
     assert!(
-        sim.recent_chat(10).is_empty(),
+        sim.recent_chat_spans(10).is_empty(),
         "the new session must not inherit the old one's chat"
     );
 }
@@ -3074,7 +3074,11 @@ fn inbound_chat_is_logged_and_typed_lines_route_to_the_action_seam() {
     })
     .unwrap();
     sim.poll_net();
-    let lines: Vec<String> = sim.recent_chat(10).into_iter().map(|(l, _)| l).collect();
+    let lines: Vec<String> = sim
+        .recent_chat_spans(10)
+        .into_iter()
+        .map(|(spans, _)| crate::overlay::spans_text(&spans))
+        .collect();
     assert_eq!(
         lines,
         vec!["hello world".to_string()],
@@ -3093,7 +3097,7 @@ fn inbound_chat_is_logged_and_typed_lines_route_to_the_action_seam() {
     // used to be rewritten into `/give @s …` *here*, with a local echo
     // pushed into the chat log and — when malformed — nothing sent at all.
     // Both halves of that are now the server's business.
-    let before = sim.recent_chat(10).len();
+    let before = sim.recent_chat_spans(10).len();
     assert!(
         sim.send_chat("/givedebug minecraft:diamond_pickaxe 1"),
         "a /givedebug line is now an ordinary command and must reach the wire"
@@ -3103,7 +3107,7 @@ fn inbound_chat_is_logged_and_typed_lines_route_to_the_action_seam() {
         "even the malformed form goes to the server; nothing absorbs it locally"
     );
     assert_eq!(
-        sim.recent_chat(10).len(),
+        sim.recent_chat_spans(10).len(),
         before,
         "no local echo and no local error line — that was the wrapper's job"
     );
@@ -3151,13 +3155,13 @@ fn chat_lines_age_as_the_clock_advances() {
     sim.poll_net();
     // Freshly received: age is ~0.
     assert!(
-        sim.recent_chat(1)[0].1 < 0.001,
+        sim.recent_chat_spans(1)[0].1 < 0.001,
         "a just-received line is young"
     );
 
     // Advancing the sim clock ages the line by real elapsed time.
     sim.step(2.5);
-    let age = sim.recent_chat(1)[0].1;
+    let age = sim.recent_chat_spans(1)[0].1;
     assert!(
         (2.4..=2.6).contains(&age),
         "line age must track the sim clock, got {age}"
@@ -3370,7 +3374,7 @@ fn game_info_chat_folds_into_the_action_bar_not_the_feed() {
     assert!(alpha > 0.0, "a fresh action-bar message is fully opaque");
     // It must not have leaked into the chat scrollback.
     assert!(
-        sim.recent_chat(10).is_empty(),
+        sim.recent_chat_spans(10).is_empty(),
         "GameInfo is the action bar, not chat — it must not enter the feed"
     );
 }
@@ -8662,15 +8666,25 @@ fn hex_chat_colour_reaches_a_vertex_through_the_real_session_and_redraw_wiring()
          wiring: {missing:?} (full expected set: {expected:?})"
     );
 
-    // Control: the sibling *legacy* accessor on the exact same stored line,
-    // fed into `HudFrame::chat` instead of `chat_spans` — proves the
-    // detector can actually fail, and localises the loss to the accessor
-    // seam this issue names rather than to `HudGeometry::build` itself
-    // (which is shared by both branches).
-    let chat_owned = sim.recent_chat(10);
+    // Control: the exact same stored line, flattened to a plain string and
+    // fed into `HudFrame::chat` instead of `chat_spans` — this is the shape
+    // the deleted `Sim::recent_chat` legacy accessor used to hand back, and
+    // no production call site has built it since (`app/redraw.rs` fills
+    // `chat_spans` only). Reproducing the flattening here, rather than
+    // reaching for a production accessor that no longer exists, is what
+    // proves the detector can actually fail, and localises the loss to the
+    // accessor seam this issue names rather than to `HudGeometry::build`
+    // itself (which is shared by both branches).
+    let chat_owned = sim.recent_chat_spans(10);
     assert_eq!(chat_owned.len(), 1, "setup: same one line, legacy accessor");
-    let chat_legacy: Vec<(&str, f32)> =
-        chat_owned.iter().map(|(l, a)| (l.as_str(), *a)).collect();
+    let chat_legacy_owned: Vec<(String, f32)> = chat_owned
+        .iter()
+        .map(|(spans, a)| (crate::overlay::spans_text(spans), *a))
+        .collect();
+    let chat_legacy: Vec<(&str, f32)> = chat_legacy_owned
+        .iter()
+        .map(|(l, a)| (l.as_str(), *a))
+        .collect();
     let legacy_geo = HudGeometry::build(
         &HudFrame {
             crosshair: false,

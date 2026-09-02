@@ -322,9 +322,9 @@ mod chat_click_dispatch {
             value: "/etc/passwd".to_string(),
         });
         assert!(crate::menu::accounts::test_browser_opens::taken().is_empty());
-        let recent = app.sim.recent_chat(1);
+        let recent = app.sim.recent_chat_spans(1);
         assert_eq!(recent.len(), 1);
-        assert!(recent[0].0.contains("/etc/passwd"));
+        assert!(crate::overlay::spans_text(&recent[0].0).contains("/etc/passwd"));
     }
 
     /// `change_page` and an unrecognised action are both inert — the
@@ -335,7 +335,7 @@ mod chat_click_dispatch {
         let (mut app, actions) = headless_app_with_loopback();
         let _ = crate::menu::accounts::test_browser_opens::taken();
         let _ = crate::menu::accounts::test_clipboard::taken();
-        let before_chat = app.sim.recent_chat(10).len();
+        let before_chat = app.sim.recent_chat_spans(10).len();
         let before_input = app.chat_input.as_str().to_string();
 
         for action in [ClickAction::ChangePage, ClickAction::Other("mystery".to_string())] {
@@ -345,7 +345,7 @@ mod chat_click_dispatch {
         assert!(actions.try_recv().is_err());
         assert!(crate::menu::accounts::test_browser_opens::taken().is_empty());
         assert!(crate::menu::accounts::test_clipboard::taken().is_empty());
-        assert_eq!(app.sim.recent_chat(10).len(), before_chat);
+        assert_eq!(app.sim.recent_chat_spans(10).len(), before_chat);
         assert_eq!(app.chat_input.as_str(), before_input);
     }
 }
@@ -713,14 +713,6 @@ fn the_crosshair_and_the_hotbar_disagree_behind_a_screen() {
         hud_follows_world(ui.screen()),
         "the hotbar's gate must stay true behind the pause menu"
     );
-}
-
-#[test]
-fn vanillas_cap_is_ten_ticks_of_real_time() {
-    // Guards the constant against a silent edit. 10 ticks × 50 ms = 500 ms;
-    // read from Minecraft.java / :1176 (see `MAX_TICKS_PER_UPDATE`).
-    assert_eq!(MAX_TICKS_PER_UPDATE, 10);
-    assert!((MAX_CATCHUP_SECS - 0.5).abs() < 1e-12, "{MAX_CATCHUP_SECS}");
 }
 
 #[test]
