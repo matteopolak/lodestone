@@ -1,8 +1,7 @@
 //! `MobSim`'s raid slice — wave escalation, a raid boss bar, and the
 //! captain-marker data model. Issue #241 (the raid half; patrols already
 //! exist — see `mobs::mod`'s own module doc and `docs/pillager-patrols.md`).
-//! Ported from `Raid.java`/`Raids.java`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/raid/{Raid,Raids}.java`),
+//! Ported from vanilla's own per-raid state and raid-manager types,
 //! transcribing the wave-size tables and the `getNumGroups`/omen-level
 //! constants exactly.
 //!

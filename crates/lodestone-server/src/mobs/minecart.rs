@@ -3,9 +3,9 @@
 //!
 //! # What this is
 //!
-//! A port of `AbstractMinecart`/`OldMinecartBehavior`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/vehicle/minecart/`), plus
-//! `Minecart`, `MinecartFurnace` and `MinecartTNT`'s own overrides. **Not**
+//! A port of vanilla's own abstract minecart base and its "old" movement
+//! behaviour, plus
+//! the plain, furnace and TNT minecarts' own overrides. **Not**
 //! `NewMinecartBehavior` — 26.2 ships both behind one gate,
 //! `AbstractMinecart.useExperimentalMovement` (`level.enabledFeatures()
 //! .contains(FeatureFlags.MINECART_IMPROVEMENTS)`), and that feature flag is
@@ -239,8 +239,8 @@ pub enum MinecartKind {
 }
 
 impl MinecartKind {
-    /// `MinecartItem`'s item→type pairing (`Items.java`'s five
-    /// `new MinecartItem(EntityTypes.X, …)` registrations) — the item id
+    /// Vanilla's own minecart-item item→type pairing (its own item registration
+    /// table's five `new MinecartItem(EntityTypes.X, …)` registrations) — the item id
     /// *is* the entity-type id, exactly as `crate::boat`'s own derivation is
     /// for boats.
     #[must_use]

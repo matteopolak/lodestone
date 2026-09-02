@@ -235,9 +235,8 @@ pub fn instant_damage_amount(amplifier: u32) -> f32 {
 }
 
 // ---------------------------------------------------------------------------
-// A splash/lingering potion's impact-time burst — `ThrownSplashPotion
-// .onHitAsPotion` (`.cache/mc/26.2/src/net/minecraft/world/entity/projectile
-// /throwableitemprojectile/ThrownSplashPotion.java`).
+// A splash/lingering potion's impact-time burst — vanilla's own
+// splash-potion on-hit-as-potion routine.
 // ---------------------------------------------------------------------------
 
 /// `AbstractThrownPotion.SPLASH_RANGE` — a splash/lingering blast only reaches
@@ -266,8 +265,8 @@ pub fn splash_scale(distance_sq: f64) -> f64 {
 /// `MobEffect.isInstantaneous()` for exactly the effects a potion in this
 /// build's registry can carry.
 ///
-/// `true` only for `instant_health`/`instant_damage` — `HealOrHarmMobEffect` is
-/// the sole `InstantaneousMobEffect` subclass any `Potions.java` entry ever
+/// `true` only for `instant_health`/`instant_damage` — vanilla's own
+/// heal-or-harm effect class is the sole instantaneous-effect subclass any of vanilla's own potion registrations ever
 /// grants (the jar's *other* instantaneous effect, `saturation`, backs no
 /// potion). Accepts a bare path as well as a namespaced id, matching
 /// [`periodic_effect`]'s own input handling.
@@ -396,7 +395,7 @@ pub fn potion_splash_effects(potion_registry_id: i32, scale: f64, duration_scale
 /// `probability` defaulting to `1.0` when the Java constructor omits it.
 ///
 /// Distinct from [`SplashEffect`]: a food grant is never distance-scaled and
-/// never instantaneous (no `Consumables.java` entry names `instant_health`/
+/// never instantaneous (no entry in vanilla's own consumables table names `instant_health`/
 /// `instant_damage`), so this is the plain `(effect, duration, amplifier)`
 /// triple `ActiveEffects::apply` already takes, plus the probability
 /// [`food_consume_effects`]'s caller must roll.
@@ -412,9 +411,9 @@ pub struct FoodEffectGrant {
     pub probability: f32,
 }
 
-/// `Consumables.java`'s per-food `onConsume(new ApplyStatusEffectsConsumeEffect(...))`
-/// lists, transcribed exactly (issue #690) — every `ApplyStatusEffectsConsumeEffect`
-/// registration in that file except `CHICKEN`'s duplicate-looking-but-distinct
+/// Vanilla's own consumables table's per-food status-effect-on-consume
+/// lists, transcribed exactly (issue #690) — every such
+/// registration in that table except `CHICKEN`'s duplicate-looking-but-distinct
 /// entry, which *is* included below. Sorted by item for [`food_consume_effects`]'s
 /// linear scan (the table is seven rows; a binary search would be a second thing to
 /// keep sorted for no measured benefit).
@@ -539,7 +538,7 @@ static FOOD_EFFECTS: &[(&str, &[FoodEffectGrant])] = &[
 ];
 
 /// The effect grants `item` applies on a successful eat, or `&[]` for every
-/// item `Consumables.java` gives no `onConsumeEffects` list — including every
+/// item vanilla's own consumables table gives no on-consume-effects list — including every
 /// plain food (`FOODS` in `crate::item_use` has forty rows; this table has
 /// seven, and the other thirty-three are correctly silent here).
 #[must_use]

@@ -3,7 +3,7 @@
 //! # What it is
 //!
 //! The version-free server-side loot system: parses Mojang's datapack loot-table
-//! JSON (the same format `net.minecraft.world.level.storage.loot` reads), then
+//! JSON (the same format vanilla's own loot-table reader reads), then
 //! "rolls" a table with a deterministic RNG to produce `Vec<ItemStack>` — the
 //! data that becomes a chest fill, a mob drop, or a block drop. This is the
 //! server half of the client's `lodestone-game` recipe loader: both consume
@@ -15,7 +15,7 @@
 //! optional `conditions`/`functions`); an entry is a weighted leaf (`item`,
 //! `empty`, `loot_table`) or a composite (`alternatives`, `group`,
 //! `sequence`). [`LootTable::roll_with`] walks the structure exactly as
-//! `LootPool.addRandomItems`/`LootPool.addRandomItem` (`LootPool.java:97-95`)
+//! vanilla's own pool-roll routines
 //! do:
 //!
 //! 1. A pool whose conditions all pass emits `rolls` rolls. A roll expands the
@@ -38,21 +38,21 @@
 //! condition/function this module understands has a *defined* empty-context
 //! value, so a table with zero unsupported features rolls **correctly** here:
 //!
-//! | feature | empty-context value | vanilla source |
-//! |---|---|---|
-//! | `random_chance` | `nextFloat() < chance` | `LootItemRandomChanceCondition` |
-//! | `random_chance_with_enchanted_bonus` | uses `unenchanted_chance` (no attacker → level 0) | `…Condition.java:41-45` |
-//! | `killed_by_player` | `false` (no `LAST_DAMAGE_PLAYER` param) | `…Condition.java:26-28` |
-//! | `survives_explosion` | `true` (no `EXPLOSION_RADIUS` param) | `ExplosionCondition.test` |
-//! | `match_tool` | `false` (no tool). **With a tool it is fully evaluated** against `ItemPredicate` | `MatchTool` |
-//! | `block_state_property` | `false` (no state). **With a state it is fully evaluated** against `StatePropertiesPredicate` | `LootItemBlockStatePropertyCondition` |
-//! | `entity_properties` / `damage_source_properties` / `location_check` | `false` (no entity/source/level) | `…EntityProperty…`, `…DamageSourceProperties…`, `LocationCheck` |
-//! | `table_bonus` | `chances[0]` (fortune level 0) | `BonusLevelTableCondition.java:37-42` |
-//! | `set_count` | uniform/constant/binomial rolled | `SetItemCountFunction` |
-//! | `enchanted_count_increase` | no-op (no attacker → level 0) | `…Function.java:74-89` |
-//! | `apply_bonus` | no-op (no tool) | `ApplyBonusCount.java:63-72` |
-//! | `explosion_decay` | no-op (no `EXPLOSION_RADIUS`) | `ApplyExplosionDecay.run` |
-//! | `furnace_smelt` | smelted via [`crate::furnace::recipe_for`] | `SmeltItemFunction` |
+//! | feature | empty-context value |
+//! |---|---|
+//! | `random_chance` | `nextFloat() < chance` |
+//! | `random_chance_with_enchanted_bonus` | uses `unenchanted_chance` (no attacker → level 0) |
+//! | `killed_by_player` | `false` (no `LAST_DAMAGE_PLAYER` param) |
+//! | `survives_explosion` | `true` (no `EXPLOSION_RADIUS` param) |
+//! | `match_tool` | `false` (no tool). **With a tool it is fully evaluated** against the item predicate |
+//! | `block_state_property` | `false` (no state). **With a state it is fully evaluated** against the state-properties predicate |
+//! | `entity_properties` / `damage_source_properties` / `location_check` | `false` (no entity/source/level) |
+//! | `table_bonus` | `chances[0]` (fortune level 0) |
+//! | `set_count` | uniform/constant/binomial rolled |
+//! | `enchanted_count_increase` | no-op (no attacker → level 0) |
+//! | `apply_bonus` | no-op (no tool) |
+//! | `explosion_decay` | no-op (no `EXPLOSION_RADIUS`) |
+//! | `furnace_smelt` | smelted via [`crate::furnace::recipe_for`] |
 //!
 //! ## The explosion context
 //!
@@ -1293,11 +1293,10 @@ impl LootFunction {
     }
 }
 
-/// `ApplyBonusCount.Formula` — one of three, dispatched on the `formula` field
+/// Vanilla's own apply-bonus-count formula enum — one of three, dispatched on the `formula` field
 /// with its own `parameters` object.
 ///
-/// Every arm is transcribed from the record body in
-/// `.cache/mc/26.2/src/net/minecraft/world/level/storage/loot/functions/ApplyBonusCount.java`,
+/// Every arm is transcribed from vanilla's own record body,
 /// **not** from a summary of a call site, because two of the three are wrong in a
 /// way that reads plausibly:
 ///

@@ -28,7 +28,7 @@ use crate::mob_spawn::SpawnRng;
 /// # Where these names come from, and the heuristic that was wrong (issue #457)
 ///
 /// Every path below was read from that species' own registration in
-/// `EntityTypes.java` (`.cache/mc/26.2/src/net/minecraft/world/entity/`), which
+/// vanilla's own entity-type registration table, which
 /// is where vanilla's `MobCategory` actually lives — `EntityType.Builder.of(X::new,
 /// MobCategory.MONSTER)`. The list previously held the original **eight** and its
 /// doc claimed it "covers exactly the families
@@ -36,11 +36,11 @@ use crate::mob_spawn::SpawnRng;
 /// That heuristic is **not equivalent to vanilla's category**, and reading the
 /// registrations is what showed it:
 ///
-/// * A **ghast** is `MobCategory.MONSTER` (`EntityTypes.java:473-474`) while its
+/// * A **ghast** is `MobCategory.MONSTER` (vanilla's own registration) while its
 ///   attribute builder is a bare `Mob.createMobAttributes()` with no
-///   `attack_damage` at all (`monster/Ghast.java:116-122`). Deriving the category
+///   `attack_damage` at all (vanilla's own ghast attribute registration). Deriving the category
 ///   from the attribute template would have made it a persistent `Creature`.
-/// * A **snow golem** is `MobCategory.MISC` (`EntityTypes.java:886`) — neither
+/// * A **snow golem** is `MobCategory.MISC` (vanilla's own registration) — neither
 ///   `Monster` nor `Creature`. This function is a boolean, so it lands as
 ///   `Creature`; that is *not* vanilla's category, merely the safe direction
 ///   (`Misc` also never natural-despawns). Recorded here rather than papered
@@ -59,7 +59,7 @@ use crate::mob_spawn::SpawnRng;
 pub(super) fn is_hostile_species(entity_type: &ResourceKey) -> bool {
     matches!(
         entity_type.path(),
-        // Zombie family — `EntityTypes.java:1090, 534, 345, 1116, 1126`.
+        // Zombie family — per vanilla's own entity-type registration table.
         "zombie"
             | "husk"
             | "drowned"
@@ -82,8 +82,8 @@ pub(super) fn is_hostile_species(entity_type: &ResourceKey) -> bool {
             | "ghast"
             | "blaze"
             | "enderman"
-            // `EntityTypes.java:1039` and `:775` — both
-            // `EntityType.Builder.of(…, MobCategory.MONSTER)`. Raiders, so they are
+            // Per vanilla's own entity-type registration table, both
+            // registered `MobCategory.MONSTER`. Raiders, so they are
             // *also* spawned by a raid, but their registration category is what this
             // function answers and it is `MONSTER` like any other hostile.
             | "witch"
@@ -91,9 +91,8 @@ pub(super) fn is_hostile_species(entity_type: &ResourceKey) -> bool {
     )
 }
 
-/// Whether `entity_type` can be leashed at all — vanilla `Mob.canBeLeashed()`'s
-/// real default, `!(this instanceof Enemy)`
-/// (`.cache/mc/26.2/src/net/minecraft/world/entity/Mob.java:1292-1294`):
+/// Whether `entity_type` can be leashed at all — vanilla's own can-be-leashed
+/// method's real default, `!(this instanceof Enemy)`:
 /// every species tagged `Enemy` (`Monster`'s whole hierarchy, plus `Ghast`,
 /// `Phantom` and `Shulker`, which implement it directly) refuses a lead, and
 /// every other `Mob` accepts one — **not a curated allowlist**, which is
@@ -128,12 +127,12 @@ pub(super) fn is_leashable_species(entity_type: &ResourceKey) -> bool {
 /// everything.
 pub(super) fn avoided_species(species: &str) -> &'static [&'static str] {
     match species {
-        // `monster/Creeper.java:67-68` — two separate goals, one per class.
+        // Vanilla's own creeper goal registration — two separate goals, one per class.
         "creeper" => &["ocelot", "cat"],
-        // `monster/skeleton/AbstractSkeleton.java:79`, inherited by every
+        // Vanilla's own base-skeleton goal registration, inherited by every
         // skeleton variant.
         "skeleton" | "stray" | "wither_skeleton" | "bogged" => &["wolf"],
-        // `monster/spider/Spider.java:59`. Vanilla additionally requires
+        // Vanilla's own spider goal registration. Vanilla additionally requires
         // `!armadillo.isScared()`; nothing here models an armadillo's scared
         // state, so that filter is a disclosed omission rather than a silent
         // one — it can only make a spider flee slightly more often.
@@ -179,8 +178,8 @@ pub(super) fn is_fire_immune(entity_type: &ResourceKey) -> bool {
 /// | rabbit | `rabbit_food.json` | `carrot`, `golden_carrot`, `dandelion` |
 /// | cat | `cat_food.json` | `cod`, `salmon` |
 ///
-/// The cat is the one row here that is not a farm animal: `Cat.CatTemptGoal`
-/// (`animal/feline/Cat.java:106`) is constructed with the very same
+/// The cat is the one row here that is not a farm animal: vanilla's own
+/// cat-tempt goal is constructed with the very same
 /// `#cat_food` tag `tame_mechanism`/`breeding_food` already use for it, so
 /// this row and those two agree by construction rather than by luck. Contrast
 /// [`breeding_food`]'s own doc comment, which names the wolf as the species
@@ -495,7 +494,7 @@ mod hostility_category_tests {
     use std::str::FromStr;
 
     /// Every species any roster family claims, paired with the `MobCategory`
-    /// vanilla registers it under in `EntityTypes.java`.
+    /// vanilla registers it under in its own entity-type registration table.
     ///
     /// **This is an independent statement of the answer, not a restatement of
     /// the code under test**: the values were read from the jar's
@@ -533,9 +532,8 @@ mod hostility_category_tests {
         ("pig", false),
         ("chicken", false),
         ("rabbit", false),
-        // `EntityType.Builder.of(Cat::new, MobCategory.CREATURE)` and
-        // `EntityType.Builder.of(Parrot::new, MobCategory.CREATURE)`
-        // (`EntityTypes.java`) — issue #229's cat and parrot, neither ever
+        // Vanilla's own entity-type registration table registers both the
+        // cat and the parrot as `MobCategory.CREATURE` — issue #229's cat and parrot, neither ever
         // `MONSTER` however their taming interaction goes.
         ("cat", false),
         ("parrot", false),
@@ -710,7 +708,7 @@ mod hostility_category_tests {
         }
         assert!(
             wrong.is_empty(),
-            "is_hostile_species disagrees with EntityTypes.java: {wrong:?}"
+            "is_hostile_species disagrees with vanilla's own registration table: {wrong:?}"
         );
 
         // Control: the predicate is capable of answering `false`, so the
@@ -746,13 +744,13 @@ mod hostility_category_tests {
         assert_eq!(
             ghast,
             MobCategory::Monster,
-            "a ghast is MobCategory.MONSTER (EntityTypes.java:473); if this is \
+            "a ghast is MobCategory.MONSTER (vanilla's own registration); if this is \
              Creature the widened list is not reaching spawn_species"
         );
         assert_eq!(
             wolf,
             MobCategory::Creature,
-            "a wolf is MobCategory.CREATURE (EntityTypes.java:1073)"
+            "a wolf is MobCategory.CREATURE (vanilla's own registration)"
         );
     }
 }

@@ -3,8 +3,7 @@
 //! `tnt.rs`/`vehicles.rs` established: [`super::TrackedCrystal`] lives in
 //! `mobs/mod.rs`, the behaviour lives here.
 //!
-//! A port of `EndCrystal`
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/boss/enderdragon/EndCrystal.java`),
+//! A port of vanilla's own end-crystal entity,
 //! deliberately narrow: this codebase has no obsidian pillars anywhere (see
 //! `crate::dragon::fight`'s module doc), so a crystal here is a plain
 //! stationary point wherever a caller spawns one — it never checks whether

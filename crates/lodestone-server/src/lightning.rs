@@ -3,10 +3,10 @@
 //!
 //! # What it is
 //!
-//! A port of `ServerLevel.tickThunder`/`findLightningTargetAround`
-//! (`ServerLevel.java`) — the per-tick, per-entity-ticking-chunk strike
-//! selection — plus `LightningBolt`'s own `tick` (`LightningBolt.java`) and
-//! the `thunderHit` table across `Entity`, `Creeper`, `Pig`, `Villager`,
+//! A port of vanilla's own per-tick thunder tick and target-search routines
+//! — the per-tick, per-entity-ticking-chunk strike
+//! selection — plus its own lightning-bolt entity tick and
+//! the thunder-hit table across `Entity`, `Creeper`, `Pig`, `Villager`,
 //! `MushroomCow` and `Turtle`. Nothing about lightning existed in this crate
 //! before this module: `crate::burning`'s own doc lists it under "What is not
 //! here" and says why — it needs an entity type `MobSim` does not have.
@@ -60,7 +60,7 @@
 //! Two commonly-misremembered claims this table corrects, both checked
 //! against the jar rather than recalled:
 //!
-//! * **There is no turtle-egg interaction.** `TurtleEggBlock.java` has no
+//! * **There is no turtle-egg interaction.** Vanilla's own turtle-egg block has no
 //!   lightning hook of any kind; the real turtle-related effect is the
 //!   `Turtle` *entity* dying outright, not an egg doing anything.
 //! * **The "skeleton horse trap" is not a `thunderHit` transformation at

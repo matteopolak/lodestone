@@ -159,7 +159,7 @@ pub enum SnifferState {
 }
 
 impl SnifferState {
-    /// `Sniffer.State`'s real jar ordinal (`net.minecraft.world.entity.animal.sniffer.Sniffer.State`)
+    /// Vanilla's own sniffer-state enum's real jar ordinal
     /// for each state this crate produces. `1`/`2` (`FEELING_HAPPY`/
     /// `SCENTING`) are skipped entirely, not merely unused — see this
     /// module's own doc.

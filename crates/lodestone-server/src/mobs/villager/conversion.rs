@@ -1,6 +1,5 @@
 //! Zombie villager curing (issue #247): the conversion timer state machine —
-//! `ZombieVillager`'s `startConverting`/`tick`/`getConversionProgress` port
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/monster/zombie/ZombieVillager.java`).
+//! vanilla's own zombie-villager start-converting/tick/conversion-progress port.
 //!
 //! # What it is
 //!

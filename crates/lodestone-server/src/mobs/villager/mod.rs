@@ -123,8 +123,8 @@ pub mod gossip;
 pub mod reputation;
 pub mod trades;
 
-/// `minecraft:villager_profession`, in `VillagerProfession.bootstrap`'s own
-/// registration order (`.cache/mc/26.2/src/net/minecraft/world/entity/npc/villager/VillagerProfession.java`) —
+/// `minecraft:villager_profession`, in vanilla's own profession-bootstrap
+/// registration order —
 /// the same order `crates/protocol/v770/src/entity_variants.rs`'s
 /// `VILLAGER_PROFESSION` table transcribes independently for the wire id.
 /// Both must agree with the jar; neither is derived from the other.
@@ -182,7 +182,7 @@ impl Profession {
 /// `VillagerProfession.bootstrap`'s `jobSite -> profession` pairing,
 /// inverted: which profession a workstation POI type hands out. Only the
 /// thirteen professions with a real job site answer `Some` — `None` and
-/// `Nitwit` both register `PoiType.NONE` (`.cache/mc/26.2/src/net/minecraft/world/entity/ai/village/poi/PoiType.java`'s
+/// `Nitwit` both register `PoiType.NONE` (vanilla's own POI-type
 /// sentinel, not a real POI type any block produces), so neither is
 /// reachable from a POI type and both are absent here by construction, not
 /// by omission.
@@ -729,8 +729,7 @@ pub fn find_and_claim_bell(origin: BlockPos, world: &ChunkWorld, claims: &mut Be
     None
 }
 
-/// `VillagerData.NEXT_LEVEL_XP_THRESHOLDS` —
-/// `.cache/mc/26.2/src/net/minecraft/world/entity/npc/villager/VillagerData.java`.
+/// Vanilla's own `VillagerData.NEXT_LEVEL_XP_THRESHOLDS`.
 /// Indexed `[level - 1]` for the minimum, `[level]` for the maximum a given
 /// level spans.
 const NEXT_LEVEL_XP_THRESHOLDS: [i32; 5] = [0, 10, 70, 150, 250];
@@ -757,7 +756,7 @@ pub fn max_xp_for_level(level: i32) -> i32 {
 ///
 /// **The comparison is `>=`, not `>`** — vanilla's own gate reads
 /// `this.villagerXp >= VillagerData.getMaxXpPerLevel(currentLevel)`
-/// (`Villager.java`'s `shouldIncreaseLevel`), so a villager whose xp lands
+/// (vanilla's own should-increase-level check), so a villager whose xp lands
 /// **exactly** on a threshold levels up the same tick, not one xp later.
 #[must_use]
 pub fn level_up(mut level: i32, xp: i32) -> i32 {

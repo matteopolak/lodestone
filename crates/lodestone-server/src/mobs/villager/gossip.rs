@@ -4,8 +4,8 @@
 //! # What it is
 //!
 //! One villager's opinion ledger about every UUID it has an opinion of —
-//! vanilla's `GossipContainer` (`.cache/mc/26.2/src/net/minecraft/world/entity/ai/gossip/GossipContainer.java`),
-//! keyed on `GossipType` (`.../ai/gossip/GossipType.java`): five weighted,
+//! vanilla's own gossip container,
+//! keyed on `GossipType`: five weighted,
 //! decaying, capped counters (`major_negative`, `minor_negative`,
 //! `minor_positive`, `major_positive`, `trading`) per `(target, type)` pair.
 //!
@@ -74,7 +74,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// `GossipType` — vanilla's five gossip kinds, each carrying its own
-/// weight/cap/decay constants (`.../ai/gossip/GossipType.java`'s enum
+/// weight/cap/decay constants (vanilla's own enum
 /// constructor arguments, transcribed verbatim).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GossipType {
@@ -492,7 +492,7 @@ mod tests {
     }
 
     /// `major_positive`'s own `decayPerDay` is `0` — vanilla's own table
-    /// (`GossipType.java`) says a major positive opinion never decays on
+    /// says a major positive opinion never decays on
     /// its own. A neuter that substituted a nonzero decay for every type
     /// would pass every other decay test here and fail only this one.
     #[test]

@@ -311,8 +311,8 @@ impl PathWorld for ChunkWorld {
     /// to share those small integers. `tool::block_registry_id` is the bridge, so
     /// the lookup is state → block → tag.
     ///
-    /// `grass_block` stays block equality, because vanilla's test is equality
-    /// rather than a tag (`ai/goal/EatBlockGoal.java:34`, `:71`).
+    /// `grass_block` stays block equality, because vanilla's own eat-block goal
+    /// tests equality rather than a tag.
     fn block_cues(&self, x: i32, y: i32, z: i32) -> BlockCues {
         let state = self.block_state(x, y, z);
         // `block_state` yields a full state string; strip the property list so
@@ -332,9 +332,8 @@ impl PathWorld for ChunkWorld {
     }
 
     fn collision_top(&self, x: i32, y: i32, z: i32) -> f64 {
-        // Vanilla asks exactly this at `WalkNodeEvaluator.getFloorLevel(level,
-        // pos)` (.cache/mc/26.2/src/net/minecraft/world/level/pathfinder/
-        // WalkNodeEvaluator.java:219-222): `shape.isEmpty() ? 0.0 :
+        // Vanilla asks exactly this in its own pathfinder floor-level getter:
+        // `shape.isEmpty() ? 0.0 :
         // shape.max(Direction.Axis.Y)` over the block's real collision shape —
         // not a naive "one block tall" assumption. So this is the max Y of the
         // state's collision boxes (`lodestone_data::collision_shapes`), which is

@@ -126,8 +126,8 @@ impl<'w> MobSim<'w> {
         true
     }
 
-    /// Merges dropped items that have drifted together — `ItemEntity.tick`'s
-    /// `mergeWithNeighbours()` (`ItemEntity.java`), the other consumer
+    /// Merges dropped items that have drifted together — vanilla's own
+    /// per-tick merge-with-neighbours call, the other consumer
     /// [`ItemEntityRegistry::merge`] was missing.
     ///
     /// Vanilla's search box is `getBoundingBox().inflate(0.5, 0.0, 0.5)`, and the
