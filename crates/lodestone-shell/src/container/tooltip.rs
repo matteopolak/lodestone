@@ -94,10 +94,10 @@ const BORDER_BOTTOM: [f32; 4] = [80.0 / 255.0, 0.0, 127.0 / 255.0, 40.0 / 255.0]
 /// — i.e. white — is right for the overwhelming majority of items.
 const NAME_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// `ChatFormatting.DARK_GRAY`, `0x555555` — what the advanced lines use
-/// (`ItemStack.java, 927`).
+/// (vanilla's own item-stack tooltip rendering).
 const DARK_GRAY: [f32; 4] = [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0, 1.0];
 /// `ChatFormatting.GRAY`, `0xAAAAAA` — `PotionContents.NO_EFFECT`'s colour
-/// (`Component.translatable("effect.none").withStyle(ChatFormatting.GRAY)`).
+/// (vanilla's own "effect.none" translation, styled gray).
 const GRAY: [f32; 4] = [170.0 / 255.0, 170.0 / 255.0, 170.0 / 255.0, 1.0];
 /// `ChatFormatting.BLUE`, `0x5555FF` — `MobEffectCategory::BENEFICIAL`/`NEUTRAL`'s
 /// tooltip colour, and a positive attribute-modifier line's colour
@@ -274,9 +274,9 @@ fn lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
 /// one crate `creative.rs`'s own potion-colour resolution already establishes is
 /// allowed to import [`lodestone_data`].
 ///
-/// A custom name still wins outright: `ItemStack.getHoverName()` checks
-/// `DataComponents.CUSTOM_NAME` before ever calling `Item.getName`, and
-/// `PotionItem`/`TippedArrowItem` only override the latter.
+/// A custom name still wins outright: vanilla's own get-hover-name accessor checks
+/// `DataComponents.CUSTOM_NAME` before ever calling its own get-name accessor, and
+/// the potion and tipped-arrow items only override the latter.
 ///
 /// Returns the full [`TooltipLine`] rather than a bare `String` so the
 /// [`styled_hover_name_spans`](lodestone_game::item::styled_hover_name_spans)
@@ -437,7 +437,7 @@ fn potency_numeral(amplifier: u8) -> &'static str {
 ///
 /// The book's **title** is not a line here: it is the item's display *name*,
 /// resolved by `lodestone_game::item::styled_hover_name` through vanilla's
-/// `ItemStack.getCustomName()` fallback, so it is already the tooltip's first
+/// own get-custom-name fallback, so it is already the tooltip's first
 /// line via [`title_line`].
 fn book_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
     let Some(content) = stack.written_book_content() else {
@@ -486,7 +486,7 @@ pub(crate) fn book_generation_name(generation: u8) -> &'static str {
 ///
 /// Two clauses, straight from the method:
 ///
-/// 1. `Component.translatable(descriptionId)`, styled `RED` if the enchantment
+/// 1. Vanilla's own translatable-component construction for the description id, styled `RED` if the enchantment
 ///    carries `#minecraft:curse`, `GRAY` otherwise
 ///    ([`lodestone_data::enchantment::is_curse`]).
 /// 2. A numeral suffix (`enchantment.level.<n>`), appended **unless**
@@ -919,7 +919,7 @@ fn draw_bundle_progressbar(b: &mut Builder<'_>, font: &VanillaFont, x: f32, y: f
 ///
 /// `selected` is the shown-item index — [`crate::container::bundle
 /// ::BundleSelection::selected`]'s own index space, which is already the same
-/// one `BundleContents.getSelectedItemIndex()`/`itemVisualOrderIndex` use (both
+/// one vanilla's own get-selected-item-index/item-visual-order-index accessors use (both
 /// range over the *shown* subset, `0` = most recently inserted), so no
 /// remapping happens here.
 #[allow(clippy::too_many_arguments)]
@@ -1061,7 +1061,7 @@ mod tests {
     /// `strong_turtle_master` (two effects, two different double-digit-or-not
     /// amplifiers, a flat-not-percentage-modified effect alongside one that is,
     /// and a duration under a minute). Expected text computed independently from
-    /// `Potions.java`'s own constants (see this crate's `lodestone-data` tests
+    /// vanilla's own potion declarations' own constants (see this crate's `lodestone-data` tests
     /// for the numeric derivation), not from this module's own formatter.
     #[test]
     fn composed_strings_match_the_two_discriminating_potions() {
@@ -1158,8 +1158,8 @@ mod tests {
     }
 
     /// A custom name overrides the composed potion title outright — vanilla's
-    /// `ItemStack.getHoverName()` checks `DataComponents.CUSTOM_NAME` before
-    /// `Item.getName` ever runs, so `PotionItem`/`TippedArrowItem`'s override
+    /// own get-hover-name accessor checks `DataComponents.CUSTOM_NAME` before
+    /// its own get-name accessor ever runs, so the potion/tipped-arrow items' override
     /// never gets a chance. Checked as a differential against
     /// [`lodestone_game::item::styled_hover_name`] directly, and as a negative
     /// against the potion title, rather than duplicating the italic-formatting
@@ -1581,7 +1581,7 @@ mod tests {
             lodestone_game::item::styled_hover_name(&stack, &|_| None),
             "Wandering Notes",
             "a signed book's display name is its own title -- vanilla's \
-             `ItemStack.getCustomName()` falls back to \
+             own get-custom-name accessor falls back to \
              `written_book_content.title` -- not the item's \"Written Book\""
         );
 

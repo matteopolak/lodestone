@@ -68,7 +68,7 @@ pub const RECIPE_PANEL_GAP: f32 = 8.0;
 ///
 /// **This is the crafting *table*'s offset only.** See
 /// [`recipe_toggle_local`] — `getRecipeBookButtonPosition` is `abstract`
-/// (`AbstractRecipeBookScreen.java`, no default) and each of the three
+/// (vanilla's own abstract recipe-book-screen base, no default) and each of the three
 /// screen families overrides it with a *different* answer. Using this one
 /// everywhere is what the owner saw as "the book in my inventory is in the
 /// wrong spot": the player inventory's real offset is 99 px further right and
@@ -159,12 +159,11 @@ pub const RECIPE_GRID_ORIGIN: (f32, f32) = (11.0, 31.0);
 pub const RECIPE_GRID_STEP: f32 = 25.0;
 /// Grid columns (`i % 5`, `:65`).
 pub const RECIPE_GRID_COLS: usize = 5;
-/// Grid rows (`ITEMS_PER_PAGE / COLS`, `:65`, `RecipeBookPage.java`).
+/// Grid rows (`ITEMS_PER_PAGE / COLS`, `:65`, vanilla's own recipe-book-page rendering).
 pub const RECIPE_GRID_ROWS: usize = 4;
-/// `RecipeBookPage.ITEMS_PER_PAGE`.
+/// Vanilla's own recipe-book-page items-per-page constant.
 pub const RECIPE_ITEMS_PER_PAGE: usize = RECIPE_GRID_COLS * RECIPE_GRID_ROWS;
-/// `RecipeButton`'s own size (ctor `super(0, 0, 25, 25, ...)`,
-/// `RecipeButton.java`).
+/// Vanilla's own recipe-button widget's own size (ctor `super(0, 0, 25, 25, ...)`).
 pub const RECIPE_BUTTON_SIZE: f32 = 25.0;
 
 /// Page-forward arrow — `ImageButton(xo + 93, yo + 137, 12, 17, ...)`.
@@ -311,10 +310,10 @@ fn icon(path: &str) -> ItemStack {
 ///
 /// | book | declared in | tabs |
 /// |---|---|---|
-/// | Crafting | `CraftingRecipeBookComponent.java` | `bricks`, `redstone`, `iron_axe + golden_sword`, `lava_bucket + apple` |
-/// | Furnace | `FurnaceScreen.java` | `porkchop`, `stone`, `lava_bucket + emerald` |
-/// | BlastFurnace | `BlastFurnaceScreen.java` | `redstone_ore`, `iron_shovel + golden_leggings` |
-/// | Smoker | `SmokerScreen.java` | `porkchop` |
+/// | Crafting | vanilla's own crafting recipe-book component | `bricks`, `redstone`, `iron_axe + golden_sword`, `lava_bucket + apple` |
+/// | Furnace | vanilla's own furnace-screen rendering | `porkchop`, `stone`, `lava_bucket + emerald` |
+/// | BlastFurnace | vanilla's own blast-furnace-screen rendering | `redstone_ore`, `iron_shovel + golden_leggings` |
+/// | Smoker | vanilla's own smoker-screen rendering | `porkchop` |
 ///
 /// Vanilla's leading `TabInfo(SearchRecipeBookCategory)` — the `compass` "all"
 /// tab — has no counterpart here: this client models "all categories" as
@@ -592,7 +591,7 @@ pub fn recipe_book_panel_contents<'a>(
 }
 
 /// [`recipe_book_panel_contents`] with vanilla's **Craftable** filter applied —
-/// `RecipeBookComponent.java`'s `filtering` state, which hides every recipe the
+/// vanilla's own recipe-book component's `filtering` state, which hides every recipe the
 /// player cannot currently make.
 ///
 /// `craftable` is injected rather than computed here for the same reason the
@@ -643,7 +642,7 @@ pub fn recipe_book_panel_contents_filtered<'a>(
 /// art needed no new atlas, no new pipeline and no new bind group. This module
 /// only had to name the ids and say where they go.
 ///
-/// The panel sheet is the exception: `RecipeBookComponent.java` declares it
+/// The panel sheet is the exception: vanilla's own recipe-book component declares it
 /// as a raw texture path and `:305` blits a sub-rect of it, so it is registered
 /// as a loose extra — see
 /// [`crate::resources::RECIPE_BOOK_TEXTURES`].
@@ -654,14 +653,14 @@ pub const RECIPE_SPRITE_BUTTON: &str = "recipe_book/button";
 /// An unselected category tab — `RecipeBookTabButton.SPRITES`
 ///, 35×27.
 pub const RECIPE_SPRITE_TAB: &str = "recipe_book/tab";
-/// A selected category tab. Note `RecipeBookTabButton.java` reads
+/// A selected category tab. Note vanilla's own recipe-book-tab-button widget reads
 /// `sprites.get(true, this.selected)` — the second argument is **selected**,
 /// not hovered, so this is the selected art and hover has none of its own.
 pub const RECIPE_SPRITE_TAB_SELECTED: &str = "recipe_book/tab_selected";
 /// The filter cycle-button in its **not-filtering** state, 26×16 —
-/// `CraftingRecipeBookComponent.java`. `filter_disabled` is the "All"
+/// vanilla's own crafting recipe-book component. `filter_disabled` is the "All"
 /// state (`getFilterButtonTextures().get(filtering, hovered)` with
-/// `filtering == false`, `RecipeBookComponent.java`).
+/// `filtering == false`, vanilla's own recipe-book component).
 ///
 /// Both states are now real: [`RECIPE_SPRITE_FILTER_ENABLED`] is the other
 /// half, picked by [`RecipeBookPanelLayout::filtering`]. This doc used to say
@@ -670,20 +669,20 @@ pub const RECIPE_SPRITE_TAB_SELECTED: &str = "recipe_book/tab_selected";
 /// `SessionRecipeBookSettings` island).
 pub const RECIPE_SPRITE_FILTER: &str = "recipe_book/filter_disabled";
 /// The same cycle-button in its **Craftable** state —
-/// `getFilterButtonTextures().get(true, false)`, `RecipeBookComponent.java`.
+/// `getFilterButtonTextures().get(true, false)`, vanilla's own recipe-book component.
 /// A distinct `gui/sprites/recipe_book/**` entry, so it is already stitched
 /// into [`GuiAtlas`](lodestone_render::GuiAtlas) exactly like its sibling and
 /// needed no new atlas entry.
 pub const RECIPE_SPRITE_FILTER_ENABLED: &str = "recipe_book/filter_enabled";
-/// The furnace family's own filter art — `FurnaceRecipeBookComponent.java`.
+/// The furnace family's own filter art — vanilla's own furnace recipe-book component.
 /// A genuinely different sheet, not a tint of the crafting one.
 pub const RECIPE_SPRITE_FILTER_FURNACE: &str = "recipe_book/furnace_filter_disabled";
-/// The page-forward arrow, 12×17 — `RecipeBookPage.java`.
+/// The page-forward arrow, 12×17 — vanilla's own recipe-book-page rendering.
 pub const RECIPE_SPRITE_PAGE_FORWARD: &str = "recipe_book/page_forward";
-/// The page-back arrow, 12×17 — `RecipeBookPage.java`. Note vanilla's
+/// The page-back arrow, 12×17 — vanilla's own recipe-book-page rendering. Note vanilla's
 /// file is spelled `page_backward`, not `page_back`.
 pub const RECIPE_SPRITE_PAGE_BACK: &str = "recipe_book/page_backward";
-/// A populated recipe cell's frame, 25×25 — `RecipeButton.java`.
+/// A populated recipe cell's frame, 25×25 — vanilla's own recipe-button widget.
 ///
 /// Vanilla picks between four of these from `StackedItemContents`
 /// (craftable/uncraftable × single/many). Craftability is not modelled here, so
@@ -692,7 +691,7 @@ pub const RECIPE_SPRITE_PAGE_BACK: &str = "recipe_book/page_backward";
 /// greyed-out would be the more misleading of the two.
 pub const RECIPE_SPRITE_SLOT: &str = "recipe_book/slot_craftable";
 
-/// The `147×166` window `RecipeBookComponent.java` samples out of the
+/// The `147×166` window vanilla's own recipe-book component samples out of the
 /// `256×256` panel sheet: `blit(..., xo, yo, 1.0F, 1.0F, 147, 166, 256, 256)`,
 /// i.e. `u = v = 1`. The one-pixel inset is real — the sheet's opaque region is
 /// exactly `x 1..147, y 1..166`, verified by decoding the PNG, so sampling from
@@ -714,7 +713,7 @@ pub const RECIPE_PANEL_SRC: [f32; 4] = [1.0, 1.0, RECIPE_PANEL_W, RECIPE_PANEL_H
 pub const RECIPE_PANEL_DECLARED: (f32, f32) = (256.0, 256.0);
 
 /// Vanilla's 2 px leftward nudge on the **selected** tab's blit —
-/// `RecipeBookTabButton.java`. It shifts only the drawn art; the widget's
+/// vanilla's own recipe-book-tab-button widget. It shifts only the drawn art; the widget's
 /// own rect (and so its hit region) does not move, which is why
 /// [`RecipeBookPanelLayout::tabs`] is unaffected and this offset lives here
 /// rather than in the layout.
@@ -840,17 +839,17 @@ const SEARCH_TEXT_INSET: f32 = 4.0;
 /// not the `9` line *pitch* the caret height uses, and the two are different
 /// numbers in the same expression pair in vanilla too.
 const SEARCH_GLYPH_H: f32 = 8.0;
-/// `EditBox.setTextColor(-1)` — opaque white.
+/// Vanilla's own edit-box's set-text-color call with `-1` — opaque white.
 const SEARCH_TEXT_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-/// `EditBox.SEARCH_HINT_STYLE`'s `ChatFormatting.GRAY`,
+/// Vanilla's own search-hint style's `ChatFormatting.GRAY`,
 /// which is `0xAAAAAA`.
 const SEARCH_HINT_COLOUR: [f32; 4] = [0.666_666_7, 0.666_666_7, 0.666_666_7, 1.0];
-/// `RecipeBookComponent.SEARCH_HINT`'s `gui.recipebook.search_hint`, whose
+/// Vanilla's own recipe-book component's search-hint translation key, whose
 /// `en_us` value is `"Search..."`.
 const SEARCH_HINT: &str = "Search...";
 
 /// Vanilla's own icon inset within a `RecipeButton` — `offset = 4`
-/// (`RecipeButton.java`, the non-multi-recipe branch — the "stack two
+/// (vanilla's own recipe-button widget, the non-multi-recipe branch — the "stack two
 /// icons" `offset` dance for a multi-recipe button is not modelled, see the
 /// module doc's other documented simplifications).
 const RECIPE_ICON_INSET: f32 = 4.0;
@@ -907,11 +906,12 @@ pub fn recipe_book_panel_geometry(
 /// What the panel needs in order to draw a **hover tooltip** over the recipe
 /// button under the pointer.
 ///
-/// Vanilla really does show one: `RecipeBookComponent.extractTooltip` forwards to
-/// `RecipeBookPage.extractTooltip`, which — while a screen is up and the
+/// Vanilla really does show one: vanilla's own recipe-book component's tooltip
+/// extraction forwards to
+/// its own recipe-book-page tooltip extraction, which — while a screen is up and the
 /// ghost-recipe overlay is not visible — sets a component tooltip built by
-/// `RecipeButton.getTooltipText` for the hovered button. That method is
-/// `Screen.getTooltipFromItem(displayStack)`, i.e. exactly the lines an inventory
+/// its own recipe-button widget's get-tooltip-text for the hovered button. That method is
+/// vanilla's own get-tooltip-from-item helper, i.e. exactly the lines an inventory
 /// slot holding the same stack would show, which is why this reuses
 /// [`super::tooltip::emit_tooltip_for_stack`] rather than growing a second
 /// tooltip builder.
@@ -1065,7 +1065,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
     for (i, r) in layout.tabs.iter().enumerate() {
         let selected = selected_tab == Some(i);
         let id = if selected { RECIPE_SPRITE_TAB_SELECTED } else { RECIPE_SPRITE_TAB };
-        // `RecipeBookTabButton.java` nudges the *blit* of a selected tab
+        // Vanilla's own recipe-book-tab-button widget nudges the *blit* of a selected tab
         // 2 px left while leaving the widget's rect alone, so the drawn art and
         // the hit region legitimately disagree by 2 px — vanilla's own
         // behaviour, not a transcription slip.
@@ -1081,7 +1081,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
     }
 
     // A slot frame for **populated cells only** — vanilla hides an unused
-    // `RecipeButton` outright (`RecipeBookPage.java`'s own visibility pass), and
+    // recipe-button widget outright (vanilla's own recipe-book-page's own visibility pass), and
     // an empty cell therefore shows the bare page. Verified by decoding
     // `recipe_book.png`: the whole grid region of the sheet is uniform opaque
     // white with no slot frames baked in, so emitting all 20 would draw a grid
@@ -1198,7 +1198,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
     // shows the cursor instead, which is how a player can tell typing will land
     // here. Italic is not modelled — this font has no italic variant, and a
     // fabricated slant would be worse than upright grey.
-    // The `x / y` readout between the two arrows — `RecipeBookPage.java`,
+    // The `x / y` readout between the two arrows — vanilla's own recipe-book-page rendering,
     // which the panel had nothing for at all ("the page numbers are missing in
     // between the arrows"). Gated on `total_pages > 1` exactly as vanilla is, so a
     // single-page result shows bare page rather than a pointless "1 / 1".
@@ -1228,8 +1228,8 @@ pub(super) fn recipe_book_panel_geometry_inner(
         } else {
             b.shadowed_label(&layout.search, tx, ty, 1.0, SEARCH_TEXT_COLOUR);
             if layout.search_focused {
-                // `TextCursorUtils.extractInsertCursor(graphics, cursorX, textY,
-                // color, 9 + 1)` — a 1 px caret one glyph
+                // Vanilla's own text-cursor-utility insert-cursor extraction
+                // (`cursorX, textY, color, 9 + 1`) — a 1 px caret one glyph
                 // line tall, at the end of the value because this client has no
                 // cursor position within it.
                 let cx = tx + b.font.map_or(0.0, |f| f.width(&layout.search, 1.0));
