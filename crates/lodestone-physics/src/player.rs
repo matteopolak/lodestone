@@ -2752,27 +2752,29 @@ pub fn apply_firework_boost(state: &mut PlayerState) {
     ));
 }
 
-/// `AABB.collidedAlongVector` (`AABB.java:401-417`), specialised to one unit
+/// Vanilla's own box-collided-along-vector check, specialised to one unit
 /// cell and to a **boolean** result: vanilla returns the hit point
 /// (`Optional<Vec3>`), but every caller here only ever asks "did it collide" —
-/// `Entity.collidedWithShapeMovingFrom` immediately reduces it to
-/// `.isPresent()`-shaped logic, and that is the only vanilla caller relevant to
-/// the blocks this module's swept scan cares about (every stuck-multiplier and
-/// powder-snow cell presents `Shapes.block()` to `getEntityInsideCollisionShape`,
-/// so `insideBlock` reduces to exactly this segment test).
+/// vanilla's own "collided with shape moving from" check immediately reduces
+/// it to `.isPresent()`-shaped logic, and that is the only vanilla caller
+/// relevant to the blocks this module's swept scan cares about (every
+/// stuck-multiplier and powder-snow cell presents a solid-block shape to
+/// vanilla's own "get entity-inside collision shape" query, so `insideBlock`
+/// reduces to exactly this segment test).
 ///
 /// `from`/`to` are the entity's **box centres** at the start and end of the
-/// move — equal to `AABB.collidedAlongVector`'s own `this.getCenter()` /
-/// `from.add(vector)`, since `vector = to_pos - from_pos` and the box is rigidly
-/// attached to the entity position, so translating the centre by the position
-/// delta is the same point as the centre of a box built at the new position.
-/// `half` is the entity's own half-extents (`getXsize() * 0.5` etc.).
+/// move — equal to vanilla's own box-collided-along-vector's own
+/// `this.getCenter()` / `from.add(vector)`, since `vector = to_pos - from_pos`
+/// and the box is rigidly attached to the entity position, so translating
+/// the centre by the position delta is the same point as the centre of a
+/// box built at the new position. `half` is the entity's own half-extents
+/// (`getXsize() * 0.5` etc.).
 ///
-/// Implemented as the standard box-slab test rather than porting
-/// `AABB.getDirection`'s face-by-face walk: the two compute the same boolean
-/// (intersect / no-intersect) over the same inflated box, and no caller here
-/// reads *which* face or *where* the hit point was — the one thing
-/// `getDirection` computes that this does not.
+/// Implemented as the standard box-slab test rather than porting vanilla's
+/// own face-by-face walk: the two compute the same boolean (intersect /
+/// no-intersect) over the same inflated box, and no caller here reads
+/// *which* face or *where* the hit point was — the one thing vanilla's own
+/// walk computes that this does not.
 fn segment_hits_cell(from: Vec3d, to: Vec3d, half: Vec3d, x: i32, y: i32, z: i32) -> bool {
     // `inflate(size * 0.5 - 1.0E-7)`.
     const EPS: f64 = 1.0e-7;
@@ -2816,13 +2818,14 @@ fn segment_hits_cell(from: Vec3d, to: Vec3d, half: Vec3d, x: i32, y: i32, z: i32
     true
 }
 
-/// Enumerates the cells `Entity.checkInsideBlocks(from, to, …)` visits, for
-/// every consumer of that one vanilla sweep in this module
+/// Enumerates the cells vanilla's own "check inside blocks" sweep visits,
+/// for every consumer of that one vanilla sweep in this module
 /// ([`update_stuck_multiplier`], [`update_freezing`]).
 ///
-/// Vanilla walks a 3D DDA from `from` to `to` (`BlockGetter.forEachBlockIntersectedBetween`,
-/// capped at 16 iterations) and tests each visited cell with
-/// [`segment_hits_cell`]-equivalent logic. Porting the DDA itself buys nothing a
+/// Vanilla walks a 3D DDA from `from` to `to` (its own "for each block
+/// intersected between" walk, capped at 16 iterations) and tests each
+/// visited cell with [`segment_hits_cell`]-equivalent logic. Porting the DDA
+/// itself buys nothing a
 /// caller here needs — every block these two functions ask about
 /// (`stuck_multiplier`, `is_powder_snow`) is a single-cell yes/no answer, order-
 /// independent for the uniform volumes they occupy (see
@@ -2876,11 +2879,12 @@ fn for_each_swept_cell(old_bb: Aabb, new_bb: Aabb, mut f: impl FnMut(i32, i32, i
     }
 }
 
-/// `Entity.checkInsideBlocks` → `Block.entityInside` → `makeStuckInBlock`: after
-/// the tick's movement, record the stuck-speed multiplier of whatever block the
-/// swept movement segment intersects, for the *next* move to consume. This is
-/// what produces the observable one-tick lag between entering a cobweb and being
-/// grabbed by it.
+/// Vanilla's own "check inside blocks" sweep → per-block "entity inside"
+/// effect → "make stuck in block": after the tick's movement, record the
+/// stuck-speed multiplier of whatever block the swept movement segment
+/// intersects, for the *next* move to consume. This is what produces the
+/// observable one-tick lag between entering a cobweb and being grabbed by
+/// it.
 ///
 /// **Sweeps the segment, via [`for_each_swept_cell`], rather than sampling only
 /// the final resting position.** #216: the old version floored/ceiled the
@@ -2907,22 +2911,20 @@ fn update_stuck_multiplier(
             found = m;
         }
     });
-    // `Entity.makeStuckInBlock`: `resetFallDistance(); this.stuckSpeedMultiplier =
-    // speedMultiplier;` (`Entity.java:2945-2947`) — the reset rides along with
-    // every call that finds a stuck-triggering block (cobweb, powder snow, sweet
-    // berry bush, honey), which is every tick `Block.entityInside` sees one, not
-    // just the first.
+    // Vanilla's own "make stuck in block": `resetFallDistance();
+    // this.stuckSpeedMultiplier = speedMultiplier;` — the reset rides along
+    // with every call that finds a stuck-triggering block (cobweb, powder
+    // snow, sweet berry bush, honey), which is every tick vanilla's own
+    // per-block "entity inside" effect sees one, not just the first.
     if found != Vec3d::ZERO {
         state.fall_distance = 0.0;
     }
     state.stuck_speed_multiplier = found;
 }
 
-/// Issue #212. `LivingEntity.aiStep`'s freezing block (`LivingEntity.java:3139-3151`)
-/// plus the increment half of `InsideBlockEffectType.FREEZE`
-/// (`InsideBlockEffectType.java:6-11`, reached from
-/// `PowderSnowBlock.entityInside`, `PowderSnowBlock.java:63-83`, via the same
-/// `checkInsideBlocks` sweep [`update_stuck_multiplier`] models):
+/// Issue #212. Vanilla's own per-tick freezing block plus the increment
+/// half of its powder-snow "entity inside" freeze effect, reached via the
+/// same "check inside blocks" sweep [`update_stuck_multiplier`] models:
 ///
 /// ```text
 /// FREEZE effect, applied once per tick the swept segment finds powder snow:
@@ -2938,15 +2940,14 @@ fn update_stuck_multiplier(
 /// and consumed in the same call, which is equivalent since nothing else reads
 /// it between the two vanilla call sites.
 ///
-/// `canFreeze()` is `!is(EntityTypeTags.FREEZE_IMMUNE_ENTITY_TYPES)`
-/// (`Entity.java:3886-3888`); the player entity type is never a member (only
-/// certain mobs — striders, blazes, snow golems and others — are), so it is
-/// unconditionally `true` for every [`PlayerState`] and not modelled as a
-/// field.
+/// `canFreeze()` is vanilla's own "not tagged freeze-immune" check; the
+/// player entity type is never a member (only certain mobs — striders,
+/// blazes, snow golems and others — are), so it is unconditionally `true`
+/// for every [`PlayerState`] and not modelled as a field.
 ///
 /// **What this does not do: apply freeze damage.** Vanilla's own trigger,
-/// `tickCount % 40 == 0 && isFullyFrozen() && canFreeze()`
-/// (`LivingEntity.java:3147-3149`), needs an absolute server tick count this
+/// `tickCount % 40 == 0 && isFullyFrozen() && canFreeze()`, needs an
+/// absolute server tick count this
 /// crate has no notion of — every other timer here is a countdown
 /// ([`PlayerState::no_jump_delay`], [`PlayerState::fall_distance`]'s resets),
 /// never a count against a global clock, and this crate applies no damage
@@ -2975,14 +2976,14 @@ fn update_freezing(
     };
 }
 
-/// `BubbleColumnBlock.entityInside` → `Entity.onInsideBubbleColumn` /
-/// `onAboveBubbleColumn` (`Entity.java:2851-2898`) — the soul-sand lift and the
-/// magma-block drain. Issue #199.
+/// Vanilla's own bubble-column block-inside effect → its own inside/above
+/// bubble-column impulses — the soul-sand lift and the magma-block drain.
+/// Issue #199.
 ///
 /// # The four constants, and the branch that picks between them
 ///
-/// Vanilla decides *capped or not* per cell, in `BubbleColumnBlock.entityInside`
-/// (`BubbleColumnBlock.java:56-64`): the cell **above** this one is inspected, and
+/// Vanilla decides *capped or not* per cell, in its own bubble-column
+/// block-inside effect: the cell **above** this one is inspected, and
 /// if its collision shape is empty **and** its fluid state is empty — i.e. it is
 /// open air — the entity is "above" the column and gets the stronger, surface-
 /// launch pair. Anything else (more column, water, a solid lid) is the "inside"
@@ -2993,8 +2994,9 @@ fn update_freezing(
 /// | inside | `min(0.7, vy + 0.06)` | `max(-0.3, vy - 0.03)` |
 /// | above (air over the cell) | `min(1.8, vy + 0.1)` | `max(-0.9, vy - 0.03)` |
 ///
-/// All four are `double` arithmetic on `Vec3.y` against `double` literals, so
-/// there is no `f32` narrowing anywhere in this function.
+/// All four are `double` arithmetic on the vector's Y component against
+/// `double` literals, so there is no `f32` narrowing anywhere in this
+/// function.
 ///
 /// Note the asymmetry in the drag-down column: the **step** is `-0.03` in both
 /// rows and only the *clamp* differs (`-0.3` inside, `-0.9` above). It is the
@@ -3004,8 +3006,9 @@ fn update_freezing(
 ///
 /// # One impulse *per cell*, not per tick
 ///
-/// This is the part that surprises. `Entity.checkInsideBlocks` visits every block
-/// the movement intersects, dedupes by *position* (`visitedBlocks`), and calls
+/// This is the part that surprises. Vanilla's own "check inside blocks"
+/// sweep visits every block the movement intersects, dedupes by *position*
+/// (`visitedBlocks`), and calls
 /// `entityInside` on each — and `BubbleColumnBlock` applies its impulse
 /// **immediately**, inside that callback, rather than deferring it to the
 /// `InsideBlockEffectApplier` the way fire and freezing do. So a standing player
