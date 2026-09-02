@@ -22,8 +22,8 @@
 //! calls [`crate::rcon::run_console_command`], which is
 //! [`crate::rcon::run_command_as`] under identity `"Server"` at permission
 //! level 4 — vanilla's own dedicated-server console identity
-//! (`MinecraftServer` itself as a `CommandSource`, `Commands.LEVEL_OWNERS`),
-//! distinct from RCON's `"Rcon"`.
+//! (the server itself acting as a command source, at the owners' permission
+//! level), distinct from RCON's `"Rcon"`.
 //!
 //! ## How to change it
 //!

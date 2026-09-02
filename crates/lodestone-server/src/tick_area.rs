@@ -264,7 +264,7 @@ impl FollowArea {
         &self.chunks
     }
 
-    /// The column count, as vanilla's `spawnableChunkCount` for the spawn-cap
+    /// The column count, as vanilla's own spawnable-chunk-count for the spawn-cap
     /// formula.
     ///
     /// Worth reading as a *behavioural* quantity rather than a size: the caps are
