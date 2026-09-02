@@ -1,9 +1,9 @@
 //! Client-side geometry for the spinning miniature mob inside a mob spawner
 //! or trial spawner cage.
 //!
-//! `SpawnerRenderer`/`TrialSpawnerRenderer` share this exactly —
-//! `TrialSpawnerRenderer.extractSpawnerData` calls
-//! `SpawnerRenderer.submitEntityInSpawner` directly, so one module covers
+//! Vanilla's own regular and trial spawner renderers share this exactly —
+//! the trial spawner renderer's own spawner-data-extraction function calls
+//! the plain spawner renderer's own entity-submit function directly, so one module covers
 //! both registrations. Both block types have **real block-model geometry for
 //! the cage itself**: `models/block/spawner.json` is a plain
 //! `cube_all_inner_faces`, and `trial_spawner.json` is
@@ -15,18 +15,13 @@
 //!
 //! # Placement is a *nested* composition, not one matrix
 //!
-//! Vanilla's `SpawnerRenderer.submitEntityInSpawner`:
-//!
-//! ```text
-//! poseStack.translate(0.5, 0.4, 0.5);
-//! poseStack.mulPose(Axis.YP.rotationDegrees(spin));
-//! poseStack.translate(0.0, -0.2, 0.0);
-//! poseStack.mulPose(Axis.XP.rotationDegrees(-30.0));
-//! poseStack.scale(scale, scale, scale);
-//! entityRenderer.submit(displayEntity, camera, 0.0, 0.0, 0.0, poseStack, submitNodeCollector);
-//! ```
-//!
-//! hands that pose stack to `EntityRenderDispatcher.submit`, which then
+//! Vanilla's own spawner renderer's entity-submit function builds its pose
+//! stack with five ordered operations before dispatching to the display
+//! entity's own renderer: translate by `(0.5, 0.4, 0.5)`; rotate about world
+//! `+Y` by `spin` degrees; translate by `(0, -0.2, 0)`; rotate about world
+//! `+X` by `-30` degrees; and scale uniformly by `scale`. It then
+//! hands that pose stack to vanilla's own entity-render-dispatcher's submit
+//! function, which then
 //! dispatches to the display entity's *own* renderer — the ordinary mob
 //! render path, with its own flip/lift/yaw — at zero further translation.
 //! So [`spawner_display_outer_matrix`] is the **outer** chain only; the
@@ -45,11 +40,12 @@
 //!
 //! # No packet, and no cuboid rig
 //!
-//! Like the beacon beam, nothing here is on the wire: `spin`/`oSpin` are a
-//! client-side accumulator (`BaseSpawner.clientTick`,
+//! Like the beacon beam, nothing here is on the wire: the current and
+//! previous-tick spin angles are a
+//! client-side accumulator (vanilla's own base-spawner client-tick function,
 //! ported as [`crate::block_entities::SpawnerSpins`][spins] in the shell
 //! crate) and the display entity's *type* comes from the block entity's own
-//! `SpawnData`/`SpawnPotentials` NBT, already resolved to a plain type-path
+//! spawn-data/spawn-potentials NBT, already resolved to a plain type-path
 //! string before it reaches this module. Unlike the beacon, the geometry
 //! itself is not procedural — it is the ordinary mob corpus
 //! [`crate::EntityModelSet`] already bakes, at a shrunk, tilted, spinning
@@ -59,7 +55,7 @@
 
 use glam::{Mat4, Vec3};
 
-/// `SpawnerRenderer.submitEntityInSpawner`'s outer pose-stack chain,
+/// Vanilla's own spawner renderer's entity-submit function's outer pose-stack chain,
 /// block-relative — the caller composes this with the block's own world
 /// translation and with the display entity's ordinary placement matrix (see
 /// the module doc).
@@ -72,17 +68,13 @@ pub fn spawner_display_outer_matrix(spin_deg: f32, scale: f32) -> Mat4 {
         * Mat4::from_scale(Vec3::splat(scale))
 }
 
-/// `SpawnerRenderer`/`TrialSpawnerRenderer.extractSpawnerData`'s scale term:
+/// Vanilla's own spawner-data-extraction function's scale term:
 /// vanilla's fixed `0.53125`, halved further (divided by the larger side)
 /// once the display entity's own hitbox exceeds one block in width or
 /// height — the clause that keeps a large mob's miniature from overflowing
-/// the cage.
-///
-/// ```text
-/// state.scale = 0.53125F;
-/// float maxLength = Math.max(displayEntity.getBbWidth(), displayEntity.getBbHeight());
-/// if (maxLength > 1.0) { state.scale /= maxLength; }
-/// ```
+/// the cage. Vanilla starts the scale at `0.53125`, takes the larger of the
+/// display entity's own bounding-box width and height, and — only when that
+/// larger side exceeds one block — divides the scale by it.
 #[must_use]
 pub fn spawner_display_scale(bb_width: f32, bb_height: f32) -> f32 {
     const BASE: f32 = 0.531_25;
@@ -90,11 +82,12 @@ pub fn spawner_display_scale(bb_width: f32, bb_height: f32) -> f32 {
     if max_len > 1.0 { BASE / max_len } else { BASE }
 }
 
-/// `SpawnerRenderState.spin`: `Mth.lerp(partialTick, oSpin, spin) * 10.0`.
+/// Vanilla's own spawner render-state's spin field: a plain lerp between the
+/// previous and current spin, times `10.0`.
 ///
-/// Plain lerp, not the shortest-arc `Mth.rotLerp` a wrapping angle usually
+/// Plain lerp, not the shortest-arc lerp a wrapping angle usually
 /// wants — vanilla's own choice, and correct here because
-/// `BaseSpawner.clientTick` only ever moves `spin` by a handful of degrees a
+/// vanilla's own base-spawner client-tick function only ever moves `spin` by a handful of degrees a
 /// tick (`1000 / (spawnDelay + 200)`, at most `5`), never enough to cross the
 /// `0`/`360` wrap within a single tick's interpolation.
 #[must_use]
@@ -115,7 +108,7 @@ pub struct SpawnerMobSpawn {
     pub pos: [i32; 3],
     /// The entity type to draw, e.g. `"minecraft:zombie"` —
     /// [`crate::EntityModelSet::resolve_at`]'s `type_path`, already resolved
-    /// from the block entity's `SpawnData`/`SpawnPotentials` NBT. This
+    /// from the block entity's spawn-data/spawn-potentials NBT. This
     /// module has no NBT dependency of its own.
     pub entity_type: String,
     /// Interpolated spin, in degrees — [`spawner_spin_degrees`]'s output.
