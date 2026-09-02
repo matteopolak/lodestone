@@ -729,26 +729,27 @@ fn the_footer_buttons_are_present_and_three_are_inactive_with_no_selection() {
     );
 }
 
-/// Vanilla's own rects for `JoinMultiplayerScreen` at 854×480, hand-derived
-/// from the Java rather than read back out of the layout — `CLAUDE.md`'s rule
+/// Vanilla's own rects for its own join-multiplayer screen at 854×480, hand-derived
+/// from vanilla's own source rather than read back out of the layout — `CLAUDE.md`'s rule
 /// that an expected value must originate outside the code under test.
 ///
 /// The derivation, which is what a future reader has to be able to check:
 ///
-/// - `HeaderAndFooterLayout(this, 33, 60)`, so `getContentHeight()` is
+/// - Vanilla's own header-and-footer layout, built with a 33 px header and 60 px
+///   footer, so its own content-height accessor is
 ///   `480 - 33 - 60` = **387**, and the list is sized to exactly that
 ///   (`:61-62`). The content clamp is then `min(33 + 30, 480 - 60 - 387)` =
 ///   `min(63, 33)` = **33** — flush under the header, because the content
 ///   fills the band.
-/// - `getFirstEntryY()` is `getY() + 2` = **35**, and rows stack by
+/// - Vanilla's own first-entry-y accessor is its own y accessor plus 2 = **35**, and rows stack by
 ///   `itemHeight` 36 with no gap.
-/// - `getRowLeft()` is `0 + 854/2 - 305/2` = `427 - 152` = **275**. Note the
+/// - Vanilla's own row-left accessor is `0 + 854/2 - 305/2` = `427 - 152` = **275**. Note the
 ///   two halvings are separate integer divisions; `(854 - 305) / 2` is 274.
-/// - `CONTENT_PADDING` insets the entry by 2 a side, so content is
+/// - Vanilla's own content-padding constant insets the entry by 2 a side, so content is
 ///   `(277, 37, 301, 32)` and the 32 is exactly the favicon's height.
-/// - `statusIconX = getContentRight() - 10 - 5` = `578 - 15` = **563**, at
-///   `getContentY()` = 37 — the status icon is *not* vertically centred.
-/// - The title is a 9 px `StringWidget` centred in the 854×33 header frame:
+/// - Its own status-icon x is its own content-right accessor minus 15 = `578 - 15` = **563**, at
+///   its own content-y accessor = 37 — the status icon is *not* vertically centred.
+/// - The title is a 9 px vanilla-own string-label widget centred in the 854×33 header frame:
 ///   `round((33 - 9) / 2)` = **12** from the top, on `width / 2`.
 /// - The footer column is `3*100 + 2*4` = 308 wide on its top row and
 ///   `4*74 + 3*4` = 308 on its lower one — they match, which is why the
@@ -827,7 +828,7 @@ fn the_server_list_rects_are_vanillas_own() {
         "a one-notch offset moves the row by 18 px — the value a row index \
          could not represent"
     );
-    // `getRowLeft()` is not `(width - rowWidth) / 2`, and the difference shows
+    // Vanilla's own row-left accessor is not `(width - rowWidth) / 2`, and the difference shows
     // at an odd canvas: 855/2 = 427 either way here, 856 is where they split.
     assert_eq!(server_row_left(856.0), 276.0, "floor(856/2) - 152");
     assert_eq!(
@@ -852,7 +853,7 @@ fn the_server_list_rects_are_vanillas_own() {
 /// This is what stands between the screen and being correct at 854×480 and
 /// wrong everywhere else. It holds because the footer column measures 308 at
 /// any width and the content band always starts at the header height (the list
-/// is sized to `getContentHeight()`, so the clamp always picks it).
+/// is sized to vanilla's own content-height accessor, so the clamp always picks it).
 ///
 /// **Even widths only, and that is a real limit rather than a convenient
 /// choice.** `Origin::ScreenBottom`'s x is `width * 0.5` unrounded, while
@@ -1173,8 +1174,8 @@ fn the_who_is_online_tooltip_escapes_the_band_clip() {
     let (icon_x, ..) = server_status_icon_rect(0, V_W, 0.0);
     let (_, cy, ..) = server_row_content_rect(0, V_W, 0.0);
     let status_x = icon_x - text_px("5/20", 1.0) - SERVER_ENTRY_SPACING;
-    // The top of the status text box (`mouseY == getContentY()` is inclusive in
-    // vanilla), the highest this row can push the tooltip.
+    // The top of the status text box (mouse-y equal to vanilla's own
+    // content-y accessor is inclusive in vanilla), the highest this row can push the tooltip.
     f.cursor = Some((status_x + 12.0, cy));
     let got = colour_bounds(&geometry(&f, V_W, V_H), V_W, V_H, TOOLTIP_BG)
         .expect("the tooltip must draw");
@@ -2987,7 +2988,7 @@ fn one_notch_on_the_accounts_list_is_half_a_row_through_the_generic_router() {
     assert_eq!(
         nav.accounts().scroll(),
         content - band,
-        "the clamp must be maxScrollAmount() = contentHeight() - height"
+        "the clamp must be vanilla's own max-scroll-amount accessor = its own content-height accessor - height"
     );
 
     // Scrolling up past the top clamps at zero rather than going negative.
@@ -3043,7 +3044,8 @@ fn the_wheel_router_declines_a_screen_with_no_list() {
 /// - the thumb's rect carries `LABEL`, the colour `draw_scrollbar` gives the scroller
 /// - the 8 px gutter between the rows' right edge and the bar carries nothing **but
 ///   the band's own tint**, which is what pins the bar *outside* the row column
-///   (`scrollBarX() = getRowRight() + scrollbarWidth() + 2`) rather than inset into it
+///   (vanilla's own scroll-bar-x accessor equals its own row-right accessor plus its
+///   own scrollbar-width accessor plus 2) rather than inset into it
 /// - a list short enough not to scroll draws **no bar at all** — vanilla's
 ///   `if (this.scrollable())` gate, and the control that stops the two assertions
 ///   above passing on a bar that is unconditionally painted
@@ -3085,8 +3087,8 @@ fn the_accounts_screen_draws_the_same_scrollbar_the_server_list_does() {
     // **Re-derived when the band chrome landed**, and the old form is worth recording
     // because it was correct and is now the wrong question. This asserted
     // `coverage(...) == 0` — nothing at all in the gutter — which held only because the
-    // band had no background: `extractListBackground` blits `menu_list_background.png`
-    // across the list widget's own `getX()..getRight()`, and that is the whole canvas,
+    // band had no background: vanilla's own list-background extraction blits `menu_list_background.png`
+    // across the list widget's own x-through-right span, and that is the whole canvas,
     // so the gutter is *inside* the tint by vanilla's own construction. Asserting
     // emptiness again would mean asserting the tint away.
     //
@@ -3209,8 +3211,8 @@ fn an_account_row_straddling_the_band_is_clipped_not_drawn_over_the_footer() {
     // from — rather than being restated as a constant.
     //
     // **The strip now starts `SEPARATOR_H` below the band, and that is a re-derivation
-    // rather than a loosening.** `extractListSeparators` blits `footer_separator.png`
-    // — 32×2 — at exactly `getBottom()`, so the first two rows of this strip belong to
+    // rather than a loosening.** Vanilla's own list-separator extraction blits `footer_separator.png`
+    // — 32×2 — at exactly its own bottom accessor, so the first two rows of this strip belong to
     // the separator by vanilla's own construction, and the old bound of `band_bottom`
     // asserted them away. It read 0.083 covered when the chrome landed, which is 2 of
     // the 24 sample rows: the bar, not a row. The clip under test is unchanged.
@@ -3489,7 +3491,7 @@ fn resource_pack_prompt_overlay_frame_is_dim_and_blurred_in_world_and_untouched_
     );
     assert!(
         in_frame.blur,
-        "PackConfirmScreen does not override isInGameUi() either"
+        "vanilla's own pack-confirm screen does not override its own in-game-ui predicate either"
     );
     // The second bug this audit found: the canvas stamp was missing
     // entirely, not just the backdrop.
@@ -3514,8 +3516,9 @@ fn resource_pack_prompt_overlay_frame_is_dim_and_blurred_in_world_and_untouched_
 /// this reason). This asserts the real rasterised geometry — through
 /// `nav::stats_overlay_frame`, the actual production path now that
 /// Statistics is an overlay — carries vanilla's own `0xFFBABABA` (`-4539718`,
-/// `StatsScreen.java`'s `GeneralStatisticsList.Entry.extractContent`) grey
-/// somewhere on screen, not only inside the frame's own metadata.
+/// from vanilla's own stats-screen general-statistics-list entry
+/// content-extraction logic) grey somewhere on screen, not only inside the
+/// frame's own metadata.
 #[test]
 fn the_odd_stat_rows_zebra_grey_reaches_real_geometry_not_just_frame_metadata() {
     let nav = test_nav("stats-zebra-geometry");
@@ -3681,9 +3684,10 @@ fn the_published_pause_frame_drops_open_to_lan_and_reflows_options() {
     assert_eq!(f.rows[8].label, PauseButton::QuitToTitle.label());
 
     // The discriminating rect: vanilla's own non-singleplayer branch gives
-    // Options the full-width row alone (`PauseScreen.java`, `:160-164`) once
-    // there is no sibling to share it with, and this reproduces that shape
-    // rather than leaving a half-width gap where Open to LAN used to sit.
+    // Options the full-width row alone (vanilla's own pause-screen menu
+    // construction) once there is no sibling to share it with, and this
+    // reproduces that shape rather than leaving a half-width gap where Open
+    // to LAN used to sit.
     let options_rect = f.rows[7].slot.expect("Options has a slot").resolve(V_W, V_H);
     let (_, _, options_w, _) = options_rect;
     assert_eq!(
@@ -3713,10 +3717,10 @@ const V_H: f32 = 480.0;
 #[test]
 fn the_title_screen_rects_are_vanillas_own() {
     use crate::menu::nav::MainButton as B;
-    // Hand-derived from `TitleScreen.init` / `createNormalMenuOptions`
-    // at 854×480, *not* read back out of
-    // `title_slot`: topPos = 480/4 + 48 = 168, rows every 24 px, the icon
-    // row from `getHorizontalPosition(n, 3, 20)` = 427 - 34 + (n-1)*24, and
+    // Hand-derived from vanilla's own title-screen init and its
+    // normal-menu-options construction at 854×480, *not* read back out of
+    // `title_slot`: vanilla's own top-position local = 480/4 + 48 = 168, rows every 24 px, the icon
+    // row from vanilla's own horizontal-position accessor(n, 3, 20) = 427 - 34 + (n-1)*24, and
     // the Options/Quit pair at `W/2 - 100` / `W/2 + 2`, 98 wide.
     //
     // Since #394 `title_slot` computes these from an arranged
@@ -3757,8 +3761,8 @@ fn the_title_screen_rects_are_vanillas_own() {
 #[test]
 fn the_pause_screen_rects_are_vanillas_own() {
     use crate::menu::nav::PauseButton as B;
-    // Hand-derived from `PauseScreen.createPauseMenu`
-    // through `GridLayout.arrangeElements`, at 854×480: the 212×166 grid is
+    // Hand-derived from vanilla's own pause-menu construction
+    // through `GridLayout`'s own element-arrangement pass, at 854×480: the 212×166 grid is
     // aligned (0.5, 0.25) so its origin is (321, 78); row y offsets inside it
     // are [0, 70, 94, 118, 142] and each child sits at its own padding.
     //
@@ -3778,8 +3782,8 @@ fn the_pause_screen_rects_are_vanillas_own() {
         (B::Feedback, (gx + 84.0, gy + 98.0, 20.0, 20.0)),
         (B::Friends, (gx + 108.0, gy + 98.0, 20.0, 20.0)),
         (B::PlayerReporting, (gx + 132.0, gy + 98.0, 20.0, 20.0)),
-        // Issue #535: the Options row is now vanilla's `hasSingleplayerServer()`
-        // branch (`:157-160`) — two half-width cells, same 8 px gutter and same
+        // Issue #535: the Options row is now vanilla's own has-singleplayer-server
+        // predicate's branch — two half-width cells, same 8 px gutter and same
         // row `y` as the Advancements/Statistics pair two rows up. The grid's five
         // row offsets and its 212x166 size are unchanged, which is why this repair
         // touches three lines and not the table.
@@ -3935,15 +3939,15 @@ fn death_frame_builds_vanillas_two_widgets_in_order_and_tracks_the_highlight() {
     assert!(!geometry(&f, V_W, V_H).is_empty());
 
     // No message: two labels, not three, and the score line still draws —
-    // matching vanilla's own `if (this.causeOfDeath != null)` guard.
+    // matching vanilla's own null-check guard on the cause-of-death message.
     let no_message = death_frame(&nav, None);
     assert_eq!(no_message.labels.len(), 2);
     assert_eq!(no_message.labels[0].text, "You Died!");
     assert_eq!(no_message.labels[1].text, "Score: 0");
 }
 
-/// The discriminating gate for #574: vanilla's `DeathScreen.extractDeathBackground`
-/// draws a vertical gradient, not a flat wash, so the colour at the top and the
+/// The discriminating gate for #574: vanilla's own death-screen background-extraction
+/// logic draws a vertical gradient, not a flat wash, so the colour at the top and the
 /// bottom of the backdrop quad must differ — a gate sampling one point (or the
 /// vertex-*coverage* helpers elsewhere in this file, which count vertices
 /// *inside* a probe rect and so read a full-screen quad as zero coverage) would
@@ -4013,7 +4017,7 @@ fn death_screen_backdrop_is_a_red_gradient_not_a_flat_dim() {
 #[test]
 fn the_death_screen_rects_are_vanillas_own() {
     use crate::menu::nav::DeathButton as B;
-    // Hand-derived from `DeathScreen.init` at
+    // Hand-derived from vanilla's own death-screen init logic at
     // 854×480: both buttons are `width/2-100, height/4+72|96, 200x20`,
     // and `height/4+72 == TitleTop.anchor().1 + 24` since `TitleTop` is
     // itself `floor(height/4) + 48` — 168 + 24 = 192, 168 + 48 = 216.
@@ -4032,8 +4036,8 @@ fn the_death_screen_rects_are_vanillas_own() {
 
 #[test]
 fn the_death_screens_title_is_anchored_on_the_left_quarter_not_the_centre() {
-    // The trap named in `Origin::DeathTitle`'s docs: `DeathScreen.
-    // visitText` draws the title at `middleLine / 2` where `middleLine ==
+    // The trap named in `Origin::DeathTitle`'s docs: vanilla's own death-screen
+    // text-visiting draws the title at `middleLine / 2` where `middleLine ==
     // width / 2`, i.e. `width / 4` — not `width / 2` like every other
     // centred heading in this file (`Origin::ScreenTop`). A layout
     // "corrected" to the screen centre would fail this by a wide margin.
@@ -4367,9 +4371,9 @@ fn any_quad_centre_in(sprite: &[f32], min: [f32; 2], max: [f32; 2]) -> bool {
 
 #[test]
 fn the_button_sprite_matches_vanillas_enabled_hovered_rule() {
-    // `WidgetSprites::get(enabled, focused)` with `AbstractButton`'s
-    // three-argument set (`AbstractButton.java`,
-    // `WidgetSprites.java`): enabled+hovered → highlighted,
+    // `WidgetSprites::get(enabled, focused)` with vanilla's own abstract
+    // button base's three-argument sprite selection (its own source, and its
+    // own widget-sprites companion): enabled+hovered → highlighted,
     // enabled → button, and **disabled wins over hovered** → disabled.
     //
     // The assertion is on *which atlas region the UVs sample*, not on "a
@@ -4594,7 +4598,8 @@ fn nine_slice_borders_come_from_the_mcmeta_not_a_constant() {
 
 #[test]
 fn a_disabled_label_is_drawn_in_vanillas_grey_and_an_enabled_one_in_white() {
-    // `AbstractWidget.WithInactiveMessage.defaultInactiveMessage` recolours
+    // Vanilla's own abstract-widget base's with-inactive-message default
+    // recolours
     // an inactive widget's message to `-6250336` == `0xFFA0A0A0`
     //. Assert the actual colour, with the
     // enabled case as the control.
@@ -4656,7 +4661,7 @@ fn a_disabled_label_is_drawn_in_vanillas_grey_and_an_enabled_one_in_white() {
 
 #[test]
 fn an_icon_button_draws_its_sprite_and_no_label() {
-    // Vanilla's `SpriteIconButton.CenteredIcon` draws the button background
+    // Vanilla's own sprite-icon-button centred-icon variant draws the button background
     // plus a 15×15 sprite centred in it, and no text
     //.
     let atlas = GuiAtlas::build(&button_pack()).expect("synthetic atlas builds");
@@ -4716,7 +4721,7 @@ fn an_icon_button_draws_its_sprite_and_no_label() {
 fn the_pause_overlays_backdrop_is_vanillas_measured_black_at_alpha_64() {
     // `inworld_menu_background.png` decoded out of the real `client.jar` is
     // 16×16 greyscale+alpha with every pixel grey 0 / alpha 64
-    // (`Screen.java` tiles it at 32 px). This pins the exact
+    // (vanilla's own screen base tiles it at 32 px). This pins the exact
     // value rather than "translucent enough".
     let nav = test_nav("overlay-exact");
     let v = geometry(&pause_frame(&nav), V_W, V_H);
@@ -4935,9 +4940,9 @@ fn every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack() {
         assert!(atlas.native_size(icon).is_some(), "{icon} was not placed");
         // Deliberately *no* assertion on the native size, and this is a
         // belief that was held and measured false. "Vanilla's icon-button
-        // sprites are 15×15" is true of every **blit** (`spriteWidth`/
-        // `spriteHeight` are 15 at each call site — `CommonButtons.java`,
-        // `FriendsButton.java`, `PauseScreen.java`) and true
+        // sprites are 15×15" is true of every **blit** (the sprite width and
+        // height are 15 at each call site — vanilla's own common-buttons,
+        // friends-button, and pause-screen rendering) and true
         // of almost none of the **files**. Measured out of the real 26.2 jar:
         //
         //   icon/language 15×15, icon/accessibility 15×15,
@@ -4974,7 +4979,7 @@ fn every_sprite_id_the_vanilla_screens_name_exists_in_the_real_pack() {
     assert_eq!(
         atlas.native_size(super::draw::PACK_SELECT_SPRITES.0),
         Some((32, 32)),
-        "the overlay sprites are PackEntry.ICON_SIZE square"
+        "the overlay sprites are vanilla's own pack-entry icon-size square"
     );
 
     // The real pack's nine-slice borders, which is where the hardcoding trap
@@ -5190,18 +5195,18 @@ fn world_select_frame(nav: &MenuNav, ui: &UiState) -> MenuFrame<'static> {
     frame_for(ui, nav, &statuses, &mut fav).expect("the world list owns its frame")
 }
 
-/// Vanilla's own rects for `SelectWorldScreen`, hand-derived from the Java at
+/// Vanilla's own rects for its own select-world screen, hand-derived from its own source at
 /// 854×480 rather than read back out of the layout — `CLAUDE.md`'s rule that
 /// an expected value must originate outside the code under test.
 ///
 /// The derivation, which is what a future reader has to be able to check:
 ///
 /// - The header column is `LinearLayout.vertical().spacing(4)` holding a 9 px
-///   `StringWidget` and a nested 200×20 row, so it measures 200×33 and the
+///   vanilla-own string-label widget and a nested 200×20 row, so it measures 200×33 and the
 ///   header `FrameLayout` (854×49, `align(0.5, 0.5)`) puts it at
 ///   `((854-200)/2, (49-33)/2)` = (327, 8). The search box is one spacing plus
-///   the title below that: y = 8 + 9 + 4 = **21**, *not* the 22 written at
-///   `SelectWorldScreen.java`, because the layout overwrites it.
+///   the title below that: y = 8 + 9 + 4 = **21**, *not* the 22 written in
+///   vanilla's own select-world screen rendering, because the layout overwrites it.
 /// - The footer's four columns are all 71: Play's 150 px spanning two columns
 ///   with an 8 px gutter splits `Divisor(142, 2)` = 71/71, and the four 71 px
 ///   buttons can only match it. So the grid is `4*71 + 3*8` = **308** wide and
@@ -5211,9 +5216,9 @@ fn world_select_frame(nav: &MenuNav, ui: &UiState) -> MenuFrame<'static> {
 ///   0, 79, 158, 237, and row 2 is 24 px down.
 /// - The content band's top is `min(headerHeight + 30, height - footerHeight -
 ///   contentHeight)` = `min(79, 480 - 60 - 371)` = **49**, i.e. flush under the
-///   header, because vanilla sizes the list to `getContentHeight()` exactly.
-/// - The first list row is at `getY() + 2` = 51, 270 wide
-///   (`getRowWidth()`), 36 tall, centred: `427 - 135` = 292.
+///   header, because vanilla sizes the list to its own content-height accessor exactly.
+/// - The first list row is at vanilla's own y accessor plus 2 = 51, 270 wide
+///   (its own row-width accessor), 36 tall, centred: `427 - 135` = 292.
 #[test]
 fn the_world_select_rects_are_vanillas_own() {
     use crate::menu::world_select::WorldSelectButton as B;
@@ -5341,7 +5346,7 @@ fn the_world_select_frame_is_the_screen_vanilla_draws() {
     // **Four** disabled here, not three, and that is the empty-list state rather
     // than a regression: `test_nav` points this nav at a temp data directory whose
     // `saves/` does not exist, so there is nothing selected and
-    // `updateButtonStatus(null)` greys Play as well as Edit/Delete/Re-Create.
+    // vanilla's own update-button-status call, given no selection, greys Play as well as Edit/Delete/Re-Create.
     // Create and Back stay live, which is what keeps a fresh install off a dead
     // end. `the_world_select_frame_with_worlds_lists_them_all` is the populated
     // arm, and between them they are also each other's control: the same frame
@@ -5375,7 +5380,8 @@ fn the_world_select_frame_is_the_screen_vanilla_draws() {
         );
     }
 
-    // The two free-standing strings: the title, and `NoWorldsEntry`'s notice —
+    // The two free-standing strings: the title, and vanilla's own
+    // no-worlds-entry's notice —
     // which is what keeps "no worlds" apart from "the list failed to draw".
     let texts: Vec<&str> = f.labels.iter().map(|l| l.text.as_str()).collect();
     assert_eq!(
@@ -5389,7 +5395,7 @@ fn the_world_select_frame_is_the_screen_vanilla_draws() {
 
 /// **The populated arm of the frame gate**: N worlds on disk become N rows, at
 /// the rects `app.rs` hit-tests, carrying the three text lines
-/// `WorldListEntry` draws.
+/// vanilla's own world-list-entry draws.
 ///
 /// This is the anti-island assertion for the save list: `crate::saves` can
 /// enumerate perfectly and reach zero pixels if `frame_for` never emits a row for
@@ -5423,7 +5429,7 @@ fn the_world_select_frame_with_worlds_lists_them_all() {
     assert!(!f.rows[WorldSelectButton::Edit.row()].enabled);
     assert!(!f.rows[WorldSelectButton::ReCreate.row()].enabled);
 
-    // No `NoWorldsEntry` notice — the list is not empty.
+    // No vanilla-own no-worlds-entry notice — the list is not empty.
     let texts: Vec<&str> = f.labels.iter().map(|l| l.text.as_str()).collect();
     assert_eq!(texts, vec![crate::menu::world_select::WORLD_SELECT_TITLE]);
 
@@ -5572,7 +5578,7 @@ fn every_world_select_button_draws_the_sprite_the_widget_layer_picks() {
 /// exact value.
 ///
 /// Predicted, not asserted as a direction — `CLAUDE.md`'s *magnitude*
-/// species. The expectation comes from `AbstractWidget.java`'s
+/// species. The expectation comes from vanilla's own abstract-widget base's
 /// `-6250336` unpacked by `widget::argb_to_rgba`, and the enabled button
 /// beside it is the control that says the measurement can tell them apart.
 #[test]
@@ -5702,7 +5708,7 @@ fn the_empty_world_list_draws_its_notice_inside_row_zeros_content_rect() {
 ///
 /// 1. ink inside that row's own content rect;
 /// 2. the ink starts to the **right** of the reserved 32 px icon column
-///    (`getTextX() = contentX + 32 + 3`) — measured by location, not by amount,
+///    (vanilla's own text-x accessor equals content-x plus 32 plus 3) — measured by location, not by amount,
 ///    which is `CLAUDE.md`'s "ask where, not what";
 /// 3. it is three short lines of text, not a fill: the vertical extent spans more
 ///    than one 9 px line and less than the band.
@@ -5728,11 +5734,12 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
         );
         let bounds = inside.bounds.expect("a non-empty band has bounds");
         // (2) The text column starts past the icon column, for **every** row
-        // including the selected one: `extractItem`'s outline is drawn at the *row*
-        // rect's edge, which is `CONTENT_PADDING` outside this band, and its
+        // including the selected one: vanilla's own item-extraction's outline is
+        // drawn at the *row*
+        // rect's edge, which is vanilla's own content-padding constant outside this band, and its
         // interior fill is black — so the leftmost thing inside a content rect is
-        // always `getTextX()`. That equality is checked rather than an inequality
-        // where it can be: `getTextX()` is `contentX + 32 + 3` exactly.
+        // always vanilla's own text-x accessor. That equality is checked rather than an inequality
+        // where it can be: vanilla's own text-x accessor is `contentX + 32 + 3` exactly.
         assert!(
             bounds.0 >= band.0 + WORLD_LIST_TEXT_DX,
             "row {row}'s text must start past the {WORLD_LIST_TEXT_DX} px icon \
@@ -5751,8 +5758,8 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
         );
     }
 
-    // The selection outline — `AbstractSelectionList.extractItem` (`:354-370`) —
-    // is drawn for the selected row **only**, at the row rect's own left edge.
+    // The selection outline — vanilla's own abstract-selection-list item
+    // extraction — is drawn for the selected row **only**, at the row rect's own left edge.
     // Sampled by colour at a 1 px column there, which is a different measurement
     // from the vertex bands above and is the one that discriminates a selected row
     // from an unselected one. Its own control is the second assertion: row 1 is not
@@ -5807,8 +5814,8 @@ fn every_world_in_the_list_draws_inside_its_own_row_band() {
 
 /// The empty-list notice fits the row it is centred in.
 ///
-/// Vanilla's `NoWorldsEntry` gives its `StringWidget` no `maxWidth`
-///, so nothing clips it and a longer
+/// Vanilla's own no-worlds-entry type gives its own string-label widget no max-width
+/// clamp, so nothing clips it and a longer
 /// string would overhang the row. Measured with [`text_px`], the same
 /// fixed-advance measure the jar-less draw uses — the real vanilla font is
 /// narrower, so this is the conservative direction.
@@ -5838,11 +5845,12 @@ fn the_world_list_row_label_fits_the_row_it_is_centred_in() {
     }
 }
 
-/// A world row's three lines are clipped to `WorldListEntry`'s own
-/// `maxTextWidth`, so a long name cannot overhang the row.
+/// A world row's three lines are clipped to vanilla's own world-list-entry's
+/// own max-text-width, so a long name cannot overhang the row.
 ///
 /// Unlike the notice above, these lines *are* clipped in vanilla
-/// (`StringWidget.setMaxWidth`, `WorldSelectionList.java`), so the assertion
+/// (its own string-label widget's max-width clamp, applied by its own
+/// world-selection list rendering), so the assertion
 /// is about the **draw** rather than about the string: a 200-character world name
 /// must still paint nothing outside its row.
 #[test]
@@ -6060,7 +6068,8 @@ fn settings_nav_on(page: crate::menu::options::SettingsPage) -> (MenuNav, crate:
 /// Every expected value originates **outside this crate**: the four colours are the
 /// pixel values of `textures/gui/{header,footer}_separator.png` and
 /// `menu_list_background.png` decoded out of the 26.2 `client.jar`, and the two
-/// y offsets are `extractListSeparators`' own `getY() - 2` and `getBottom()`. The
+/// y offsets are vanilla's own list-separator extraction's own y-minus-2 and its
+/// own bottom accessor. The
 /// rects come from `ListSpec::chrome_rect`, the same call the draw makes.
 ///
 /// **What else paints here** was asked first, and it decides every sample point:
@@ -6091,7 +6100,7 @@ fn the_settings_band_carries_vanillas_separators_and_its_tint() {
         (cx, cy, cw, ch),
         (0.0, 33.0, W, H - 33.0 - 33.0),
         "the chrome rect is not the 33 px-header / 33 px-footer band vanilla's \
-         OptionsList is sized to"
+         own options-list type is sized to"
     );
     let v = geometry(&frame, W, H);
 
@@ -6165,10 +6174,10 @@ fn the_settings_band_carries_vanillas_separators_and_its_tint() {
 /// Four claims, each measured by location and by the tooltip fill's own colour, and
 /// the last two are the controls:
 ///
-/// 1. hovering a row that carries an `OptionInstance` tooltip paints a `TOOLTIP_BG`
+/// 1. hovering a row that carries a vanilla-own option-instance tooltip paints a `TOOLTIP_BG`
 ///    box, and it lands **at the cursor** rather than somewhere plausible;
 /// 2. its content is really wrapped — a multi-line string produces a box taller than
-///    a one-line one, so `Tooltip.MAX_WIDTH` is being applied rather than ignored;
+///    a one-line one, so vanilla's own tooltip max-width is being applied rather than ignored;
 /// 3. hovering a row with **no** tooltip in the table paints no box (so the box is
 ///    not unconditional);
 /// 4. hovering where a row *used to be* before the list scrolled paints no box (so
@@ -6176,9 +6185,10 @@ fn the_settings_band_carries_vanillas_separators_and_its_tint() {
 ///    hang over the footer for a row nothing can click).
 ///
 /// The expected values originate outside this crate: which accessors have tooltips
-/// and what their text is came out of `Options.java`'s `cachedConstantTooltip` sites
+/// and what their text is came out of vanilla's own persisted-options declarations'
+/// `cachedConstantTooltip` sites
 /// resolved through `en_us.json`, and the box geometry is
-/// `TooltipRenderUtil`'s own padding and mouse offset. The cursor is set through
+/// vanilla's own tooltip-render utility's own padding and mouse offset. The cursor is set through
 /// `MenuNav::set_menu_cursor`, the same call `app`'s mouse-move path makes.
 #[test]
 fn hovering_a_settings_row_shows_its_option_tooltip_and_only_then() {
@@ -6228,7 +6238,8 @@ fn hovering_a_settings_row_shows_its_option_tooltip_and_only_then() {
     let (tip_box, at) = hover_box(&mut nav, &ui, tipped);
     let (bx, by, _, bh) =
         tip_box.expect("hovering a row with a tooltip painted no TOOLTIP_BG box at all");
-    // (1) It is **at the cursor**, not somewhere plausible. `TooltipRenderUtil`'s
+    // (1) It is **at the cursor**, not somewhere plausible. Vanilla's own
+    // tooltip-render utility's
     // content box starts `MOUSE_OFFSET` right of and above the cursor and the fill is
     // `PAD` larger on every side, so both edges are exact — this canvas is wide and
     // tall enough that `draw_tooltip`'s off-screen nudge cannot fire.
@@ -6246,10 +6257,10 @@ fn hovering_a_settings_row_shows_its_option_tooltip_and_only_then() {
     );
 
     // (2) The box's height is **predicted**, and the two hypotheses differ at this
-    // input. `ClientTextTooltip.getHeight` is 8 px for one line and
+    // input. Vanilla's own client-text-tooltip height accessor is 8 px for one line and
     // `TOOLTIP_LINE_H * n` for n, and the fill adds `2 * PAD`, so:
     //
-    // - wrapped at `Tooltip.MAX_WIDTH`: `10n + 6`
+    // - wrapped at vanilla's own tooltip max-width: `10n + 6`
     // - not wrapped at all, the whole string on one line: `8 + 6` = 14
     //
     // The line count comes from `wrap_measured` at `TOOLTIP_MAX_WIDTH` — the same call
@@ -6340,8 +6351,9 @@ fn hovering_a_settings_row_shows_its_option_tooltip_and_only_then() {
 
     // -- the census, both directions -----------------------------------------
     //
-    // The expected value comes from outside this crate: `Options.java` has 34
-    // `cachedConstantTooltip` sites and `OnlineOptionsScreen` two `withTooltip` ones,
+    // The expected value comes from outside this crate: vanilla's own persisted-options
+    // declarations have 34
+    // `cachedConstantTooltip` sites and its own online-options screen two `withTooltip` ones,
     // and of those exactly **33** resolve to an accessor this tree carries a row for
     // (`japaneseGlyphVariants` has no row here; `telemetryOptInExtra` belongs to the
     // Telemetry screen). Asserted in both directions, because either alone is
@@ -6402,7 +6414,7 @@ fn hovering_a_settings_row_shows_its_option_tooltip_and_only_then() {
 ///
 /// A page whose rows already fit cannot tell "laid out clear of the footer" from
 /// "happens not to overflow", which is exactly how an overlap ships. So this runs
-/// every `OptionsList` page at a canvas where the longest of them overflows by
+/// every page of vanilla's own options-list type at a canvas where the longest of them overflows by
 /// hundreds of pixels, at **every** scroll offset one pixel apart, and requires the
 /// strip between the band's footer separator and the footer's own top button to be
 /// empty in all of them.
@@ -6466,7 +6478,7 @@ fn every_settings_page_keeps_its_footer_band_clear_at_every_scroll_offset() {
                 .list
                 .as_ref()
                 .and_then(|s| s.model(H))
-                .expect("premise: every OptionsList page has a band at 240");
+                .expect("premise: every page of vanilla's own options-list type has a band at 240");
             let band_bottom = list.top() + list.height();
             let strip = (
                 0.0,
@@ -6497,7 +6509,7 @@ fn every_settings_page_keeps_its_footer_band_clear_at_every_scroll_offset() {
     // worthless unless some page genuinely has more rows than its band holds.
     assert!(
         overflowed.len() >= 4,
-        "only {} of the OptionsList pages overflow a 240 px canvas ({overflowed:?}), so \
+        "only {} of vanilla's own options-list pages overflow a 240 px canvas ({overflowed:?}), so \
          this sweep mostly measured pages that could not overlap anyway",
         overflowed.len()
     );
@@ -6554,7 +6566,7 @@ fn every_settings_page_keeps_its_footer_band_clear_at_every_scroll_offset() {
 /// `every_world_in_the_list_draws_inside_its_own_row_band` had to be: the
 /// selection outline is the one thing that separates "row 0 is here" from "some
 /// row is here", and the leftmost *ink* inside a content rect is always
-/// `getTextX()` whichever row it belongs to.
+/// vanilla's own text-x accessor, whichever row it belongs to.
 #[test]
 fn a_scrolled_world_list_is_cut_at_the_band_and_stops_drawing_the_rows_above_it() {
     let owned: Vec<String> = (0..25).map(|i| format!("world{i:02}")).collect();
@@ -6717,7 +6729,7 @@ fn hovering_a_world_select_button_lights_it_without_moving_focus() {
         "hovering must not move keyboard focus"
     );
 
-    // Vanilla's sprite argument is `isHoveredOrFocused()`, so a hovered
+    // Vanilla's sprite argument is its own is-hovered-or-focused predicate, so a hovered
     // *enabled* button draws `widget/button_highlighted`.
     let row = frame.rows[B::Back.row()].clone();
     let draw = |hovered: Option<usize>| {
@@ -8036,10 +8048,10 @@ fn an_uncoloured_kick_reason_still_draws_in_the_error_colour() {
 /// A client-side failure and a server disconnect get vanilla's two different
 /// titles, from [`crate::sim::SessionEndKind`] rather than from the wording.
 ///
-/// `DisconnectedScreen` takes its `title` as a constructor argument;
-/// `ClientCommonPacketListenerImpl.onDisconnect` passes `disconnect.lost`
-/// ("Connection Lost") and both `ClientHandshakePacketListenerImpl.onDisconnect`
-/// and `ConnectScreen`'s `connectFailedTitle` pass `connect.failed` ("Failed to
+/// Vanilla's own disconnected-screen type takes its `title` as a constructor argument;
+/// vanilla's own common packet-listener's on-disconnect handler passes `disconnect.lost`
+/// ("Connection Lost") and both its own handshake packet-listener's on-disconnect handler
+/// and its own connect-screen's failed-title site pass `connect.failed` ("Failed to
 /// connect to the server"). The English strings are vanilla's own `en_us.json`
 /// entries for those keys, transcribed by hand.
 #[test]
@@ -8305,8 +8317,8 @@ fn settings_nav_in_world_on(
 /// are the decoded pixels of `textures/gui/{header,footer}_separator.png` and
 /// `menu_list_background.png` from the 26.2 `client.jar` (whose `inworld_*` variants
 /// are byte-identical, which is why one constant is faithful to both arms), and the
-/// two y offsets are `AbstractSelectionList.extractListSeparators`' own `getY() - 2`
-/// and `getBottom()`. The rects come from `ListSpec::chrome_rect`, the call the draw
+/// two y offsets are vanilla's own abstract-selection-list separator extraction's own
+/// top-minus-2 and bottom accessors. The rects come from `ListSpec::chrome_rect`, the call the draw
 /// makes.
 ///
 /// # What else paints here
@@ -8320,7 +8332,7 @@ fn settings_nav_in_world_on(
 ///
 /// # The grid page is asserted too
 ///
-/// `SettingsPage::Root` is a widget grid, not an `OptionsList` — `Root.entries()` is
+/// `SettingsPage::Root` is a widget grid, not vanilla's own options-list type — `Root.entries()` is
 /// empty, so `active_list` answers `None` and it has no chrome by construction. That
 /// is deliberate (a scrollbar beside a screen with no rows), and `packs.rs` has its
 /// own deliberate `ListChrome::None`. This fix widens no condition, so the claim
@@ -8436,7 +8448,7 @@ fn in_world_settings_carries_the_same_band_chrome_as_the_main_menu() {
         assert!(wrong.is_empty(), "{wrong:#?}");
         unreachable!("in_rect is None but nothing was reported");
     };
-    // The same 33 px-header / 33 px-footer band vanilla's `OptionsList` is sized
+    // The same 33 px-header / 33 px-footer band vanilla's own options-list type is sized
     // to, asserted here as well as in the main-menu gate so a change to one arm
     // cannot quietly move both.
     if (cx, cy, cw, ch) != (0.0, 33.0, W, H - 33.0 - 33.0) {
@@ -8588,15 +8600,15 @@ fn in_world_settings_carries_the_same_band_chrome_as_the_main_menu() {
 /// `366..490`, Mobs `490..614`, and the flanks are `0..242`/`614..854`.
 ///
 /// Three claims, all from the owner's report and none of them a size
-/// change (`MenuTabBar.HEIGHT`/`tab_bar_geometry` were already vanilla's
+/// change (vanilla's own menu-tab-bar height constant and `tab_bar_geometry` were already vanilla's
 /// own constants):
 ///
-/// 1. The header separator (`Screen.HEADER_SEPARATOR`) appears in the two
+/// 1. The header separator (vanilla's own screen base's header-separator constant) appears in the two
 ///    flanking margins, and **only** there — not under any tab, selected
 ///    or not. Before this fix a full-width bar ran under the whole strip.
 /// 2. The selected tab's bottom edge **meshes with the content panel
 ///    below**: the merge fill (`LIST_BAND_TINT`, standing in for vanilla's
-///    `Screen.MENU_BACKGROUND`, which this client has no tiled texture
+///    own screen base's menu-background constant, which this client has no tiled texture
 ///    for) paints under General but not under the unselected Items tab.
 /// 3. That merge is not a guess at a gap — the selected tab's own bottom
 ///    edge (`layout::TAB_BAR_HEIGHT`) and the content band's own top
@@ -8674,13 +8686,13 @@ fn the_statistics_tab_bar_meshes_selected_tab_only_and_the_flanks_carry_the_head
         if close(got, SEPARATOR_LIGHT) || close(got, SEPARATOR_DARK) {
             wrong.push(format!(
                 "{what} at ({x}, {y}) painted a header-separator colour ({got:?}) — vanilla's \
-                 `MenuTabBar` never draws one under any tab, only in the two flanking margins"
+                 own menu-tab-bar type never draws one under any tab, only in the two flanking margins"
             ));
         }
     }
 
     // Claim 2: the merge fill under General's own inset body (`x+2, y+2` per
-    // `MenuTabButton.renderMenuBackground`), sampled 10 px in from the tab's
+    // vanilla's own menu-tab-button background-render call), sampled 10 px in from the tab's
     // left edge and away from its centred label so a glyph quad cannot be
     // mistaken for (or hide) the fill. Absent under Items, which is not
     // selected and must not merge with anything.
@@ -8767,10 +8779,12 @@ fn create_worlds_tab_bar_gets_the_flanking_separators_but_never_the_merge_fill()
 /// The owner's report on the just-landed tab widget (issues #564/#567): "the
 /// tabs for Create New World etc look almost perfect! the text like 'Game',
 /// 'World' etc. (the tab labels) are too high up". `draw_tab` blitted the
-/// label at vanilla's `top` local directly (`getY() + (isSelected() ? 0 :
-/// 3)`, `MenuTabBar.java`) instead of centring it between `top` and `bottom`
-/// the way `MenuTabButton.renderLabel` → `acceptScrollingWithDefaultCenter`
-/// → `ActiveTextCollector.defaultScrollingHelper` actually does — see
+/// label at vanilla's own `top` local directly (its own y-accessor, plus 3
+/// when unselected and 0 when selected — vanilla's own menu-tab-bar source)
+/// instead of centring it between `top` and `bottom`
+/// the way vanilla's own menu-tab-button's label-render call, through its own
+/// scrolling-with-default-center helper, through its own active-text-collector's
+/// default-scrolling helper, actually does — see
 /// `widget::tab_label_top`'s own doc for the formula and the incident.
 ///
 /// Two arms, selected and unselected, on the **same label** ("More",
