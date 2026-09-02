@@ -2,54 +2,39 @@
 //!
 //! # Where the truth comes from
 //!
-//! `.cache/mc/26.2/src/net/minecraft/world/level/block/ComposterBlock.java`.
-//! There is no separate `BlockEntity` class for the composter — the level
-//! (`0..=8`) lives directly on the block state (`LEVEL =
-//! BlockStateProperties.LEVEL_COMPOSTER`, `IntegerProperty.create("level", 0,
-//! 8)`, on `BlockStateProperties.LEVEL_COMPOSTER`'s own declaration), so
+//! The real composter block's own tick and item-insertion rules.
+//! There is no separate block-entity type for the composter — the level
+//! (`0..=8`) lives directly on the block state, so
 //! [`Composter`] here models that
-//! block-state integer plus the one piece of transient timing state vanilla
-//! keeps as a scheduled block tick (`ComposterBlock.addItem`'s
-//! `level.scheduleTick` call and `ComposterBlock.tick`) rather than persisted NBT.
+//! block-state integer plus the one piece of transient timing state the
+//! real block keeps as a scheduled block tick rather than persisted NBT.
 //!
 //! ## The state machine
 //!
-//! * `MIN_LEVEL = 0`, `MAX_LEVEL = 7`, `READY = 8`
-//!   (`ComposterBlock`'s own static field declarations).
-//! * [`addItem`] (`ComposterBlock.addItem`) is only ever called with
-//!   `fillLevel < 7` (both call sites — `ComposterBlock.useItemOn`,
-//!   and the static `ComposterBlock.insertItem` hoppers/
+//! * `MIN_LEVEL = 0`, `MAX_LEVEL = 7`, `READY = 8`.
+//! * [`addItem`] is only ever called with
+//!   `fillLevel < 7` (both call sites — the right-click insert path,
+//!   and the shared insert path hoppers/
 //!   dispensers use — guard on `fillLevel < 7` before calling
-//!   it), and `ComposterBlock.getContainer` hands out an `EmptyContainer` (all
-//!   inserts rejected) for level `7`, so an insert at level `7` *or* `8` is
+//!   it), and the real container lookup hands out an empty, insert-rejecting
+//!   container for level `7`, so an insert at level `7` *or* `8` is
 //!   always a no-op. This is [`Composter::insert`]'s `level >= MAX_FILL_LEVEL`
 //!   guard.
-//! * The per-item chance roll (`ComposterBlock.addItem`):
-//!   ```java
-//!   float chance = COMPOSTABLES.getFloat(itemStack.getItem());
-//!   if ((fillLevel != 0 || !(chance > 0.0F)) && !(level.getRandom().nextDouble() < chance)) {
-//!       return state; // unchanged
-//!   }
-//!   ```
-//!   Every compostable item has `chance > 0.0` (the table's
-//!   `defaultReturnValue(-1.0F)` means a *non*-compostable item never reaches
-//!   this code — `useItemOn`/`insertItem` both gate on
-//!   `COMPOSTABLES.containsKey` first), so at `fillLevel == 0` the left
+//! * The per-item chance roll: look up the item's compost chance; if the
+//!   fill level is nonzero, or that chance is not positive, and a random
+//!   draw does not fall under the chance, nothing changes.
+//!   Every compostable item has `chance > 0.0` (a non-compostable item
+//!   never reaches this code at all — both insertion paths gate on the
+//!   compost table containing the item first), so at `fillLevel == 0` the left
 //!   disjunct `fillLevel != 0` is false and `chance > 0.0F` is always true,
 //!   making the whole `&&` condition false: **the first item into an empty
 //!   composter always raises the level, regardless of its own chance value**.
 //!   At any other level the roll is the ordinary `roll < chance` test. Either
-//!   way the item is consumed (`itemStack.consume(1, ...)` in
-//!   `ComposterBlock.useItemOn`; `itemStack.shrink(1)` in
-//!   `ComposterBlock.insertItem`) whether or not the
+//!   way the item is consumed whether or not the
 //!   level actually increased — a failed roll is not a rejected insert.
-//! * Reaching level `7` schedules a tick **20 game ticks** later
-//!   (`level.scheduleTick(pos, state.getBlock(), 20)`, inside
-//!   `ComposterBlock.addItem`), and the tick
-//!   handler (`ComposterBlock.tick`) unconditionally advances `7 -> 8` (`state.cycle
-//!   (LEVEL)`) — deterministic, no further roll.
-//! * Extraction (`ComposterBlock.extractProduce`, reached via
-//!   `ComposterBlock.useWithoutItem`
+//! * Reaching level `7` schedules a tick **20 game ticks** later, and the tick
+//!   handler unconditionally advances `7 -> 8` — deterministic, no further roll.
+//! * Extraction (reached via the empty-hand-use path
 //!   when `fillLevel == 8`) resets the level to `0` and yields
 //!   exactly one `minecraft:bone_meal`.
 //!
@@ -58,31 +43,30 @@
 //! Item consumption from the *caller's* stack (the composter itself never
 //! holds the inserted item — it is shrunk by the caller and only the fill
 //! level state carries over) and the world-facing side effects
-//! (`levelEvent`/particles/sound, `ComposterBlock.handleFill`) are for a wiring
+//! (level events/particles/sound) are for a wiring
 //! layer to add; [`Composter`] is the pure value type, matching this crate's
 //! established shape for tick-driven mechanics (see
 //! [`crate::vitals::PlayerVitals`], [`crate::fall::FallTracker`]).
 
-/// Vanilla's `ComposterBlock.READY`: the level at
+/// The real ready-level constant: the level at
 /// which the composter holds bone meal instead of accepting compost.
 pub const READY_LEVEL: u8 = 8;
 
-/// Vanilla's `ComposterBlock.MAX_LEVEL`: the
+/// The real max-level constant: the
 /// highest level an insert can still land on (`7` itself never accepts an
 /// insert — see [`Composter::insert`]'s doc comment).
 pub const MAX_FILL_LEVEL: u8 = 7;
 
 /// The fixed delay between reaching level `7` and flipping to [`READY_LEVEL`]
-/// (`level.scheduleTick(pos, state.getBlock(), 20)`, inside
-/// `ComposterBlock.addItem`).
+/// (the real scheduled-tick delay set on reaching level 7).
 pub const READY_DELAY_TICKS: u8 = 20;
 
 /// The outcome of one [`Composter::insert`] call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InsertOutcome {
-    /// `item` is not in vanilla's `COMPOSTABLES` table at all — the caller's
-    /// stack must not be touched (mirrors the `useItemOn`/`insertItem`
-    /// `COMPOSTABLES.containsKey` guard rejecting the interaction outright).
+    /// `item` is not in the real compost table at all — the caller's
+    /// stack must not be touched (mirrors both insertion paths'
+    /// "is this item compostable" guard rejecting the interaction outright).
     NotCompostable,
     /// The composter is at level `7` (full, waiting on the scheduled tick)
     /// or [`READY_LEVEL`] (holding bone meal) — no insert is possible until
@@ -91,8 +75,8 @@ pub enum InsertOutcome {
     NotAccepting,
     /// The item was compostable and the composter was accepting inserts —
     /// the caller must shrink its stack by exactly one regardless of
-    /// `level_increased` (vanilla consumes on every accepted insert, roll
-    /// outcome notwithstanding).
+    /// `level_increased` (the real rule consumes on every accepted insert,
+    /// roll outcome notwithstanding).
     Consumed {
         /// Whether the fill level actually advanced this call.
         level_increased: bool,
@@ -100,8 +84,8 @@ pub enum InsertOutcome {
 }
 
 /// A composter's fill-level state machine plus the one piece of transient
-/// timing state vanilla schedules as a block tick (see the module doc
-/// comment).
+/// timing state the real block schedules as a block tick (see the module
+/// doc comment).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Composter {
     level: u8,
@@ -121,13 +105,13 @@ impl Composter {
     /// [`crate::furnace::Furnace::restore`] for why this is one total
     /// constructor rather than a setter per field.
     ///
-    /// **Vanilla has no composter block entity at all**: its fill level is a
+    /// **The real composter has no block entity at all**: its fill level is a
     /// block-state property (`minecraft:composter[level=0..8]`) and the
     /// 20-tick ready delay is a scheduled block tick. This crate models it as
     /// a block entity instead (`crate::block_entities`), so
-    /// [`ticks_until_ready`](Self::ticks_until_ready) has no vanilla field to
+    /// [`ticks_until_ready`](Self::ticks_until_ready) has no real field to
     /// live in and [`crate::chunk_nbt`] writes the whole thing under a
-    /// namespaced id. See that module for what a real vanilla server does
+    /// namespaced id. See that module for what a real server does
     /// with it.
     #[must_use]
     pub fn restore(level: u8, ticks_until_ready: Option<u8>) -> Self {
@@ -158,15 +142,14 @@ impl Composter {
 
     /// Attempts to insert one `item` (a full `minecraft:...` id, matching
     /// [`lodestone_model::ItemStack::item`]'s `Display`), given `roll`, an
-    /// injected `[0.0, 1.0)` uniform sample standing in for vanilla's
-    /// `RandomSource.nextDouble()` — the same "caller supplies the
+    /// injected `[0.0, 1.0)` uniform sample standing in for the real
+    /// random draw — the same "caller supplies the
     /// randomness" shape [`crate::vitals::PlayerVitals::tick`] and
     /// [`crate::fall::FallTracker`] already use, so a test can pin an exact
     /// outcome rather than looping until one appears.
     ///
     /// See [`InsertOutcome`] for what each variant means and the module doc
-    /// comment for the exact vanilla formula this implements
-    /// (`ComposterBlock.addItem`).
+    /// comment for the exact real formula this implements.
     pub fn insert(&mut self, item: &str, roll: f64) -> InsertOutcome {
         if self.level >= MAX_FILL_LEVEL {
             return InsertOutcome::NotAccepting;
@@ -209,7 +192,7 @@ impl Composter {
 
     /// Extracts the bone meal, resetting to level `0`. Returns `true` if
     /// bone meal was actually produced (level was [`READY_LEVEL`]), `false`
-    /// as a no-op otherwise (mirrors `ComposterBlock.useWithoutItem`'s
+    /// as a no-op otherwise (mirrors the real empty-hand-use rule's
     /// `fillLevel == 8` guard).
     pub fn extract(&mut self) -> bool {
         if self.level == READY_LEVEL {
@@ -221,12 +204,11 @@ impl Composter {
     }
 }
 
-/// The per-item compost chance, restated from `ComposterBlock.bootStrap`
-/// — every `add(chance, Items.X)` call, `Items.X`
-/// lowered to its registry id. `None` for anything not in vanilla's
-/// `COMPOSTABLES` table (which defaults every unlisted item to `-1.0F`,
-/// i.e. "rejected", per `COMPOSTABLES.defaultReturnValue(-1.0F)` in that
-/// same method).
+/// The per-item compost chance, restated from the real compost-table
+/// bootstrap — every registered chance/item pair,
+/// lowered to its registry id. `None` for anything not in the real
+/// compost table (which defaults every unlisted item to `-1.0`,
+/// i.e. "rejected").
 #[must_use]
 pub fn compostable_chance(item: &str) -> Option<f32> {
     Some(match item {
