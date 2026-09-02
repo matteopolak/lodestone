@@ -1,5 +1,5 @@
 // Rain and snow columns: one instanced quad per column, angled to face the
-// camera. Vanilla's `WeatherEffectRenderer.renderInstances` builds the same four
+// camera. Vanilla's own weather-effect pass builds the same four
 // vertices on the CPU into a `PARTICLE` format buffer; here the CPU emits one
 // 48-byte instance and this shader expands it, which is the same trade the
 // particle pass already makes.

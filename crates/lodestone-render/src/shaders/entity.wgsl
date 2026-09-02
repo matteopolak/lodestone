@@ -48,7 +48,7 @@ fn fog_amount(rel: vec3<f32>) -> f32 {
 // night. The server's sky-light array does not change with the clock — measured
 // live at one position, with the server clock as the control, the packed byte is
 // 0xF0 and `light_term` is 1.000 at both noon *and* midnight. Vanilla darkens
-// client-side only, in `LightTexture.updateLightTexture`.
+// client-side only, when the light texture is rebuilt.
 //
 // `0.0` is the `not wired yet` sentinel and reads as full daylight: every caller
 // builds this uniform from a `FogUniform` that zeroes the lane, and taking 0.0
@@ -303,7 +303,7 @@ fn fs_main_no_cutout(in: VsOut) -> @location(0) vec4<f32> {
 // `ExperienceOrbRenderer` rather than chosen:
 //
 //  * the cutout is `0.1`, not `0.5`. `RenderPipelines.ENTITY_TRANSLUCENT` (which
-//    `RenderTypes.entityTranslucentCullItemTarget` builds on) declares
+//    the entity translucent-cull item target builds on) declares
 //    `ALPHA_CUTOUT 0.1F` — the same threshold `fs_main_flame` uses and for the
 //    same reason: the orb sprite's glow has a soft low-alpha fringe that a `0.5`
 //    cutout would clip into a hard-edged disc;
@@ -393,7 +393,7 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // near-greyscale, so it is the whole visible colour of the piece.
     let shaded = linear_to_srgb(tex_col.rgb) * in.tint * diffuse * in.light_term;
     // Vanilla's hurt/death overlay (`OverlayTexture`, sampled per
-    // `LivingEntityRenderer.java:281`'s `hasRedOverlay`) is a flat-red **blend**
+    // vanilla's own hurt-overlay flag) is a flat-red **blend**
     // at a fixed alpha, not a multiply — multiplying by red would crush the mob
     // toward black instead of washing it red. Blended in the same gamma-space
     // stage as the tint/shade multiply above, per this shader's convention that
@@ -422,7 +422,7 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     let red_weight = select(0.0, 1.0 - in.overlay, in.overlay > 0.0);
     var overlaid = mix(shaded, vec3<f32>(1.0, 0.0, 0.0), red_weight);
     // A creeper's white-flash overlay (`OverlayTexture`'s white row,
-    // `CreeperRenderer.getWhiteOverlayProgress`). Unlike the red overlay this
+    // vanilla's own creeper white-overlay progress). Unlike the red overlay this
     // is a genuine `mix(white, colour, alpha)` with no polarity inversion to
     // account for: our sentinel (`white_overlay == 0` means "absent") already
     // agrees with vanilla's own no-overlay edge (`alpha == 1.0` at `progress
@@ -499,15 +499,15 @@ fn vs_main_flame(
 fn fs_main_flame(in: FlameVsOut) -> @location(0) vec4<f32> {
     let tex_col = textureSample(tex, smp, in.uv);
     // Vanilla's `ENTITY_CUTOUT_CULL` pipeline is `ALPHA_CUTOUT` at `0.1`
-    // (`RenderPipelines.java:238-243`), not the `0.5` `fs_main` uses — a
+    // (vanilla's own pipeline for that pass), not the `0.5` `fs_main` uses — a
     // lower threshold keeps more of a flame sprite's soft, low-alpha fringe
     // than the mob-body cutout would.
     if (tex_col.a < 0.1) {
         discard;
     }
     // Vanilla forces the flame's light coords to full block-light
-    // (`LightCoordsUtil.withBlock(state.lightCoords, 15)`,
-    // `FlameFeatureRenderer.java:42`) and submits a flat white vertex colour
+    // (the entity's light coords with block light forced to 15, as vanilla's
+    // own flame feature does) and submits a flat white vertex colour
     // (`fireVertex`'s `setColor(-1)`, `:71`) with no per-face lighting define
     // on `ENTITY_CUTOUT_CULL` — fire reads as self-lit, not shaded by the
     // scene the way a mob's body is. This entry point therefore skips

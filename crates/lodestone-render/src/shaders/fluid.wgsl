@@ -71,7 +71,7 @@ fn not_gamma_vec3(c: vec3<f32>) -> vec3<f32> {
 // There is deliberately no anti-z-fight depth nudge here.
 //
 // `bake_fluid` insets each fluid side face 0.001 blocks off its block boundary,
-// exactly where vanilla's `FluidRenderer.tesselate` does, so that a waterlogged
+// exactly where vanilla's own fluid tesselation does, so that a waterlogged
 // block's water face on a *partially* covered side -- a stair front, where the
 // stair itself fills only the bottom half -- sits behind the block's own
 // coplanar face and loses the depth test cleanly. Vanilla spends that inset in a

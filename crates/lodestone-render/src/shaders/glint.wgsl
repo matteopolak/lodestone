@@ -1,7 +1,7 @@
 // Enchantment glint: the scrolling foil shimmer over an item's own geometry.
 //
 // A faithful port of vanilla 26.2's `core/glint` pair plus `RenderPipelines.GLINT`
-// (`RenderPipelines.java:419-433`). Vanilla's own vertex shader is four lines and
+// (vanilla's own glint pipeline). Its vertex shader is four lines and
 // the fragment four more; the interesting content is entirely in the constants,
 // which live on the Rust side in `crate::glint` so they can be unit-gated against
 // the jar.
@@ -10,7 +10,7 @@
 //
 // First, it re-rasterises *the item's own quads*, not a flat overlay quad. Vanilla
 // runs the glint as a second pass over the same submit list
-// (`ItemFeatureRenderer.java:74-84`) and its pipeline uses depth compare EQUAL with
+// (vanilla's item-feature pass) and its pipeline uses depth compare EQUAL with
 // zero depth bias (`DepthStencilState(CompareOp.EQUAL, false)`), which only works
 // if the two passes rasterise byte-identical clip positions. So the vertex stage
 // here computes `clip` exactly as `model.wgsl` does — same uniform, same
@@ -35,7 +35,7 @@ struct Glint {
     tex_matrix: mat4x4<f32>,
     // `.xyz` is the section origin added to each vertex position, matching
     // `model.wgsl`'s `Origin.section_origin`. `.w` carries `GlintAlpha` — the
-    // `glintStrength` option, default 0.75 (`Options.java:867-874`) — folded into
+    // glint-strength option, default 0.75 — folded into
     // the same uniform rather than given a binding of its own.
     origin_and_alpha: vec4<f32>,
 }
@@ -51,7 +51,7 @@ struct VsIn {
     // layout unchanged, and therefore re-draw the *same* vertex buffer the model
     // pass drew. That identity is what makes depth-EQUAL viable. Neither value is
     // used: vanilla's glint vertex format is POSITION_TEX only
-    // (`DefaultVertexFormat.java:55`) and carries no shade, light or colour.
+    // (vanilla's own position-plus-UV vertex format) and carries no shade, light or colour.
     @location(2) ao: f32,
     @location(3) packed: vec4<u32>,
 }

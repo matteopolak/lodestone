@@ -29,7 +29,7 @@ fn vs_main(
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let sampled = textureSample(cloud_tex, cloud_smp, in.uv);
-    // `CloudRenderer.isCellEmpty`: alpha under 10/255 is an empty cell in
+    // Vanilla's own empty-cell rule: alpha under 10/255 is an empty cell in
     // `clouds.png` — discarding it here is what turns one flat textured quad
     // into the right cloud silhouette with no CPU-side cell meshing.
     if sampled.a < 0.04 {

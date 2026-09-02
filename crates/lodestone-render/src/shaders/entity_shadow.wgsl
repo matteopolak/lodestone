@@ -1,6 +1,5 @@
-// The entity ground-shadow decal (`EntityRenderDispatcher.submitShadow` /
-// `ShadowFeatureRenderer`, `.cache/mc/26.2/client-src/net/minecraft/client/
-// renderer/feature/ShadowFeatureRenderer.java`). Every quad is built fresh
+// The entity ground-shadow decal, matching vanilla's own shadow feature
+// pass. Every quad is built fresh
 // on the CPU each frame (`lodestone_shell`'s `prepare_shadows`) with its own
 // world-space corners and UV already resolved, so unlike `entity.wgsl` this
 // shader carries no per-instance transform or bone logic at all — it is the
@@ -30,8 +29,8 @@ struct Camera {
 struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) uv: vec2<f32>,
-    // Vanilla's own per-piece colour is `ARGB.white(piece.alpha())` — white,
-    // alpha-only — so this carries just the scalar rather than a full vec4.
+    // Vanilla's own per-piece colour is white with only the alpha varying,
+    // so this carries just the scalar rather than a full vec4.
     @location(2) alpha: f32,
 };
 
@@ -54,8 +53,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // `shadow.png` is a radial gradient sprite (opaque-ish centre fading to
     // fully transparent at the rim); the per-piece alpha further scales it,
-    // exactly `ARGB.white(alpha)` multiplying the sampled texel in vanilla's
-    // `ENTITY_SHADOW` blend.
+    // exactly white-at-that-alpha multiplying the sampled texel, as vanilla's
+    // own entity-shadow blend does.
     let texel = textureSample(tex, smp, in.uv);
     return vec4<f32>(texel.rgb, texel.a * in.alpha);
 }
