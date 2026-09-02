@@ -814,7 +814,7 @@ pub enum ServerBound {
     /// tick — i.e. the overwhelmingly common case of a player walking while
     /// turning. It was decoded and discarded here until issue #262's wiring:
     /// a player who walks and turns never sends `move_player_rot` at all
-    /// (vanilla's `LocalPlayer.sendPosition` picks exactly one of the four
+    /// (vanilla's own client-side send-position routine picks exactly one of the four
     /// movement packets per tick), so handling only the rotation-*only*
     /// sibling would have left the common case frozen at yaw 0. `None` for
     /// `move_player_pos`, whose wire body genuinely has no angles — a
@@ -873,7 +873,7 @@ pub enum ServerBound {
     ItemDropped {
         /// `true` for `DROP_ALL_ITEMS` (`Ctrl+Q`, the whole selected stack),
         /// `false` for `DROP_ITEM` (one item) — vanilla's `all` argument to
-        /// `Inventory.removeFromSelected`.
+        /// its own remove-from-selected routine.
         whole_stack: bool,
     },
     /// A block-breaking phase (`ServerboundPlayerActionPacket`'s
@@ -900,8 +900,8 @@ pub enum ServerBound {
     /// (`ServerboundUseItemOnPacket`).
     ///
     /// The clicked block and face determine the placement cell (see
-    /// `crate::server`'s handling); `cursor` is vanilla's
-    /// `BlockHitResult.getLocation()` reduced to block-local coordinates, and
+    /// `crate::server`'s handling); `cursor` is vanilla's own
+    /// block-hit-result location getter reduced to block-local coordinates, and
     /// is what decides a stair/slab/trapdoor's `half`.
     UseItemOn {
         /// The block face the client clicked.
@@ -916,7 +916,7 @@ pub enum ServerBound {
         /// [`BlockAction::sequence`](Self::BlockAction) for why it is
         /// decoded but not yet acted on).
         sequence: i32,
-        /// `0` main hand, `1` off hand — vanilla's `InteractionHand.ordinal()`.
+        /// `0` main hand, `1` off hand — vanilla's own interaction-hand enum ordinal.
         /// `crate::server`'s `apply_use_item_on` reads this to resolve which
         /// native inventory slot the spawn-egg/flint-and-steel/placement
         /// branches act on; same convention as [`UseItem::hand`](Self::UseItem).
@@ -950,7 +950,7 @@ pub enum ServerBound {
     /// id — see `crate::sleep::SleepVote` for why the key cannot come from the
     /// wire.
     PlayerCommand {
-        /// The `ServerboundPlayerCommandPacket.Action` ordinal sent by the
+        /// Vanilla's own player-command-packet action ordinal sent by the
         /// client.
         action: i32,
     },
@@ -985,8 +985,8 @@ pub enum ServerBound {
         entries: Vec<(String, String)>,
     },
     /// The client selected a new hotbar slot
-    /// (`ServerboundSetCarriedItemPacket`). Mirrors vanilla's
-    /// `ServerGamePacketListenerImpl::handleSetCarriedItem`, which writes
+    /// (`ServerboundSetCarriedItemPacket`). Mirrors vanilla's own
+    /// set-carried-item handler, which writes
     /// straight into `ServerPlayer.getInventory().setSelectedSlot(...)` with
     /// **no confirmation packet** — see `crate::inventory::PlayerInventory
     /// ::set_selected_hotbar_slot`'s consumer in `crate::server` for why
@@ -1002,8 +1002,8 @@ pub enum ServerBound {
     ///
     /// **The button input is what the consumer acts on.** `slot`, `button` and
     /// `click_type` are the raw click; `crate::container_click::do_click`
-    /// re-derives the whole menu state from them, exactly as vanilla's
-    /// `AbstractContainerMenu.doClick` does. That replaces the earlier scope cut
+    /// re-derives the whole menu state from them, exactly as vanilla's own
+    /// container-menu do-click routine does. That replaces the earlier scope cut
     /// in which the client's own `changed_slots` prediction was applied verbatim
     /// — a hole through which any client could name any item in any slot.
     ///
