@@ -40,8 +40,8 @@ pub struct ItemQuad {
     pub layer: u8,
 }
 
-/// A pixel is transparent when its alpha is zero (matching vanilla's
-/// `SpriteContents.isTransparent`), or when it lies outside the sprite.
+/// A pixel is transparent when its alpha is zero (matching vanilla's own
+/// sprite-contents "is transparent" check), or when it lies outside the sprite.
 fn is_transparent(img: &Image, x: i64, y: i64) -> bool {
     if x < 0 || y < 0 || x >= img.width as i64 || y >= img.height as i64 {
         return true;
@@ -147,7 +147,7 @@ fn bake_side_walls(img: &Image, layer: u8, out: &mut Vec<ItemQuad>) {
     }
 }
 
-/// Builds one side-wall quad, faithful to `ItemModelGenerator.bakeSideFaces`.
+/// Builds one side-wall quad, faithful to vanilla's own item-model-generator "bake side faces" step.
 fn side_wall(side: Side, x: f32, y: f32, x_scale: f32, y_scale: f32, layer: u8) -> ItemQuad {
     // UV strip (texel space, 0..16), inset by UV_SHRINK.
     let u0 = x + UV_SHRINK;

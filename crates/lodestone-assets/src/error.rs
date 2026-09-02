@@ -437,8 +437,9 @@ pub enum FontError {
     Location(#[from] ResourceLocationError),
     /// A `unihex` provider's `.hex` payload was not in GNU Unifont HEX form.
     ///
-    /// Mirrors the three `IllegalArgumentException`s in
-    /// `UnihexProvider.readFromStream` / `decodeHex`: a codepoint field that is
+    /// Mirrors the three `IllegalArgumentException`s (standard Java exception
+    /// type) in
+    /// vanilla's own unihex-provider "read from stream"/"decode hex" steps: a codepoint field that is
     /// not 4, 5 or 6 hex digits followed by a colon, a bitmap field that is not
     /// 32, 64, 96 or 128 hex digits, or a non-hex digit anywhere.
     #[error("invalid unihex font data: {reason}")]

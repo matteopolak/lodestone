@@ -166,8 +166,8 @@ impl AtlasSprite {
     }
 
     /// Resolves an absolute `tick` count to the physical frames to sample and the
-    /// interpolation blend between them, mirroring vanilla's
-    /// `SpriteContents.AnimationState`.
+    /// interpolation blend between them, mirroring vanilla's own
+    /// sprite-contents animation-state class.
     ///
     /// This is the draw-time animation seam: the renderer holds the clock and,
     /// each frame, calls this with the current tick to learn which two atlas
@@ -638,11 +638,11 @@ impl AtlasBuilder {
         // mips are requested, so the layout is unchanged).
         //
         // This whole-atlas cap is deliberately vanilla-faithful, not a
-        // limitation: `SpriteLoader.stitch` computes
+        // limitation: vanilla's own sprite-loader stitch step computes
         // `lowestOneBit = min over sprites of min(lowestOneBit(w), lowestOneBit(h))`
         // and, if `log2(lowestOneBit) < requested`, drops the *entire* atlas to
         // that level (logging a warning per offending texture). Because
-        // `2^trailing_zeros(x) <= x`, vanilla's parallel `minTexelSize` term never
+        // `2^trailing_zeros(x) <= x`, vanilla's parallel minimum-texel-size term never
         // binds, so this reduces exactly to `min over sprites of max_mip_level`.
         // A single NPOT or odd-sized sprite therefore caps mips for the whole
         // sheet in vanilla too; matching that is correct, and changing it would
@@ -726,7 +726,7 @@ impl AtlasBuilder {
         let height = next_pow2(cursor_y + shelf_height).max(gran);
 
         // One mip chain per placed sprite, in **placement** order, each built by
-        // vanilla's `MipmapGenerator.generateMipLevels`. Hoisted above the
+        // vanilla's own mipmap-generator "generate mip levels" step. Hoisted above the
         // level-0 blit because level 0 is `chain[0]` — the *prepared* base
         // (solidified, or dark-filled for a `dark_cutout` sprite) — and not the
         // raw decoded PNG. Vanilla gets that for free by mutating the sprite's
@@ -738,9 +738,9 @@ impl AtlasBuilder {
         // byte-identical to before.
         //
         // The strategy and the cutoff bias are per *sprite*, off its own
-        // `*.png.mcmeta` `texture` section — vanilla's `SpriteContents` reads
-        // both out of `TextureMetadataSection` and hands them to
-        // `generateMipLevels`. Passing `Auto`/`0.0` unconditionally (which this
+        // `*.png.mcmeta` `texture` section — vanilla's own sprite-contents class reads
+        // both out of its own texture-metadata section and hands them to
+        // its own "generate mip levels" step. Passing `Auto`/`0.0` unconditionally (which this
         // once did) is right for the majority and wrong for 45 of 26.2's block
         // sprites: every leaves texture asks for `dark_cutout`, 27 flower and
         // amethyst sprites for `strict_cutout` (a 0.3 coverage reference, not
@@ -772,11 +772,11 @@ impl AtlasBuilder {
         // surrounding gutter is filled by extruding the sprite's edge pixels.
         let mut rgba = vec![0u8; (width as usize) * (height as usize) * 4];
         for (p, &(i, x, y)) in placements.iter().enumerate() {
-            // Vanilla's `MipmapGenerator.generateMipLevels` mutates
-            // `currentMips[0]` **in place** (`TextureUtil.solidify` /
-            // `fillEmptyAreasWithDarkColor`) and then sets `result[0] =
+            // Vanilla's own mipmap-generator "generate mip levels" step mutates
+            // `currentMips[0]` **in place** (its own texture-util "solidify" /
+            // "fill empty areas with dark color" steps) and then sets `result[0] =
             // currentMips[0]`, and `currentMips[0]` *is* the `NativeImage`
-            // `SpriteContents.uploadFirstFrame` later uploads at level 0. So
+            // its own sprite-contents "upload first frame" step later uploads at level 0. So
             // vanilla's level 0 carries the prepared base, not the raw PNG, and
             // the chain's own level 1 was downsampled from that same prepared
             // image. Blitting the raw image here instead made level 0 the one
@@ -867,7 +867,7 @@ impl AtlasBuilder {
         // level deeper each time. Vanilla avoids this because its atlas upload
         // is a GPU blit per mip level sampling each sprite's own scratch
         // texture with `CLAMP_TO_EDGE`, which extrudes automatically at every
-        // level (`TextureAtlas.uploadInitialContents`); this CPU path has to
+        // level (vanilla's own texture-atlas "upload initial contents" step); this CPU path has to
         // extrude explicitly instead.
         let mips = if let Some(chains) = chains.as_ref() {
             let mut levels = Vec::with_capacity(effective_levels as usize);

@@ -49,8 +49,10 @@
 //! and `PatternLayer::sprite`'s path (minus the `entity/banner/` prefix)
 //! carry, so a caller holding either can look itself up here with no string
 //! surgery beyond what [`BannerPatternAtlas::get_sprite`] already does.
-//! `banner_base` (the plain wood/cloth texture `submitBanner` draws under
-//! the *opaque* body/flag pass, `Sheets.BANNER_BASE` — not a pattern mask at
+//! `banner_base` (the plain wood/cloth texture vanilla's own "submit banner"
+//! step draws under
+//! the *opaque* body/flag pass, its own banner-base sheet constant — not a
+//! pattern mask at
 //! all, see the module doc on `crates/lodestone-render/src/block_entity.rs`)
 //! is deliberately excluded: including it under a real-sounding key would
 //! let a caller bind the wrong texture for a pattern layer and have it look
@@ -67,7 +69,8 @@ use crate::texture::Image;
 /// In-pack path of vanilla's own banner-pattern atlas descriptor.
 pub const BANNER_PATTERNS_ATLAS_PATH: &str = "assets/minecraft/atlases/banner_patterns.json";
 
-/// The plain cloth/wood sheet `submitBanner`'s opaque body/flag pass uses —
+/// The plain cloth/wood sheet vanilla's own "submit banner" step's opaque
+/// body/flag pass uses —
 /// present in the same directory as every pattern mask but not itself a
 /// pattern, so [`BannerPatternAtlas::load_reported`] excludes it.
 const NON_PATTERN_STEM: &str = "banner_base";
@@ -228,13 +231,15 @@ fn load_pattern_directory(
 }
 
 /// In-pack path of vanilla's own shield-pattern atlas descriptor —
-/// `Sheets.SHIELD_PATTERN_BASE`'s directory source, the shield sibling of
+/// its own shield-pattern-base sheet constant's directory source, the shield
+/// sibling of
 /// [`BANNER_PATTERNS_ATLAS_PATH`].
 pub const SHIELD_PATTERNS_ATLAS_PATH: &str = "assets/minecraft/atlases/shield_patterns.json";
 
 /// The two non-pattern sheets living in `entity/shield/` alongside every
 /// pattern mask — [`crate::block_entity_models::shield_model`]'s own two
-/// base sheets, `Sheets.SHIELD_BASE`/`Sheets.SHIELD_BASE_NO_PATTERN` — so
+/// base sheets, vanilla's own shield-base/shield-base-no-pattern sheet
+/// constants — so
 /// [`ShieldPatternAtlas::load_reported`] excludes them the same way
 /// [`NON_PATTERN_STEM`] excludes a banner's plain cloth.
 const SHIELD_NON_PATTERN_STEMS: [&str; 2] = ["shield_base", "shield_base_nopattern"];

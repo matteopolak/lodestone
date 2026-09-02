@@ -109,7 +109,8 @@ impl Language {
     ///
     /// This is [`Self::from_source`]'s intended replacement wherever the
     /// caller wants vanilla's own language-loading behaviour
-    /// (`ClientLanguage.loadFrom`, which walks `ResourceManager.getResourceStack`
+    /// (its own client-language "load from" step, which walks its own
+    /// resource-manager "get resource stack" accessor
     /// and folds every layer's entries into one map): `from_source`/`read`
     /// answer "what does the winning pack's file say", which is correct for a
     /// texture or a model but wrong for a language file, where vanilla treats

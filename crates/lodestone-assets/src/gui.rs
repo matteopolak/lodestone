@@ -174,8 +174,8 @@ impl GuiScaling {
     /// Builds the geometry mapping this sprite onto a `dst_w` x `dst_h` target.
     ///
     /// `sprite_w`/`sprite_h` are the sprite's real pixel dimensions, and **all
-    /// three modes need them, nine-slice included**. Vanilla's
-    /// `GuiSpriteScaling.NineSlice` treats its declared `width`/`height` as the
+    /// three modes need them, nine-slice included**. Vanilla's own
+    /// nine-slice GUI-sprite-scaling variant treats its declared `width`/`height` as the
     /// size the border insets were *authored* against, not as the size of the
     /// texture on disk: a 32x pack ships a sprite twice the declared dimensions,
     /// and every source coordinate is therefore a fraction of the declared size
@@ -374,8 +374,7 @@ fn corner(
 ///
 /// # Why source rects are rescaled and destination rects are not
 ///
-/// Vanilla (`GuiGraphicsExtractor.blitNineSlicedSprite` —
-/// `AbstractBoatRenderer` is unrelated)
+/// Vanilla (its own "blit nine sliced sprite" step)
 /// never computes an absolute source pixel offset. Every corner/edge call
 /// passes `nineSlice.width()`/`height()` as `spriteWidth`/`spriteHeight` and a
 /// *declared*-space offset as `textureX`/`textureY`, and the actual sample is

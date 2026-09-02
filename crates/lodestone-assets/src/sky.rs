@@ -2,9 +2,9 @@
 //! `assets/<ns>/textures/environment/**`.
 //!
 //! Vanilla 26.2 stitches `sun.png` and the eight `moon/<phase>.png` sprites into
-//! one small runtime atlas (`AtlasIds.CELESTIALS`, built by
-//! `SkyRenderer`/`AtlasManager` — see
-//! `.cache/mc/26.2/client-src/net/minecraft/client/renderer/SkyRenderer.java`,
+//! one small runtime atlas (built by
+//! its own sky-renderer/atlas-manager classes — see
+//! the decompiled 26.2 tree,
 //! behavioural reference only). [`CelestialAtlas`] mirrors that using the same
 //! [`AtlasBuilder`] every other atlas in this crate uses (block, item, particle,
 //! GUI), rather than a bespoke stitcher.
@@ -22,9 +22,9 @@ use crate::manager::ResourceManager;
 use crate::texture::Image;
 
 /// The eight lunar phase texture names (under `environment/celestial/moon/`),
-/// in vanilla's `MoonPhase` enum declaration order. Index `n` is the sprite for
+/// in vanilla's own moon-phase enum declaration order. Index `n` is the sprite for
 /// [`crate::sky`]'s callers computing `moon_phase_index_for_time_of_day(..) ==
-/// n` — see `.cache/mc/26.2/client-src/net/minecraft/world/level/MoonPhase.java`,
+/// n` — see the decompiled 26.2 tree's own moon-phase enum,
 /// whose own `startTick() == index() * 24000` is what fixes this ordering: the
 /// phase active on world-day `d` is enum index `d % 8`.
 pub const MOON_PHASE_NAMES: [&str; 8] = [
@@ -48,7 +48,7 @@ fn moon_sprite_path(phase_index: u8) -> String {
     )
 }
 
-/// The stitched sun + 8-moon-phase atlas (mirrors vanilla's `AtlasIds.CELESTIALS`).
+/// The stitched sun + 8-moon-phase atlas (mirrors vanilla's own celestials atlas id).
 #[derive(Debug)]
 pub struct CelestialAtlas {
     atlas: Atlas,
