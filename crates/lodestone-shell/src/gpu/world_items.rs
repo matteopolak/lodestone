@@ -40,7 +40,7 @@ use crate::entities::{EntityDraw, ITEM_ENTITY_TYPE_PATH};
 /// change what it means.
 const FIREWORK_ROCKET_TYPE_PATH: &str = "firework_rocket";
 
-/// `FireworkRocketEntity.getDefaultItem()` — the stack vanilla's accessor is
+/// Vanilla's own firework-rocket-entity default-item accessor — the stack vanilla's accessor is
 /// *initialised* to, and therefore what a rocket whose item field was never
 /// marked dirty genuinely draws as.
 const FIREWORK_ROCKET_ITEM: &str = "minecraft:firework_rocket";
@@ -54,7 +54,7 @@ const FIREWORK_ROCKET_ITEM: &str = "minecraft:firework_rocket";
 /// item_display` with no `item_display` tag *is* `NONE` — vanilla's own
 /// accessor default — so this seam needs a context that can answer
 /// `minecraft:display_context` with `"none"`, which is
-/// `ItemDisplayContext.NONE.getSerializedName()`.
+/// vanilla's own serialized-name accessor for its `NONE` display-context variant.
 ///
 /// That matters rather than being pedantic: `spyglass`, `trident`, the spears
 /// and every bundle branch on `minecraft:display_context` at the top of their
@@ -717,8 +717,8 @@ impl RenderState {
             let fan_step = depth * 1.5;
             let jitter_extent = if flat { 0.075 } else { 0.15 };
             // Vanilla seeds `renderMultipleFromCount`'s RNG off
-            // `ItemClusterRenderState.getSeedForItemStack`
-            // (`Item.getId(item) + damageValue`); reusing the registry item id
+            // its own item-cluster-render-state's get-seed-for-item-stack accessor
+            // (vanilla's own get-id accessor plus damageValue); reusing the registry item id
             // as `item_cluster_jitter`'s hash key gives the identical
             // *property* that function's own doc names — no two vaults'
             // clusters scatter in lockstep — rather than chasing the exact

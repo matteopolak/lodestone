@@ -24,7 +24,7 @@
 //!
 //! **The side's own dye colour is the default a run falls back to, not an
 //! override**: vanilla's own sign-renderer submit routine passes the side's
-//! resolved colour (full dye when glowing, `ARGB.scaleRGB(dye, 0.4)`
+//! resolved colour (full dye when glowing, vanilla's own ARGB-scale-RGB helper applied to `(dye, 0.4)`
 //! otherwise) as the font's own default-colour argument, and
 //! vanilla's own text-colour resolver only substitutes it when a glyph's own style
 //! carries no colour at all — a run that *does* specify one always wins,
@@ -67,7 +67,7 @@
 //! # Colour space: this pass draws into a raw (non-sRGB) view
 //!
 //! Vanilla is not colour-managed, so a sign's resolved run colour —
-//! `ARGB.scaleRGB(dye, 0.4)` for an unlit side, the full dye when glowing — is
+//! vanilla's own ARGB-scale-RGB helper applied to `(dye, 0.4)` for an unlit side, the full dye when glowing — is
 //! a gamma byte written straight to the framebuffer. Every pipeline in this
 //! crate targets the swapchain's *sRGB* view, which would encode it a second
 //! time and read markedly lighter than vanilla. So this pass shares a render
@@ -106,7 +106,7 @@
 //!
 //! Two details that are not simplifications: the grow amount is the run's own
 //! per-glyph [`StyledRect::outline_grow`](super::nametag::StyledRect)
-//! (`GlyphInfo.getShadowOffset()`, half a pixel for a unihex glyph), and
+//! (vanilla's own glyph-info shadow-offset accessor, half a pixel for a unihex glyph), and
 //! underline/strikethrough bars carry `0.0` there and so contribute no
 //! outline at all — vanilla's `outlineOutput.discardEffects()`.
 //!
@@ -1213,7 +1213,7 @@ fn order_by_forward_distance<'a>(
 
 /// This side's resolved default run colour, packed `0x00rrggbb` — the exact
 /// value [`sign_side_color`] already computes (full dye when glowing,
-/// `ARGB.scaleRGB(dye, 0.4)` otherwise), just converted back from its `0..=1`
+/// vanilla's own ARGB-scale-RGB helper applied to `(dye, 0.4)` otherwise), just converted back from its `0..=1`
 /// float form into the integer form [`lodestone_world::SignTextSpan::color`]
 /// and [`lodestone_model::text::TextColor::Rgb`] both use. A pure unit
 /// conversion of an already-correct value, not a re-derivation of the
@@ -1257,7 +1257,7 @@ fn styled_spans(line: &[SignTextSpan], default_rgb: u32) -> Vec<TextSpan> {
 /// overlong line is *cut*, not shrunk and not scrolled. That is easy to
 /// misread as a bug when you see it, and it is the reason a hanging sign's
 /// text stays inside a board that is a third narrower than a standing one's:
-/// `SignBlockEntity.getMaxTextLineWidth()` is 90 and
+/// vanilla's own sign-block-entity max-text-line-width accessor is 90 and
 /// `HangingSignBlockEntity`'s override is 60, and nothing else in the two
 /// renderers constrains the text horizontally at all.
 ///
