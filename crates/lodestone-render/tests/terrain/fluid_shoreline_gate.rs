@@ -40,6 +40,7 @@ use lodestone_render::block_models::{FluidCell, FluidKind, FluidSprites};
 use lodestone_render::models::{FluidSectionView, mesh_fluids};
 use lodestone_render::{BlockModels, RenderLayer, blocks_json_registry, is_full_cube};
 
+#[path = "../gate_harness/mod.rs"]
 mod gate_harness;
 use gate_harness::{require_blocks_report, require_client_jar};
 
