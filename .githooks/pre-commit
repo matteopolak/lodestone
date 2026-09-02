@@ -1,0 +1,102 @@
+#!/bin/sh
+# Token budget for AI-ingested artifacts.
+#
+# Some files in this repo are loaded into an AI agent's context automatically,
+# before it has read a line of code -- CLAUDE.md and AGENTS.md are the whole
+# set today. Every token they spend is a token unavailable to the actual task,
+# and unlike a doc under docs/ nobody chooses to open them. So they are
+# budgeted like code rather than allowed to grow like prose: this hook fails a
+# commit that pushes one past its cap.
+#
+# The cap is an ESTIMATE. There is no tokenizer available in a git hook, so we
+# use the standard rule of thumb of ~4 bytes per token for English prose and
+# state that plainly rather than pretending to precision. Markdown tables and
+# fenced code tokenize somewhat worse than 4 bytes/token, so the estimate runs
+# slightly optimistic -- which is the right direction for a cap that should
+# only fire on real growth, not on rounding.
+#
+# Install with `just install-hooks` (sets core.hooksPath to .githooks).
+# Bypass, if you genuinely must, with `git commit --no-verify`.
+
+set -u
+
+# path <space> max_tokens. Add a row here when a new file starts being
+# auto-loaded into an agent's context; do not add rows for docs under docs/,
+# which are read on demand.
+#
+# 6000 tokens is roughly 1.5x the size of CLAUDE.md after the rewrite that
+# introduced this hook (~3.7k), and about a sixth of what it had grown to
+# before (~37k). That leaves real room for a genuine addition while keeping
+# the file to something a new contributor reads in a few minutes -- which is
+# the property the cap exists to protect.
+BUDGETS="CLAUDE.md 6000
+AGENTS.md 6000"
+
+BYTES_PER_TOKEN=4
+
+changed=$(git diff --cached --name-only --diff-filter=ACMR)
+status=0
+checked=0
+budgeted=0
+
+for row in $(printf '%s' "$BUDGETS" | tr ' ' ':'); do
+    path=${row%%:*}
+    cap=${row##*:}
+    budgeted=$((budgeted + 1))
+
+    # Only a file this commit actually touches needs checking; one that is not
+    # changing cannot push itself over.
+    printf '%s\n' "$changed" | grep -Fxq "$path" || continue
+
+    # Read the STAGED content, not the working tree -- that is what is being
+    # committed. `git commit -- <paths>` runs this hook against a temporary
+    # index, so `:path` resolves correctly there too.
+    bytes=$(git show ":$path" 2>/dev/null | wc -c | tr -d ' ')
+
+    # A detector that could not look must never share a value with "no
+    # findings": an unreadable blob fails the commit rather than passing it.
+    if [ -z "$bytes" ] || [ "$bytes" -eq 0 ] 2>/dev/null; then
+        echo "pre-commit: could not read staged content of $path -- refusing to"
+        echo "            certify a budget it did not measure."
+        status=1
+        continue
+    fi
+
+    checked=$((checked + 1))
+    tokens=$(( (bytes + BYTES_PER_TOKEN - 1) / BYTES_PER_TOKEN ))
+
+    if [ "$tokens" -gt "$cap" ]; then
+        over=$((tokens - cap))
+        trim=$((over * BYTES_PER_TOKEN))
+        status=1
+        echo ""
+        echo "pre-commit: $path is over its context budget."
+        echo ""
+        echo "    estimated  ${tokens} tokens (${bytes} bytes / ${BYTES_PER_TOKEN} bytes-per-token)"
+        echo "    cap        ${cap} tokens"
+        echo "    over by    ${over} tokens -- cut about ${trim} bytes"
+        echo ""
+        echo "  This file is loaded into every agent's context automatically, so it is"
+        echo "  budgeted like code. To land this commit, do ONE of:"
+        echo ""
+        echo "    1. Move the detail into docs/ and leave a one-line pointer here."
+        echo "       Subsystem prose belongs in docs/<feature>.md, which is read on"
+        echo "       demand. Regenerate the index afterwards with 'just regen-docs-index'."
+        echo "    2. Cut something that has gone stale. Status annotations and"
+        echo "       incident histories age worst; check the tree before believing one."
+        echo "    3. Raise the cap in .githooks/pre-commit -- deliberately, in its own"
+        echo "       commit, saying in the message why the budget should grow."
+        echo ""
+        echo "  'git commit --no-verify' bypasses this, but the next commit will fail"
+        echo "  the same way, so it is a delay rather than a fix."
+        echo ""
+    fi
+done
+
+# Say what was measured. A guard that prints nothing is indistinguishable from
+# one that did not run.
+if [ "$checked" -gt 0 ]; then
+    echo "pre-commit: context budget checked ${checked}/${budgeted} budgeted file(s)."
+fi
+
+exit $status
