@@ -14,12 +14,11 @@
 //! vanilla **bit-for-bit for seeded sounds**, and the generic mechanism under
 //! it:
 //!
-//! * [`JavaRandom`] reproduces vanilla's `LegacyRandomSource` — which is exactly
-//!   `java.util.Random` (26.2 `LegacyRandomSource`/`BitRandomSource`). Sound
-//!   packets carry a `long` seed (`ClientboundSoundPacket`/
-//!   `ClientboundSoundEntityPacket`); vanilla feeds it through
-//!   `RandomSource.create(seed)` so that **every client hearing the event picks
-//!   the same variant**. To match that, the variant draw must be this exact LCG.
+//! * [`JavaRandom`] reproduces vanilla's legacy random source — which is
+//!   exactly `java.util.Random`. Sound packets carry a `long` seed; vanilla
+//!   feeds it through its random-source constructor so that **every client
+//!   hearing the event picks the same variant**. To match that, the variant
+//!   draw must be this exact LCG.
 //!   The type itself is [`lodestone_javarandom::JavaRandom`] — the workspace's
 //!   one copy, shared with `lodestone-particle`, `lodestone-render`'s lightning
 //!   bolt and `lodestone-shell`'s enchanting-table book — re-exported here so
@@ -27,7 +26,7 @@
 //!   unchanged. Validated against a real JVM (see `tests/select.rs` and the
 //!   committed golden vectors), not against anything lodestone wrote.
 //!
-//! * [`select_weighted`] is vanilla's `WeighedSoundEvents.getSound` walk in
+//! * [`select_weighted`] is vanilla's weighted-sound-selection walk in
 //!   version-free, asset-free form: draw `roll ∈ [0, total)` and subtract each
 //!   weight until the running index goes negative. It operates on a plain
 //!   `&[u32]` of weights so it carries no sound or protocol knowledge.
@@ -55,8 +54,8 @@
 pub use lodestone_javarandom::JavaRandom;
 
 /// Selects an index into `weights` with probability proportional to each
-/// weight, using vanilla's cumulative-subtraction walk
-/// (`WeighedSoundEvents.getSound`).
+/// weight, using vanilla's cumulative-subtraction walk over weighted sound
+/// events.
 ///
 /// `roll` must return a uniform value in `[0, total)` where `total` is the sum
 /// of `weights` (capped at `u32::MAX`); pass [`JavaRandom::roll`] for vanilla

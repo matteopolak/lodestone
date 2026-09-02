@@ -5,7 +5,7 @@
 //! anything lodestone wrote (plan §12.31: agreement between two of your own
 //! ports is weak evidence). `tests/fixtures/oracle/java_random_golden.txt` is
 //! its output; `JavaRandomOracle.java` beside it regenerates the file. Vanilla's
-//! `LegacyRandomSource` *is* this generator, so matching it bit-for-bit is what
+//! legacy random source *is* this generator, so matching it bit-for-bit is what
 //! makes seeded-sound variant selection identical to vanilla.
 
 use lodestone_audio::{JavaRandom, select_weighted};

@@ -4,9 +4,9 @@
 //!
 //! # Vanilla parity
 //!
-//! Vanilla sets `AL_PITCH` on the OpenAL source (`Channel.setPitch`), which
-//! resamples playback by that factor, and `SoundEngine.calculatePitch` clamps it
-//! to `[0.5, 2.0]`. Pitch and rate conversion compose into a single read ratio:
+//! Vanilla sets `AL_PITCH` on the OpenAL source, which resamples playback by
+//! that factor, and clamps the pitch to `[0.5, 2.0]` before applying it.
+//! Pitch and rate conversion compose into a single read ratio:
 //! for each output frame the read head advances
 //! `pitch * source_rate / output_rate` source frames.
 //!

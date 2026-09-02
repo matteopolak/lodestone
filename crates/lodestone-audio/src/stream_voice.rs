@@ -68,13 +68,13 @@ const MAX_SOURCE_CHANNELS: usize = 8;
 /// start a streaming voice: the shared ring plus the playback parameters a
 /// [`SoundInstance`](crate::event::SoundInstance) would otherwise carry.
 ///
-/// Music is always head-relative (vanilla `SimpleSoundInstance.forMusic`), so
-/// unlike [`SoundInstance`](crate::event::SoundInstance) there is no
-/// position/attenuation here — every field a streaming voice needs is
-/// present. The runtime volume *fade* (the music-bus crossfade) applies
-/// through [`crate::CategoryVolumes::set_runtime_gain`], not a per-voice
-/// field — matching vanilla's own `MusicManager.fadePlaying` calling
-/// `updateCategoryVolume(SoundSource.MUSIC, gain)` rather than touching the
+/// Music is always head-relative (vanilla's own music-sound constructor
+/// forces this), so unlike [`SoundInstance`](crate::event::SoundInstance)
+/// there is no position/attenuation here — every field a streaming voice
+/// needs is present. The runtime volume *fade* (the music-bus crossfade)
+/// applies through [`crate::CategoryVolumes::set_runtime_gain`], not a
+/// per-voice field — matching vanilla's own music-fade routine, which
+/// updates the music bus's category volume directly rather than touching the
 /// individual sound instance.
 #[derive(Debug, Clone)]
 pub struct StreamSource {
