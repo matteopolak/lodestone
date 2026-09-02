@@ -83,10 +83,10 @@ fn convert_collision_rule(rule: lodestone_game::scoreboard::CollisionRule) -> Co
     }
 }
 
-/// `Entity.getScoreboardName()` — the string a scoreboard team's member list
-/// actually carries. `Player.getScoreboardName()` overrides the base
-/// `Entity` behaviour to the account name; every other entity
-/// keeps the base `Entity.java` behaviour, its own UUID rendered as a string.
+/// Vanilla's own scoreboard-name accessor — the string a scoreboard team's member list
+/// actually carries. Vanilla's own player override of it resolves to the
+/// account name; every other entity
+/// keeps the base entity behaviour, its own UUID rendered as a string.
 /// Getting this backwards (e.g. keying a player by UUID) would silently miss
 /// every real server's `/team join <team> <player-name>`.
 fn scoreboard_holder(
@@ -155,11 +155,11 @@ impl Sim {
     /// server dump of all 158 entity types. A
     /// neighbour pushes the player only if vanilla's crowd pass reaches
     /// `player.push(neighbour)`, which needs three things: the type is a
-    /// `LivingEntity` (the sole caller of `pushEntities()`, at
-    /// `LivingEntity.java`), its `pushEntities()` can still see a player
-    /// (`Bat.java` empties it; `ArmorStand.java` narrows it to ridable
-    /// minecarts), and its `doPush(Entity)` still reaches `entity.push(this)`
-    /// for one (`Parrot.java` skips players outright).
+    /// living entity (the sole caller of its own push-entities pass), its
+    /// push-entities pass can still see a player
+    /// (the bat's own override empties it; the armor stand's own override narrows it to ridable
+    /// minecarts), and its own do-push override still reaches `entity.push(this)`
+    /// for one (the parrot's own override skips players outright).
     ///
     /// Note this is *not* the neighbour's `isPushable()`. That gates the
     /// **pushee** — it is the `input` of `EntitySelector.pushableBy` — which is
@@ -179,9 +179,9 @@ impl Sim {
     /// # What the census deliberately excludes
     ///
     /// Boats and rideable minecarts do push players in vanilla, but from their
-    /// own ticks — `AbstractBoat.push(Entity)` (`AbstractBoat.java`, with a
-    /// Y-ordering condition at `:181`) and
-    /// `NewMinecartBehavior.pushEntities(AABB)` (`:537`, gated on
+    /// own ticks — the boat's own push override (with a
+    /// Y-ordering condition) and
+    /// the minecart's own push-entities pass (gated on
     /// `isRideable()` and querying a `1.0E-7`-inflated box). Those cannot join
     /// this list without changing the gate, so the census reports them `false`
     /// rather than approximating them into the wrong pass. See
@@ -209,9 +209,10 @@ impl Sim {
             let tab_list = w.get::<SessionTabList>(local).map(|list| &list.0);
             let ridden_vehicle = w.get::<Riding>(local).and_then(|riding| riding.0);
 
-            // `Entity.getTeam()` for the local player itself — the other half
+            // Vanilla's own get-team accessor for the local player itself — the other half
             // of the team gate that a neighbour's own `CollisionRule` below
-            // only supplies one side of. `Player.getScoreboardName()` is the
+            // only supplies one side of. Vanilla's own player scoreboard-name
+            // override is the
             // account name, resolved the same way a remote player's is: by
             // uuid through the tab list, not through any component the local
             // player entity carries (it carries none — see

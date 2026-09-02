@@ -297,7 +297,7 @@ impl Sim {
     ///
     /// The pose's eye height is passed to [`build_camera`] explicitly, so the
     /// position handed to it is the player's real interpolated feet in every pose
-    /// (`Avatar.java`: `0.4` swimming, `1.27` crouching, `1.62` standing).
+    /// (vanilla's own per-pose eye heights: `0.4` swimming, `1.27` crouching, `1.62` standing).
     /// It used to be folded into the feet Y as a bias instead — arithmetically the
     /// same, but the argument was then not the feet whenever a non-standing pose
     /// was active. See `camera_rig.rs`'s module docs.
@@ -331,8 +331,8 @@ impl Sim {
     /// View Bobbing, and polled per frame for the same reason.
     ///
     /// Per frame rather than at launch because vanilla applies this one
-    /// immediately: its `IntRange(30, 110)` takes the default
-    /// `applyValueImmediately`, unlike `renderDistance`'s explicit `false`. So the
+    /// immediately: its own int-range option takes the default
+    /// immediate-apply behaviour, unlike `renderDistance`'s explicit opt-out. So the
     /// FOV slider must move the view while the settings page is still open, which
     /// is why this is a `Sim` field and not a `Config::resolve_persisted` fold like
     /// `render_distance`.
@@ -352,7 +352,7 @@ impl Sim {
     }
 
     /// Advances the camera mode one step (vanilla's `F5`, i.e.
-    /// `CameraType.cycle()`): first person → third person back → third person
+    /// its own camera-type cycling): first person → third person back → third person
     /// **front** → first person.
     ///
     /// [`Self::render_camera`] and [`Self::third_person_body_state`] are the two
@@ -549,14 +549,14 @@ impl Sim {
             0.0,
         );
         // `is_first_person`, not "is it the back view": vanilla's own predicate
-        // here is `!getCameraType().isFirstPerson()` (`Camera.java`, the
-        // `detached` assignment), so the front view takes the *same* pullback
+        // here is the negation of its own camera-type first-person check (its
+        // own client-side camera update's `detached` assignment), so the front view takes the *same* pullback
         // path as the back view and differs only by the mirror inside
         // `third_person_camera`.
         if self.camera_type.is_first_person() {
             // Vanilla's FOV zoom is gated on `firstPerson &&
-            // isScoping()` (`AbstractClientPlayer.getFieldOfViewModifier`,
-            // `AbstractClientPlayer.java`) — a third-person camera
+            // isScoping()` (its own field-of-view-modifier calculation) —
+            // a third-person camera
             // never zooms, so this composition only runs on the early
             // first-person return, not the two third-person branches below.
             return apply_spyglass_fov(eye, self.spyglass_scoping());
@@ -575,8 +575,8 @@ impl Sim {
         }
     }
 
-    /// Vanilla's `Player.isScoping()`:
-    /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
+    /// Vanilla's own is-scoping check: using an item, and that item
+    /// is the spyglass
     ///, computed entirely from `Sim`'s own state so
     /// [`Self::render_camera`] needs no new parameter — `app.rs` computes the
     /// same condition independently for `ScreenEffects::scoping` (it already
@@ -897,7 +897,7 @@ impl Sim {
             // spread with `..AnimInput::REST` so the gap is visible here.
             arm_pose: lodestone_render::ArmPose::Empty,
             arm_pose_left_hand: false,
-            // `Entity.isCrouching()` is `hasPose(Pose.CROUCHING)` — the
+            // Vanilla's own is-crouching check is really a pose check — the
             // *pose*, not the shift-key flag, and
             // the two genuinely differ: holding shift in a one-block gap
             // leaves you shift-key-down and `SWIMMING`. For the local player
@@ -906,7 +906,7 @@ impl Sim {
             // `PlayerState::pose` as the tail of every tick — so this reads
             // it directly rather than re-deriving a crouch from input.
             crouching: interp.pose == lodestone_physics::pose::Pose::Crouching,
-            // `Entity.isPassenger()`. The local player has no `Vehicle`
+            // Vanilla's own is-passenger check. The local player has no `Vehicle`
             // component the way a tracked remote entity does (see
             // `entities::extract_entity_draws`'s own doc on why) — it is the
             // one entity `session::Riding` exists to answer this for instead,

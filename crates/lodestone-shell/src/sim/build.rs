@@ -353,7 +353,7 @@ impl Sim {
         // device.
         ecs.insert_resource(AudioEngine(ShellAudio::from_env()));
         // Beside the device, for the same config-scoped reason. Time-seeded to
-        // match vanilla, whose `MusicManager` draws from `RandomSource.create()`
+        // match vanilla, whose own music-manager draws from a fresh random source
         // (itself time-seeded) — a fixed constant here would give every run of the
         // client the identical sequence of gaps between songs. Determinism is not
         // lost where it matters: every gate constructs `ShellMusic::new` with its

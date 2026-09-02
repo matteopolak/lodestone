@@ -54,27 +54,28 @@ const FIREWORK_BOOST_TICKS: u32 = 20;
 /// answers and only one of them should read as level 0.
 const RIPTIDE_ENCHANTMENT_ID: i32 = 32;
 
-/// Whether `id`'s `Item.getUseAnimation` is anything other than `NONE` — i.e.
+/// Whether `id`'s vanilla use-animation is anything other than "none" — i.e.
 /// whether right-clicking with it would actually enter vanilla's
 /// `isUsingItem()` state at all, the gate [`Sim::use_item_live`] applies
 /// before arming [`UsingItem`]/[`ItemUseEffects`].
 ///
-/// `Item.java`'s own base implementation resolves this from three
+/// Vanilla's own item base resolves this from three
 /// components: `minecraft:consumable` (food/drink — [`consumable_for_item`]),
 /// `minecraft:blocks_attacks` (the shield) and `minecraft:kinetic_weapon`
-/// (the seven `*_spear` items, `Item.Properties.spear(...)`); everything else
-/// falls to `NONE`. Seven item classes override it unconditionally, each
-/// returning one fixed `ItemUseAnimation` regardless of stack state:
-/// `BowItem` (`minecraft:bow`), `CrossbowItem` (`minecraft:crossbow`),
-/// `SpyglassItem` (`minecraft:spyglass`), `TridentItem`
-/// (`minecraft:trident`), `BrushItem` (`minecraft:brush`), `InstrumentItem`
-/// (`minecraft:goat_horn` is the only item built on it) and `BundleItem`
+/// (the seven `*_spear` items, built with a dedicated spear-properties
+/// helper); everything else
+/// falls to "none". Seven specific items override it unconditionally, each
+/// returning one fixed use-animation regardless of stack state:
+/// the bow (`minecraft:bow`), the crossbow (`minecraft:crossbow`),
+/// the spyglass (`minecraft:spyglass`), the trident
+/// (`minecraft:trident`), the brush (`minecraft:brush`), the instrument item
+/// (`minecraft:goat_horn` is the only item built on it) and the bundle
 /// (every `*_bundle` colour, plus the plain `minecraft:bundle`, share the
-/// class).
+/// same base item).
 ///
 /// A sword, a tool, a plain block and an empty hand all have none of the
-/// three components and no class override, so `getUseAnimation` returns
-/// `NONE` and vanilla's `use()` never calls `startUsingItem` for them — this
+/// three components and no such override, so the animation lookup returns
+/// "none" and vanilla's `use()` never enters the item-use state for them — this
 /// must return `false` for exactly that set.
 #[must_use]
 fn item_has_use_animation(id: &str) -> bool {
@@ -111,45 +112,45 @@ fn item_path(id: &str) -> &str {
     id.rsplit_once(':').map_or(id, |(_, path)| path)
 }
 
-/// Whether a **generic use** of `id` — vanilla's `Item.use`, reached from
-/// `Minecraft.startUseItem`'s per-hand fallback — produces an
-/// `InteractionResult.Success` whose `swingSource()` is `CLIENT`, and so is
+/// Whether a **generic use** of `id` — vanilla's own generic item-use path,
+/// reached from its per-hand use fallback — produces a success result whose
+/// swing source is the client, and so is
 /// one of the uses that swings the arm.
 ///
 /// This is the table the "every right-click swings" report was about. Vanilla
-/// does **not** swing on a generic use in general: `InteractionResult.CONSUME`
-/// is `SwingSource.NONE`, and `Item.java`'s base `use()` returns `CONSUME` for
+/// does **not** swing on a generic use in general: a "consume" result carries
+/// no client-side swing, and vanilla's own item base's `use()` returns "consume" for
 /// a consumable, for `minecraft:blocks_attacks` (the shield) and for
-/// `minecraft:kinetic_weapon`, `PASS` for everything else — a sword, a
-/// pickaxe, a plain block held at open air. `BowItem`, `CrossbowItem`,
-/// `TridentItem`, `InstrumentItem` and `SpyglassItem` all return `CONSUME`
+/// `minecraft:kinetic_weapon`, "pass" for everything else — a sword, a
+/// pickaxe, a plain block held at open air. The bow, the crossbow,
+/// the trident, the instrument item and the spyglass all return "consume"
 /// too. So drawing a bow, raising a shield, eating and aiming a spyglass are
 /// all *silent* in vanilla and were all swinging here.
 ///
-/// What is left is the set of `use()` overrides that really do return
-/// `InteractionResult.SUCCESS`. Two of vanilla's return `SUCCESS_SERVER`
-/// instead (`FoodOnAStickItem`, `EnderEyeItem`) — that is
-/// `SwingSource.SERVER`, so the client does not swing for those either, and
+/// What is left is the set of `use()` overrides that really do return an
+/// unqualified success. Two of vanilla's items return a server-attributed
+/// success instead (the item on a stick base, and the ender eye) — that
+/// carries no client-side swing either, so the client does not swing for those either, and
 /// they are deliberately absent below.
 ///
-/// `equippable`'s branch of the base `use()` is the one remaining `SUCCESS`
-/// and is **not** here: it depends on what is already in the armour slot, so
+/// `equippable`'s branch of the base `use()` is the one remaining plain
+/// success and is **not** here: it depends on what is already in the armour slot, so
 /// [`Sim::predict_equip_swap`] answers it from the live menu instead.
 ///
 /// # The over-approximation, named
 ///
-/// Five of these return `SUCCESS` only for a hit the client would have to
-/// re-cast to know about — `BoatItem`, `BucketItem`, `BottleItem` and
-/// `SpawnEggItem` each run their own fluid-aware `getPlayerPOVHitResult`,
+/// Five of these return success only for a hit the client would have to
+/// re-cast to know about — the boat, the bucket, the glass bottle and
+/// the spawn egg each run their own fluid-aware hit-result ray,
 /// which this shell does not model (its block ray is a separate, non-fluid
-/// one), and all four return `PASS` on a miss. They are listed as swinging,
+/// one), and all four fall back to "pass" on a miss. They are listed as swinging,
 /// because the click a player makes with a bucket or a boat in hand is
 /// overwhelmingly the one that lands on water. **The case this gets wrong is
 /// a bucket, boat, glass bottle or spawn egg right-clicked at open sky**,
-/// where vanilla returns `PASS` and stays still and this swings.
+/// where vanilla returns "pass" and stays still and this swings.
 ///
-/// `firework_rocket` is *not* in that class: `FireworkRocketItem.use` gates on
-/// `player.isFallFlying()`, which this client tracks, so the caller passes
+/// `firework_rocket` is *not* in that class: the firework rocket's own use
+/// path gates on whether the player is fall-flying, which this client tracks, so the caller passes
 /// `fall_flying` and the answer is exact.
 #[must_use]
 fn generic_use_swings(id: &str, fall_flying: bool) -> bool {
@@ -183,36 +184,36 @@ fn generic_use_swings(id: &str, fall_flying: bool) -> bool {
         || path.ends_with("_spawn_egg")
         || path.ends_with("_boat")
         || path.ends_with("_raft")
-        // `milk_bucket` is a consumable, not a `BucketItem`: its use is the
-        // base `Item.use`'s `CONSUME` arm, which does not swing.
+        // `milk_bucket` is a consumable, not a fluid-bucket item: its use is the
+        // base item's "consume" arm, which does not swing.
         || (path.ends_with("_bucket") && path != "milk_bucket")
 }
 
-/// Whether `id`'s **`Item.useOn`** — vanilla's `case BLOCK` arm, reached
-/// through `MultiPlayerGameMode.performUseItemOn`'s `itemStack.useOn(context)`
-/// — returns a `SUCCESS` that swings.
+/// Whether `id`'s **use-on-block** path — vanilla's `case BLOCK` arm, reached
+/// through its own client-side use-on-block dispatch
+/// — returns a success that swings.
 ///
 /// Needed because [`Placement::use_on`] answers a narrower question than
-/// vanilla's `performUseItemOn` does. Its [`UseOnDecision::Interact`] and
-/// [`UseOnDecision::Place`] cover the block actuating and a `BlockItem`
-/// placing, both `SUCCESS`; its [`UseOnDecision::Nothing`] collapses two
-/// vanilla outcomes that swing differently — the base `Item.useOn`'s `PASS`
+/// vanilla's own use-on-block dispatch does. Its [`UseOnDecision::Interact`] and
+/// [`UseOnDecision::Place`] cover the block actuating and a block item
+/// placing, both success; its [`UseOnDecision::Nothing`] collapses two
+/// vanilla outcomes that swing differently — the base item's "pass" use-on
 /// (a sword or a pickaxe against stone: no swing, fall through to the generic
 /// use) and the overrides that light, till, strip, shear, wax or place an
-/// entity against that block (`SUCCESS`: swing, and vanilla *returns* rather
+/// entity against that block (success: swing, and vanilla *returns* rather
 /// than falling through).
 ///
 /// The over-approximation is the same shape as [`generic_use_swings`]'s and
-/// it is one-sided the same way: each of these is `SUCCESS` only against the
+/// it is one-sided the same way: each of these is success only against the
 /// block it acts on — a hoe on tillable dirt, an axe on strippable log,
 /// honeycomb on unwaxed copper — and this shell does not carry the tags to
 /// test that. **The case this gets wrong is one of these items right-clicked
-/// against a block it cannot act on**, where vanilla is `PASS` and silent.
+/// against a block it cannot act on**, where vanilla is "pass" and silent.
 ///
-/// Four narrow `useOn` overrides are deliberately left out, because for them
-/// the `SUCCESS` arm is the rare one and listing them would swing on the
-/// common `PASS`: `CompassItem` (lodestone only), `MapItem` (lectern only),
-/// `EnderEyeItem` (end portal frame only) and `PotionItem` (a *water* bottle
+/// Four narrow use-on-block overrides are deliberately left out, because for them
+/// the success arm is the rare one and listing them would swing on the
+/// common "pass": the compass (lodestone only), the map (lectern only),
+/// the ender eye (end portal frame only) and the potion (a *water* bottle
 /// on a mud-convertible block only).
 #[must_use]
 fn use_on_block_swings(id: &str) -> bool {
@@ -272,10 +273,10 @@ impl Sim {
             // model.
             self.particles_mut(|p| p.destroy_block(hit.block, broken, [1.0; 3]));
             // Vanilla's own break is *predicted*, not received: the client's
-            // `MultiPlayerGameMode.destroyBlock` runs `playerWillDestroy` →
-            // `spawnDestroyParticles` → `level.levelEvent(player, 2001, …)`, and
-            // `ClientLevel.levelEvent` ignores the exclusion and dispatches
-            // straight into `LevelEventHandler`'s `case 2001` locally
+            // own destroy-block path runs a will-destroy hook, then spawns the
+            // destroy particles, then raises a level event, and
+            // the client-side level dispatch ignores the exclusion and dispatches
+            // straight into its own level-event handling locally
             // — sound and debris together. This is
             // the offline mirror of that; the live predicted break is still
             // silent because its emit lives in `interact.rs`'s ECS system, which
@@ -371,13 +372,13 @@ impl Sim {
     /// three-way switch this implements.
     ///
     /// Two more gates now sit ahead of that switch, both ported from
-    /// `Minecraft.startAttack` in the same order the jar checks them:
+    /// vanilla's own attack-start entry point in the same order the jar checks them:
     ///
-    /// 1. **Spectator.** `MultiPlayerGameMode.isSpectator()`, checked before
+    /// 1. **Spectator.** Vanilla's own is-spectator check, checked before
     ///    any item or hit-result logic at all — see [`Self::spectate_or_no_action`].
     ///    Neither of vanilla's two spectator arms swings the arm or falls
     ///    through to the ordinary switch below.
-    /// 2. **Piercing weapon.** `heldItem.get(DataComponents.PIERCING_WEAPON)`,
+    /// 2. **Piercing weapon.** The held item's own piercing-weapon data component,
     ///    checked next and, when present, taken unconditionally regardless of
     ///    what — if anything — is under the crosshair; vanilla's own switch on
     ///    `hitResult.getType()` is never reached for a piercing weapon. See
@@ -412,8 +413,8 @@ impl Sim {
         self.swing_main_hand_live();
     }
 
-    /// `Minecraft.startAttack`'s spectator branch
-    /// (`MultiPlayerGameMode.spectate`/`spectatorNoAction`): left-clicking an
+    /// Vanilla's own attack-start entry point's spectator branch
+    /// (vanilla's own client-side spectate/no-op-spectate pair): left-clicking an
     /// entity while spectating attaches the spectator camera to it
     /// (`SpectatorAction { target_entity_id: Some(id) }`); left-clicking
     /// anything else — a block, or nothing at all — detaches it
@@ -421,7 +422,7 @@ impl Sim {
     /// the same nearer entity-or-block pick every other left-click branch
     /// here uses, so both vanilla arms fold into one send. Neither vanilla
     /// arm swings the arm or falls through to the ordinary attack switch —
-    /// `startAttack` returns immediately after either call.
+    /// vanilla's own attack-start entry point returns immediately after either call.
     fn spectate_or_no_action(&mut self) {
         let target_entity_id = self.entity_target();
         if let Some(net) = &self.net {
@@ -443,15 +444,15 @@ impl Sim {
             .is_some_and(|stack| lodestone_game::item::is_piercing_weapon(stack.item()))
     }
 
-    /// `MultiPlayerGameMode.piercingAttack`'s outbound half: send the wire
+    /// Vanilla's own client-side piercing-attack path's outbound half: send the wire
     /// `Stab` action. Vanilla's own local-only follow-up
-    /// (`onAttack`/`postPiercingAttack`, a sound) all feed the crosshair
+    /// (an on-attack hook and a post-piercing-attack hook, a sound) all feed the crosshair
     /// cooldown indicator and hit sound/particles this shell does not model
     /// yet for the *ordinary* attack path either — see [`Self::begin_attack`]'s
     /// own doc for why that gap is out of scope here too, same reasoning.
-    /// The caller is responsible for the swing, matching
-    /// `player.swing(InteractionHand.MAIN_HAND)` sitting beside
-    /// `piercingAttack()` at the call site rather than inside it.
+    /// The caller is responsible for the swing, matching vanilla's own
+    /// main-hand swing sitting beside
+    /// the piercing-attack call at the call site rather than inside it.
     fn stab(&mut self) {
         if let Some(net) = &self.net {
             net.send_action(ClientAction::Stab);
@@ -484,9 +485,9 @@ impl Sim {
         self.read(|w| w.resource::<EntityRayTarget>().0)
     }
 
-    /// `key.pickItem` — vanilla's `Minecraft.pickBlockOrEntity`
+    /// `key.pickItem` — vanilla's own pick-block-or-entity handling
     ///, middle-click by default
-    ///. `include_data` is vanilla's `hasControlDown()`.
+    ///. `include_data` is vanilla's own control-key-held check.
     ///
     /// Entity wins over block, for the same reason [`Self::begin_attack_live`]
     /// already gives: [`EntityRayTarget`] is resolved as the *nearer* pick, so
@@ -520,8 +521,8 @@ impl Sim {
         }
     }
 
-    /// Send the serverbound attack for `entity_id` — vanilla's
-    /// `MultiPlayerGameMode.attack`'s outbound half. Lowers to
+    /// Send the serverbound attack for `entity_id` — vanilla's own
+    /// client-side attack path's outbound half. Lowers to
     /// `ClientAction::InteractEntity { interaction: EntityInteraction::Attack,
     /// .. }`, which the v770 adapter already encodes as the dedicated `Attack`
     /// packet (26.2 split entity-attack out of the old combined interact
@@ -534,10 +535,9 @@ impl Sim {
     /// loop (see `crate::interact`'s "how to change it"), and an attack is a
     /// discrete click event, not a per-tick one.
     ///
-    /// Also resets [`AttackStrengthTicker`] to `0` — vanilla's
-    /// `MultiPlayerGameMode.attack` calling `player.resetAttackStrengthTicker()`
-    /// right after the client-side `player.attack(entity)`
-    /// (`MultiPlayerGameMode.java`, `.cache/mc/26.2/client-src`).
+    /// Also resets [`AttackStrengthTicker`] to `0` — vanilla's own
+    /// client-side attack path resets its attack-strength ticker
+    /// right after the client-side predicted attack call.
     /// Unconditional on every entity target, exactly like vanilla's call site:
     /// there is no client-side `cannotAttack` gate here (damage is fully
     /// server-authoritative per `docs/combat.md`), so every left-click on an
@@ -575,9 +575,9 @@ impl Sim {
                 sneaking,
             });
         }
-        // Vanilla's own order (`MultiPlayerGameMode.attack`,
-        // `MultiPlayerGameMode.java`): the packet, then the
-        // client-side `player.attack(entity)` prediction — whose crit
+        // Vanilla's own order (its own client-side attack path):
+        // the packet, then the
+        // client-side attack prediction — whose crit
         // condition reads `attackStrengthTicker` **before** it is reset — and
         // only then `resetAttackStrengthTicker()`. Reading the ticker after
         // zeroing it here would make `fullStrengthAttack` false on every
@@ -591,18 +591,17 @@ impl Sim {
         });
     }
 
-    /// Vanilla's local-only crit-particle prediction — `Player.attack`'s
-    /// `criticalAttack = fullStrengthAttack && canCriticalAttack(entity)`
+    /// Vanilla's local-only crit-particle prediction — vanilla's own attack
+    /// path's crit flag is full-strength-attack anded with a can-crit check
     ///, whose visual half is
-    /// `attackVisualEffects`' `this.crit(entity)` call (`Player.java`,
-    /// `LocalPlayer.crit` → `ParticleEngine.createTrackingEmitter`,
-    /// `LocalPlayer.java`).
+    /// its own visual-effects hook's crit call, which spawns a tracking
+    /// particle emitter.
     ///
     /// # This is real vanilla dual simulation, not an approximation invented
     /// for this port
     ///
-    /// `MultiPlayerGameMode.attack` runs the **client's own copy** of
-    /// `player.attack(entity)` independently
+    /// Vanilla's own client-side attack path runs the **client's own copy** of
+    /// the attack call independently
     /// of, and before, the server's authoritative copy of the same method —
     /// the server computes the real damage, the client predicts only the
     /// cosmetic trigger (sound + particle) so it does not wait a round trip to
@@ -612,12 +611,13 @@ impl Sim {
     ///
     /// # Condition, checked against the jar rather than assumed
     ///
-    /// `canCriticalAttack`: `fallDistance > 0.0 &&
-    /// !onGround && !onClimbable && !isInWater && !isMobilityRestricted &&
-    /// !isPassenger && entity is LivingEntity && !isSprinting`.
-    /// `fullStrengthAttack = getAttackStrengthScale(0.5F) > 0.9F`
+    /// Vanilla's own can-crit check: positive fall distance, not on ground,
+    /// not on a climbable, not in water, not mobility-restricted,
+    /// not a passenger, the target is a living entity, and not sprinting.
+    /// The full-strength-attack gate (attack-strength scale over a 0.5-tick
+    /// partial exceeding `0.9`)
     /// is the caller's own gate, not part of
-    /// `canCriticalAttack` — hence [`Self::attack_strength_scale_at`] rather
+    /// the can-crit check — hence [`Self::attack_strength_scale_at`] rather
     /// than reusing [`Self::attack_strength_scale`]'s `a = 0.0`, which is a
     /// different call site's (the crosshair's) partial-tick argument.
     ///
@@ -625,7 +625,7 @@ impl Sim {
     /// explained rather than silent:
     /// - **`!onClimbable` is not read separately.** This engine resets
     ///   `fall_distance` to `0.0` the instant `tick_air` finds a climbable —
-    ///   `LivingEntity.handleOnClimbable`, folded into `tick_air` per
+    ///   matching vanilla's own on-climbable handling, folded into `tick_air` per
     ///   [`lodestone_physics::player::PlayerState::fall_distance`]'s own
     ///   "Climbable reset" bullet — so `fall_distance > 0.0` already implies
     ///   not-on-climbable in this port's physics model. Checked against that
@@ -642,9 +642,9 @@ impl Sim {
     ///   as "nothing happens" at the outer `if` — the crit particle is cosmetic
     ///   and no damage number depends on it either way.
     ///
-    /// # The particle burst: one tick of `TrackingEmitter`, not three
+    /// # The particle burst: one tick of vanilla's own tracking emitter, not three
     ///
-    /// `TrackingEmitter` runs for **3 ticks**,
+    /// Vanilla's own tracking emitter runs for **3 ticks**,
     /// spawning up to 16 candidates per tick (filtered to a unit sphere,
     /// ~52% pass) that track the entity's *current* position each tick. This
     /// shell's particle system has no per-attack persistent emitter — every
@@ -653,8 +653,8 @@ impl Sim {
     /// worth (16 candidates, same unit-sphere filter) at the target's
     /// position at the moment of the attack, rather than adding new
     /// multi-tick emitter machinery for a purely cosmetic burst. The
-    /// per-candidate position/velocity formula (`Entity.getX(double)` etc.,
-    /// `Entity.java`) and the emitted particle's own physics
+    /// per-candidate position/velocity formula (vanilla's own entity-position
+    /// accessors) and the emitted particle's own physics
     /// (`lodestone_particle::emit::crit`) are both exact; only the tick count
     /// is a disclosed simplification.
     fn maybe_spawn_crit_particles(&mut self, entity_id: i32) {
@@ -704,8 +704,8 @@ impl Sim {
         });
     }
 
-    /// Send the serverbound **use-on-entity** for `entity_id` — vanilla's
-    /// `MultiPlayerGameMode.interact`, the outbound half of mounting a boat,
+    /// Send the serverbound **use-on-entity** for `entity_id` — vanilla's own
+    /// client-side interact path, the outbound half of mounting a boat,
     /// minecart or saddled animal.
     ///
     /// This is the mirror image of [`Self::attack_entity`]: same packet family,
@@ -720,16 +720,17 @@ impl Sim {
     ///
     /// # The swing here is unconditional, and that is a known divergence
     ///
-    /// Vanilla is not: `Minecraft.startUseItem`'s `case ENTITY` swings only
-    /// when `gameMode.interact(...)` returns an `InteractionResult.Success`
-    /// *and* that success's `swingSource()` is `CLIENT`. Every other outcome
-    /// — the overwhelmingly common `PASS` from right-clicking a hostile mob
+    /// Vanilla is not: vanilla's own per-hand use-item dispatch's entity case swings only
+    /// when its own game-mode interact call returns an unqualified success
+    /// *and* that success's swing source is the client. Every other outcome
+    /// — the overwhelmingly common "pass" from right-clicking a hostile mob
     /// with a sword — leaves the arm still.
     ///
-    /// The client half of that decision is `Player.interactOn` →
-    /// `Entity.interact` → `ItemStack.interactLivingEntity`, run locally
+    /// The client half of that decision is vanilla's own chain of
+    /// player-interacts-on, entity-interact, and item-stack-interacts-living-entity
+    /// calls, run locally
     /// against the real entity. This shell models **none** of it: it does not
-    /// carry the entity state (`AbstractBoat.outOfControlTicks`, an animal's
+    /// carry the entity state (a boat's out-of-control ticks, an animal's
     /// breeding item, a horse's saddle) any of those branches read, and
     /// [`Self::update_entity_target`] keeps only the winning entity's id.
     /// There is therefore no local result to gate on, and the two honest
@@ -739,10 +740,10 @@ impl Sim {
     /// that has no interaction — a zombie, a creeper — where vanilla stays
     /// still and this swings.** The case it gets right is every deliberate
     /// entity right-click (boarding a boat or minecart, mounting a saddled
-    /// horse, feeding, shearing, trading), all of which are `SUCCESS` with a
-    /// `CLIENT` swing source. Unlike the block and generic paths — which have
+    /// horse, feeding, shearing, trading), all of which are success with a
+    /// client swing source. Unlike the block and generic paths — which have
     /// real local predictions and are now gated on them — closing this one
-    /// needs a client-side `Entity.interact`, not a better guess here.
+    /// needs a client-side entity-interact call, not a better guess here.
     fn interact_entity(&mut self, entity_id: i32) {
         let sneaking = self.movement_intent().sneak;
         if let Some(net) = &self.net {
@@ -790,20 +791,13 @@ impl Sim {
         }
     }
 
-    /// Release the use button — vanilla's `Minecraft.java`:
+    /// Release the use button — vanilla's own client entry point: while the
+    /// player is using an item, releasing the use key tells the client-side
+    /// game-mode handler to release the used item.
     ///
-    /// ```text
-    /// if (this.player.isUsingItem()) {
-    ///    if (!this.options.keyUse.isDown()) {
-    ///       this.gameMode.releaseUsingItem(this.player);
-    ///    }
-    ///    ...
-    /// }
-    /// ```
-    ///
-    /// which itself lowers to `MultiPlayerGameMode.releaseUsingItem`
-    /// (`:513-517`) sending a bare `ServerboundPlayerActionPacket`
-    /// (`RELEASE_USE_ITEM`) — [`ClientAction::ReleaseUseItem`] here, encoded
+    /// That release handling itself lowers to vanilla's own client-side
+    /// release-using-item path sending a bare player-action packet
+    /// (a release-use-item action) — [`ClientAction::ReleaseUseItem`] here, encoded
     /// by all four protocol adapters already
     /// (`crates/protocol/{v47,v340,v735,v770}/src/adapter.rs`) but with no
     /// producer anywhere in this shell before this method. Bow, crossbow and
@@ -824,7 +818,7 @@ impl Sim {
     /// End a completed consumable's local use state and, while the physical use
     /// button is still held, begin its next use. This is the fixed-tick half of
     /// vanilla's held-key polling: the OS only reports the original press edge,
-    /// but `Minecraft.handleKeybinds` starts another use once the previous one
+    /// but vanilla's own client-side key handling starts another use once the previous one
     /// has completed.
     ///
     /// Only consumables have a client-known completion duration. Bows, shields
@@ -876,8 +870,7 @@ impl Sim {
     /// A no-op if [`UsingItem`] is already `false`: no button was ever pressed
     /// down (via [`Self::use_item_live`]) for this to be the release edge of.
     /// Sending `RELEASE_USE_ITEM` in that case would still be harmless —
-    /// `LivingEntity.releaseUsingItem`
-    /// (`.cache/mc/26.2/src/…/LivingEntity.java`) no-ops whenever
+    /// vanilla's own release-using-item handling no-ops whenever
     /// the server has no `useItem` in progress — but there is nothing to
     /// justify sending it for.
     pub(crate) fn end_use_live(&mut self) {
@@ -904,9 +897,9 @@ impl Sim {
             return;
         }
         // That fix. Before the send, because vanilla's own order is the same:
-        // `MultiPlayerGameMode.releaseUsingItem` runs the client's
-        // `LivingEntity.releaseUsingItem` — which is what calls
-        // `TridentItem.releaseUsing` and applies the launch locally — and the
+        // its own client-side release-using-item path runs the client's
+        // own release-using-item entity handling — which is what calls
+        // the trident's own release-using hook and applies the launch locally — and the
         // `RELEASE_USE_ITEM` packet is the server being told afterwards. The
         // riptide launch is client-predicted in vanilla, which is why it feels
         // instant, and reproducing that ordering is what keeps our reported
@@ -926,9 +919,9 @@ impl Sim {
     /// Whether some equipment slot holds a glider, for
     /// [`lodestone_physics::can_glide`].
     ///
-    /// Vanilla walks every `EquipmentSlot` looking for a
-    /// `DataComponents.GLIDER` component (`LivingEntity.canGlideUsing`,
-    /// `LivingEntity.java`). Two deliberate narrowings:
+    /// Vanilla walks every equipment slot looking for a
+    /// glider data component, in its own can-glide-using entity check.
+    /// Two deliberate narrowings:
     ///
     /// * **the chest slot only.** Vanilla's loop is over equipment slots, and in
     ///   practice `minecraft:elytra`'s `minecraft:equippable` names `chest`, so a
@@ -1101,12 +1094,13 @@ impl Sim {
             .map_or(0, |enchantment| enchantment.level)
     }
 
-    /// `Entity.isInWaterOrRain()`, that fix.
+    /// Vanilla's own is-in-water-or-rain check, that fix.
     ///
     /// The water half is exact — the same [`lodestone_physics::FluidState`] the
-    /// tick computed. The rain half is `Level.isRainingAt`, which is
-    /// `isRaining() && canSeeSky(pos) && precipitationAt(pos) == RAIN`; this
-    /// client has **no `canSeeSky`** (`crate::app::weather`'s own doc records the
+    /// tick computed. The rain half is vanilla's own is-raining-at check, which is
+    /// raining, and able to see sky at the position, and the precipitation
+    /// there is rain; this
+    /// client has **no can-see-sky check** (`crate::app::weather`'s own doc records the
     /// same gap for the rain-muffling sound path) and no per-position
     /// precipitation here, so a non-zero rain level stands in for the whole
     /// predicate.
@@ -1179,13 +1173,13 @@ impl Sim {
             return;
         }
         // **Gated on the held item actually having a use, matching
-        // `Item.getUseAnimation` — see [`item_has_use_animation`].** Before
+        // vanilla's own use-animation lookup — see [`item_has_use_animation`].** Before
         // this gate, [`UsingItem`]/[`ItemUseEffects`] were armed for *every*
         // right click, so aiming at open air with an empty hand (or any item
         // with no use at all, a sword included) applied the same
         // `UseEffects::DEFAULT` movement slowdown as eating: `isUsingItem()`
-        // in vanilla only becomes true when the item's own `use()` calls
-        // `startUsingItem`, and the base `Item.use()` — which is what a
+        // in vanilla only becomes true when the item's own `use()` starts the
+        // item-use state, and the base item's `use()` — which is what a
         // sword, a block or an empty hand all fall back to — never does.
         let held = self
             .player_menu()
@@ -1241,8 +1235,9 @@ impl Sim {
         // is decided here, before them, off the held stack alone.
         self.start_firework_boost_if_gliding();
         // **Entity before block, and this branch is the whole of "get in a boat".**
-        // Vanilla's `Minecraft.startUseItem` switches on `hitResult.getType()` and
-        // `case ENTITY` comes first (`Minecraft.java`'s `useItem`), the identical
+        // Vanilla's own per-hand use-item dispatch switches on the hit-result type and
+        // its entity case comes first (vanilla's own client entry point's use-item
+        // dispatch), the identical
         // priority [`Self::begin_attack_live`] already implements for the left
         // button off the same [`EntityRayTarget`]. Before this, `use_item_live`
         // returned early on `self.target()` being `None` and never looked at the
@@ -1424,18 +1419,20 @@ impl Sim {
             if let Some(state) = state_for_placement(name, states, *orientation, &prediction.state) {
                 let pos = prediction.pos;
                 self.predict_block([pos.x, pos.y, pos.z], state);
-                // Vanilla's placement sound is the tail of `BlockItem.place`
+                // Vanilla's placement sound is the tail of its own block-item
+                // place path
                 //, which passes the placing player as
-                // `playSound`'s **excluded** entity — so the server broadcasts it
+                // its own sound-play's **excluded** entity — so the server broadcasts it
                 // to everyone but us, and our own copy is predicted locally by
-                // `ClientLevel.playSound`, whose exclusion test is inverted
-                // (`if (except == this.minecraft.player)`, `ClientLevel.java`).
+                // vanilla's own client-side sound-play, whose exclusion test is inverted
+                // (it plays only for the excluded entity, on the client that is
+                // the local player).
                 // It therefore hangs off the prediction, exactly as vanilla's
                 // does: no prediction, no sound, and no double-play either.
                 //
                 // Tied to the *predicted state* rather than to the item, because
-                // the sound is `placedState.getSoundType()` — a waterlogged or
-                // half-slab placement can be a different `SoundType` from the
+                // the sound is the placed state's own sound type — a waterlogged or
+                // half-slab placement can be a different sound type from the
                 // block's default state.
                 self.play_block_place_sound([pos.x, pos.y, pos.z], state);
             }
@@ -1487,8 +1484,8 @@ impl Sim {
     }
 
     /// Vanilla's unconditional generic-use fallback at the bottom of
-    /// `Minecraft.startUseItem`'s per-hand loop (`Minecraft.java`,
-    /// `gameMode.useItem`) — the send that actually raises a shield, draws a
+    /// its own per-hand use-item dispatch loop (its own client-side
+    /// game-mode's use-item call) — the send that actually raises a shield, draws a
     /// bow, or starts eating/drinking, independent of any block or entity
     /// under the crosshair. Called from [`Self::use_item_live`]'s entity and
     /// no-target branches; see that method's docs for exactly which vanilla
@@ -1517,28 +1514,28 @@ impl Sim {
     /// This is also the one place [`Self::predict_equip_swap`] can fire: an
     /// armour piece right-clicked from the hotbar has no block or entity
     /// target and no special-cased use of its own, so vanilla's
-    /// `Minecraft.startUseItem` falls all the way through to `gameMode.
-    /// useItem` — this method's send — exactly like a shield raise or a bow
+    /// per-hand use-item dispatch falls all the way through to its own
+    /// game-mode use-item call — this method's send — exactly like a shield raise or a bow
     /// draw. See that method's own doc for why the equip write belongs here
     /// rather than in [`Self::use_item_live`].
     /// # The swing, and why it is no longer unconditional
     ///
-    /// `Minecraft.startUseItem`'s fallback swings only when
-    /// `gameMode.useItem(...)` returns an `InteractionResult.Success` whose
-    /// `swingSource()` is `CLIENT`. `MultiPlayerGameMode.useItem` computes
-    /// that by running `itemStack.use(...)` locally, so — as on the block
+    /// Vanilla's own per-hand use-item dispatch's fallback swings only when
+    /// its own game-mode use-item call returns an unqualified success whose
+    /// swing source is the client. Its own client-side use-item path computes
+    /// that by running the item's own use call locally, so — as on the block
     /// path — the decision is one the client owns rather than one it waits a
     /// round trip for. [`generic_use_swings`] is that decision ported by item
     /// id, plus [`Self::predict_equip_swap`] for the one branch of the base
-    /// `Item.use` that depends on the live menu rather than on the id.
+    /// item's use that depends on the live menu rather than on the id.
     ///
     /// This is the owner's report — *"right clicking with (i think) any item
     /// makes me swing my arm"* — and it was: a drawn bow, a raised shield, a
     /// bite of food, a spyglass and an idle sword all return
-    /// `InteractionResult.CONSUME` or `PASS`, all of which are silent in
+    /// a "consume" or "pass" result, all of which are silent in
     /// vanilla, and every one of them swung here and put a `SwingArm` on the
     /// wire. A snowball, an ender pearl, a fishing rod and a book still do
-    /// swing, because those really are `SUCCESS`.
+    /// swing, because those really are a plain success.
     ///
     /// `already_swung` is the entity path's: [`Self::interact_entity`] has
     /// swung before this is reached and vanilla never swings twice for one
@@ -1551,9 +1548,9 @@ impl Sim {
         let Some(held) = held.filter(|stack| !stack.is_empty()) else {
             return;
         };
-        // Reported, not assumed: `Equippable.swapWithEquipmentSlot` is
-        // `SUCCESS` only when the swap actually happens (`FAIL` when the
-        // armour slot already holds the same item, `PASS` when the slot is not
+        // Reported, not assumed: vanilla's own equip-swap component logic is
+        // success only when the swap actually happens ("fail" when the
+        // armour slot already holds the same item, "pass" when the slot is not
         // usable), and that is precisely the condition this predicts.
         let equipped = self.predict_equip_swap(&held);
         let swings = !already_swung
@@ -1578,8 +1575,8 @@ impl Sim {
         }
     }
 
-    /// Predicts vanilla's `Item.use()` → `Equippable.swapWithEquipmentSlot`
-    /// (`Item.java`, `Equippable.java`) — the branch that actually equips a
+    /// Predicts vanilla's own item `use()` falling into its own equip-swap
+    /// component logic — the branch that actually equips a
     /// helmet/chestplate/leggings/boots right-clicked from the hotbar with no
     /// block or entity under the crosshair (or one whose own interaction
     /// declined). Before this, [`Self::use_item_generic`] sent
@@ -1593,9 +1590,10 @@ impl Sim {
     /// the same idiom [`Self::apply_creative_slot`] uses for `SET_CREATIVE_
     /// MODE_SLOT` — against the **same menu-slot indices** the wire uses:
     /// the armour slot's [`EquipmentSlot::player_menu_index`] (`5..=8`) and
-    /// the hotbar's `36 + selected_slot`. `ServerPlayerGameMode.useItem`
-    /// mutates `player.inventoryMenu` (window 0) directly, and that menu's
-    /// `broadcastChanges` diff runs every tick regardless of which action
+    /// the hotbar's `36 + selected_slot`. Vanilla's own server-side use-item
+    /// handling
+    /// mutates the player's inventory menu (window 0) directly, and that menu's
+    /// own change-broadcast diff runs every tick regardless of which action
     /// changed it, so the exact same `ContainerSlot` event — this time
     /// server-authoritative — arrives again for both slots shortly after.
     /// `Menu::reconcile` (`lodestone_game::reconcile`, reached through
@@ -1611,15 +1609,15 @@ impl Sim {
     /// * Only the four `HUMANOID_ARMOR` positions predict — see
     ///   [`EquipmentSlot::player_menu_index`]'s own doc for why the off-hand
     ///   slot is excluded (no real item swaps into it this way).
-    /// * Only a `count <= 1` held stack predicts, matching `Equippable.
-    ///   swapWithEquipmentSlot`'s own `inHand.getCount() <= 1` branch — every
+    /// * Only a `count <= 1` held stack predicts, matching vanilla's own
+    ///   equip-swap logic's own held-count-at-most-one branch — every
     ///   shipped armour item has a max stack size of 1, so this covers
     ///   ordinary play; a hypothetical equippable item with a larger cap
     ///   falls back to send-and-wait rather than modelling vanilla's partial-
-    ///   consume branch (`inHand.consumeAndReturn(1, player)`).
-    /// * Not modelled: `swappable == false` items and a target slot carrying
+    ///   consume branch (a one-item partial consume-and-return).
+    /// * Not modelled: non-swappable items and a target slot carrying
     ///   a `minecraft:prevent_armor_change`-effect enchantment — vanilla's
-    ///   own `Equippable` record and [`lodestone_model::ItemComponents`]
+    ///   own equippable data component and [`lodestone_model::ItemComponents`]
     ///   both carry only the *slot*, per that type's own doc ("Only the slot
     ///   is carried"), so there is no flag here to gate on. A server that
     ///   refuses for either reason is corrected by the same reconcile path
@@ -1628,10 +1626,10 @@ impl Sim {
     /// # Return value
     ///
     /// Whether the swap was predicted — i.e. whether
-    /// `Equippable.swapWithEquipmentSlot` would have returned
-    /// `InteractionResult.SUCCESS` rather than its `FAIL`/`PASS` arms. This is
+    /// vanilla's own equip-swap component logic would have returned
+    /// a plain success rather than its "fail"/"pass" arms. This is
     /// [`Self::use_item_generic`]'s swing predicate for equippables: it is the
-    /// one `SUCCESS` the base `Item.use` can produce, and it cannot be
+    /// one success the base item's `use` can produce, and it cannot be
     /// answered from the item id alone because it depends on what the armour
     /// slot already holds. `false` for every early return below, including
     /// the `already the same item` case vanilla `FAIL`s on — vanilla's test
