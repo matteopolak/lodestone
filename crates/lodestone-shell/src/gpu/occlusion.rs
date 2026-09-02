@@ -81,8 +81,8 @@ pub(super) struct OcclusionCache {
 }
 
 /// The 8-block invalidation cell vanilla keys `invalidateIfNeeded` on
-/// (`SectionOcclusionGraph`'s `lastCameraSectionX/Y/Z` are section-grid, but its
-/// `Frustum.offsetToFullyIncludeCameraCube(8)` and the "camera moved" test are
+/// (vanilla's own section-occlusion graph's `lastCameraSectionX/Y/Z` are section-grid, but its
+/// own camera-cube-frustum expansion by 8 and the "camera moved" test are
 /// both on the half-section grid — the same 8 as
 /// [`lodestone_render::CAMERA_CUBE_BLOCKS`]).
 const INVALIDATION_CELL_BLOCKS: f32 = lodestone_render::CAMERA_CUBE_BLOCKS;

@@ -109,8 +109,8 @@ pub(super) const PRIMED_TNT_TYPE_PATH: &str = "tnt";
 ///
 /// Used for the light sample, not for collision: vanilla's own
 /// falling-block renderer's
-/// render-state extract routine reads light at `BlockPos.containing(entity.getX(),
-/// entity.getBoundingBox().maxY, entity.getZ())` — the **top** of the box, not the
+/// render-state extract routine reads light at the position built from the
+/// entity's x, its bounding box's max y, and its z — the **top** of the box, not the
 /// feet. That matters at the moment of landing: a block resting on the floor has
 /// its feet inside the cell it is about to occupy, and sampling there would read
 /// the light of a solid block (dark) rather than of the air the block is falling

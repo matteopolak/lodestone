@@ -27,7 +27,7 @@
 //! sequentially, so one buffer cannot be read by two draws at once.
 //!
 //! `millis` comes from [`glint_now_ms`], the same wall clock vanilla keys the
-//! scroll off (`Util.getMillis()`), matching the convention
+//! scroll off (its own millis-since-epoch clock), matching the convention
 //! `crate::app::recipe_toast_now_ms` established for the same reason.
 
 use lodestone_assets::Image;

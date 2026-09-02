@@ -520,7 +520,7 @@ impl ThirdPersonBodySource {
 /// Where this frame's first-person **arm-swing progress** comes from, polled once
 /// per frame like [`SkyDarkenSource`] / [`EntityLightSource`].
 ///
-/// The value is vanilla's `attackValue` — `Player.getAttackAnim(partialTick)`, in
+/// The value is vanilla's `attackValue` — its own attack-anim calculation at a given partial tick, in
 /// `0.0..=1.0`, already interpolated for this frame's sub-tick alpha. It must come
 /// from a **tick** clock read with a partial tick, not from anything derived from
 /// frame time: `lodestone_entity::pose::EntityPose` advances the swing in

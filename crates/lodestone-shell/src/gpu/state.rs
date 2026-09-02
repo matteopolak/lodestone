@@ -631,7 +631,7 @@ impl RenderState {
     /// All three move together deliberately. They share one shader
     /// (`shaders/nametag.wgsl` — flat vertex colour, no texture at all), so
     /// every colour any of them submits is a vanilla gamma byte: a sign's
-    /// `ARGB.scaleRGB(dye, 0.4)`, a coloured nametag span, a `text_display`
+    /// own ARGB-scale-RGB applied to `(dye, 0.4)`, a coloured nametag span, a `text_display`
     /// panel. Fixing one alone would leave the three visibly disagreeing.
     ///
     /// # What it costs, and when it is optional
@@ -1072,7 +1072,7 @@ impl RenderState {
     }
 
     /// Push the connected **dimension's** `Skybox` down — vanilla's
-    /// `DimensionType.skybox()`. Read by the sky pass in `gpu/frame.rs` when it
+    /// own per-dimension skybox choice. Read by the sky pass in `gpu/frame.rs` when it
     /// builds this frame's `lodestone_render::SkyFrame`.
     ///
     /// Deliberately a sibling of [`Self::set_cloud_status`] and **not** part of
@@ -1092,7 +1092,7 @@ impl RenderState {
     }
 
     /// Push this level's void-fog geometry down — the dimension's own `min_y`
-    /// and `ClientLevelData.voidDarknessOnsetRange()`'s flat/non-flat fork.
+    /// and vanilla's own void-darkness-onset-range's flat/non-flat fork.
     /// See [`crate::gpu::RenderState::void_fog`]'s field doc for what the two
     /// constants it replaced got wrong.
     pub fn set_void_fog(&mut self, void_fog: lodestone_render::fog::VoidFog) {
@@ -1462,7 +1462,7 @@ impl RenderState {
     ///
     /// `f` returns [`ItemUseState`]. Its `using`/`ticks` pair is the live item-use
     /// state; its `eat` field is vanilla's `getUseItemRemainingTicks() -
-    /// frameInterp + 1.0F` paired with the item's `Consumable.consumeTicks()`.
+    /// frameInterp + 1.0F` paired with the item's own consumable-consume-ticks component.
     ///
     /// **Re-install it every frame**, for the same reason
     /// [`set_hand_swing_source`](Self::set_hand_swing_source) says to: the value

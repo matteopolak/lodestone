@@ -1664,7 +1664,7 @@ impl RenderState {
             // the two reach the frame together and a missing one is
             // unambiguous. Depth-tested against terrain (a line behind a wall
             // does not bleed through) but not depth-writing, which is this
-            // pass's own state rather than vanilla's `RenderTypes.lines()` —
+            // pass's own state rather than vanilla's own generic-line render type —
             // at 2.5 logical pixels the difference is whether two overlapping
             // lines z-fight, and they do not.
             self.fishing_line.draw(&mut pass, fishing_line_count);
@@ -2150,15 +2150,15 @@ impl RenderState {
         // The screen overlays, each from its own closed fix: their own `Load` passes (see
         // `ScreenEffectRenderer::draw_underwater`'s doc — they must not erase
         // the world/hand just drawn), run last, matching vanilla's own order
-        // (`GameRenderer.java`: the hand, then
-        // `screenEffectRenderer.submit`/`Hud.extractCameraOverlays`, then the
+        // (vanilla's own game-renderer rendering: the hand, then
+        // its own screen-effect submission/camera-overlay extraction, then the
         // HUD/feature renderers — this shell's HUD draws in a later, separate
         // pass in `app.rs`).
         //
         // Two independent gate groups, not one — see
         // `ScreenEffects::any_active`'s doc for why: underwater/fire/pumpkin/
         // spyglass are first-person-only in vanilla, freeze/confusion/portal
-        // are not (`Hud.java` are siblings of the `isFirstPerson`
+        // are not (vanilla's own hud rendering has them as siblings of the `isFirstPerson`
         // block, not nested in it), so each group re-checks its own
         // applicability here rather than relying on the outer `any_active`
         // short-circuit alone — that call only proves *something* should
@@ -2192,7 +2192,7 @@ impl RenderState {
                         stats.freeze_overlay_drawn = true;
                     }
                     // Portal takes priority over confusion when both are
-                    // positive — `Hud.java`'s own `if`/`else if`.
+                    // positive — vanilla's own hud rendering's own `if`/`else if`.
                     if screen_effects.portal_intensity > 0.0 {
                         let frame = (screen_effects.tick % u64::from(fx.portal_frame_count())) as u32;
                         fx.draw_portal(queue, &mut encoder, view, frame, screen_effects.portal_intensity);
