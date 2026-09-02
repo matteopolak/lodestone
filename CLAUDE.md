@@ -208,9 +208,13 @@ section to annotating it.
   none. Measurements keep their numbers — those are evidence, not citations.
 - **Do not cross-reference issue numbers from code comments or docs.** Say what the code does and why,
   in terms a reader of that file can check. Commit messages and issue comments may name an issue.
-- **Vanilla record definitions are cited in `docs/` only, never in a `.rs` file** (owner's decision, on
-  legal-advice grounds). When you remove such a citation from code, say what rule the code implements
-  instead and point at the `docs/` page carrying the reference.
+- **Never name vanilla code anywhere — not in `.rs`, not in `docs/`** (owner's decision; this is a
+  clean-room implementation). No class, method, field or `.java` file names, no `net.minecraft` paths.
+  This supersedes the earlier rule that allowed such citations under `docs/`.
+  **Describe the rule instead, in terms a reader can check**: "two knockback impulses, the flat one
+  unconditional and the sprint bonus gated" rather than a method name. Behaviour, constants and
+  measurements are all still welcome — it is the *identifiers* that go. Our own types keep their
+  names even where they coincide (`BlockPos`, `ItemStack`, `ResourceLocation` are ours).
 
 **AI-ingested artifacts are size-capped.** `CLAUDE.md` is auto-loaded into every agent's context, so it
 is budgeted like code: a pre-commit hook (`.githooks/pre-commit`, installed by `just install-hooks`)
