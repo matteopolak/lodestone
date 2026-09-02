@@ -6258,11 +6258,11 @@ fn slab_doubles(clicked: &str, held: &str, face: BlockFace, cursor: Vec3f) -> bo
 }
 
 /// Which of a brewing stand's five slots a held item routes to — decided by
-/// item identity alone, mirroring `BrewingStandBlockEntity.canPlaceItem`
-/// (`:217-227`: slots 0-2 take potions/bottles, slot 3 takes any
-/// `potionBrewing.isIngredient`, slot 4 takes `ItemTags.BREWING_FUEL`).
+/// item identity alone, mirroring vanilla's own brewing-stand-block-entity
+/// can-place-item check (slots 0-2 take potions/bottles, slot 3 takes any
+/// `potionBrewing.isIngredient`, slot 4 takes the brewing-fuel item tag).
 enum BrewingSlot {
-    /// Blaze powder — `ItemTags.BREWING_FUEL`'s sole member (slot 4).
+    /// Blaze powder — the brewing-fuel item tag's sole member (slot 4).
     Fuel,
     /// A bottle this crate can represent — a water bottle, whose potion the
     /// item id fully determines. See [`bottle_from_item`] for why the other
@@ -6275,8 +6275,8 @@ enum BrewingSlot {
 /// The outcome of one right-click on a brewing stand — this crate's
 /// one-item-per-click stand-in for the brewing menu it cannot open (see
 /// [`BlockEntity::menu_name`]'s doc comment for why a brewing stand answers
-/// `None` there), the same shape `ComposterBlock.useItemOn` establishes for
-/// the composter.
+/// `None` there), the same shape vanilla's own composter-block use-item-on
+/// routine establishes for the composter.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BrewingInsertOutcome {
     /// An item moved out of the player's hand into the stand; the player's
@@ -6315,8 +6315,8 @@ fn bottle_from_item(item: &str) -> Option<Bottle> {
 }
 
 /// Routes `item` to the brewing-stand slot it belongs in, or `None` if it
-/// belongs nowhere — mirroring `BrewingStandBlockEntity.canPlaceItem`
-/// (`:217-227`). Blaze powder is checked first even though it is *also* a
+/// belongs nowhere — mirroring vanilla's own brewing-stand-block-entity
+/// can-place-item check. Blaze powder is checked first even though it is *also* a
 /// potion ingredient (strength, `brewing.rs`'s `potion_mix`): the fuel slot
 /// wins, matching the slot-4 test vanilla applies.
 #[must_use]
@@ -6456,7 +6456,7 @@ const COMPOSTER_BEHAVIOR_SEED: u64 = 0x5EED_C011;
 const BONE_MEAL_BEHAVIOR_SEED: u64 = 0x5EED_B04E;
 
 /// The seed for the per-connection [`SpawnRng`] that draws
-/// `BaseFireBlock.fireIgnite`'s `nextInt(1, 3)` player ramp. Its own stream for the
+/// vanilla's own base-fire-block ignite routine's `nextInt(1, 3)` player ramp. Its own stream for the
 /// reason the two constants above give.
 const BURN_BEHAVIOR_SEED: u64 = 0x5EED_F14E;
 
@@ -6517,7 +6517,7 @@ fn composter_state(level: u8) -> String {
 /// `Composter::insert`/`extract` (and therefore the whole seven-tier fill
 /// state machine, issue #249) reachable from a player at all.
 ///
-/// Mirrors `ComposterBlock.useItemOn`'s order: the held item (if any) is
+/// Mirrors vanilla's own composter-block use-item-on routine's order: the held item (if any) is
 /// offered to the fill machine first, and whatever the item offer does not
 /// consume falls through to vanilla's own `useWithoutItem`,
 /// which extracts at level `8` and otherwise `PASS`s. Concretely:
@@ -6529,7 +6529,7 @@ fn composter_state(level: u8) -> String {
 /// * a compostable item at level `7` (waiting on its scheduled tick) is
 ///   consumed as a click but changes nothing;
 /// * a *non*-compostable item never reaches `insert`'s level gate, because at
-///   level `7` vanilla's `COMPOSTABLES.containsKey` guard fails *before* the
+///   level `7` vanilla's own compostables-table containment guard fails *before* the
 ///   `fillLevel < 7` add, so the click falls through to placement there while
 ///   the same item at level `8` extracts. Checking the chance table up front
 ///   reproduces that ordering (`insert` alone would answer `NotAccepting` for
@@ -6651,7 +6651,7 @@ fn apply_composter_use(
 }
 
 /// Applies a right-click placement, mirroring
-/// `ServerGamePacketListenerImpl.handleUseItemOn`'s replace-vs-relative
+/// vanilla's own use-item-on handler's replace-vs-relative
 /// choice of placement cell (`BlockPlaceContext`'s constructor: place at the
 /// clicked block if it `canBeReplaced`, otherwise at its `face`-neighbour) —
 /// simplified per this crate's documented scope (`docs/block-edit.md`): no
@@ -6664,7 +6664,7 @@ fn apply_composter_use(
 /// **Placement honours the held item for every block in the game** (#466).
 /// `inventory`'s currently selected item is resolved through
 /// [`lodestone_data::block_items::block_for_item`] — the 26.2 census of
-/// `BlockItem.getBlock()`, dumped from the real jar — which decides both
+/// vanilla's own block-item block getter, dumped from the real jar — which decides both
 /// whether a placement happens and which block it writes.
 ///
 /// Before #466 this went through [`block_entity_for_item`] alone, whose
@@ -6693,7 +6693,7 @@ fn apply_composter_use(
 ///
 /// Sends [`ServerProtocol::encode_block_update`] for **both** `pos` and its
 /// `face`-neighbour unconditionally, matching vanilla's own
-/// `handleUseItemOn`, which
+/// use-item-on handler, which
 /// sends both regardless of whether the placement succeeded — this doubles
 /// as the correction for a client that predicted a placement the server
 /// rejected.
@@ -6701,7 +6701,7 @@ fn apply_composter_use(
 /// **Right-clicking a block that already has an *openable* container opens
 /// its screen instead of attempting a placement at all** — the closing half
 /// of `docs/block-entities.md`'s gap 3. Mirrors vanilla's own order:
-/// `ServerGamePacketListenerImpl.handleUseItemOn` runs the clicked block's
+/// its own use-item-on handler runs the clicked block's
 /// own `useItemOn`/`useWithoutItem` (which is what opens a furnace/hopper's
 /// menu) **before** any `BlockPlaceContext` placement logic, and a block
 /// that opens a menu never falls through to placement.
@@ -6710,15 +6710,16 @@ fn apply_composter_use(
 /// but without a menu** (issue #252): it cannot be opened — `menu_name`
 /// answers `None`, because its `Bottle` slots are not real `ItemStack`s — so
 /// [`insert_into_brewing_stand`] stands in for the menu with a direct
-/// one-item-per-click insert, the shape `ComposterBlock.useItemOn` uses for
+/// one-item-per-click insert, the shape vanilla's own composter-block
+/// use-item-on routine uses for
 /// the composter (which is the *other* kind `menu_name` answers `None` for,
 /// there because vanilla gives a composter no menu at all). A held item that
 /// belongs in a brewing stand is routed into the matching slot and consumed;
 /// an unrelated held item still falls through to the placement logic below
-/// exactly as before this change.
+/// exactly as before the fix that added this routing.
 ///
 /// Whether writing `state` at `target` would intersect the placer's own
-/// bounding box — vanilla's `BlockItem.canPlace` refusing when
+/// bounding box — vanilla's own item-can-place check refusing when
 /// `Level.isUnobstructed(state, pos, CollisionContext.empty())` is false,
 /// narrowed to the one entity this server can currently name
 /// at a placement site: the placer, from `player_pos`. A full
@@ -6729,12 +6730,12 @@ fn apply_composter_use(
 ///
 /// A state with an **empty** collision shape (a torch, a rail, a pressure
 /// plate, redstone dust…) is never obstructed, matching vanilla's own
-/// `Shapes.empty()` never intersecting anything — placing one at your own
+/// empty collision shape never intersecting anything — placing one at your own
 /// feet is legal in vanilla and stays legal here.
 ///
-/// The placer's box is vanilla's `EntityType.PLAYER` (`0.6 x 1.8`, centred
+/// The placer's box is vanilla's own player entity-type dimensions (`0.6 x 1.8`, centred
 /// horizontally on `feet`, `feet.y..feet.y + 1.8` vertically) —
-/// `isUnobstructed` reads `Entity.getBoundingBox()` at click time, which does
+/// the unobstructed check reads the entity's own bounding-box getter at click time, which does
 /// not shrink for the sneaking pose (`1.5`), so this does not model pose
 /// either.
 fn placement_obstructs_placer(target: BlockPos, state: &str, feet: Vec3) -> bool {
@@ -6831,7 +6832,7 @@ async fn apply_use_item_on<T, P, S>(
     // count per use is part of the specification its own tests pin. Pre-drawing
     // would fix the count at one and desynchronise the stream.
     bone_meal_rng: &mut SpawnRng,
-    // The **world** difficulty, for `EntityType.canSpawn` — a spawn egg on
+    // The **world** difficulty, for vanilla's own can-spawn entity-type check — a spawn egg on
     // Peaceful fails for any `notInPeaceful` species rather than spawning and
     // being evicted on the next tick. Passed by value rather than as the
     // `WorldStateHandle` because this is the only scalar this function needs and
@@ -6839,7 +6840,7 @@ async fn apply_use_item_on<T, P, S>(
     // rather than added to this module's `lodestone_model` import list, which is
     // edited concurrently by other work.
     difficulty: lodestone_model::Difficulty,
-    // The acting player's game mode, for `ItemStack.consume`'s
+    // The acting player's game mode, for vanilla's own item-stack consume routine's
     // `hasInfiniteMaterials()` gate — a creative placement writes the block and
     // consumes nothing. See the consumption arm at the end of the placement branch.
     game_mode: GameMode,
@@ -6936,9 +6937,9 @@ where
     // Issues #253-#255: the anvil, grindstone, smithing table and enchanting
     // table are, like the crafting table just above, **not** block entities in
     // vanilla — each menu's own input slots are scratch space the menu itself
-    // owns and throws away on close (`AnvilMenu.inputSlots`,
-    // `GrindstoneMenu.repairSlots`, `SmithingMenu.inputSlots`,
-    // `EnchantmentMenu.enchantSlots`), so `existing_menu` above structurally
+    // owns and throws away on close (vanilla's own per-menu input-slot
+    // containers on the anvil, grindstone, smithing and enchantment menus),
+    // so `existing_menu` above structurally
     // cannot reach any of them either.
     let clicked_block = source
         .block_state(pos.x, pos.y, pos.z)
