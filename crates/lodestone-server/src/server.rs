@@ -7938,7 +7938,7 @@ where
     (changed, scheduled)
 }
 
-/// `TripWireBlock.affectNeighborsAfterRemoval`'s bridge from a [`ChunkSource`]
+/// Vanilla's own tripwire-block affect-neighbors-after-removal routine's bridge from a [`ChunkSource`]
 /// to [`crate::random_tick::react_at_removal`] — the block-**removal** twin
 /// of [`propagate_placement_with_entities`], same column-snapshot shape.
 /// `wire_state_before_removal` is the removed block's own state just before
@@ -8041,7 +8041,7 @@ where
 /// with an empty `entries`, so the reply below is naturally an empty
 /// confirmation rather than this function needing its own refusal branch.
 /// Rule-name/value validation, by contrast, **is** real: vanilla looks each
-/// key up in `BuiltInRegistries.GAME_RULE` and parses `value` through that
+/// key up in vanilla's own game-rule registry and parses `value` through that
 /// rule's own type (`GameRule<T>::deserialize`), and
 /// [`crate::world_state::WorldStateHandle::set_rule`] does the same against
 /// this crate's own rule set, rejecting an unknown key or an unparseable
@@ -8061,7 +8061,7 @@ where
     P: ServerProtocol,
 {
     // **Validated now**, which is what vanilla does too
-    // (`BuiltInRegistries.GAME_RULE` lookup + `GameRule<T>::deserialize`). The old
+    // (its own game-rule registry lookup + `GameRule<T>::deserialize`). The old
     // store kept every `(String, String)` verbatim, so `randomTickSpeed` — the
     // pre-26.2 spelling — was accepted, echoed back, and then never read by
     // anything, because the reader asks for `random_tick_speed`. The player saw
@@ -8100,8 +8100,8 @@ where
 /// # `action == 0`, `PERFORM_RESPAWN`
 ///
 /// **The respawn position is the player's bed when they have a usable one**, and
-/// the world spawn otherwise — vanilla's
-/// `ServerPlayer.findRespawnPositionAndUseSpawnBlock`, resolved through
+/// the world spawn otherwise — vanilla's own
+/// find-respawn-position-and-use-spawn-block routine, resolved through
 /// [`crate::world_spawn::resolve_bed_respawn`]. The bed block is **re-read at
 /// death time** rather than trusted from when the point was set, so a bed that has
 /// since been broken (or walled in) falls back to the world spawn instead of
@@ -8266,7 +8266,7 @@ where
 }
 
 /// Applies a `SET_CARRIED_ITEM` request (`ServerBound::CarriedItemChanged`),
-/// mirroring `ServerGamePacketListenerImpl::handleSetCarriedItem`, which
+/// mirroring vanilla's own carried-item-set handler, which
 /// writes straight into `Inventory.setSelectedSlot` and sends **no**
 /// confirmation packet back — see that `ServerBound` variant's own doc
 /// comment. A no-op if `slot` is already out of range (the protocol decoder
@@ -8283,7 +8283,7 @@ fn apply_carried_item_changed(inventory: &mut PlayerInventory, slot: u8) {
 /// table `CONTAINER_CLICK` against window 0 already uses
 /// ([`PlayerInventory::apply_menu_slot_change`]) — `SET_CREATIVE_MODE_SLOT`'s
 /// wire `slot` field uses the identical `InventoryMenu` numbering
-/// (`ServerGamePacketListenerImpl::handleSetCreativeModeSlot`'s
+/// (vanilla's own creative-mode-slot-set handler's
 /// `player.inventoryMenu.getSlot(slotNum)`), so no new mapping is needed.
 /// `slot` values that table does not recognise (`0`, the crafting output; any
 /// negative value, vanilla's "drop into the world" case) are silent no-ops
@@ -8331,7 +8331,7 @@ fn read_menu(
 
 /// The `stateId` the join snapshot carries, and it is **`1`, not `0`**.
 ///
-/// Vanilla's `AbstractContainerMenu::setSynchronizer` calls `sendAllDataToRemote`,
+/// Vanilla's own container-menu synchronizer-setter calls `sendAllDataToRemote`,
 /// which hands the list to `ContainerSynchronizer::sendInitialData` — and
 /// `ServerPlayer`'s implementation of that sends
 /// `new ClientboundContainerSetContentPacket(container.containerId,
@@ -8344,7 +8344,7 @@ fn read_menu(
 /// Measured against the 26.2 decompile rather than assumed, because the obvious
 /// worry — "a wrong state id makes the client reject the next update" — is
 /// **backwards**. No client validates this field:
-/// `ClientPacketListener.handleContainerContent` calls
+/// Vanilla's own client-side container-content handler calls
 /// `menu.initializeContents(packet.stateId(), …)` unconditionally, and
 /// `initializeContents` simply assigns `this.stateId = stateId`. Ditto
 /// `AbstractContainerMenu::setItem` for a single-slot update, and this workspace's
@@ -8352,7 +8352,7 @@ fn read_menu(
 /// adopts whatever arrived).
 ///
 /// The only consumer anywhere is a **server** checking a click's *echoed* id:
-/// `ServerGamePacketListenerImpl.handleContainerClick`'s
+/// vanilla's own container-click handler's
 /// `packet.stateId() != this.player.containerMenu.getStateId()` picks the
 /// `broadcastFullState()` branch. That is the other direction of travel, and this
 /// crate does not perform that check at all (the `ServerBound::ContainerClicked`
@@ -8362,8 +8362,8 @@ fn read_menu(
 /// [`dispatch_play_packet`] for a field nothing reads.
 const JOIN_CONTENT_STATE_ID: i32 = 1;
 
-/// The window-`0` inventory snapshot a joining player is owed — vanilla's
-/// `ServerPlayer::initInventoryMenu`.
+/// The window-`0` inventory snapshot a joining player is owed — vanilla's own
+/// per-player inventory-menu initializer.
 ///
 /// # Why this exists
 ///
@@ -8382,12 +8382,12 @@ const JOIN_CONTENT_STATE_ID: i32 = 1;
 ///
 /// # Placement, and it is deliberate
 ///
-/// `PlayerList.placeNewPlayer` calls `initInventoryMenu()` **last** — after the
+/// Vanilla's own new-player placement routine calls `initInventoryMenu()` **last** — after the
 /// abilities/held-slot/recipe packets, after `sendPlayerPermissionLevel`, after the
 /// placement `teleport`, after the player-info adds and after `sendLevelInfo`. So
 /// the top of [`serve_play`] is the faithful position: `serve_connection_inner` has
 /// already done all of those, and the deferred chunk stream that this loop drains
-/// corresponds to vanilla's `PlayerChunkSender` feeding columns over *subsequent*
+/// corresponds to vanilla's own per-player chunk sender feeding columns over *subsequent*
 /// ticks. Sending it later — say, lazily on the first movement packet — would
 /// reintroduce the same class of bug for a player who joins and stands still.
 ///
@@ -8397,7 +8397,7 @@ const JOIN_CONTENT_STATE_ID: i32 = 1;
 /// recording why only one is correct here.
 /// `ClientboundSetPlayerInventoryPacket` is a **single-slot** record — `(int slot,
 /// ItemStack contents)` — and vanilla's only producer is
-/// `Inventory.createInventoryUpdatePacket`, called from `Inventory.add` to
+/// vanilla's own inventory-update-packet builder, called from `Inventory.add` to
 /// acknowledge one item pickup. It carries no slot list and no cursor, so it cannot
 /// express a snapshot. `ClientboundContainerSetContentPacket` is what
 /// `sendInitialData` sends, and `handleContainerContent`'s `containerId == 0` arm
@@ -8435,7 +8435,7 @@ fn join_inventory_snapshot<P: ServerProtocol>(
 ///
 /// **The XP bar never appeared, in survival as well as creative**, and the creative
 /// gate was a red herring (vanilla hides the bar client-side via
-/// `Player.hasExperience`, and still sends the packet). Same island shape as
+/// its own has-experience check, and still sends the packet). Same island shape as
 /// [`join_inventory_snapshot`], one step further along: the encoder existed in both
 /// the [`ServerProtocol`] trait and `V770ServerProtocol`, the client decodes
 /// `SET_EXPERIENCE` into `ClientEvent::ExperienceChanged`, and the HUD draws the bar
@@ -8446,7 +8446,7 @@ fn join_inventory_snapshot<P: ServerProtocol>(
 ///
 /// # Where vanilla sends it, and why "on join" is the faithful answer
 ///
-/// Not from `placeNewPlayer` — from `ServerPlayer.doTick`, which sends whenever
+/// Not from `placeNewPlayer` — from vanilla's own per-player tick routine, which sends whenever
 /// `this.totalExperience != this.lastSentExp`. `lastSentExp` is initialised to
 /// `-99999999`, so the comparison is true on the **first tick after any join** even
 /// for a player with zero experience, and the packet goes out unconditionally.
