@@ -21,8 +21,8 @@ this plan's Phase S).
 
 ### 1. Parity census, stage by stage
 
-Vanilla's generation pipeline is the `ChunkStatus` chain (`.cache/mc/26.2/src/net/minecraft/world/
-level/chunk/status/ChunkStatus.java`): `empty → structure_starts → structure_references →
+Vanilla's generation pipeline is its own chunk-generation-status chain: `empty → structure_starts →
+structure_references →
 biomes → noise → surface → carvers → features → initialize_light → light → spawn → full`, with the
 `features` status fanning out into eleven decoration steps (`GenerationStep.Decoration`) run per biome
 in order. Status per stage, **verified against the tree this session** (2026-08-04), not quoted from
@@ -30,11 +30,11 @@ prose — several worldgen claims in this repo's own files are stale (see §"sta
 
 | # | vanilla stage | status | evidence |
 |---|---|---|---|
-| 1 | RNG / noise / density router (`DensityFunctions.java`, `NoiseRouterData.java`) | **ported, bit-exact** | `rng_parity` 663/663, `noise_parity` 1224/1224, `region_parity` 34048/34048, interpolated `final_density` 98304/98304 — committed JVM dumps in `crates/lodestone-worldgen/tests/support/*_jvm.txt` |
-| 2 | biome assignment (`ChunkStatusTasks.generateBiomes` calling `createBiomes`; `Climate.ParameterList.findValueIndex` nearest-point search, `Climate.RTree`) | **partial: 2-D only** | `crates/lodestone-worldgen/src/biome.rs` module doc: one sample per horizontal quart at that quart's own surface height, broadcast down the column — vanilla is per quart **cube**. Table: 7594 rows dumped from `MultiNoiseBiomeSourceParameterList.knownPresets()`, brute-force search. Cave biomes (`dripstone_caves`, `lush_caves`, `deep_dark`) are unreachable underground |
-| 3 | noise fill + real aquifer (`fillFromNoise`) | **ported + composed** | `aquifer_parity`; composed harness: chunk (0,0) `postcarve` **0 real mismatches** (`docs/worldgen-parity.md`) |
-| 4 | surface rules (`buildSurface`), incl. badlands bands | **ported + composed** | `surface_parity`; `getBand` ported in `3cf523c`, badlands exclusion removed |
-| 5 | carvers (`applyCarvers`, 17×17 per-source-chunk biome) | **ported + composed** | `carver_parity`; same (0,0) zero-real-mismatch postcarve result |
+| 1 | RNG / noise / density router (vanilla's own density-function and noise-router data) | **ported, bit-exact** | `rng_parity` 663/663, `noise_parity` 1224/1224, `region_parity` 34048/34048, interpolated `final_density` 98304/98304 — committed JVM dumps in `crates/lodestone-worldgen/tests/support/*_jvm.txt` |
+| 2 | biome assignment (vanilla's own per-status biome-generation call and its climate-parameter-list nearest-point search over the climate R-tree) | **partial: 2-D only** | `crates/lodestone-worldgen/src/biome.rs` module doc: one sample per horizontal quart at that quart's own surface height, broadcast down the column — vanilla is per quart **cube**. Table: 7594 rows dumped from vanilla's own biome-parameter-list bootstrap, brute-force search. Cave biomes (`dripstone_caves`, `lush_caves`, `deep_dark`) are unreachable underground |
+| 3 | noise fill + real aquifer (vanilla's own noise-fill routine) | **ported + composed** | `aquifer_parity`; composed harness: chunk (0,0) `postcarve` **0 real mismatches** (`docs/worldgen-parity.md`) |
+| 4 | surface rules (vanilla's own surface-build routine), incl. badlands bands | **ported + composed** | `surface_parity`; the badlands band lookup ported in `3cf523c`, badlands exclusion removed |
+| 5 | carvers (vanilla's own apply-carvers routine, 17×17 per-source-chunk biome) | **ported + composed** | `carver_parity`; same (0,0) zero-real-mismatch postcarve result |
 | 6a | `UNDERGROUND_ORES` | **ported + composed (real 3×3)** | `feature_parity`; composed residual vs the *single-source* oracle stage 2237/98304 at (0,0); single-source debug toggle isolates the engine at 563/98304 — the rest is real spill the oracle can't model yet |
 | 6b | `VEGETAL_DECORATION` | **partial: composed 3×3, named gaps** | `vegetation_parity`: bit-exact at 4 fixtures modulo gaps; `KNOWN_VEGETATION_GAPS` (`crates/lodestone-server/src/worldgen_data.rs`) names them per biome: `multiface_growth` (glow lichen — in **every** biome's list), `fallen_tree`,
  fancy/giant trunks (jungle, dark oak, mangrove, cherry; acacia closed in `04bfb57`), kelp/seagrass/coral/`sea_pickle` (oceans), bamboo, vines, huge mushrooms, `root_system`/`vegetation_patch` (lush caves), `random_boolean_selector`, two `simple_block`/`block_column` config variants. Plus two measured, mechanism-unknown savanna residuals (11 leaf-`distance` cells; 1 `short_grass` cell) |
@@ -44,11 +44,11 @@ prose — several worldgen claims in this repo's own files are stale (see §"sta
 | 6f | `SURFACE_STRUCTURES` step *features* (`blue_ice` in frozen oceans; `desert_well` etc.) | **absent** | |
 | 6g | `UNDERGROUND_DECORATION` (`dripstone_cluster`, `pointed_dripstone`, sculk...) | **absent** — and unreachable until 3-D biomes, since only cave biomes carry these | |
 | 6h | `FLUID_SPRINGS` (`spring_water`, `spring_lava`) | **absent** | in every biome's list |
-| 6i | `TOP_LAYER_MODIFICATION` (`freeze_top_layer` — snow layers + ice) | **ported + composed, bit-exact at 4 fixtures** | U2, closed. `top_layer_parity` (in `lodestone-server/src/worldgen_data.rs`) loads vanilla's own post-vegetation field and requires the same writes at the same coordinates: snowy_plains 250 snow + 250 `snowy` flips, frozen_ocean 36 ice + 0 snow, windswept_hills 115 snow, desert 0. Plus 1,024 columns of `MOTION_BLOCKING` heightmap against vanilla's own `getHeight`. Four controls run and observed. See [`worldgen-freeze-top-layer.md`](../worldgen-biomes.md) |
+| 6i | `TOP_LAYER_MODIFICATION` (`freeze_top_layer` — snow layers + ice) | **ported + composed, bit-exact at 4 fixtures** | U2, closed. `top_layer_parity` (in `lodestone-server/src/worldgen_data.rs`) loads vanilla's own post-vegetation field and requires the same writes at the same coordinates: snowy_plains 250 snow + 250 `snowy` flips, frozen_ocean 36 ice + 0 snow, windswept_hills 115 snow, desert 0. Plus 1,024 columns of `MOTION_BLOCKING` heightmap against vanilla's own heightmap query. Four controls run and observed. See [`worldgen-freeze-top-layer.md`](../worldgen-biomes.md) |
 | 7 | structures proper (`structure_starts`/`structure_references` statuses + jigsaw assembly) | **absent entirely** | tracked as "do not start implementation"; no Rust module; data exists (34 `structure`, 20 `structure_set`, 188 `template_pool`, 40 `processor_list` JSON) |
 | 8 | `initialize_light` / `light`; heightmaps | **absent from the served wire** | `encode_column_body`, `crates/protocol/v770/src/server_protocol.rs`: heightmaps sent empty, light all-`Missing` — documented gap; client relights locally |
 | 9 | `spawn` (initial mob generation, `disable_mob_generation`) | **absent from generation** | runtime spawning is `crates/lodestone-server/src/natural_spawn.rs` (a different mechanism, currently another agent's file) |
-| — | old-chunk blending (`Blender.of(region)`, `BelowZeroRetrogen`, `ChunkStatusTasks.generateBiomes`/`ChunkStatusTasks.generateNoise`) | **absent, deliberately out of scope** | only matters for worlds imported from older versions |
+| — | old-chunk blending (vanilla's own region blender, its below-zero retrogen pass, and its per-status biome/noise generation calls) | **absent, deliberately out of scope** | only matters for worlds imported from older versions |
 
 Also known and bounded: fluid block-states are emitted without the `level` property (`docs/
 worldgen-parity.md` "Known representation gap") — representation-only, tracked separately in the
@@ -69,7 +69,7 @@ independent, parallel now:          whole-chunk gate per stage
   benches #85/#87 (U9)
   version seam #407 (U8)
 
-3-D biome sampling + Climate.RTree port (U7)
+3-D biome sampling + climate R-tree port (U7)
   └─► UNDERGROUND_DECORATION / cave-biome vegetation (dripstone, lush-caves flora, sculk)
         └─► "full FEATURES-status parity" measurable
 
@@ -204,7 +204,7 @@ the `mobs/` module in `lodestone-server` are **owned by other agents at the time
 | U4 geodes, dungeons, fossils, icebergs | `GeodeFeature`, `MonsterRoomFeature`, `FossilFeature`, `IcebergFeature` + oracle | `feature/geode.rs`, `feature/misc_structures.rs` (new) | same |
 | U5 vegetation gap burn-down | `multiface_growth` (every biome), fancy/giant trunk placers, `fallen_tree` | `feature/vegetation.rs`, `vegetation_parity.rs`, `VegetationOracle.java`, `KNOWN_VEGETATION_GAPS` | one agent only — all in one file |
 | U6 ocean vegetation | kelp, seagrass, sea_pickle, coral (3 kinds) | `feature/ocean.rs` (new) | same overworld.rs hook |
-| U7 3-D biomes | per-quart-cube climate sampling; `Climate.RTree` port with `Climate.RTree.findValueBruteForce` as its own in-tree control | `biome.rs`, `BiomeOracle.java` | perf gate from U9 before landing |
+| U7 3-D biomes | per-quart-cube climate sampling; a port of vanilla's own climate R-tree with its brute-force nearest-point search as its own in-tree control | `biome.rs`, `BiomeOracle.java` | perf gate from U9 before landing |
 | U8 seam | §4 as written | `worldgen_data.rs`, `assets/worldgen/` move, v770 additions, registry field | `integrated.rs`/`server.rs` owners; lib.rs broker |
 | U9 benches | `StageTimes` extended past its current 4 fields (shape/fluid_heightmap/surface/intern — it predates carve/ore/vegetation entirely); persisted split; RD 8/16/32 sweep with peak RSS via `lodestone-allocbench`'s `/usr/bin/time -l` pattern | `benches/generation.rs`, `column_timed`/`StageTimes` in overworld.rs (small brokered touch) | — |
 | S1..Sn structures | placement grid first (deterministic, `/locate`-checkable), then jigsaw/template/terrain-adaptation as separate units | new `crates/lodestone-worldgen/src/structure/` (or sibling crate) | after U1–U7; unblocks the structures work |
@@ -235,8 +235,8 @@ Predictions to verify (the *predict-then-measure* discipline, not direction-only
   chunk), so it is the *cheapest* shape in this group; U3/U4/U6 do spill and should not inherit
   this figure.
 - 3-D biomes without an index: 16 → 1536 samples/chunk × 7594 rows ≈ **~96×** the biome stage.
-  That is why U7 carries the `RTree` port and a perf gate, with vanilla's own
-  `Climate.RTree.findValueBruteForce` as the correctness control for the index.
+  That is why U7 carries the climate R-tree port and a perf gate, with vanilla's own
+  brute-force nearest-point search as the correctness control for the index.
 - The 3×3 drivers' 9× recompute is already amortized by `pre_ore_cache`/`post_ore_cache` (512-entry
   FIFO) for sweep-shaped access; the open cost item is release-profile confirmation plus the
   benches unit's peak-RSS story (each cache entry is a ~200 KiB grid; two caches ≈ up to ~200 MiB worst case —
