@@ -796,7 +796,7 @@ impl Sim {
     /// `food` does — or `None` before the first `set_health`.
     ///
     /// Read by the HUD's hunger wobble: vanilla shakes the hunger
-    /// row only while saturation is exhausted (`Hud.java`), so without
+    /// row only while saturation is exhausted, so without
     /// this the animation is computed correctly and never fires on a live
     /// server. `Vitals::saturation` was already populated; only the accessor
     /// and `app.rs`'s one assignment were missing.
@@ -903,7 +903,7 @@ impl Sim {
     }
 
     /// The same folded tab list [`Self::tab_list_view`] projects, unprojected —
-    /// issue #189's Social Interactions roster needs the raw entries
+    /// Social Interactions roster needs the raw entries
     /// (`crate::menu::social::entries_from_tablist`), not pre-rendered strings.
     #[must_use]
     pub fn tab_list(&self) -> lodestone_game::tablist::TabList {
@@ -1082,8 +1082,8 @@ impl Sim {
 
     /// The attack-cooldown fraction the crosshair indicator fills to,
     /// `0.0..=1.0` — vanilla's `getAttackStrengthScale(0.0F)`
-    /// (`Player.java`), the exact call `Hud.extractCrosshair` makes
-    /// for the crosshair-style indicator (`Hud.java`). The `a` (partial
+    ///, the exact call `Hud.extractCrosshair` makes
+    /// for the crosshair-style indicator. The `a` (partial
     /// tick) argument is fixed at `0.0` here, same as that call site; nothing
     /// in this shell threads a render-time partial tick into `Sim`'s other
     /// accessors either (see [`Self::health`]/[`Self::xp`]).
@@ -1092,12 +1092,12 @@ impl Sim {
         self.attack_strength_scale_at(0.0)
     }
 
-    /// `getAttackStrengthScale(a)` (`Player.java`) with the partial
+    /// `getAttackStrengthScale(a)` with the partial
     /// tick argument exposed, because vanilla itself calls this with two
     /// different values for two different purposes: `0.0F` for the crosshair
     /// indicator ([`Self::attack_strength_scale`], `Hud.java`) and `0.5F`
     /// for `Player.attack`'s own `fullStrengthAttack` gate
-    /// (`Player.java`), which [`Self::maybe_spawn_crit_particles`]
+    ///, which [`Self::maybe_spawn_crit_particles`]
     /// needs. One private helper rather than two public accessors that would
     /// otherwise duplicate the ticker read and delay computation.
     #[must_use]
@@ -1273,7 +1273,7 @@ impl Sim {
     /// The open merchant's trade list, if any server has sent one this
     /// session — [`lodestone_ecs::SessionTrades`], the same
     /// `MerchantOffersReceived -> TradeOffers` fold every other session
-    /// scalar in this file reads (issue #245's UI half). Empty (never `None`
+    /// scalar in this file reads (UI half). Empty (never `None`
     /// — see [`lodestone_game::trades::TradeOffers::new`]) off a live
     /// connection or before any merchant screen has opened, which is what
     /// lets `app.rs` build a [`crate::container::ContainerFrame`] with
@@ -1475,7 +1475,7 @@ impl Sim {
 
     /// The currently held `minecraft:writable_book`'s edit-screen seed, or
     /// `None` if neither hand holds one — `WindowApp::try_use`'s fork for
-    /// issue #613's `EditBook` producer, the same shape its command-block
+    /// `EditBook` producer, the same shape its command-block
     /// fork already has.
     ///
     /// The main hand is checked first, matching vanilla's own hand
@@ -1706,7 +1706,7 @@ impl Sim {
     }
 
     /// The server's own recipe-book panel state, as `RECIPE_BOOK_SETTINGS` (76)
-    /// last reported it (issue #436's `SessionRecipeBookSettings` island).
+    /// last reported it (`SessionRecipeBookSettings` island).
     ///
     /// Same shape as [`Self::difficulty`], and the same story: the fold landed
     /// in `fd53995`, was gated through the real `SharedState::apply` path, and
@@ -1727,7 +1727,7 @@ impl Sim {
 
     /// The server's recipe-book **unlock** sync — `RECIPE_BOOK_ADD`/`_REMOVE`,
     /// `PLACE_GHOST_RECIPE` and `UPDATE_RECIPES` as last folded into
-    /// `lodestone_ecs::session::SessionRecipeBook` (issue #687's missing hop 3).
+    /// `lodestone_ecs::session::SessionRecipeBook` (missing hop 3).
     ///
     /// Same shape as [`Self::recipe_book_settings`] and [`Self::difficulty`]: a
     /// plain read of a local-player session component through the ordinary
@@ -1787,7 +1787,7 @@ impl Sim {
 
     /// Select a merchant trade row — vanilla's `ServerboundSelectTradePacket`
     /// (`MerchantScreen.postButtonClick`, `MerchantScreen.java`), sent
-    /// when the player clicks a trade-list row (issue #245's UI half).
+    /// when the player clicks a trade-list row (UI half).
     ///
     /// [`ClientAction::SelectTrade`] was already encoded by every protocol
     /// family with no shell caller anywhere — the outbound-island shape
@@ -1806,7 +1806,7 @@ impl Sim {
     /// Confirm a beacon's primary/secondary power selection — vanilla's
     /// `ServerboundSetBeaconPacket` (`BeaconConfirmButton.onPress`,
     /// `BeaconScreen.java`), sent when the player presses the beacon
-    /// screen's confirm button (issue #613's `SetBeaconEffects` remainder).
+    /// screen's confirm button (`SetBeaconEffects` remainder).
     ///
     /// [`ClientAction::SetBeaconEffects`] was already encoded by every
     /// protocol family with no shell caller anywhere — the outbound-island
@@ -1823,7 +1823,7 @@ impl Sim {
     /// (`EnchantmentScreen.mouseClicked` → `Minecraft.gameMode.
     /// handleInventoryButtonClick`, `EnchantmentScreen.java`), sent when the
     /// player clicks an offer row the client-side gate already accepted
-    /// (issue #613's `ContainerButtonClick` remainder).
+    /// (`ContainerButtonClick` remainder).
     ///
     /// [`ClientAction::ContainerButtonClick`] was already encoded by every
     /// protocol family with no shell caller anywhere — the same
@@ -1887,7 +1887,7 @@ impl Sim {
     }
 
     /// Apply the world-creation Game Rules editor's overrides — vanilla's
-    /// `ServerboundSetGameRulePacket` (issue #592's More tab). Sent once, by
+    /// `ServerboundSetGameRulePacket` (More tab). Sent once, by
     /// `app/session.rs`'s `drive_ui_from_session`, the moment a freshly
     /// created singleplayer session reaches `SessionPhase::Connected` — there
     /// is no server to hold this state on any earlier, since the integrated
@@ -2042,7 +2042,7 @@ impl Sim {
     }
 
     /// The server's game rules, as `GAME_EVENT`/`CHANGE_GAME_STATE` last
-    /// reported them (issue #436's `SessionGameRules` island).
+    /// reported them (`SessionGameRules` island).
     ///
     /// Cloned rather than `Copy`ed: [`GameRuleValues`] wraps a `BTreeMap`. The
     /// map is small (a handful of rules a server actually reports), and the
@@ -2143,7 +2143,7 @@ impl Sim {
     }
 
     /// The player's spawn point, as `SET_DEFAULT_SPAWN_POSITION` last reported
-    /// it (issue #436's `SessionSpawnPoint` island).
+    /// it (`SessionSpawnPoint` island).
     ///
     /// `is_reported()` on the result separates "the server never sent one" from
     /// "the server sent the origin" — the distinction a compass needle needs in
@@ -2159,7 +2159,7 @@ impl Sim {
     }
 
     /// The world border's warning-overlay strength for this frame, in `0.0..=1.0`
-    /// — issue #436's `SessionWorldBorder` island reaching pixels.
+    /// — `SessionWorldBorder` island reaching pixels.
     ///
     /// A direct port of `Hud.extractVignette` (`Hud.java`,
     /// `.cache/mc/26.2/client-src`):
@@ -2184,9 +2184,9 @@ impl Sim {
     /// # A unit hazard, recorded rather than silently resolved
     ///
     /// Vanilla's `getLerpSpeed()` is `abs(from - to) / (lerpEnd - lerpBegin)`
-    /// (`WorldBorder.java`) where that denominator is
+    /// where that denominator is
     /// `lerpSizeBetween`'s third parameter — named **`ticks`**
-    /// (`WorldBorder.java`), not milliseconds. Our `BorderExtent::Moving`
+    ///, not milliseconds. Our `BorderExtent::Moving`
     /// stores `duration_ms`, documented as milliseconds as the server sent it,
     /// so the conversion below is explicit at [`MILLIS_PER_TICK`].
     ///
@@ -2197,9 +2197,9 @@ impl Sim {
     /// shrinking a border and a measurement of when the tint first appears. The
     /// static case, which is what the gates pin, is exact either way because
     /// `StaticBorderExtent.getLerpSpeed()` returns `0.0`
-    /// (`WorldBorder.java`) and the floor wins outright.
+    /// and the floor wins outright.
     /// The command block the crosshair is on, resolved into the edit screen's
-    /// opening state — issue #47's missing trigger, tracked on #436.
+    /// opening state — missing trigger, tracked on #436.
     ///
     /// `None` when the crosshair is on nothing, on a block that is not a
     /// command block, or when the chunk store has no data at that cell. Only

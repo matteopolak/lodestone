@@ -863,7 +863,7 @@ pub struct EntityDraw {
     pub name_tag: Option<NameTag>,
     /// Whether the hurt/death **red overlay** applies to this entity's model
     /// this frame — vanilla's `state.hasRedOverlay = entity.hurtTime > 0 ||
-    /// entity.deathTime > 0` (`LivingEntityRenderer.java`), issue #98.
+    /// entity.deathTime > 0`, issue #98.
     ///
     /// Boolean, not a fade: vanilla does not interpolate by how much of
     /// `hurtTime` remains, so neither does this (see
@@ -1267,7 +1267,7 @@ pub struct ProjectilePhysics {
     pub grounded: bool,
 }
 
-/// Vanilla's `Creeper.DEFAULT_MAX_SWELL` (`Creeper.java`): the tick count a
+/// Vanilla's `Creeper.DEFAULT_MAX_SWELL`: the tick count a
 /// fuse counts up to before [`tick_creeper_fuse`] treats it as fully swollen.
 /// A creeper's real `maxSwell` can differ (the `Fuse` NBT tag), but that value
 /// is never synchronised to the client — see
@@ -1328,7 +1328,7 @@ pub fn tick_creeper_fuse(mut fuses: Query<&mut CreeperFuse>) {
 /// exists: only the *pose* (`Pose.SWIMMING`, at metadata index 6) is ever on
 /// the wire, never the ramp itself, so [`tick_swim_ramp`] has to advance it
 /// here exactly as `LivingEntity.updateSwimAmount()` does
-/// (`LivingEntity.java:3478-3483`) rather than reading a synced value.
+/// rather than reading a synced value.
 ///
 /// **Present on every track entity**, not gated by [`RenderKind`] the way
 /// [`CreeperFuse`] is gated to `"creeper"` — vanilla's swim rotation is not
@@ -1704,7 +1704,7 @@ const PICKUP_LIFE_TICKS: f32 = 3.0;
 ///
 /// `ItemPickupParticle.updatePosition()` targets
 /// `(target.getY() + target.getEyeY()) / 2.0`, and `Entity.getEyeY()` is
-/// `position.y + eyeHeight` (`Entity.java`) — an **absolute** Y, not an
+/// `position.y + eyeHeight` — an **absolute** Y, not an
 /// offset. So the midpoint is `y + eyeHeight / 2`, i.e. this constant times the
 /// eye height above the feet. Reading `getEyeY()` as a relative offset instead
 /// would target `y + (y + 1.62)/2`, which for a player at y = 64 is 32 blocks
@@ -2598,7 +2598,7 @@ pub fn extract_entity_draws(
     // nothing: this is the query that turns it into a sneaking player's crouch.
     //
     // **Deliberately not `EntityFlags & 0x02`.** Vanilla's `isCrouching()` is
-    // `hasPose(Pose.CROUCHING)` (`Entity.java`) and the shift-key bit is
+    // `hasPose(Pose.CROUCHING)` and the shift-key bit is
     // `isShiftKeyDown()`/`isDiscrete()` (`:2691-2705`) — which is what the
     // *nametag* see-through gate below reads, correctly, because
     // `EntityRenderer.shouldShowName` really does ask `isDiscrete()`. Two
@@ -3912,7 +3912,7 @@ fn default_remote_skin(uuid: uuid::Uuid) -> crate::remote_skins::RemoteSkin {
 /// unchanged, only each test's setup moves from building an `EntitySnapshot`
 /// to spawning the ingest components directly. See
 /// `docs/entity-components.md`'s "Update, and it changes the plan" for why
-/// the schedule reorder issue #36's title implies is a separate change this
+/// the schedule reorder title implies is a separate change this
 /// one does not need.
 ///
 /// Skips any id [`EntityIndex`] maps to a [`LocalPlayer`] — the same filter
@@ -4884,7 +4884,7 @@ mod tests {
         assert!(facts.on_ground);
     }
 
-    /// `ArmorStand.isSmall()` halves the whole model — issue #643's `small`
+    /// `ArmorStand.isSmall()` halves the whole model — `small`
     /// clause, folded into [`EntityFacts::scale`] the same way [`Baby`]
     /// already is (a uniform half-scale approximating vanilla's separate
     /// small-model bake). Two arms, not one: `small: false` must leave scale
@@ -5935,8 +5935,7 @@ mod tests {
         }
 
         /// `Entity.isDiscrete()` (`isShiftKeyDown()`, bit 1 of the shared
-        /// flags byte) gates the see-through pass off while sneaking
-        /// (`SubmitNodeCollection.java`).
+        /// flags byte) gates the see-through pass off while sneaking.
         #[test]
         fn sneaking_suppresses_see_through_but_not_the_tag_itself() {
             let mut world = World::new();
@@ -6470,7 +6469,7 @@ mod tests {
         );
     }
 
-    /// The render-side half of issue #10's fix: [`extract_entity_draws`] must
+    /// The render-side half of fix: [`extract_entity_draws`] must
     /// read a swinging [`AttackSwing`] through [`EntityIndex`] and land it on
     /// [`EntityDraw::anim`]`.attack_anim`. `lodestone-ecs::ingest`'s own tests
     /// cover the producer (`SwingMainHand` → `AttackSwing`); this is the
@@ -6551,7 +6550,7 @@ mod tests {
         interp.update(0.0);
         assert!(
             interp.draws()[0].hurt,
-            "a live HurtTime must reach EntityDraw::hurt — this is issue #98's island"
+            "a live HurtTime must reach EntityDraw::hurt — this is island"
         );
 
         // The expiry case: `tick_hurt_time` saturates at zero and leaves the
@@ -6619,7 +6618,7 @@ mod tests {
             interp.draws()[0].on_fire,
             true,
             "a live EntityFlags with bit 0x01 set must reach EntityDraw::on_fire \
-             — this is issue #434's extraction half"
+             — this is extraction half"
         );
 
         // Clearing bit 0x01 again (crouch bit left set) must clear on_fire —

@@ -1027,7 +1027,7 @@ impl ContainerRenderer {
             pass.draw(dim2_start..dim2_end, 0..1);
         }
 
-        // `extractSlotHighlightFront` (`AbstractContainerScreen.java`):
+        // `extractSlotHighlightFront`:
         // the second highlight sprite, over the hovered slot's item and under the
         // carried stack's stratum — exactly where vanilla calls it, between
         // `extractSlots` and `extractCarriedItem`. Ranges against

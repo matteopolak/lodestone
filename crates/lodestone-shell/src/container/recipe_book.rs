@@ -50,7 +50,7 @@ use super::FLOATS_PER_VERTEX;
 pub const RECIPE_PANEL_W: f32 = 147.0;
 /// See [`RECIPE_PANEL_W`].
 pub const RECIPE_PANEL_H: f32 = 166.0;
-/// `RecipeBookComponent.BORDER_WIDTH` (`RecipeBookComponent.java`).
+/// `RecipeBookComponent.BORDER_WIDTH`.
 ///
 /// Kept because it is a real vanilla constant and is re-exported, but **no longer
 /// used as a screen gap**: the book's x comes from `getXOrigin()` now, not from
@@ -60,13 +60,12 @@ pub const RECIPE_PANEL_GAP: f32 = 8.0;
 /// The screen-toggle button, in **local coordinates off the main container
 /// panel's own origin** (not the book panel's). Derived, not guessed:
 /// `CraftingScreen.getRecipeBookButtonPosition` returns `(leftPos + 5,
-/// height/2 - 49)` (`CraftingScreen.java`) and `topPos == (height -
+/// height/2 - 49)` and `topPos == (height -
 /// imageHeight) / 2` for every `AbstractContainerScreen`
-/// (`AbstractContainerScreen.java`), so subtracting the two —
+///, so subtracting the two —
 /// `(leftPos+5) - leftPos = 5`, `(height/2-49) - (height/2-83) = 34` for
 /// `imageHeight = 166` — cancels the screen height and leftPos out entirely,
-/// leaving a width/height-independent local offset of `(5, 34)`, size `20x18`
-/// (`AbstractRecipeBookScreen.java`).
+/// leaving a width/height-independent local offset of `(5, 34)`, size `20x18`.
 ///
 /// **This is the crafting *table*'s offset only.** See
 /// [`recipe_toggle_local`] — `getRecipeBookButtonPosition` is `abstract`
@@ -80,7 +79,7 @@ pub const RECIPE_TOGGLE_LOCAL: Rect = Rect { x: 5.0, y: 34.0, w: 20.0, h: 18.0 }
 /// The **player inventory** screen's toggle offset —
 /// `InventoryScreen.getRecipeBookButtonPosition` returns
 /// `new ScreenPosition(this.leftPos + 104, this.height / 2 - 22)`
-/// (`InventoryScreen.java`). Same cancellation as
+///. Same cancellation as
 /// [`RECIPE_TOGGLE_LOCAL`]'s: `x = 104`, and
 /// `y = (height/2 - 22) - (height/2 - 83) = 61`.
 ///
@@ -94,7 +93,7 @@ pub const RECIPE_TOGGLE_LOCAL_INVENTORY: Rect = Rect { x: 104.0, y: 61.0, w: 20.
 /// The **furnace family**'s toggle offset (furnace, blast furnace, smoker,
 /// which all inherit it) — `AbstractFurnaceScreen.getRecipeBookButtonPosition`
 /// returns `new ScreenPosition(this.leftPos + 20, this.height / 2 - 49)`
-/// (`AbstractFurnaceScreen.java`), i.e. the crafting table's `y = 34` but
+///, i.e. the crafting table's `y = 34` but
 /// `x = 20` rather than `5`. `FurnaceScreen`, `BlastFurnaceScreen` and
 /// `SmokerScreen` declare no override of their own.
 pub const RECIPE_TOGGLE_LOCAL_FURNACE: Rect = Rect { x: 20.0, y: 34.0, w: 20.0, h: 18.0 };
@@ -129,8 +128,7 @@ pub fn recipe_toggle_local(menu: &Menu) -> Rect {
 }
 
 /// The search box, local to the book panel's own origin —
-/// `EditBox(font, xo + 25, yo + 13, 81, 9 + 5, ...)`
-/// (`RecipeBookComponent.java`).
+/// `EditBox(font, xo + 25, yo + 13, 81, 9 + 5, ...)`.
 pub const RECIPE_SEARCH_BOX: Rect = Rect { x: 25.0, y: 13.0, w: 81.0, h: 14.0 };
 /// The magnifier-icon hit region beside the search box —
 /// `ScreenRectangle.of(HORIZONTAL, xo + 8, searchBox.y, searchBox.x - xo,
@@ -142,12 +140,12 @@ pub const RECIPE_MAGNIFIER: Rect = Rect { x: 8.0, y: 13.0, w: 25.0, h: 14.0 };
 /// 26, 16, ...)` (`:138`).
 pub const RECIPE_FILTER_BUTTON: Rect = Rect { x: 110.0, y: 12.0, w: 26.0, h: 16.0 };
 
-/// `RecipeBookTabButton.WIDTH`/`HEIGHT` (`RecipeBookTabButton.java`).
+/// `RecipeBookTabButton.WIDTH`/`HEIGHT`.
 pub const RECIPE_TAB_W: f32 = 35.0;
 /// See [`RECIPE_TAB_W`].
 pub const RECIPE_TAB_H: f32 = 27.0;
 /// Local x for every tab — `xPosTab = (width-147)/2 - xOffset - 30`, i.e.
-/// `xo - 30` (`RecipeBookComponent.java`).
+/// `xo - 30`.
 pub const RECIPE_TAB_X: f32 = -30.0;
 /// Local y of the **first** visible tab — `yPosTab = (height-166)/2 + 3`,
 /// i.e. `yo + 3` (`:254`).
@@ -156,8 +154,7 @@ pub const RECIPE_TAB_Y0: f32 = 3.0;
 pub const RECIPE_TAB_SPACING: f32 = 27.0;
 
 /// Local origin of the recipe-icon grid's first cell —
-/// `setPosition(xo + 11 + 25*(i%5), yo + 31 + 25*(i/5))`
-/// (`RecipeBookPage.java`).
+/// `setPosition(xo + 11 + 25*(i%5), yo + 31 + 25*(i/5))`.
 pub const RECIPE_GRID_ORIGIN: (f32, f32) = (11.0, 31.0);
 /// Grid step, both axes (`:65`).
 pub const RECIPE_GRID_STEP: f32 = 25.0;
@@ -165,14 +162,13 @@ pub const RECIPE_GRID_STEP: f32 = 25.0;
 pub const RECIPE_GRID_COLS: usize = 5;
 /// Grid rows (`ITEMS_PER_PAGE / COLS`, `:65`, `RecipeBookPage.java`).
 pub const RECIPE_GRID_ROWS: usize = 4;
-/// `RecipeBookPage.ITEMS_PER_PAGE` (`RecipeBookPage.java`).
+/// `RecipeBookPage.ITEMS_PER_PAGE`.
 pub const RECIPE_ITEMS_PER_PAGE: usize = RECIPE_GRID_COLS * RECIPE_GRID_ROWS;
 /// `RecipeButton`'s own size (ctor `super(0, 0, 25, 25, ...)`,
 /// `RecipeButton.java`).
 pub const RECIPE_BUTTON_SIZE: f32 = 25.0;
 
-/// Page-forward arrow — `ImageButton(xo + 93, yo + 137, 12, 17, ...)`
-/// (`RecipeBookPage.java`).
+/// Page-forward arrow — `ImageButton(xo + 93, yo + 137, 12, 17, ...)`.
 pub const RECIPE_PAGE_FORWARD: Rect = Rect { x: 93.0, y: 137.0, w: 12.0, h: 17.0 };
 /// Page-back arrow — `(xo + 38, yo + 137, 12, 17, ...)` (`:70`).
 pub const RECIPE_PAGE_BACK: Rect = Rect { x: 38.0, y: 137.0, w: 12.0, h: 17.0 };
@@ -252,7 +248,7 @@ pub struct RecipeBookPanelLayout {
     ///
     /// Same carrying argument as [`Self::tab_icons`]. Focus matters to the draw
     /// because vanilla shows the greyed hint *only* when the value is empty **and**
-    /// the box is unfocused (`EditBox.java`), and draws a cursor when focused.
+    /// the box is unfocused, and draws a cursor when focused.
     pub search: String,
     /// See [`Self::search`].
     pub search_focused: bool,
@@ -261,16 +257,14 @@ pub struct RecipeBookPanelLayout {
     ///
     /// Same carrying argument as [`Self::tab_icons`] — the geometry layer is given
     /// no [`RecipeBookPanelContents`]. `(0, 1)` is the default and draws nothing,
-    /// because vanilla only shows the readout at all when `totalPages > 1`
-    /// (`RecipeBookPage.java`).
+    /// because vanilla only shows the readout at all when `totalPages > 1`.
     pub page: usize,
     /// See [`Self::page`].
     pub total_pages: usize,
 }
 
 /// The item icon(s) one recipe-book category tab draws — vanilla's
-/// `RecipeBookComponent.TabInfo` `(primaryIcon, secondaryIcon)`
-/// (`RecipeBookComponent.java`).
+/// `RecipeBookComponent.TabInfo` `(primaryIcon, secondaryIcon)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RecipeTabIcons {
     /// Always drawn.
@@ -281,8 +275,7 @@ pub struct RecipeTabIcons {
 }
 
 /// Local x of a tab's icon when it is the only one —
-/// `graphics.fakeItem(primaryIcon, getX() + 9 + moveLeft, getY() + 5)`
-/// (`RecipeBookTabButton.java`).
+/// `graphics.fakeItem(primaryIcon, getX() + 9 + moveLeft, getY() + 5)`.
 const RECIPE_TAB_ICON_SOLO_X: f32 = 9.0;
 /// Local x of the **first** of two icons — `getX() + 3 + moveLeft` (`:76`).
 const RECIPE_TAB_ICON_PAIR_X: f32 = 3.0;
@@ -412,7 +405,7 @@ pub fn recipe_book_panel_layout_with_scale(
     // `0` for those two and keeps this correct if either ever isn't.
     let by = my + (main_layout.height - RECIPE_PANEL_H) * 0.5;
     // **Screen**-centred, then shifted left by `xOffset` — `getXOrigin()` is
-    // `(this.width - 147) / 2 - this.xOffset` (`RecipeBookComponent.java`)
+    // `(this.width - 147) / 2 - this.xOffset`
     // and `xOffset` is `widthTooNarrow ? 0 : 86` (`:117`). It is *not* placed
     // relative to the container panel, which is what this used to do; see
     // `layout::recipe_book_panel_shift`'s own doc for why that could never fit.
@@ -434,7 +427,7 @@ pub fn recipe_book_panel_layout_with_scale(
         filter_button: at(RECIPE_FILTER_BUTTON),
         tabs: (0..tab_count)
             .map(|i| Rect {
-                // `xPosTab = xo - 30` (`RecipeBookComponent.java`), and
+                // `xPosTab = xo - 30`, and
                 // **no longer clamped**. The clamp existed because `bx` was
                 // panel-relative and could be pushed to a 4 px floor, which put
                 // every tab at `-26` and then stacked them all at `4` on top of
@@ -657,10 +650,10 @@ pub fn recipe_book_panel_contents_filtered<'a>(
 /// [`crate::resources::RECIPE_BOOK_TEXTURES`].
 pub const RECIPE_SPRITE_PANEL: &str = crate::resources::RECIPE_BOOK_PANEL_SPRITE;
 /// The toggle button — `RecipeBookComponent.RECIPE_BUTTON_SPRITES`
-/// (`RecipeBookComponent.java`), 20×18.
+///, 20×18.
 pub const RECIPE_SPRITE_BUTTON: &str = "recipe_book/button";
 /// An unselected category tab — `RecipeBookTabButton.SPRITES`
-/// (`RecipeBookTabButton.java`), 35×27.
+///, 35×27.
 pub const RECIPE_SPRITE_TAB: &str = "recipe_book/tab";
 /// A selected category tab. Note `RecipeBookTabButton.java` reads
 /// `sprites.get(true, this.selected)` — the second argument is **selected**,
@@ -831,27 +824,26 @@ impl RecipeBookPanelGeometry {
 }
 
 /// The page readout's own anchor — `xo - pWidth / 2 + 73`, `yo + 141`
-/// (`RecipeBookPage.java`). The `73` is measured from the book page's local
+///. The `73` is measured from the book page's local
 /// origin and the `- pWidth / 2` centres the string on it, which puts it midway
 /// between the back arrow (local x `38`) and the forward arrow (local x `93`).
 const PAGE_TEXT_CENTRE_X: f32 = 73.0;
 /// See [`PAGE_TEXT_CENTRE_X`].
 const PAGE_TEXT_Y: f32 = 141.0;
-/// The readout's colour — `graphics.text(..., -1)` (`RecipeBookPage.java`),
+/// The readout's colour — `graphics.text(..., -1)`,
 /// i.e. opaque white.
 const PAGE_TEXT_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 
-/// `EditBox`'s bordered text inset — `textX = getX() + 4`
-/// (`EditBox.java`).
+/// `EditBox`'s bordered text inset — `textX = getX() + 4`.
 const SEARCH_TEXT_INSET: f32 = 4.0;
 /// The glyph height `EditBox` centres its text against — the literal `8` in
-/// `textY = getY() + (height - 8) / 2` (`EditBox.java`). Note this is `8`,
+/// `textY = getY() + (height - 8) / 2`. Note this is `8`,
 /// not the `9` line *pitch* the caret height uses, and the two are different
 /// numbers in the same expression pair in vanilla too.
 const SEARCH_GLYPH_H: f32 = 8.0;
-/// `EditBox.setTextColor(-1)` (`RecipeBookComponent.java`) — opaque white.
+/// `EditBox.setTextColor(-1)` — opaque white.
 const SEARCH_TEXT_COLOUR: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
-/// `EditBox.SEARCH_HINT_STYLE`'s `ChatFormatting.GRAY` (`EditBox.java`),
+/// `EditBox.SEARCH_HINT_STYLE`'s `ChatFormatting.GRAY`,
 /// which is `0xAAAAAA`.
 const SEARCH_HINT_COLOUR: [f32; 4] = [0.666_666_7, 0.666_666_7, 0.666_666_7, 1.0];
 /// `RecipeBookComponent.SEARCH_HINT`'s `gui.recipebook.search_hint`, whose
@@ -1052,7 +1044,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
         src: Some(RECIPE_PANEL_SRC),
     });
     // The search box has **no sprite of its own** — vanilla's is a plain
-    // `EditBox` (`RecipeBookComponent.java`) over the well that is already
+    // `EditBox` over the well that is already
     // painted into the panel sheet, and the magnifier glyph beside it is baked
     // into the sheet too. So there is deliberately nothing to emit here; the
     // flat `SEARCH_BOX_COLOUR` rect underneath is jar-less-only.
@@ -1065,7 +1057,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
     //
     // The All/Craftable state, however, *is* modelled now — vanilla's
     // `getFilterButtonTextures().get(filtering, hovered)`
-    // (`RecipeBookComponent.java`), with `hovered` still unmodelled.
+    //, with `hovered` still unmodelled.
     sprites.push(whole(
         if layout.filtering { RECIPE_SPRITE_FILTER_ENABLED } else { RECIPE_SPRITE_FILTER },
         layout.filter_button,
@@ -1164,7 +1156,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
     }
 
     // The category tabs' own item icons — `RecipeBookTabButton.extractIcon`
-    // (`RecipeBookTabButton.java`), which the panel had none of: the tabs
+    //, which the panel had none of: the tabs
     // drew their sprite and nothing on it, so every category slot was blank.
     //
     // In the icon half of the stream on purpose. `extractIcon` is called *after*
@@ -1198,7 +1190,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
     // though the state behind it (`RecipePanelState::search`) was already live
     // and already edited by typing.
     //
-    // `EditBox.renderWidget` (`EditBox.java`): `textX = getX() + 4`
+    // `EditBox.renderWidget`: `textX = getX() + 4`
     // (bordered), `textY = getY() + (height - 8) / 2`. With this box's declared
     // `9 + 5` height that is `y + 3`.
     //
@@ -1238,7 +1230,7 @@ pub(super) fn recipe_book_panel_geometry_inner(
             b.shadowed_label(&layout.search, tx, ty, 1.0, SEARCH_TEXT_COLOUR);
             if layout.search_focused {
                 // `TextCursorUtils.extractInsertCursor(graphics, cursorX, textY,
-                // color, 9 + 1)` (`EditBox.java`) — a 1 px caret one glyph
+                // color, 9 + 1)` — a 1 px caret one glyph
                 // line tall, at the end of the value because this client has no
                 // cursor position within it.
                 let cx = tx + b.font.map_or(0.0, |f| f.width(&layout.search, 1.0));

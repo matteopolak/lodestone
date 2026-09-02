@@ -171,7 +171,7 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
         }
         return Some(world_list_row_rect(view.index, width, scroll));
     }
-    // A tab-bar row (issue #564, and issue #567's second consumer) is placed
+    // A tab-bar row (issue #564, and second consumer) is placed
     // by `MenuTabBar.arrangeElements`'s arithmetic, which a `Slot` cannot
     // express either — not because of an integer division like the three arms
     // above, but because the row's own *width* is a function of the canvas

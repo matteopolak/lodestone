@@ -30,7 +30,7 @@
 //! ## Geometry, transcribed
 //!
 //! - [`HEADER_HEIGHT`] = 81: `new HeaderAndFooterLayout(this, 16 + 9 * 5 + 20,
-//!   …)` (`TelemetryInfoScreen.java`) — a **compile-time constant**,
+//!   …)` — a **compile-time constant**,
 //!   not derived from measuring the description's real wrapped height (this
 //!   client has no font metrics at layout-build time either, so that is not
 //!   a gap introduced here).

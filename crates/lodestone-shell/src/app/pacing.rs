@@ -125,7 +125,7 @@ pub(crate) const AFK_FPS: u32 = 30;
 pub(crate) const LONG_AFK_FPS: u32 = 10;
 
 /// Vanilla's `FramerateLimitTracker::getFramerateLimit`'s AFK half
-/// (`FramerateLimitTracker.java`), minus the `WINDOW_ICONIFIED`/
+///, minus the `WINDOW_ICONIFIED`/
 /// `OUT_OF_LEVEL_MENU` branches: this pacer already throttles an
 /// occluded/unfocused window unconditionally (the module doc's table
 /// predates `framerateLimit`), so those two vanilla branches are subsumed by

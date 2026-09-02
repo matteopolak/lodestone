@@ -449,7 +449,7 @@ impl Sim {
     /// The option zeroes **only the walk terms**, never the hurt half of the
     /// frame: vanilla's `bobHurt` is unconditional — `GameRenderer.renderLevel`
     /// applies it outside the `optionsRenderState.bobView` check
-    /// (`GameRenderer.java`) — so the damage tilt must survive View
+    /// — so the damage tilt must survive View
     /// Bobbing being off. A player who has not been hit recently is unaffected
     /// either way (`frame.hurt` is negative when the countdown has lapsed, and
     /// `BobFrame::hurt_roll_degrees` already returns `0` for that), so this
@@ -524,7 +524,7 @@ impl Sim {
         //
         // Not gated on `third_person`: 26.2's `renderLevel` applies `bobView`
         // whenever `optionsRenderState.bobView` is set, with no camera-type check
-        // (`GameRenderer.java`), and `bobView` itself only tests
+        //, and `bobView` itself only tests
         // `isPlayer`. Older versions did suppress it in third person and issue
         // That fix's body says so; re-read against `.cache/mc/26.2/client-src`, that is
         // no longer true.
@@ -577,7 +577,7 @@ impl Sim {
 
     /// Vanilla's `Player.isScoping()`:
     /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
-    /// (`Player.java`), computed entirely from `Sim`'s own state so
+    ///, computed entirely from `Sim`'s own state so
     /// [`Self::render_camera`] needs no new parameter — `app.rs` computes the
     /// same condition independently for `ScreenEffects::scoping` (it already
     /// has the held item at hand for the first-person render source), and
@@ -898,7 +898,7 @@ impl Sim {
             arm_pose: lodestone_render::ArmPose::Empty,
             arm_pose_left_hand: false,
             // `Entity.isCrouching()` is `hasPose(Pose.CROUCHING)` — the
-            // *pose*, not the shift-key flag (`Entity.java`), and
+            // *pose*, not the shift-key flag, and
             // the two genuinely differ: holding shift in a one-block gap
             // leaves you shift-key-down and `SWIMMING`. For the local player
             // the pose is already authoritative and already fit-gated —

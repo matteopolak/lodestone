@@ -343,8 +343,8 @@ impl ProbeMemo {
 
     /// The whole per-column resolve: `(x, y, z)`'s standing biome translated to
     /// a [`lodestone_render::Precipitation`] via vanilla's own
-    /// `getPrecipitationAt` (`Biome.java`), height-adjusted the same way
-    /// `Biome.getHeightAdjustedTemperature` is (`Biome.java`), with all
+    /// `getPrecipitationAt`, height-adjusted the same way
+    /// `Biome.getHeightAdjustedTemperature` is, with all
     /// three world reads memoised.
     ///
     /// The three reads arrive as closures because that is what lets one type own
@@ -443,8 +443,8 @@ pub(super) fn section_key(
 impl ShellWeatherProbe {
     /// Resolve `(x, y, z)`'s standing biome and translate its declared
     /// climate to a [`lodestone_render::Precipitation`] via vanilla's own
-    /// `getPrecipitationAt` (`Biome.java`), height-adjusted the same
-    /// way `Biome.getHeightAdjustedTemperature` is (`Biome.java`).
+    /// `getPrecipitationAt`, height-adjusted the same
+    /// way `Biome.getHeightAdjustedTemperature` is.
     ///
     /// `None` at any hop — world not loaded, section elided (all-air), the
     /// climate table still empty, or the biome's own `temperature`/

@@ -12,7 +12,7 @@
 //!
 //! * **Normal pass** (`RenderPipelines.TEXT`, via `WORLD_TEXT_SNIPPET`):
 //!   `DepthStencilState.DEFAULT = new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true)`
-//!   (`DepthStencilState.java`) — depth-tested **and depth-written**.
+//!   — depth-tested **and depth-written**.
 //!   Vanilla's reversed-Z convention makes "closer" `GREATER_THAN_OR_EQUAL`,
 //!   and this renderer is reversed-Z too, so the port is
 //!   [`lodestone_render::DEPTH_COMPARE_NEARER_OR_EQUAL`] with **no** sign flip,
@@ -21,7 +21,7 @@
 //!   (a nearer tag's glyphs must win over a farther, overlapping one, exactly
 //!   as vanilla's write-enabled pass does).
 //! * **See-through pass** (`RenderPipelines.TEXT_SEE_THROUGH`):
-//!   `.withDepthStencilState(Optional.empty())` (`RenderPipelines.java`)
+//!   `.withDepthStencilState(Optional.empty())`
 //!   — **no depth attachment use at all**, neither tested nor written. There
 //!   is no comparison operator to port here, so there is no sign to get
 //!   backwards — but `wgpu` itself has no "this pipeline ignores the pass's
@@ -158,7 +158,7 @@
 //!   which is a close approximation of that emission override rather than a
 //!   divergence from it.
 //! * **`EntityAttachment` per-type overrides**, the crosshair-look-at
-//!   override to `shouldShowName` (`EntityRenderer.java`), scoreboard
+//!   override to `shouldShowName`, scoreboard
 //!   team colouring/prefixes and the `belowName` scoreboard line — all
 //!   explicitly out of scope per the issue.
 //!
@@ -286,11 +286,10 @@ pub(super) fn tinted(color: [f32; 4], tint: [f32; 3]) -> [f32; 4] {
 /// — one logical text pixel is this many world blocks.
 const PX_SCALE: f32 = 0.025;
 
-/// The distance cutoff, in blocks (`EntityRenderer.java`).
+/// The distance cutoff, in blocks.
 const MAX_DISTANCE: f32 = 64.0;
 
-/// The padding above the `NAME_TAG` attachment point
-/// (`SubmitNodeCollection.java`).
+/// The padding above the `NAME_TAG` attachment point.
 const ATTACHMENT_PADDING: f32 = 0.5;
 
 /// Fallback base hitbox height, in blocks, for a type path the jar-derived
@@ -492,7 +491,7 @@ fn resolved_rgb(color: Option<TextColor>, base: [f32; 3]) -> [f32; 3] {
 /// string — it supplies one only as the *fallback* for a span whose colour is
 /// unspecified (`base_rgb`, always opaque white for both of today's callers:
 /// vanilla hardcodes white as the base tint for both nametags
-/// (`SubmitNodeCollection.java`) and `text_display` (`TextDisplayRenderer.submitInner`'s
+/// and `text_display` (`TextDisplayRenderer.submitInner`'s
 /// `textOpacity << 24 | 16777215`), and only a real per-span [`TextColor`]
 /// overrides it — see `Font.java::getTextColor`, which is exactly this
 /// function's `resolved_rgb`).

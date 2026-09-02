@@ -126,7 +126,7 @@ use crate::hud::item_icon::IconAssets;
 use super::advancement_data::{ADVANCEMENTS, Advancement, AdvancementFrame};
 use super::advancement_tree::{TreeLayout, layout_tree};
 
-/// `WINDOW_WIDTH` / `WINDOW_HEIGHT` (`AdvancementsScreen.java`).
+/// `WINDOW_WIDTH` / `WINDOW_HEIGHT`.
 pub const WINDOW_W: f32 = 252.0;
 /// See [`WINDOW_W`].
 pub const WINDOW_H: f32 = 140.0;
@@ -151,7 +151,7 @@ const TILE: f32 = 16.0;
 const SCROLL_SPEED: f32 = 16.0;
 
 /// One tab button, `AdvancementTabType.ABOVE` — `28 x 32`, `max 8`
-/// (`AdvancementTabType.java`). With five roots every tab is `ABOVE`, so
+///. With five roots every tab is `ABOVE`, so
 /// the other three variants are unreachable and deliberately unported; add them
 /// the day a data pack ships a ninth root.
 const TAB_W: f32 = 28.0;
@@ -166,7 +166,7 @@ const TAB_ICON_DX: f32 = 6.0;
 /// See [`TAB_ICON_DX`].
 const TAB_ICON_DY: f32 = 9.0;
 
-/// `this.x = floor(display.getX() * 28.0F)` (`AdvancementWidget.java`).
+/// `this.x = floor(display.getX() * 28.0F)`.
 const NODE_PITCH_X: f32 = 28.0;
 /// `this.y = floor(display.getY() * 27.0F)` (`:62`).
 const NODE_PITCH_Y: f32 = 27.0;
@@ -194,7 +194,7 @@ const SPRITE_BOX_UNOBTAINED: &str = "advancements/box_unobtained";
 
 /// One text line's height, vanilla's font line advance.
 const LINE_H: f32 = 9.0;
-/// `TITLE_MAX_WIDTH` (`AdvancementWidget.java`) — the wrap width for the
+/// `TITLE_MAX_WIDTH` — the wrap width for the
 /// title.
 const TITLE_MAX_WIDTH: f32 = 163.0;
 /// `TITLE_MIN_WIDTH` (`:39`).
@@ -314,17 +314,17 @@ impl AdvancementProgress {
 }
 
 /// Vanilla's `-1` (white) for the foreground connector line and `-16777216`
-/// (black) for the wider shadow underneath it (`AdvancementWidget.java`).
+/// (black) for the wider shadow underneath it.
 const LINE_FG: [f32; 4] = [1.0, 1.0, 1.0, 1.0];
 /// See [`LINE_FG`].
 const LINE_BG: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
 /// `extractTooltips`' `fill(0, 0, 234, 113, floor(fade * 255) << 24)`
-/// (`AdvancementTab.java`): the viewport dims while a widget is hovered.
+///: the viewport dims while a widget is hovered.
 /// [`FADE_CEILING`] is the alpha it reaches; the ramp is
 /// [`AdvancementsState::tick_fade`].
 const HOVER_DIM_RGB: [f32; 3] = [0.0, 0.0, 0.0];
-/// `Mth.clamp(fade + 0.06F, 0.0F, 0.3F)` (`AdvancementTab.java`) — the rise
+/// `Mth.clamp(fade + 0.06F, 0.0F, 0.3F)` — the rise
 /// per frame and its ceiling.
 const FADE_RISE: f32 = 0.06;
 /// See [`FADE_RISE`].
@@ -364,7 +364,7 @@ pub fn advancement_frame_sprite(frame: AdvancementFrame, obtained: bool) -> &'st
 
 /// Vanilla's `advancements.progress` readout (`"%s/%s"`), or `None` when there is
 /// only one requirement group — `getMaxProgressWidth` returns `0` there and no
-/// text is drawn (`AdvancementWidget.java`).
+/// text is drawn.
 #[must_use]
 pub fn progress_text(done: u32, total: u32) -> Option<String> {
     (total > 1).then(|| format!("{done}/{total}"))
@@ -399,7 +399,7 @@ impl AdvancementsState {
     /// The current tab's scroll, centring it if this is its first frame.
     ///
     /// `extractContents`' own initialiser: `scrollX = 117 - (maxX + minX) / 2`,
-    /// `scrollY = 56 - (maxY + minY) / 2` (`AdvancementTab.java`), where
+    /// `scrollY = 56 - (maxY + minY) / 2`, where
     /// the bounds come from every widget's `28 x 27` cell (`addWidget`, `:208-214`).
     pub fn scroll_for(&mut self, tree: &TreeLayout) -> (f32, f32) {
         if self.scroll.len() <= self.tab {
@@ -508,7 +508,7 @@ pub struct AdvancementsLayout {
 ///
 /// `progress` decides which hidden advancements are visible: vanilla's
 /// `extractRenderState` gate is `!isHidden() || progress.isDone()`
-/// (`AdvancementWidget.java`), so a hidden node appears the moment it is
+///, so a hidden node appears the moment it is
 /// obtained and its connector appears with it.
 #[must_use]
 pub fn advancements_layout(
@@ -783,7 +783,7 @@ fn wrap(measure: &dyn Fn(&str) -> f32, text: &str, max_px: f32) -> Vec<String> {
     lines
 }
 
-/// `findOptimalLines` (`AdvancementWidget.java`): wrap at five candidate
+/// `findOptimalLines`: wrap at five candidate
 /// widths and keep the one whose longest line lands closest to `preferred`,
 /// returning early on anything within 10 px.
 ///
@@ -880,7 +880,7 @@ struct HoverPlan {
     description_at: (f32, f32),
 }
 
-/// `extractHover` (`AdvancementWidget.java`), including its two
+/// `extractHover`, including its two
 /// flips: `leftSide` when the box would run off the screen's right edge, and
 /// `topSide` when the description would run past the viewport's bottom.
 fn hover_plan(
@@ -1688,7 +1688,7 @@ fn clip_quads_from(
 }
 
 /// The tab-button sprite for `index` — `AdvancementTabType.extractRenderState`
-/// (`AdvancementTabType.java`): the `left` sprite at index 0, the `right`
+///: the `left` sprite at index 0, the `right`
 /// one at `max - 1`, `middle` otherwise, where `max` is the **type**'s capacity
 /// (8 for `ABOVE`) and not the number of tabs shown. With five roots that means
 /// no tab ever draws the `right` variant — vanilla's own behaviour, and it looks
@@ -1705,10 +1705,10 @@ pub fn tab_sprite(index: usize, selected: bool) -> &'static str {
     }
 }
 
-/// `AdvancementTabType.ABOVE`'s `max` (`AdvancementTabType.java`).
+/// `AdvancementTabType.ABOVE`'s `max`.
 const TAB_MAX: usize = 8;
 
-/// `AdvancementToast.DISPLAY_TIME` (`AdvancementToast.java`), milliseconds.
+/// `AdvancementToast.DISPLAY_TIME`, milliseconds.
 pub const TOAST_DISPLAY_MS: u64 = 5000;
 
 /// Newly-completed advancements, queued for the HUD toast.
@@ -1788,8 +1788,7 @@ impl AdvancementToastQueue {
 }
 
 /// The `advancements.toast.{task,goal,challenge}` heading for a frame type, and
-/// its colour: `-30465` (`0xFFFF88FF`) for a challenge, `-256` (yellow) otherwise
-/// (`AdvancementToast.java`).
+/// its colour: `-30465` (`0xFFFF88FF`) for a challenge, `-256` (yellow) otherwise.
 #[must_use]
 pub fn toast_heading(frame: AdvancementFrame) -> (&'static str, &'static str, [f32; 4]) {
     const CHALLENGE: [f32; 4] = [1.0, 0x88 as f32 / 255.0, 1.0, 1.0];

@@ -34,13 +34,13 @@
 mod anvil_rename;
 mod background;
 /// The beacon screen's power-selection buttons and confirm/cancel click
-/// surface (issue #613's `SetBeaconEffects` remainder) — see its own module
+/// surface (`SetBeaconEffects` remainder) — see its own module
 /// doc.
 pub mod beacon;
-/// Bundle scroll-to-select tracking (issue #616's `BUNDLE_ITEM_SELECTED` /
+/// Bundle scroll-to-select tracking (`BUNDLE_ITEM_SELECTED` /
 /// #613's `SelectBundleItem` remainder) — see its own module doc.
 pub mod bundle;
-/// The crafter's slot-disable toggle (issue #613's `SetContainerSlotState`
+/// The crafter's slot-disable toggle (`SetContainerSlotState`
 /// remainder) — see its own module doc.
 pub mod crafter;
 /// The enchanting table's three enchant-offer buttons (issue #613's
@@ -156,7 +156,7 @@ const BLAST_FURNACE_BURN_PROGRESS: &str = "container/blast_furnace/burn_progress
 const SMOKER_LIT_PROGRESS: &str = "container/smoker/lit_progress";
 const SMOKER_BURN_PROGRESS: &str = "container/smoker/burn_progress";
 
-/// The beacon screen's own sprites (`BeaconScreen.java`): the four
+/// The beacon screen's own sprites: the four
 /// button states every one of its ten buttons blits behind its icon, plus the
 /// confirm/cancel glyphs the last two blit in front. The eight *power* buttons'
 /// front icon is the effect's own `mob_effect/<id>` sprite instead, which is

@@ -261,7 +261,7 @@ impl SectionSnapshot {
         }
     }
 
-    /// Attach a live biome-registry-names snapshot (issue #96's follow-up),
+    /// Attach a live biome-registry-names snapshot (follow-up),
     /// overriding the empty default every constructor otherwise leaves in
     /// place. In production the sole caller is [`TerrainMesh::mesh_column`]/
     /// [`TerrainMesh::mesh_section`], which have a `Sim`-derived
@@ -2785,7 +2785,7 @@ pub struct TerrainMesh {
     pub deferred: u64,
     /// The session facts meshing cannot read off the store.
     pub policy: MeshPolicy,
-    /// The live biome registry's ordered entry names (issue #96's follow-up),
+    /// The live biome registry's ordered entry names (follow-up),
     /// refreshed alongside [`Self::policy`] by `Sim::refresh_mesh_policy` and
     /// attached to every section this pool snapshots
     /// ([`SnapshotOutcome::with_biome_names`]) so `mesher::biome_name_at`

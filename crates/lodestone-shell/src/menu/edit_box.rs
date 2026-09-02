@@ -43,7 +43,7 @@
 //!   `insertText` runs `StringUtil.filterText` and `charTyped` gates on
 //!   `CharacterEvent.isAllowedChatCharacter`, both of which are
 //!   `StringUtil.isAllowedChatCharacter` — `ch != 167 && ch >= 32 && ch != 127`
-//!   (`StringUtil.java`). A per-field predicate does not exist and cannot
+//!  . A per-field predicate does not exist and cannot
 //!   be added without editing the class. `addFormatter` **is** real but is
 //!   display-only (`EditBox.java`, a `FormattedCharSequence`), so it
 //!   cannot reject a character either. [`is_allowed_chat_character`] is the whole
@@ -85,7 +85,7 @@
 //! 1. `Util.offsetByCodepoints` exists in vanilla only to step *over* a
 //!    surrogate pair, so [`EditBox::move_cursor`] is a plain `±1` here.
 //! 2. `insertText`'s `Character.isHighSurrogate(text.charAt(len - 1))` guard
-//!    (`EditBox.java`), which backs the truncation point off by one to
+//!   , which backs the truncation point off by one to
 //!    avoid splitting a pair, has nothing to split and is omitted.
 //! 3. `maxLength` counts astral characters as **one**, not two. An emoji costs
 //!    one of a 32-character budget here and two in vanilla. Nothing in this
@@ -159,12 +159,12 @@
 //!
 //! - **`textX`/`textY` are methods here, not cached fields.** Vanilla caches
 //!   them and calls `updateTextPosition()` from `setX`, `setY`, `setValue`,
-//!   `setBordered`, `setCentered` and `onValueChange` (`EditBox.java`) —
+//!   `setBordered`, `setCentered` and `onValueChange` —
 //!   six places, and a seventh that forgets is a field drawing at a stale
 //!   offset. Computing them on demand deletes that bug class outright.
 //! - **The caret does not blink.** `EditBox` blinks on
 //!   `Util.getMillis() - focusedTime` with a 300 ms interval
-//!   (`TextCursorUtils.java`), and no `super::render::MenuFrame` carries
+//!  , and no `super::render::MenuFrame` carries
 //!   a clock. [`is_cursor_visible`] is the pure predicate, ready for the day one
 //!   does; [`EditBox::show_cursor`] takes `None` to mean "always on", which is
 //!   what the shell passes and what the pre-existing form caret already did.
@@ -252,21 +252,21 @@ pub(crate) mod clipboard_seam {
     }
 }
 
-/// `EditBox.SPRITES` (`EditBox.java`) — the **two**-argument
+/// `EditBox.SPRITES` — the **two**-argument
 /// `WidgetSprites` collapse, so `disabled` is `enabled` and there is no disabled
 /// art.
 pub const SPRITES: WidgetSprites =
     WidgetSprites::focusable("widget/text_field", "widget/text_field_highlighted");
 
-/// `EditBox.DEFAULT_TEXT_COLOR` (`EditBox.java`), as the signed ARGB integer
+/// `EditBox.DEFAULT_TEXT_COLOR`, as the signed ARGB integer
 /// the jar writes.
 pub const DEFAULT_TEXT_COLOR_ARGB: i32 = -2_039_584;
 
-/// `EditBox.textColorUneditable`'s initialiser (`EditBox.java`). Keyed on
+/// `EditBox.textColorUneditable`'s initialiser. Keyed on
 /// `isEditable`, **not** on `active` — see the module docs.
 pub const TEXT_COLOR_UNEDITABLE_ARGB: i32 = -9_408_400;
 
-/// `EditBox.maxLength`'s initialiser (`EditBox.java`).
+/// `EditBox.maxLength`'s initialiser.
 pub const DEFAULT_MAX_LENGTH: usize = 32;
 
 /// A practically-unbounded [`EditBox::max_length`] for a field whose real
@@ -281,7 +281,7 @@ pub const DEFAULT_MAX_LENGTH: usize = 32;
 /// what actually governs.
 pub const UNBOUNDED_LENGTH: usize = usize::MAX / 2;
 
-/// `EditBox(Font, Component)`'s default size (`EditBox.java`): 150×20 —
+/// `EditBox(Font, Component)`'s default size: 150×20 —
 /// which is `Button.DEFAULT_WIDTH` × `Button.DEFAULT_HEIGHT`.
 pub const DEFAULT_WIDTH: f32 = 150.0;
 /// See [`DEFAULT_WIDTH`].
@@ -292,8 +292,7 @@ pub const DEFAULT_HEIGHT: f32 = 20.0;
 pub const BORDER_INSET: f32 = 4.0;
 
 /// `EditBox`'s hardcoded line height: `9` in `extractWidgetRenderState`'s
-/// highlight rect and `9 + 1` in the insert cursor's
-/// (`EditBox.java`).
+/// highlight rect and `9 + 1` in the insert cursor's.
 pub const LINE_HEIGHT: f32 = 9.0;
 
 /// `TextCursorUtils.CURSOR_BLINK_INTERVAL_MS`.
@@ -316,7 +315,7 @@ pub const CURSOR_BLINK_INTERVAL_MS: u64 = 300;
 /// point.
 pub const MENU_TEXT_ADVANCE: f32 = 6.0;
 
-/// `StringUtil.isAllowedChatCharacter` (`StringUtil.java`): the *only*
+/// `StringUtil.isAllowedChatCharacter`: the *only*
 /// input filter `EditBox` has.
 ///
 /// `ch != 167 && ch >= 32 && ch != 127` — so the section sign (the legacy
@@ -328,7 +327,7 @@ pub fn is_allowed_chat_character(ch: char) -> bool {
     c != 167 && c >= 32 && c != 127
 }
 
-/// `StringUtil.filterText(input)` (`StringUtil.java`), single-line: drop
+/// `StringUtil.filterText(input)`, single-line: drop
 /// every character [`is_allowed_chat_character`] refuses.
 #[must_use]
 pub fn filter_text(input: &str) -> String {
@@ -345,7 +344,7 @@ pub const fn is_cursor_visible(millis_since_focus: u64) -> bool {
 /// [`EditBox::draw_state`].
 ///
 /// This exists so `extractWidgetRenderState`'s arithmetic
-/// (`EditBox.java`) lives *here*, next to the state it reads, rather than
+/// lives *here*, next to the state it reads, rather than
 /// being re-derived inside `super::render`'s draw loop. #393 established the
 /// discipline: a screen asks the widget, it does not restate the widget's rules.
 #[derive(Debug, Clone, PartialEq)]
@@ -360,7 +359,7 @@ pub struct EditBoxDraw {
     pub before_x: f32,
     /// Where [`Self::after`] starts. Note this is **not** `before_x +
     /// width(before)`: vanilla adds a 1 px gap after the first half and then
-    /// takes it back when the caret is in insert mode (`EditBox.java`).
+    /// takes it back when the caret is in insert mode.
     pub after_x: f32,
     /// The caret's left edge.
     pub cursor_x: f32,
@@ -397,7 +396,7 @@ pub struct EditBox {
     /// `EditBox.bordered`. `false` drops the sprite *and* the 4 px text inset.
     pub bordered: bool,
     /// `EditBox.canLoseFocus`. When `false`, `setFocused(false)` is ignored
-    /// entirely (`EditBox.java`) — how the chat prompt keeps the
+    /// entirely — how the chat prompt keeps the
     /// keyboard.
     pub can_lose_focus: bool,
     /// `EditBox.isEditable`. Separate from `active`: this is what greys the text
@@ -512,7 +511,7 @@ impl EditBox {
         self.max_length
     }
 
-    /// `setMaxLength(int)` (`EditBox.java`): truncates an over-long
+    /// `setMaxLength(int)`: truncates an over-long
     /// value in place, and notably does **not** move the cursor.
     pub fn set_max_length(&mut self, max_length: usize) {
         self.max_length = max_length;
@@ -539,7 +538,7 @@ impl EditBox {
         self
     }
 
-    /// `setValue(String)` (`EditBox.java`): truncate to `maxLength`, then
+    /// `setValue(String)`: truncate to `maxLength`, then
     /// cursor **and** highlight to the end.
     pub fn set_value(&mut self, value: impl AsRef<str>) {
         let value = value.as_ref();
@@ -610,7 +609,7 @@ impl EditBox {
         (width / self.advance).floor().max(0.0) as usize
     }
 
-    /// `getInnerWidth()` (`EditBox.java`): the width text may occupy,
+    /// `getInnerWidth()`: the width text may occupy,
     /// which for a bordered box is 8 px less — 4 on each side.
     #[must_use]
     pub fn inner_width(&self) -> f32 {
@@ -621,7 +620,7 @@ impl EditBox {
         }
     }
 
-    /// `updateTextPosition()`'s `textX` (`EditBox.java`), as a method —
+    /// `updateTextPosition()`'s `textX`, as a method —
     /// see the module docs on why it is not cached.
     #[must_use]
     pub fn text_x(&self) -> f32 {
@@ -671,21 +670,21 @@ impl EditBox {
         }
     }
 
-    /// `setCursorPosition(int)` (`EditBox.java`): clamp, then scroll so
+    /// `setCursorPosition(int)`: clamp, then scroll so
     /// the new position is visible.
     pub fn set_cursor_position(&mut self, pos: usize) {
         self.cursor_pos = pos.min(self.len());
         self.scroll_to(self.cursor_pos);
     }
 
-    /// `setHighlightPos(int)` (`EditBox.java`). Also scrolls — which is
+    /// `setHighlightPos(int)`. Also scrolls — which is
     /// why dragging a selection off the right edge follows it.
     pub fn set_highlight_pos(&mut self, pos: usize) {
         self.highlight_pos = pos.min(self.len());
         self.scroll_to(self.highlight_pos);
     }
 
-    /// `moveCursorTo(int, boolean)` (`EditBox.java`). `extend_selection`
+    /// `moveCursorTo(int, boolean)`. `extend_selection`
     /// is Shift: it leaves `highlightPos` where it was.
     pub fn move_cursor_to(&mut self, pos: usize, extend_selection: bool) {
         self.set_cursor_position(pos);
@@ -720,7 +719,7 @@ impl EditBox {
         self.move_cursor_to(self.len(), extend_selection);
     }
 
-    /// `insertText(String)` (`EditBox.java`): replace the selection with
+    /// `insertText(String)`: replace the selection with
     /// `input`, filtered and truncated to what `maxLength` still allows.
     ///
     /// Read vanilla's budget again — it is written oddly and it is right:
@@ -771,7 +770,7 @@ impl EditBox {
         }
     }
 
-    /// `deleteWords(int)` (`EditBox.java`). A live selection wins: it is
+    /// `deleteWords(int)`. A live selection wins: it is
     /// deleted instead of a word, which is why Ctrl+Backspace over a selection
     /// does not eat the word before it as well.
     pub fn delete_words(&mut self, dir: i32) {
@@ -792,7 +791,7 @@ impl EditBox {
         self.delete_chars_to_pos(pos);
     }
 
-    /// `deleteCharsToPos(int)` (`EditBox.java`).
+    /// `deleteCharsToPos(int)`.
     pub fn delete_chars_to_pos(&mut self, pos: usize) {
         if self.value.is_empty() {
             return;
@@ -823,7 +822,7 @@ impl EditBox {
         self.word_position_from(dir, self.cursor_pos, true)
     }
 
-    /// `getWordPosition(dir, from, stripSpaces)` (`EditBox.java`),
+    /// `getWordPosition(dir, from, stripSpaces)`,
     /// transcribed over `char` indices.
     #[must_use]
     pub fn word_position_from(&self, dir: i32, from: usize, strip_spaces: bool) -> usize {
@@ -856,7 +855,7 @@ impl EditBox {
         result
     }
 
-    /// `scrollTo(int)` (`EditBox.java`): nudge `displayPos` until `pos`
+    /// `scrollTo(int)`: nudge `displayPos` until `pos`
     /// is inside the visible window.
     ///
     /// The order is deliberate and slightly strange: `lastPos` is computed from
@@ -894,14 +893,14 @@ impl EditBox {
         self.highlight_pos = self.highlight_pos.min(self.len());
     }
 
-    /// `canConsumeInput()` (`EditBox.java`):
+    /// `canConsumeInput()`:
     /// `isActive() && isFocused() && isEditable()`.
     #[must_use]
     pub fn can_consume_input(&self) -> bool {
         self.widget.is_active() && self.widget.focused && self.is_editable
     }
 
-    /// `SPRITES.get(isActive(), isFocused())` (`EditBox.java`), or `None`
+    /// `SPRITES.get(isActive(), isFocused())`, or `None`
     /// when `bordered` is false — an unbordered box draws no background at all.
     ///
     /// **Both arguments differ from `AbstractButton`'s.** See the module docs:
@@ -913,7 +912,7 @@ impl EditBox {
             .then(|| SPRITES.get(self.widget.is_active(), self.widget.focused))
     }
 
-    /// `isEditable ? textColor : textColorUneditable` (`EditBox.java`).
+    /// `isEditable ? textColor : textColorUneditable`.
     ///
     /// Note the flag: **`isEditable`, not `active`**. A widget can be active and
     /// uneditable.
@@ -936,7 +935,7 @@ impl EditBox {
         self.widget.focused && millis_since_focus.is_none_or(is_cursor_visible)
     }
 
-    /// `extractWidgetRenderState`'s geometry (`EditBox.java`), gathered
+    /// `extractWidgetRenderState`'s geometry, gathered
     /// so `super::render` reads rather than re-derives it.
     #[must_use]
     pub fn draw_state(&self, millis_since_focus: Option<u64>) -> EditBoxDraw {
@@ -1027,7 +1026,7 @@ impl EditBox {
         }
     }
 
-    /// `EditBox.keyPressed(KeyEvent)` (`EditBox.java`).
+    /// `EditBox.keyPressed(KeyEvent)`.
     ///
     /// **The `false` returns are the interesting part**, not the `true` ones —
     /// they are what let Up/Down (and anything unhandled) reach
@@ -1076,7 +1075,7 @@ impl EditBox {
                 true
             }
             // Vanilla's `default:` group, which the Insert / Up / Down / PageUp /
-            // PageDown cases deliberately fall *into* (`EditBox.java`) —
+            // PageDown cases deliberately fall *into* —
             // so those five keys reach the shortcut tests and then return false,
             // which is exactly how vertical arrows escape to focus navigation.
             _ => {
@@ -1115,7 +1114,7 @@ impl EditBox {
         }
     }
 
-    /// `EditBox.charTyped(CharacterEvent)` (`EditBox.java`).
+    /// `EditBox.charTyped(CharacterEvent)`.
     pub fn handle_char(&mut self, ch: char) -> bool {
         if !self.can_consume_input() {
             return false;
@@ -1130,7 +1129,7 @@ impl EditBox {
         }
     }
 
-    /// `onClick` (`EditBox.java`): put the caret at the clicked
+    /// `onClick`: put the caret at the clicked
     /// character, extending the selection if Shift is held.
     ///
     /// `findClickedPositionInText` (`:371-375`) clamps the click's offset to
@@ -1163,7 +1162,7 @@ impl super::focus::FocusTarget for EditBox {
         self.widget.focused
     }
 
-    /// `EditBox.setFocused(boolean)` (`EditBox.java`): the
+    /// `EditBox.setFocused(boolean)`: the
     /// `canLoseFocus || focused` guard means a `canLoseFocus == false` box
     /// **ignores** being unfocused.
     fn set_focused(&mut self, focused: bool) {
@@ -1399,7 +1398,7 @@ mod tests {
     #[test]
     fn an_unfocused_or_inactive_box_consumes_nothing() {
         // `keyPressed` is gated on `isActive() && isFocused()`
-        // (`EditBox.java`) and `charTyped` on `canConsumeInput()`, which adds
+        // and `charTyped` on `canConsumeInput()`, which adds
         // `isEditable()`. Three different gates, and they are not the same.
         let mut b = field();
         b.widget.focused = false;
@@ -1613,7 +1612,7 @@ mod tests {
         assert!(b.handle_key(ctrl_back));
         assert_eq!(b.value(), "one two  ");
         // With a selection live, the selection wins over the word
-        // (`EditBox.java`).
+        //.
         b.move_cursor_to(0, false);
         b.set_highlight_pos(3);
         assert!(b.handle_key(ctrl_back));
@@ -1712,7 +1711,7 @@ mod tests {
     #[test]
     fn text_y_truncates_like_javas_integer_division() {
         // `this.getY() + (this.height - 8) / 2` with int arithmetic
-        // (`EditBox.java`). A 20-high box gives 6; a 19-high one gives 5,
+        //. A 20-high box gives 6; a 19-high one gives 5,
         // not 5.5.
         assert_eq!(EditBox::new(0.0, 0.0, 100.0, 20.0, "a").text_y(), 6.0);
         assert_eq!(EditBox::new(0.0, 100.0, 100.0, 19.0, "a").text_y(), 105.0);
@@ -1764,7 +1763,7 @@ mod tests {
         assert!(
             b.widget.focused,
             "`canLoseFocus == false` drops the unfocus entirely \
-             (`EditBox.java`)"
+            "
         );
     }
 

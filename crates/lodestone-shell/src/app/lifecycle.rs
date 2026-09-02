@@ -171,7 +171,7 @@ impl ApplicationHandler for WindowApp {
                 //
                 // Gated on `Options.pauseOnLostFocus` (F3+P) — vanilla's
                 // `Minecraft.pauseIfInactive` calls `pauseGame` only when the
-                // option is on (`Minecraft.java`); the pointer release and the
+                // option is on; the pointer release and the
                 // pacer's background throttle are a different mechanism (mouse
                 // capture, frame rate). The opt-in benchmark keeps foreground
                 // pacing so an incidental focus notification cannot change the
@@ -188,7 +188,7 @@ impl ApplicationHandler for WindowApp {
                 // Presentation resumes at full rate. The pointer is *not*
                 // re-grabbed here — the player clicks to resume, as before.
                 self.pacer.set_focused(true);
-                // The cheap half of issue #560's folder-watch request: if the
+                // The cheap half of folder-watch request: if the
                 // Resource Packs screen is open, rescan the folder now — the
                 // shape of "extract or drop a pack in with a file manager,
                 // alt-tab back". See `MenuNav::refresh_open_resource_packs_screen`
@@ -550,7 +550,7 @@ impl ApplicationHandler for WindowApp {
                         && self.handle_beacon_click(&menu, w, h);
                     // The enchanting table's three offer rows, same
                     // first-refusal shape as the beacon buttons just above
-                    // (issue #613's `ContainerButtonClick` remainder): never
+                    // (`ContainerButtonClick` remainder): never
                     // overlaps a real slot, and by construction never overlaps
                     // the beacon buttons either, since each only ever fires on
                     // its own `special_layout`.
@@ -711,7 +711,7 @@ impl ApplicationHandler for WindowApp {
             // move a slot.
             //
             // **`accumulate_scroll`'s magnitude is not the slot count** (issue
-            // #597): `getNextScrollWheelSelection` (`ScrollWheelHandler.java`)
+            // #597): `getNextScrollWheelSelection`
             // collapses it to its sign, so the hotbar always advances exactly
             // one slot per scroll event no matter how many whole notches that
             // event's accumulator crossed — see `hotbar_scroll_step`'s own
@@ -813,7 +813,7 @@ impl ApplicationHandler for WindowApp {
                 let dy = wheel_notches(delta);
                 // The same boundary transform the hotbar arm above uses, because
                 // vanilla computes it **once** for both: `MouseHandler.onScroll`
-                // (`MouseHandler.java`) hands one `scaledYOffset` to
+                // hands one `scaledYOffset` to
                 // `screen().mouseScrolled(..)` and to `ScrollWheelHandler` alike.
                 // Deliberately **not** run through `accumulate_scroll`, which exists
                 // for the hotbar's sub-notch *quantization*: `cycle_slot` takes a
@@ -1164,7 +1164,7 @@ impl WindowApp {
             Some(KeyOutcome::DebugModifier(down)) => {
                 // Issue #197. Vanilla's
                 // `keyDebugModifier.setDown(!didDebugAction)`
-                // (`KeyboardHandler.java`): the overlay toggles
+                //: the overlay toggles
                 // on the **release**, and only if no chord consumed the
                 // hold. Without that, F3+B would both open the overlay
                 // and toggle hitboxes on one keystroke.
@@ -1250,7 +1250,7 @@ impl WindowApp {
                     let mut typed = false;
                     for ch in text.chars().filter(|c| !c.is_control()) {
                         // `searchBox.setMaxLength(50)`
-                        // (`RecipeBookComponent.java`).
+                        //.
                         if self.recipe_panel.search.chars().count() < RECIPE_SEARCH_MAX_LEN {
                             self.recipe_panel.search.push(ch);
                             typed = true;
@@ -1286,7 +1286,7 @@ impl WindowApp {
                 // also has a *responder*: vanilla calls `onNameChanged`
                 // after every edit (`EditBox::setResponder`), which is
                 // what actually produces `ClientAction::RenameItem` —
-                // this arm is issue #603's whole fix, closing the send
+                // this arm is whole fix, closing the send
                 // side of the island the issue names (`RenameItem` was
                 // modelled, encoded and consumed server-side with zero
                 // producers anywhere in `lodestone-shell`).

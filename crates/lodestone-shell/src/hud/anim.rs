@@ -2,7 +2,7 @@
 //! (`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`) — see
 //! `docs/hud-animations.md` for the full citation-by-citation notes.
 //!
-//! This module carries all three of issue #30's real vanilla animations: the
+//! This module carries all three of real vanilla animations: the
 //! heart row's flash (blink) and critical-health jitter on a health change,
 //! the hunger-row wobble while saturation is empty, and the hotbar item
 //! "pop" when a stack lands in a slot.
@@ -72,7 +72,7 @@ pub(super) fn jitter(tick: i64, salt: u64, bound: u32) -> u32 {
 
 /// Cross-frame heart-row animation state — vanilla's
 /// `lastHealth`/`displayHealth`/`healthBlinkTime`/`lastHealthTime`
-/// (`Hud.java`). One instance lives for the life of a
+///. One instance lives for the life of a
 /// [`super::HudRenderer`], so a fresh renderer (a gate, a reconnect) starts
 /// idle rather than inheriting a previous connection's blink window.
 #[derive(Debug, Clone, Copy)]
@@ -95,7 +95,7 @@ impl HeartAnim {
 
     /// Advances the state to `tick` for this frame's `health` (in
     /// half-points, `Player.getHealth()`'s unit) and returns vanilla's
-    /// `blink` (`Hud.java`) and `displayHealth` (`Hud.java` —
+    /// `blink` and `displayHealth` (`Hud.java` —
     /// the count the "ghost" heart overlay draws during a blink window).
     ///
     /// `blink` is read from the *previous* call's window before this call's
@@ -133,7 +133,7 @@ impl HeartAnim {
         }
         self.last_health = Some(current);
 
-        // `timeMillis - lastHealthTime > 1000` (`Hud.java`); 1000ms is
+        // `timeMillis - lastHealthTime > 1000`; 1000ms is
         // 20 ticks at this module's 50ms/tick.
         if tick - self.caught_up_tick > 20 {
             self.display_health = current;
@@ -144,16 +144,16 @@ impl HeartAnim {
     }
 }
 
-/// The critical-health y-jitter (`Hud.java`): once
+/// The critical-health y-jitter: once
 /// `currentHealth + absorption <= 4`, every heart **container** redraws with
 /// a fresh `0..=1`px offset. Vanilla reseeds one shared RNG stream per
-/// `extractPlayerHealth` call (`Hud.java`); this keys an independent draw
+/// `extractPlayerHealth` call; this keys an independent draw
 /// by `(tick, container)` instead — see the module doc.
 pub(super) fn heart_jitter(tick: i64, container: usize) -> f32 {
     jitter(tick, 0xBEEF_0000_u64 ^ container as u64, 2) as f32
 }
 
-/// The hunger-row wobble while saturation is empty (`Hud.java`):
+/// The hunger-row wobble while saturation is empty:
 /// `getSaturationLevel() <= 0.0 && tickCount % (food * 3 + 1) == 0` gates a
 /// fresh `-1..=1`px offset per pip; any other tick draws flush (no
 /// cross-frame memory needed — unlike the heart row, this is a pure function
@@ -173,8 +173,8 @@ pub(super) fn hunger_wobble(tick: i64, food: i32, saturation: f32, pip: usize) -
 
 /// Cross-frame per-slot hotbar "pop" timers — vanilla's `ItemStack.popTime`,
 /// set to `5` by `Inventory.add` whenever a stack merges into or fills a slot
-/// (`Inventory.java`) and decremented once per tick
-/// (`ItemStack.java`). [`HotbarPop::tick`] detects the same trigger
+/// and decremented once per tick
+///. [`HotbarPop::tick`] detects the same trigger
 /// client-side (a slot's item identity changed, or its count rose) since
 /// nothing forwards the server's own `Inventory.add` call site here, and
 /// returns each slot's current pop amount on vanilla's own `5.0 → 0.0` scale
@@ -274,7 +274,7 @@ impl HotbarPop {
 /// than as a separate effect with its own timing vocabulary.
 const XP_FLASH_TICKS: i64 = 10;
 
-/// The XP bar's level-up flash (issue #30's last item).
+/// The XP bar's level-up flash (last item).
 ///
 /// # What this is, and what vanilla actually does
 ///
@@ -286,8 +286,7 @@ const XP_FLASH_TICKS: i64 = 10;
 /// non-visual or non-bar: `LocalPlayer.setExperienceValues` stamps
 /// `experienceDisplayStartTick`, which `Hud.willPrioritizeExperienceInfo` uses
 /// to keep the XP bar *chosen* over the other contextual bars for 100 ticks;
-/// and `Player.giveExperienceLevels` plays the level-up sound every fifth level
-/// (`Player.java`).
+/// and `Player.giveExperienceLevels` plays the level-up sound every fifth level.
 ///
 /// So this is **not** a parity port and must not be described as one. It is the
 /// effect the issue asks for, built to sit alongside the other animations in

@@ -1534,7 +1534,7 @@ impl ParticleRenderer {
 
         // Two pipelines over one shader and one layout, differing **only** in
         // depth write. They are vanilla's `OPAQUE_PARTICLE` and
-        // `TRANSLUCENT_PARTICLE` (`RenderPipelines.java`), both built from
+        // `TRANSLUCENT_PARTICLE`, both built from
         // the same `PARTICLE_SNIPPET`.
         //
         // One deliberate deviation: vanilla's opaque pipeline has no blending at

@@ -33,7 +33,7 @@
 //! itself reads the two separately:
 //!
 //! * **Mode** comes from the *block*, not the NBT —
-//!   `CommandBlockEntity.getMode()` (`CommandBlockEntity.java`) matches
+//!   `CommandBlockEntity.getMode()` matches
 //!   on `Blocks.COMMAND_BLOCK` / `REPEATING_COMMAND_BLOCK` /
 //!   `CHAIN_COMMAND_BLOCK`. There is no mode field on the wire at all, which is
 //!   why a reader that only looked at NBT would show every chain block as
@@ -112,7 +112,7 @@ pub fn mode_for_state(state_id: u32) -> Option<CommandBlockMode> {
 ///
 /// Absent property reads `false`, matching
 /// `CommandBlockEntity.isConditional()`'s own fallback for a block that is not
-/// a `CommandBlock` (`CommandBlockEntity.java`).
+/// a `CommandBlock`.
 #[must_use]
 fn conditional_for_state(state_id: u32) -> bool {
     lodestone_data::block_states::properties(state_id)
@@ -172,7 +172,7 @@ pub fn command_block_open(pos: BlockPos, state_id: u32, nbt: &Nbt) -> Option<Com
     };
 
     // `BaseCommandBlock.load` defaults: `Command` to `""`, `TrackOutput` to
-    // **`true`** (`BaseCommandBlock.java`) — note the asymmetry, it is
+    // **`true`** — note the asymmetry, it is
     // the one field here whose default is not `false`/empty.
     let command = find(fields, "Command")
         .and_then(as_string)

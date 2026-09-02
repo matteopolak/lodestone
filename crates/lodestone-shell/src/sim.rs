@@ -97,10 +97,10 @@ const MAX_WORLD_RADIUS: i32 = 6;
 const PRE_SESSION_FEET: [f64; 3] = [0.5, 71.0, 0.5];
 /// Block placed by right-click interaction (the demo palette has no inventory).
 const PLACE_BLOCK: u32 = id::STONE;
-/// Vanilla's `DEFAULT_ENTITY_INTERACTION_RANGE` (`Player.java`) — the reach
+/// Vanilla's `DEFAULT_ENTITY_INTERACTION_RANGE` — the reach
 /// for attacking/interacting with an entity, distinct from and shorter than
 /// [`REACH`] (block interaction range, `Player.java`'s `4.5`). Creative
-/// adds a further `+2.0` modifier (`Player.java`) that this shell does not
+/// adds a further `+2.0` modifier that this shell does not
 /// track, so every session uses the unmodified survival default.
 const ENTITY_REACH: f64 = 3.0;
 /// Number of hotbar slots (vanilla is a fixed 9).
@@ -1059,7 +1059,7 @@ impl Sim {
     // -----------------------------------------------------------------------
 
     /// The **one** chunk store this session meshes, collides against and edits,
-    /// as the read handle (issue #423's split).
+    /// as the read handle (split).
     ///
     /// A handle, cheap to clone, onto the same `lodestone_world::World` the net
     /// thread writes decoded columns into once
@@ -1151,7 +1151,7 @@ impl Sim {
     ///
     /// Half of vanilla's `Player.isScoping()`:
     /// `isUsingItem() && getUseItem().is(Items.SPYGLASS)`
-    /// (`Player.java`). This crate has no held-item identity check
+    ///. This crate has no held-item identity check
     /// — the caller already has `held` (the `ResourceLocation` used for
     /// `set_main_hand_source`), so `app.rs` combines the two rather than this
     /// method reaching into inventory state it does not otherwise need. See

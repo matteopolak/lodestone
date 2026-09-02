@@ -32,7 +32,7 @@ pub struct ContainerFrame<'a> {
     /// Unlike [`title`](Self::title) this never comes from a packet: vanilla
     /// reads it from `Inventory.getDisplayName()`, whose default is the
     /// client-side constant `Component.translatable("container.inventory")`
-    /// (`Inventory.java`), so resolving it locally *is* the vanilla
+    ///, so resolving it locally *is* the vanilla
     /// behaviour. The default below is `en_us.json`'s value, which is what
     /// a jar-less run and every hermetic gate see; `app.rs` overrides it with
     /// the same key run through the live language table so a non-English client
@@ -113,7 +113,7 @@ pub struct ContainerFrame<'a> {
     /// construction-time default, exactly as before this field existed.
     ///
     /// See `container/player_preview.rs`'s `PlayerPreview::
-    /// maybe_default_from_uuid` for the consumer — issue #646's "both sites
+    /// maybe_default_from_uuid` for the consumer — "both sites
     /// derive from one resolver, keyed on the same uuid" requirement.
     pub avatar_uuid: Option<uuid::Uuid>,
     /// `Player.hasInfiniteMaterials()` — `Abilities.instabuild`
@@ -576,7 +576,7 @@ pub fn merchant_title(
 }
 
 /// Vanilla's `merchant.trades` — the merchant screen's second label, "Trades"
-/// (`MerchantScreen.java`), resolved the same way
+///, resolved the same way
 /// [`player_inventory_label`] resolves `container.inventory`.
 #[must_use]
 pub fn merchant_trades_label(translate: &dyn Fn(&str) -> Option<String>) -> String {
@@ -592,7 +592,7 @@ pub fn merchant_trades_label(translate: &dyn Fn(&str) -> Option<String>) -> Stri
 /// to `super`, naming the 2×2 grid rather than the screen. This client used to
 /// hardcode the string `"Inventory"` here (`app.rs`), which is wrong twice over:
 /// wrong word, and — because it went in as the *title* — drawn at the title
-/// anchor, which for this one screen is `x = 97` (`InventoryScreen.java`), not
+/// anchor, which for this one screen is `x = 97`, not
 /// `x = 8`.
 ///
 /// Resolved through the language table for the same reason [`menu_title`] is: a
@@ -651,7 +651,7 @@ pub struct LabelLayout {
 ///
 /// The player inventory screen is the only one that omits the second label, and
 /// it does so by *overriding `extractLabels`* to drop the second `graphics.text`
-/// call entirely (`InventoryScreen.java`) — so the label is not wrong in
+/// call entirely — so the label is not wrong in
 /// general, only there. Deleting it globally would trade one bug for another.
 ///
 /// `inventory` is `[8, layout.height - 94]`: `inventoryLabelX = 8` and

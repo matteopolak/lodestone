@@ -208,7 +208,7 @@ fn the_command_block_done_button_sends_a_real_set_command_block_action() {
         "the action must carry the screen's edits, field for field"
     );
 
-    // Vanilla closes after sending (`CommandBlockEditScreen.java`).
+    // Vanilla closes after sending.
     assert_ne!(
         app.ui.screen(),
         crate::menu::Screen::CommandBlockEdit,
@@ -217,7 +217,7 @@ fn the_command_block_done_button_sends_a_real_set_command_block_action() {
 }
 
 /// `WindowApp::dispatch_click_action`'s dispatch table, driven end to end for
-/// each `ClickAction` — issue #673's whole point, that a chat `click_event`
+/// each `ClickAction` — whole point, that a chat `click_event`
 /// actually *does something* rather than reaching a hit-test and stopping.
 /// [`WindowApp::dispatch_click_action`] is deliberately split out of
 /// [`WindowApp::dispatch_chat_click_under_cursor`] so this needs no renderer
@@ -588,7 +588,7 @@ fn accumulate_scroll_moves_several_slots_per_notch_at_high_sensitivity() {
 }
 
 /// A direction reversal must drop the old carry rather than fight it
-/// (`ScrollWheelHandler.java`): three-quarters of a slot built up
+///: three-quarters of a slot built up
 /// scrolling one way must not partially cancel a fresh scroll the other
 /// way, or a player flicking back and forth would see scroll amounts
 /// depend on unrelated history.
@@ -1128,7 +1128,7 @@ fn effective_target_fps_matches_vanillas_framerate_limit_tracker() {
         Some(120)
     );
     // SHORT_AFK: `min(limit, 30)` past 60 s idle, vanilla's own formula
-    // (`FramerateLimitTracker.java`) — a limit *above* 30 gets capped down.
+    // — a limit *above* 30 gets capped down.
     assert_eq!(
         effective_target_fps(120, InactivityFpsLimit::Afk, 90.0),
         Some(30)
@@ -1145,7 +1145,7 @@ fn effective_target_fps_matches_vanillas_framerate_limit_tracker() {
         Some(30)
     );
     // LONG_AFK: flatly 10 past 600 s, vanilla's own `LONG_AFK_LIMIT`
-    // (`FramerateLimitTracker.java`), regardless of the raw limit.
+    //, regardless of the raw limit.
     assert_eq!(
         effective_target_fps(120, InactivityFpsLimit::Afk, 700.0),
         Some(10)
@@ -2059,7 +2059,7 @@ fn the_drop_key_in_the_world_sends_the_drop_action_to_the_wire() {
 }
 
 /// The spectator control, the one guard vanilla applies
-/// (`Minecraft.java`) — same shape as `a_spectator_does_not_send_
+/// — same shape as `a_spectator_does_not_send_
 /// the_offhand_swap_and_everyone_else_does`, watched failing the same way:
 /// remove the `Spectator` arm from `drop_selected_action` and the first
 /// assertion below reports `Some(DropSelectedItem)`.
@@ -2645,7 +2645,7 @@ fn the_mouse_path_resolves_the_default_attack_and_use_buttons() {
         Some(InputAction::Use)
     );
     // Middle **is** a gameplay binding now: `key.pickItem` defaults to
-    // `Type.MOUSE, 2` (`Options.java`), so it is the primary route for
+    // `Type.MOUSE, 2`, so it is the primary route for
     // pick-item rather than a rebound one. This assertion previously read
     // `None`, which was correct only while pick-item did not exist — the
     // premise went stale when the binding landed, not the code.

@@ -148,7 +148,7 @@ pub const SKY_COLOR: [f32; 3] = [0.242_867, 0.462_361, 0.827_571];
 ///
 /// **This is vanilla's span expressed as a fraction, not a taste knob** (issue
 /// That fix). Vanilla does not use a fraction at all:
-/// `FogRenderer.setupFog` (`FogRenderer.java`) fades over an absolute
+/// `FogRenderer.setupFog` fades over an absolute
 /// band of `clamp(renderDistanceInBlocks / 10, 4, 64)` blocks ending at the view
 /// distance — see [`lodestone_render::fog::render_distance_fade_span`], which is
 /// the authoritative form and the one
@@ -483,7 +483,7 @@ pub struct RenderState {
     /// Vanilla bobs the hand with a *second, independent* application of
     /// `bobView` — `GameRenderer.renderItemInHand` seeds a fresh `PoseStack`
     /// with the **unbobbed** inverted model-view and re-applies the bob to that
-    /// (`GameRenderer.java`), rather than inheriting the world's already
+    ///, rather than inheriting the world's already
     /// bobbed matrix. Unset reads as `BobFrame::default`, i.e. the pre-existing
     /// unbobbed hand, so headless tests are unaffected.
     hand_bob: first_person::HandBobSource,
@@ -981,7 +981,7 @@ struct ArmourPartAccum {
 /// The [`ArmourSlot`] an [`EquipmentSlot`] maps onto, or `None`.
 ///
 /// This is vanilla's `EquipmentSlot.Type.HUMANOID_ARMOR` predicate
-/// (`EquipmentSlot.java`) and nothing looser. In particular:
+/// and nothing looser. In particular:
 ///
 /// * **`Body` is not `Chest`.** `BODY` is `ANIMAL_ARMOR` — wolf armour and horse
 ///   barding live there — and `SADDLE` is its own type. A fold of `"body"` into
@@ -990,7 +990,7 @@ struct ArmourPartAccum {
 ///   diamond barding on a player's torso.
 /// * **`EquipmentSlot::isArmor` is the wrong predicate** even though it sounds
 ///   right: it is the *union* of humanoid and animal armour
-///   (`EquipmentSlot.java`).
+///  .
 /// * `MainHand`/`OffHand` are held items and go through `merge_held_items`.
 fn humanoid_armour_slot(slot: EquipmentSlot) -> Option<ArmourSlot> {
     match slot {

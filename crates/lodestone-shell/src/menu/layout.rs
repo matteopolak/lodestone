@@ -23,7 +23,7 @@
 //!
 //! ### The alignment model is padding-aware
 //!
-//! `AbstractLayout.AbstractChildWrapper::setX` (`AbstractLayout.java`) is
+//! `AbstractLayout.AbstractChildWrapper::setX` is
 //! the whole of it:
 //!
 //! ```text
@@ -73,7 +73,7 @@
 //!
 //! - **`GridLayout`'s row and column counts are *derived*, not declared.** They
 //!   are `max(lastOccupiedRow)` / `max(lastOccupiedColumn)` over the children
-//!   (`GridLayout.java`), so a child at row 3 in an otherwise empty grid
+//!  , so a child at row 3 in an otherwise empty grid
 //!   creates rows 0..3 with heights `[0, 0, 0, h]`. Nothing anywhere states a
 //!   dimension.
 //! - **A spanning cell splits its size with a [`Divisor`], not by division.**
@@ -85,7 +85,7 @@
 //!   icon row (spanning the same two) changes nothing.
 //! - **[`LinearLayout`] is not its own algorithm.** It *wraps* a one-row or
 //!   one-column `GridLayout` and delegates `arrangeElements` entirely
-//!   (`LinearLayout.java`); `spacing()` sets `columnSpacing` when
+//!  ; `spacing()` sets `columnSpacing` when
 //!   horizontal and `rowSpacing` when vertical (`:103-111`). Do not give it
 //!   arithmetic of its own — a bug fixed in `GridLayout` must fix it too.
 //! - **`FrameLayout`'s children default to centred, `GridLayout`'s do not.**
@@ -95,7 +95,7 @@
 //!   or corners a whole screen, and it looks deliberate either way.
 //! - **[`GridLayout::default_cell_setting`] is the live baseline;
 //!   [`GridLayout::new_cell_settings`] is a copy of it**
-//!   (`GridLayout.java`). Mutating the former changes what
+//!  . Mutating the former changes what
 //!   every *subsequent* cell inherits. Ours are `Copy`, so a child snapshots its
 //!   settings when added; vanilla can also *alias* the live object into a cell, so
 //!   a late mutation there would move already-added children. That is the one
@@ -105,7 +105,7 @@
 //!
 //!   The aliasing is reachable through **exactly one** path: `RowHelper`'s short
 //!   `addChild` forms, which pass `defaultCellSetting()` itself
-//!   (`GridLayout.java`). Every other `addChild` — `GridLayout`'s,
+//!  . Every other `addChild` — `GridLayout`'s,
 //!   `LinearLayout`'s, `FrameLayout`'s, `EqualSpacingLayout`'s — passes a
 //!   `copy()`. Of the ~75 `defaultCellSetting`/`defaultChildLayoutSetting` call
 //!   sites in the client, the only one on a `RowHelper` is
@@ -121,7 +121,7 @@
 //!   the true one.
 //! - **`arrange_elements` lives on [`LayoutElement`] with a no-op default**,
 //!   where vanilla puts it on `Layout` and tests `child instanceof Layout` in the
-//!   default body (`Layout.java`). Behaviourally identical — a leaf's
+//!   default body. Behaviourally identical — a leaf's
 //!   arrange is a no-op either way — and it avoids needing a downcast from
 //!   `dyn LayoutElement`.
 //! - **`addChild` returns nothing.** Vanilla hands the child back so the screen
@@ -152,7 +152,7 @@
 
 use super::widget::{LayoutElement, Widget};
 
-/// `Mth.lerp(alpha, p0, p1)` (`Mth.java`), argument order included.
+/// `Mth.lerp(alpha, p0, p1)`, argument order included.
 #[must_use]
 fn lerp(alpha: f32, p0: f32, p1: f32) -> f32 {
     p0 + alpha * (p1 - p0)
@@ -260,7 +260,7 @@ impl Iterator for Divisor {
     }
 }
 
-/// Vanilla's `LayoutSettings` (`LayoutSettings.java`): one cell's padding and
+/// Vanilla's `LayoutSettings`: one cell's padding and
 /// alignment.
 ///
 /// `Default` is vanilla's `LayoutSettingsImpl()` — zero padding, top-left
@@ -287,7 +287,7 @@ pub struct LayoutSettings {
 }
 
 impl LayoutSettings {
-    /// `LayoutSettings.defaults()` (`LayoutSettings.java`).
+    /// `LayoutSettings.defaults()`.
     #[must_use]
     pub fn defaults() -> Self {
         Self::default()
@@ -306,7 +306,7 @@ impl LayoutSettings {
     }
 
     /// `padding(int left, int top, int right, int bottom)` — note the order,
-    /// which is *not* CSS's (`LayoutSettings.java`).
+    /// which is *not* CSS's.
     #[must_use]
     pub fn padding_ltrb(self, left: i32, top: i32, right: i32, bottom: i32) -> Self {
         self.padding_left(left)
@@ -414,7 +414,7 @@ impl LayoutSettings {
     }
 }
 
-/// Vanilla's `Layout` (`Layout.java`): a [`LayoutElement`] that owns children.
+/// Vanilla's `Layout`: a [`LayoutElement`] that owns children.
 ///
 /// `arrangeElements` and `visitWidgets` are on [`LayoutElement`] instead — see
 /// the module docs — so what is left here is child traversal and teardown.
@@ -443,7 +443,7 @@ pub fn widget_rects(root: &dyn LayoutElement) -> Vec<(f32, f32, f32, f32)> {
     out
 }
 
-/// `AbstractLayout.AbstractChildWrapper` (`AbstractLayout.java`): one child
+/// `AbstractLayout.AbstractChildWrapper`: one child
 /// plus the cell settings it was added with.
 #[derive(Debug)]
 struct ChildWrapper {
@@ -466,7 +466,7 @@ impl ChildWrapper {
         ipx(self.child.height()) + self.settings.padding_top + self.settings.padding_bottom
     }
 
-    /// `setX(int x, int availableSpace)` (`AbstractLayout.java`) — the
+    /// `setX(int x, int availableSpace)` — the
     /// alignment model, truncating.
     fn set_x(&mut self, x: i32, available_space: i32) {
         let least = self.settings.padding_left as f32;
@@ -475,7 +475,7 @@ impl ChildWrapper {
         self.child.set_x((offset + x) as f32);
     }
 
-    /// `setY(int y, int availableSpace)` (`AbstractLayout.java`) — the same
+    /// `setY(int y, int availableSpace)` — the same
     /// expression, **rounded** rather than truncated.
     fn set_y(&mut self, y: i32, available_space: i32) {
         let least = self.settings.padding_top as f32;
@@ -485,7 +485,7 @@ impl ChildWrapper {
     }
 }
 
-/// `GridLayout.ChildContainer` (`GridLayout.java`).
+/// `GridLayout.ChildContainer`.
 #[derive(Debug)]
 struct GridChild {
     wrapper: ChildWrapper,
@@ -505,7 +505,7 @@ impl GridChild {
     }
 }
 
-/// Vanilla's `GridLayout` (`GridLayout.java`): children at explicit `(row,
+/// Vanilla's `GridLayout`: children at explicit `(row,
 /// column)` cells, optionally spanning, with the grid's dimensions **derived**
 /// from the highest occupied index.
 ///
@@ -560,7 +560,7 @@ impl GridLayout {
         self.column_spacing(spacing).row_spacing(spacing)
     }
 
-    /// `defaultCellSetting()` (`GridLayout.java`): the **live** baseline
+    /// `defaultCellSetting()`: the **live** baseline
     /// every later cell is copied from. Mutating it changes what subsequent
     /// `add_child` calls inherit — and nothing else, unlike vanilla, which also
     /// aliases it into already-added cells (see the module docs).
@@ -568,7 +568,7 @@ impl GridLayout {
         &mut self.default_cell_settings
     }
 
-    /// `newCellSettings()` (`GridLayout.java`): a **copy** of the
+    /// `newCellSettings()`: a **copy** of the
     /// baseline, to be adjusted for one cell.
     #[must_use]
     pub fn new_cell_settings(&self) -> LayoutSettings {
@@ -593,7 +593,7 @@ impl GridLayout {
     }
 
     /// `addChild(child, row, column, rows, columns, cellSettings)` — the one all
-    /// the others funnel into (`GridLayout.java`).
+    /// the others funnel into.
     ///
     /// # Panics
     ///
@@ -620,7 +620,7 @@ impl GridLayout {
         });
     }
 
-    /// `createRowHelper(int columns)` (`GridLayout.java`): fills cells
+    /// `createRowHelper(int columns)`: fills cells
     /// left to right, wrapping to the next row.
     pub fn create_row_helper(&mut self, columns: usize) -> RowHelper<'_> {
         RowHelper {
@@ -648,7 +648,7 @@ impl LayoutElement for GridLayout {
         self.height as f32
     }
 
-    /// `AbstractLayout.setX` (`AbstractLayout.java`): moving a layout moves
+    /// `AbstractLayout.setX`: moving a layout moves
     /// every child by the same delta. This is what places a nested
     /// [`LinearLayout`]'s children after its parent has arranged it.
     fn set_x(&mut self, x: f32) {
@@ -661,7 +661,7 @@ impl LayoutElement for GridLayout {
         self.x = new_x;
     }
 
-    /// `AbstractLayout.setY` (`AbstractLayout.java`).
+    /// `AbstractLayout.setY`.
     fn set_y(&mut self, y: f32) {
         let new_y = ipx(y);
         let delta = (new_y - self.y) as f32;
@@ -672,10 +672,10 @@ impl LayoutElement for GridLayout {
         self.y = new_y;
     }
 
-    /// `GridLayout.arrangeElements` (`GridLayout.java`), transliterated.
+    /// `GridLayout.arrangeElements`, transliterated.
     fn arrange_elements(&mut self) {
         // `super.arrangeElements()` — `Layout.arrangeElements`'s default body
-        // (`Layout.java`): nested layouts size themselves *before* this grid
+        //: nested layouts size themselves *before* this grid
         // measures them, or every nested container would measure as 0×0. Written
         // as a direct walk of the child list, which is what `visitChildren` is.
         for child in &mut self.children {
@@ -736,7 +736,7 @@ impl LayoutElement for GridLayout {
         self.height = row_y_offsets[max_row] + max_row_heights[max_row];
     }
 
-    /// `Layout.visitWidgets`'s default (`Layout.java`): forward to children,
+    /// `Layout.visitWidgets`'s default: forward to children,
     /// which is what makes a whole tree reachable from one call.
     fn visit_widgets(&self, visitor: &mut dyn FnMut(&Widget)) {
         for child in &self.children {
@@ -763,7 +763,7 @@ impl Layout for GridLayout {
     }
 }
 
-/// `GridLayout.RowHelper` (`GridLayout.java`): adds children left to
+/// `GridLayout.RowHelper`: adds children left to
 /// right, wrapping to the next row when the next span would not fit.
 ///
 /// Every child it adds spans exactly **one row** — the helper only ever varies
@@ -826,7 +826,7 @@ impl RowHelper<'_> {
     }
 }
 
-/// Vanilla's `FrameLayout` (`FrameLayout.java`): every child is aligned
+/// Vanilla's `FrameLayout`: every child is aligned
 /// independently inside one box, whose size is `max(minWidth/minHeight, the
 /// largest padded child)`.
 ///
@@ -919,7 +919,7 @@ impl FrameLayout {
     }
 }
 
-/// `FrameLayout.alignInDimension` (`FrameLayout.java`): the one-axis
+/// `FrameLayout.alignInDimension`: the one-axis
 /// half of aligning a whole block inside a rectangle. Returns the new position.
 ///
 /// Note the truncation happens on the *offset*, before `pos` is added, and that
@@ -931,12 +931,11 @@ pub fn align_in_dimension(pos: f32, length: f32, widget_length: f32, align: f32)
     pos + trunc_int(lerp(align, 0.0, length - widget_length)) as f32
 }
 
-/// `FrameLayout.alignInRectangle` (`FrameLayout.java`): position an
+/// `FrameLayout.alignInRectangle`: position an
 /// element inside `(x, y, width, height)` at the given alignment.
 ///
 /// This is what `PauseScreen.createPauseMenu` calls on the whole grid, with
-/// `(0.5, 0.25)` — centred horizontally, a quarter of the way down
-/// (`PauseScreen.java`).
+/// `(0.5, 0.25)` — centred horizontally, a quarter of the way down.
 pub fn align_in_rectangle(
     element: &mut dyn LayoutElement,
     x: f32,
@@ -952,7 +951,7 @@ pub fn align_in_rectangle(
     element.set_y(new_y);
 }
 
-/// `FrameLayout.centerInRectangle` (`FrameLayout.java`).
+/// `FrameLayout.centerInRectangle`.
 pub fn center_in_rectangle(
     element: &mut dyn LayoutElement,
     x: f32,
@@ -1000,7 +999,7 @@ impl LayoutElement for FrameLayout {
         self.y = new_y;
     }
 
-    /// `FrameLayout.arrangeElements` (`FrameLayout.java`): size is the
+    /// `FrameLayout.arrangeElements`: size is the
     /// largest padded child (floored at the minimum), and every child is then
     /// aligned in the *whole* box independently.
     fn arrange_elements(&mut self) {
@@ -1049,7 +1048,7 @@ impl Layout for FrameLayout {
     }
 }
 
-/// `LinearLayout.Orientation` (`LinearLayout.java`).
+/// `LinearLayout.Orientation`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Orientation {
     /// One row: children advance in `column`, and `spacing` is `columnSpacing`.
@@ -1058,7 +1057,7 @@ pub enum Orientation {
     Vertical,
 }
 
-/// Vanilla's `LinearLayout` (`LinearLayout.java`) — the container 46 of the 57
+/// Vanilla's `LinearLayout` — the container 46 of the 57
 /// layout-using screens reach for, and **not its own algorithm**: it wraps a
 /// one-row or one-column [`GridLayout`] and delegates every arrangement decision
 /// to it.
@@ -1093,7 +1092,7 @@ impl LinearLayout {
     }
 
     /// `spacing(int)`: `columnSpacing` when horizontal, `rowSpacing` when
-    /// vertical (`LinearLayout.java`). Setting the wrong one is a no-op
+    /// vertical. Setting the wrong one is a no-op
     /// on a single-row grid, which is a silently unspaced row.
     #[must_use]
     pub fn spacing(mut self, spacing: i32) -> Self {
@@ -1184,7 +1183,7 @@ impl Layout for LinearLayout {
     }
 }
 
-/// `HeaderAndFooterLayout.MAGIC_PADDING` (`HeaderAndFooterLayout.java`).
+/// `HeaderAndFooterLayout.MAGIC_PADDING`.
 pub const MAGIC_PADDING: f32 = 13.0;
 /// `HeaderAndFooterLayout.DEFAULT_HEADER_AND_FOOTER_HEIGHT` (`:11`).
 pub const DEFAULT_HEADER_AND_FOOTER_HEIGHT: f32 = 33.0;
@@ -1192,11 +1191,11 @@ pub const DEFAULT_HEADER_AND_FOOTER_HEIGHT: f32 = 33.0;
 /// *prefers* below the header, before clamping.
 pub const CONTENT_MARGIN_TOP: f32 = 30.0;
 
-/// Vanilla's `HeaderAndFooterLayout` (`HeaderAndFooterLayout.java`): three
+/// Vanilla's `HeaderAndFooterLayout`: three
 /// [`FrameLayout`]s — header pinned at the top, footer pinned at the bottom,
 /// content between them.
 ///
-/// It is the base of `OptionsSubScreen` (`OptionsSubScreen.java`), so **every**
+/// It is the base of `OptionsSubScreen`, so **every**
 /// settings sub-screen inherits it, which is why it is ported now even though the
 /// screen that consumes it is #55/#396. Nothing in this commit builds one outside
 /// its tests — that is a deliberate exception to this repo's island rule, taken
@@ -1420,7 +1419,7 @@ impl Layout for HeaderAndFooterLayout {
     }
 }
 
-/// Vanilla's `SpacerElement` (`SpacerElement.java`): a fixed-size hole in a
+/// Vanilla's `SpacerElement`: a fixed-size hole in a
 /// layout.
 ///
 /// It implements only `LayoutElement`, and **its `visitWidgets` is a no-op**
@@ -1495,17 +1494,17 @@ impl LayoutElement for SpacerElement {
 
 // -- the tab widget's row geometry ------------------------------
 //
-// `MenuTabBar.arrangeElements` (`MenuTabBar.java`) — not a
+// `MenuTabBar.arrangeElements` — not a
 // `LayoutElement`, unlike everything above: a `MenuTabBar` positions its own
 // children directly rather than through `LinearLayout`/`GridLayout`
 // arithmetic, so this is transcribed as a free function instead of a type.
 
-/// `MenuTabBar.HEIGHT` (`MenuTabBar.java`).
+/// `MenuTabBar.HEIGHT`.
 pub const TAB_BAR_HEIGHT: f32 = 24.0;
 /// `MenuTabBar.MAX_WIDTH` (`:18`).
 const TAB_BAR_MAX_WIDTH: f32 = 400.0;
 
-/// `Mth.roundToward(int, int)` (`Mth.java`): round `value` **up** to
+/// `Mth.roundToward(int, int)`: round `value` **up** to
 /// the nearest multiple of `multiple`, via `positiveCeilDiv`.
 ///
 /// Transcribed for the `f32` geometry this crate uses everywhere else rather
@@ -1521,7 +1520,7 @@ pub fn round_toward(value: f32, multiple: f32) -> f32 {
     (value / multiple).ceil() * multiple
 }
 
-/// `MenuTabBar.arrangeElements(width)` (`MenuTabBar.java`): the tab
+/// `MenuTabBar.arrangeElements(width)`: the tab
 /// row's own left edge and each tab's (equal) width, for `tab_count` tabs
 /// spread across a canvas `width` px wide.
 ///
@@ -1573,7 +1572,7 @@ mod tests {
 
     #[test]
     fn set_x_is_padding_aware_not_a_naive_centre() {
-        // `AbstractLayout.AbstractChildWrapper::setX` (`AbstractLayout.java`)
+        // `AbstractLayout.AbstractChildWrapper::setX`
         // interpolates between `paddingLeft` and
         // `availableSpace - child.width - paddingRight`, so padding *biases* the
         // alignment rather than shrinking a box that is then centred.
@@ -1743,7 +1742,7 @@ mod tests {
 
     #[test]
     fn row_helper_wraps_and_abandons_the_rest_of_the_row() {
-        // `GridLayout.RowHelper.addChild` (`GridLayout.java`). Two
+        // `GridLayout.RowHelper.addChild`. Two
         // columns: a 1-wide child, then a 2-wide one that cannot fit beside it,
         // then another 1-wide. The 2-wide starts a new row, and `roundToward`
         // pushes the *third* child to the row after that rather than beside the
@@ -1769,7 +1768,7 @@ mod tests {
 
     #[test]
     fn nested_layouts_are_arranged_before_the_parent_measures_them() {
-        // `Layout.arrangeElements`'s default body (`Layout.java`) recurses
+        // `Layout.arrangeElements`'s default body recurses
         // first. Without it a nested container measures 0×0 and every column it
         // is in collapses — which looks like a missing widget, not a missing
         // recursion.
@@ -1792,7 +1791,7 @@ mod tests {
     fn visit_children_yields_the_children_where_visit_widgets_yields_the_leaves() {
         // `Layout.visitChildren` yields the immediate children — a nested layout
         // counts as *one* — while `visitWidgets` recurses to the leaves
-        // (`Layout.java`). Both readings are load-bearing: the pause
+        //. Both readings are load-bearing: the pause
         // screen's icon row is one grid cell and four drawable buttons.
         let mut inner = LinearLayout::horizontal().spacing(4);
         for _ in 0..3 {
@@ -1820,7 +1819,7 @@ mod tests {
 
     #[test]
     fn moving_a_layout_moves_its_children_by_the_same_delta() {
-        // `AbstractLayout.setX`/`setY` (`AbstractLayout.java`). This is the
+        // `AbstractLayout.setX`/`setY`. This is the
         // mechanism that positions an already-arranged nested layout, and the one
         // `FrameLayout.alignInRectangle` uses on a whole screen's tree.
         let mut row = LinearLayout::horizontal().spacing(4);
@@ -1840,7 +1839,7 @@ mod tests {
 
     #[test]
     fn align_in_rectangle_truncates_the_offset_before_adding_the_origin() {
-        // `FrameLayout.alignInDimension` (`FrameLayout.java`). This is
+        // `FrameLayout.alignInDimension`. This is
         // the *screen*-level align, distinct from a cell's padding-aware one.
         let mut block = LinearLayout::vertical();
         block.add_child(cell(200.0, 20.0));
@@ -1943,7 +1942,7 @@ mod tests {
 
     #[test]
     fn a_spacer_occupies_space_and_reaches_no_widget_list() {
-        // `SpacerElement.visitWidgets` is empty (`SpacerElement.java`), so
+        // `SpacerElement.visitWidgets` is empty, so
         // a spacer is measured and never drawn. This is the mechanism, not an
         // accident of having no art.
         let mut column = LinearLayout::vertical();

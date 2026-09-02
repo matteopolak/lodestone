@@ -630,7 +630,7 @@ pub enum HighlightKind {
     /// A matched, valid argument value. The carried index cycles `0..5` once
     /// per argument regardless of nesting depth, selecting vanilla's
     /// `ARGUMENT_STYLES` in order — `AQUA, YELLOW, GREEN, LIGHT_PURPLE, GOLD`
-    /// (`CommandSuggestions.java`). Colour-to-`ChatFormatting` mapping
+    ///. Colour-to-`ChatFormatting` mapping
     /// is a draw-call concern (`hud.rs`, brokered — not this crate), not
     /// modelled as an actual colour here.
     Argument(u8),
@@ -1928,8 +1928,7 @@ impl ChatInput {
 }
 
 /// The chat scrollback's scroll position while the box is open — vanilla's
-/// `ChatComponent.chatScrollbarPos`/`newMessageSinceScroll`
-/// (`ChatComponent.java`).
+/// `ChatComponent.chatScrollbarPos`/`newMessageSinceScroll`.
 ///
 /// # Where this differs from vanilla, and why
 ///

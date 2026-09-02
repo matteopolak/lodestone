@@ -253,7 +253,7 @@ const MOB_EFFECT_BENEFICIAL: &[(&str, bool)] = &[
 /// from the id rather than a hand-maintained beneficial/harmful table. Distinct
 /// ids get distinct tints; the same id is stable across frames and runs (a
 /// fixed-key hasher, never `RandomState`).
-/// `pub(crate)` since issue #613's beacon screen (`container::beacon`) reuses
+/// `pub(crate)` since beacon screen (`container::beacon`) reuses
 /// this same hash-derived swatch colour for its power buttons — the
 /// identical "no real sprite exists, so tint a flat quad" simplification
 /// this HUD chip already established.

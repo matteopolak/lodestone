@@ -106,7 +106,7 @@ pub(crate) fn launch_singleplayer(
 /// already open to LAN, on an OS-assigned port, with the real RSA/AES
 /// handshake and session-server ownership check running on every connection
 /// it accepts — `crate::menu::create_world::WorldCreationConfig::online_mode`
-/// (issue #273's shell-side control), the one field on that struct that is
+/// (shell-side control), the one field on that struct that is
 /// wired rather than decorative. See that field's own doc for why this is
 /// reachable only from **Create New World** and not **Play Selected World**.
 ///

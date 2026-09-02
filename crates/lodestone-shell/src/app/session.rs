@@ -176,7 +176,7 @@ impl WindowApp {
         // message every frame the screen stays up; the `respawn_confirmed`
         // side needs no such guard — it is already a no-op off `Screen::Death`.
         //
-        // `doImmediateRespawn` (issue #436's `SessionGameRules` island) forks
+        // `doImmediateRespawn` (`SessionGameRules` island) forks
         // this: vanilla's `ClientPacketListener.handleRespawn` never puts the
         // death screen up at all when the rule is on, it respawns on the spot.
         // That is the rule's entire user-visible meaning, and it is the reason
@@ -354,7 +354,7 @@ impl WindowApp {
                 crate::menu::social::entries_from_tablist(&tab_list, self.sim.local_uuid());
             self.nav.refresh_social(entries);
 
-            // The Spectator Menu (issue #613's `TeleportToEntity`
+            // The Spectator Menu (`TeleportToEntity`
             // remainder), same reason and same shape as the Social roster
             // immediately above — `crate::menu::spectator_menu`'s module
             // doc names why this cannot be built inside `MenuNav` itself
@@ -396,7 +396,7 @@ impl WindowApp {
     }
 
     /// Apply the server's `RECIPE_BOOK_SETTINGS` (76) to the recipe-book panel,
-    /// once per book type per session — issue #436's `SessionRecipeBookSettings`
+    /// once per book type per session — `SessionRecipeBookSettings`
     /// island.
     ///
     /// Before this, the panel always started closed and unfiltered no matter
@@ -851,7 +851,7 @@ impl WindowApp {
         // `config` above.
     }
 
-    /// The pause menu's **Open to LAN** (issue #535's scope 1): publish the
+    /// The pause menu's **Open to LAN** (scope 1): publish the
     /// world this process is hosting on a TCP port, so other machines can join it.
     ///
     /// # Publishes the live handle in place — issue #562
@@ -908,7 +908,7 @@ impl WindowApp {
     }
 
     /// Vanilla's `key.debug.spectate` (F3+N): drop into spectator, or come back
-    /// out of it (`KeyboardHandler.java`).
+    /// out of it.
     ///
     /// **The first producer of `ClientAction::ChangeGameMode` anywhere outside
     /// `crates/protocol/`** — the variant was encoded by two families and sent by
@@ -1058,11 +1058,11 @@ impl WindowApp {
         // `launch_singleplayer` needs this on wasm32 too.
         //
         // The full `WorldTypePreset` is threaded now, not just its
-        // `lodestone_server::WorldType` projection (issue #592's item 1) —
+        // `lodestone_server::WorldType` projection (item 1) —
         // `net.rs`'s `preset_chunk_source` is what resolves the other four
         // presets (`SingleBiomeSurface`/`Flat`/`FlatAllDimensions`/
         // `DebugAllBlockStates`) once `lodestone-server`'s `lib.rs` re-exports
-        // their entry points (issue #592's item 2, already landed), and it
+        // their entry points (item 2, already landed), and it
         // needs the preset itself to pick among four different generator
         // constructors, not a three-way `WorldType`.
         let world_type = match &launch {

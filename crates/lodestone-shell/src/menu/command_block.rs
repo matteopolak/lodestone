@@ -110,7 +110,7 @@ pub const OUTPUT_W: f32 = 20.0;
 /// See [`OUTPUT_DX`].
 pub const OUTPUT_H: f32 = 20.0;
 
-/// The mode/conditional/autoexec row's shared y (`CommandBlockEditScreen.java`).
+/// The mode/conditional/autoexec row's shared y.
 pub const EXTRA_ROW_Y: f32 = 165.0;
 /// Each of the three extra-row buttons is `100` wide, `20` tall.
 pub const EXTRA_ROW_W: f32 = 100.0;
@@ -177,7 +177,7 @@ pub fn next_mode(mode: CommandBlockMode) -> CommandBlockMode {
 
 /// `outputButton`'s label: `CycleButton.booleanBuilder(Component.literal("O"),
 /// Component.literal("X"), trackOutput).displayOnlyValue()`
-/// (`AbstractCommandBlockEditScreen.java`) — `true` shows the *first*
+/// — `true` shows the *first*
 /// argument (`CycleButton.booleanBuilder`'s own `b == TRUE ? trueText :
 /// falseText`, `CycleButton.java`).
 #[must_use]
@@ -254,8 +254,7 @@ pub struct CommandBlockOpen {
     pub track_output: bool,
     /// The block's last recorded output line, if [`Self::track_output`] and
     /// the block has run at least once. `None` draws `"-"`, matching
-    /// vanilla's own `previousEdit.setValue("-")` default
-    /// (`AbstractCommandBlockEditScreen.java`).
+    /// vanilla's own `previousEdit.setValue("-")` default.
     pub previous_output: Option<String>,
     /// The block's current mode.
     pub mode: CommandBlockMode,
@@ -369,7 +368,7 @@ impl CommandBlockState {
     #[must_use]
     pub fn new(open: CommandBlockOpen) -> Self {
         let mut command = EditBox::new(0.0, 0.0, COMMAND_W, COMMAND_H, "Console Command");
-        // `EditBox.setMaxLength(32500)` (`AbstractCommandBlockEditScreen.java`).
+        // `EditBox.setMaxLength(32500)`.
         command.set_max_length(32_500);
         command.set_value(&open.command);
         command.widget.focused = true;
@@ -486,7 +485,7 @@ impl CommandBlockState {
         true
     }
 
-    /// `populateAndSendPacket` (`CommandBlockEditScreen.java`): the
+    /// `populateAndSendPacket`: the
     /// outbound packet this screen exists to produce.
     #[must_use]
     pub fn to_action(&self) -> ClientAction {

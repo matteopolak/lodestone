@@ -962,7 +962,7 @@ impl UiState {
 
     /// Back to the title screen from the world list — vanilla's
     /// `SelectWorldScreen.onClose()`, which is `setScreen(this.lastScreen)`
-    /// (`SelectWorldScreen.java`), and also what its Back button does
+    ///, and also what its Back button does
     /// (`:106`).
     pub fn close_world_select(&mut self) {
         if self.screen == Screen::WorldSelect {
@@ -1022,7 +1022,7 @@ impl UiState {
     /// the pause menu rather than the title.
     ///
     /// This is vanilla's `inWorld` flag on `OptionsScreen`
-    /// (`OptionsScreen.java`), and it picks between two mutually exclusive
+    ///, and it picks between two mutually exclusive
     /// buttons in the root screen's header: `options.worldOptions.button` when a
     /// level is loaded, `options.online` when not (`:56-66`). It reads
     /// [`Self::settings_return`], which is already the exact fact — see
@@ -1148,8 +1148,7 @@ impl UiState {
     /// "Either way" for [`close_chat`](Self::close_chat)'s reason: which button
     /// was pressed decides *whether a world was deleted*, not which screen comes
     /// next. Vanilla is the same shape — `WorldSelectionList.deleteWorld`'s
-    /// callback calls `this.list.returnToScreen()` outside its `if (result)`
-    /// (`WorldSelectionList.java`).
+    /// callback calls `this.list.returnToScreen()` outside its `if (result)`.
     pub fn close_confirm(&mut self) {
         if self.screen == Screen::Confirm {
             self.screen = Screen::WorldSelect;
@@ -1476,7 +1475,7 @@ impl UiState {
             Screen::Connecting => self.cancel_connect(),
             // Deliberately a no-op, not "unwind one level" like every screen
             // above: vanilla's `DeathScreen.shouldCloseOnEsc()` returns
-            // `false` (`DeathScreen.java`), so Escape does not dismiss
+            // `false`, so Escape does not dismiss
             // it. `MenuNav::key_death` mirrors this — it does not call
             // `on_escape` for `MenuKey::Escape` the way every other screen's
             // key handler does — so this arm exists only so the match stays
@@ -1534,7 +1533,7 @@ impl UiState {
     }
 
     /// Force the pause overlay up (e.g. the window lost focus). Vanilla's own
-    /// gate, `Gui.setPauseScreen` (`Gui.java`): `if (this.screen == null)` —
+    /// gate, `Gui.setPauseScreen`: `if (this.screen == null)` —
     /// only when *nothing* is open, matched here by `Screen::Playing` alone.
     /// Chat, an inventory/container, a command block, a sign or a book editor
     /// are all a non-null `screen` in vanilla's terms, so a focus loss while

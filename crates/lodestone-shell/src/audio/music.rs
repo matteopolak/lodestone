@@ -186,7 +186,7 @@ impl ShellMusic {
 /// The situation for a **menu** screen: not in world, so
 /// `MusicSituation::situational_music` selects `musics::MENU`.
 ///
-/// `MENU` is `20/600` ticks with `replaceCurrentMusic` set (`Musics.java`),
+/// `MENU` is `20/600` ticks with `replaceCurrentMusic` set,
 /// so it *interrupts* rather than queues — and `Music::can_replace`'s second
 /// clause is what stops it restarting itself every tick.
 pub(crate) fn menu_situation() -> MusicSituation<'static> {
@@ -204,11 +204,11 @@ pub(crate) fn menu_situation() -> MusicSituation<'static> {
 /// `audio/background_music` (`Minecraft.java`,
 /// `EnvironmentAttributes.java`), which yields a three-slot
 /// [`BackgroundMusic`] whose precedence is **underwater → creative → default**
-/// (`BackgroundMusic.java`). Our biome table *is* that probe's answer
+///. Our biome table *is* that probe's answer
 /// (a biome is what sets the attribute), so `background_music` is looked up per
 /// biome — but the final pick is [`BackgroundMusic::select`], never the biome id.
 ///
-/// And `creative` there is **`instabuild && mayfly`** (`Minecraft.java`), not
+/// And `creative` there is **`instabuild && mayfly`**, not
 /// a gamemode check. Wiring it to `GameMode::Creative` would look right and be
 /// wrong: a survival player granted both abilities gets creative music in vanilla,
 /// and a creative player with `mayfly` revoked does not.

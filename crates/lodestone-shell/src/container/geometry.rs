@@ -327,9 +327,9 @@ impl ContainerGeometry {
 
         // Vanilla's own dim behind an open container screen (that fix's
         // leftover). `AbstractContainerScreen::isInGameUi()` overrides `true`
-        // (`AbstractContainerScreen.java`), which routes
+        //, which routes
         // `Screen::extractBackground` to `extractTransparentBackground`
-        // (`Screen.java`) — a full-canvas vertical **gradient**, not the
+        // — a full-canvas vertical **gradient**, not the
         // pause menu's tiled dirt texture (that is the `else` branch, for
         // `isInGameUi() == false` screens). `-1072689136`/`-804253680` decoded:
         // ARGB (192,16,16,16) top to (208,16,16,16) bottom.
@@ -413,7 +413,7 @@ impl ContainerGeometry {
                 ) => {
                     // `AbstractFurnaceMenu`: data[0] litTime, data[1]
                     // litDuration, data[2] cookingProgress, data[3]
-                    // cookingTotalTime (`AbstractFurnaceMenu.java`).
+                    // cookingTotalTime.
                     let (lit_sprite, burn_sprite) = match kind {
                         SpecialLayout::BlastFurnace => {
                             (BLAST_FURNACE_LIT_PROGRESS, BLAST_FURNACE_BURN_PROGRESS)
@@ -458,7 +458,7 @@ impl ContainerGeometry {
                 }
                 Some(SpecialLayout::Brewing) => {
                     // `BrewingStandMenu`: data[0] brewingTicks, data[1] fuel
-                    // (`BrewingStandMenu.java`).
+                    //.
                     let fuel = data(1);
                     let fuel_len = ((18 * fuel + 19) / 20).clamp(0, 18);
                     if fuel_len > 0
@@ -552,7 +552,7 @@ impl ContainerGeometry {
         }
         // Which slot the pointer is over — vanilla's `hoveredSlot`, set from
         // `getHoveredSlot(mouseX, mouseY)` every frame
-        // (`AbstractContainerScreen.java`). Derived from the **same**
+        //. Derived from the **same**
         // `hit_test_with_book` the click path calls, with the same `gui_scale`
         // *and* the same `book_open`, so the highlight cannot land on a different
         // slot than a click would — the failure mode `hit_test_with_scale`'s own
@@ -671,7 +671,7 @@ impl ContainerGeometry {
         }
 
         // Both labels, exactly as `AbstractContainerScreen::extractLabels` draws
-        // them (`AbstractContainerScreen.java`):
+        // them:
         //
         //     graphics.text(font, title,               titleLabelX, titleLabelY, -12566464, false);
         //     graphics.text(font, playerInventoryTitle, inventoryLabelX, inventoryLabelY, -12566464, false);
@@ -862,7 +862,7 @@ impl ContainerGeometry {
         // carried stack, drawn in its own later stratum. This is vanilla's
         // `graphics.nextStratum()`, called immediately before it draws the
         // carried item and nowhere else on the screen
-        // (`AbstractContainerScreen.java`).
+        //.
         //
         // It has to be a stratum and not merely "appended last".
         // Append order only settles two of the four cases, because the GUI item
@@ -1030,7 +1030,7 @@ const COST_DISABLED_GREEN: [f32; 4] = [64.0 / 255.0, 127.0 / 255.0, 16.0 / 255.0
 /// Draws the merchant screen's trade list: the second "Trades" label, and
 /// each visible offer's cost/result icons, discount strikethrough and trade
 /// arrow (that fix's UI half) — `MerchantScreen.extractLabels`/
-/// `extractContents` (`MerchantScreen.java`). A no-op for any
+/// `extractContents`. A no-op for any
 /// screen without [`SpecialLayout::Merchant`], or a merchant screen with no
 /// offers yet (`frame.trades` is `None`) — every existing caller.
 ///
@@ -1152,9 +1152,9 @@ fn draw_container_costs(
     }
 }
 
-/// `AnvilScreen.extractLabels` (`AnvilScreen.java`): the XP cost in
+/// `AnvilScreen.extractLabels`: the XP cost in
 /// the top-right of the panel, on a translucent backdrop, right-aligned.
-/// `container_data(0)` is `AnvilMenu`'s one `DataSlot` (`AnvilMenu.java`).
+/// `container_data(0)` is `AnvilMenu`'s one `DataSlot`.
 fn draw_anvil_cost(
     b: &mut Builder<'_>,
     menu: &Menu,
@@ -1179,7 +1179,7 @@ fn draw_anvil_cost(
     } else if menu.slot_item(RESULT_SLOT).is_none() {
         None
     } else {
-        // `AnvilMenu::mayPickup` (`AnvilMenu.java`): affordable iff
+        // `AnvilMenu::mayPickup`: affordable iff
         // infinite materials, or the player's level covers the cost.
         let may_pickup = frame.has_infinite_materials || frame.xp_level >= cost;
         let colour = if may_pickup { COST_GREEN } else { COST_RED };
@@ -1208,10 +1208,9 @@ fn draw_anvil_cost(
     b.shadowed_label(&text, x + tx, y + ty, 1.0, colour);
 }
 
-/// `EnchantmentScreen.extractBackground` (`EnchantmentScreen.java`):
+/// `EnchantmentScreen.extractBackground`:
 /// the per-row level-cost number, bottom-right of each of the three offer
-/// buttons. `container_data(0..3)` are `EnchantmentMenu.costs[0..3]`
-/// (`EnchantmentMenu.java`).
+/// buttons. `container_data(0..3)` are `EnchantmentMenu.costs[0..3]`.
 ///
 /// **Deliberately does not draw the enchantment-name text.** That is
 /// `EnchantmentNames`' Standard Galactic Alphabet cipher font, a whole
@@ -1258,7 +1257,7 @@ fn draw_enchanting_costs(b: &mut Builder<'_>, menu: &Menu, frame: &ContainerFram
 /// re-expressed as normalised RGBA.
 const BEACON_LABEL_COLOUR: [f32; 4] = [0xf0 as f32 / 255.0, 0xe0 as f32 / 255.0, 0xe0 as f32 / 255.0, 1.0];
 
-/// `BeaconScreen.extractLabels`/`init` (`BeaconScreen.java`): the two centred
+/// `BeaconScreen.extractLabels`/`init`: the two centred
 /// "Primary Power"/"Secondary Power" labels, the eight power buttons and the
 /// confirm/cancel controls.
 ///
@@ -1515,7 +1514,7 @@ impl DragPreview {
 /// Resolve [`ContainerFrame::drag`] against a menu, or `None` when no drag is
 /// armed, nothing is painted, or the cursor is empty — vanilla gates the whole
 /// preview on `isQuickCrafting && quickCraftSlots.contains(slot) &&
-/// !carried.isEmpty()` (`AbstractContainerScreen.java`).
+/// !carried.isEmpty()`.
 ///
 /// Note the `single` case is still `Some`: it has to be, because it draws
 /// *nothing* in the painted cell rather than falling back to the real contents,

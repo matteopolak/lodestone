@@ -761,7 +761,7 @@ impl RenderState {
         // "the skybox ends too early and the bottom half is always black" — a
         // hard *pure black* band with a flat top edge at the horizon. Vanilla
         // clears the same target to the fog colour in a separate `"clear"` pass
-        // (`LevelRenderer.java`) and its `SkyRenderer` passes never
+        // and its `SkyRenderer` passes never
         // clear at all. `SkyFrame::clear_color` is that colour, resolved for
         // this frame's clock and eye height so it is identical to the disc's own
         // rim.

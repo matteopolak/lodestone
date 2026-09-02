@@ -98,12 +98,12 @@ pub struct ContainerBackground {
     /// [`SpecialLayout::Dispenser`]'s doc comment.
     dispenser: ResourceLocation,
     hopper: ResourceLocation,
-    /// `textures/gui/container/villager.png` (issue #245's UI half) — a
+    /// `textures/gui/container/villager.png` (UI half) — a
     /// `512×256` sheet, not `256×256` like every sheet above; the atlas
     /// placement is unaffected (see [`Self::quads`]'s `whole_panel_sized`),
     /// only the sub-rect grabbed from it (`276×166`) differs.
     merchant: ResourceLocation,
-    /// `textures/gui/container/beacon.png` (issue #613's `SetBeaconEffects`
+    /// `textures/gui/container/beacon.png` (`SetBeaconEffects`
     /// remainder) — a `256×256` sheet like every non-merchant one above, but
     /// a taller-than-usual `230×219` whole-panel blit
     /// (`BeaconScreen.java`'s `super(menu, inventory, title, 230, 219)`).
@@ -284,7 +284,7 @@ impl ContainerBackground {
         // list's doc comment (see `SpecialLayout::Hopper`).
         let hopper = ResourceLocation::new("minecraft", "gui/container/hopper")
             .expect("hardcoded location is always valid");
-        // The merchant/trading screen (issue #245's UI half): a `512×256`
+        // The merchant/trading screen (UI half): a `512×256`
         // sheet, unlike every sheet above — see the `merchant` field's own doc
         // comment for why that needs no special handling here.
         let merchant = ResourceLocation::new("minecraft", "gui/container/villager")
@@ -468,12 +468,12 @@ impl ContainerBackground {
 
     /// The Advancements screen's window blit —
     /// `graphics.blit(..., WINDOW_LOCATION, leftPos, topPos, 0, 0, 252, 140, 256,
-    /// 256)` (`AdvancementsScreen.java`).
+    /// 256)`.
     ///
     /// The `252 x 140` sample is scaled by the sprite's **real placed size**
     /// against vanilla's declared `256 x 256` sheet
     /// (`BACKGROUND_TEXTURE_WIDTH`/`HEIGHT`, `AdvancementsScreen.java`) —
-    /// issue #565's first defect ("the bottom and right side don't have UI on
+    /// first defect ("the bottom and right side don't have UI on
     /// the edges"). `window.png` has no sibling `.mcmeta` (see this struct's
     /// own doc), so a higher-resolution pack is the only way this sheet's real
     /// size can differ from 256x256, and nothing else here would notice: the
@@ -559,7 +559,7 @@ impl ContainerBackground {
     /// The creative screen's own background blit —
     /// `graphics.blit(..., selectedTab.getBackgroundTexture(), leftPos, topPos,
     /// 0, 0, imageWidth, imageHeight, 256, 256)`
-    /// (`CreativeModeInventoryScreen.java`), i.e. the top-left
+    ///, i.e. the top-left
     /// `195 x 136` window of a `256 x 256` sheet.
     ///
     /// A separate entry point from [`Self::quads`] rather than a
@@ -823,7 +823,7 @@ impl ContainerBackground {
             }])
         };
         // As `whole_panel`, but at an explicit size and declared sheet size —
-        // the hopper's `176×133` (`HopperScreen.java`), the one screen in
+        // the hopper's `176×133`, the one screen in
         // this whole family that is not vanilla's usual `166` tall, and the
         // merchant's `276×166` off a genuinely `512×256`-declared sheet.
         let whole_panel_sized = |loc: &ResourceLocation,

@@ -25,7 +25,7 @@ pub enum Origin {
     /// Java integer division — hence the `floor`.
     ScreenTop,
     /// `(floor(w / 2), floor(h / 4) + 48)` — vanilla `TitleScreen.init`'s
-    /// `topPos` (`TitleScreen.java`) for y, and the same `this.width / 2`
+    /// `topPos` for y, and the same `this.width / 2`
     /// as [`Origin::ScreenTop`] for x. Both are Java integer division, hence
     /// both `floor`s (only the y one used to be here).
     TitleTop,
@@ -33,12 +33,12 @@ pub enum Origin {
     /// `(floor((w - 212) / 2), floor((h - 166) / 4))`.
     ///
     /// That comes from `FrameLayout.alignInRectangle(grid, 0, 0, w, h, 0.5, 0.25)`
-    /// (`PauseScreen.java`), and since that fix it is *evaluated* rather than
+    ///, and since that fix it is *evaluated* rather than
     /// restated: [`layout::align_in_dimension`] applied to
     /// [`pause_grid_size`], which is the arranged
     /// [`GridLayout`](layout::GridLayout)'s own output. The `floor`s in the
     /// formula above are vanilla's truncating `(int)` cast
-    /// (`FrameLayout.java`); the two differ only for a canvas narrower
+    ///; the two differ only for a canvas narrower
     /// than the grid, which `calculate_gui_scale`'s 320 px floor rules out.
     PauseGrid,
     /// `(0, h)` — bottom-left corner text (the title screen's version string).
@@ -80,7 +80,7 @@ pub enum Origin {
     Centre,
     /// `(floor(w / 4), 0)` — the death screen's title anchor.
     /// `DeathScreen.visitText` draws it at `middleLine / 2` where
-    /// `middleLine = this.width / 2` (`DeathScreen.java`), i.e.
+    /// `middleLine = this.width / 2`, i.e.
     /// **centred on the screen's left quarter, not the middle** — this is
     /// vanilla's own layout (seemingly an oversight nobody ever fixed, not a
     /// deliberate design), reproduced faithfully rather than "corrected" to
@@ -144,7 +144,7 @@ pub enum Origin {
     /// where Delete was cannot press Yes" property is a statement about two
     /// **arranged** rects, and a restated offset could be right while the drawn
     /// rect was not. `ConfirmScreen.repositionElements` arranges the tree and then
-    /// `centerInRectangle`s it (`ConfirmScreen.java`), so the canvas is an
+    /// `centerInRectangle`s it, so the canvas is an
     /// input and the tree has to be run.
     Confirm(super::confirm::ConfirmPlacement),
     /// The command block edit screen's Done/Cancel row:
@@ -179,14 +179,14 @@ pub enum Origin {
         popup_w: f32,
     },
     /// A widget of Create New World's Game Rules sub-screen, resolved by
-    /// [`super::create_world::game_rule_placement_anchor`] (issue #592's More
+    /// [`super::create_world::game_rule_placement_anchor`] (More
     /// tab). A data-carrying variant for the same reason
     /// [`Origin::KeyBinds`]/[`Origin::Language`] are: this screen's rows are a
     /// `-`/`+` step pair plus a label, not `OptionsList`'s or `KeyBindsList`'s
     /// shape — see [`super::create_world::GameRulesEditor`]'s own module doc.
     CreateWorldGameRules(super::create_world::GameRulePlacement),
     /// A row of Create New World's Data Packs sub-screen, resolved by
-    /// [`super::create_world::data_pack_placement_anchor`] (issue #592's More
+    /// [`super::create_world::data_pack_placement_anchor`] (More
     /// tab). A data-carrying variant for the same reason
     /// [`Origin::CreateWorldGameRules`] is: this screen's rows scroll and each
     /// carries a live index — see

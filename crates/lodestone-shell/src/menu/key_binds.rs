@@ -7,7 +7,7 @@
 //! Every other settings page is `OptionsList` geometry: fixed-width columns,
 //! one widget per `addBig`/`addSmall` cell, a caption plus a value.
 //! `KeyBindsList` is a different `AbstractSelectionList` entirely
-//! (`KeyBindsList.java`): `getRowWidth()` is 340 (not 310), every row's real
+//!: `getRowWidth()` is 340 (not 310), every row's real
 //! height is a flat 20 (not `OptionsList`'s header-dependent rule), and an
 //! action row carries **two** buttons anchored from the row's *right* edge —
 //! a 75 px bind button and a 50 px reset button, 5 px apart — plus a name
@@ -65,14 +65,14 @@
 //!   (`KeyBindsList.java`, `AbstractSelectionList.java`), so the
 //!   window math here has no first-entry special case.
 //! - `getRowWidth() = 340` (`:59-61`). `getRowLeft() = x + width/2 -
-//!   rowWidth/2` (`AbstractSelectionList.java`), and this list's `x`
+//!   rowWidth/2`, and this list's `x`
 //!   is 0 (the whole canvas width), so [`ROW_LEFT`] is `width/2 - 170`.
 //! - `scrollBarX() = getRowRight() + scrollbarWidth() + 2`
-//!   (`AbstractSelectionList.java`), and `scrollbarWidth()` is the
-//!   record default `6` (`AbstractScrollArea.java`) — `width/2 + 170 + 8`.
+//!  , and `scrollbarWidth()` is the
+//!   record default `6` — `width/2 + 170 + 8`.
 //! - `KeyEntry.extractContent` (`:129-143`): `resetButtonX = scrollBarX() -
 //!   50 - 10`, `changeButtonX = resetButtonX - 5 - 75`, `buttonY =
-//!   getContentY() - 2`. `getContentY() = getY() + 2` (`AbstractSelectionList.java`),
+//!   getContentY() - 2`. `getContentY() = getY() + 2`,
 //!   so `buttonY` is exactly the entry's own `y` — a button fills its 20 px
 //!   row with no inset, unlike `OptionsList`'s 2 px content margin.
 //! - The name label draws at `(getContentX(), getContentYMiddle() - 9/2)`
@@ -93,7 +93,7 @@
 //!   ([`CATEGORY_TEXT_DY`]) rather than `FocusableTextWidget`'s real border
 //!   metrics, which this client does not model.
 //! - The footer is `LinearLayout.horizontal().spacing(8)` of two default-width
-//!   (150 px) buttons (`KeyBindsScreen.java`) — **identical** in shape
+//!   (150 px) buttons — **identical** in shape
 //!   to [`super::options::SettingsPage::Accessibility`]'s own two-button
 //!   footer, so this reuses [`super::options::Placement::Footer`] and
 //!   [`super::options::footer_rects`] directly rather than a second
@@ -141,9 +141,9 @@ const RESET_RIGHT_GAP: f32 = 10.0;
 /// `changeButtonX = resetButtonX - 5 - 75`'s gap (`:134`).
 const BIND_RESET_GAP: f32 = 5.0;
 /// `AbstractScrollArea.ScrollbarSettings` default `scrollbarWidth` (`:145`),
-/// plus `scrollBarX()`'s own `+ 2` (`AbstractSelectionList.java`).
+/// plus `scrollBarX()`'s own `+ 2`.
 const SCROLLBAR_GAP: f32 = 6.0 + 2.0;
-/// `getContentX()`'s `+2` (`AbstractSelectionList.java`).
+/// `getContentX()`'s `+2`.
 const NAME_LEFT_INSET: f32 = 2.0;
 /// The name label's line-top offset from the entry's own `y` — derived in the
 /// module docs: `getContentYMiddle() - 9/2 = (y + 10) - 4 = y + 6`.
@@ -294,7 +294,7 @@ impl KeyControl {
     /// The label drawn on the widget.
     ///
     /// `awaiting` decorates the one bind button currently capturing input
-    /// with vanilla's own `"> {name} <"` (`KeyBindsList.java`) —
+    /// with vanilla's own `"> {name} <"` —
     /// there is no `changeButton.getMessage` state to read here, so the
     /// decoration is computed fresh from the same fact
     /// [`KeyBindsNav::awaiting`] already tracks, the same "one source of
@@ -960,7 +960,7 @@ mod tests {
     /// Vanilla's registration order, not declaration order — the trap the
     /// module docs name. `Category::SORT_ORDER` is Movement, Misc,
     /// Multiplayer, Gameplay, Inventory, Creative, Spectator, Debug
-    /// (`KeyMapping.java`). `InputAction::ALL`'s own *declaration*
+    ///. `InputAction::ALL`'s own *declaration*
     /// order is different: Movement, then Gameplay (Attack/Use), then
     /// Inventory, then Multiplayer (Chat/Command/PlayerList), then Misc
     /// (TogglePerspective/Pause), then Debug — Gameplay and Inventory both

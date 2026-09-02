@@ -175,7 +175,7 @@ impl<'a> Builder<'a> {
 
     /// The anvil/enchanting-table cost numbers' own text call — vanilla's
     /// **default** `graphics.text(font, str, x, y, colour)` overload
-    /// (`GuiGraphicsExtractor.java`), which defaults `dropShadow` to
+    ///, which defaults `dropShadow` to
     /// `true`, unlike [`label`](Self::label)'s explicit `false` for the two
     /// container labels. Degrades to the same fixed-advance debug font
     /// [`label`](Self::label) does on a jar-less run.
@@ -333,7 +333,7 @@ mod tests {
     /// surface (chest, furnace, recipe panel, creative menu) actually reads
     /// `enchanted` off, so a correct `stack_has_foil` that never reached this
     /// field would still leave every one of those surfaces dark. Checks both
-    /// the reported case (issue #605's second half, an unenchanted
+    /// the reported case (second half, an unenchanted
     /// `minecraft:enchanted_book`) and a plain item as the negative control.
     #[test]
     fn icon_record_carries_the_baked_glint_override_through_to_enchanted() {

@@ -146,8 +146,8 @@ pub struct RayTarget(pub Option<RayHit>);
 ///
 /// Recomputed alongside [`RayTarget`] by `Sim::update_target`, from the same
 /// camera and against a *shorter* range: vanilla's `DEFAULT_ENTITY_INTERACTION_RANGE`
-/// is `3.0` blocks (`Player.java`) versus `DEFAULT_BLOCK_INTERACTION_RANGE`'s
-/// `4.5` (`Player.java`), and further capped by the block hit distance when
+/// is `3.0` blocks versus `DEFAULT_BLOCK_INTERACTION_RANGE`'s
+/// `4.5`, and further capped by the block hit distance when
 /// a block sits closer than that — an entity behind a wall cannot be targeted
 /// through it. Holds the target's [`lodestone_ecs::entity::MinecraftEntityId`]
 /// (the wire id `ClientAction::InteractEntity` needs), not a `bevy_ecs::Entity`,
@@ -416,7 +416,7 @@ impl NetHandle {
     }
 }
 
-/// `LocalPlayer.sendIsSprintingIfNeeded` (`LocalPlayer.java`): put the
+/// `LocalPlayer.sendIsSprintingIfNeeded`: put the
 /// sprint **edge** on the wire as a `PlayerCommand`.
 ///
 /// The source of truth is [`PhysicsState`]'s `sprinting`, which the physics tick
@@ -912,7 +912,7 @@ pub fn drive_mining(
     // Keyed on **destruction**, not on the `StopDestroy` packet.
     //
     // This is the local **prediction** half of vanilla's
-    // `MultiPlayerGameMode.destroyBlock` (`MultiPlayerGameMode.java`):
+    // `MultiPlayerGameMode.destroyBlock`:
     // it clears the block and throws the destroy-effect debris synchronously
     // on the acting client, without waiting for a server round trip. The
     // effect hangs off that method, not off any packet — `destroyBlock` calls

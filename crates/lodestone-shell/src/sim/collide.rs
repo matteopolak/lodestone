@@ -85,7 +85,7 @@ fn convert_collision_rule(rule: lodestone_game::scoreboard::CollisionRule) -> Co
 
 /// `Entity.getScoreboardName()` — the string a scoreboard team's member list
 /// actually carries. `Player.getScoreboardName()` overrides the base
-/// `Entity` behaviour to the account name (`Player.java`); every other entity
+/// `Entity` behaviour to the account name; every other entity
 /// keeps the base `Entity.java` behaviour, its own UUID rendered as a string.
 /// Getting this backwards (e.g. keying a player by UUID) would silently miss
 /// every real server's `/team join <team> <player-name>`.
@@ -152,7 +152,7 @@ impl Sim {
     ///
     /// [`VersionData::entity_facts`] answers it, from
     /// `lodestone_data::entity_census` — a table generated from a headless 26.2
-    /// server dump of all 158 entity types (`EntityCensusOracle.java`). A
+    /// server dump of all 158 entity types. A
     /// neighbour pushes the player only if vanilla's crowd pass reaches
     /// `player.push(neighbour)`, which needs three things: the type is a
     /// `LivingEntity` (the sole caller of `pushEntities()`, at
@@ -272,7 +272,7 @@ impl Sim {
                     {
                         neighbour.collision_rule = convert_collision_rule(team.collision_rule);
                         // `Team.isAlliedTo` is reference equality
-                        // (`Team.java`) — vanilla has no cross-team alliance,
+                        // — vanilla has no cross-team alliance,
                         // so "allied" collapses to "same named team", and the
                         // comparison is symmetric regardless of which side
                         // is read as `ownTeam` and which as `theirTeam`.

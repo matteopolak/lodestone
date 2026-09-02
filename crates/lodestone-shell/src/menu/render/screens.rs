@@ -32,7 +32,7 @@ pub(super) fn version_line() -> String {
 /// rects (see [`pause_slot`] and [`super::nav::PauseButton`]) — **ten** of
 /// them, six present-and-disabled, or **nine** once the hosted world is
 /// published and [`super::nav::MenuNav::pause_buttons`] drops
-/// [`super::nav::PauseButton::OpenToLan`] (issue #535's scope 2; see that
+/// [`super::nav::PauseButton::OpenToLan`] (scope 2; see that
 /// variant's own doc for why an *omission* rather than a disabled row) — with
 /// the highlight tracking [`super::nav::MenuNav::pause_index`].
 ///
@@ -73,8 +73,8 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
         blur: true,
         vanilla: true,
         // `PauseScreen.init` adds a `StringWidget` with the screen title at
-        // y=40 when the pause menu is showing (`PauseScreen.java`); the
-        // title itself is `menu.game` == "Game Menu" (`PauseScreen.java`).
+        // y=40 when the pause menu is showing; the
+        // title itself is `menu.game` == "Game Menu".
         labels: vec![MenuLabel {
             text: "Game Menu".to_string(),
             origin: Origin::ScreenTop,
@@ -89,7 +89,7 @@ pub fn pause_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
 }
 
 /// The score line's format, vanilla's `deathScreen.score.value` with the
-/// value substituted (`DeathScreen.java`).
+/// value substituted.
 const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 
 /// Builds the death screen's overlay frame: vanilla's
@@ -110,7 +110,7 @@ const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 /// `message` is the server's own death message
 /// (`net::NetUpdate::Death`/`Sim::death_message`, already flattened to plain
 /// text) — `None` draws no message line, matching vanilla's own `if
-/// (this.causeOfDeath != null)` guard (`DeathScreen.java`).
+/// (this.causeOfDeath != null)` guard.
 ///
 /// Two simplifications named rather than silently taken:
 /// - **No hardcore variant.** This client has no hardcore mode (nothing
@@ -142,7 +142,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
 
     let mut labels = vec![
         // `output.defaultParameters(normalParameters.withScale(2.0F))` then
-        // drawn at `(middleLine / 2, 30)` (`DeathScreen.java`) — see
+        // drawn at `(middleLine / 2, 30)` — see
         // `Origin::DeathTitle`'s doc for why that x is `width / 4`, not the
         // screen centre.
         MenuLabel {
@@ -159,7 +159,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
         && !text.is_empty()
     {
         // `output.accept(CENTER, middleLine, 85, this.causeOfDeath)`
-        // (`DeathScreen.java`) — `middleLine == width / 2`, i.e.
+        // — `middleLine == width / 2`, i.e.
         // `Origin::ScreenTop`, at normal (1.0) scale.
         labels.push(MenuLabel {
             text: text.to_string(),
@@ -172,7 +172,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
         });
     }
     // `output.accept(CENTER, middleLine, 100, this.deathScore)`
-    // (`DeathScreen.java`) — always drawn, message or not.
+    // — always drawn, message or not.
     labels.push(MenuLabel {
         text: DEATH_SCORE_UNTRACKED.to_string(),
         origin: Origin::ScreenTop,
@@ -212,8 +212,7 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
 ///
 /// Like [`pause_frame`]/[`death_frame`], not gated by [`owns_frame`]: the
 /// world keeps rendering (and, on a live server, ticking) behind it, matching
-/// vanilla's own `isInGameUi() == true`
-/// (`AbstractCommandBlockEditScreen.java`).
+/// vanilla's own `isInGameUi() == true`.
 ///
 /// `tree` carries the real server's command tree. This used to read "threaded
 /// through purely so this function is testable — every production caller passes
@@ -253,7 +252,7 @@ pub fn command_block_frame(
         },
     ];
     // Vanilla's own guard is `!previousEdit.getValue().isEmpty()`
-    // (`AbstractCommandBlockEditScreen.java`), which a freshly
+    //, which a freshly
     // `setValue("-")`-ed box always passes — see
     // `CommandBlockState::previous_output_text`'s own doc.
     if !state.previous_output_text().is_empty() {
@@ -1078,12 +1077,12 @@ pub fn loading_frame_with_progress_and_grid(
 // -- vanilla's `DisconnectedScreen` metrics -----------------------------------
 
 /// `Button.builder(…).width(200)`, every call site
-/// (`DisconnectedScreen.java`) — not [`widget::DEFAULT_WIDTH`]'s
+/// — not [`widget::DEFAULT_WIDTH`]'s
 /// 150.
 const ERROR_BUTTON_W: f32 = 200.0;
 /// Room reserved above the bottom edge for the one button this screen draws:
 /// [`WIDGET_H`] plus a margin roughly matching vanilla's `padding(2)` between
-/// stack children (`DisconnectedScreen.java`) plus some slack so the
+/// stack children plus some slack so the
 /// button never crowds the edge on a small canvas.
 const ERROR_BUTTON_BOTTOM_MARGIN: f32 = WIDGET_H + 20.0;
 /// Where the title sits, from [`Origin::ScreenTop`].
@@ -1098,7 +1097,7 @@ const ERROR_TITLE_Y: f32 = 40.0;
 /// The wrap column the reason text is bounded to.
 ///
 /// Vanilla bounds its `MultiLineTextWidget` to `this.width - 50`
-/// (`DisconnectedScreen.java`), which is canvas-*dependent* and therefore
+///, which is canvas-*dependent* and therefore
 /// not expressible as a fixed [`MenuNotice::w`] (the same reason
 /// [`ACCOUNTS_ROW_W`] is fixed rather than derived per-canvas). Sized off
 /// [`crate::config::MIN_SCALED_WIDTH`] so it is correct even at the smallest
@@ -1106,7 +1105,7 @@ const ERROR_TITLE_Y: f32 = 40.0;
 /// trade [`super::options::LIST_WINDOW_PX`] makes vertically.
 const ERROR_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
 
-/// Builds vanilla's `DisconnectedScreen` (issue #392's framework epic — this
+/// Builds vanilla's `DisconnectedScreen` (framework epic — this
 /// screen was still the pre-framework centred row stack, with no [`Slot`] on
 /// its row and no wrapped-text bound on its reason, until now):
 /// title, the disconnect reason wrapped and bounded exactly like
@@ -1234,7 +1233,7 @@ pub(super) fn error_frame(end: Option<&SessionEnd>) -> MenuFrame<'static> {
 //    this project rather than borrowing vanilla's.
 //
 // So this screen is a short, honestly-Lodestone-authored placeholder: it
-// proves the screen/session-teardown mechanism (issue #192's own scope is
+// proves the screen/session-teardown mechanism (own scope is
 // "the scrolling text screen itself" plus "the trigger", and the trigger is
 // out of this crate's ownership for this batch — see [`super::Screen::Credits`]'s
 // doc) without inventing scroll geometry that has no elapsed-time input to

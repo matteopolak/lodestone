@@ -508,7 +508,7 @@ fn the_drop_key_needs_an_item_in_the_slot_but_not_an_empty_cursor() {
 
 /// Unlike middle-click, the pick-block **key** is not gated on infinite
 /// materials at the screen layer: `keyPressed` (`:496-497`) sends CLONE
-/// unconditionally and `doClick` (`AbstractContainerMenu.java`) is where
+/// unconditionally and `doClick` is where
 /// `hasInfiniteMaterials()` lives. The control is the mouse path in the same
 /// state, which *is* gated — so this asserts a real difference between the
 /// two entry points rather than restating one of them.
@@ -625,7 +625,7 @@ fn shift_double_click_gathers_only_matching_slots_in_the_same_backing_container(
 
 /// Control for the test above: `last_quick_moved` is captured off the
 /// double-clicked slot's *own* contents at press time
-/// (`AbstractContainerScreen.java`), so shift+double-clicking an
+///, so shift+double-clicking an
 /// **empty** slot records vanilla's `ItemStack.EMPTY` — and
 /// `!this.lastQuickMoved.isEmpty()` then suppresses the gather entirely,
 /// sending nothing. This proves the emitted clicks in the test above come
@@ -683,7 +683,7 @@ fn result_and_cursor(result_count: i32, carried_count: i32) -> Menu {
 /// which is the only click that reaches the cursor-merge arm.
 ///
 /// Hand-derived from `AbstractContainerScreen.java`: the result
-/// slot's `mayPlace` is `false` (`ResultSlot.java`), so
+/// slot's `mayPlace` is `false`, so
 /// `shouldAddSlotToQuickCraft` is `false`, `quickCraftSlots` stays empty, and
 /// `mouseReleased`'s `isQuickCrafting && !quickCraftSlots.isEmpty()` test
 /// fails into the `else if (!carried.isEmpty())` branch at `:420-430`.
@@ -775,7 +775,7 @@ fn the_paint_gate_also_honours_item_identity_and_the_cursor_count() {
     let dirt = |n: i32| ItemStack::new("minecraft:dirt".parse().unwrap(), n);
 
     // `canItemQuickReplace`: an occupied cell holding a *different* item is
-    // never painted (`AbstractContainerMenu.java`).
+    // never painted.
     let mut mismatched = Menu::generic(9);
     mismatched.set_slot_item(0, Some(dirt(1)));
     mismatched.set_carried(Some(stick(8)));
@@ -934,7 +934,7 @@ fn a_painted_drag_changes_the_geometry_it_would_not_otherwise() {
 }
 
 /// Vanilla's `extractSlot` **returns before drawing anything** when exactly
-/// one cell is painted (`AbstractContainerScreen.java`), so that cell
+/// one cell is painted, so that cell
 /// blanks — including whatever it already held. Easy to miss, and visible:
 /// the drag is about to be re-dispatched as an ordinary click.
 #[test]
@@ -1079,7 +1079,7 @@ fn background_kind_recognises_the_six_menus_issue_28_added() {
     );
 }
 
-/// The hopper — not one of issue #28's own named containers, but found
+/// The hopper — not one of own named containers, but found
 /// while documenting the family it was almost mistaken for already
 /// covering (see `SpecialLayout::Hopper`'s doc comment). The control
 /// proves it is keyed on `special_layout`, not merely on size: a
@@ -1101,9 +1101,9 @@ fn background_kind_recognises_the_hopper_as_a_shorter_panel_not_a_generic_row() 
 }
 
 /// The hopper's own panel is genuinely shorter than every other special
-/// layout — `176×133`, not `166` (`HopperScreen.java`) — because its
+/// layout — `176×133`, not `166` — because its
 /// `addStandardInventorySlots` call uses `main_y = 51`, not `84`
-/// (`HopperMenu.java`). The wrong hypothesis this rules out: reusing
+///. The wrong hypothesis this rules out: reusing
 /// the other special layouts' fixed `84.0` would still produce a
 /// plausible-looking layout, just one 33px taller than the real panel,
 /// with the hopper's own five slots overlapping the top of the main
@@ -1134,7 +1134,7 @@ fn hopper_slots_land_at_vanillas_real_positions_on_a_shorter_panel() {
 }
 
 /// The beacon's one payment slot lands at vanilla's real position
-/// (`BeaconMenu.java:50`), on a panel that is both wider (`230`, not `176`)
+///, on a panel that is both wider (`230`, not `176`)
 /// and taller (`219`, not `166`) than the usual special layout — the two
 /// wrong hypotheses this rules out are reusing either the default panel
 /// width or the default `main_y = 84`.
@@ -1162,7 +1162,7 @@ fn beacon_slot_lands_at_vanillas_real_position_on_a_wider_taller_panel() {
 /// `GENERIC_9x1`..`GENERIC_9x6` shape every chest, barrel, shulker box and
 /// trapped/ender chest uses — computed the player-inventory row origin as
 /// `18 + rows*18 + 14`, one off from `ChestMenu`'s own constructor:
-/// `int inventoryTop = 18 + this.containerRows * 18 + 13;` (`ChestMenu.java`).
+/// `int inventoryTop = 18 + this.containerRows * 18 + 13;`.
 /// A row-count-independent constant, not a scaled term, so the drift is
 /// identical at every chest size — checked here at both ends of the real
 /// range (`1` row and `6` rows) rather than only the common 3-row case, so a
@@ -1210,7 +1210,7 @@ fn background_kind_recognises_the_beacon() {
 }
 
 /// The anvil's three slots land at vanilla's real positions
-/// (`AnvilMenu.java`), not [`generic_layout`]'s plain left-to-right
+///, not [`generic_layout`]'s plain left-to-right
 /// row — and the panel is the real `176x166`, not whatever height a
 /// 3-slot generic container's single row would compute.
 #[test]
@@ -1353,7 +1353,7 @@ fn anvil_cost_reaches_pixels_and_colours_by_affordability() {
 
 /// The enchanting table's three per-row level costs: reach pixels, in
 /// vanilla's own affordable/disabled colours
-/// (`EnchantmentScreen.java`). Deliberately does not check the
+///. Deliberately does not check the
 /// enchantment-name text — this build has no Standard Galactic Alphabet
 /// glyphs, see [`draw_enchanting_costs`]'s doc.
 #[test]
@@ -1613,12 +1613,12 @@ fn synthetic_background_with_window_size(window_w: u32, window_h: u32) -> Contai
         "cartography_table",
         "dispenser",
         "hopper",
-        // The beacon screen (issue #613's `SetBeaconEffects` remainder) —
+        // The beacon screen (`SetBeaconEffects` remainder) —
         // loaded by `ContainerBackground::build` alongside the sixteen
         // above, so a missing stand-in fails every test in this module
         // rather than just the beacon ones.
         "beacon",
-        // The merchant screen (issue #245's UI half) — real `villager.png` is
+        // The merchant screen (UI half) — real `villager.png` is
         // `512x256`, but the stand-in only needs to exist; `whole_panel_sized`
         // grabs a `276x166` sub-rect regardless of the sheet's own dimensions,
         // the same way it already does for every sheet in this list.
@@ -1682,19 +1682,19 @@ fn synthetic_background_with_window_size(window_w: u32, window_h: u32) -> Contai
         } else if id == BREWING_BUBBLES {
             (12, 29)
         } else if id.starts_with("container/creative_inventory/tab_") {
-            // `26 x 32` (`CreativeModeInventoryScreen.java`).
+            // `26 x 32`.
             (26, 32)
         } else if id.starts_with("container/creative_inventory/scroller") {
             // `12 x 15` (`:753`).
             (12, 15)
         } else if id.starts_with("advancements/tab_") {
-            // `28 x 32` for `AdvancementTabType.ABOVE` (`AdvancementTabType.java`).
+            // `28 x 32` for `AdvancementTabType.ABOVE`.
             (28, 32)
         } else if id.ends_with("_frame_obtained") || id.ends_with("_frame_unobtained") {
-            // `26 x 26` (`AdvancementWidget.java`).
+            // `26 x 26`.
             (26, 26)
         } else if id == "advancements/title_box" {
-            // `200 x 26` — `BOX_WIDTH` by `HEIGHT` (`AdvancementWidget.java`).
+            // `200 x 26` — `BOX_WIDTH` by `HEIGHT`.
             (200, 26)
         } else {
             (CELL as u32, CELL as u32)
@@ -1824,7 +1824,7 @@ fn an_anvil_titles_at_vanillas_fixed_sixty_not_the_usual_eight() {
 }
 
 /// The centred family, `(imageWidth - font.width(title)) / 2` floored
-/// (`AbstractFurnaceScreen.java`). Reusing this crate's own
+///. Reusing this crate's own
 /// `VanillaFont::width` is not circular: the glyph metrics are validated by
 /// the font's own gates, so what this pins is the **centring arithmetic**.
 ///
@@ -2002,7 +2002,7 @@ fn geo_with_background_and_data(menu: &Menu, data: &[(i32, i32)]) -> ContainerGe
 }
 
 /// The furnace family's lit-flame and burn-progress bars
-/// (`AbstractFurnaceScreen.java`), driven entirely by
+///, driven entirely by
 /// `frame.cost_data` — the same `container_set_data` feed the
 /// anvil/enchanting cost lines already read, so this needs no new
 /// wiring to reach `app.rs`. `data[0]` litTime `100`, `data[1]`
@@ -2060,7 +2060,7 @@ fn control_an_unlit_furnace_with_no_container_data_draws_neither_bar() {
 }
 
 /// The brewing stand's three progress widgets
-/// (`BrewingStandScreen.java`). `data[1]` fuel `15` gives
+///. `data[1]` fuel `15` gives
 /// `fuelLength = (18*15+19)/20 = 14`; `data[0]` brewingTicks `100` gives
 /// `brewLength = floor(28*(1 - 100/400)) = 21` and
 /// `bubbleLength = BUBBLELENGTHS[(100/2) % 7] = BUBBLELENGTHS[1] = 24`.
@@ -2424,7 +2424,7 @@ fn id(name: &str) -> lodestone_model::Identifier {
 /// rejected hypothesis. Both hypotheses were wrong, because both placed
 /// the book relative to the **container panel**. Vanilla's
 /// `getXOrigin()` is `(width - 147) / 2 - xOffset`
-/// (`RecipeBookComponent.java`) — screen-centred — and the
+/// — screen-centred — and the
 /// *panel* is what moves (`updateScreenPosition`).
 ///
 /// So the expected value now comes from that expression, computed here
@@ -2832,7 +2832,7 @@ fn logical_view_h() -> i32 {
 ///
 /// This is the owner-reported bug, and the shipped value was the crafting
 /// table's, applied to every screen. `getRecipeBookButtonPosition` is
-/// `abstract` with no default (`AbstractRecipeBookScreen.java`) and each
+/// `abstract` with no default and each
 /// family overrides it:
 ///
 /// | screen | absolute (jar) | local |
@@ -3344,7 +3344,7 @@ fn recipe_panel_emits_vanillas_art_in_an_order_that_cannot_bury_a_control() {
 
     // Tabs: `panel_geo_for` selects tab 0, so exactly one is the selected art
     // and it is nudged 2 px left of its own hit rect
-    // (`RecipeBookTabButton.java`) while the rest are not.
+    // while the rest are not.
     let selected = find(RECIPE_SPRITE_TAB_SELECTED);
     let plain = find(RECIPE_SPRITE_TAB);
     assert_eq!(selected.len(), 1, "one tab is selected");
@@ -4114,7 +4114,7 @@ fn advanced_tooltips_add_lines_to_the_recipe_tooltip() {
     );
 }
 
-// -- merchant screen (issue #245's UI half) --------------------------------
+// -- merchant screen (UI half) --------------------------------
 
 /// Builds the merchant `Menu` through the **real** dispatch path — a
 /// synthesized `ScreenOpened` + `ContainerContent`, exactly what a live
