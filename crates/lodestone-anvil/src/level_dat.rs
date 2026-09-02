@@ -169,6 +169,13 @@ fn compound_field<'a>(nbt: &'a Nbt, name: &str) -> Option<&'a Nbt> {
         .map(|(_, value)| value)
 }
 
+fn compound_fields_mut(nbt: &mut Nbt) -> Option<&mut Vec<(String, Nbt)>> {
+    match nbt {
+        Nbt::Compound(fields) => Some(fields),
+        _ => None,
+    }
+}
+
 /// Builds the `spawn` compound in the field order the real 26.2 files carry.
 fn spawn_to_nbt(spawn: &Spawn) -> Nbt {
     Nbt::Compound(vec![
@@ -217,6 +224,15 @@ impl LevelDat {
     #[must_use]
     pub fn data(&self) -> Option<&Nbt> {
         compound_field(&self.root, DATA_FIELD)
+    }
+
+    /// The `"Data"` compound's field list, mutably, if the root has one in the
+    /// shape [`Self::from_data`]/[`Self::for_new_world`] build.
+    fn data_fields_mut(&mut self) -> Option<&mut Vec<(String, Nbt)>> {
+        compound_fields_mut(&mut self.root)?
+            .iter_mut()
+            .find(|(name, _)| name == DATA_FIELD)
+            .and_then(|(_, value)| compound_fields_mut(value))
     }
 
     /// The `"DataVersion"` field inside `"Data"`, per this module's doc.
@@ -303,6 +319,48 @@ impl LevelDat {
         ]))
     }
 
+    /// Adds vanilla's `enabled_features` field to the `"Data"` compound —
+    /// `WorldDataConfiguration.enabledFeatures`
+    /// (`FeatureFlagRegistry::codec`'s `Identifier.CODEC.listOf()`), for the
+    /// experimental feature flags a player turned on in Create New World's
+    /// Experiments screen (issue #693's Experiments half).
+    ///
+    /// `ids` are bare flag ids with no namespace — [`ExperimentFlag`]'s own
+    /// `id()` shape (`lodestone_shell::menu::create_world`, not depended on
+    /// from here, so the caller passes plain strings). The written list
+    /// always carries `"minecraft:vanilla"` alongside them: every real
+    /// `FeatureFlagSet` a freshly created world can have already contains it
+    /// (`FeatureFlags.DEFAULT_FLAGS`), and vanilla's own construction path
+    /// only ever *joins* onto that default (`WorldDataConfiguration::expandFeatures`)
+    /// rather than replacing it. Each id gets the `minecraft:` namespace
+    /// `Identifier`'s wire form always carries.
+    ///
+    /// A no-op for an empty slice, deliberately not folded into
+    /// [`Self::for_new_world`]: every real 26.2 `level.dat` this crate has
+    /// measured (this module's own doc) omits `enabled_features` entirely,
+    /// because every measured world had no experiment turned on — the
+    /// vanilla codec's `lenientOptionalFieldOf` default. Writing the field
+    /// only when the player actually chose something keeps that parity for
+    /// the common case instead of adding a field vanilla itself would not.
+    #[must_use]
+    pub fn with_enabled_features(mut self, ids: &[String]) -> Self {
+        if ids.is_empty() {
+            return self;
+        }
+        let mut elements = vec![Nbt::String("minecraft:vanilla".to_string())];
+        elements.extend(ids.iter().map(|id| Nbt::String(format!("minecraft:{id}"))));
+        if let Some(fields) = self.data_fields_mut() {
+            fields.push((
+                "enabled_features".to_string(),
+                Nbt::List {
+                    element_type: NbtTag::String,
+                    elements,
+                },
+            ));
+        }
+        self
+    }
+
     /// The world's display name, or `None` if absent or mistyped.
     #[must_use]
     pub fn level_name(&self) -> Option<&str> {
@@ -318,6 +376,27 @@ impl LevelDat {
         match compound_field(self.data()?, GAME_TYPE_FIELD) {
             Some(Nbt::Int(kind)) => Some(*kind),
             _ => None,
+        }
+    }
+
+    /// `enabled_features`, verbatim (with whatever namespace the list carries,
+    /// `minecraft:` for everything [`Self::with_enabled_features`] writes) —
+    /// empty if the field is absent, matching vanilla's own default
+    /// (`FeatureFlags.DEFAULT_FLAGS`, no experiment turned on).
+    #[must_use]
+    pub fn enabled_features(&self) -> Vec<String> {
+        let Some(data) = self.data() else {
+            return Vec::new();
+        };
+        match compound_field(data, "enabled_features") {
+            Some(Nbt::List { elements, .. }) => elements
+                .iter()
+                .filter_map(|element| match element {
+                    Nbt::String(id) => Some(id.clone()),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -749,6 +828,49 @@ mod tests {
         assert_eq!(fresh.level_name(), Some("New World"));
         assert_eq!(fresh.time(), Some(0));
         assert_eq!(fresh.spawn().expect("has spawn").pos, [0, 64, 0]);
+    }
+
+    /// **An empty flag list must not add a field**, matching every real 26.2
+    /// `level.dat` this crate has measured (no `enabled_features` at all — see
+    /// this module's own 14-field doc) and keeping
+    /// [`a_new_world_carries_exactly_the_real_schemas_field_set`]'s schema
+    /// assertion true for the common case of a world where nothing was ever
+    /// toggled.
+    #[test]
+    fn with_enabled_features_is_a_no_op_for_an_empty_slice() {
+        let plain = LevelDat::for_new_world("New World", &Spawn::default(), 0);
+        let untouched = plain.clone().with_enabled_features(&[]);
+        assert_eq!(
+            untouched, plain,
+            "an empty flag list must leave the level.dat byte-for-byte identical"
+        );
+        assert!(untouched.enabled_features().is_empty());
+    }
+
+    /// **The real path a toggled Experiments flag takes to disk** (issue #693):
+    /// `with_enabled_features`, a real gzip round trip, and read back with
+    /// [`LevelDat::enabled_features`] — a decoder sharing its parsing with
+    /// every other accessor in this file but not with the encoder under test,
+    /// so this is not the closed `decode(encode(x)) == x` loop this repo's own
+    /// evidence rules warn against on its own; the real safeguard is
+    /// [`re_encoding_a_real_vanilla_file_reproduces_mojangs_own_bytes`]
+    /// pinning this crate's writer against Mojang's own bytes elsewhere in
+    /// this schema, and vanilla's `FeatureFlagRegistry::codec` (this method's
+    /// doc) fixing the `minecraft:`-namespaced list shape being asserted here.
+    #[test]
+    fn with_enabled_features_round_trips_the_chosen_flags_plus_vanilla() {
+        let level = LevelDat::for_new_world("New World", &Spawn::default(), 0)
+            .with_enabled_features(&["redstone_experiments".to_string()]);
+        let round_tripped = read(&write(&level).expect("encodes")).expect("decodes");
+        assert_eq!(
+            round_tripped.enabled_features(),
+            vec![
+                "minecraft:vanilla".to_string(),
+                "minecraft:redstone_experiments".to_string(),
+            ],
+            "the base vanilla flag must survive alongside the chosen one, both \
+             carrying the minecraft: namespace Identifier's wire form uses"
+        );
     }
 
     /// A read/modify/write cycle must not drop or reorder the fields this

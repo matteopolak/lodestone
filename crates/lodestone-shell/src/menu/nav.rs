@@ -4396,7 +4396,12 @@ impl MenuNav {
                     return MenuAction::Singleplayer(SingleplayerLaunch::Created { config });
                 }
                 #[cfg(not(target_arch = "wasm32"))]
-                match crate::saves::create_world_in(&self.saves_root, &config.name, game_type) {
+                match crate::saves::create_world_in(
+                    &self.saves_root,
+                    &config.name,
+                    game_type,
+                    &config.experiments,
+                ) {
                     Ok(world_dir) => {
                         MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, config })
                     }
@@ -8887,6 +8892,88 @@ mod tests {
             ui.screen(),
             Screen::CreateWorld,
             "the nav layer must not leave the screen; begin_singleplayer does that"
+        );
+    }
+
+    /// **Toggling an Experiments flag reaches a real `level.dat` on disk**
+    /// (issue #693's Experiments half stops being decorative).
+    ///
+    /// Before this, `WorldCreationConfig::experiments` was collected and
+    /// discarded: nothing between here and the freshly created world's save
+    /// data ever read it. This drives the exact screen flow a player uses —
+    /// World Creation, the More tab, the Experiments row, one toggle, Done,
+    /// Create — through `nav.click`, the same dispatch
+    /// `creating_a_world_asks_the_app_to_start_singleplayer_with_the_typed_seed`
+    /// uses for the Seed field, so it fails if `apply_create_world` or
+    /// `saves::create_world_in` ever stops threading the flag through. The
+    /// assertion reads the written file back with
+    /// `lodestone_anvil::level_dat::read_from_file` — a decoder sharing no
+    /// code with `LevelDat::with_enabled_features`, per this repo's own rule
+    /// that `decode(encode(x)) == x` against one's own writer proves nothing.
+    #[test]
+    fn toggling_an_experiment_and_creating_writes_enabled_features_to_level_dat() {
+        use crate::menu::create_world::{CREATE_ROW, EXPERIMENTS_ROW, MORE_TAB};
+        use crate::menu::world_select::WorldSelectButton as B;
+
+        let (mut nav, _) = self::nav("create-world-experiments");
+        let mut ui = UiState::new();
+        nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(ui.screen(), Screen::WorldSelect, "premise");
+        assert_eq!(nav.click(&mut ui, B::Create.row()), MenuAction::None);
+        assert_eq!(ui.screen(), Screen::CreateWorld, "premise: World Creation is open");
+
+        // Experiments lives on the More tab (issue #567's tab layout).
+        assert_eq!(nav.click(&mut ui, MORE_TAB), MenuAction::None);
+        let experiments_row = nav
+            .create_world()
+            .frame_row_for_focus_id(EXPERIMENTS_ROW)
+            .expect("the Experiments row is visible on the More tab");
+        assert_eq!(nav.click(&mut ui, experiments_row), MenuAction::None);
+        assert!(
+            nav.create_world().experiments_open(),
+            "premise: the click opened the Experiments sub-screen"
+        );
+        // Toggle(1) == RedstoneExperiments (`ExperimentFlag::ALL`), then Done —
+        // the sub-editor's own row space, exactly as `click_row` dispatches
+        // while `CreateWorldMode::Experiments` is active.
+        assert_eq!(nav.click(&mut ui, 1), MenuAction::None);
+        // Done is the row right after the three toggles (`ALL_EXPERIMENT_CONTROLS`,
+        // private to `create_world.rs`): `Toggle(0)`, `Toggle(1)`, `Toggle(2)`, `Done`.
+        let done_row = crate::menu::create_world::ExperimentFlag::ALL.len();
+        assert_eq!(nav.click(&mut ui, done_row), MenuAction::None);
+        assert!(
+            !nav.create_world().experiments_open(),
+            "Done must leave the sub-editor, back onto the More tab"
+        );
+
+        let create_row = nav
+            .create_world()
+            .frame_row_for_focus_id(CREATE_ROW)
+            .expect("Create is always visible, on every tab");
+        let action = nav.click(&mut ui, create_row);
+        let MenuAction::Singleplayer(SingleplayerLaunch::Created { world_dir, config }) = action
+        else {
+            panic!("expected MenuAction::Singleplayer(Created {{ .. }}), got {action:?}");
+        };
+        assert_eq!(
+            config.experiments,
+            vec!["redstone_experiments".to_string()],
+            "the action's own config must carry the one toggled flag"
+        );
+
+        let level = lodestone_anvil::level_dat::read_from_file(
+            &lodestone_anvil::level_dat::path_in(&world_dir),
+        )
+        .expect("apply_create_world must have written a decodable level.dat");
+        assert_eq!(
+            level.enabled_features(),
+            vec![
+                "minecraft:vanilla".to_string(),
+                "minecraft:redstone_experiments".to_string(),
+            ],
+            "the real level.dat on disk must carry vanilla's own enabled_features \
+             shape for the flag the player actually toggled — read back with the \
+             crate's real decoder, not asserted against the writer's own input"
         );
     }
 
