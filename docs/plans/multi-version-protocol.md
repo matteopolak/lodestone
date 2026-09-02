@@ -484,7 +484,7 @@ output): 1.8 stone `1:0` had been decoding as `minecraft:spruce_planks`, bedrock
 canonicalisation retrofit.** Same shape as U3, different mechanism than originally
 planned: this landed as a **direct name/properties bridge**, not the DFU-walk-against-the-
 26.2-jar oracle this entry originally specified. Both sides' `(name, properties)` come
-straight from Mojang's own data generator (`net.minecraft.data.Main --reports`) — the
+straight from Mojang's own data-generator tool, invoked with its reports flag — the
 1.16.5 side run fresh against `.cache/mc/1.16.5/server.jar` under Apple `container`
 (`tests/support/blocks_1_16_5_jar.json`, committed), the 26.2 side already available via
 `lodestone_data::block_states` — matched through a reverse index exactly like

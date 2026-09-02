@@ -84,8 +84,8 @@ position/rotation already use, no new plumbing — plus `ServerProtocol::encode_
 radius)`, fed from a new `MobSim::take_detonations()` drain and an `ExplosionFeed`
 (`crate::tick`, the same publish/drain_all idiom `BlockTickFeed` already establishes).
 `V770ServerProtocol`'s implementations of both are byte-format-verified against the
-`EntityDataIndexOracle` dump (indices 16/18) and Mojang's decompiled
-`ClientboundExplodePacket`/`Level.java`/`ServerExplosion.java` respectively, not guessed from
+`EntityDataIndexOracle` dump (indices 16/18) and Mojang's decompiled sources for the explosion
+packet and its two server-side callers respectively, not guessed from
 our own decoder. See `crates/protocol/v770/tests/server_creeper_metadata_and_explode.rs` for
 the gate: encodes with our own server, decodes with the real, already-live-validated
 `V770Adapter`.
@@ -134,7 +134,7 @@ A same-day pass closed the four client-side (not server-side) gaps this doc's ow
   session's packets.
 - **Cookies and transfers were dead ends.** Added `ClientAction::CookieResponse`
   (Login/Configuration/Play, one wire shape) and an in-memory cookie store on the driver
-  mirroring vanilla's own `ClientCommonPacketListenerImpl.serverCookies`. `transfer` now
+  mirroring vanilla's own per-connection cookie store on its common packet listener. `transfer` now
   ends the session with `SessionOutcome::Transferred { host, port, cookies }` rather than
   reaching nothing — short of a silent reconnect, since the driver has no generic way to
   open a new transport from inside itself (native TCP and wasm32 are different
@@ -475,8 +475,8 @@ wired" versus "the cryptography does not exist at all, in either role":
   parse (`player_info_update`'s `INITIALIZE_CHAT`) is explicitly discarded rather than
   stored. Filed as #283 (client) and #271 (server — a strictly harder problem, since a
   server must *verify*, not just produce).
-- **Concrete, sourced consequence**: per `.cache/mc/26.2/src`'s
-  `ServerGamePacketListenerImpl.handleMessageDecodeFailure`, a real server with
+- **Concrete, sourced consequence**: per `.cache/mc/26.2/src`'s own
+  message-decode-failure handling on the server side, a real server with
   `enforce-secure-profile=true` silently drops (not kicks) every message we send today.
   Servers with it off show our chat as "not secure" but still deliver it.
 
