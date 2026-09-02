@@ -133,20 +133,9 @@ pub struct RelEntityMove {
     pub on_ground: bool,
 }
 
-/// Clientbound `entity_look` — a rotation-only update.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:entity_look", state = Play, bound = Client)]
-pub struct EntityLook {
-    /// Entity id.
-    #[mc(varint)]
-    pub entity_id: i32,
-    /// Yaw as a signed-byte angle (`256` = 360°).
-    pub yaw: i8,
-    /// Pitch as a signed-byte angle.
-    pub pitch: i8,
-    /// Whether the entity is on the ground.
-    pub on_ground: bool,
-}
+// `EntityLook` is byte-identical across v47/v340/v735 (measured), shared via
+// `lodestone-protocol-common` -- see `packets::entity`'s module docs.
+pub use lodestone_protocol_common::packets::entity::EntityLook;
 
 /// Clientbound `entity_move_look` — a combined relative move and rotation.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
@@ -195,20 +184,10 @@ pub struct EntityTeleport {
     pub on_ground: bool,
 }
 
-/// Clientbound `entity_velocity` — a velocity update in `1/8000` block/tick.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:entity_velocity", state = Play, bound = Client)]
-pub struct EntityVelocityPacket {
-    /// Entity id.
-    #[mc(varint)]
-    pub entity_id: i32,
-    /// Velocity X in `1/8000` block/tick.
-    pub velocity_x: i16,
-    /// Velocity Y in `1/8000` block/tick.
-    pub velocity_y: i16,
-    /// Velocity Z in `1/8000` block/tick.
-    pub velocity_z: i16,
-}
+// `EntityVelocityPacket` is byte-identical across v47/v340/v735 (measured),
+// shared via `lodestone-protocol-common` -- see `packets::entity`'s module
+// docs.
+pub use lodestone_protocol_common::packets::entity::EntityVelocityPacket;
 
 /// Clientbound `entity_destroy` — a varint-counted list of varint entity ids to
 /// remove.
@@ -401,18 +380,6 @@ pub struct RemoveEntityEffect {
     pub effect_id: i8,
 }
 
-/// Clientbound `entity_destroy` — a varint-counted list of varint entity ids to
-/// remove.
-///
-/// Previously hand-decoded because the derive macro could not express a `Vec`
-/// whose *elements* are varints (only the length prefix was varint). That gap
-/// was reported to `lodestone-macros` and closed: `#[mc(varint)]` on a
-/// `Vec<i32>` now encodes the length **and** each element as a varint, so this
-/// is an ordinary derived struct.
-#[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:entity_destroy", state = Play, bound = Client)]
-pub struct EntityDestroy {
-    /// Entity ids to remove.
-    #[mc(varint)]
-    pub entity_ids: Vec<i32>,
-}
+// `EntityDestroy` is byte-identical across v47/v340/v735 (measured), shared
+// via `lodestone-protocol-common` -- see `packets::entity`'s module docs.
+pub use lodestone_protocol_common::packets::entity::EntityDestroy;

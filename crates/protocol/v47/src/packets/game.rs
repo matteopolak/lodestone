@@ -282,23 +282,9 @@ pub struct UseEntityAt {
     pub z: f32,
 }
 
-/// Serverbound `entity_action` (player command) — sneak, sprint, leave bed, and
-/// vehicle actions.
-///
-/// Wire layout: varint entity id, varint action id, varint jump boost.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:entity_action", state = Play, bound = Server)]
-pub struct EntityAction {
-    /// Player entity id.
-    #[mc(varint)]
-    pub entity_id: i32,
-    /// Action id (see the adapter's `PlayerCommand` mapping).
-    #[mc(varint)]
-    pub action_id: i32,
-    /// Jump boost for the ride-jump action, otherwise `0`.
-    #[mc(varint)]
-    pub jump_boost: i32,
-}
+// `EntityAction` is byte-identical across v47/v340/v735 (measured), shared
+// via `lodestone-protocol-common` -- see `packets::entity`'s module docs.
+pub use lodestone_protocol_common::packets::entity::EntityAction;
 
 /// Serverbound `client_command` packet.
 ///
