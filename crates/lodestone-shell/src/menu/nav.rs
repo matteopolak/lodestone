@@ -496,7 +496,7 @@ impl EditForm {
     /// A blank form for a new entry, focused on the name field.
     ///
     /// The initial focus is set explicitly, which is
-    /// `Screen.setInitialFocus(GuiEventListener)` rather
+    /// vanilla's own screen base's set-initial-focus call taking an explicit target rather
     /// than the no-argument overload — that one is gated on
     /// `minecraft.getLastInputType().isKeyboard()`, a piece of state this shell
     /// does not track. Without it the form would open with **nothing** focused
@@ -732,7 +732,7 @@ impl EditForm {
 /// layout that reads wrong, while a disabled one in the right position reads
 /// exactly like vanilla with the feature unavailable (which is a state vanilla
 /// itself ships — `Multiplayer` and `Minecraft Realms` are disabled for a
-/// banned account, `TitleScreen.java`).
+/// banned account, vanilla's own title-screen rendering).
 ///
 /// The three 20×20 icon buttons come from `CommonButtons`
 ///; vanilla positions them with
@@ -754,7 +754,7 @@ pub enum MainButton {
     /// Vanilla's friends icon button (`CommonButtons.friends`). Present and
     /// disabled: it needs a Microsoft-account social graph.
     Friends,
-    /// Vanilla's language icon button — `TitleScreen.java` constructs
+    /// Vanilla's language icon button — vanilla's own title-screen rendering constructs
     /// `LanguageSelectScreen` directly with `lastScreen = this` (the title),
     /// never through `OptionsScreen`. **Now live** (issue #415 built
     /// [`super::options::SettingsPage::Language`]): this doc used to say the
@@ -766,7 +766,7 @@ pub enum MainButton {
     /// straight to the title, matching vanilla's `lastScreen`.
     Language,
     /// Vanilla's accessibility icon button —
-    /// `TitleScreen.java`, same direct-construction shape as
+    /// vanilla's own title-screen rendering, same direct-construction shape as
     /// [`MainButton::Language`]. **Now live** (the Accessibility Settings
     /// page has existed since issue #55): this doc used to say there was no
     /// accessibility options screen, which was already false by the time
@@ -778,7 +778,7 @@ pub enum MainButton {
     /// Quit the game.
     Quit,
     /// Open the account list. **Not a vanilla widget** — unlike
-    /// every other row in this enum, there is no `TitleScreen.java` line to
+    /// every other row in this enum, there is no vanilla's own title-screen rendering line to
     /// cite for it. Real Minecraft has no in-game account switcher at all:
     /// an account is chosen once, outside the game, by the separate
     /// Minecraft Launcher, and the game client just uses whatever it was
@@ -913,7 +913,7 @@ impl MainButton {
 
     /// The GUI sprite drawn centred in the button instead of a label —
     /// vanilla's `SpriteIconButton.CenteredIcon`, 15×15 inside a 20×20 button
-    /// (`CommonButtons.java`, `FriendsButton.java`).
+    /// (vanilla's own common-buttons helper, vanilla's own friends-button type).
     #[must_use]
     pub fn icon(self) -> Option<&'static str> {
         match self {
@@ -939,7 +939,7 @@ impl MainButton {
 /// *action* — which is why they are [`PauseButton::enabled`]-`false` — but it
 /// does not hold for the *position*: a greyed-out button where vanilla puts one
 /// is faithful UI, and vanilla itself greys these out (`playerReportingButton`
-/// with no players to report, `PauseScreen.java`).
+/// with no players to report, vanilla's own pause-screen rendering).
 ///
 /// Which Options layout is reproduced is a real fork in vanilla:
 /// `minecraft.hasSingleplayerServer()` splits the row into Options + Open to LAN
@@ -949,7 +949,7 @@ impl MainButton {
 /// unconditionally false for it and the full-width branch is the correct one.
 ///
 /// Vanilla's last button is labelled by
-/// `CommonComponents.disconnectButtonLabel(isLocalServer)` — "Save and Quit to
+/// its own common-components disconnect-button-label helper applied to `isLocalServer` — "Save and Quit to
 /// Title" locally, "Disconnect" remotely. This
 /// client uses "Disconnect" for both, because [`SessionKind::Singleplayer`] is
 /// currently the local dev world with no persistence: "Save and Quit" would
@@ -1024,7 +1024,7 @@ pub enum PauseButton {
     /// decompile shows this row whenever
     /// `hasSingleplayerServer()` is true **regardless of publish state**: it
     /// is vanilla's `MultiplayerOptionsScreen` behind the button that changes,
-    /// an on/off `CycleButton` seeded from `IntegratedServer.isPublished()`
+    /// an on/off `CycleButton` seeded from its own integrated-server is-published accessor
     /// — vanilla never re-presses a "publish"
     /// action against an already-published world because the same button
     /// re-opens a form that can also *unpublish*. This client has no such
@@ -1366,7 +1366,7 @@ pub struct MenuNav {
     /// **This was a `usize` row counter until issue #445**, and that was the
     /// whole of the owner's bug report: one wheel notch is
     /// `scrollY * scrollRate()` where `scrollRate = defaultEntryHeight / 2`
-    /// (`AbstractScrollArea.java`, `:141-142`, `AbstractSelectionList.java`
+    /// (vanilla's own abstract scroll-area base, `:141-142`, vanilla's own abstract selection-list base
     /// via `defaultSettings`), i.e. **18 px** for a 36 px row — a value a row
     /// index structurally cannot hold, so the list jumped a whole entry per
     /// notch. See [`Self::scroll_server_list`], which now delegates to
@@ -1471,7 +1471,7 @@ pub struct MenuNav {
     /// changing which thread clears the shared cell or when.
     resource_pack_answered_id: Option<uuid::Uuid>,
     /// A double-click on a **selection-list row** activates it: a server row
-    /// joins (vanilla's `ServerSelectionList.java`, `if (doubleClick) join()`,
+    /// joins (vanilla's own server-selection list rendering, `if (doubleClick) join()`,
     /// unconditional on where in the row the click landed), an account row
     /// selects that account. The primitive is
     /// [`super::focus::DoubleClickTracker`].
@@ -1549,7 +1549,7 @@ pub struct MenuNav {
     /// is the one place the two combine. See [`Self::pause_buttons`], one of
     /// its two readers.
     lan_published: bool,
-    /// Vanilla's `Minecraft.hasSingleplayerServer()` — whether this session
+    /// Vanilla's own client-instance has-singleplayer-server accessor — whether this session
     /// is an **integrated** server at all, pushed in from
     /// `UiState::kind() == Some(SessionKind::Singleplayer)` by
     /// `app::session::drive_ui_from_session`, next to [`Self::lan_published`]'s
@@ -1978,7 +1978,7 @@ impl MenuNav {
     /// F3+P. Persists eagerly, the same shape as
     /// [`Self::toggle_advanced_item_tooltips`] and for the same vanilla reason
     /// (`options.pauseOnLostFocus = !options.pauseOnLostFocus; options.save();`
-    /// in `KeyboardHandler.java`).
+    /// in vanilla's own keyboard-handler type).
     pub fn toggle_pause_on_lost_focus(&mut self) {
         self.options.pause_on_lost_focus = !self.options.pause_on_lost_focus;
         self.persist_options();
@@ -2983,7 +2983,7 @@ impl MenuNav {
                     prompt.hover(row);
                 }
             }
-            // `hover_row` is `ContainerEventHandler.setFocused(child)` for the
+            // `hover_row` is vanilla's own container-event-handler set-focused call for the
             // two text fields — real focus, not a highlight index, because the
             // row indices and `EditForm`'s focus ids are the same numbers (see
             // [`NAME_FIELD`]) — and plain hover tracking for the three button
@@ -3386,7 +3386,7 @@ impl MenuNav {
     /// player reported it immediately. Vanilla reaches
     /// `AbstractSelectionList.setSelected` only from `setFocused`
     /// and the click paths — never from
-    /// hover; `ServerSelectionList.java` shows what hover *does* draw,
+    /// hover; vanilla's own server-selection list rendering shows what hover *does* draw,
     /// which is a `fill(…, -1601138544)` scrim over the 32 px favicon plus the
     /// join / move-up / move-down sprite for the quadrant under the cursor.
     ///
@@ -3487,7 +3487,7 @@ impl MenuNav {
 
     /// Reorders the list and persists it — vanilla's
     /// `OnlineServerEntry.swap`, which is `servers.swap` then `servers.save`
-    /// (`ServerSelectionList.java`, `:434-436`).
+    /// (vanilla's own server-selection list rendering, `:434-436`).
     ///
     /// The selection **follows the row**, matching vanilla's
     /// `scrollToEntry(children.get(newIndex))`: the entry the player grabbed stays
@@ -3734,7 +3734,7 @@ impl MenuNav {
                     }
                     MainButton::Options => {
                         // Vanilla builds a **new** `OptionsScreen` every time
-                        // (`TitleScreen.java`'s `setScreen(new OptionsScreen(…))`),
+                        // (vanilla's own title-screen rendering's `setScreen(new OptionsScreen(…))`),
                         // so re-entering Options never resumes three pages deep.
                         // Opened from the title, so `inWorld` is false — the
                         // root's Online button is live (`SettingsPage::Online`),
@@ -3878,7 +3878,7 @@ impl MenuNav {
     /// Validates and saves the form, exactly as `Enter` does
     /// ([`FormOutcome::Save`]) — shared with [`Self::click`]'s [`DONE_ROW`]
     /// arm (vanilla's `CommonComponents.GUI_DONE`,
-    /// `ManageServerScreen.java`) for the same reason
+    /// vanilla's own manage-server screen rendering) for the same reason
     /// [`Self::cancel_edit`] is shared.
     fn save_entry(&mut self, ui: &mut UiState) -> MenuAction {
         if !self.form.is_valid() {
@@ -5764,7 +5764,7 @@ impl MenuNav {
     /// [`key_paused`](Self::key_paused).
     ///
     /// **Escape is deliberately absent from this match** — it falls to `_`,
-    /// which does nothing. Vanilla's `DeathScreen.shouldCloseOnEsc()` returns
+    /// which does nothing. Vanilla's own death-screen should-close-on-esc check returns
     /// `false`: the only way off this screen is a
     /// click. Every sibling `key_*` above calls `ui.on_escape()` for
     /// `MenuKey::Escape`; this one is the one screen that must not.
@@ -7228,7 +7228,7 @@ mod tests {
 
     #[test]
     fn the_edit_form_fields_carry_vanillas_real_narration_and_our_own_hint() {
-        // `ManageServerScreen.java`: `manageServer.enterName`/
+        // vanilla's own manage-server screen rendering: `manageServer.enterName`/
         // `manageServer.enterIp` (`en_us.json`: "Server Name"/"Server
         // Address") as each field's own message — those narration strings are
         // kept. The name field's hint is Lodestone's own text,
@@ -7414,7 +7414,7 @@ mod tests {
     /// both destination pages have existed since #415 and #55 respectively,
     /// and nothing ever revisited the button. This is the structural-liveness
     /// finding this test pins: each icon must open `Screen::Settings` on
-    /// *its own* page directly (vanilla's `TitleScreen.java`
+    /// *its own* page directly (vanilla's own title-screen rendering
     /// constructs `LanguageSelectScreen`/`AccessibilityOptionsScreen` with
     /// `lastScreen = this`, never through `OptionsScreen`), and Escape from
     /// there must leave in **one** step, straight back to the title — not
@@ -7552,7 +7552,7 @@ mod tests {
         assert_eq!(nav.settings().page(), page);
     }
 
-    /// Matches the `OptionInstance` whose `Options.java` accessor is `name`.
+    /// Matches the `OptionInstance` whose vanilla's own persisted-options declarations accessor is `name`.
     fn is_option(name: &str) -> impl Fn(&crate::menu::options::Cell) -> bool + '_ {
         move |c| matches!(c, crate::menu::options::Cell::Option(s) if s.accessor == name)
     }
@@ -7696,7 +7696,7 @@ mod tests {
     /// real geometry can tell the difference.
     ///
     /// The predicted numbers come from outside this client:
-    /// `ChatComponent.getWidth(pct) = floor(pct * 280 + 40)`
+    /// vanilla's own chat-component rendering's get-width accessor: `floor(pct * 280 + 40)`
     ///, so `1.0` is 320px and `0.0` is 40px, and
     /// `step_unit_double` wraps `1.0` straight to `0.0` — a 280px move on the
     /// very first click, which no rounding could fake.
@@ -8063,7 +8063,7 @@ mod tests {
         );
 
         // Persisted eagerly, one key per bus, under vanilla's **singular**
-        // `SoundSource.getName()` spellings.
+        // sound-category name spellings.
         let saved = std::fs::read_to_string(&options_path).expect("options.json must exist");
         for name in crate::config::SOUND_CATEGORY_NAMES {
             assert!(
@@ -10244,7 +10244,7 @@ mod tests {
 
     #[test]
     fn escape_does_nothing_on_the_death_screen() {
-        // Vanilla's `DeathScreen.shouldCloseOnEsc()` returns `false`
+        // Vanilla's own death-screen should-close-on-esc check returns `false`
         // — unlike every other screen in this
         // file, Escape here must not even unwind one level, let alone quit.
         let (mut nav, mut ui) = dead("death-escape");
@@ -10538,7 +10538,8 @@ mod tests {
     }
 
     /// `scrollRate = defaultEntryHeight / 2` for the 36 px server row —
-    /// `AbstractScrollArea.defaultSettings(defaultEntryHeight / 2)`
+    /// vanilla's own abstract scroll-area base's default-settings call applied
+    /// to `defaultEntryHeight / 2`
     ///, read back by `scrollRate()`
     /// and applied by `mouseScrolled`
     /// (`:34`). Transcribed from `.cache/mc/26.2/client-src`, not guessed.
