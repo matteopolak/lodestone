@@ -3009,9 +3009,10 @@ fn update_freezing(
 /// This is the part that surprises. Vanilla's own "check inside blocks"
 /// sweep visits every block the movement intersects, dedupes by *position*
 /// (`visitedBlocks`), and calls
-/// `entityInside` on each — and `BubbleColumnBlock` applies its impulse
-/// **immediately**, inside that callback, rather than deferring it to the
-/// `InsideBlockEffectApplier` the way fire and freezing do. So a standing player
+/// its own per-block "entity inside" effect on each — and vanilla's own
+/// bubble-column block applies its impulse **immediately**, inside that
+/// callback, rather than deferring it to the effect-applier the way fire
+/// and freezing do. So a standing player
 /// (a `1.8`-high box) inside a column spans two cells and takes **two** impulses
 /// every tick. The clamp is what keeps that from diverging: repeated
 /// `min(0.7, vy + 0.06)` converges on `0.7` instead of running away. Applying the
@@ -3021,12 +3022,12 @@ fn update_freezing(
 ///
 /// # `resetFallDistance` on `inside` only
 ///
-/// `handleOnInsideBubbleColumn` ends with `entity.resetFallDistance()`
-/// (`Entity.java:2897`); `handleOnAboveBubbleColumn` ends with
-/// `sendBubbleColumnParticles` and **no** reset (`:2865`). The asymmetry is
+/// Vanilla's own inside-bubble-column handler ends with
+/// `entity.resetFallDistance()`; its own above-bubble-column handler ends
+/// with sending bubble-column particles and **no** reset. The asymmetry is
 /// reproduced here faithfully, but **no test pins it, because it is currently
 /// unobservable and cannot honestly be made observable.** A bubble column *is* a
-/// water source cell (`BubbleColumnBlock.java:73-75`), so any player this function
+/// water source cell, so any player this function
 /// finds in one has already been through [`tick_water`], which zeroes
 /// `fall_distance` unconditionally at its top. The only world that would separate
 /// the two is a bubble column in a cell that does not hold water — which vanilla
@@ -3038,8 +3039,8 @@ fn update_freezing(
 /// # Divergences, deliberate
 ///
 /// * **Cell enumeration is the post-move box, not the swept path — no longer
-///   shared with [`update_stuck_multiplier`].** Vanilla walks
-///   `forEachBlockIntersectedBetween(from, to, …)`, so a player moving fast enough
+///   shared with [`update_stuck_multiplier`].** Vanilla walks its own
+///   "for each block intersected between" walk, so a player moving fast enough
 ///   to pass *through* a column cell without ending inside it still takes that
 ///   cell's impulse. This function still enumerates the cells of the post-move
 ///   bounding box only. **This used to be "exactly the approximation
@@ -3062,8 +3063,8 @@ fn update_freezing(
 ///   disagree on the constant, even though the enumeration itself has now
 ///   diverged. The difference from vanilla's widened float can only change an
 ///   answer when a box edge lies within `1.2e-13` of a cell boundary.
-/// * **`Player`'s `!abilities.flying` gate is not applied.** Both overrides
-///   (`Player.java:310-321`) skip the impulse entirely for a flying player. This
+/// * **The player's `!abilities.flying` gate is not applied.** Both overrides
+///   skip the impulse entirely for a flying player. This
 ///   crate has no abilities state, so the conjunct is vacuously true — see
 ///   [`tick`]'s note. A driver with a flight mode must not route a flying player
 ///   through [`tick`].
@@ -3089,17 +3090,17 @@ fn apply_bubble_column(
                 };
                 let vy = state.velocity.y;
                 if cell_is_open_air(view, x, y + 1, z) {
-                    // `Entity.handleOnAboveBubbleColumn`. The particle burst is
-                    // server-side only (`sendBubbleColumnParticles` checks
-                    // `instanceof ServerLevel`) and carries no motion, so nothing
-                    // is owed here; note it does *not* reset fall distance.
+                    // Vanilla's own above-bubble-column handler. The particle
+                    // burst is server-side only and carries no motion, so
+                    // nothing is owed here; note it does *not* reset fall
+                    // distance.
                     state.velocity.y = if drag_down {
                         (vy - 0.03).max(-0.9)
                     } else {
                         (vy + 0.1).min(1.8)
                     };
                 } else {
-                    // `Entity.handleOnInsideBubbleColumn`.
+                    // Vanilla's own inside-bubble-column handler.
                     state.velocity.y = if drag_down {
                         (vy - 0.03).max(-0.3)
                     } else {
@@ -3112,17 +3113,16 @@ fn apply_bubble_column(
     }
 }
 
-/// `BubbleColumnBlock.entityInside`'s `nothingAbove` test
-/// (`BubbleColumnBlock.java:58`): `stateAbove.getCollisionShape(…).isEmpty() &&
-/// stateAbove.getFluidState().isEmpty()`.
+/// Vanilla's own bubble-column "nothing above" test:
+/// `stateAbove.getCollisionShape(…).isEmpty() && stateAbove.getFluidState().isEmpty()`.
 ///
 /// The fluid half is what makes the common cases fall out correctly without any
-/// special-casing: a bubble column's own `getFluidState` is a **water source**
-/// (`BubbleColumnBlock.java:73-75`), and this engine classifies the block as water
-/// for the same reason (`docs/fluid-classification.md`'s
-/// `UNCONDITIONAL_WATER_BLOCKS`), so a cell with more column above it reports
-/// `false` here and takes the *inside* branch. Only the cell at the very top of a
-/// column, with real air over it, reports `true`.
+/// special-casing: a bubble column's own fluid state is a **water source**,
+/// and this engine classifies the block as water for the same reason
+/// (`docs/fluid-classification.md`'s `UNCONDITIONAL_WATER_BLOCKS`), so a cell
+/// with more column above it reports `false` here and takes the *inside*
+/// branch. Only the cell at the very top of a column, with real air over
+/// it, reports `true`.
 ///
 /// **One vanilla quirk deliberately not reproduced.** Vanilla calls
 /// `stateAbove.getCollisionShape(level, pos)` — passing `pos`, the *lower* cell,
@@ -3136,16 +3136,17 @@ fn cell_is_open_air(view: &dyn CollisionView, x: i32, y: i32, z: i32) -> bool {
     boxes.is_empty() && !view.is_water(x, y, z) && !view.is_lava(x, y, z)
 }
 
-/// Advances the player one tick: dispatches to the fluid/elytra/air travel path
-/// exactly as vanilla's `LivingEntity.travel()`, records any stuck-in-block
-/// multiplier for the next tick to consume (`Entity.checkInsideBlocks`), and
-/// finally re-decides the **pose** through vanilla's fit gate
-/// ([`crate::pose::update_player_pose`]).
+/// Advances the player one tick: dispatches to the fluid/elytra/air travel
+/// path exactly as vanilla's own travel dispatch, records any stuck-in-block
+/// multiplier for the next tick to consume (vanilla's own "check inside
+/// blocks" sweep), and finally re-decides the **pose** through vanilla's
+/// fit gate ([`crate::pose::update_player_pose`]).
 ///
-/// The pose runs last because `Player.updatePlayerPose` is the last statement of
-/// `Player.tick()` (`Player.java:284`), after `super.tick()` has done all the
-/// moving. So this tick's movement used the pose decided at the end of the
-/// *previous* tick, and the fit gate probes the post-move position.
+/// The pose runs last because vanilla's own pose update is the last
+/// statement of its own per-tick player update, after the base per-tick
+/// update has done all the moving. So this tick's movement used the pose
+/// decided at the end of the *previous* tick, and the fit gate probes the
+/// post-move position.
 pub fn tick(
     state: &mut PlayerState,
     input: MovementInput,
@@ -3153,19 +3154,20 @@ pub fn tick(
     profile: &PhysicsProfile,
 ) {
     travel_and_check_inside_blocks(state, input, view, profile, &[]);
-    // `Player.updatePlayerPose()` with no entity snapshot: the block half of the
-    // fit gate. See `tick_among_entities` for the full predicate.
+    // Vanilla's own pose update with no entity snapshot: the block half of
+    // the fit gate. See `tick_among_entities` for the full predicate.
     update_player_pose(state, input, view, &[]);
 }
 
-/// Everything vanilla's `super.tick()` does to a player's motion — `baseTick`'s
-/// fluid/swim summary, then `travel` — up to but excluding the pose decision.
+/// Everything vanilla's own base per-tick update does to a player's motion
+/// — its fluid/swim summary, then travel — up to but excluding the pose
+/// decision.
 ///
-/// Split out so [`tick`] and [`tick_among_entities`] can share it while keeping
-/// vanilla's ordering: `pushEntities` is the end of `aiStep`, *inside*
-/// `super.tick()`, and therefore **before** `updatePlayerPose`. That order is
-/// observable, because the push's pair test reads `getBoundingBox()` — which the
-/// pose sizes.
+/// Split out so [`tick`] and [`tick_among_entities`] can share it while
+/// keeping vanilla's ordering: the crowd-push pass is the end of its
+/// per-tick update, *inside* the base per-tick update, and therefore
+/// **before** the pose update. That order is observable, because the
+/// push's pair test reads `getBoundingBox()` — which the pose sizes.
 fn travel_and_check_inside_blocks(
     state: &mut PlayerState,
     input: MovementInput,
@@ -3180,8 +3182,9 @@ fn travel_and_check_inside_blocks(
     // every branch below, because every one of them can write `state.position`.
     let pre_move_position = state.position;
 
-    // `Entity.baseTick` computes the fluid summary from the *pre-move* box, before
-    // `travel` reads `isInWater`/`isInLava`. Do the same: one source of truth for
+    // Vanilla's own per-tick base update computes the fluid summary from the
+    // *pre-move* box, before travel reads `isInWater`/`isInLava`. Do the
+    // same: one source of truth for
     // eye/box submersion, recorded on the state for the swimming pose and for the
     // shell's fog / overlay / ambient-sound consumers.
     //
@@ -3200,8 +3203,9 @@ fn travel_and_check_inside_blocks(
     );
     state.eye_in_water = fluid.eye_in_water;
     state.eye_in_lava = fluid.eye_in_lava;
-    // `Player.updateSwimming` (`Player.java:1433-1439`) forces `setSwimming(false)`
-    // while flying instead of delegating to `super.updateSwimming()`, so a player
+    // Vanilla's own player-swim-state override forces `setSwimming(false)`
+    // while flying instead of delegating to the base swim-state update, so a
+    // player
     // who dives, starts sprint-swimming and then takes off drops the swim pose on
     // the very next tick rather than flying around with a `0.4` eye height.
     state.swimming = !state.flying
@@ -3212,20 +3216,20 @@ fn travel_and_check_inside_blocks(
             view,
             state.position,
         );
-    // `LivingEntity.updateSwimAmount()` — see its doc for why this sits here,
-    // between `updateSwimming` and the travel dispatch below.
+    // Vanilla's own swim-amount update — see its doc for why this sits here,
+    // between the swim-state update and the travel dispatch below.
     update_swim_amount(state);
 
-    // `LivingEntity.aiStep`: `if (isFallFlying()) updateFallFlying();`
-    // (`LivingEntity.java:3117-3119`), which is `checkFallDistanceAccumulation`'s
-    // only call site for a player. Runs before the Slow Falling/Levitation check
-    // and before `travel()`, on the velocity as it stood at the end of the
-    // *previous* tick — see `check_fall_distance_accumulation`'s doc.
+    // Vanilla's own per-tick update: `if (isFallFlying()) updateFallFlying();`,
+    // which is `checkFallDistanceAccumulation`'s only call site for a player.
+    // Runs before the Slow Falling/Levitation check and before `travel()`,
+    // on the velocity as it stood at the end of the *previous* tick — see
+    // `check_fall_distance_accumulation`'s doc.
     if state.fall_flying {
         check_fall_distance_accumulation(state);
     }
-    // `LivingEntity.aiStep`: `if (hasEffect(SLOW_FALLING) || hasEffect(LEVITATION))
-    // resetFallDistance();` (`LivingEntity.java:3123-3125`), unconditionally before
+    // Vanilla's own per-tick update: `if (hasEffect(SLOW_FALLING) ||
+    // hasEffect(LEVITATION)) resetFallDistance();`, unconditionally before
     // the `travel()` dispatch below, regardless of which path it picks.
     if state.effects.slow_falling || state.effects.levitation.is_some() {
         state.fall_distance = 0.0;
