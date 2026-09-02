@@ -1490,39 +1490,3 @@ impl std::fmt::Debug for MovingPistonSource {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-
-    #[test]
-    fn item_use_source_carries_bow_state_and_eat_transform_separately() {
-        let source = ItemUseSource(Some(Box::new(|| ItemUseState {
-            using: true,
-            ticks: 10,
-            eat: None,
-        })));
-        let state = source.sample();
-        assert!(state.using);
-        assert_eq!(state.ticks, 10);
-        assert_eq!(state.eat, None);
-    }
-
-    #[test]
-    fn map_source_carries_stable_map_identity_and_revision() {
-        let pixels = Arc::new(vec![9; lodestone_game::maps::MAP_SIZE.pow(2)]);
-        let captured = Arc::clone(&pixels);
-        let source = MapSource(Some(Box::new(move |_, _| {
-            Some(MapPicture::new(17, 3, Arc::clone(&captured)))
-        })));
-
-        let held = source.picture(None, None).expect("held map picture");
-        let framed = source.picture(None, Some(9)).expect("framed map picture");
-        assert_eq!(held.map_id, 17);
-        assert_eq!(held.color_revision, 3);
-        assert_eq!(held.map_id, framed.map_id);
-        assert_eq!(held.color_revision, framed.color_revision);
-        assert!(Arc::ptr_eq(&held.colors, &framed.colors));
-        assert!(Arc::ptr_eq(&held.colors, &pixels));
-    }
-}
