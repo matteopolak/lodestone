@@ -924,10 +924,10 @@ fn do_move(
                 fall_distance: state.fall_distance,
             }
         },
-        // `Player.getBlockSpeedFactor()`: `!flying && !isFallFlying()`. The elytra
-        // half is what this reaches in practice — `do_move`'s fluid callers are
-        // unreachable while flying, because the dispatch suppressor sends a flying
-        // player to `tick_air` instead.
+        // Vanilla's own block-speed-factor gate: not flying and not gliding.
+        // The elytra half is what this reaches in practice — `do_move`'s
+        // fluid callers are unreachable while flying, because the dispatch
+        // suppressor sends a flying player to `tick_air` instead.
         suppress_block_speed_factor: state.flying || state.fall_flying,
     };
     move_entity_with_nearby(&mut motion, state.dimensions(), view, profile, ctx, nearby);
@@ -938,12 +938,12 @@ fn do_move(
     state.stuck_speed_multiplier = motion.stuck_speed_multiplier;
 }
 
-/// `Entity.restituteMovementAfterCollisions` — the post-collision velocity
-/// rewrite that zeroes blocked axes and produces slime/bed bounces.
+/// Vanilla's own post-collision velocity rewrite that zeroes blocked axes
+/// and produces slime/bed bounces.
 ///
-/// `current` is the pre-collision velocity (`deltaMovement`, still `== delta`
-/// here); `resolved` is the movement actually achieved. A `LivingEntity` has
-/// zero base bounciness, so horizontal wall bounces never happen for a player;
+/// `current` is the pre-collision velocity (still `== delta` here);
+/// `resolved` is the movement actually achieved. A living entity has zero
+/// base bounciness, so horizontal wall bounces never happen for a player;
 /// the only live branch is the vertical land-bounce off a bouncy block.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn restitute_movement_after_collisions(
@@ -959,8 +959,8 @@ pub(crate) fn restitute_movement_after_collisions(
     profile: &PhysicsProfile,
     suppress_bounce: bool,
 ) -> Vec3d {
-    // restitution starts at getEntityBounciness() (0.0 for a player), or 0 while
-    // sneaking.
+    // restitution starts at vanilla's own base entity bounciness (0.0 for a
+    // player), or 0 while sneaking.
     let mut restitution: f64 = 0.0;
     let mut vx = current.x;
     let mut vy = current.y;
@@ -974,7 +974,8 @@ pub(crate) fn restitute_movement_after_collisions(
 
     if vertical_collision {
         if vertical_collision_below {
-            // Block at getOnPosLegacy() == getOnPos(0.2), from the post-move pos.
+            // Block at vanilla's own legacy on-pos lookup (0.2 below), from
+            // the post-move pos.
             let ex = mth::floor(position.x);
             let ey = mth::floor(position.y - f64::from(0.2f32));
             let ez = mth::floor(position.z);
@@ -1010,73 +1011,68 @@ pub(crate) fn restitute_movement_after_collisions(
     Vec3d::new(vx, vy, vz)
 }
 
-/// `Mth.equal(a, b)` → `Math.abs(b - a) < 1.0E-5F`.
+/// Vanilla's own approximate-equality check: `abs(b - a) < 1.0E-5F`.
 pub(crate) fn mth_equal(a: f64, b: f64) -> bool {
     (b - a).abs() < f64::from(1.0e-5f32)
 }
 
-/// Which `maybeBackOffFromEdge` override the entity being moved has.
+/// Which edge-back-off override the entity being moved has.
 ///
-/// `Entity.maybeBackOffFromEdge(Vec3, MoverType)` (`Entity.java:1099-1101`) is a
-/// virtual hook whose **base implementation is the identity** — `return delta`.
-/// `Player` (`Player.java:880-927`) is the only override in the tree: it is the
-/// sneak-at-a-ledge back-off that stops you walking off a drop while shift is
-/// held. Modelling the override as a variant rather than a bare `bool` makes a
-/// mob *structurally* unable to acquire player-only behaviour, which is the same
+/// Vanilla's own edge-back-off hook is a virtual method whose **base
+/// implementation is the identity** — return the delta unchanged. The
+/// player is the only override in the tree: it is the sneak-at-a-ledge
+/// back-off that stops you walking off a drop while shift is held. Modelling
+/// the override as a variant rather than a bare `bool` makes a mob
+/// *structurally* unable to acquire player-only behaviour, which is the same
 /// property vanilla gets from the class hierarchy.
 ///
 /// [`Self::Entity`] is the [`Default`], so [`crate::MoveContext::default()`] — what
 /// a mob or a dropped item passes — is inert by construction.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum EdgeBackOff {
-    /// `Entity.maybeBackOffFromEdge` — the base implementation, `return delta`.
-    /// Every non-player entity.
+    /// Vanilla's own base implementation: return the delta unchanged. Every
+    /// non-player entity.
     #[default]
     Entity,
-    /// `Player.maybeBackOffFromEdge` — the sneak-at-a-ledge back-off.
+    /// Vanilla's own sneak-at-a-ledge back-off.
     Player {
-        /// `Player.isStayingOnGroundSurface()` (`Player.java:300-302`), which is
-        /// exactly `isShiftKeyDown()` — the raw shift key, not the crouch *pose*
-        /// and not `isCrouching()`.
+        /// Vanilla's own "staying on ground surface" check, which is
+        /// exactly the raw shift key — not the crouch *pose* and not the
+        /// separate "is crouching" check.
         ///
-        /// The two ends of the wire read the same boolean from different places
-        /// and it matters that they agree: the client uses
-        /// `LocalPlayer.isShiftKeyDown()`, overridden to return
-        /// `this.input.keyPresses.shift()` directly
-        /// (`client-src/.../LocalPlayer.java:674-676`), while the server reads the
-        /// `SHIFT_KEY_DOWN` shared flag set from `ServerboundPlayerInputPacket`
-        /// (`ServerGamePacketListenerImpl.java:427`). A driver that sneaks
-        /// *locally* without sending the input packet manufactures the very
-        /// disagreement this rule exists to prevent, only inverted — see
-        /// `docs/edge-back-off.md`.
+        /// The two ends of the wire read the same boolean from different
+        /// places and it matters that they agree: the client reads its own
+        /// input key-presses directly, while the server reads the shared
+        /// sneak flag set from the movement-input packet. A driver that
+        /// sneaks *locally* without sending the input packet manufactures
+        /// the very disagreement this rule exists to prevent, only inverted
+        /// — see `docs/edge-back-off.md`.
         staying_on_ground_surface: bool,
-        /// `Entity.fallDistance` (`Entity.java:245`, a `double` since 26.2).
+        /// Vanilla's own fall-distance accumulator (a `double` since 26.2).
         ///
         /// **An input this crate does not maintain**, like
-        /// [`PlayerState::water_movement_efficiency`]. It is read by exactly one
-        /// place — `Player.isAboveGround`'s airborne branch — and only when
-        /// `on_ground` is `false`.
+        /// [`PlayerState::water_movement_efficiency`]. It is read by exactly
+        /// one place — vanilla's own "above ground" check's airborne branch
+        /// — and only when `on_ground` is `false`.
         fall_distance: f64,
     },
 }
 
-/// `Player.maybeBackOffFromEdge(Vec3, MoverType)` (`Player.java:880-927`) — the
-/// sneak-at-a-ledge back-off, called from inside `Entity.move` on the *candidate*
-/// delta before collision resolution.
+/// Vanilla's own sneak-at-a-ledge back-off, called from inside its move
+/// step on the *candidate* delta before collision resolution.
 ///
 /// # Why this is a desync rule and not a feel rule
 ///
-/// `ServerGamePacketListenerImpl.handleMovePlayer` replays the movement we claim
-/// through `this.player.move(MoverType.PLAYER, …)`
-/// (`ServerGamePacketListenerImpl.java:1134`) — and `MoverType.PLAYER` is one of
-/// the two mover types this rule's own gate admits. It then compares the replay's
-/// result against the position we claimed and teleports us back if
-/// `movedDist > 0.0625` (`:1146-1153`), i.e. **0.25 blocks in a single packet with
-/// no accumulator**. Because the intervening `yDist` clamp zeroes Y
-/// unconditionally (`:1137-1139`), that comparison is **purely horizontal** — and
-/// this rule modifies exactly and only the horizontal components. A client that
-/// sneaks near a ledge without modelling it claims a position past where the
-/// server's own replay puts it, and gets corrected.
+/// The server replays the movement we claim through its own move step using
+/// the player mover type — one of the two mover types this rule's own gate
+/// admits. It then compares the replay's result against the position we
+/// claimed and teleports us back if the moved distance exceeds `0.0625`,
+/// i.e. **0.25 blocks in a single packet with no accumulator**. Because the
+/// intervening Y-distance clamp zeroes Y unconditionally, that comparison is
+/// **purely horizontal** — and this rule modifies exactly and only the
+/// horizontal components. A client that sneaks near a ledge without
+/// modelling it claims a position past where the server's own replay puts
+/// it, and gets corrected.
 ///
 /// # The gate, transcribed
 ///
@@ -1090,20 +1086,22 @@ pub enum EdgeBackOff {
 ///
 /// Two of the five are satisfied by construction here and so are not parameters:
 ///
-/// * **`!abilities.flying`** — this crate does not model creative flight at all
-///   (`travelInAir` applies gravity unconditionally), so a flying driver does not
-///   route through [`tick`]. This is the same standing argument
-///   [`update_swimming`] makes for `Player.updateSwimming`'s flying override.
-/// * **the mover type** — [`crate::move_entity`] *is* `move(MoverType.SELF, …)`.
-///   The excluded types are `PISTON` (which this crate has no equivalent of) and
-///   the mover types used for vehicle/knockback pushes.
+/// * **not flying** — this crate does not model creative flight at all
+///   (airborne travel applies gravity unconditionally), so a flying driver
+///   does not route through [`tick`]. This is the same standing argument
+///   [`update_swimming`] makes for vanilla's own swim-state update's flying
+///   override.
+/// * **the mover type** — [`crate::move_entity`] *is* vanilla's own
+///   self-mover-type move. The excluded types are the piston mover (which
+///   this crate has no equivalent of) and the mover types used for
+///   vehicle/knockback pushes.
 ///
-/// `maxDownStep` is `this.maxUpStep()`, i.e. the resolved **`STEP_HEIGHT`
-/// attribute** (`LivingEntity.java:3975`), whose `RangedAttribute` default is
-/// `0.6` (`Attributes.java:98-100`) — *not* a literal. It arrives as
-/// [`EntityDimensions::step_height`], which is documented as the post-modifier
-/// value, so a step-height modifier is honoured for free. Hard-coding `0.6` would
-/// agree today and silently diverge the moment anything modifies the attribute.
+/// `maxDownStep` is vanilla's own resolved max-up-step value, i.e. the
+/// resolved **step-height attribute**, whose ranged-attribute default is
+/// `0.6` — *not* a literal. It arrives as [`EntityDimensions::step_height`],
+/// which is documented as the post-modifier value, so a step-height modifier
+/// is honoured for free. Hard-coding `0.6` would agree today and silently
+/// diverge the moment anything modifies the attribute.
 ///
 /// # The stepping loop
 ///
@@ -1112,11 +1110,11 @@ pub enum EdgeBackOff {
 /// probe says will not fall. There are **three** loops, and X and Z are
 /// *independent first, then joint*:
 ///
-/// 1. X alone, probing `canFallAtLeast(deltaX, 0.0, …)`.
-/// 2. Z alone, probing `canFallAtLeast(0.0, deltaZ, …)`, starting from the
-///    original `delta.z` (**not** from anything loop 1 produced).
-/// 3. X and Z **together**, probing `canFallAtLeast(deltaX, deltaZ, …)` and
-///    stepping both, starting from whatever loops 1 and 2 left behind.
+/// 1. X alone, probing a fall check against `(deltaX, 0.0)`.
+/// 2. Z alone, probing a fall check against `(0.0, deltaZ)`, starting from
+///    the original `delta.z` (**not** from anything loop 1 produced).
+/// 3. X and Z **together**, probing a fall check against `(deltaX, deltaZ)`
+///    and stepping both, starting from whatever loops 1 and 2 left behind.
 ///
 /// The third loop is what handles an outside corner, where neither the pure-X nor
 /// the pure-Z move leaves the ledge but the diagonal does. It also differs
@@ -1124,21 +1122,20 @@ pub enum EdgeBackOff {
 /// zeroed, whereas the diagonal loop zeroes one component and keeps stepping the
 /// other in the same iteration, exiting only when the `!= 0.0` guards fail.
 ///
-/// The step magnitude is fixed at `Math.signum(delta) * 0.05` **computed once**,
+/// The step magnitude is fixed at `signum(delta) * 0.05` **computed once**,
 /// before any stepping, so it never changes sign mid-loop. `Y` is passed through
 /// untouched.
 ///
 /// # What the caller must know
 ///
-/// This rewrites the *local* candidate delta only. Vanilla never calls
-/// `setDeltaMovement` here, so `getDeltaMovement()` — the vector
-/// `restituteMovementAfterCollisions` later reads — keeps its **un-backed-off**
-/// value. A player pressed against a ledge by the back-off therefore keeps
-/// accumulating horizontal velocity: the back-off is invisible to
-/// `xCollision`/`zCollision` too, because those compare against the *backed-off*
-/// delta (`Entity.java:766-767`), so a fully-cancelled component reads as "no
-/// collision" and is never zeroed. That is vanilla behaviour and it is observable
-/// the moment you release shift.
+/// This rewrites the *local* candidate delta only. Vanilla never writes its
+/// own velocity field here, so the vector `restitute_movement_after_collisions`
+/// later reads keeps its **un-backed-off** value. A player pressed against a
+/// ledge by the back-off therefore keeps accumulating horizontal velocity:
+/// the back-off is invisible to the X/Z collision flags too, because those
+/// compare against the *backed-off* delta, so a fully-cancelled component
+/// reads as "no collision" and is never zeroed. That is vanilla behaviour
+/// and it is observable the moment you release shift.
 #[must_use]
 pub(crate) fn maybe_back_off_from_edge(
     delta: Vec3d,
@@ -1156,8 +1153,8 @@ pub(crate) fn maybe_back_off_from_edge(
         return delta;
     };
 
-    // `float maxDownStep = this.maxUpStep();` — kept at `f32` width, and widened
-    // at each use exactly where vanilla's implicit promotion happens.
+    // Vanilla's own max-up-step value — kept at `f32` width, and widened at
+    // each use exactly where vanilla's implicit promotion happens.
     let max_down_step = step_height;
 
     // Vanilla's gate, in vanilla's order and shape: the whole body sits inside one
@@ -1174,8 +1171,9 @@ pub(crate) fn maybe_back_off_from_edge(
     {
         let mut delta_x = delta.x;
         let mut delta_z = delta.z;
-        // `Math.signum(…) * 0.05`, computed **once** so the step cannot change
-        // sign mid-loop. Java's `signum`, not Rust's — see [`mth::java_signum`].
+        // Vanilla's own sign function, computed **once** so the step cannot
+        // change sign mid-loop — its zero case differs from Rust's, see
+        // [`mth::java_signum`].
         let step_x = mth::java_signum(delta_x) * 0.05;
         let step_z = mth::java_signum(delta_z) * 0.05;
         let min_height = f64::from(max_down_step);
