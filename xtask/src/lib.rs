@@ -8139,6 +8139,21 @@ fn write_docs_index_entry(out: &mut String, entry: &DocIndexEntry) {
     out.push('\n');
 }
 
+/// [`read_md_dir_sorted`] for a directory that is allowed not to exist.
+///
+/// Only `NotFound` is tolerated; every other error still propagates. The
+/// distinction matters: a directory that is absent has nothing to omit, whereas
+/// a directory that fails to read for any other reason would be silently
+/// skipped, which is the failure mode the `docs/plans/` comment below records —
+/// the drift gate proves the index is *consistent* with the docs, never that it
+/// *covers* them.
+fn read_md_dir_sorted_optional(dir: &Path) -> Result<Vec<PathBuf>> {
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    read_md_dir_sorted(dir)
+}
+
 fn read_md_dir_sorted(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
         .with_context(|| format!("reading {}", dir.display()))?
@@ -8189,7 +8204,11 @@ pub fn generate_docs_index(workspace_root: &Path) -> Result<String> {
         roadmap.push(DocIndexEntry { link: rel, title, summary });
     }
 
-    for path in read_md_dir_sorted(&docs_dir.join("research"))? {
+    // `docs/research/` was deleted wholesale during the documentation
+    // reduction, so this scan is optional rather than required. It stays
+    // because the group still exists and a research doc added later must be
+    // indexed rather than silently dropped.
+    for path in read_md_dir_sorted_optional(&docs_dir.join("research"))? {
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
         let rel = format!("./research/{name}");
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;

@@ -5,984 +5,193 @@ itself and regenerate (`cargo xtask docs-index`), or run `LODESTONE_REGEN=1 carg
 test -p xtask docs_index_matches_committed`. `cargo test -p xtask` fails loudly if
 this file drifts from the generator's output. -->
 
-Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
-(architecture and rationale) and [`HANDOFF.md`](../HANDOFF.md) (deferred work).
+Subsystem documentation. See also [`architecture.md`](./architecture.md)
+(the crate graph and the cross-cutting constraints) and
+[`meta/handoff.md`](./meta/handoff.md) (for an agent orchestrating this repo).
 
-- [The accounts screen](./accounts-screen.md) — `Screen::Accounts` — the account
-  switcher and its sign-in sub-flow — rebuilt to look like the multiplayer server
-  list: a real `HeaderAndFooterLayout`, list rows at a 36 px pitch in a 305 px column,
-  a footer of `LinearLayout`-arranged nine-slice buttons, and **no text that can run
-  off the screen**.
-- [Microsoft account storage and online-mode join](./accounts.md) —
-  `crates/lodestone-auth` stores **multiple** Microsoft accounts instead of one, and
-  no longer keeps the long-lived refresh token in a plaintext file — see "Storage"
-  below — and **the multiplayer join now actually uses the account the switcher has
-  selected**. A join resolves that selection on the net thread, presents the profile's
-  real username and UUID, and completes the online-mode RSA/AES handshake plus an
-  authenticated `POST /session/minecraft/join`; with nothing selected it joins offline
-  exactly as before, and makes no network call looking for an account. Offline mode
-  remains the default and singleplayer is never authenticated. There is also a screen
-  — `crates/lodestone-shell/src/menu/accounts.rs` draws the account list, every
-  saved account plus an always-present offline entry, and drives its own device-code
-  sign-in.
-- [Advancements screen](./advancements-screen.md) — Vanilla's `AdvancementsScreen`,
-  reached from the pause menu's Advancements button: five tabs, the real 26.2
-  advancement tree, connector lines, frames, icons, a tiled per-tab background,
-  panning, and the full hover tooltip. The tree *shape* comes off the data pack; the
-  *progress* comes off the wire, so completed advancements really do draw their
-  obtained frames.
-- [Ambient sound loops and client-predicted local sounds](./ambient-sounds.md) — Two
-  related pieces of the audio layer, both in `crates/lodestone-sound`:
-- [Arm swing animation](./arm-swing-animation.md) — The arm swing you see when you
-  mine, place, or hit something. Vanilla drives three separate things off one number
-  — `attackAnim`, swing progress in `0.0..=1.0`:
-- [Humanoid armour rendering](./armour-rendering.md) — The path from "the server
-  says this zombie is wearing a diamond chestplate" to a posed, textured armour layer
-  on screen. Four cuboid meshes baked at **two different inflations**, painted by
-  per-material sheets resolved through the `equipment_asset` chain, drawn through the
-  entity pipeline over the wearer's own already-animated part matrices.
-- [Armour stand poses](./armour-stand-poses.md) — The chain that turns an armour
-  stand's six synced part rotations into the pose it is drawn in — and, just as
-  importantly, the reason **every** armour stand is posed whether or not a server ever
-  sent one. Without it a stand animates as a walking humanoid: a stand carried along
-  by a moving contraption swings its arms like a running player, and an item in its
-  hand swings off the same arm.
-- [Armour trim decoding, and the component-patch decode cliff](./armour-trim-decode.md) —
-  `minecraft:trim` now decodes off the wire into
-  `lodestone_model::ItemComponents::trim`, so a smithing-table armour trim reaches the
-  client as a `(material, pattern)` pair. The asset layer it feeds
-  (`lodestone_assets::trim`, `trim_decal_pipeline`) was already complete with zero
-  callers; this is the missing link.
+- [Accounts, join, and chat: identity, scheduling, and secure messaging](./accounts-and-join.md) —
+  Everything between "the player wants to connect" and "the player is standing in a
+  synced world with working chat": Microsoft account storage and the online-mode
+  handshake, the offline fallback identity, the single resolver that decides which
+  identity a join presents, the loading-screen readiness rule, the server's join-time
+  chunk-generation scheduler, the `transfer` tracing target used to debug
+  rubberbanding across a server transfer, the TLS crypto-provider choice underneath
+  every HTTPS call, secure (signed) chat, and how a server's `Text` component becomes
+  displayed words.
+- [Architecture](./architecture.md) — The shape of the whole project: how the crates
+  fit together, why version knowledge is confined to one crate per protocol family,
+  and the load-bearing constraints — physics parity, memory layout, renderer
+  budgets, the browser target — that the rest of the tree is built around.
+  Per-subsystem detail lives in the other docs; this is the map and the reasoning
+  behind it.
 - [Autonomous navigation: `lodestone-nav` + `lodestone-autopilot`](./autonomous-navigation.md) —
-  Two crates under [`crates/plugins/`](../crates/plugins/) implementing M1 and part of
-  M2 of [`docs/baritone-port.md`](./baritone-port.md)'s Baritone-class navigation
-  design:
-- [Banner and shield pattern compositing (issue #174)](./banner-shield-patterns.md) —
-  The shared colour/ordering math behind vanilla's banner and shield pattern system: a
-  base dye colour plus an ordered list of pattern layers, each drawn as a masked
-  sprite tinted by its own dye colour. `lodestone_render::banner_pattern`
-  (`crates/lodestone-render/src/banner_pattern.rs`) is that math: a [`DyeColor`] enum
-  carrying vanilla's real per-colour tint, and
-  `banner_pattern_layers`/`shield_pattern_layers`, which turn a base colour plus a
-  pattern list into the exact ordered draw list vanilla itself builds.
-- [Autonomous navigation: a Baritone-equivalent for Lodestone](./baritone-port.md) —
-  A plan for building a **Baritone-class navigation and autonomy system** for this
-  client: tell it a coordinate or a block type and it walks, jumps, digs, bridges and
-  climbs its way there, across terrain it has not seen yet, without desyncing.
-  Delivered as a **bevy plugin**, so it has the same power as built-in code — the
-  requirement driving [`docs/bevy-migration.md`](./bevy-migration.md).
-- [Beacon: pyramid detection, power selection and periodic effects](./beacon.md) —
-  Server-side simulation for `minecraft:beacon` (issue #616's `SET_BEACON` remainder):
-  pyramid-tier detection, the primary/secondary power menu, and the periodic
-  status-effect grant to nearby players. Before this, `SET_BEACON` decoded and was
-  discarded, and there was no beacon block entity, menu, or effect-selection state
-  anywhere in `lodestone-server`.
-- [Benchmark harness](./benchmark-harness.md) — The criterion-based benchmark
-  harness for epic [#78](https://github.com/matteopolak/lodestone/issues/78),
-  implemented for six crates so far: `lodestone-worldgen` (chunk generation,
-  sub-issues #84/#85), `lodestone-v770` (protocol decode throughput, sub-issues
-  #137/#142/#146/#88), `lodestone-world` (client-side chunk loading — store
-  insertion, heightmap decode, light propagation, light *application*, memory
-  footprint), `lodestone-entity` (mob simulation and pathfinding), `lodestone-physics`
-  (movement integration, collision sweep, pose fit gate, crowd push — sub-issues
-  #115/#120/#124/#102) and `lodestone-render` + `lodestone-shell` together
-  (render-submit counts and durations — sub-issues #106/#128/#133/#160, see ["The
-  render/entity batch"](#the-renderentity-batch-87-90-91-92-97-99-106-128-151-160)
-  below for the split between the two crates and what closed in the most recent pass).
-  It is the concrete implementation of the design recorded in
-  [`docs/roadmap/benchmarks.md`](./roadmap/benchmarks.md) — that doc is the
-  *argument* for the shape; this one is *how it actually works* and how to extend it.
-- [Migrating to `bevy_ecs`](./bevy-migration.md) — A staged plan for moving
-  Lodestone's world/entity/session state onto `bevy_ecs`, so that third-party
-  extensions are native Rust plugins with the same power as built-in code.
-- [Biome mob-spawn settings: the `spawners` / `spawn_costs` parse](./biome-spawners.md) —
-  `crates/lodestone-worldgen/src/spawners.rs` parses the `spawners` and `spawn_costs`
-  fields every one of 26.2's 66 bundled biome documents carries. Until it existed,
-  **nothing in the workspace read either field** — the data shipped in
-  `crates/lodestone-server/assets/worldgen/biome/*.json` and was named by no line of
-  code. `OverworldGenerator::biome_spawners(biome)` exposes the per-biome answer.
-- [Real per-position biome tint (grass, foliage, water)](./biome-tint.md) — Grass,
-  foliage, dry-foliage and water quads used to render one fixed **plains-default**
-  colour everywhere — real per-biome variety existed in the world data (climate
-  table, per-biome
-  `water_color`/`grass_color`/`foliage_color`/`grass_color_modifier`), but nothing
-  consumed it at render time. `lodestone_assets::tint::BiomeTint` had zero
-  implementors outside a test mock. This closes that gap: the live mesher now resolves
-  each tinted quad's **real, position-blended** colour, matching vanilla's own
-  `ClientLevel.calculateBlockTint` box-blend.
-- [Block-break timing](./block-break-timing.md) — How long the shell takes to mine a
-  block, and how fast the crack overlay fills while it does. The arithmetic lives in
-  `lodestone-game`'s `mining` module (`BreakInputs`, `Mining`), the per-block data
-  lives in the version crates behind `VersionAdapter::block_hardness`, and
-  `lodestone-shell`'s `sim.rs` is the join between them.
-- [Block drops](./block-drops.md) — Breaking a block server-side now rolls that
-  block's vanilla loot table, spawns the result as real item entities with vanilla's
-  `popResource` position and velocity, streams them to every connection, and lets a
-  player walk over them to collect them into their inventory. This is issue #337's
-  *consumer* — the loot roller itself already existed and had never been called.
-- [Block editing: dig, place, and a world that actually holds the change](./block-edit.md) —
-  The piece that closes the loop a served session was still missing after
-  [`docs/served-session-liveness.md`](./served-session-liveness.md): a player on our
-  own server could walk around real generated terrain but could not change one block
-  of it. This is the decode → mutate → confirm path for the two serverbound
-  editing packets — `PLAYER_ACTION` (block-breaking) and `USE_ITEM_ON` (block
-  placement) — plus the retention that lets an edit survive a chunk being forgotten
-  and re-sent.
-- [Block-entity simulation: composter, furnace, hopper, brewing stand](./block-entities.md) —
-  Four independent, pure, tick-driven state machines in
-  `crates/lodestone-server/src/`, each a line-by-line port of the corresponding
-  vanilla `BlockEntity`/`Block` class:
-- [Block-entity frame snapshot](./block-entity-frame-snapshot.md) — The block-entity
-  frame snapshot is one immutable, camera-scoped gather of block-entity positions,
-  block states, and packed entity light. It lets state-driven renderers share the same
-  world read instead of independently scanning loaded chunks and reacquiring the
-  chunk-world lock for every visible object's light.
-- [Block entity renderers](./block-entity-renderers.md) — The cuboid rigs vanilla's
-  `BlockEntityRenderer`s draw for blocks whose block model **does not fully describe
-  them**. Chest and skull are the total-absence case — their block models have zero
-  elements, so before this work they were a hole in the world. Bell is the partial
-  case: its block model has real geometry for the attachment frame, but the swinging
-  body/rim comes from `BellRenderer` alone, same as chest and skull in kind, just not
-  in degree. The lectern is the far end of that spectrum: its shelf, base and posts
-  are *all* real block models, and only the open book on top comes from a renderer.
-  Today: chests (single, double left, double right; every material; the lid
-  animation), skull/head geometry (five of vanilla's seven types), the bell body/rim
-  (see [Bell](#bell)), the shulker box (see [Shulker box](#shulker-box)),
-  standing/wall/hanging sign text, the banner with its pattern layers, the lectern's
-  book (see [Lectern](#lectern)), the enchanting table's floating book (see
-  [Enchanting table](#enchanting-table)), the food on a campfire (see
-  [Campfire](#campfire), which is the one type here that draws no cuboid rig at all),
-  the piston head (see [Piston head](#piston-head), which draws whole moving *block*
-  models rather than a cuboid rig) and the decorated pot's base plus its four
-  independently-sherded sides (see [Decorated pot](#decorated-pot)).
-- [The block-entity scan is a cold-column term, but not a distance one](./block-entity-tick-distance.md) —
-  The measured resolution of the block-entity lead in [issue
-  #503](https://github.com/matteopolak/lodestone/issues/503): whether
-  `BlockEntityRegistry`'s unfiltered 20 Hz scan is a **second, CPU-side,
-  distance-dependent** cause of the game degrading as you walk from spawn. The
-  cold-column mechanism was real and cost **610 column regenerations per tick** past a
-  threshold, but it was flat in distance — what crossed the threshold was registry
-  size, not travel.
-- [Block outline and interaction shapes](./block-outline-shapes.md) —
-  Per-block-state `BlockStateBase.getShape` (the **outline**) and
-  `BlockStateBase.getInteractionShape`, for protocol 776 (Minecraft 26.2), dumped from
-  the real 26.2 server and committed as generated tables.
-- [Block physics constants](./block-physics-constants.md) — The block facts a
-  **moving entity** needs that are not geometry — how slippery a cell is, how much
-  it slows you, whether it grabs you, whether you can climb it, and whether it stops
-  you at all. Seven values, split across two homes because they are keyed differently:
-- [Block placement conventions](./block-placement-conventions.md) — The server-side
-  table of `Block.getStateForPlacement` conventions: which `facing`, `half`, `axis`,
-  `type`, `shape` or `hinge` a block gets when a player right-clicks it into the
-  world. Lives in `crates/lodestone-server/src/block_placement.rs`, called from
-  `server.rs`'s `placed_block_state`, and is why a placed stair, chest, furnace or
-  anvil now points the way vanilla points it.
-- [Block placement prediction](./block-placement-prediction.md) — When you
-  right-click a block on a live server the shell now **writes the placed block into
-  the client-owned world immediately**, instead of sending `use_item_on` and waiting
-  for the server's `BLOCK_UPDATE`. It writes the block state *and* the block entity,
-  so a placed chest is a chest the moment you click it rather than a hole for one
-  round trip (issue [#381](https://github.com/matteopolak/lodestone/issues/381)).
-- [Block sound types](./block-sound-types.md) — `lodestone_data::sound_types` —
-  the per-block-state `SoundType` census: break, step, place, hit and fall sound for
-  every one of the 32,366 block states, plus the type's volume and pitch. It is the
-  data half of every surface sound a block makes, and its absence is the whole reason
-  block breaking was silent (see [sound playback](./sound-playback.md)).
-- [Block support, placement consumption, and `Item.use`](./block-support-and-item-use.md) —
-  Three joins the integrated server was missing, all of them producer-side gaps rather
-  than missing models: a block whose support is destroyed now pops off and drops,
-  placing a block now costs you the block, and a right-click in mid-air now eats food
-  and equips armour instead of doing nothing at all.
-- [Boats: placing, boarding and steering](./boat-placement.md) — The server-side
-  half of "put a boat down, get in it, row it". It covers `BoatItem.use`'s raytrace
-  (`lodestone_server::boat`), a rideable-vehicle registry that is deliberately **not**
-  the mob simulation (`lodestone_server::mobs`' `vehicles` field), the
-  `SET_PASSENGERS` producer that makes a client believe it is aboard, and the
-  acceptance of the client's authoritative `MoveVehicle`.
-- [Bone meal](./bone-meal.md) — The instant-growth right-click: a port of 26.2's
-  `BoneMealItem::useOn` and the per-block `isValidBonemealTarget` /
-  `isBonemealSuccess` / `performBonemeal` triples it dispatches to, in
-  `crates/lodestone-server/src/bone_meal.rs`. Bone meal on wheat, carrots, potatoes or
-  beetroots jumps the crop several growth stages; on a sapling it advances the stage
-  45% of the time and is consumed either way.
-- [Book-and-quill editing](./book-editing.md) — `EDIT_BOOK` (issue #616's
-  remainder): drafting and signing a `minecraft:writable_book`, server-side, **and**
-  the client-side screen that produces the packet (issue #613's remainder). Before the
-  client half, `ClientAction::EditBook` was encoded by every protocol family with zero
-  producers anywhere in `lodestone-shell` — the same outbound-island shape
-  `ClientAction::SetFlying` was caught in, except here the failure mode is silent
-  (nothing disconnects; a book simply cannot be written). Before either half, the
-  packet decoded and was discarded, and `ItemComponents` (`lodestone-model`) had no
-  book-content fields at all — a written or writable book anywhere in an inventory
-  silently truncated the rest of whatever packet carried it, the same decode-cliff
-  class as `trim`/`map_id`/`pot_decorations`/`profile`.
-- [Written books](./book-reading.md) — Reading a signed `minecraft:written_book`:
-  its title, author and copy generation on the item itself, and the screen that opens
-  when you right-click one. Vanilla's `WrittenBookContent` component plus
-  `BookViewScreen`, the read-only counterpart of [book-and-quill
-  editing](./book-editing.md).
-- [Brain target acquisition: nearby-entity perception and OR-gated activities](./brain-target-acquisition.md) —
-  Two small additions to `lodestone_entity::brain` that a previous investigation
-  identified as the actual blocker for goat ram and villager panic — not a missing
-  jump-arc port or a missing flee behaviour, but the perception and eligibility
-  machinery those features need:
-- [Break particles](./break-particles.md) — A terrain particle is a small
-  camera-facing billboard textured from a random **quarter** of its block's
-  `#particle` sprite, tinted by a per-state colour, and shaded by the light at its
-  cell. Three layers own the parts:
-- [Browser shell port](./browser-shell-port.md) — The work of making `web/` run the
-  **real `lodestone-shell`** — the same menu, the same `Sim`, the same renderer the
-  native binary uses — instead of a separate feasibility-spike application with its
-  own `main`. This document is the hazard census that the port is driven from: for
-  each way the shell depends on an operating system, which files are involved, what
-  was actually *measured* about the hazard, and the chosen disposition (**gate**,
-  **replace with a seam**, or **delete the need**).
-- [Bubble columns](./bubble-columns.md) — The vertical impulse a `bubble_column`
-  block applies to the player: soul sand pushes you up (an elevator), a magma block
-  drags you down (a drain). Issue #199.
-- [Build caching (`sccache`), dev profiles, and multi-agent build contention](./build-caching.md) —
-  The measured design for how up to eleven agents build concurrently in one shared
-  checkout on a 10-core / 16 GB machine: a repo-level `sccache` compiler-cache wrapper
-  (**active in `.cargo/config.toml` since 2026-08-04**), per-agent private target dirs
-  via the `--target-dir` flag, trimmed dev profiles in the root `Cargo.toml`, and a
-  cleanup-on-finish policy. This doc is the record of what was measured, what was
-  decided from it, and the honest limits of both.
-- [Burning](./burning.md) — Entity burning: ignition from fire and lava, the
-  fire-tick damage interval, the lava-vs-fire duration distinction, and Fire
-  Resistance immunity. `crates/lodestone-server/src/burning.rs` holds the rules as a
-  pure value type; `server.rs`'s vitals timer is both the ignition producer and the
-  burn consumer.
-- [The render camera: basis, view matrix, and the pitch-±90 singularity](./camera.md) —
-  `lodestone-render`'s `Camera` — the eye position, yaw/pitch orientation and
-  projection every world-space matrix in the frame is derived from, reconciled against
-  vanilla's `net.minecraft.client.Camera`. Its orientation is built the way vanilla
-  builds it, from a **single YXZ Euler rotation**, because the obvious alternative (a
-  look-at with a hardcoded `Vec3::Y` up) is degenerate at pitch `±90` and flipped the
-  camera whenever the player looked straight up or straight down.
-- [Cancelable interaction verbs](./cancelable-actions.md) — `ActionVetoes`
-  (`crates/lodestone-ecs/src/veto.rs`) is the veto point for the interaction verbs
-  every protection, anti-grief and anti-cheat plugin actually cancels. A plugin
-  registers a predicate per verb; the engine asks *before* it commits, and a `Deny`
-  stops the action before the predictor runs and before anything reaches the wire.
-  This is what separates "plugins can read state" from "plugins can be a protection
-  plugin".
-- [`lodestone-canonical`: the shared pre-Flattening → 26.2 block-state layer](./canonical-block-states.md) —
-  The crate every pre-1.13 protocol family maps its blocks through. It holds two
-  things that used to live inside `lodestone-v340`: the JVM-dumped `(old_block_id,
-  meta)` → modern-block table (vanilla's own 1.13.2 `DataFixerUpper` flattening
-  fix), and the bridge from that table's output to a concrete canonical **26.2**
-  block-state id — the id space `lodestone-world`'s palette consumers (the mesher's
-  atlas, collision) are actually built from. Extracted here as unit U1 of epic #343's
-  dispatch plan
-  ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)) so that the
-  four pre-1.13 families do not each carry a private copy of a 9,000-line generated
-  table.
-- [Cauldron rendering](./cauldron-rendering.md) — Cauldron block models combine an
-  opaque body and rim with an inset liquid surface. They remain on Lodestone's
-  depth-writing model path so the liquid cannot blend through the cauldron body.
-- [Chat input editing](./chat-input-editing.md) — Ordinary text editing in the chat
-  prompt: a caret you can move, a selection, copy/cut/paste, word-wise motion and
-  deletion, and Home/End. The line is `crate::chat::ChatInput`, and since it became an
-  `EditBox` the editing itself is vanilla's `EditBox` port rather than anything
-  written for chat.
-- [Chat](./chat.md) — The chat box: the outbound input line
-  (`crate::chat::ChatInput`), the received scrollback
-  (`lodestone_game::chat::ChatLog`, folded into legacy `§`-coded strings at read
-  time), and the HUD draw that renders both (`crate::hud::HudGeometry::build_inner`'s
-  chat block, `crates/lodestone-shell/src/hud.rs`). This doc covers the **rendering**
-  half — input caret, word wrap, and the persisted Chat Settings that shape it —
-  not the wire path (`chat.rs`'s own module docs cover composing an outbound line) or
-  the log itself (`lodestone-game/src/chat.rs`).
-- [Chunk column encoding: real block states on the wire (issue #363)](./chunk-column-encoding.md) —
-  `V770ServerProtocol::encode_chunk`'s `build_world_column` turns one
-  `lodestone-server` [`ChunkColumn`](../crates/lodestone-server/src/chunk.rs) — the
-  server's own per-block-state terrain data, whatever produced it (the real generator,
-  an edit, a stand-in) — into the version-free
-  [`lodestone_world::ChunkColumn`](../crates/lodestone-world/src/column.rs) that
-  `encode_column_body` serialises as the `level_chunk_with_light` packet body: the
-  whole-column send every client gets at join, and that `ViewTracker` resends as a
-  player walks (`crates/lodestone-server/src/server.rs`).
-- [Server-side chunk column storage](./chunk-column-storage.md) — `SectionedBlocks`
-  (`crates/lodestone-server/src/chunk_blocks.rs`) is how a server-side `ChunkColumn`
-  stores its block-state indices: one bit-packed 16-row section at a time, each either
-  a single repeated value or a packed array sized to the palette ids that section
-  actually uses. It replaced a flat `Vec<u16>` over the column's full height, which
-  was **192 KiB of the 195.5 KiB** the chunk store measured per retained column. It is
-  the storage half of unit **U8** of
-  [`plans/chunk-lifecycle.md`](./plans/chunk-lifecycle.md), issue #551, and it cut
-  per-column residency to **31.1 KiB, measured** — so the singleplayer store at
-  `render_distance` 32 went from **867 MiB to 139.2 MiB**, both measured under
-  `/usr/bin/time -l`.
-- [Chunk section memory: pool footprint measurement (issue #362)](./chunk-memory-pool-footprint.md) —
-  Issue #362 proposed a size-classed buffer pool with handles for chunk section data
-  (the `Vec<u64>` behind [`PackedArray`](../crates/lodestone-world/src/packed.rs) and
-  the `Vec<u32>` palette behind `PalettedContainer::Indirect`), but explicitly asked
-  for the footprint to be *measured* before anything gets built. This doc is that
-  measurement, plus the recommendation it implies. **No pool exists in the tree; this
-  doc does not add one.**
-- [The server-side chunk store](./chunk-store.md) — `ChunkStore`
-  (`crates/lodestone-server/src/chunk_store.rs`) is a bounded, least-recently-used
-  cache of generated chunk columns that wraps any `ChunkSource` and *is* a
-  `ChunkSource`. It exists because the integrated server had no column cache at all,
-  so a column was re-generated from scratch on every request — and two different
-  repeating 50 ms timers were requesting them, which made singleplayer effectively
-  unplayable. It is unit **U3** of
-  [`plans/chunk-lifecycle.md`](./plans/chunk-lifecycle.md) (issue #289).
-- [Chunk tickets and the status pipeline](./chunk-tickets.md) — `crate::ticket`
-  (`crates/lodestone-server/src/ticket.rs`) is a vanilla-shaped ticket/level graph
-  that answers one question independent of any single connection's view radius: *why
-  should this chunk exist at all, and how urgently*. `crate::chunk_store::ChunkStore`
-  (`crates/lodestone-server/src/ chunk_store.rs`) is the one production consumer —
-  it grants tickets, checks in with the graph on its own read traffic, and evicts a
-  chunk through the real persistence-aware [`crate::chunk::ChunkSource::unload`] path
-  once nothing wants it any more.
-- [The chunk world as an ECS resource](./chunk-world-resource.md) — One
-  `lodestone_world::World` for the whole process, held behind `Arc<RwLock<_>>` as the
-  `bevy_ecs` resource `lodestone_ecs::ChunkWorld`, plus all terrain-mesh scheduling
-  state as a second resource (`lodestone_shell::mesher::TerrainMesh`) driven by one
-  `Update` system. This is Stage 4 of [`bevy-migration.md`](./bevy-migration.md) and
-  the §4.1(d) half of its `World` unification.
-- [Continuous integration](./ci.md) — `.github/workflows/ci.yml` runs on every push
-  to `main` and every pull request. It exists so an agent can push and let a
-  GitHub-hosted runner verify the four commands in `CLAUDE.md`'s "Build and test"
-  section, instead of every agent running heavy `cargo` builds on the one shared dev
-  laptop — with ten agents on ten cores, local verification was slower than the work
-  it was checking.
-- [Client chunk-path cycle accounting](./client-chunk-cycles.md) — An
-  instruction-denominated attribution of the **client** chunk path — from a
-  `level_chunk_with_light` packet arriving to its pixels being submitted — measured
-  over real generated terrain with macOS's task-level hardware counters. It answers
-  "where do the CPU cycles actually go?" with a number per stage and a named counter
-  behind each one, and it carries the controls that prove the counter is a counter.
-  The harness is `crates/lodestone-shell/tests/client_chunk_cycles.rs`; this doc is
-  how to read it, what it found, and how to extend it without reintroducing a defect
-  it already caught.
-- [Client frame performance — 2026-08-24](./client-frame-performance-2026-08-24.md) —
-  This is a measured client-rendering investigation at render distance 24 in a release
-  configuration. It covers ordinary Java terrain and a dense Java-hosted showcase
-  containing signs, player heads, patterned banners, mapped item frames, equipped
-  entities, particles, displays, and block entities.
-- [Client frame performance — 2026-08-25](./client-frame-performance-2026-08-25.md) —
-  This is the large-world follow-up to the 2026-08-24 client rendering study. It
-  measures the release client in fullscreen on the MacBook's built-in display while
-  joined to the official Hermitcraft Season 10 Java world, compares F3 closed and
-  open, attributes the open-overlay cost with CPU sampling, and records the result of
-  caching HUD glyph geometry.
-- [Client-side relight](./client-relight.md) — The client's own light engine: a
-  block change queues a relight, and once a frame the client recomputes sky and block
-  light in a bounded box around each change and re-meshes what moved. It is vanilla's
-  `LightEngine.checkBlock` plus `ClientLevel`'s `runLightUpdates`, and without it a
-  block broken on a real vanilla server leaves a **permanently pitch-black hole**.
-- [v770 clientbound `play` packet coverage, and the 32-packet remainder](./clientbound-packet-coverage.md) —
-  The measured decode/consumer coverage of protocol 776's `play` clientbound packets
-  in `crates/protocol/v770`, and a sourced triage of every packet that is still
-  undecoded — which ones are one small patch away from reaching a real consumer, and
-  which would be islands (decoded, reaching nothing) if decoded today. This is the
-  record for GitHub issue #26 ("the remaining clientbound packets").
-- [Climbing (scaffolding vs. ladder) and powder-snow freezing](./climbing-and-freezing.md) —
-  Two small, related additions to `lodestone-physics`, plus a correctness fix that
-  both lean on: scaffolding's distinct climb/descend behaviour (#210), powder-snow
-  freezing (#212), and a swept-segment fix to the "which block is the player standing
-  inside" sweep both consume (#216).
-- [Collision shapes](./collision-shapes.md) — The route from the version crate's
-  per-block-state **collision census** to the physics engine's `CollisionView`, so the
-  player collides with the shapes vanilla actually uses — a bottom slab is 8/16
-  tall, a fence is 1.5 blocks tall, cobweb has no collision at all — instead of one
-  unit cube per block that happens to occlude.
-- [Combat: swinging, attacking entities, knockback, and the attack-cooldown indicator](./combat.md) —
-  Issues #72 (left-click only swung when a dig started), #12 (attacking entities,
-  taking knockback), and #121 (the crosshair cooldown reticle). Covers three things
-  from the original change, plus the ticker/indicator pair added afterward:
-- [Command block edit screen](./command-block-screen.md) — The command block edit
-  screen (issue #47): vanilla's `CommandBlockEditScreen` — an in-game overlay with a
-  command text field, tab-completion, a read-only "Previous Output" line, a Track
-  Output toggle, and Mode/Conditional/Needs Redstone toggles for the block variants.
-- [Command tree](./command-tree.md) — `crates/lodestone-command` is a standalone,
-  **ECS-free, version-free** library for Brigadier-style command trees:
-  root/literal/argument nodes with redirects and an `executable` flag, parsers and
-  completion-suggesters for Brigadier's primitive argument types, and a registry for a
-  plugin to add its own. It depends on nothing else in this workspace and nothing else
-  in this workspace depends on it yet — see "Why this is a sanctioned island" below.
-- [Commands](./commands.md) — The client's half of vanilla's Brigadier command UX: a
-  decode target for the server's whole command tree, and the tab-completion /
-  syntax-highlighting engine that walks it against the chat box's input line. This
-  covers **joining** a vanilla server and typing against its tree, not hosting one —
-  the server-side dispatcher and a plugin's own command registration are both
-  explicitly out of scope here, and are designed to share an argument-type library
-  with this work rather than duplicate it.
-- [Compile times: `--timings` critical path, Cranelift, parallel frontend, and linker](./compile-times.md) —
-  Measured findings from `cargo build --timings`, a Cranelift-vs-LLVM debug-build
-  comparison, the nightly parallel front-end (`-Z threads=N`), and the macOS linker,
-  taken to decide whether crates should split, dev-profile options should change, or
-  nightly-only compiler flags are worth taking permanently. This complements
-  [`docs/build-caching.md`](./build-caching.md) (sccache + the existing dev-profile
-  trims), which everything below assumes as the baseline.
-- [Confirmation screen](./confirm-screen.md) — `Screen::Confirm` — vanilla's
-  `ConfirmScreen`: a question, a warning naming the thing at risk, and two buttons. It
-  is the gate an **irreversible** action passes through, and the only thing that opens
-  it today is the world list's Delete button (issue
-  [#540](https://github.com/matteopolak/lodestone/issues/540)).
-- [Container clicks](./container-clicks.md) — The client-side predictor for what a
-  mouse click on an open container screen does — vanilla
-  `AbstractContainerMenu.doClick`, reimplemented version-free. It runs locally the
-  instant the player clicks, so the screen updates before the server round-trips a
-  confirmation, and it is deliberately faithful to vanilla's quirks rather than
-  "corrected," because a corrected version would predict a different result than the
-  server computes and desync the display for one round trip. Lives in
-  `crates/lodestone-game/src/{click.rs, menu.rs, menus.rs}`. Landed from a
-  line-by-line click audit against 26.2's decompiled `AbstractContainerMenu`.
-- [The cost-based container screens: anvil, grindstone, smithing, enchanting](./container-cost-screens.md) —
-  The client half of issues #253 (enchanting table), #254 (anvil / grindstone) and
-  #255 (smithing table): decoding, modelling and drawing the four "item-combiner"
-  screens whose result depends on a cost the server computes.
-- [The container / inventory / crafting screen](./container-screen.md) —
-  `crates/lodestone-shell/src/container.rs` — the screen that draws an open
-  [`Menu`](../crates/lodestone-game/src/menu.rs): a panel, a well per slot, the slot
-  contents, and (for menus that have one) a crafting grid and result slot.
-- [The container station widgets: enchanting, stonecutter, loom](./container-station-widgets.md) —
-  The three screens whose `ClientAction::ContainerButtonClick` producer lives in
-  `crates/lodestone-shell/src/container/{enchant,stonecutter,loom}.rs`: the enchanting
-  table's three enchant-offer rows, the stonecutter's up-to-32-recipe scroll grid, and
-  the loom's up-to-32-pattern scroll grid. `ContainerButtonClick` was encoded by every
-  protocol family with zero shell callers before this — the same outbound-island
-  shape `ClientAction::SetFlying`/`SetBeaconEffects` were caught in — and these
-  three modules are its producers.
-- [Coplanar overlay depth](./coplanar-overlay-depth.md) — Several subsystems draw a
-  thin quad a small **world-space** distance in front of another surface and rely on
-  the depth test to keep it there: a filled map's picture over an item frame or its
-  attachment wall, a sign's glyph ink and its glowing outline over the sign board, an
-  item-frame body over the wall it hangs on. This document is the measurement of how
-  much depth separation those overlays actually have in this renderer, and what the
-  polygon offsets attached to them really contribute on the device we ship on. The
-  instrument is `crates/lodestone-render/tests/coplanar_overlay_depth_survey.rs`.
+  Two crates under [`crates/plugins/`](../crates/plugins/) implementing a
+  Baritone-class client-side pathfinder: `lodestone-nav` is a version-free search core
+  (`(snapshot, start, goal, policy, budget) → plan`), and `lodestone-autopilot` is
+  the bevy plugin that wraps it into `MovementIntent`/`LookIntent` output. It is a
+  separate subsystem from server-side mob AI (`docs/mob-ai.md`) — this is a
+  pathfinder for a *player-shaped* body, built as an opt-in plugin for people writing
+  bots on top of the client, not a feature of the shipped game.
+- [Block entity renderers](./block-entity-renderers.md) — The render path for blocks
+  whose visible geometry is not (fully) described by their own block model — chests,
+  skulls, signs, banners, shields, bells, shulker boxes, lecterns, campfires,
+  decorated pots, conduits, beacons, piston heads, spawners, vaults, end
+  portals/gateways, and related types — plus two adjacent families that live in this
+  same corner of the renderer: block models drawn away from their own cell (falling
+  sand, piston heads, primed TNT) and flat "ground-plate" blocks (carpets, pressure
+  plates, leaf litter, rails) whose flicker problems turned out to be a
+  mipmap/sampling issue rather than a geometry one.
+- [Blocks: placement, breaking, outlines, sound, entities and persistence](./blocks.md) —
+  Everything about a block once it exists in the world: how a right-click resolves to
+  a placed state (server rule table, and the client's own prediction of it), how long
+  a block takes to break and what interrupts that, which shapes a block presents to
+  selection vs. collision, what sound a block makes, how the server actually mutates
+  and persists an edited block, the four simulated block-entity types
+  (composter/furnace/hopper/brewing stand), bone meal, and how entities/players (not
+  just terrain) survive a world restart. Structure chests, block drops and loot tables
+  live in [`docs/mining-and-drops.md`](./mining-and-drops.md).
+- [Books](./books.md) — Reading and writing in-game books: the writable-book editor
+  and its signing flow, and the read-only screen for a signed book (plus a lectern's
+  book display). All three share one texture, one word-wrap model, and one overlay
+  frame builder.
+- [Browser shell port](./browser-shell-port.md) — The wasm32 target: `web/` runs the
+  real `lodestone-shell` — the same menu, `Sim`, and renderer the native binary uses
+  — fetching `client.jar` and `blocks.json` at startup instead of reading them off a
+  filesystem. This document is the hazard census the port is driven from: for each way
+  the shell depends on an operating system, what was measured about the hazard and the
+  chosen disposition (**gate**, **replace with a seam**, or **delete the need**), plus
+  the confinement guards that keep a fixed hazard from creeping back in.
+- [Camera, view bobbing and frame pacing](./camera-and-view.md) — How the render
+  camera's orientation is built and why (`lodestone-render`'s `Camera`), the three
+  tick-driven effects layered onto it before it reaches a uniform — the walking bob,
+  the damage tilt, and (not yet built) held-item view lag — and the shell's frame
+  clock, which decides how much simulated time a frame gets and whether it presents at
+  all.
+- [Chat](./chat.md) — The chat box: the outbound input line, the received
+  scrollback, and the HUD draw that renders both, including in-line editing (caret,
+  selection, history, word motion) and interactive text (clickable links, hover
+  tooltips, command suggestions). This covers the client-side rendering and editing
+  surface; the wire path for composing an outbound line and the log itself live in
+  `lodestone-game`.
+- [Chunk lifecycle: residency, generation, and streaming](./chunk-lifecycle.md) —
+  Everything that decides which chunk columns exist in memory on the integrated
+  server, how expensive it is to make one exist, and how a connected client's own view
+  of the world stays in sync as it walks around — plus the client-side mirror of the
+  same "one authoritative copy" idea for the terrain a session renders and collides
+  against.
+- [Server-side chunk column storage and wire encoding](./chunk-storage.md) — How a
+  server-side `ChunkColumn` holds its block-state data in memory, how those states
+  reach a real client on the wire as the `level_chunk_with_light` packet body, and how
+  the one heightmap this server currently computes (`MOTION_BLOCKING`) is derived and
+  sent alongside them.
+- [Colour and tint](./colour-and-tint.md) — The one rule that governs every colour
+  operation in this renderer — vanilla is not colour-managed, so tint, shade, fog
+  and text all multiply and blend in **gamma** (sRGB byte) space, never linear — and
+  the concrete pipelines built on it: biome tint, item tint, the enchantment glint,
+  world-space text colour/lighting/blending, and the menu background blur.
+- [Combat](./combat.md) — Melee/ranged attack resolution end to end: swinging and
+  targeting, sending and decoding the attack packet, knockback, the attack-cooldown
+  ticker and its HUD indicator, hurt/death visual feedback, equipment-derived combat
+  attributes (damage, armor, toughness), and the damage-type registry that tags how a
+  hit is reduced.
+- [Container screens](./container-screens.md) — The container/inventory screen
+  family: the shared model that draws any open `Menu` (chest, furnace, crafting table,
+  anvil-family, creative inventory, merchant), the client-side click predictor that
+  mirrors vanilla's `doClick`, and the handful of screens with real bespoke chrome on
+  top of that shared base — cost readouts, station widgets, the creative grid, the
+  merchant trade list, the 3-D player preview, and inventory potion-effect icons.
 - [Crafting](./crafting.md) — The version-free crafting stack in `lodestone-game`:
   the recipe data model and matching rules (`recipe.rs`), a loader for Mojang's own
-  datapack JSON (`recipe_json.rs`), and the crafting-table menu layout that `menus.rs`
-  builds when the server opens a `minecraft:crafting` screen.
-- [Creative flight](./creative-flight.md) — Two things, and separating them was the
-  whole design:
-- [Creative inventory screen](./creative-inventory-screen.md) — Vanilla's
-  `CreativeModeInventoryScreen` (issue #158): the 14-tab strip, the scrollable 5×9
-  item grid, the search tab, and the inventory tab. Contents come from
-  `crates/lodestone-shell/src/container/creative_items.rs` — a hand-transcription of
-  the decompiled `CreativeModeTabs.java`, 1725 items over 14 tabs, every id
-  cross-checked against `lodestone-data`'s real item registry.
-- [The credits / end-poem screen](./credits-screen.md) — `Screen::Credits` (issue
-  #192): the screen reached after vanilla's dragon fight, on exiting the End through
-  the exit portal — vanilla's `WinScreen`. Reachable through
-  [`UiState::show_credits`](../crates/lodestone-shell/src/menu.rs), dismissed by
-  Enter, Escape, or its own Done button, all of which leave through
-  [`UiState::quit_to_title`](../crates/lodestone-shell/src/menu.rs) — the same
-  teardown the pause menu's Disconnect and the death screen's Title Screen button
-  already use, not a fourth copy of "clear session state and go to the title".
-- [Cross-plugin custom messages](./cross-plugin-messages.md) — The pattern a plugin
-  uses to publish its own message type so an unrelated plugin can subscribe **without
-  depending on the publisher's crate** — Bukkit's
-  `pluginManager.callEvent(MyOwnEvent)` plus a listener in a plugin that has never
-  heard of the publisher. `lodestone_ecs::plugin_message` carries the one piece of
-  machinery it needs, and three toy crates under `crates/plugins/` prove it end to
-  end. Issue #107.
-- [Custom entity types](./custom-entity-types.md) — A registry mapping a plugin's
-  own entity kind (`myplugin:sentry`) to the vanilla entity type it is **disguised as
-  on the wire** (`minecraft:armor_stand`).
-- [Custom items](./custom-items.md) — The API a plugin uses to define an item the
-  vanilla registry does not have (issue
-  [#147](https://github.com/matteopolak/lodestone/issues/147)): its own namespaced id,
-  a vanilla **base item** it is actually made of on the wire, and the components that
-  make it look and behave like something new.
-- [Damage types and tags](./damage-types.md) — The authoritative
-  `minecraft:damage_type` registry for Minecraft 26.2 — 51 damage types and their 35
-  tags — generated from vanilla's own datapack JSON and consumed by
-  `lodestone-entity`'s `DamageFlags`, so combat, fall, fire and loot code reads one
-  table instead of hand-deriving "does this bypass armour?" at each call site. Closes
-  issue [#263](https://github.com/matteopolak/lodestone/issues/263).
-- [Death screen](./death-screen.md) — Vanilla's `DeathScreen` (issue #103): the
-  screen that appears when the local player's health reaches zero — the "You Died!"
-  title, the server's death message, a score line, and two buttons (Respawn / Title
-  Screen). It draws as an overlay over the still-rendering, still-ticking world, the
-  same way [`Screen::Paused`](./pause-menu.md) does, and gates a respawn the client
-  used to send automatically with no screen at all.
-- [F3 debug overlay](./debug-overlay.md) — The F3 instrument: two columns of stats
-  over the world in vanilla's own plate, pitch and font, plus the F3+B hitbox and F3+G
-  chunk-border world overlays. The presentation is a port of `DebugScreenOverlay`; the
-  *content* is curated — vanilla lines that describe the JVM are dropped rather than
-  faked, and this engine's own counters take the slots they leave.
-- [Standalone dedicated server](./dedicated-server.md) —
-  `lodestone-dedicated-server` is a new, thin binary crate — its produced binary is
-  named `lodestone-server` — that runs `lodestone-server` headless: no client, no
-  renderer, no windowing crate in the graph. Drop it into a directory and run it; it
-  reads `server.properties` and `eula.txt` from that directory (writing vanilla-shaped
-  defaults on a first run, exactly like vanilla's own `server.jar`), enforces
-  ops/whitelist/bans, opens a persistent, autosaving world, hosts it over real TCP,
-  takes commands on stdin, and saves and closes the world cleanly on `stop` or a
-  shutdown signal.
-- [Dimension visuals: sky, fog and the Nether/End](./dimension-visuals.md) — How the
-  client's render path is supposed to look different in the Nether and the End, versus
-  what it actually does today: which parts already work (sky light defaulting, and now
-  fog colour and the frame clear colour), the one dimension attribute deliberately
-  left unwired (the End's sky-darken factor, pending a live-server check), and one bug
-  that used to undermine the rest — the connected dimension the render path read
-  went stale the moment a player changed dimension without reconnecting (portal
-  travel, `/execute in`, end-gateway teleport). **That one is fixed**; the diagnosis
-  is kept below because it is the best record of how it failed and of the trap that
-  hid it.
-- [Display entity orientation](./display-entity-orientation.md) —
-  `lodestone_render::display`: the shared geometry every `text_display`/
-  `item_display`/`block_display` entity carries — the billboard orientation that
-  decides which way it faces, and the `translation`/`left_rotation`/
-  `scale`/`right_rotation` transformation on top of it. A faithful port of
-  `DisplayRenderer.calculateOrientation` and `Transformation.compose` (`26.2`).
-- [The ender dragon fight](./dragon-fight.md) — The server-side state for the ender
-  dragon boss fight: the eleven-phase flight/combat state machine, end-crystal beam
-  healing, and the `EndDragonFight` controller (persisted "already defeated" flag,
-  scan-on-load, boss-bar progress value, the exit-portal block geometry, and the
-  four-crystal respawn sequence). Lives at `crates/lodestone-server/src/dragon/`,
-  ported from 26.2's decompiled `EnderDragon`/`EnderDragonPhaseManager`/`EndCrystal`/
-  `EnderDragonFight`/`DragonRespawnStage` under
-  `.cache/mc/26.2/src/net/minecraft/world/entity/boss/enderdragon/` and
-  `.../world/level/dimension/end/`.
-- [Dropped items](./dropped-items.md) — The render path for `minecraft:item`
-  entities — the stacks lying on the ground after a block breaks or a mob dies. Item
-  entities are *not* cuboid part rigs, so none of the entity pipeline applies to them:
-  a drop is an **item model** drawn in the world, through the same `ModelPipeline` and
-  the same stitched block atlas that terrain and the hotbar's 3-D icons use.
-- [Drowning: the server-side air-supply countdown and its damage](./drowning.md) —
-  Issue #267's server half: `PlayerVitals` (`crates/lodestone-server/src/vitals.rs`)
-  ticks a connected player's air supply down while their eye is submerged in water,
-  and deals drowning damage on vanilla's own cadence. Before this, the client's
-  air-bubble row (`docs/sky-and-air-bubbles.md`) was a display for a value that only
-  ever arrived at full — `airSupply` decoded correctly end to end, but nothing on
-  the server ever sent anything other than the join-time default. This closes the loop
-  from the *server* side, which is the side that has to be authoritative.
-- [Eating and drinking](./eating-and-drinking.md) — Everything visible and audible
-  about a consume, on both sides of the seam: the first-person dip and jitter of the
-  food toward the mouth, the crumbs that carry the food's own texture, the
-  third-person raised arm, and the eating/drinking/burp sounds. The *gameplay* half
-  — nutrition, saturation, the use clock, cancel-on-release — landed earlier and
-  lives in [`lodestone_server::item_use`](./hunger.md); this is the half that makes it
-  look and sound like eating.
-- [`maybeBackOffFromEdge` — the sneak-at-a-ledge back-off](./edge-back-off.md) —
-  `Player.maybeBackOffFromEdge` is the vanilla rule that stops you walking off a drop
-  while shift is held. It lives in `lodestone-physics` as
-  `player::maybe_back_off_from_edge`, called from inside
-  [`entity::move_entity`](../crates/lodestone-physics/src/entity.rs) — the shared
-  `Entity.move` core — and selected per entity by `MoveContext::edge_back_off:
-  EdgeBackOff`.
-- [Elytra rendering](./elytra-rendering.md) — The elytra's two wings as a wearable
-  layer over the humanoid rig: a mesh baked from `ElytraModel.createLayer`, a per-wing
-  transform posed off the wearer's own `body` part matrix, and the three-way
-  glide/crouch/rest pose that `ElytraAnimationState` lerps toward. Geometry, pose and
-  the GPU draw are all landed; the wings reach pixels. What is **not** landed is the
-  per-tick animation state, so every wearer is posed at the resting triple — see
-  "The pose is the resting one" below for what that is right and wrong for.
-- [Enchantment glint](./enchantment-glint.md) — The shimmering foil overlay an
-  enchanted item carries: a scrolling, rotated, additively-blended pass over the
-  item's **own geometry**, using vanilla's `enchanted_glint_item.png`. This doc covers
-  the render substrate — `crates/lodestone-render/src/glint.rs` and
-  `crates/lodestone-render/src/shaders/glint.wgsl` — plus what still has to happen
-  in `lodestone-shell` for a player to see it.
-- [Entity and player persistence](./entity-and-player-persistence.md) — The wiring
-  that makes mobs, dropped items and the player's own inventory survive quitting a
-  Lodestone world: per-player `.dat` storage, per-chunk entity storage and the
-  `DataVersion` decision. It sits alongside
-  [`world-save-load.md`](./world-save-load.md), which covers terrain, block entities
-  and scheduled ticks — everything *except* the things that move.
-- [Entity state as ECS components](./entity-components.md) — Every non-player
-  entity's state — position, rotation, health, equipment, the item a drop is made
-  of, and the render-side interpolation that turns 20 Hz reports into per-frame
-  transforms — held as `bevy_ecs` components and folded by systems. This is Stage 1
-  of [`bevy-migration.md`](./bevy-migration.md), which existed to collapse the
-  three-copy entity pipeline that doc's §1.1 measured.
-- [Entity metadata: the item field](./entity-metadata-item.md) — The seam that lets
-  a dropped item (`minecraft:item`) tell the client *what it is*. A drop carries no
-  item id in its spawn packet; its entire visible identity rides one entity-metadata
-  field, index 8, under the `ITEM_STACK` serializer. This doc covers decoding that
-  field in the 26.2 adapter and carrying it into the version-free
-  [`EntityMetadataUpdate`].
-- [Entity and player nametags](./entity-nametags.md) — Billboarded text above every
-  entity with a visible custom name, and above every other player (issue #100). Before
-  this landed, `EntityView` already decoded
-  `DATA_CUSTOM_NAME`/`DATA_CUSTOM_NAME_VISIBLE` in full
-  (`crates/protocol/v770/src/packets/metadata.rs`, indices 2/3), folded them into real
-  ECS components (`lodestone_ecs::entity::CustomName`/ `CustomNameVisible`, wired into
-  `apply_entity_metadata`'s routing switch), and reconstituted them onto `EntityView`
-  — but `net::entity_snapshot`, the one place that lowers `EntityView` into the
-  version-free `EntitySnapshot` the renderer actually consumes, dropped both fields on
-  the floor. The data was fully decoded and simply never read past that boundary —
-  the exact "island" shape this repo's other entity-metadata fixes (velocity,
-  equipment, variant) already had.
-- [Entity picking](./entity-picking.md) — The client's view-ray resolution of *which
-  entity, if any, the crosshair is on* — vanilla's `EntitySelector.CAN_BE_PICKED`
-  predicate plus the ray-versus-hitbox search that consumes it. It decides what a
-  left-click attacks, what a right-click interacts with, and what middle-click picks,
-  so getting the candidate set wrong is directly visible as a wrong attack target —
-  and, against a real server, as a disconnect.
-- [Entity-versus-entity interaction](./entity-push.md) — The two things that happen
-  when two entities occupy the same space, ported into `lodestone-physics` as
-  [`push.rs`](../crates/lodestone-physics/src/push.rs):
-- [Entity rendering: type → model → texture → pose](./entity-rendering.md) —
-  The path from "the server says there is a `minecraft:drowned` at (x, y, z)" to a
-  posed, textured, instanced mob on screen. Three separate decisions live along it,
-  and each has burned us once:
-- [The `v340`/`v735` `tests/entity.rs` spawn-packet fixture](./entity-spawn-wire-fixture.md) —
-  `lodestone-testsupport::EntitySpawnWireFixture` is a small data table that replaces
-  the hand-written wire bytes in `crates/protocol/v340/tests/entity.rs` and
-  `crates/protocol/v735/tests/entity.rs`'s `spawn_entity`/`spawn_entity_living` tests.
-  The two test files are structurally identical hermetic seam tests through
-  `VersionAdapter::handle_packet`; comment-stripped, the only difference between them
-  is six literals, not a code-shape difference — so this is a fixture table, not a
-  templated test body.
-- [Entity sprite renderers](./entity-sprite-renderers.md) — The draw path for the
-  three entity types that had **no** draw path at all until this landed:
-  `dragon_fireball`, `fishing_bobber` and `ominous_item_spawner`. `cargo xtask
-  world-coverage` reported all three as *stranded* — named in `SHADOW_RADII`,
-  decoded off the wire, reaching zero pixels — and the census moved from 148 drawn /
-  7 stranded to 151 drawn / 4 stranded when they were wired.
-- [Entity tick drivers: `ProjectileRegistry` and `ItemEntityRegistry`](./entity-tick-drivers.md) —
-  Two small per-tick driver types in `lodestone-entity` that own a *collection* of
-  already-correct, previously-unconsumed entity mechanics and advance all of them
-  through one call:
-  [`ProjectileRegistry`](../crates/lodestone-entity/src/projectile.rs) for ballistic
-  motion (arrows, snowballs, ender pearls, …) and
-  [`ItemEntityRegistry`](../crates/lodestone-entity/src/item_entity.rs) for
-  dropped-item age/pickup-delay/merge. Both are now constructed and ticked in
-  production by [`MobSim`](../crates/lodestone-server/src/mobs/mod.rs) — see
-  "Production wiring" below; this doc's earlier revision described them as unwired,
-  which is no longer true and is corrected here rather than left to mislead the next
-  reader.
-- [Equipment combat stats: the feed the damage pipeline never had](./equipment-combat-stats.md) —
-  What an equipped item contributes to a living entity's combat attributes — armour
-  points, armour toughness, knockback resistance, weapon attack damage — and the
-  wiring that makes a player's held sword and worn armour reach the damage pipeline.
-  The reduction formulas were live-verified against a real vanilla 26.2 server long
-  before anything populated a `Defenses`: armour reduced a number that came from a
-  per-species base attribute and never from a helmet, and every player attack dealt a
-  flat bare-hand `1.0`.
+  datapack JSON (`recipe_json.rs`), the crafting-table menu layout, the plugin-facing
+  recipe-registration API, and the recipe-book UI (browsing, auto-fill, unlock toast)
+  layered on top. Our own server now computes crafting results too — see
+  [`docs/server-side-crafting.md`](./server-gameplay.md).
+- [F3 debug overlay](./debug-overlay.md) — The F3 instrument: two columns of engine
+  and world stats drawn over the world in vanilla's own plate, pitch and font, plus
+  two world-space overlays (F3+B entity hitboxes, F3+G chunk borders). The
+  presentation — plate geometry, text metrics, column layout — is a faithful port
+  of vanilla's `DebugScreenOverlay`; the *content* is curated rather than faked: lines
+  that describe the JVM (heap stats, Java/CPU info, GPU-utilization percentage) are
+  dropped outright instead of being filled with fabricated numbers, and this engine's
+  own diagnostics take the slots vanilla's JVM-only lines leave empty.
+- [The integrated and dedicated server](./dedicated-server.md) — `IntegratedServer`
+  (`crates/lodestone-server/src/integrated.rs`) is the one server implementation
+  Lodestone has, and singleplayer, open-to-LAN, and the standalone
+  `lodestone-dedicated-server` binary are all the same code path over a different
+  transport: an in-memory duplex for singleplayer, a real `TcpListener` for LAN and
+  dedicated hosting. Everything downstream of the socket — login, the tick loop,
+  chunk streaming, commands — is byte-identical code regardless of which one is
+  running.
+- [Entity physics](./entity-physics.md) — General entity and block physics:
+  per-block-state collision geometry, the movement constants a block applies to
+  whatever stands on it, entity-versus-entity pushing and hard collision, vehicles
+  (riding, minecarts, boats, leashing), dropped-item physics and the pickup-flight
+  animation, and falling sand/gravel. All of it ports vanilla 26.2 behaviour rather
+  than approximating it, and most of it is reached only through the `VersionAdapter`
+  seam so it degrades cleanly when no version family is compiled in.
+- [Entity rendering](./entity-rendering.md) — The path from "the server says there
+  is an entity at (x, y, z)" to a posed, textured, lit mob (or sprite, or nametag) on
+  screen, plus two systems that ride on the same entity data: picking (what the
+  crosshair targets) and pose-dependent collision dimensions (crouch/swim box sizing).
 - [Event routing — making a mis-routed `ClientEvent` a compile error](./event-routing.md) —
   `lodestone_model::event::route` is a single **exhaustive** table saying which of the
-  client's event routers claim each `ClientEvent` variant. It exists so that adding a
-  variant and forgetting to wire it is a **compile error** (`E0004`) rather than a
-  silent nothing.
-- [Experience](./experience.md) — The XP level curve, the orb denomination ladder, a
-  player's experience state, and the `experience_orb` entity that carries points from
-  a kill or a broken ore to the bar. `crates/lodestone-server/src/experience.rs` holds
-  the arithmetic, `MobSim` owns the live orbs, `ServerProtocol::encode_set_experience`
-  puts the result on the wire, and `crates/lodestone-server/src/player_data.rs` saves
-  and restores it across a rejoin. The wired sources are mob death, ore mining and
-  furnace smelting.
-- [Explosion block destruction](./explosion-blocks.md) — The half of an explosion
-  that removes blocks: a port of 26.2's `ServerExplosion::calculateExplodedPositions`
-  into `crates/lodestone-server/src/explosion_blocks.rs`, on real per-block blast
-  resistance dumped from the jar, so a creeper leaves a crater instead of only hurting
-  whoever was standing in it.
-- [Explosion performance](./explosion-performance.md) — A measured profile of what
-  an explosion costs on the integrated server, and a plan for making it cheap without
-  changing a single output. Vanilla's own explosions visibly stall a Java tick when
-  several fire at once; the goal here is identical physics at a different cost, so a
-  TNT cannon does not freeze the game.
-- [Fall damage and death](./fall-damage-and-death.md) — The server-side half of the
-  damage→death→respawn loop: `FallTracker` (`crates/lodestone-server/src/fall.rs`)
-  accumulates fall distance from the positions a client reports and turns a landing
-  into damage, `PlayerVitals` (`vitals.rs`) holds the health it comes off, and
-  `server.rs` reports the result — including the `player_combat_kill` packet that
-  actually raises the client's death screen, and the `respawn` packet that closes it
-  again.
-- [Falling blocks](./falling-blocks.md) — Sand, red sand and gravel become a real,
-  broadcast `FallingBlockEntity` when their support disappears — a temporary
-  block-shaped entity that free-falls with vanilla's own physics and becomes a block
-  again where it lands. It spans the server (decision, entity, physics), the wire (the
-  `ADD_ENTITY` Object Data field) and the client (a reusable moving-block-model render
-  seam).
-- [Filled map item rendering](./filled-map-item.md) — This covers the filled map
-  item's own visual: the generated per-map pixel texture and border frame when held or
-  displayed in an item frame. The wire, session fold, palette conversion, and these
-  two render paths are live; marker icons and a retained per-map GPU texture cache
-  remain follow-up work.
-- [Filled map rendering](./filled-map-rendering.md) — Drawing a
-  `minecraft:filled_map`'s actual picture — the vanilla `MapColor` palette, a
-  per-map 128×128 texture built from the colour bytes `SessionMaps` folds, and the
-  quads that show it in the hand and in an item frame.
-- [Fire spread and burnout](./fire-spread.md) — Fire behaving like fire on the
-  integrated server: a port of 26.2's `FireBlock` into
-  `crates/lodestone-server/src/fire.rs`, driven by the block scheduled-tick queue, so
-  a fire ages toward burnout, eats the blocks around it, spreads onto flammable
-  neighbours at vanilla's own odds, is put out by rain, and burns forever over
-  netherrack. Lava's own random tick is what lights the first one.
-- [Firework rocket rendering](./firework-rocket-rendering.md) — The flying firework
-  rocket entity: a billboarded item model, spun onto its flight axis when it was fired
-  from a crossbow, and suppressed entirely when it is the elytra boost riding inside a
-  gliding player.
-- [First-person held item](./first-person-held-item.md) — The item in the local
-  player's hand in first person — vanilla's `ItemInHandRenderer.submitArmWithItem`
-  non-empty branch. It replaces the bare arm rather than joining it, and it is one
-  half of a fork: **the arm or the item, never both.**
-- [Fishing](./fishing.md) — A server-side port of vanilla's fishing rod: casting a
-  bobber, its cast/bob/bite state machine, the fish/junk/treasure loot roll (Luck of
-  the Sea shifting weight toward treasure), and reeling in a real item entity plus
-  experience. It lives in `lodestone_server::mobs`
-  (`MobSim::cast_fishing_bobber`/`retrieve_fishing_bobber`/ `tick_fishing_bobbers`, in
-  `mobs/fishing.rs`).
-- [Fluid classification](./fluid-classification.md) — The single answer to **"does
-  this block state carry water (or lava)?"** — shared by the mesher (which draws the
-  water surface) and by physics (which decides whether you swim, and whether your eye
-  is submerged).
-- [Fluid rendering](./fluid-rendering.md) — How a water or lava cell becomes quads:
-  the vanilla-derived surface math (`crates/lodestone-assets/src/fluid.rs`), the
-  neighbourhood the mesher gathers for it (`mesh_fluids` in
-  `crates/lodestone-render/src/models.rs`), and — the part that has already been
-  wrong once and is the reason this doc exists — **which faces get emitted at all**.
-- [Fluid spread](./fluid-spread.md) — Water and lava flowing on the integrated
-  server: a port of 26.2's `FlowingFluid` family into
-  `crates/lodestone-server/src/fluid.rs`, driven by the scheduled-tick queue, so a
-  water source spreads seven cells on flat ground, a broken block under an ocean
-  floods, and lava meeting water makes obsidian, cobblestone or stone.
-- [Distance fog](./fog.md) — The linear ramp that fades distant geometry into a flat
-  colour, so the loaded world does not end in a hard wall of terrain against the sky.
-  This doc owns the **distance math** — where the ramp starts, how wide it is, and
-  which distance metric measures it. The **colours** it fades into, and how they are
-  chosen per dimension and per biome, are
-  [`dimension-visuals.md`](./dimension-visuals.md).
-- [Frame pacing](./frame-pacing.md) — `FramePacer` in
-  [`crates/lodestone-shell/src/app.rs`](../crates/lodestone-shell/src/app.rs) owns the
-  shell's frame clock. Once per event-loop iteration it answers two questions: **how
-  much real time to hand the simulation**, and **whether to present a frame at all**.
-- [Frame profiling](./frame-profiling.md) — A live, in-process instrument that
-  answers "where does a frame's time go", on **both** sides of the CPU/GPU divide: a
-  per-phase CPU breakdown of `WindowApp::redraw`
-  (`crates/lodestone-shell/src/app/frame_profile.rs`), each of the two large phases
-  split further into sub-phases with counts, alongside real per-pass and
-  whole-command-buffer GPU timings from `wgpu`'s `TIMESTAMP_QUERY` feature
-  (`crates/lodestone-shell/src/gpu/gpu_timing.rs`) — so "am I CPU-bound or
-  GPU-bound" is answerable rather than guessed at. It ships live in every build, not
-  behind a feature flag, so it is available on whatever machine and server the owner
-  is actually playing on, and `just bench-frame` is its reproducible counterpart for
-  comparing two builds over a fixed camera path.
-- [Fuzz/property-testing harness](./fuzz-harness.md) — `crates/lodestone-fuzz` is a
-  property-based fuzzing harness for lodestone's wire decoders — the first one in
-  the repo. It exists to check properties that need no expected value at all: a
-  decoder must never panic on arbitrary bytes, a truncated prefix of a valid packet
-  must error cleanly, and a length prefix must not force an allocation disconnected
-  from the bytes actually available. That last property is not hypothetical — this
-  harness found it already violated on its first run (see "Bug found" below).
-- [Goat horns](./goat-horns.md) — The wire half of issue #230's goat work:
-  `Goat.DATA_HAS_LEFT_HORN`/ `DATA_HAS_RIGHT_HORN`, the two entity-metadata fields a
-  client's `GoatRenderer` reads to hide a broken horn's cuboid. Until this landed,
-  `MetadataField` had no goat arm at all, so every goat rendered with both horns
-  regardless of server state — the field this doc covers is what makes that state
-  exist and reach the wire.
-- [Golem construction (issue #239)](./golem-construction.md) — Block-pattern
-  detection and spawn for the snow golem and the iron golem — given a just-placed
-  carved pumpkin or jack o'lantern, does a valid `snow_block`/`iron_block` structure
-  now exist around it, and if so, spawn the golem. Lives in
-  `crates/lodestone-server/src/mobs/mod.rs` as `MobSim::try_construct_golem` (the
-  pattern-matching internals it calls into are `mobs/golem.rs`, split out of the same
-  file since this doc was written), ported from vanilla
-  `CarvedPumpkinBlock.trySpawnGolem`
-  (`.cache/mc/26.2/src/net/minecraft/world/level/block/CarvedPumpkinBlock.java`).
-- [`gpu/` module layout](./gpu-module-layout.md) —
-  `crates/lodestone-shell/src/gpu.rs` was a single ~5,300-line file carrying eight
-  distinct render responsibilities (block outline, debug lines, per-frame stats,
-  terrain storage, the entity pass, the polled per-frame "sources", the first-person
-  hand pass, and `RenderState` itself, the coordinator). Issue #359 split it into
-  `gpu.rs` (the root, unchanged in role) plus a `gpu/` folder of submodules. This is a
-  pure reorganisation — no rendering behaviour changed, and no test file was edited.
-- [Ground-plate rendering](./ground-plate-rendering.md) — Flat, ground-hugging
-  blocks — leaf litter, carpets, moss carpets, snow layers, pressure plates, rails,
-  lily pads, frogspawn, redstone dust — render as a thin horizontal plate a fraction
-  of a block above the floor of their own cell, which puts them within millimetres of
-  the top face of the block underneath. This page records what that geometry actually
-  is, how far the depth buffer can separate it, and which of the obvious explanations
-  for "flat blocks flicker" have been measured and ruled out.
-- [GUI item icons (the draw half)](./gui-item-icons.md) — The **draw half** of
-  putting an item in a GUI slot: the shell code that turns a resolved item icon into
-  pixels. It serves **both** screens that have slots — the hotbar (`hud.rs`) and the
-  container / inventory / crafting screen (`container.rs`) — from one shared module,
-  `hud/item_icon.rs`. Two kinds of icon reach two different pipelines:
-- [Held block-entity items](./held-block-entity-items.md) — The path that draws a
-  **chest, shulker box or skull the player is holding**. These items have no item
-  model and no block model in vanilla — every triangle comes from a block-entity
-  renderer — so they need a rig, not baked quads, and the 3-D surfaces had no way to
-  ask for one. A held chest drew *nothing at all*: the hand showed a bare arm as if
-  the slot were empty, while the inventory slot right below it drew a real chest.
-- [Held-item equip animation](./held-item-equip-animation.md) — The dip-and-raise
-  the first-person hand makes when the held item changes — vanilla's
-  `ItemInHandRenderer` swap animation. Issue #366, reported from live play as
-  "switching the held item produces no animation, the new item simply appears".
-- [Held-item name tooltip](./held-item-name-tooltip.md) — The item name that briefly
-  appears centred above the hotbar whenever the selected item's *identity* changes
-  (issue #126) — vanilla's `Hud.extractSelectedItemName` (`Hud.java:625-648` in the
-  26.2 client). It fades in **instantly** (no ramp-up) and holds at full opacity, then
-  fades out over its last half-second.
-- [HUD vitals animations](./hud-animations.md) — Three cosmetic, client-side-only
-  animations on the survival vitals cluster, ported from vanilla's `Hud` class
-  (`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`): the heart row
-  flashes and jitters around a health change, the hunger row wobbles while saturation
-  is empty, and a hotbar item "pops" (squashes then settles) when a stack lands in a
-  slot.
-- [HUD heart regeneration wave](./hud-heart-regen-wave.md) — Vanilla's travelling
-  heart "bounce" — a **−2 px** vertical offset that moves along the heart row one
-  container per tick while the player has the Regeneration effect. It is the one heart
-  animation still missing from our HUD, and this doc exists mainly to correct a
-  plausible-sounding but wrong model of *what triggers* the heart and hunger offsets.
-- [HUD text scale](./hud-text-scale.md) — The pose scale applied to the HUD's own
-  text surfaces, and the record of an ad-hoc, HUD-wide 2× pitch
-  (`HUD_TEXT_SCALE`/`hud_line_h`) that used to double several of them against vanilla.
-  It also records the answer to a recurring design question: vanilla exposes **no**
-  size option for the title/subtitle/action-bar trio, and we should not invent one.
-- [HUD vertical layout](./hud-vertical-layout.md) — Where every row of the
-  bottom-centre HUD cluster sits — hotbar, XP bar and level number, hearts, hunger,
-  armour, air bubbles, action bar — and which vanilla expression each `y` is
-  transcribed from. One page because these rows are all derived from two anchors, and
-  getting either wrong moves everything above it.
-- [Hunger](./hunger.md) — Server-authoritative food: exhaustion accumulation from
-  actions, the hidden saturation buffer, the visible food level, natural health
-  regeneration and starvation damage. `crates/lodestone-server/src/food.rs` holds the
-  rules as a pure value type; `crate::vitals::PlayerVitals` owns one and applies its
-  health consequences; `crate::server` charges exhaustion at the sites that know an
-  action happened.
-- [Sprint food gate, toggle sneak/sprint, and mouse feel](./input-options.md) —
-  Three small, related fixes to `lodestone-controller`'s input model and the settings
-  screen's mouse/controls pages:
-- [The inventory player avatar](./inventory-player-preview.md) — The player standing
-  in the inventory panel with their head and eyes tracking the mouse — vanilla's
-  `InventoryScreen.extractEntityInInventoryFollowsMouse`. Before this, the recess at
-  `(leftPos + 26, topPos + 8)` was the *hole in vanilla's own `inventory.png`* with
-  nothing rendered into it, so the screen showed a black box where the player belongs.
-  It is the first thing in this workspace to draw a full 3-D entity rig inside a 2-D
-  GUI panel, and the first to use a GPU scissor.
-- [Potion effects in the inventory](./inventory-potion-effects.md) —
-  `EffectsInInventory` (`26.2`): the column of active-effect widgets drawn beside the
-  player's own inventory screen — the effect's real icon sprite, its translated name
-  with a level numeral, and the remaining time — on a nine-sliced background sprite.
-  Drawn inside the container screen's own geometry pass, which is where the GUI sprite
-  atlas and the vanilla proportional font already are.
-- [Island detection (`cargo xtask islands`)](./island-detection.md) — A `syn`-based
-  static scanner, `cargo xtask islands` (`xtask/src/islands.rs`), that reports four
-  things per workspace crate: functions/methods with zero production call sites,
-  struct fields with zero production readers, struct fields whose every production
-  assignment is a default-like value, and `#[allow(dead_code)]` sites. It exists
-  because `cargo xtask connectedness` answers one narrow question — "is this
-  clientbound packet reaching anything" — and is structurally blind to everything
-  else: Rust call graphs, a field nothing reads, a function that is tested but never
-  called from production. `islands` is the general-purpose instrument; `connectedness`
-  stays the packet-specific one.
-- [Item → block census](./item-block-census.md) — The authoritative 26.2 answer to
-  "if a player right-clicks holding this item, which block gets placed?" —
-  `lodestone_data::block_items`, generated from a headless dump of the real server's
-  `BuiltInRegistries.ITEM` joined with `BlockItem.getBlock()`.
-- [Item component read/write for plugins](./item-component-access.md) — The typed
-  surface a plugin uses to read and write an item stack's data components (issue
-  [#143](https://github.com/matteopolak/lodestone/issues/143)) — custom name,
-  damage, dye, enchantments, tool patch — plus the game → model lowering that lets
-  a mutated stack reach a consumer keyed on the other stack type.
-- [Item data-component decoding, and the partial-stack contract](./item-data-component-decode.md) —
-  How protocol 776 clientbound item stacks have their `DataComponentPatch` decoded,
-  which of 26.2's 111 data-component types this build consumes, and the type-level
-  contract a caller must honour when a component it does not model ends a packet
-  early. All of it lives in `read_component_patch` / `read_item_stack` in
-  `crates/protocol/v770/src/adapter/inventory.rs`.
-- [Item frame rendering](./item-frame-rendering.md) — How `minecraft:item_frame` and
-  `minecraft:glow_item_frame` reach the screen: the frame's own wooden body, and
-  whatever hangs in it — an ordinary item, a `minecraft:special` rig, or a filled
-  map. Four producers in four files, sharing one pose chain.
-- [Item GUI geometry (3-D block items in a slot)](./item-gui-geometry.md) — The
-  **geometry half** of drawing a block item as an isometric mini-block in a
-  hotbar/inventory slot. It bakes every item whose inventory icon is a 3-D model into
-  quads at asset-load time, and provides the matrices that pose those quads into a GUI
-  slot.
-- [Item-icon tint pipeline (issue #171) — scoping](./item-icon-tint-pipeline.md) —
-  Issue #171 asks for the *item-icon/held-item* tint path: potion bottle liquid
-  colour, spawn-egg background/foreground dots, map marker/border colours, and leather
-  dye's icon form (armour dye's **worn 3-D model** form is already done, a separate
-  issue, and out of scope here — see `crates/lodestone-assets/src/equipment.rs`'s
-  `only_leather_is_dyeable_and_only_its_base_layer`). This codebase already does biome
-  (grass/foliage) tint and multiplies tint and shade in gamma space; this issue is
-  specifically the *data-driven, per-item-stack* tint sources that are not the biome
-  lookup.
-- [Dropped-item physics: swept collision against real block shapes](./item-physics.md) —
-  How a dropped item entity comes to rest on the server. It used to be a solid/air
-  boolean per cell with the rest height hardcoded to the top of the block, which meant
-  an item settled a full block too high on any grassy surface and half a block too
-  high on a slab. It is now `lodestone_physics::collision::collide` — vanilla's own
-  `Entity.collide` sweep — against the real per-block-state collision shapes from
-  `lodestone-data`.
-- [Item pickup animation](./item-pickup-animation.md) — The short flight a collected
-  item makes toward whoever collected it, before it vanishes — vanilla's
-  `ItemPickupParticle`. Reported from live play as "picked-up items teleport into the
-  inventory".
-- [Item prototype components](./item-prototypes.md) — The per-item
-  `minecraft:max_stack_size`, `minecraft:max_damage` and `minecraft:equippable` values
-  for protocol 776 (Minecraft 26.2) — three data components normally absent from
-  clientbound patches and therefore dumped from the real 26.2 server and committed as
-  a generated table. Explicit patches can still carry and override each value.
-- [Item tint pipeline](./item-tint.md) — Resolving an item model's `tints` list —
-  potion liquid colour, leather dye, map colour, foliage constants — to a concrete
-  ARGB that the item's tinted sprite layer multiplies, and carrying that colour
-  through the bake into the tint palette the model shader reads. This is the *item*
-  tint mechanism, which is unrelated to and never consults the *block* tint mechanism
-  in [`biome-tint.md`](./biome-tint.md).
-- [Arm poses (bow and crossbow)](./item-use-arm-poses.md) — The chain that turns a
-  synced metadata bit into a visibly drawn bow or a winding crossbow. There are **two
-  different bits, on two different bytes, and which one applies depends on what kind
-  of entity it is**:
-- [Item variants: one item, several baked geometries](./item-variants.md) — An
-  item's appearance in 26.2 is not one model. A stack's `minecraft:item_model` can
-  select `assets/<namespace>/items/<path>.json` independently of its gameplay id; that
-  definition is a **selector tree** (`condition` / `select` / `range_dispatch` /
-  `composite`) whose leaves name concrete models, and which leaf wins depends on where
-  the item is being drawn and on live stack state. A bow is `item/bow` at rest and
-  `item/bow_pulling_0`, `_1` or `_2` as it is drawn; a spyglass is the flat
-  `item/spyglass` sprite in an inventory slot and `item/spyglass_in_hand`'s 3-D tube
-  in the hand.
-- [`java.util.Random` (`lodestone-javarandom`)](./java-random.md) — The workspace's
-  one implementation of `java.util.Random` — a 48-bit truncated linear congruential
-  generator, bit-exact against the Java specification. Every vanilla system that needs
-  a seeded, reproducible draw uses it: particle bursts (`lodestone-particle`), the
-  enchanting-table book animation (`lodestone-shell`'s `block_entities.rs`), the
-  lightning bolt's procedural geometry (`lodestone-render`'s `lightning_bolt.rs`),
-  seeded sound-variant selection (`lodestone-audio`'s `select.rs`), and the ghast
-  model's nine seeded tentacle lengths (`lodestone-assets`'s
-  `entity_models::ghast_model`).
-- [Which player a join presents](./join-identity.md) — The single producer of the
-  local player's username and UUID — `crates/lodestone-shell/src/join_identity.rs`.
-  Every production join, remote and singleplayer alike, asks
-  `join_identity::join_identity()` who it is, and gets one answer: the account the
-  switcher has selected, or the persisted "Play offline" identity when there is none.
-- [Join readiness](./join-readiness.md) — The rule that decides when a join stops
-  showing the loading screen and starts showing the world. It is **two** conditions,
-  not one: the terrain rule (the player's own chunk column has arrived) *and* an asset
-  rule (no server-pushed resource pack is still downloading or waiting to be applied
-  to the block atlas). Before the asset half existed the screen cleared on the column
-  alone, so a server that pushes a pack dropped the player into a world wearing the
-  *previous* pack's textures, hitched for about a second while the atlas rebuilt, and
-  popped.
-- [Join generation scheduler](./join-scheduler.md) — The server-side scheduler that
-  decides in what order, and with how much concurrency, the `(2r + 1)²` chunk columns
-  of a joining player's view are generated. It is a **primed sliding window** over the
-  wire order, and it replaced the per-ring barrier that `4307b59` reinstated — Unit
-  10 of [`plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md), issue #494.
-- [Keybindings](./keybindings.md) — A rebindable table mapping **logical actions**
-  (`key.forward`, `key.inventory`) to **physical inputs** (a keyboard key or a mouse
-  button), so nothing in the shell's gameplay input path names a key literally. It
-  exists so the Controls menu is a later, small addition rather than a rewrite of
-  `app.rs`.
-- [Language screen](./language-screen.md) — `SettingsPage::Language` (issue #415):
-  vanilla's `LanguageSelectScreen`, reached from the root settings screen's own
-  "Language..." grid button (`ROOT_GRID` in
-  `crates/lodestone-shell/src/menu/options.rs`, now live). It is the first of the
-  three settings sub-screens #392's plan always said would need a *different* list
-  widget than this tree's other two (`OptionsList`, `KeyBindsList`) — vanilla's
-  `ObjectSelectionList` — and this issue builds that third kind.
-- [Leashing (issue #236)](./leashing.md) — Lead attach/detach, the fence-anchor
-  re-parent, and the distance-based pull and snap physics for a leashed mob —
-  vanilla `Leashable`/`LeadItem`
-  (`.cache/mc/26.2/src/net/minecraft/world/entity/Leashable.java`,
-  `.../item/LeadItem.java`). Lives in `crates/lodestone-server/src/mobs/mod.rs` (the
-  `mobs.rs` file split moved several other domains to sibling files under `mobs/`, but
-  leashing stayed in `mod.rs` — it is core `MobSim` tick logic, not a
-  per-entity-kind slice): `MobSim::try_leash`, `MobSim::try_leash_to_fence`,
-  `MobSim::tick_leashes`, plus the `LeashHolder`/`LeashOutcome` types and a
-  `leash_holder` field on `SimMob`.
+  client's event routers claim each `ClientEvent` variant, so that adding a variant
+  and forgetting to wire it is a compile error rather than a silent nothing — the
+  *island* defect class this repo's architecture rules name as its most expensive
+  recurring bug.
+- [Fuzzing (issue #549)](./fuzzing.md) — Two independent fuzzing tracks, per issue
+  #549's own split. **Track A** (`fuzz/`, a `cargo-fuzz`/libFuzzer workspace) is
+  coverage-guided, in-process fuzzing over pure parsing functions — packet decoders,
+  NBT, loot-table JSON, block-state strings, the density compiler, the unihex font
+  parser, region-file deserialization, and chat-text JSON/NBT. It finds panics, hangs
+  and decode crashes on malformed input; it has no oracle for correctness. **Track B**
+  (`crates/lodestone-fuzz/src/differential.rs`) is a tick-aligned differential-fuzzing
+  *harness* against a real vanilla oracle, for the class of bug Track A structurally
+  cannot see — wrong behaviour that never panics (the motivating example: breaking a
+  waterlogged block used to destroy the water too, which is not the real mechanic).
+  Track B is a skeleton today, not a finished fuzzer — see its own section below for
+  exactly how far it got.
+- [`gpu/` module layout and shader conventions](./gpu-module-layout.md) — How
+  `crates/lodestone-shell`'s render coordinator (`RenderState`) is split across
+  `gpu.rs` and a `gpu/` folder of submodules, plus the convention every WGSL shader in
+  the workspace follows: one `.wgsl` file per pipeline, pulled in with `include_str!`,
+  never inlined as a Rust string literal.
+- [GUI item rendering](./gui-item-rendering.md) — How an item reaches a
+  hotbar/inventory slot as pixels: the geometry and pose math for a 3-D block item's
+  isometric mini-block icon, the shell-side draw path that puts both flat sprites and
+  3-D icons on screen for the hotbar and container screens, and the font-glyph
+  fallback chain (vanilla bitmap sheets, then Unifont HEX, then an embedded TrueType
+  face) that renders the text drawn over those slots.
+- [Held items](./held-items.md) — Everything about what the local player's hand
+  shows and how it moves: the first-person item/arm draw itself, the dip-and-raise
+  when the held item changes, the arm pose vanilla selects while an item is in use
+  (drawing a bow, blocking with a shield), the swing animation shared by
+  mining/attacking/placing, and the special case of items (chests, skulls) that have
+  no baked model at all and need a block-entity rig in hand.
+- [The HUD](./hud.md) — The game HUD: the bottom-centre vitals cluster (hotbar, XP
+  bar, hearts, hunger, armour, air bubbles, action bar), the vitals' cosmetic
+  animations, the Tab player-list overlay, the scoreboard sidebar, and the held-item
+  name tooltip. Unlike the menu screens (see [`ui-framework.md`](./ui-framework.md)),
+  the HUD is not a widget tree — it is rebuilt fresh from live game state every
+  frame, so its layout is a set of pure functions of that state rather than a set of
+  persistent objects with their own lifecycle.
+- [Item model, components and rendering](./items.md) — The item stack model end to
+  end: the two `ItemStack` types (wire/model vs. game-side inventory) and the plugin
+  read/write surface over them, how a 26.2 clientbound stack's data-component patch is
+  decoded, the per-item prototype census that fills in components vanilla omits from
+  the wire, how one item resolves to several baked geometries (`ItemVariants`), custom
+  (plugin-defined) items, armour trim, goat horns, the portable clock crate, and the
+  entity-metadata field a dropped item's identity rides on.
+- [Java plugin bridge: backing Paper's own NMS calls with Rust](./java-plugin-bridge.md) —
+  A design, a measurement, and a foundation crate for running **real, unmodified
+  Bukkit/Spigot/Paper plugin jars** against this server, with **zero cost when no Java
+  plugin is loaded**.
+- [Keybindings and input options](./keybindings.md) — The rebindable action table
+  that maps logical actions (`key.forward`, `key.inventory`) to physical inputs (a
+  keyboard key or mouse button) so nothing in the gameplay input path names a key
+  literally, plus the small cluster of input-feel options built on top of it — mouse
+  sensitivity, wheel sensitivity, axis inversion, hold-vs-toggle sneak/sprint, and the
+  sprint food gate.
 - [Legacy movement packet selection](./legacy-movement-packet-selection.md) — The
   v47 (Minecraft 1.8.9), v340 (1.12.2), and v735 (1.16.5) protocol adapters select a
   serverbound movement packet from the pose actually last transmitted on that
@@ -994,1575 +203,316 @@ Per-feature documentation. See also the root [`DESIGN.md`](../DESIGN.md)
   for counsel rather than for an agent working in this repo. This doc is the "why" for
   those files; it is not itself a legal opinion, and nothing in it should be read as
   one.
-- [The light ramp: vanilla's lightmap curve](./light-ramp.md) — The scalar every
-  terrain, fluid, entity and particle fragment multiplies its texel by, as a function
-  of the server's packed sky/block light byte and the time of day. Vanilla calls it a
-  *lightmap*: a 16x16 texture indexed by `(block_level, sky_level)` that `block.vsh`
-  folds into the vertex colour with `vertexColor = Color * sample_lightmap(Sampler2,
-  UV2)`.
-- [Lightning bolt rendering](./lightning-rendering.md) — The lightning bolt's own
-  geometry: four concentric hollow square tubes traced along one seeded random walk,
-  128 blocks tall, untextured, blended additively. Distinct from the **sky flash**,
-  which `lodestone-render`'s `weather` module has carried since long before this
-  landed — and that split is exactly why the gap survived, because a storm looked
-  like it was doing something.
-- [Lightning](./lightning.md) — Vanilla's thunderstorm lightning: per-chunk
-  strike-target selection during a thunderstorm, the `LightningBolt` entity's
-  life-cycle, and its entity-facing effects (damage, ignition, and species
-  transformations) — wired end to end, storm to screen.
-  `crates/lodestone-server/src/lightning.rs` is the pure decision layer;
-  `crates/lodestone-server/src/mobs/lightning.rs` is the producer that turns a
-  decision into a real, network-visible entity;
-  `crates/lodestone-server/src/tick.rs`'s `run_tick_loop_with_weather` is the driver
-  that calls the per-chunk gate every tick and applies the one effect `MobSim` cannot
-  apply itself (fire ignition, since `MobSim::world` is a frozen pathfinding snapshot,
-  not the live world).
-- [Live client frame benchmark](./live-client-frame-benchmark.md) — The live client
-  frame benchmark measures Lodestone’s real fullscreen client while it is joined to
-  a Java 26.2 server. It records frame intervals and CPU/GPU phase timings for a
-  normal-terrain workload and a dense render showcase, then summarizes stationary and
-  moving segments separately.
-- [Live mob simulation (issue #217)](./live-mob-sim.md) — The production wiring that
-  turns `lodestone-server`'s `MobSim` (AI-driven mob motion, computed server-side)
-  into mobs a real client actually watches move. Before this, `mobs.rs`'s own module
-  doc admitted "no encoder wiring exists" — but the encoders
-  (`V770ServerProtocol::encode_add_entity`/
-  `encode_entity_update`/`encode_remove_entity`) had in fact already shipped and were
-  proven against a real client. The actual gap was one level up: nothing in production
-  ever *constructed* a `MobSim` or *ticked* it. `IntegratedServer`'s singleplayer path
-  called `open_in_memory` (no entities), never `open_in_memory_with_entities`.
-- [Loading screen](./loading-screen.md) — The screen shown between a menu click and
-  a playable world: named connect phases while the session is established, then
-  `Loading terrain...` with a real progress bar and a real per-chunk status grid while
-  the initial view streams in. Its value is diagnostic before it is cosmetic, because
-  before it there was no way to tell "still loading" from "broken".
-- [Plugin-opened local menus](./local-menus.md) — `Bukkit.createInventory` +
-  `Player.openInventory` for this codebase (issue
-  [#145](https://github.com/matteopolak/lodestone/issues/145)): a plugin opens an
-  arbitrary container screen to the local player with **no server container behind
-  it** — the mechanism behind shops, kit selectors and client-side settings screens
-  in the Java ecosystem.
-- [The local player as ECS components](./local-player-components.md) — The local
-  player's physics state, movement intent, submersion, free-fly flag, hotbar
-  selection, death state and the two outbound-movement edge-trackers, held as
-  `bevy_ecs` components on one `LocalPlayer` entity and advanced by `GameTick`
-  systems. This is Stage 2 of [`bevy-migration.md`](./bevy-migration.md).
-- [The `lodestone-data` crate](./lodestone-data-crate.md) — `lodestone-data`
-  (`crates/lodestone-data`) owns the canonical 26.2 game-data censuses that used to
-  live under `crates/protocol/v770/src/generated/`, plus the `oracle-java/` dump
-  programs that produce them and the tests that regenerate/drift-check them. Issue
-  #361 extracted them: of the ~20 tables `v770` generated, exactly one —
-  `packet_ids.rs` — is wire format. The other nineteen (`attribute_types`,
-  `block_registry`, `block_solidity`, `block_states`, `collision_shapes`,
-  `data_component_types`, `entity_census`, `entity_dimensions`, `entity_types`,
-  `hardness`, `item_prototypes`, `items`, `menus`, `mob_effects`, `outline_shapes`,
-  `particle_types`, `path_types`, `sound_events`, `tools`) describe **the game**, not
-  **the protocol**, and now live here instead.
-- [Server loot tables: loading and rolling](./loot-tables.md) — The version-free
-  server-side loot system in `crates/lodestone-server/src/loot.rs`: it parses Mojang's
-  datapack loot-table JSON (the same format `net.minecraft.world.level.storage.loot`
-  reads) and **rolls** a table with the server's deterministic RNG to produce
-  `Vec<ItemStack>` — the data that becomes a mob drop, a block drop, or a chest
-  fill. This is the server half of the client's `lodestone-game` recipe loader: both
-  consume vanilla datapack JSON behind a version seam, neither names a protocol.
-- [Main menu](./main-menu.md) — The GUI entry point. Running `lodestone` with no
-  connection flags opens on a title screen instead of dropping straight into the local
-  dev world: Singleplayer / Multiplayer / Quit, a persisted multiplayer server list
-  with add/edit/delete, a per-server status ping showing MOTD, player count, latency
-  and favicon, and an account list (issue #66) for the Microsoft accounts
-  `lodestone-auth` knows about plus an always-present offline entry.
-- [Filled-map and advancement wire](./map-and-advancement-wire.md) — The four wire
-  gaps that kept filled maps, the advancements screen and the statistics screen from
-  having any data at all: the v770 decode arms for `map_item_data` (id 51) and
-  `update_advancements` (id 130), and the two v770 `ServerProtocol` overrides —
-  `encode_update_advancements` and `encode_award_stats` — that had never existed, so
-  the server's own advancement and statistic tracking reached the wire as
-  `ServerDirective::None`.
-- [The background blur behind an open in-game menu](./menu-blur.md) — Vanilla blurs
-  whatever is already on screen behind most menu screens before drawing the screen's
-  own widgets on top — a six-pass separable box blur, `Screen::extractBackground`
-  → `extractBlurredBackground` → `GuiRenderState::blurBeforeThisStratum` →
-  `GameRenderer::processBlurEffect` running the `minecraft:blur` post chain
-  (`assets/minecraft/post_effect/blur.json`). This client had the accompanying dim
-  wash (`MenuBackdrop::Dim`) but not the blur; this is the missing half —
-  [`crates/lodestone-shell/src/menu/render/blur.rs`](../crates/lodestone-shell/src/menu/render/blur.rs)
-  plus
-  [`src/shaders/menu_blur.wgsl`](../crates/lodestone-shell/src/shaders/menu_blur.wgsl).
-- [Screen focus, tab traversal, event dispatch — and `EditBox`](./menu-focus.md) —
-  Two modules, the third child of the menu-framework epic (#392/#395):
-- [Menu layout containers](./menu-layout.md) —
-  `crates/lodestone-shell/src/menu/layout.rs` — vanilla's
-  `net/minecraft/client/gui/layouts/` package as arithmetic: `GridLayout`,
-  `LinearLayout`, `FrameLayout`, `HeaderAndFooterLayout`, `SpacerElement`, the
-  `LayoutSettings` cell model and Mojang's `Divisor`. Its consumers are the title
-  screen's button column and the pause screen's grid, which since this change are
-  **built and arranged** rather than stored as tables of hand-derived offsets.
-- [Menu list band chrome](./menu-list-chrome.md) — The **band chrome**: the tinted
-  background a scrolling menu list draws behind its rows, plus the two 2 px horizontal
-  bars that fence that band off from the header above it and the footer below it. It
-  is what makes a settings screen read as three sections — title, content, buttons
-  — rather than one field of widgets, and it is vanilla's
-  `AbstractSelectionList.extractListBackground` and `extractListSeparators` ported as
-  three flat quad rows.
-- [The menu background and the title-screen panorama](./menu-panorama.md) —
-  Vanilla's out-of-world menu screens are drawn over a **spinning cubemap panorama**,
-  with a flat wash of `textures/gui/menu_background.png` composited on top — except
-  the title screen, which shows the raw panorama. This is the port of both:
-  [`crates/lodestone-shell/src/menu/panorama.rs`](../crates/lodestone-shell/src/menu/panorama.rs)
-  plus
-  [`src/shaders/panorama.wgsl`](../crates/lodestone-shell/src/shaders/panorama.wgsl),
-  drawn from `MenuRenderer::draw` in `menu/render.rs`.
-- [Menu widgets, and the disabled render path](./menu-widgets.md) —
-  `crates/lodestone-shell/src/menu/widget.rs` — one type, `Widget`, that owns a menu
-  control's bounds, message and state (`active` / `visible` / `focused`) and answers
-  the two questions each screen used to answer for itself: **which sprite is my
-  background** and **what colour is my label**. With it comes `WidgetSprites`,
-  vanilla's four-state sprite record, and therefore the **disabled render path** —
-  the thing the settings tree needs so an unsupported option can be present and greyed
-  out rather than absent.
-- [The merchant/trading screen](./merchant-screen.md) — The client-side
-  villager/wandering-trader trading screen — vanilla's `MerchantScreen` over a
-  `MerchantMenu` — reached when the server sends `OPEN_SCREEN` with `menu_type =
-  minecraft:merchant` followed by `MERCHANT_OFFERS`. This is issue #245's UI half,
-  client-side only: it renders the real panel, the two payment slots and the take-only
-  result slot, the seven-row scrollable trade list with prices and availability
-  arrows, and sends `SELECT_TRADE` when a row is clicked. It does not generate trades,
-  assign professions, or open the screen from an in-game right-click — that is the
-  server half (#245's core / V4 in `docs/plans/villager-economy.md`), not built yet.
-- [Mesh fill rate](./mesh-fill-rate.md) — A headless measurement of the owner's own
-  metric — **how long, standing still, the whole render distance takes to reach the
-  GPU as meshed geometry** — driven through the real `Sim`, the real integrated
-  server and the real mesh worker pool. It exists because that figure was once
-  measured, attributed and then made unobservable when the diagnostics that produced
-  it were deleted, and because the answer it gives is not the one the mesher is
-  usually blamed for.
-- [Message translation](./message-translation.md) — How a server-authored `Text`
-  component becomes words on screen: the `en_us.json` table read out of `client.jar`,
-  the `translate`-node resolver that expands it, and where command feedback, colours
-  and italics come from. This is the doc to read before adding a message anywhere, and
-  before assuming a translation table needs building — most of this already exists.
-- [Minecarts](./minecart.md) — The `minecraft:minecart` entity family — plain,
-  chest, hopper, furnace and TNT minecarts — plus rail-following physics, riding,
-  and the placement producers (item use on a rail, and a dispenser). A port of
-  `AbstractMinecart`/`OldMinecartBehavior` and the three subclass overrides
-  (`Minecart`, `MinecartFurnace`, `MinecartTNT`), living in
-  `crates/lodestone-server/src/mobs/minecart.rs`.
-- [Mob block perception](./mob-block-perception.md) — The seam that lets a mob AI
-  goal ask what block it is standing on. `MobController` declared 33 methods and not
-  one read a block, so every vanilla goal whose predicate consults the world was
-  inexpressible — a sheep that eats grass could not ask whether there was grass
-  (issue #456). Goals now pull `BlockCues` through the controller, which the
-  production host answers from the `PathWorld` it already borrows for pathfinding.
-- [Mob breeding and aging (issues #234, #237)](./mob-breeding-and-aging.md) — The
-  entity-side half of vanilla animal breeding (`Animal`/`AgeableMob`) and baby growth,
-  filling four `MobController` trait-default no-ops that were previously always
-  `false`/`None`/`{}` (`crates/lodestone-entity/src/ai/mob.rs`'s `MobController`
-  trait): `is_in_love`, `find_love_partner`, `love_partner_position`, `breed`, plus
-  `is_baby` and `parent_position`. Until this, `BreedGoal` and `FollowParentGoal`
-  (`crates/lodestone-entity/src/ai/goals.rs`) were scheduler-correct and unit-tested
-  but could never actually run against the crate's one production `MobController`
-  implementor, [`NavigatingMob`](../crates/lodestone-entity/src/ai/navigating_mob.rs)
-  — the same "goal exists, effect doesn't" shape a prior triage sweep found for all
-  four defaults.
-- [Status-effect wire sync](./mob-effect-wire-sync.md) — The clientbound
-  `update_mob_effect`/`remove_mob_effect` encoders
-  (`ServerProtocol::encode_update_mob_effect`/`encode_remove_mob_effect`). Before
-  this, the integrated server's `ActiveEffects` (`crate::mob_effects`) changed real
-  gameplay state — `/effect give`, and now a beacon's periodic grant (see
-  [`beacon.md`](./beacon.md)) — but no client was ever told: the clientbound
-  direction of both packets had zero references anywhere in
-  `crates/protocol/v770/src/server_protocol.rs`, even though the **decode** side
-  (`V770Adapter`'s `UPDATE_MOB_EFFECT`/`REMOVE_MOB_EFFECT` arms, `adapter/entity.rs`)
-  already existed and already emits
-  `ClientEvent::MobEffectApplied`/`MobEffectRemoved`. So an applied effect changed
-  health/exhaustion/hunger correctly and put no icon on the HUD at all — the
-  "nothing consumes this" island CLAUDE.md's own evidence section calls out, on the
-  *producer* side this time rather than the consumer.
-- [Mob goal roster](./mob-goal-roster.md) — The per-species goal-set seam: a pure,
-  world-free lookup from a species path (`"cow"`, `"creeper"`) to the list of `Goal`s
-  vanilla's own `registerGoals()` installs for it, at vanilla's own priority numbers.
-  `MobSim::spawn_species` consults it with one loop, so no per-species behaviour data
-  lives in `lodestone-server` any more, and five parallel roster units can each own
-  one file without touching a shared one.
-- [Mob neutral roster: the grudge-holding species](./mob-neutral-roster.md) — The
-  `neutral` family of the per-species goal roster — enderman, zombified piglin, bee
-  and wolf — plus the record of why the four mechanisms named in the tracking
-  issue's title are **not** implemented as goals. The tables are complete
-  transcriptions of the jar; the mechanisms are blocked on five named primitives that
-  do not exist on `MobController`, and this doc is the list of what has to be added
-  and where.
-- [Mob perception: what a goal is allowed to know](./mob-perception.md) — The seam
-  that lets a goal ask questions about the world — *am I in water, who hurt me,
-  where is the nearest player, is there a threat nearby* — and the server-side feed
-  that answers them. Before this work, this seam existed but was **unfilled**:
-  `NavigatingMob`'s `impl MobController` left eight perception methods at their trait
-  defaults, so six goals had a `can_use` that was constant-`false` in the running game
-  and two more read fields nothing ever wrote. Eight of thirteen implemented goals
-  could not act, and every one of them had a *green* unit test. This doc records what
-  each method reads, who feeds it, and why the whole thing was invisible to the test
-  suite.
-- [Mob ranged attacks](./mob-ranged-attacks.md) — The goal family that makes a mob
-  shoot: a bow goal, vanilla's generic `RangedAttackGoal`, and the blaze's
-  three-fireball burst, plus the `ProjectileLaunch` intent that carries a shot from
-  the AI layer out to whoever owns entity ids. Issue
-  [#227](https://github.com/matteopolak/lodestone/issues/227) unit B3a. Before it,
-  `RangedAttackGoal` and `BowAttack` were zero hits tree-wide and no mob in this repo
-  could throw anything.
-- [Mob spawn equipment: what a mob spawns holding and wearing](./mob-spawn-equipment.md) —
-  Vanilla's `Mob.populateDefaultEquipmentSlots` and its per-species overrides, ported
-  so a mob can spawn holding a weapon or wearing armour at all. Before this, nothing
-  in the workspace produced an `(EquipmentSlot, item id)` pair for a *mob* —
-  [`equipment-combat-stats.md`](./equipment-combat-stats.md)'s attribute-modifier fold
-  existed and worked, but its only producer was a player's inventory. A drowned's
-  `RangedAttackGoal` trident builder had existed for a while with zero producers of
-  "is this drowned holding a trident", and a naturally-armoured zombie was not a thing
-  this sim could represent.
-- [Species-aware mob spawning](./mob-species-spawning.md) — `MobSim::spawn_species`
-  (`crates/lodestone-server/src/mobs/mod.rs`), a spawn entry point that resolves a
-  mob's body, combat stats, and baseline goal set from its real vanilla species
-  instead of the universal `minecraft:zombie` placeholder `MobSim::spawn` used to hand
-  every caller. Before this, `SimMob::entity_type` defaulted to `minecraft:zombie`
-  unconditionally and a freshly spawned mob's `GoalSelector` started empty, so two
-  different species were behaviourally and nominally identical — a `minecraft:pig`
-  and a `minecraft:zombie` were, on the wire and in the sim, the same mob.
-- [Mob vertical motion: auto-step, jump, and fall](./mob-vertical-motion.md) —
-  `NavigatingMob::step_vertical` (`crates/lodestone-entity/src/ai/navigating_mob.rs`)
-  — the one function that decides a path-following mob's height each tick: an
-  instant auto-step over a small ledge, a real gravity-accelerated jump arc over a
-  taller one, or a gravity-accelerated fall down a drop. It is the vertical half of
-  [`NavigatingMob::advance`](../crates/lodestone-entity/src/ai/navigating_mob.rs),
-  whose horizontal half moves the mob toward its current waypoint by up to
-  `step_per_tick` blocks (see `docs/mob-species-spawning.md` for how that per-tick
-  rate itself is derived).
-- [Smooth lighting / ambient occlusion on the model path](./model-smooth-lighting.md) —
-  Per-corner ambient occlusion and light smoothing for baked block-model geometry —
-  vanilla's `ModelBlockRenderer.AmbientOcclusionFace`, ported to
-  `quad_corner_sample`/`mesh_models` in `crates/lodestone-render/src/models.rs`. This
-  is the "not Minecraft" tell a player report named: flat per-block light plus
-  directional shade, with no darkening in corners and crevices.
-- [The `MOTION_BLOCKING` heightmap](./motion-blocking-heightmap.md) — Every served
-  chunk used to carry a well-framed, **zero-entry** heightmap NBT —
-  `encode_column_body` wrote `Heightmaps::new().encode(&mut w)`, an empty `Vec<(u32,
-  Heightmap)>`. `lodestone-worldgen` computes the real `MOTION_BLOCKING` map per
-  column and exposes it on `GeneratedColumn`; `ChunkColumn` now carries it across the
-  generator/server seam and `encode_column_body` packs it into the chunk packet, so a
-  client receives a real map instead of an empty one.
-- [Moving block models](./moving-block-models.md) — The render path for a block's
-  own geometry drawn somewhere other than its own cell — vanilla's
-  `SubmitNodeCollector.submitMovingBlock`. It is a **seam with more than one intended
-  producer**, not a falling-block feature: falling sand and gravel use it, so does
-  `PistonHeadRenderer` — the piston head and the block it pushes — and so does
-  `TntRenderer`, primed TNT's block model.
-- [The multi-protocol seam: constructing an adapter for the protocol it negotiated](./multi-protocol-seam.md) —
-  The change that lets one `crates/protocol/vNNN` crate serve several protocol
-  revisions instead of exactly one. Unit U2 of epic #343's dispatch plan
-  ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)), and a
-  prerequisite for every grouped family the plan schedules — `v110`
-  (1.9.4/1.10.2/1.11.2), `v498` (1.14.4/1.15.2), `v756` (1.17.1/1.18.2). Building
-  those single-protocol first and retrofitting the seam afterwards is the expensive
-  order, which is why this landed before any of them.
-- [Situational music selection](./music-selection.md) — The layer that decides
-  *when* to play a music track and *which* one — menu music, per-biome overworld
-  music, the creative and underwater variants, and the End boss and credits tracks. It
-  is pure logic over the player's situation plus a randomised countdown, and it lives
-  in `crates/lodestone-sound/src/music.rs` with a generated biome table beside it in
-  `src/biome_music.rs`.
-- [Natural mob spawning](./natural-mob-spawning.md) — How the integrated server
-  populates a live world with mobs: the per-species `SpawnPlacements` table, the
-  per-column light the spawn rules test against, and the per-tick cycle that consults
-  the biome spawn lists and the mob caps. Issues #221 and #222 — before this,
-  `crates/lodestone-server/src/mob_spawn.rs` held a proven cap/despawn engine with
-  **no production caller at all**, so a world held exactly the mobs `seed_demo_mobs`
-  put in it, forever, and nothing anywhere implemented `lodestone_entity::spawn`'s
-  `SpawnRule`/`SpawnEnvironment` seam.
-- [Nether portals and multi-dimension world state](./nether-portals.md) — The
-  integrated server hosts two dimensions and moves players between them through nether
-  portals. Three modules and one protocol method:
-- [The "Play offline" identity](./offline-identity.md) — The one persisted,
-  user-editable name the client joins under when no Microsoft account is signed in,
-  plus the stable UUID derived from it. It lives in
-  `crates/lodestone-shell/src/offline_identity.rs`.
-- [Open to LAN](./open-to-lan.md) — `IntegratedServer::open_to_lan` — the
-  TCP-listening entry point, plus the config surface for the four subsystems that were
-  implemented, gated, and then unreachable because `IntegratedServer::bind` took no
-  way to say anything about them: RCON (#331), the GameSpy4/UT3 query listener (#332),
-  resource-pack pushes (#334), plugin channels (#335) and commands (#48). Adds
-  vanilla's LAN-discovery broadcast so the world shows up in a client's multiplayer
-  list without anyone typing an address.
-- [Which settings actually do something, and what the rest are waiting on](./options-consumption-census.md) —
-  A consumption audit of the settings tree: for every option
-  `crates/lodestone-shell/src/menu/options.rs` puts on screen, whether the value
-  reaches anything. The tree carries **143 controls**; most rows are present and
-  greyed. This doc records *why* each greyed group is greyed — i.e. which subsystem
-  it is waiting on — so the next person wiring an option can tell a five-minute
-  threading job from a new renderer feature.
-- [Oracle runtimes: Apple `container`](./oracle-runtimes.md) — All six JVM-oracle
-  scripts under `scripts/live-oracles/` and `scripts/worldgen-oracle/`, plus the three
-  Rust test files that used to shell out to `docker` directly, now run their real
-  vanilla server (or JVM oracle) under Apple's `container` CLI
-  (https://github.com/apple/container) instead of Docker. Docker is gone from every
-  one of these paths — there is no `LODESTONE_ORACLE_RUNTIME` switch and no
-  fallback; `container` is simply what these scripts and tests invoke.
-- [The outbound action hook](./outbound-action-hook.md) — `EgressFilters`
-  (`crates/lodestone-ecs/src/egress.rs`) is the seam where a plugin inspects, replaces
-  or suppresses a `ClientAction` that another plugin queued, after `GameTick` has
-  finished and before it reaches the socket. ProtocolLib's outbound side, at the one
-  layer where it is version-free. Issue #157.
-- [Packet framing, and the empty frame that ended sessions](./packet-framing.md) —
-  How `lodestone-net` turns a byte stream into packets — the length prefix, the
-  compression header, and the one shape of frame that carries no packet at all.
-  `Codec` in `crates/lodestone-net/src/codec.rs` does the framing and
-  `Connection::read_packet` in `connection.rs` splits a frame body into `(packet_id,
-  fields)`.
-- [Painting rendering](./painting-rendering.md) — The wall-hung painting entity, end
-  to end: the variant off the wire, the 51-entry size table, one baked mesh per shape,
-  one texture per variant, and the GPU pass that draws them. A painting is neither a
-  rig nor a billboard — it is a flat slab of `width x height` blocks — so it
-  reaches pixels through its own pass rather than through the mob corpus.
-- [The particle catalogue: what's wired, what isn't, and why](./particle-catalogue.md) —
-  `lodestone-particle`'s `Sheet` enum names a physical texture sheet under
-  `textures/particle/*.png`; `Behaviour` names a per-type tick/quad-size/layer
-  override; `emit` is one function per vanilla particle *class* (not per registry type
-  — several registry types share a Java class, see "One class, several registry
-  names" below). `Particles::spawn_one` (`crates/lodestone-shell/src/particles.rs`) is
-  the one place that maps a decoded registry name to an emitter call. Adding a type
-  end-to-end means: a `Sheet` variant naming the real sheet (if one doesn't already
-  exist for it), a `Behaviour` variant if the tick shape is new, an `emit::` function
-  transcribed from the matching `net.minecraft.client.particle.*` class, and one
-  `match` arm in `spawn_one`.
-- [Pause menu](./pause-menu.md) — The in-game Escape menu, and `Sim::end_session`
-  — the teardown that lets a player leave a live session cleanly and start (or join)
-  another one without carrying anything over. Landed in `c53d022` ("an in-game pause
-  menu, and a way to leave a session on purpose").
-- [Permissions](./permissions.md) — The permission system plugins ask questions of:
-  dotted nodes (`myplugin.admin.reload`), wildcards (`myplugin.*`), per-node defaults,
-  per-player and per-group grants with negation, vanilla's five command levels, and a
-  resolver trait a permissions *plugin* can use to take the whole decision over. One
-  resource, `lodestone_ecs::permissions::Permissions`, answering one question: does
-  this subject hold this permission?
-- [PGO experiment](./pgo-experiment.md) — A measured answer to "is profile-guided
-  optimization worth adding to this workspace's release build" — filed as a
-  general-improvements follow-up with no further detail beyond that question. This is
-  a report of one experiment, not a build-config change: nothing in `Cargo.toml` or
-  `.cargo/config.toml` was touched. PGO's two-pass build (instrument, train,
-  re-optimize) is expressed entirely through `RUSTFLAGS`/`llvm-profdata`, which is a
-  build-pipeline concern, not something `[profile.release]` can express as a static
-  setting.
-- [Pillager patrols](./pillager-patrols.md) — The server-side port of vanilla's
-  `PatrolSpawner`: a periodic, difficulty-scaled group of pillagers spawns near a
-  random connected player, one of them a *leader*, and the group marches across the
-  map together rather than standing still. It lives in `lodestone_server::mobs`
-  (`MobSim::run_patrol_spawn_cycle`) plus one new goal in
-  `lodestone_entity::ai::goals` (`LongDistancePatrolGoal`), registered on the
-  pillager's roster row in `lodestone_entity::ai::roster::ranged`.
-- [Player capes](./player-capes.md) — The player cape overlay: a real,
-  per-tick-lagged cloak that sways as the wearer walks, turns and sprints, rather than
-  a flat plane pinned to the back. Before this landed, capes were an island — the
-  profile texture was already parsed and the options toggle already existed, and
-  nothing drew.
-- [Player chat](./player-chat.md) — The inbound half of chat: a player types a
-  message, our server decodes it, and every connected player sees it. Before #469 the
-  two halves of chat were in opposite states — we could say things to a player
-  (`system_chat` was complete and well-tested) and a player could say nothing to us,
-  because serverbound `minecraft:chat` was never decoded at all.
-- [Player entities](./player-entities.md) — The server-side machinery that makes a
-  connected player an **entity other connections receive** (issue #438): a shared
-  registry of connected players, a per-connection tab-list diff, and the two
-  `ServerProtocol` encoders that put both on the wire. Before it, two players on one
-  server — including over LAN — were completely invisible to one another.
-- [Player skins](./player-skins.md) — The `textures` profile property — base64 →
-  JSON → a URL plus a **wide/slim rig declaration** — the host-restricted fetch
-  that turns it into a sheet, and the render halves that draw it on the inventory
-  avatar, on other players' bodies in the world, and — rig **and** texture — on
-  the local player's own third-person body and first-person arm. Resource-pack reload
-  also rebinds the vanilla default head sheet when an overlay omits it. What is left
-  is capes and the Yggdrasil signature, named under [What is
-  missing](#what-is-missing).
-- [The plugin API](./plugin-api.md) — The surface a third-party bevy plugin uses to
-  do everything native Lodestone code can do — read world/entity/player state, write
-  intent, order systems against internal ones, and observe events — specified
-  against `docs/bevy-migration.md`'s six-stage plan. This is a specification, not an
-  implementation: Stages 0–4 are landed (`crates/lodestone-ecs`, `415138f`,
-  `8be6544`, `beae37c`, `b2baf02`, and the chunk-world resource of Stage 4 — see the
-  stage-map table below for its commit); Stages 5–6 are not. (Stages 2, 3 and 4 each
-  landed after this document's first draft — see "Correction: Stages 2 and 3 landed
-  after the paragraphs above were written" below for what changed and, just as
-  important, what it did not; Stage 4's own landing is recorded in the stage-map table
-  rather than a second correction section, since by then it was one row, not three
-  paragraphs of prose.) Read this before building any of them — several requirements
-  below are things a stage must deliver, and finding that out at Baritone time
-  (`docs/baritone-port.md`) would mean reopening finished stages.
-- [Async plugin tasks and the World hand-back](./plugin-async-tasks.md) —
-  `AsyncTaskPool` (`crates/lodestone-ecs/src/async_task.rs`) lets a plugin run
-  blocking work off the tick thread — a database query, an HTTP call, a pathfinding
-  search — and get the result back into the `World` safely. Results arrive either by
-  polling a `PendingTask<T>` from a system or through a hand-back closure the pool
-  runs with `&mut World` at a tick boundary. This is Bukkit's `runTaskAsynchronously`
-  plus `runTask`. Issue #114.
-- [Plugin channels (`custom_payload`)](./plugin-channels.md) — Typed, per-channel
-  delivery of Minecraft's `custom_payload` (plugin-messaging) packet to a plugin. A
-  plugin declares a channel by implementing
-  `lodestone_ecs::plugin_channel::PluginChannel` on its own `#[derive(Message)]` type,
-  calls `add_plugin_channel::<T>()` in its `Plugin::build`, and reads decoded `T`s
-  with an ordinary `MessageReader<T>`. Issue #301.
-- [Plugin commands](./plugin-commands.md) — The extension point a third-party plugin
-  uses to register its own commands: a `CommandRegistry` resource it populates in
-  `Plugin::build`, an argument tree per command with built-in and custom argument
-  types, a permission node on any node gating it and its whole subtree, tab
-  completion, and a dispatcher that resolves an input string and runs a handler with
-  `&mut World`.
-- [Plugin data directory, config, and persistent key-value storage](./plugin-data-and-config.md) —
-  `crates/plugins/lodestone-plugin-support` — shared, non-engine conveniences every
-  native plugin would otherwise reimplement for itself: a per-plugin data directory
-  and typed config file (mirroring `JavaPlugin.getDataFolder()`/`getConfig()`), and an
-  in-memory, namespaced key-value store attachable to an entity or a chunk (the
-  non-persistent half of a persistent data container, mirroring Bukkit's
-  `PersistentDataContainer`/`Metadatable.setMetadata`). Neither is engine surface —
-  deleting this crate leaves a working client, per `crates/plugins/README.md`'s own
-  test for what belongs under `crates/plugins/`.
-- [Plugin registration — how a consumer gets their plugin into the client](./plugin-registration.md) —
-  The seam that lets a crate outside this repo register a `bevy_app::Plugin` into
-  Lodestone's client, headless *or* rendered. `lodestone-app`'s `client_app()` returns
-  the composed but unfinalised `App`; the caller `add_plugins` on it and hands the
-  result to a runner. This is milestone zero of
-  [`docs/plans/runtime-plugin-loading.md`](plans/runtime-plugin-loading.md), and every
-  later milestone there — the wasm host included — arrives through it.
-- [The plugin task scheduler](./plugin-scheduler.md) — `TaskScheduler`
-  (`crates/lodestone-ecs/src/scheduler.rs`) is the delayed-and-repeating task API for
-  plugins — Bukkit's `BukkitScheduler.runTaskLater` / `runTaskTimer`, which is the
-  most-used non-event surface in the Java plugin ecosystem. A plugin schedules a
-  closure to run on a future `GameTick`, once or on a period, instead of hand-rolling
-  a countdown component plus a per-tick system that checks it. Issue #113.
-- [Point-of-interest storage](./point-of-interest-storage.md) — The reader/writer
-  for vanilla's third region-file set: `poi/`, a per-section index of workstations,
-  beds, bells and lit nether portals — `PoiRecord`/`PoiSection`/`PoiManager` in
-  vanilla. It is the second half of the persistence work
-  [`entity-and-player-persistence.md`](./entity-and-player-persistence.md) covers;
-  that doc's own "what is not done yet" section used to list this as absent.
-- [The portable clock (`lodestone-time`)](./portable-clock.md) — `lodestone-time` is
-  the workspace's one sanctioned way to read a clock. It wraps `web-time` —
-  `Instant` (monotonic) and `epoch_duration()` (wall-clock time since the Unix epoch)
-  — and every other crate that needs a clock depends on `lodestone-time` instead of
-  on `web-time` directly. It replaces three separate, independently-arrived-at copies
-  of the identical seam: `crates/lodestone-shell/src/platform.rs` (which was the
-  original, fullest version), plus an inline `web_time::Instant::now()` in
-  `lodestone-net`'s ping timer and a `web_time::{SystemTime, UNIX_EPOCH}` import in
-  `lodestone-particle`'s entropy-seeded RNG.
-- [Pose-dependent dimensions and the fit gate](./pose-dimensions.md) — The player's
-  collision box is `0.6 × 1.8` standing, `0.6 × 1.5` crouching and `0.6 × 0.6`
-  swimming or elytra-gliding — and *which* of those applies is decided by a
-  **fit-gated state machine**, not by a pose→dimensions lookup. It lives in
-  [`crates/lodestone-physics/src/pose.rs`](../crates/lodestone-physics/src/pose.rs)
-  and runs from the end of `lodestone_physics::tick`.
-- [Primed TNT](./primed-tnt.md) — The `minecraft:tnt` entity — the fuse-countdown,
-  gravity-affected block that TNT becomes once ignited — plus every producer that
-  ignites one. A port of `PrimedTnt`
-  (`.cache/mc/26.2/src/net/minecraft/world/entity/item/PrimedTnt.java`) and
-  `TntBlock`'s ignition methods, living in `crates/lodestone-server/src/mobs/tnt.rs`.
-- [Projectile impact and the player's own launch](./projectile-impact.md) — The half
-  of the projectile system that made arrows matter: hit detection against terrain and
-  mobs, the per-projectile damage arithmetic, and the serverbound path by which a
-  **player** launches a bow shot, a snowball, an egg or an ender pearl. Before this,
-  every projectile in the game came from a mob goal, flew through anything in its way,
-  and hurt nothing.
-- [Projectile renderers (arrow, spectral arrow, trident)](./projectile-renderers.md) —
-  The three entity types vanilla draws with `ArrowRenderer` and
-  `ThrownTridentRenderer`: `minecraft:arrow`, `minecraft:spectral_arrow` and
-  `minecraft:trident`. Each is a code-built cuboid rig aligned to the projectile's
-  **velocity**, not a billboard and not a mob.
-- [Wiring v340's flattening table into the adapter (`crates/lodestone-canonical/src/canonical.rs`)](./protocol-340-canonical-bridge.md) —
-  The follow-up to
-  [`protocol-340-flattening-table.md`](./protocol-340-flattening-table.md): that
-  document built and verified the `id:meta` → modern-block table but explicitly did
-  not wire it up (its own "What wiring `v340` would need" section). This closes that
-  gap. `crates/lodestone-canonical/src/canonical.rs` bridges [`flattening::lookup`]'s
-  answer — vanilla's own first flattening step, in its own intermediate spelling —
-  to a real, canonical **26.2** [`lodestone_data::block_states`] id, and
-  `crates/protocol/v340/src/packets/chunk.rs`'s `map_chunk` decode now calls it for
-  every block a 1.12.2 server sends. A 1.12.2 chunk decodes into the same id space
-  `lodestone-world`'s storage, the mesher, and collision already assume.
-- [The `id:meta` → block-state table for protocol 340 (1.12.2)](./protocol-340-flattening-table.md) —
-  Epic #343 (support 1.7.10 → 26.2 via one canonical internal version plus a
-  per-version translation layer) asks for one pre-Flattening version to be built
-  early, specifically to force the `id:meta` → block-state mapping problem while the
-  cost of changing course is still low. `v340` (protocol 340, Minecraft 1.12.2) is
-  that version: pre-Flattening, already depends only on version-free crates, already
-  live-verified against a real 1.12.2 server.
-- [Protocol 47 (1.8.9) block canonicalisation](./protocol-47-canonicalisation.md) —
-  The retrofit that made `lodestone-v47`'s chunk decoder emit **canonical 26.2**
-  block-state ids instead of 1.8's raw `(blockId << 4) | meta` wire composite — unit
-  U3 of epic #343's dispatch plan
-  ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)). Before it,
-  every 1.8.9 world this client joined was meshed and collided as the wrong blocks,
-  with a fully green test suite.
-- [Protocol 754 (1.16.5) block canonicalisation](./protocol-735-canonicalisation.md) —
-  The retrofit that made `lodestone-v735`'s chunk decoder emit **canonical 26.2**
-  block-state ids instead of 1.16.5's own flat wire state ids — unit U4 of epic
-  #343's dispatch plan
-  ([`plans/multi-version-protocol.md`](./plans/multi-version-protocol.md)). Before it,
-  every 1.16.5 world this client joined was meshed and collided as the wrong blocks,
-  with a fully green test suite: `v47` and `v340` had already received the equivalent
-  fix (see [`protocol-47-canonicalisation.md`](./protocol-47-canonicalisation.md) and
-  [`canonical-block-states.md`](./canonical-block-states.md)), and `v735` was the last
-  live instance of the defect.
-- [The version-free part of each adapter's helper prologue](./protocol-adapter-prologue.md) —
-  `crates/lodestone-core/src/lib.rs` now exports `encode_body`, `decode_body`,
-  `decode_body_exact`, and `unpack_degrees` — the substance of four small helpers
-  that used to be hand-copied, byte-for-byte, at the top of each version crate's
-  adapter (`crates/protocol/{v47,v340,v735}/src/adapter.rs`; `v770`'s equivalent now
-  lives in `crates/protocol/v770/src/adapter/mod.rs`, since that crate's adapter was
-  later split into a directory module). Each version crate keeps a same-named local
-  wrapper that is now one line.
-- [Protocol version crate naming, and what `v47`/`v340`/`v735` already are](./protocol-crate-naming.md) —
-  Groundwork for GitHub epic #343 (support 1.7.10 through 26.2, one crate per major
-  version's latest patch, via a single canonical internal version plus a per-version
-  translation layer — the ViaVersion shape, not sixteen parallel simulations). This
-  doc settles two questions before fifteen more `crates/protocol/vNNN` crates get
-  created:
-- [Raids and patrols](./raids-and-patrols.md) — Issue #241 in two halves. **Patrols
-  already exist and are wired into production** — see `docs/pillager-patrols.md` for
-  the full account (`MobSim::run_patrol_spawn_cycle`, `LongDistancePatrolGoal`, wired
-  into `crate::tick`'s production loop). This document covers the **raid** half:
-  wave-escalating illager assaults with a boss bar and a captain marker, in
-  `lodestone_server::mobs` (`MobSim::start_raid`/`tick_raids`, in `mobs/raid.rs`).
-- [Runtime recipe registration](./recipe-registration.md) — The plugin-facing door
-  onto the crafting corpus (issue
-  [#148](https://github.com/matteopolak/lodestone/issues/148)) — the
-  `Bukkit.addRecipe` analogue. A plugin registers a shaped/shapeless/cooking recipe
-  from inside its own `Plugin::build`, and that recipe becomes matchable by the
-  crafting-table screen and browsable in the recipe-book panel exactly like one of the
-  1585 vanilla recipes.
-- [Redstone benchmark harness](./redstone-benchmark-harness.md) — A schematic loader
-  (`lodestone_anvil::schematic`) plus a benchmark harness
-  (`crates/lodestone-anvil/tests/redstone_benchmark.rs`) that loads a real,
-  publicly-downloaded redstone contraption into the real production tick loop
-  (`lodestone_server::IntegratedServer::open_in_memory_with_mobs`) and reports where
-  its per-tick cost goes — built for issue #548 (the incrementally-invalidated
-  redstone dependency graph), which a previous agent correctly declined to build
-  without exactly this measurement.
-- [Pistons](./redstone-pistons.md) — `crates/lodestone-server/src/piston.rs` —
-  vanilla's `PistonBaseBlock` and `PistonStructureResolver`, ported as pure decisions
-  over a `Fn(BlockPos) -> String` world lookup, plus the wiring in `random_tick.rs`'s
-  neighbour-reaction pass that makes a powered piston actually move blocks, and the
-  two-phase `moving_piston` transition that makes a push *animate* on a client rather
-  than snap. Issue #316, **partially**: read "What is not here" before assuming a
-  contraption works.
-- [Redstone: dust, torches, repeaters, comparators, observers, and the input devices](./redstone.md) —
-  Five new modules in `crates/lodestone-server/src/`, all pure query/decision
-  functions with no `ChunkColumn` in scope except through a `lookup: Fn(BlockPos) ->
-  String` closure — the same "pure decision, fake world via closure" shape
-  [`docs/tick-scheduling.md`](./tick-scheduling.md) already established for gravity
-  blocks:
-- [Regional Difficulty](./regional-difficulty.md) — Vanilla's `DifficultyInstance`:
-  a scalar (`effective_difficulty`, roughly `0.0`–`6.75`) grown from world
-  difficulty, elapsed world time, a chunk's inhabited time and the moon phase.
-  `crates/lodestone-server/src/regional_difficulty.rs` is the pure formula. There is
-  no single wired call site — `crate::tick::run_tick_loop` resolves a fresh
-  `DifficultyInstance` inline, once per tick, from
-  `WorldState::time()`/`difficulty()`, and feeds its two derived quantities to every
-  real consumer that tick: `crate::lightning`'s skeleton-horse-trap chance
-  (`effective_difficulty()` directly) and
-  `MobSim::set_spawn_difficulty`/`set_spawn_monsters_enabled` (`special_multiplier()`/
-  `is_hard()`, feeding the zombie-family gear roll, door-breaking roll and
-  reinforcement roll below).
-- [Registry data ingest (`registry_data`, dimension types, world clocks)](./registry-data-ingest.md) —
-  The client's decode of the Configuration-phase `registry_data` packet, and the two
-  registries it turns into typed values: `minecraft:dimension_type` and
-  `minecraft:world_clock`. This is what replaced three hardcoded, level-name-keyed
-  guesses — chunk column height, sky-light presence, and which world clock is "the"
-  day clock — with values the server actually declared.
-- [Registry types: generated enums instead of strings](./registry-types.md) — The
-  representation this codebase uses to name a registry entry — a block, an item, an
-  entity type — in memory and in generated tables. The answer is a **generated enum
-  whose discriminant is the registry id**, with the plugin case kept in a separate
-  wrapper type so it costs the built-in path nothing. `lodestone_data::block::Block`
-  was the first registry converted; `lodestone_data::item::Item` and
-  `lodestone_data::entity_type::EntityType` are Stage 1, landed the same way. This
-  document records the decision, what was rejected, what was measured, and the order
-  the remaining registries should follow.
-- [Rendering handoff: first-person bow and framed maps](./rendering-handoff-bow-and-maps-2026-09-01.md) —
-  This is the 2026-09-01 handoff for two live rendering defects that remain after
-  commit `62c3d425`: a bow that disappears while charging in first person, and filled
-  maps that still z-fight or disappear on the DemocracyCraft server. Sign text is now
-  confirmed fixed and should not be changed as part of this work.
-- [Resource Packs screen](./resource-packs-screen.md) —
-  `SettingsPage::ResourcePacks` (issue #415): vanilla's `PackSelectionScreen`, two
-  transferable columns over a real pack repository. **Available** on the left lists
-  every pack in the user's `resourcepacks/` folder — directories *and* `.zip`
-  archives — with its `pack.mcmeta` description and `pack.png` thumbnail;
-  **Selected** on the right is the priority order, highest first. Clicking a row moves
-  it between the columns, per-row buttons reorder it, and leaving the screen feeds the
-  order into `ResourceManager`'s pack stack — which a live world session now picks
-  up within a frame or two, not just on the next atlas/model build. An accepted server
-  pack is also shown in Selected, above every local row. It is force-enabled for the
-  lifetime of that push: it has no transfer or reorder controls and is deliberately
-  excluded from the persisted local order. See "How to change it" below for
-  `resources::pack_generation` and `Sim::reload_resource_pack_atlas`, the live-reload
-  chain.
+- [Lighting and sky](./lighting-and-sky.md) — The client's whole lighting and
+  atmosphere model: per-corner smooth lighting and ambient occlusion on baked block
+  models, the vanilla lightmap curve that turns a light byte plus time-of-day into a
+  shading factor, the day clock feed that drives it, distance and environmental fog,
+  the sky pass (disc, sun, moon, stars, clouds) and per-dimension/per-biome tint, and
+  the client's own light-relight engine that fixes a broken block's lighting without
+  waiting for the server.
+- [Menu screens](./menu-screens.md) — A catalogue of every individual non-container
+  menu screen in the shell: what each one is, where its code lives, and what makes it
+  distinctive. See [`ui-framework.md`](./ui-framework.md) for the shared
+  widget/layout/focus machinery these screens are built from, and
+  [`container-screens.md`](./container-screens.md) for the inventory-and-menu family,
+  which follows a different geometry model (slot rects from the *menu* classes, not
+  layout containers).
+- [Mining, drops and loot tables](./mining-and-drops.md) — How fast a held item
+  mines a block (the item half of break-time math; the block half — hardness —
+  lives in [`docs/blocks.md`](./blocks.md)), and the whole chain that turns a broken
+  block or a dead mob into real item entities: the server-side loot-table engine, its
+  bundled corpus of vanilla tables, and generated structures' pre-filled chests.
+- [Mob AI](./mob-ai.md) — Server-side mob AI and simulation: the per-species goal
+  roster and priority scheduler, brain-style target acquisition for villager-class
+  mobs, entity and block perception (what a goal is allowed to know about the world),
+  the neutral-mob anger/aggro roster, ranged attacks, vertical motion (step/jump/
+  fall), and the generic per-tick projectile/item drivers. All of it runs every tick
+  inside `MobSim` (`crates/lodestone-server/src/mobs/mod.rs`), which is also the
+  production wiring that gets AI-driven mobs onto the wire to a real client.
+- [Mob spawning](./mob-spawning.md) — Everything that puts a mob into a live world
+  and gives it a life after that: the natural spawn cycle and its per-biome tables,
+  what a naturally spawned mob holds/wears, species-aware body and goal resolution,
+  spawn eggs, breeding and baby growth, taming, and the registry for adding a wholly
+  custom entity type. Most of it lives under `crates/lodestone-server/src/mobs/` and
+  `crates/lodestone-server/src/natural_spawn.rs`, with entity-side timing state in
+  `crates/lodestone-entity/src/ai/navigating_mob.rs`.
+- [The multi-protocol seam: version crates, canonicalisation, and framing](./multi-protocol-seam.md) —
+  How `crates/protocol/vNNN` family crates are structured and named, how the registry
+  resolves a negotiated protocol number to the right adapter, how each pre-26.2 family
+  translates its own wire block-state representation into the canonical 26.2
+  block-state space, the reference table of protocol/data-version numbers this project
+  tracks per Minecraft release, and the packet-framing shape (length prefix,
+  compression, the one frame that carries no packet) all four families share
+  underneath `lodestone-net`.
+- [Oracle assets: what's on disk under `.cache/mc/`, and who reads it](./oracle-assets.md) —
+  A census of `.cache/mc/` — the vanilla server jars, client jars, and booted-server
+  world directories this repo has fetched — cross-referenced against `crates/`,
+  `xtask/` and `scripts/` to say, for each version, exactly what test or script
+  consumes it. It exists because `docs/plans/multi-version-protocol-dedup.md`'s Stage
+  0 found eight jars on disk that nothing in the tree reaches: fetched by `xtask
+  version-table`, unknown to the protocol work. This document is that finding turned
+  into a maintained table, so the next agent reads it instead of re-deriving it (or
+  worse, assuming a fetched jar is therefore a used one).
+- [Oracles and benchmarks: runtimes, fuzzing, and real-workload measurement](./oracles-and-benchmarks.md) —
+  Where this repo gets ground truth and cost measurements from outside its own code:
+  the Apple `container` runtime every JVM/vanilla-server oracle now runs under, the
+  property-based fuzz harness that checks wire decoders for crash-freedom rather than
+  round-trip agreement, the redstone benchmark harness that measures the real tick
+  loop against downloaded contraptions, and the profile-guided-optimization experiment
+  that measured whether PGO is worth adding to the release build.
+- [Packet and action wiring: routers, gates, and cancellation](./packet-wiring.md) —
+  How a decoded packet reaches a real consumer instead of an island, on both the
+  serverbound (hosting) and clientbound (joining) sides, and the two plugin-facing
+  hooks — `EgressFilters` and `ActionVetoes` — that let a plugin inspect, replace,
+  suppress, or veto an action before it takes effect or reaches the wire.
+- [Particle rendering](./particles.md) — The particle system: how a decoded particle
+  type becomes a physically-simulated, textured billboard on screen, and the special
+  case of block-break debris, whose colour and texture are derived from the broken
+  block itself rather than from a dedicated sprite.
+- [Player rendering](./player-rendering.md) — Everything that turns a player's (or
+  player-shaped entity's) identity and pose into pixels: skin and cape texture
+  resolution, the local player's synthetic third-person body, armour and trim layers,
+  armour stand poses, and elytra wings. All six share one mechanism — a second mesh
+  posed off a wearer's own already-computed part matrices — and one recurring
+  failure mode: attaching by part *name* instead of by the wearer's resolved
+  model/animation family.
+- [Player simulation](./player-simulation.md) — The local player's simulated
+  survival systems — hunger, drowning, burning, freezing/climbing, swimming, fall
+  damage and death, experience, status effects, eating/drinking, creative flight, and
+  the sneak-at-a-ledge back-off — plus the ECS component sets that back the player,
+  the session/HUD state, and every other entity. Survival rules are mostly
+  server-authoritative (`crates/lodestone-server/src`); movement integration and
+  component wiring live client-side (`lodestone-physics`, `lodestone-ecs`,
+  `lodestone-shell`).
+- [The plugin API](./plugin-api.md) — The surface a third-party plugin uses to
+  extend Lodestone: a native, compiled-in `bevy_ecs` plugin tier with the same power
+  as internal engine code, and a sandboxed WASM plugin host that loads a
+  capability-gated guest from disk at runtime. It covers reading and writing
+  world/entity/player state, expressing player-verb intent (break, place, move, look),
+  commands, plugin messaging, persistent per-plugin data, task scheduling, off-tick
+  async work, and bulk world edits.
+- [Plugin crafting-station hooks — anvil, grindstone, smithing table, loom, stonecutter](./plugin-crafting-hooks.md) —
+  The plugin-facing seam issue #150 asked for: a server-side mirror of Bukkit's
+  `PrepareAnvilEvent`/ `PrepareSmithingEvent`/`PrepareItemCraftEvent`, letting a
+  plugin allow, deny, or replace the result a crafting station is about to show a
+  player, before it ever reaches their screen.
+- [Plugin entity spawn/despawn/modify, and custom entity type registration](./plugin-entity-api.md) —
+  Two independent halves, one per side of the client/server split, both giving a
+  native plugin the Bukkit-class `World.spawnEntity(loc,
+  type)`/`Entity.remove()`/free-modification surface:
+- [Plugin worldgen API — custom generators, custom dimensions, structure placement](./plugin-worldgen-api.md) —
+  The plugin-facing seam that answers three issues Paper's own API covers —
+  `ChunkGenerator`/ `BiomeProvider` (#132), per-world dimension creation (#134), and
+  structure-template pasting (#136) — scoped against what
+  `lodestone-worldgen`/`lodestone-server` actually are today: a version-free,
+  oracle-verified terrain interpreter (see `docs/worldgen.md`'s own parity discipline)
+  called imperatively from plain functions, never installed as a bevy `System`.
+- [Projectile and effect rendering](./projectile-and-effect-rendering.md) — The draw
+  paths for entities that are neither an ordinary mob rig nor a plain billboard:
+  velocity-aligned projectiles (arrow, spectral arrow, trident), firework rockets,
+  lightning bolts, paintings, item frames (and whatever hangs in one, including filled
+  maps), and the three `Display` entity subtypes
+  (`text_display`/`item_display`/`block_display`). Each needed its own placement logic
+  because none of them is posed the way a `LivingEntityRenderer` mob is.
+- [Projectiles](./projectiles.md) — Everything that leaves an entity's hand and
+  travels under its own motion on the integrated server and client: thrown-item
+  ballistics and impact resolution (snowballs, eggs, ender pearls, potions, fireballs,
+  arrows), the fishing rod's bobber, the riptide trident and elytra firework boost
+  impulses, primed TNT, and the block-destroying half of an explosion.
+- [Protocol packet ranges and data-driven dispatch](./protocol-dispatch.md) — Two
+  additions that let one packet definition serve a range of protocol versions, and let
+  a family's clientbound dispatch be checked at construction time instead of falling
+  through a silent `_ =>` arm. Landed as Stage 1 of the multi-version protocol dedup
+  plan (`docs/plans/multi-version-protocol-dedup.md`): the macro attribute and the
+  dispatch builder, with no `crates/protocol/*` family converted to use either yet.
+- [Redstone execution model](./redstone-execution.md) — How a redstone change
+  actually gets *executed* — what wakes up, what it costs, and why. This is the
+  layer underneath `docs/redstone.md`'s per-device behaviour: the
+  neighbour-notification cascade, the scheduled-tick drain, and the palette-derived
+  reaction classification (`lodestone_server::redstone_graph`) that decides which
+  family, if any, a notification dispatches to.
+- [Redstone: dust, torches, repeaters, comparators, pistons, devices and the beacon](./redstone.md) —
+  The server's redstone model: dust/torch signal propagation, repeaters, comparators,
+  observers, pistons, the player-facing input devices (levers, buttons, plates, rails,
+  dispensers, note blocks, tripwire, target blocks), and two consumers built on top
+  — the beacon and the vibration/warden substrate. All of it is pure query/decision
+  functions over a `Fn(BlockPos) -> String` world lookup, the same shape
+  [`docs/tick-scheduling.md`](./tick-scheduling.md) established for gravity blocks —
+  no `ChunkColumn` in scope except through that closure.
+- [Registries: synchronized data, canonical block states, and generated tables](./registries.md) —
+  How Minecraft's data-driven registries reach this client and this server: the
+  Configuration-phase `registry_data` wire packet and what we keep from it, the
+  `lodestone-canonical` bridge that maps a legacy protocol family's own block-id space
+  onto the canonical 26.2 block-state space, the generated-enum representation used
+  for registry types (`Block`, `Item`, `EntityType`), and the `lodestone-data` crate
+  that owns the ~20 generated game-data censuses (block states, hardness, collision
+  shapes, item prototypes, and the rest) neither a protocol family nor the game logic
+  should hand-roll.
+- [Render benchmarks](./render-benchmarks.md) — Three complementary instruments for
+  answering "where does frame time go, and did a change actually help": a live
+  in-process CPU/GPU frame profiler that ships in every build, a reproducible
+  criterion-based benchmark harness used across many crates (worldgen, protocol
+  decode, physics, and this cluster's own render/entity benchmarks), and a full-client
+  live benchmark that joins a real Java server and measures the actual windowed game.
+- [Repo tooling: the task runner, CI, build caching, and the xtask scanners](./repo-tooling.md) —
+  The tools that keep this workspace buildable and testable at scale: the `just` task
+  runner that gives every health check a short canonical name, the GitHub Actions CI
+  workflow that verifies pushes without contending for the shared dev machine, the
+  `sccache`/private-target-dir build-caching design that lets many agents build
+  concurrently in one checkout, and the `cargo xtask` static scanners (`islands`,
+  `world-coverage`, and their siblings `connectedness`, `check-ptr-const`,
+  `wasm-check`) that catch classes of defect no compiler check can see.
 - [Server resource packs](./resource-packs.md) — The end-to-end flow for a
-  server-pushed resource pack: the accept/decline prompt
-  (`Screen::ResourcePackPrompt`), the per-server policy that can skip it
-  (`menu::servers::ServerPackPolicy`), the download/verify/apply pipeline (`net.rs`),
-  and how a downloaded pack actually reaches the block atlas (`resources.rs`). Landed
-  against a player report that a server's pack never prompted at all and the "Server
-  Resource Packs" row was permanently greyed out.
-- [Riding](./riding.md) — `ClientboundSetPassengersPacket` tells the client which
-  entities are riding which. Before this change it was a **complete island**: decoded
-  at `crates/protocol/v770/src/adapter/entity.rs`'s `SET_PASSENGERS` arm,
-  round-tripped by `crates/protocol/v770/tests/entity_events.rs`, and a tree-wide grep
-  for `EntityPassengersChanged` returned exactly **four** hits — the decode, those
-  two tests, and the `ClientEvent` variant. Zero consumers, no arm in either
-  `handles_event` router, and no producer of any of the serverbound riding actions
-  either.
-- [Riptide and the elytra firework boost](./riptide-and-firework-boost.md) — Two
-  item-driven velocity impulses: the riptide-trident launch (#208) and the elytra
-  firework-rocket glide boost (#206). The **arithmetic** lives in `lodestone-physics`
-  and the **triggers** — item use, held duration, the wet gate, the enchantment
-  level, the glide flag, the rocket's duration — live in the shell and
-  `lodestone-ecs`, because none of them is physics state.
-- [Scoreboard sidebar](./scoreboard-sidebar.md) — The right-edge panel that lists a
-  scoreboard objective's scores — `Hud.displayScoreboardSidebar`, ported into
-  `HudGeometry::build_inner` (`crates/lodestone-shell/src/hud.rs`) from the folded
-  state `crate::scoreboard::sidebar_from` (`crates/lodestone-shell/src/scoreboard.rs`)
-  builds out of `lodestone_game::scoreboard::Scoreboard`.
-- [The screen overlays: underwater, fire, pumpkin, freeze, spyglass, confusion, portal](./screen-overlays.md) —
-  Seven full-screen (or near-full-screen) post-hand-pass effects: a blue-ish tint plus
-  a scrolling `misc/underwater.png` texture when the camera's eye is submerged, a
-  looping flame texture across the bottom of the screen while the local player is on
-  fire, a static full-screen `misc/pumpkinblur.png` vignette while a carved pumpkin is
-  worn in the helmet slot, a `misc/powder_snow_outline.png` vignette that ramps in
-  with `Entity.getPercentFrozen()` while freezing in powder snow, a
-  `misc/spyglass_scope.png` lens with four black letterbox bars while scoping with a
-  spyglass, a green-tinted `misc/nausea.png` "confusion" overlay while the Nausea
-  effect is active, and an animated `block/nether_portal.png` swirl while near a
-  nether/end portal (portal takes priority over confusion when both are active).
-  Underwater and fire come from one vanilla class, `ScreenEffectRenderer.submit`
-  (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/ScreenEffectRenderer.java`);
-  pumpkin/freeze/spyglass/confusion/portal are all vanilla's *different* mechanism,
-  `Hud.extractCameraOverlays` (`Hud.java` — see the pumpkin section below for why it
-  shares this pipeline anyway) but share the identical "textured, alpha-blended,
-  screen-space quad after the hand pass" shape closely enough that all seven landed in
-  one pass rather than inventing a second pipeline:
-  `lodestone_render::ScreenEffectRenderer`.
-- [Screenshots](./screenshots.md) — The README's in-game images, and the harness
-  that produces them. Every PNG under `docs/images/` is this client rendering a live
-  session against the flat creative 26.2 oracle — no mock-ups, no compositing, no
-  editing. `just screenshots` regenerates the whole set, so the images can be
-  refreshed when the renderer changes instead of drifting into a record of how the
-  client looked one afternoon.
-- [The scrollable list primitive](./scrollable-list.md) — `menu::widget::ScrollList`
-  is the shared substrate for every list-shaped menu screen: a **pixel** scroll
-  offset, a scrollbar, and a `hovered`/`selected` pair that are two genuinely separate
-  pieces of state. It is a port of vanilla's `AbstractScrollArea` +
-  `AbstractSelectionList` scroll model, and it exists because the multiplayer list and
-  the account list had each grown their own — with different bugs.
-- [Section camera uniform (shared buffer + origin arena)](./section-camera-uniform.md) —
-  The group-0 camera binding **every** terrain pipeline reads from — the model/fluid
-  pair ([`ModelPipeline`](../crates/lodestone-render/src/model_pipeline.rs)) and the
-  packed full-cube path ([`BlockPipeline`](../crates/lodestone-render/src/block.rs))
-  — split into a **shared** per-frame half (view-projection + fog) and a
-  **per-section** half (world origin) that lives in one physically resident
-  [`ArenaBuffer`](../crates/lodestone-render/src/arena.rs) and is addressed by a
-  dynamic offset at draw time, instead of one small buffer + one bind group per
-  section.
-- [Section mesh invalidation: absent vs. not-yet-loaded neighbours](./section-mesh-invalidation.md) —
-  A section's mesh is a function of its whole **3×3×3 = 27-section neighbourhood**,
-  not just the section itself: face culling reads the six orthogonal neighbours,
-  ambient occlusion and the smooth-light corner blend read the edges *and* corners,
-  and fluid corner heights and flow vectors read a 3×3 ring. So the mesher has to
-  answer, for every slot of that neighbourhood, *what is there?* — and when the
-  answer is "nothing", it has to answer a second question that used to be conflated
-  with the first: **is nothing the truth, or have I just not been told yet?**
-- [Secure chat: session keys and per-message signatures](./secure-chat.md) — The
-  client-side half of vanilla's secure chat: fetching the Mojang-issued RSA
-  chat-signing key pair ([`lodestone_auth::fetch_key_pair`]) and signing outgoing chat
-  messages with it ([`lodestone_auth::ChatSession`]), plus the wire shapes needed to
-  carry a session announcement and a signed message ( [`ChatSessionUpdate`],
-  [`ChatCommandSigned`] in `crates/protocol/v770/src/packets/game.rs`), **and** the
-  receiving half: keeping another player's announced session (
-  [`RemoteChatSessionData`] in `crates/protocol/v770/src/packets/player_info.rs`,
-  carried through to [`lodestone_model::event::ChatSessionInfo`] and
-  [`lodestone_game::tablist::RemoteChatSession`]) and verifying their signed messages
-  against it ([`Driver`]'s `emit`, via [`verify_signature`]).
-- [Served session liveness: keep-alive, time-of-day, and view streaming](./served-session-liveness.md) —
-  The three things that make a served session (singleplayer over `memory_pair`, or
-  open-to-LAN over TCP) survive, keep time, and follow the player, instead of being a
-  static, timeless island that a real client would eventually give up on:
-- [Server access control](./server-access-control.md) — Ops, whitelist, player bans
-  and IP bans — vanilla's four JSON files, read and written by
-  `crates/lodestone-server/src/access.rs` and enforced at login. Issue #336. Before
-  this, `grep -rniE 'whitelist|banned.player|ops\.json|permission.level'` over
-  `crates/` returned two hits, both *test comments* about vanilla's RCON console:
-  there was no operator model at all and a hosted world had no way to refuse anybody.
-- [Server-side advancements and statistics](./server-advancements.md) — The
-  version-free server-authoritative model for advancement and statistic tracking in
-  `crates/lodestone-server/src/advancements.rs` (issue #338): the advancement tree,
-  per-player criteria progress and completion, the every-tick flush to the client, NBT
-  persistence for the #437 world-save hook, and a statistics counter answered on
-  `REQUEST_STATS`. It is the "server plumbing" half of the epic — the data model and
-  rules, never the wire bytes.
-- [Server-side block-break validation](./server-block-break-validation.md) — The
-  server's answer to "may this player really break that block, now?" — vanilla's
-  `ServerPlayerGameMode.handleBlockBreakAction` destroy-progress arithmetic, ported to
-  `crates/lodestone-server/src/block_breaking.rs` and consulted by `server.rs`'s
-  `apply_block_action`. It fixes two defects that were opposite ends of one missing
-  computation: a zero-hardness block (grass, flowers, sugar cane) could not be broken
-  *at all*, and any block — bedrock included — could be broken *instantly*.
-- [Server block-light updates](./server-block-light-updates.md) — Why a torch placed
-  after join emitted no light, what the served-light path was actually measured to
-  compute, and the column resend `crates/lodestone-server/src/light.rs` gates so an
-  emissive edit now relights. Companion to
-  [`server-chunk-light.md`](./server-chunk-light.md), which covers producing the light
-  bytes in the first place.
-- [Off-task chunk encode](./server-chunk-encode-offload.md) — `ChunkEncoder` is the
-  seam that moves protocol column encode off the connection task and into the blocking
-  worker that generated the column, so the task that owes a player a reply to their
-  block break never spends 62 M instructions encoding terrain first.
-- [Server chunk generation: fanned out over scoped threads (issue #414)](./server-chunk-generation-parallelism.md) —
-  `crates/lodestone-server/src/chunk.rs`'s `generate_columns_parallel` runs a batch of
-  `ChunkSource::column()` calls across `std::thread::scope` worker threads and hands
-  the results back in the same order the coordinates were given. It replaces the
-  serial, one-column-at-a-time loop the integrated server used to run for both places
-  a connection asks for a burst of terrain: `serve_connection`'s initial `view_radius`
-  join, and `ViewTracker::recenter`'s "chunks that entered the view" diff (both in
-  `crates/lodestone-server/src/server.rs`).
-- [Server chunk light](./server-chunk-light.md) — How the integrated server computes
-  the sky and block light it puts on the wire, and where the per-block-state light
-  census that feeds it comes from. Issue #517: until this landed, every column
-  `V770ServerProtocol::encode_chunk` sent carried `ColumnLight::new(section_count)`
-  — all-`Missing`, both layers, every section — while a full `LightEngine` port
-  sat in `lodestone-world` with the client's singleplayer worldgen as its only
-  production caller.
-- [Server-side command execution](./server-commands.md) — The path a `/command`
-  typed by a player takes from a serverbound `chat_command` frame to a registered
-  plugin command's handler and back as system chat — and, more importantly, the
-  **seam** that path has to cross, because the crate that receives the frame is
-  deliberately forbidden from linking the crate that dispatches it. Issues [#48] (the
-  Brigadier dispatcher server-side) and [#464] (the wire gap that kept any command
-  from reaching a dispatcher).
-- [Server-side disconnect packets](./server-disconnect.md) — How Lodestone's
-  integrated server tells a client **why** it is being disconnected, instead of
-  silently closing the socket. Issue #279.
-- [Server ECS, Phase 0: the `App` exists and is provably live](./server-ecs-phase0.md) —
-  Phase 0 of [`docs/plans/server-ecs-migration.md`](./plans/server-ecs-migration.md)
-  — the dependency edge and `ServerCorePlugin` that give `lodestone-server` its own
-  `bevy_ecs::World`, plus the gate that proves the `World` is *live* rather than an
-  inert scaffold. It migrates no state and does not make the tick loop drive the
-  `World`; that is Phase 1. [`docs/server-ecs.md`](./server-ecs.md) is the
-  architectural decision record and this document does not revisit it.
-- [The server's own `bevy_ecs::World`](./server-ecs.md) — The architectural
-  decision, and the design it produced, to link `lodestone-ecs` into
-  `lodestone-server` so that server-side plugins get the same five-clause intent
-  doctrine [`docs/plugin-api.md`](./plugin-api.md) already gives client-side plugins
-  — one system per machine, always-observable refusal, lifecycle-encodes-verb-shape
-  — instead of a second, hand-rolled plugin idiom. This reverses
-  [`docs/server-tick-loop.md`](./server-tick-loop.md)'s recommendation not to link
-  `lodestone-ecs` into the server (see that doc's own "Recommendation reversed"
-  section for why each of its three original reasons no longer blocks). This document
-  is the decision record and the design five queued implementation phases build
-  against — **nothing in `crates/lodestone-server/` implements this yet**. Where
-  this document describes behaviour, it is describing the design, not shipped code;
-  where it cites `crates/lodestone-ecs/` today, that code already exists and this
-  document is reporting it directly.
-- [Server game modes](./server-game-modes.md) — The server's game-type state: what
-  mode a connection joins in, how it changes, and the consequences the server applies
-  (flight permission, instant break, damage immunity). Before this, `begin_play`
-  hardcoded `game_type: 0` and the `change_game_mode` packet decoded to
-  `ServerBound::Ignored`, so there was no way to be in creative at all.
-- [Server-side gameplay gap census against vanilla 26.2](./server-gameplay-gap-census.md) —
-  An evidenced inventory of what the integrated server actually simulates, measured
-  against vanilla 26.2 — block drops, crafting, mob spawning, lighting, drowning,
-  hunger, fluids, fire, explosions, redstone, item entities, sound and particles.
-  Every row carries a verdict (**reached** / **orphaned** / **partial** / **absent**),
-  what consumes it in production, a `file:line` citation and an issue number, so a
-  later reader can re-verify rather than inherit. It is the server-side sibling of
-  [`worldgen-gap-census.md`](./worldgen-gap-census.md) and exists for the same reason:
-  the written record here goes stale silently, and this repo's dominant defect is the
-  *island* — code that is built, unit-tested green, and reached by nothing.
-- [Server-authoritative inventory](./server-inventory.md) — `lodestone-server`'s
-  model for a player's own inventory, and the decode + consumer that lets
-  `SET_CARRIED_ITEM` and `CONTAINER_CLICK` actually change server state. Before this,
-  `lodestone-server` had **no inventory/container model at all** — three separate
-  doc comments (`server.rs`'s `apply_use_item_on`, `protocol.rs`'s `UseItemOn`,
-  `vitals.rs`) already said so, and an earlier investigation comment concluded that
-  decoding any of its 16 packets would produce "real bytes parsed with genuinely
-  nothing to write into and nothing that would read it." This closes that gap for two
-  of the sixteen — the two the investigation named as the shortest path from "a
-  model exists" to "a real client moves an item on our server and it sticks."
-- [The multiplayer server list](./server-list.md) — `Screen::ServerList` —
-  vanilla's `JoinMultiplayerScreen` plus its `ServerSelectionList` — at vanilla's
-  geometry: a `HeaderAndFooterLayout` title, 36 px list rows with a 32×32 favicon,
-  wrapped MOTD and a status column, and seven footer buttons three of which are
-  inactive when there is nothing selected.
-- [Server-side login compression](./server-login-compression.md) —
-  `lodestone-server` (via `V770ServerProtocol`) now enables zlib packet compression
-  during login, the mechanical half of issue #273 ("server-side login has no
-  encryption or compression"). The much larger half — encryption and the online-mode
-  session-server ownership check — is now implemented too; see
-  [`docs/server-online-mode.md`](./server-online-mode.md).
-- [Server-side encryption and online-mode](./server-online-mode.md) — The other half
-  of issue #273: `lodestone-server` can now run the online-mode RSA/AES-128-CFB8
-  handshake and verify a connecting client's identity against Mojang's session server,
-  mirroring the client-side join path `docs/accounts.md` documents.
-  `docs/server-login-compression.md` covers the compression half that landed first;
-  this doc covers what it called "the much larger half."
-- [Server-side plugin messaging: the channel registry and dispatch](./server-plugin-channels.md) —
-  The server side of Minecraft's custom plugin-message machinery, in
-  `crates/lodestone-server/src/plugin_channels.rs`: a registry of channels the server
-  has registered interest in, per-connection tracking of which channels each client
-  announced, and dispatch both ways on the wire. A client sends a raw payload on a
-  named channel and it reaches the server handler registered for that channel; the
-  server broadcasts a payload and every connection that declared support for the
-  channel receives it. **Deliberately not** the plugin-facing API — that is issue
-  #77's plugin framework; this is the wire-level registry and dispatch seam it will
-  sit on.
-- [Server-initiated resource pack push (issue #334)](./server-resource-pack.md) —
-  How Lodestone's integrated server pushes a resource pack to a connected player —
-  the download URL, SHA-1 hash, required flag, and optional prompt that a client shows
-  on its accept/decline screen. The client-side **decode** of the packet landed first;
-  this issue is the server half: the version-free vocabulary struct, the
-  `ServerProtocol` seam method, its `v770` encoder, and the feed a host publishes a
-  push into. Part of the server-plumbing epic (#339).
-- [Server-side crafting](./server-side-crafting.md) — The server half of crafting
-  (issue #529): `crates/lodestone-server/src/crafting.rs` holds the crafting grid the
-  **server** owns plus the bundled 26.2 recipe corpus it resolves a result from, and
-  `apply_container_clicked` now derives the crafting result slot itself instead of
-  storing whatever the client claimed. The client-side matcher and menu layout are
-  `docs/crafting.md`.
-- [Server-list status (the Status phase)](./server-status.md) — How Lodestone's
-  integrated server answers a client's **server-list ping** — the MOTD, player
-  count, version, protocol number, and optional favicon a player sees in their
-  multiplayer list before they ever try to join, plus the latency `pong` that renders
-  the connection-strength bars. Issue #277.
-- [The server tick clock: MSPT/TPS accounting and overrun handling](./server-tick-loop.md) —
-  `crates/lodestone-server/src/tick.rs`: [`TickClock`]/[`TickStats`] plus
-  `run_tick_loop`, the single background task that advances world state (the mob
-  simulation and every registered block entity) at vanilla's 20Hz, whether or not a
-  client is connected. It replaces two separate background loops
-  (`mobs::run_mob_tick_loop`, `block_entities::run_block_entity_tick_loop`) that used
-  to be spawned side-by-side, and adds MSPT/TPS accounting: ticks-run, most-recent and
-  rolling-average tick duration (MSPT), a derived TPS figure, and an overrun counter
-  for when the loop falls behind schedule.
-- [Steady-state view streaming and the connection-loop stall watchdog](./server-view-streaming.md) —
-  The server-side path that sends a walking player their newly-visible chunk columns,
-  and the watchdog that measures how long `serve_play`'s `select!` loop goes without
-  servicing the socket. Together they close the second half of the *"chunk gen is too
-  slow, and if I move around I eventually get Timed Out"* report: the join burst was
-  fixed by [`join-scheduler.md`](join-scheduler.md), the **move** kept the identical
-  defect, and the visible symptom of it was a keep-alive disconnect the server issued
-  to itself.
-- [Server-owned sounds, particles and level events](./server-world-effects.md) — The
-  path by which the integrated server tells a client "play this here". Before it, the
-  `ServerProtocol` trait had **no sound encoder and no particle encoder** — so the
-  server emitted no `sound`, no `level_event` and no `level_particles` packet, ever,
-  and anything the client could not predict for itself was silent and invisible. A
-  player could beat a cow to death without a sound.
-- [Serverbound coverage: encoders versus producers](./serverbound-coverage.md) — The
-  record of which serverbound packets this client can **encode** and which it actually
-  **produces**, and why those are two different numbers. A batch of new encoders
-  landed the encoder half; this doc exists because the encoder half is the half that
-  is easy to measure and the wrong one to trust.
-- [v770 serverbound `play` packet wiring, and why decoding is not the bar](./serverbound-packet-wiring.md) —
-  The measured state of protocol 776's **serverbound** `play` packets on the hosting
-  side — what `V770ServerProtocol::decode` understands, what actually reaches a
-  consumer in `lodestone-server`, and why those two numbers differ by more than 3×.
-  This is the record for the "server-side decode" issue family — five tracker
-  issues, one per packet-name grouping (movement/player-state, entity actions/combat,
-  inventory/container, world/block admin, connection lifecycle) — whose bodies all
-  originally framed the gap as a decode gap. **That framing is stale**: decode is
-  nearly complete and connectedness is the real bar.
-- [Session and HUD state as ECS components](./session-components.md) — The
-  scoreboard, tab list, boss bars, menus, session phase, vitals, experience, the
-  title/action-bar overlays, the HUD effect stack, the respawn counter and the
-  server-assigned player id — held as `bevy_ecs` components and folded by systems.
-  This is Stage 3 of [`bevy-migration.md`](./bevy-migration.md), whose stated payoff
-  was deleting the **double fold** that doc's §1.1 measured.
-- [The settings tree, with unsupported controls disabled](./settings-screen.md) —
-  `crates/lodestone-shell/src/menu/options.rs` — vanilla's `OptionsScreen` tree as a
-  **table plus arithmetic**: nine `OptionsList` pages, **143 controls**, of which **39
-  or 40 work** (see below) **and the rest are present and greyed out** — plus four
-  more pages that are not `OptionsList` at all and are counted separately (see below):
-  Key Binds, and, since issue #415, Language, Telemetry and Resource Packs. Reached
-  from the title screen's Options button and from the pause menu's, on
-  `Screen::Settings`.
-- [Shaders](./shaders.md) — Every WGSL shader in the client lives in its own `.wgsl`
-  file under `crates/<crate>/src/shaders/`, pulled into the binary at compile time
-  with `include_str!`. There is no runtime file loading, no asset path and nothing to
-  ship alongside the executable — the shader text is still a `&'static str` baked
-  into the binary, sourced from a file instead of a Rust string literal.
-- [Dissolving `Sim`](./sim-dissolution.md) — `lodestone_shell::sim::Sim` is the
-  shell's god object: the non-graphical game state plus the driver loop that advances
-  it. [`docs/bevy-migration.md`](./bevy-migration.md) Stage 5 is its deletion.
-- [Singleplayer](./singleplayer.md) — Pressing **Singleplayer** on the title screen
-  opens the world list; pressing **Play Selected World** there starts a real
-  integrated server inside the running process and connects the client to it over an
-  in-memory duplex. Issue #287.
-- [The sky pass and the air-bubble row](./sky-and-air-bubbles.md) — Two features
-  that landed as complete, tested, unreachable modules and were then wired into the
-  frame:
-- [Social Interactions screen](./social-interactions.md) — `Screen::Social` (issue
-  #189): vanilla's `SocialInteractionsScreen`, reached from the pause menu's Player
-  Reporting icon button (`crates/lodestone-shell/src/menu/nav.rs`'s
-  `PauseButton::PlayerReporting`, now live). An online-player list with a per-player
-  **Hide in Chat**/**Show in Chat** toggle (vanilla's own terms —
-  `gui.socialInteractions.hide`/`.show`, not "mute") and a **Report** button that
-  stays permanently inactive.
-- [Sound playback](./sound-playback.md) — The path from a server sound packet to the
-  machine's speakers, and the two things that keep it quiet: a **missing sample
-  corpus** and a **missing environment variable**. The mixing engine was already built
-  and correct; this doc is mostly about everything either side of it.
-- [Sound subtitle captions](./sound-subtitles.md) — Vanilla's accessibility overlay
-  that names each sound as it plays — a stack of right-aligned plates just above the
-  hotbar, oldest at the bottom, each fading from white to grey over three seconds,
-  with a `<` or `>` arrow when the sound came from behind you. Gated by the
-  `showSubtitles` option (issue #198).
-- [Spawn eggs](./spawn-eggs.md) — The rule layer for `*_spawn_egg` items —
-  `crates/lodestone-server/src/spawn_egg.rs`: which entity a given egg names, where a
-  right-click puts it, and when the click is refused. It is the cheapest way for a
-  player to make any mob appear, and it was completely inert before: no handler
-  existed anywhere in the tree, so an egg fell through to the block-placement branch,
-  found the clicked cell non-replaceable and did nothing.
-- [Statistics screen](./statistics-screen.md) — `Screen::Statistics` (issue #188):
-  vanilla's `StatsScreen`, reached from the pause menu's Statistics button
-  (`crates/lodestone-shell/src/menu/nav.rs`'s `PauseButton::Statistics`, now live).
-  Only the **General** tab (vanilla's 77 fixed stats — time, distance, damage,
-  counters) is a real scrollable list; **Items** and **Mobs** are
-  present-and-inactive.
-- [Status effects](./status-effects.md) — The general server-side status-effect
-  registry: duration countdown, amplifier stacking with vanilla's hidden-effect chain,
-  and the periodic poison / wither / regeneration / hunger ticks.
-  `crates/lodestone-server/src/mob_effects.rs` holds the rules; `/effect give` and
-  `/effect clear` write to it; `server.rs`'s vitals timer ticks it and applies the
-  result through `PlayerVitals`.
-- [Structure chests](./structure-chests.md) — The server-side pass that fills a
-  generated structure's chests with rolled loot (issue #337): shipwrecks, ocean ruins
-  and igloos place real blocks since the worldgen `structure` S2 unit, and every one
-  of them arrived with an **empty** chest — or, for an ocean ruin, no chest at all.
-  `crates/lodestone-server/src/structure_loot.rs` is vanilla's
-  `TemplateStructurePiece.postProcess` data-marker pass plus the three
-  `handleDataMarker` overrides it dispatches to.
-- [Swimming](./swimming.md) — The water-movement port: how the client integrates a
-  swimming player, and — the actual defect this work started from — why
-  sprint-swimming didn't work even though the client believed it was sprinting the
-  whole time. Landed in `13a1d3a` ("kelp is breakable again, and swimming actually
-  swims").
-- [The Tab player-list overlay](./tab-list.md) — The list of online players the game
-  shows while Tab is held, ported from vanilla's `PlayerTabOverlay`: a translucent
-  plate, one striped row per player carrying that player's display name and a
-  five-band ping icon, split into columns past twenty players, with the server's
-  header above and footer below when it sent them.
-- [Taming and breeding](./taming-and-breeding.md) — The server-side model for making
-  a wild animal *yours* and for making two of them produce a third: per-species taming
-  (a wolf, a cat, a parrot and a horse are four different mechanisms, not one with
-  different constants), the ownership state that survives a reconnect, sitting and
-  following, and the right-click that puts two adults in love. It lives in
-  `lodestone_server::mobs` plus two new goals in `lodestone_entity::ai::goals`.
-- [The task runner (`just`)](./task-runner.md) — A [`Justfile`](../Justfile) at the
-  repo root, run with `casey/just` (installed at `/opt/homebrew/bin/just`, 1.58.0+).
-  It gives every health check, `xtask` invocation, and `LODESTONE_REGEN` regeneration
-  a short, memorable name — `just check`, `just xtask docs-index`, `just
-  regen-hardness` — so an agent does not have to reconstruct the exact flag set from
-  CLAUDE.md by hand every time, and so a fidelity check has one file to diff against
-  instead of a half-remembered command.
-- [Telemetry Data screen](./telemetry-screen.md) — `SettingsPage::Telemetry` (issue
-  #415): vanilla's `TelemetryInfoScreen`, reached from the root settings grid's own
-  "Telemetry Data..." button (flipped from `no_screen` to `nav()`). Built as an honest
-  prose screen: a title, a two-paragraph description, and four buttons — two of them
-  real.
-- [Terrain culling and draw submission](./terrain-culling.md) — The per-frame
-  decision about which resident chunk sections actually get a draw call, and the
-  shared vertex/index arena that makes each of those draws cheap. Together they are
-  what makes render distance 30+ playable: before this, every resident section issued
-  a draw at every heading, measured at **19,024 instructions per section** — 17.7M
-  per frame at the shipped render distance 8 (issue #543).
-- [Terrain sky holes](./terrain-sky-holes.md) — The record of a recurring owner
-  report — *"the sky colour comes through the blocks"* — and of the four pixel
-  gates built to reproduce it. Each gate owns a different regime (far and flat, far
-  and uneven, far and grazing, **near** and grazing), and each has ruled out a
-  different set of causes. This page exists so the next reader can tell which regime
-  is already answered from which is not, without re-running four twenty-minute suites
-  to find out.
-- [Text colour](./text-colour.md) — Server-authored text colour and formatting —
-  the sixteen legacy `§` colours, modern `TextColor` hex values, and the five format
-  flags — carried from the wire through to the emitted vertex on **every** surface
-  that draws server text: chat, item names and tooltips, the scoreboard sidebar, the
-  tab list, the title/subtitle overlay, boss bars, container titles, nametags, sign
-  text, the kick screen and the server-list MOTD.
-- [The third-person player body](./third-person-player-body.md) — The render-side
-  path that turns the local player's own state into a drawable third-person avatar —
-  full rig, both skin layers, walking/head-look animation — reusing the same code
-  every other humanoid entity draws through. Landed in `81f4cc4`
-  (`crates/lodestone-render/src/entity.rs`, `crates/lodestone-shell/src/gpu.rs`).
-  **Pose path only**: the camera and input side that would make this visible do not
-  exist yet — see "Zero pixels" below.
-- [Thrown projectiles](./thrown-projectiles.md) — The render path for the nine
-  entity types vanilla draws with `ThrownItemRenderer` — snowball, egg, ender pearl,
-  experience bottle, splash potion, lingering potion, eye of ender, fireball and small
-  fireball. Each is drawn as its **item model**, posed by `display.ground`, turned to
-  face the camera, at the entity's position.
-- [Tick-loop and worldgen per-phase profiling](./tick-and-worldgen-profiling.md) —
-  Per-phase timing for [`run_tick_loop`](../crates/lodestone-server/src/tick.rs) (the
-  server's 20 Hz world tick) and per-stage duration percentiles for
-  [`OverworldGenerator::column`](../crates/lodestone-worldgen/src/overworld/mod.rs)
-  (the overworld generation pipeline) — an answer to "which parts of the tick loop
-  and worldgen should we improve on", built to measure the **tail**, not the mean,
-  after this repo's own record of a keep-alive timeout once being diagnosed from an
-  average that hid the one window that actually mattered (`DESIGN.md` §12, the
-  "measure the tail" incident cited throughout `CLAUDE.md`). The SIMD half of that
-  original request is explicitly downstream of this: see ["Where SIMD would pay
-  next"](#where-simd-would-pay-next) for a recommendation, not an implementation.
-- [Random ticks, scheduled ticks, and neighbour-update propagation](./tick-scheduling.md) —
-  Five modules in `crates/lodestone-server/src/`, each a generic, vanilla-shaped
-  primitive with its own test suite, wired into `tick::run_tick_loop`:
-- [The ticked area follows the player](./ticked-area-follows-the-player.md) — The
-  set of chunk columns the integrated server's world tick loop actually simulates —
-  random ticks, scheduled block and fluid ticks, the natural-spawn cycle and its
-  census — and the mechanism that keeps that set **centred on the players** instead
-  of on world spawn. It lives in `lodestone_server::tick_area` (`FollowArea`,
-  `TickAnchors`, `TickAnchor`, `TickFollow`) and is consumed by
-  `lodestone_server::tick::run_tick_loop_with_weather`.
-- [Time-of-day lighting: the day clock and `sky_darken`](./time-of-day-lighting.md) —
-  The one number that makes terrain and mobs darker at night: the factor the **sky**
-  half of the lightmap is scaled by. **This doc's original scope was the clock feed
-  alone** — the paragraphs below describing `lightmap_term` and "Decision: not
-  built" are the historical record of that scope, kept per this repo's practice of
-  writing down what was measured rather than deleting it once overtaken. **The colour
-  half described as declined is now built** — see ["`SKY_LIGHT_COLOR`: now built"
-  below](#sky_light_color-now-built-n1n2n3) for what changed and why the objections
-  below stopped applying.
-- [TLS crypto provider (`ring`, not `aws-lc-rs`)](./tls-crypto-provider.md) —
-  Lodestone's HTTPS stack is `reqwest` → `rustls`, and rustls requires a
-  *`CryptoProvider`* to be chosen. We choose **`ring`**, installed once per process by
-  `lodestone_auth::install_crypto_provider()`, so that `aws-lc-rs` — and with it
-  `aws-lc-sys`'s roughly 1,500 vendored C translation units — stays out of the
-  dependency graph entirely (issue #446).
-- [Tool mining speeds](./tool-mining.md) — How fast a *held item* mines a given
-  block state, and whether it is the correct tool for that block's drops — vanilla
-  `ItemStack.getDestroySpeed` and `Player.hasCorrectToolForDrops`, for protocol 776
-  (Minecraft 26.2). This is the item half of break-time math; the block half
-  (`destroySpeed`, `requiresCorrectToolForDrops`) is the pre-existing hardness census
-  documented in [`block-break-timing.md`](./block-break-timing.md). Landed in
-  `875f452`.
-- [Transfer tracing](./transfer-tracing.md) — A single `tracing` target, `transfer`,
-  that records every step of the client's position handshake with a server — the
-  teleport arriving, the confirmation going out, the pose reaching the simulation, and
-  each outbound movement packet with the position it claims. It exists to settle, from
-  a real session on a real server, whether the client ever tells a server it is
-  somewhere the server has already overruled: the "rubberbanded after being
-  transferred to another server" report.
-- [Translucent block culling](./translucent-block-culling.md) — Why an interior face
-  between two identical translucent blocks (ice, glass, stained glass, honey, slime)
-  is not drawn, and why only the camera-facing side of a solid translucent cube's face
-  pair renders. Two independent rules, both missing until #637:
-  `Block.shouldRenderFace`'s `skipRendering` clause (the "grid" bug) and vanilla's
-  ordinary back-face culling on the translucent render pipeline (the "no opacity from
-  above" bug).
-- [TTF font glyphs](./ttf-font-glyphs.md) — Rasterisation of vanilla's `ttf` glyph
-  provider — an embedded TrueType/OpenType face in a resource pack's font definition
-  — so that a pack declaring one draws real glyphs instead of the hollow
-  missing-glyph box. This is the last box on "full Unicode text": `unihex` (CJK,
-  Hangul, Thai, Arabic, Cyrillic extensions and most of the rest of the BMP) and
-  bidi/RTL ordering already landed; `ttf` closes the gap for anything neither the
-  three vanilla bitmap sheets nor `unifont.zip` covers — chiefly astral-plane glyphs
-  a pack supplies its own font for. Vanilla's own `default.json` declares no `ttf`
-  provider, so this affects resource packs only, never the base game's own text.
-- [The menu UI framework](./ui-framework.md) — The plan of record for
-  vanilla-faithful **menu** screens: a widget type, layout containers, a
-  `Screen`-level input layer, and the three target screens — the multiplayer server
-  list, world select with creation disabled, and the full settings tree with every
-  real button present and the unsupported ones greyed out.
-- [Unihex font glyphs](./unihex-font-glyphs.md) — Rasterisation of vanilla's
-  `unihex` glyph provider — the GNU Unifont HEX bitmaps in `font/unifont.zip` — so
-  that CJK, Hangul, Thai, Arabic, Cyrillic extensions, box drawing and most of the
-  rest of the Basic Multilingual Plane draw real glyphs instead of the hollow
-  missing-glyph box. It takes the `minecraft:default` font from **2,414 codepoints to
-  114,432**.
-- [Vanilla HUD text](./vanilla-hud-text.md) — Every string the HUD draws — chat,
-  the F3 overlay, titles, the action bar, the scoreboard, the tab list, stack counts
-  — rendered as **vanilla's proportional `default` font** with its 1 px drop shadow,
-  instead of the shell's fixed-advance 5×7 debug bitmap.
-- [Version table (epic #343 groundwork)](./version-table.md) — For each of the
-  sixteen versions GitHub epic #343 committed Lodestone to supporting — the latest
-  patch of every major Minecraft release from 1.7.10 through 26.2 — this is the
-  checked-in, provenance-tracked record of that release's **protocol number**, its
-  save-format **`DataVersion`**, and its **release date**:
-- [Vibration substrate (issue #459, steps 2–3)](./vibration-substrate.md) — A
-  world-event type (`VibrationEvent`) and a host-side "nearest audible event"
-  resolution (step 2), plus a first real consumer: warden anger, pursuit, a real
-  melee-or-sonic-boom hit, and a real invulnerable emerging spawn window (step 3,
-  `crates/lodestone-server/src/mobs/warden.rs`). Step 1 of that issue (the Brain
-  driver reaching production) is separate, tracked elsewhere. Step 3 here is **almost
-  complete** — anger accumulation, pursuit, emerging and both attacks (melee and a
-  real ranged sonic boom) are all built and reach a real health change through
-  production ticks; only `Digging` (the warden's give-up-and-despawn retreat) remains,
-  deliberately left open rather than guessed at — see `warden.rs`'s own module doc
-  for exactly why.
-- [View bobbing, the damage tilt, and view lag](./view-bobbing.md) — Three separate
-  mechanisms that a screenshot makes look like one:
-- [Villager professions and trading (issues #243, #245)](./villager-professions-and-trading.md) —
-  Workstation claiming — an unemployed villager finds a nearby job-site block,
-  claims it, and takes the matching profession — plus bed claiming (issue #241's own
-  missing raid-trigger primitive) and trade generation for the farmer profession,
-  ported from the real 26.2 registry data. Losing the workstation loses the job.
-  Interacting with a professioned villager opens a real `minecraft:merchant` screen
-  carrying generated offers.
-- [Villager gossip and reputation (issues #244, #246)](./villager-reputation.md) —
-  The villager economy's opinion system: what a villager remembers about a UUID
-  (gossip, issue #244) and the single reputation score that memory reduces to,
-  including its two real consequences — a trade-price discount/surcharge and Hero of
-  the Village's additional discount (issue #246). This is the gossip/reputation hook
-  `docs/villager-trade-generation.md` already named as built-but-uncalled
-  (`OfferState::special_price_diff`) — this work is the caller.
-- [Villager trade generation and refresh (issue #245)](./villager-trade-generation.md) —
-  The data and economics half of villager trading: a complete, per-profession,
-  per-level trade table transcribed from the real 26.2 registry data (all thirteen
-  workstation professions, not just farmer), and the purchase/restock mechanics —
-  offer uses, demand-driven price fluctuation, and restock cadence — that turn that
-  static table into a live, buyable state per villager.
-- [Villager WORK/MEET/REST schedule (issue #231, villager half)](./villager-work-rest-schedule.md) —
-  A real day/night activity schedule for villagers — `IDLE` in the morning and late
-  night, `WORK` at a claimed workstation from tick 2000, `MEET` at a claimed bell from
-  tick 9000, `REST` at a claimed bed from tick 12000 — read straight off 26.2's own
-  `data/minecraft/timeline/villager_schedule.json` rather than transcribed from a
-  pre-26.2 `Schedule` constant. A villager with the relevant POI claimed visibly walks
-  there once its window opens; one without simply falls back to `IDLE`.
-- [Wandering trader (issue #240)](./wandering-trader.md) — The entity-spawn slice of
-  the wandering trader: `MobSim::spawn_wandering_trader` spawns a real
-  `minecraft:wandering_trader` with 1–2 `minecraft:trader_llama` escorts leashed to
-  it, ported from the entity-creation half of vanilla `WanderingTraderSpawner.spawn`
-  (`.cache/mc/26.2/src/net/minecraft/world/entity/npc/wanderingtrader/WanderingTraderSpawner.java`).
-  **This is a partial implementation** — see "What is not implemented" below, which
-  is most of the issue's own scope.
-- [The WASM plugin host — runtime plugin loading](./wasm-plugin-host.md) —
-  Lodestone's second plugin tier: `crates/lodestone-wasm-host` embeds `wasmtime`,
-  loads a WebAssembly component from a **file on disk at runtime**, and drives it
-  through a capability-gated ABI defined in WIT. It is what makes "install a plugin
-  without rebuilding" true at all — the thing [`docs/plugin-api.md`](plugin-api.md)
-  is explicit the native tier categorically does not deliver, where "install a plugin"
-  means "add a dependency and rebuild". It closes issues
-  [#172](https://github.com/matteopolak/lodestone/issues/172) (scaffold),
-  [#173](https://github.com/matteopolak/lodestone/issues/173) (the queries-and-actions
-  surface) and [#175](https://github.com/matteopolak/lodestone/issues/175) (the
-  manifest), and it is **additive** — the native tier
-  (`crates/plugins/lodestone-{autopilot,nav,event-logger}`) is untouched and stays the
-  right home for anything Baritone-shaped.
-- [Weather](./weather.md) — The server owns weather entirely. It sends four
-  `GAME_EVENT` codes — `START_RAINING` (1), `STOP_RAINING` (2), `RAIN_LEVEL_CHANGE`
-  (7), `THUNDER_LEVEL_CHANGE` (8) — and the client turns two scalars in `0.0..=1.0`
-  into:
-- [The wither boss fight](./wither-fight.md) — The server-side state for the wither
-  boss fight: the summon-structure block pattern (soul sand/soil plus three wither
-  skulls), the 220-tick invulnerable "emerging" phase, the powered-armor
-  arrow/wind-charge immunity below half health, and the skull-projectile combat rules
-  (flat damage, unconditional impact blast, the `minecraft:wither` status effect on a
-  landed hit, and an owner heal on a kill). Lives at
-  `crates/lodestone-server/src/wither.rs` (the pure port) and
-  `crates/lodestone-server/src/mobs/{wither.rs,wither_pattern.rs}` (the `MobSim`
-  integration and the structure matcher), ported from 26.2's decompiled
-  `WitherBoss`/`WitherSkull`/`WitherSkullBlock` under
-  `.cache/mc/26.2/src/net/minecraft/world/{entity/boss/wither,entity/projectile/hurtingprojectile,level/block}/`.
-- [The workstation economy: anvil, grindstone, smithing table, enchanting table, loom, stonecutter](./workstation-economy.md) —
-  The server-side maths and click wiring for the cost-driven container screens issues
-  #253–#255 (and, for the loom/stonecutter, #150) ask for: the anvil
-  (repair-with-material, repair-by-combining, rename, the prior-work penalty, the
-  too-expensive cap), the grindstone (strip enchantments to curses, combine-repair, a
-  partial XP refund), the smithing table (netherite upgrade, armour/tool trim), the
-  enchanting table (bookshelf power, the three-slot level cost, weighted-random
-  offers), the loom (banner pattern application) and the stonecutter (its own recipe
-  list). `docs/container-cost-screens.md` already covers the **client** half (menu
-  shape, layout, background art, cost-number rendering) — this is the half that was
-  still missing: nothing server-side computed a result, charged XP, or consumed an
-  input.
-- [World coverage (`cargo xtask world-coverage`)](./world-coverage.md) — A
-  registry-driven census, `cargo xtask world-coverage`
-  (`xtask/src/world_coverage.rs`), that answers one question for every entity type,
-  block-entity type and particle type the game has: **does it reach any geometry?** It
-  exists because the two instruments that came before it are structurally blind to
-  this — `connectedness` asks whether a clientbound *packet* reaches anything, and
-  `islands` asks whether a Rust *symbol* has a caller — while the defect that
-  motivated it is neither. An item frame's packet arrives, its code is called, its
-  counter increments, and no pixel is ever drawn.
-- [World Creation screen](./world-creation-screen.md) — `Screen::CreateWorld` (issue
-  #190): vanilla's `CreateWorldScreen`, reached from the world list's "Create New
-  World" button (`crates/lodestone-shell/src/menu/world_select.rs`'s
-  `WorldSelectButton::Create`, now live — issue #397 left it present-and-disabled
-  deliberately for this issue). Collects a world name, seed, world type, game mode,
-  difficulty, three toggles (generate structures, bonus chest, allow cheats), and
-  online mode, across vanilla's own three tabs (issue #567).
-- [World-open latency in singleplayer](./world-open-latency.md) — The two orderings
-  that made opening a singleplayer world feel broken — *"it takes forever to load
-  and the chunks generated are not close to me"* — and how they were fixed. Mob
-  seeding used to generate the whole tick area **inside the constructor** from a
-  second, independent generator, and the join used to generate all 361 columns of the
-  view before encoding any, in raster order from the far corner. Both live in
-  `lodestone-server`; both are about *ordering*, not throughput. They are the tail of
-  the same report the [`ChunkStore`](./chunk-store.md) fix (its U3) opened.
-- [World persistence: `lodestone-anvil`](./world-persistence.md) — `lodestone-anvil`
-  (`crates/lodestone-anvil/`) reads and writes Minecraft's on-disk world formats: the
-  Anvil region file (`.mca`, issue
-  [#298](https://github.com/matteopolak/lodestone/issues/298)) and `level.dat` world
-  metadata (issue [#300](https://github.com/matteopolak/lodestone/issues/300)). Before
-  this crate, nothing in the workspace could save or load a world at all — `grep
-  -rln 'RegionFile\|\.mca\b|region_file|Anvil\b'` across every `.rs` file returned
-  nothing.
-- [World save and load](./world-save-load.md) — The wiring that makes a Lodestone
-  world survive quitting: `lodestone-server` loads chunk columns from Anvil region
-  files on disk and writes back everything the world mutated, through
-  `lodestone-anvil`'s container codec. Issue
-  [#437](https://github.com/matteopolak/lodestone/issues/437).
-- [World-save parity against real vanilla 26.2](./world-save-parity.md) — A gate
-  that hands a world to a **real Mojang 26.2 server** in a container, lets vanilla
-  load and save it, reads it back, and requires semantic identity of every field we
-  author — in both directions.
-  `crates/lodestone-anvil/tests/vanilla_save_parity.rs`, driven by
-  `scripts/live-oracles/save-parity.sh`, reporting through
-  `lodestone_anvil::nbt_diff`. It exists because the owner asked for a roundtrip that
-  proves world saving is 1:1, and because every save test that existed before it
-  compared our writer against our own reader.
-- [World select, and the singleplayer save list](./world-select.md) —
-  `Screen::WorldSelect` — vanilla's `SelectWorldScreen`, reached from the title
-  screen's **Singleplayer** button. A title, a search field, a world list, and six
-  footer buttons: Play Selected World, Create New World, Edit, Delete, Re-Create,
-  Back. The list holds **one row per world in `saves/`**, it **scrolls**, and **two of
-  the six buttons are present and disabled**: Edit and Re-Create have no screen to
-  open. Delete is live since issue #540 and opens a real [confirmation
-  screen](./confirm-screen.md); the list scrolls since #541.
-- [World spawn](./world-spawn.md) — The server-side search that decides where a
-  fresh player appears in a new world —
-  `crates/lodestone-server/src/world_spawn.rs`, a port of vanilla's
-  `MinecraftServer.setInitialSpawn` plus `PlayerSpawnFinder.getLevelRespawnPos`. It
-  also holds the per-player bed respawn point (`RespawnPoint`) and the set-time
-  legality check applied before one is accepted.
-- [World state: game rules, difficulty and the clock](./world-state.md) — One
-  shared, persistable store for the world's *scalars* —
-  `crates/lodestone-server/src/world_state.rs` — closing issues #327 (game rules),
-  #328 (difficulty) and #323 (time simulation). Those were the same defect three
-  times: **stored-and-broadcast is not enforced, and per-connection is not stored.**
-- [World text and its background plate blend on gamma bytes](./world-text-gamma-blend.md) —
-  The three world-space flat-colour text passes — entity nametags
-  (`gpu/nametag.rs`), sign text (`gpu/sign_text.rs`) and `text_display` glyphs and
-  panels (`gpu/display_text.rs`) — composite into a **raw, non-sRGB view** of the
-  same colour texture the rest of the world draws into, because vanilla is not
-  colour-managed and blends text and its background plate directly on the
-  framebuffer's stored gamma bytes. This is the world-space sibling of the HUD fix
-  `docs/tab-list.md` records; the mechanism differs because a world pass cannot just
-  be handed a second view, it needs a second *render pass*.
-- [World-space text samples the lightmap](./world-text-lighting.md) — The three
-  world-space flat-colour text passes — entity nametags (`gpu/nametag.rs`), sign
-  text (`gpu/sign_text.rs`) and `text_display` glyphs and panels
-  (`gpu/display_text.rs`) — multiply vanilla's lightmap texel into every vertex
-  colour they emit, so a sign in a dark room reads dark and a glowing one does not.
-  Until this landed none of the three sampled any lightmap at all and every glyph in
-  the world drew at full brightness, which made `has_glowing_text` a feature with no
-  visible effect in the one situation it exists for.
-- [One bevy `World` — §4.1(c)](./world-unification.md) — Until this change the
-  process held **three** `bevy_ecs::World`s: the net thread's
-  (`lodestone_client::state::SharedState`, authoritative over the network read-model),
-  the entity interpolator's (`lodestone_shell::entities::EntityInterpolator`), and the
-  driver's (`lodestone_shell::sim::Sim`). It now holds **one**, behind
-  `lodestone_ecs::EcsHandle = Arc<parking_lot::RwLock<World>>`, and that one `World`
-  carries **one** `GameTick` schedule driven by **one** 20 Hz accumulator.
-- [Bulk-edit (WorldEdit-class) region API](./worldedit-plugin.md) —
-  `crates/plugins/lodestone-worldedit` — a WorldEdit-class plugin: region
-  fill/replace with a per-session undo/redo stack, built entirely on top of
-  `lodestone_world::World::fill_region_capturing` and
-  `lodestone_ecs::ChunkWorldWrite`, with no engine change of its own beyond the
-  batched-write primitive that backs it. "This is a *second* plugin, conceptually —
-  WorldEdit itself is a plugin in the Java ecosystem, not a server feature"; every
-  region-selection/undo-shaped concern lives here rather than in `lodestone-world` or
-  `lodestone-ecs`.
-- [The beardifier — terrain adaptation under structures (worldgen phase S3)](./worldgen-beardifier.md) —
-  The density term that reshapes terrain under an adaptation-bearing structure: it
-  grows a flat foundation ("beard") up to a village house's floor, and swallows a
-  stronghold or a trial chamber whole ("bury"/"encapsulate"). Phase **S3** of issue
-  #514, and the only structures phase that changes *terrain* rather than adding blocks
-  on top of it. Vanilla's
-  [`Beardifier`](../.cache/mc/26.2/src/net/minecraft/world/level/levelgen/Beardifier.java);
-  ours is
-  [`crates/lodestone-worldgen/src/structure/beardifier.rs`](../crates/lodestone-worldgen/src/structure/beardifier.rs).
-- [3-D biome cells and ore veins](./worldgen-biome-cells-and-veins.md) — Two
-  independent worldgen additions that share a page because both changed what a
-  generated column *contains* rather than how it is driven: the full 4×4×4 biome
-  grid (issue #512) and `OreVeinifier` (issue #496).
-- [Worldgen biome search](./worldgen-biome-search.md) — The climate → biome lookup
-  layer: vanilla's `Climate.RTree` ported as a real search structure — and, since
-  the owner's ruling on #492, as the *definition of the answer* — plus a
-  per-source-chunk memo, replacing an uncached brute-force scan of the 7,594-row
-  overworld climate table. Unit 9 of
-  [`docs/plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md), the fix for its
-  diagnostic **D5**. Measured over a 6×6 sweep of real embedded data: **235,991,144
-  climate comparisons → 278,298**, an 848× reduction.
-- [Overworld biome assignment (multi-noise climate)](./worldgen-biomes.md) — Before
-  this, `OverworldGenerator` ran the whole world under one hardcoded biome
-  (`minecraft:plains`) — every column looked the same and surface rules never
-  varied. This is vanilla's real **multi-noise biome source**: each column samples six
-  climate values (temperature, humidity, continentalness, erosion, depth, weirdness)
-  and finds the nearest match, by squared distance, in a table of ~7.6k `(climate
-  range, biome)` entries. Different climate → different biome → different surface
-  material (sand in deserts, snow in taiga, terracotta-adjacent in savanna, etc.) and,
-  once a render-layer consumer exists, different grass/foliage tint.
-- [Decoration scratch reuse](./worldgen-decoration-scratch-reuse.md) — The
-  per-thread free-list that recycles the three containers worldgen's decoration media
-  write into — `RegionView`'s write overlay and `VegGrid`'s overlay and `dirty` log
-  — so a served column takes them already at capacity instead of growing them from
-  empty. Unit 19 of [`plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md); it took
-  a warm served column from **87 heap allocations to 64** and the vegetation stage's
-  own share from **30 to 7**, while changing **not one byte** of generated world (45
-  columns, 5 seeds, `cmp` clean, both dumps md5 `a9db7cf741214167db615fa8b9356fa8`).
-- [Worldgen decoration steps and feature types](./worldgen-decoration-steps.md) —
-  The `GenerationStep.Decoration` driver: which of vanilla's 11 decoration steps this
-  engine runs, which `configured_feature` types it can place, and which placement
-  modifiers it understands. Issue #513 took this from **1 step and 7 types** to **8
-  steps and 30 types**. Companion docs:
-  [`worldgen-vegetation.md`](./worldgen-vegetation.md) for the placement engine
-  itself, [`worldgen-parity.md`](./worldgen-parity.md) for what the JVM fixtures
-  measure.
-- [Worldgen density engine: the block field, and the interpolation order it depends on](./worldgen-density-engine.md) —
-  How `crates/lodestone-worldgen-core`'s density stack turns vanilla's data-driven
-  density-function graph into the per-block field that `fillFromNoise` writes, and the
-  one bit-significant decision inside it that is easy to get wrong in the direction
-  that looks *more* faithful: which of vanilla's **two** trilinear interpolation
-  orders the block field actually uses. Written while executing U4 of
-  [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); it records a measured
-  correction to that plan's U4 row plus the engine shape the correction implies.
-- [Nether and End worldgen](./worldgen-dimensions.md) — The bundled 26.2 data for
-  the Nether and the End, and the per-dimension deficit inventory it was written to
-  answer. **All three dimensions generate terrain now** — `NetherGenerator` and
-  `EndGenerator` both landed, the Nether with a structure stage — so what is left
-  here is decoration, the remaining structure piece generators, and the server-side
-  wiring that would let a portal reach either dimension. This doc is the jar-derived
-  answer to "what is actually missing", per dimension, with each item classed
-  **[data]** (absent from the bundle), **[engine]** (absent engine primitive),
-  **[unwritten]** (nothing blocks it), **[gameplay]** (cannot finish even with perfect
-  worldgen) or **[structures]** (belongs to the structure corpus, not terrain). Phase
-  NE-data of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md); the data half
-  landed first, then the engine half.
-- [End worldgen](./worldgen-end.md) — The composed End generator —
-  `lodestone_worldgen::end::EndGenerator` — plus the two pieces it is built on
-  (`EndIslandNoise`, the `minecraft:end_islands` algorithm, and `EndBiomeSource`,
-  `TheEndBiomeSource`). It is the third dimension this engine produces real terrain
-  for, and the only one with **no vanilla block oracle anywhere**, so this doc is as
-  much about what its gates can and cannot claim as about how it works.
-- [Worldgen fast hashing](./worldgen-fast-hashing.md) — The worldgen engine's
-  internal lookup tables use a cheap in-house `FxHash`-style `BuildHasher`
-  (`lodestone_worldgen_core::hash::fast`) instead of `std`'s SipHash-1-3
-  `RandomState`. A `samply` profile measured **21.01% of all worldgen CPU as self time
-  inside SipHash** — the second-largest item in the whole pipeline — and this is
-  unit U17 of [`plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md) removing the
-  part of it that can be removed *safely*, where "safely" is a claim about `HashMap`
-  iteration order and not about speed.
-- [Snow layers and surface ice: `freeze_top_layer` (`TOP_LAYER_MODIFICATION`)](./worldgen-freeze-top-layer.md) —
-  The port of vanilla's `freeze_top_layer` — the whole of the eleventh and last
-  decoration step, `TOP_LAYER_MODIFICATION` — into `lodestone-worldgen`, composed
-  into the live generator, and gated bit-exactly against the real 26.2 server. This is
-  issue #404's unit U2. Before it, nothing in this engine ever wrote `minecraft:snow`
-  or surface ice: every snowy biome generated bare, which the parity census called the
-  most player-visible absent feature in worldgen.
-- [World-generation gap census against vanilla 26.2](./worldgen-gap-census.md) — An
-  evidenced inventory of what our world generation actually does, per axis, measured
-  against vanilla 26.2 — dimensions, biomes, surface rules, carvers, ores and ore
-  veins, decoration steps, structures, slime chunks, mob spawning, heightmaps, light,
-  block entities and the seed's derivation. Every row carries a verdict (**reached** /
-  **orphaned** / **partial** / **absent**), the vanilla source of truth, and a
-  `file:line` citation, so a later reader can re-verify rather than inherit. It exists
-  because the written record here goes stale silently and because this repo's dominant
-  defect is the *island* — code that is built, unit-tested green, and reached by
-  nothing.
-- [In-place region decoration](./worldgen-in-place-decoration.md) — The read/write
-  medium the worldgen decoration stages use to reach across a 3×3 chunk neighbourhood
-  without copying it. Vanilla's `blockStateWriteRadius(1)` at the FEATURES stage lets
-  a feature placed in one chunk write into its neighbour, so both the
-  `UNDERGROUND_ORES` and `VEGETAL_DECORATION` drivers run all nine of a column's
-  source chunks against one shared block field. Until Unit 7 of
-  [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md) that field was a
-  *materialised copy* of the neighbourhood, rebuilt on every served column;
-  [`RegionView`](../crates/lodestone-worldgen/src/feature/region_view.rs) and
-  `VegGrid::with_sources` route reads to whichever source chunk owns the column
-  instead, holding writes in a sparse overlay, which took the copy count from ~2.85M
-  cells per column to zero.
-- [The `SPAWN` generation stage: animals placed once, at chunk generation](./worldgen-mob-generation-spawn.md) —
-  Vanilla's `ChunkStatus.SPAWN` step places a handful of `MobCategory.CREATURE`
-  animals once, the moment a chunk is generated for the first time — which is why a
-  freshly generated vanilla world already has cows and sheep on it before any spawn
-  tick runs. This is that step, ported as three pieces that only make sense together:
-- [Worldgen module layout and per-unit file ownership](./worldgen-module-layout.md) —
-  The file layout of `crates/lodestone-worldgen`'s generation engine after Unit 16
-  (the decomposition unit) of
-  [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md), plus the map of which
-  rewrite unit owns which file. Two files that six units all had to edit —
-  `src/overworld.rs` (1,873 lines) and `src/feature/vegetation.rs` (3,661) — became
-  two directories, by pure move, so the rewrite's engine middle can run at width 2 and
-  then 4 instead of width 1.
-- [Nether worldgen](./worldgen-nether.md) — The composed Nether generator —
-  `lodestone_worldgen::nether::NetherGenerator` — and the engine work it needed: a
-  selectable RNG family, the two bespoke Nether biome noises, a disabled-aquifer fill,
-  and the `minecraft:nether_cave` carver. It is the second dimension this engine
-  produces real terrain for, and it is verified against a real Mojang server's own
-  Nether, not against itself.
-- [Ore placement: where its allocations went, and why the ore path was not the biggest one](./worldgen-ore-allocations.md) —
-  Unit 18 of [`plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md): the
-  `UNDERGROUND_ORES` placement engine's heap traffic, taken from **8,306 allocations
-  per ore pass to 20** (**207,671 → 503** over a 3×3 sweep, −99.76%) without
-  moving one RNG draw or one generated byte. It is the sequel to
-  [`worldgen-ore-lookup-cost.md`](./worldgen-ore-lookup-cost.md) (U15, which removed
-  the engine's *lookups*) and applies
-  [`worldgen-vegetation-ids.md`](./worldgen-vegetation-ids.md)'s (U8) `Positions`
-  shape to the engine U8 did not touch.
-- [Ore placement: lookup cost, and the vein system that is still missing](./worldgen-ore-lookup-cost.md) —
-  The cost model of the `UNDERGROUND_ORES` decoration stage — the most expensive
-  stage in chunk generation, **28.7% of a steady-state column** after DESIGN.md
-  §12.149 (38.7% before it, and 43.54% of stage time when this doc was written) —
-  plus the record of what U15 and §12.149 removed from it, why neither removal can
-  move an RNG draw, and the two non-obvious couplings that any future `OreVeinifier`
-  port has to respect. It is the companion to
-  [`worldgen-in-place-decoration.md`](./worldgen-in-place-decoration.md) (which owns
-  the *medium* decoration writes travel through) and to
-  [`worldgen-fast-hashing.md`](./worldgen-fast-hashing.md) (which makes the engine's
-  remaining lookup tables cheaper); this doc is about the lookups the ore engine
-  stopped performing at all.
-- [Cross-seam decoration consistency](./worldgen-seam-consistency.md) — Why a tree
-  that straddles a chunk border comes out whole rather than sliced flat along it, and
-  what still does not. The 3×3 decoration driver serves chunk `C` by re-running all
-  nine of `C ± 1`'s own decoration passes and keeping only what lands in `C`, so a
-  tree standing in `A` and spilling into `B` is **computed twice** — once with `A`
-  as the centre and once with `B`. Each drive supplies the half in its own chunk.
-  Nothing about the driver forces those two computations to agree, and when they
-  disagree the served world keeps one half and drops the other. That is the "trees cut
-  off at chunk borders" defect the owner reported in-game, and this doc is the record
-  of which of its two causes is closed and which is not.
-- [Worldgen SIMD kernels: what vectorising the noise actually bought](./worldgen-simd-kernels.md) —
-  The `std::simd` vectorisation of `lodestone-worldgen-core`'s noise kernels — Unit
-  5 of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md) — and, more
-  usefully, the profile that decided how far it was worth taking and the disassembly
-  control that showed the premise behind it was half wrong. One function is
-  vectorised: `ImprovedNoise::sample_and_lerp`. The measured whole-column effect is
-  about **2.4% of `C_ss`**, and this document exists mainly so nobody re-attempts the
-  larger version whose ceiling is recorded here as smaller.
-- [Worldgen staged sharded store](./worldgen-staged-store.md) — The memoisation
-  layer under `OverworldGenerator`'s 3×3-of-3×3 neighbourhood recursion: a
-  concurrent map from chunk position to a per-chunk entry holding one slot per
-  intermediate product, with **compute-exactly-once** as a structural property rather
-  than a hope. Unit 6 of
-  [`docs/plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md); it replaced two
-  `Mutex`-guarded FIFO caches whose contention had already forced a per-ring barrier
-  back into `lodestone-server` (`4307b59`), and it lands the plan's acceptance
-  criterion exactly — each neighbour stage computed once per chunk reached, 3 of 3
-  under 289-way concurrency, byte-identical to the old engine over 28,496,229 dumped
-  bytes.
-- [Worldgen block-state interning](./worldgen-state-interning.md) — Numeric `u16`
-  handles (`StateId`) for block-state strings inside `lodestone-worldgen`'s generation
-  engine, so a block moving between two internal grids costs a `u16` move instead of a
-  heap-allocated `String`. Unit 3 of
-  [`docs/plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md); it took a
-  steady-state warm column from **905,459 heap allocations to 20,686**, a 97.7%
-  reduction, with every parity gate byte-identical.
-- [Walking away from spawn: the staged store's dead retention ceiling](./worldgen-store-distance-leak.md) —
-  The measured diagnosis of a player-visible defect — the game getting steadily
-  worse the further you walk from spawn — **and the record of the fix that closed
-  it** ([#503](https://github.com/matteopolak/lodestone/issues/503)). Per-column
-  generation cost is **flat in distance from the origin**; what grew was *memory*.
-  `lodestone-worldgen`'s staged chunk store had a documented 512-entry retention
-  ceiling that was **never enforced on the generation path**, so the store grew
-  linearly and without bound at **21 entries (~7.9 MiB) per chunk of travel** for a
-  normal 17×17 view. The instrument is
-  [`crates/lodestone-server/tests/walk_distance_curve.rs`](../crates/lodestone-server/tests/walk_distance_curve.rs).
-- [Coded structure pieces](./worldgen-structure-coded.md) — The half of the
-  structure engine whose blocks are Java statements rather than an `.nbt` template —
-  `crates/lodestone-worldgen/src/structure/coded.rs`, issue #514's phase S5. It ports
-  `StructurePiece`'s block-writing helpers and `ScatteredFeaturePiece`'s two
-  ground-height rules, and on top of them the piece generators for **`swamp_hut`**,
-  **`desert_pyramid`** and **`jungle_pyramid`**.
-- [The bundled 26.2 structure corpus (worldgen phase S-data)](./worldgen-structure-corpus.md) —
-  The complete vanilla 26.2 structure dataset, extracted verbatim from the server jar
-  into `crates/lodestone-server/assets/`, plus the drift gate that keeps it
-  byte-identical to the jar. 1606 files, 4.42 MiB: 34 structures, 20 structure sets,
-  188 template pools, 40 processor lists, 7 world presets, 9 flat presets, 4 noise
-  settings, 92 worldgen tags, and 1212 NBT structure templates. This is phase
-  **S-data** of [`plans/worldgen-rewrite.md`](./plans/worldgen-rewrite.md) (issue
-  #484) and it is data only — no placement, no jigsaw, no beardifier.
-- [Mineshafts, and eager piece generation](./worldgen-structure-mineshaft.md) — The
-  port of `MineshaftStructure` and all four `MineshaftPieces` types —
-  `crates/lodestone-worldgen/src/structure/mineshaft.rs` — and with it the structure
-  engine's second piece-building mode: **eager** generation, where a structure's whole
-  piece tree is built *before* its generation point is known. Two structures ride on
-  it, `minecraft:mineshaft` and `minecraft:mineshaft_mesa`, which differ only in three
-  block states.
-- [Structure placement and starts (worldgen phase S1)](./worldgen-structure-placement.md) —
-  The engine that decides **which chunk gets which structure** for a seed: the two
-  `StructurePlacement` types, the four `frequency_reduction_method`s, per-set weighted
-  structure selection, per-structure start predicates, and the two new worldgen stages
-  (`structure_starts`, `structure_refs`) that carry the answer. Phase **S1** of
-  [`plans/structures.md`](./plans/structures.md) (issue #514), built on the corpus
-  that [`worldgen-structure-corpus.md`](./worldgen-structure-corpus.md) bundled.
-- [Structure templates and processors (worldgen phase S2)](./worldgen-structure-templates.md) —
-  The engine that turns a structure *start* into actual blocks: a reader for the 1212
-  bundled `.nbt` structure templates, the processors vanilla runs between a template's
-  palette and the world, and the generation stage that writes the result into a chunk.
-  Phase **S2** of issue #514 — S0 staged the chunk statuses, S1 decided *where*
-  structures go, and until this landed nothing wrote a block.
-- [Surface-stage state ids](./worldgen-surface-ids.md) — The surface stage carries
-  **interned `StateId`s** rather than `String`s across every seam: the pre-surface
-  callback, the rule interpreter's result states, the clay-band table and the sparse
-  diff handed to materialisation. Before this (issue #501, U21) that stage performed
-  **3,847,972 heap allocations** on a 3×3 cold sweep — **97.3% of the whole
-  worldgen pipeline's heap traffic, and 18× the entire ore path** — from four
-  `to_string()`/`clone()` sites. It now performs **690**, all of them one `HashMap`'s
-  growth series.
-- [Surface-stage generation performance](./worldgen-surface-perf.md) — Two
-  profile-driven optimisations to `lodestone-worldgen`'s surface stage
-  (`crates/lodestone-worldgen/src/surface/mod.rs`, consumed by
-  `crates/lodestone-worldgen/src/overworld.rs`), landed together because the
-  `generation` bench (`docs/benchmark-harness.md`) showed the surface stage was the
-  majority of per-chunk cost. Both are pure memoisation/plumbing changes — same
-  values computed, fewer times — verified bit-identical against the existing
-  JVM-oracle parity tests (`tests/surface_parity.rs`, `tests/overworld_gen.rs`), not a
-  new algorithm.
-- [Proving vegetation reaches blocks: the vegetal-decoration census](./worldgen-vegetation-census.md) —
-  The instrumentation and the two gates that answer "did vegetal decoration actually
-  put grass, flowers and trees into a served chunk, and *how many*?" —
-  `lodestone_worldgen::feature::vegetation::census` plus
-  `plains_grass_patch_attempt_count_matches_the_placement_json` and
-  `vegetation_reaches_real_blocks_over_a_production_sweep` in
-  `crates/lodestone-server/src/worldgen_data.rs`. It exists because the vegetation
-  placer's blanket rule is "an unmodelled feature type degrades to a silent no-op",
-  which makes *every* quantity of vegetation — including zero — look identical
-  from the outside. This is issue #478's other half: the diagnosis was that vegetation
-  was missing, and the finding was that it is not, but that nothing in the tree could
-  have told you either way.
-- [Vegetal decoration on numeric ids](./worldgen-vegetation-ids.md) — The vegetation
-  placement engine's port off block-state strings and onto Unit 3's `StateId`s, plus
-  the fixed bitsets that answer tag membership in O(1). Unit 8 of
-  [`plans/worldgen-rewrite.md`](plans/worldgen-rewrite.md); it took a steady-state
-  warm column from **20,678 heap allocations to 87** — vegetation's own share from
-  20,621 to 30 — while changing **not one byte** of generated world.
-- [Vegetal decoration: grass, flowers and trees](./worldgen-vegetation.md) —
-  `crates/lodestone-worldgen/src/feature/vegetation/` (a module, split by U16 Phase B
-  into `mod`/`config`/`grid`/`ids`/`place`/`tree` — the old single `vegetation.rs`
-  file no longer exists) is the engine that places grass, flowers and trees during
-  world generation — issue #406, epic #404's Phase 3, extended by issue #428. It is
-  wired into `OverworldGenerator::column` as the last composed stage,
-  `VEGETAL_DECORATION`, right after #295's ore-feature stage, and — like the ore
-  stage — over a real 3×3 `center ± 1` neighbourhood
-  (`apply_vegetal_decoration_step_3x3_per_source`), not a single chunk in isolation: a
-  tree or grass patch near a chunk edge really does spill into the neighbour that
-  generates it, matching vanilla's own cross-chunk decoration spill.
-- [World preset generator selection](./worldgen-world-type-selection.md) —
-  `crates/lodestone-server/src/worldgen_data.rs`'s entry points for building a chunk
-  source from any of the seven bundled `world_preset/*.json` documents:
-  `worldgen_data::WorldType` (`Overworld`/`Amplified`/`LargeBiomes`, all three sharing
-  `OverworldGenerator`) plus three standalone entry points —
-  `single_biome_generator`/`single_biome_chunk_source`, `flat_generator`/
-  `flat_chunk_source`, and `debug_generator`/`debug_chunk_source`. Before issue #519
-  only the plain overworld was reachable, from a hardcoded `OnceLock`; the other six
-  presets' `noise_settings`, density functions and layer/grid data were bundled and
-  byte-identical to the jar but reached by nothing but their own drift gate. All seven
-  are now generated by real, individually-verified code. What is **not** landed here
-  is a way for a player to pick one — see "How to change it".
-- [Zombie villager curing (issue #247)](./zombie-villager-curing.md) — The
-  conversion timer between "a golden apple was used on a weakened zombie villager" and
-  "it is a villager again" — the delay itself, not an instant swap, plus the two
-  real consequences the issue's own body calls out: a preserved profession/level/xp
-  and a temporary post-cure "confusion" state (vanilla's Nausea effect).
+  server-pushed resource pack: the accept/decline prompt, the per-server policy that
+  can skip it, the download/verify/apply pipeline, and how a downloaded pack actually
+  reaches every GPU surface that draws from an atlas (block/item/GUI/special-icon).
+  Also covers the general single-winner-vs-merged-stack rule for how *any* pack-loaded
+  resource type (vanilla's own jar included, as the lowest-priority layer) composes
+  across a pack stack, and the diagnostic env vars for a pack author's font.
+- [Screen effects](./screen-effects.md) — `lodestone_render::ScreenEffectRenderer`
+  draws the client's full-screen and near-full-screen post-hand-pass overlays:
+  underwater tint and scroll, fire, a carved-pumpkin vignette, freezing in powder
+  snow, the spyglass scope, the nausea "confusion" swirl, and the nether/end portal
+  swirl (portal wins when both are active), plus the world-border warning's cyan
+  vignette tint. In vanilla these come from two different mechanisms —
+  `ScreenEffectRenderer.submit` for underwater/fire, and `Hud.extractCameraOverlays`
+  for the rest — but all share one "textured, alpha-blended, screen-space quad after
+  the hand pass" shape, so this port draws all of them through one pipeline. Confusion
+  and portal additionally drive a world-space projection warp that lives in
+  `camera.rs`, not in this pass.
+- [Screenshots](./screenshots.md) — The harness that produces the README's in-game
+  images under `docs/images/`. Every PNG is this client rendering a real, live session
+  against the flat creative 26.2 oracle — no mock-ups, no compositing, no editing.
+  `just screenshots` regenerates the whole set, so the images can be refreshed
+  whenever the renderer changes instead of drifting into a record of how the client
+  looked one afternoon.
+- [Commands: the tree, dispatch, permissions, and access control](./server-commands.md) —
+  One argument-tree data model underlies three independent consumers: the server's own
+  built-in command dispatcher and permission model, a plugin-command seam that keeps
+  `lodestone-server` from depending on `lodestone-ecs`, and the client's decode of a
+  server-sent command tree for chat tab-completion and syntax highlighting. Access
+  control (ops/whitelist/bans) and permission levels gate which of a connection's
+  commands are visible or runnable at all.
+- [Server-authoritative gameplay: breaking, inventory, crafting, effects, advancements](./server-gameplay.md) —
+  Five gameplay surfaces the server is authoritative over rather than trusting a
+  client's own claim: whether a block break is legitimate and when it actually
+  completes, what a player's inventory holds and what a container click actually does
+  to it, whether a crafting grid actually produces the result a client displays, which
+  sounds/particles/level events a client should see that it cannot predict on its own,
+  and a player's advancement and statistic progress. The shared idea across all five:
+  the server independently derives the real outcome and only trusts a client's own
+  prediction as far as comparing it against that derived truth, correcting it (never
+  silently accepting it) when the two disagree.
+- [Server-side light](./server-light.md) — How the integrated server computes the
+  sky and block light it puts on the wire for a served chunk, and how it keeps that
+  light current after a block is placed or broken, rather than only computing it once
+  at the moment a chunk is first sent.
+- [Sound: playback, subtitles, ambience and music](./sound.md) — The client audio
+  layer end to end: the path from a server sound packet to the speakers, the
+  accessibility subtitle overlay, biome/cave ambient loops and client-predicted local
+  sounds (footsteps, block break/place), and situational music selection. The mixing
+  engine (`lodestone-audio`) and the event registry
+  (`lodestone-sound`/`lodestone-assets`) were built and correct from early on; this
+  doc is mostly about what sits either side of them.
+- [Terrain rendering](./terrain-rendering.md) — Everything between "a chunk section
+  changed" and "its quads are the right shape, in the right place, drawn or correctly
+  not drawn, on screen": meshing and mesh invalidation as chunks stream in,
+  frustum/distance/occlusion culling and the shared GPU arena draws come from, the
+  camera uniform every terrain pipeline reads, how translucent and fluid surfaces are
+  culled, ordered and depth-tested, and the pixel diagnostics built to chase a
+  recurring "sky shows through the blocks" class of report.
+- [Testing policy](./testing-policy.md) — The rule for what earns a test in this
+  repo. The corpus reached **12,090 test attributes across 712 files**, and that costs
+  compile time and run time on every agent's every iteration. A test earns its place
+  by catching a regression that would realistically happen. Everything else is
+  deleted.
+- [Tick scheduling: random ticks, scheduled ticks, block entities, and profiling](./tick-scheduling.md) —
+  The foundation every per-block-tick feature (crop growth, gravity blocks, fluid
+  flow, fire spread, the redstone family) is built on: a vanilla-shaped random-tick
+  scheduler, a scheduled-tick queue for "run again in N ticks" behavior, and a
+  neighbor-update propagator with vanilla's own ordering and cascade shape. It also
+  covers how block-entity ticking is bounded to chunks that are actually resident
+  rather than scanning an ever-growing registry unconditionally, and the
+  instrumentation used to measure where the tick loop's and the world generator's own
+  time actually goes.
+- [The menu UI framework](./ui-framework.md) — The shared substrate every
+  out-of-world (and paused-in-world) menu screen is built from: a `Widget` type with a
+  vanilla-faithful disabled state, layout containers that arrange those widgets, a
+  `Screen`-level focus/tab/click dispatch layer, list chrome and a pixel-accurate
+  scrollable list, the overlay-vs-full-frame distinction that lets a screen draw over
+  a live world, and the spinning panorama backdrop behind the title and other menu
+  screens. All of it is a port of vanilla's `gui/layouts`, `gui/components`,
+  `gui/navigation` and `Screen`/`Hud` background packages, kept faithful to the jar
+  rather than redesigned.
+- [Villagers](./villagers.md) — The villager subsystem: professions and
+  job-site/bed/bell claiming, per-profession trade generation and the demand/restock
+  economy behind it, gossip-driven reputation and its effect on prices, the
+  WORK/MEET/REST daily schedule, zombie-villager curing, the wandering trader, and
+  iron/snow golem construction. It also documents the unrelated workstation-container
+  economy (anvil, grindstone, smithing table, enchanting table, loom, stonecutter) for
+  lack of a better home — that machinery has no villager involvement at all; see its
+  own section below.
+- [World events](./world-events.md) — Server-driven world state that is not tied to
+  any one player: rain/thunder weather and lightning strikes, the regional-difficulty
+  scalar that scales spawns and damage over time, Bad-Omen-triggered raids and
+  pillager patrols, and the ender dragon and wither boss fights. All of it lives in
+  `lodestone-server`, with a thin render-side consumer in
+  `lodestone-render`/`lodestone-shell` for weather and lightning's visible effects.
+- [World persistence: saving, loading, and the world's own state](./world-persistence.md) —
+  Everything that makes a Lodestone world survive quitting and reopening: the on-disk
+  container formats (Anvil region files, `level.dat`, and the
+  world-generation-settings file that actually holds the seed), the server-side wiring
+  that intercepts the chunk pipeline to load from and save back to those files, the
+  world's own persisted scalars (game rules, difficulty, the clock), where a fresh or
+  respawning player appears, and the separate point-of-interest index vanilla keeps
+  for things like beds, workstations, and lit nether portals.
+- [World propagation](./world-propagation.md) — Block-level effects that spread
+  through the world over time on the integrated server: fire spread and burnout,
+  water/lava flow, the vertical push/pull of bubble columns, and nether portal
+  formation/travel between dimensions. Each is a port of the corresponding vanilla
+  block-tick behaviour, driven by the same scheduled-tick queue.
+- [Overworld biome assignment and surface material](./worldgen-biomes.md) — How a
+  generated column gets a real biome instead of one hardcoded value, and how that
+  biome then picks surface material, terracotta banding and snow/ice cover. Four
+  things share this doc because they form one pipeline: climate sampling and search
+  (`biome/`), a full 3-D biome grid plus ore veins (`overworld/biome_cells.rs`,
+  `overworld/veins.rs`), surface rule application (`surface/`), and the final
+  `TOP_LAYER_MODIFICATION` decoration step (`feature/top_layer.rs`).
+- [Decoration: features, vegetation, ores and generation-time mob spawns](./worldgen-decoration.md) —
+  Everything that runs after terrain shape and biome assignment to make a chunk look
+  inhabited: the `GenerationStep.Decoration` driver and its placement-modifier
+  interpreter, the vegetation engine (grass, flowers, trees), ore-vein placement and
+  allocation, and the one-shot animal spawn vanilla performs at chunk generation. All
+  four are interpreters over the same kind of data (`configured_feature` /
+  `placed_feature` / per-biome step lists) and share one seeding discipline: one
+  `set_decoration_seed` per chunk, then `set_feature_seed(decoration_seed, index,
+  step)` per feature, so a feature's `(step, index)` pair — never a flattened
+  running count — is what isolates its RNG stream from its neighbours'.
+- [Nether and End worldgen](./worldgen-dimensions.md) — The composed Nether and End
+  generators (`lodestone_worldgen::nether::NetherGenerator`, `::end::EndGenerator`)
+  and the engine-level differences from the Overworld that make them possible: a
+  selectable RNG family, two bespoke Nether biome noises, a disabled-aquifer fill,
+  dimension-specific cell geometry, the `minecraft:end_islands` density function, and
+  the End's non-multi-noise biome source. All bundled 26.2 data for both dimensions is
+  complete; every remaining gap is engine (unwritten decoration/structures) or
+  gameplay (portal travel, the dragon fight) rather than missing data.
+- [Structure generation](./worldgen-structures.md) — The structure engine: deciding
+  which chunk gets which structure for a seed, and turning that decision into real
+  blocks — jittered-grid and concentric-ring placement, `.nbt` structure templates
+  and their processors, jigsaw pool assembly, hand-coded piece generators for
+  structures with no template, and the beardifier that reshapes terrain underneath an
+  adaptation-bearing structure. Built in phases (S1 placement, S2 templates, S3
+  beardifier, S4 jigsaw, S5+ coded pieces, mineshaft, and per-structure closures
+  since), on top of a bundled, byte-verified copy of vanilla's structure data.
+- [Worldgen engine overview](./worldgen.md) — `crates/lodestone-worldgen` (engine)
+  and `crates/lodestone-worldgen-core` (numeric leaf crate) are a version-free port of
+  vanilla Minecraft 26.2's world generator: a density-function/noise-router
+  interpreter, biome search, surface rules, carvers, aquifer, ore/vegetation placement
+  and structures, all driven by the JSON data Mojang ships rather than by hardcoded
+  logic. This doc covers the module layout, the density engine that turns that data
+  into per-block terrain, the RNG and parity discipline every stage depends on, and
+  how a chunk is produced end to end. Biomes, structures, decoration and the
+  Nether/End have their own docs (see Dependencies).
 
 ---
 
@@ -2605,10 +555,10 @@ every issue under it inherits.
   today, the WASM host) can do in this codebase *right now*, with a gap and an issue
   number attached to every row that is not fully closed. Epic
   [#7](https://github.com/matteopolak/lodestone/issues/7) owns the ECS substrate that
-  makes any of this possible ([`../bevy-migration.md`](../bevy-migration.md),
-  [`../world-unification.md`](../world-unification.md)); this doc and its 49
-  sub-issues own whether that substrate adds up to **capability parity** with the Java
-  ecosystem, which is a different and harder question than "does the ECS exist."
+  makes any of this possible ([`../bevy-migration.md`](../architecture.md),
+  [`../world-unification.md`](../architecture.md)); this doc and its 49 sub-issues own
+  whether that substrate adds up to **capability parity** with the Java ecosystem,
+  which is a different and harder question than "does the ECS exist."
 - [Protocol, networking and multi-version — roadmap](./roadmap/protocol.md) — 1:1
   protocol parity for 26.2 (protocol 776) in both directions, on both the client *and*
   the server side — a vanilla client must be able to connect to our server, and a
@@ -2649,74 +599,6 @@ diagnosis is worth keeping *after* the fix lands -- CLAUDE.md's standing claim i
 record of confidently-held false beliefs is the most valuable thing in this repo, and several
 of these caught the *brief* being wrong rather than the code.
 
-- [Worldgen parity harness](./worldgen-parity.md) —
-  `crates/lodestone-worldgen-parity` is the shared chunk-for-chunk comparison harness
-  against a real vanilla 26.2 server, for every worldgen phase (epic `#404`: biomes
-  `#405`, carvers/aquifer/ores `#295`, vegetation `#406`) to point at instead of
-  improvising its own oracle diff. It answers one question: **for a fixed seed and
-  named chunk coordinates, how close is `lodestone_server::overworld_generator`'s
-  output to what a real vanilla 26.2 server actually generates, block for block, and
-  *where* does it differ?**
-- [World generation: plan, and a correction to the brief](./worldgen-plan.md) —
-  **Correction first, because it changes everything downstream.** The brief states
-  "there is no terrain generation at all" and asks to scope worldgen as the largest
-  net-new area. That premise is stale — this is exactly `CLAUDE.md`'s "issue tracker
-  lags the tree" trap, at brief-writing scale. `crates/lodestone-worldgen` (6,351
-  lines src / 2,600 lines tests) already exists, is wired into `lodestone-server`, and
-  is served over the real v770 wire protocol today. What follows is a plan for the
-  *remaining* ~40% (biomes, caves, ores, and a stopping-point call on structures), not
-  a from-zero plan. Section 0 documents the correction with evidence; sections 1–8
-  answer the brief's numbered questions against that corrected baseline.
-- [Diagnosis: view bobbing and distant water blockiness](./research/bobbing-and-water.md) —
-  Two read-only diagnoses. **View bobbing**: not a bug — an already-fixed bug's fix
-  is intact and unchanged in every relevant file; the report's own install simply has
-  the option persisted off, which correctly never auto-heals on its own. **Distant
-  water blockiness**: two causes, one already fixed (an air-vs-unloaded chunk-seam
-  conflation) and one newly found here — the singleplayer integrated server never
-  pads its `view_radius` by the `+1` ring vanilla's `ChunkTrackingView` always sends,
-  so the outermost ring's neighbour section never arrives and that ring's mesh (water
-  and everything else) stays permanently deferred.
-- [Scoping: Tier 1 item 7, "combat feel"](./research/combat-scope.md) — Headline
-  finding: the shield and the bow are functionally dead in combat, for two
-  independent, already-diagnosed reasons. `ClientAction::ReleaseUseItem` is encoded by
-  all four protocol adapters but constructed nowhere in `lodestone-shell` (a
-  serverbound island, the same shape as the documented `SetFlying` case), so a drawn
-  bow can never fire and a raised shield can never be intentionally lowered.
-  Separately, `Sim::use_item_live` short-circuits on any entity target even after a
-  failed interact, so aiming at a hostile mob — the common case in combat — never
-  reaches the generic use-item path at all. Also corrects three stale claims in
-  `docs/backlog.md` item 7 (two already-shipped features, one mechanic that was never
-  real).
-- [Diagnosis: container screen titles (names, capitalisation, placement, named containers)](./research/container-titles.md) —
-  Three of the four reported container-title problems are already fixed and
-  pixel-gated: the wire string, its capitalisation, and named-container resolution all
-  trace correctly through the live language table and both event routers. The one
-  real, still-open gap is placement — `label_layout` only models vanilla's
-  `titleLabelX`/`titleLabelY` anchor for 3 of its ~20 container screens, so 10 more
-  (furnace family, brewing stand, anvil, loom, stonecutter, cartography table,
-  dispenser/dropper, crafter) draw their title at the wrong default `(8, 6)` anchor.
-  §5 below is a ready-to-apply, additive patch spec for exactly that gap.
-- [Diagnosis: cross-plant faces go dark against a solid neighbour](./research/cross-model-light.md) —
-  Root cause of "cross-plant faces go dark next to a solid neighbour": `mesh_models`
-  samples light from `pos + quad.direction` unconditionally, but vanilla only samples
-  the neighbour when a quad's plane is flush with the block boundary (`faceCubic`) or
-  the quad carries a `cullface`. A cross blade's plane is diagonal and carries no
-  `cullface`, so vanilla lights it from the plant's own cell; this client instead
-  reads the interior of the adjacent solid block, which the light engine stores as 0.
-  A per-quad fix and its mesh-level proof gate are specified in §5–6 below; nothing
-  in the repo has been edited by this read-only investigation.
-- [Diagnosis: "fog too extreme / longer dropoff" + "at night the shadow is a different colour"](./research/fog-and-night-shadow.md) —
-  Two read-only diagnoses, each with a specific, previously-unrecorded root cause.
-  **Fog**: three real divergences from vanilla — the terrain/entity fog colour never
-  receives vanilla's day/night colour track (an island: the mechanism exists and is
-  already wired to the sky disc, just not to terrain), the overworld's `linear(0,
-  1024)` environmental fog term is missing entirely (the "longer dropoff"), and the
-  render-distance term uses spherical distance where vanilla uses cylindrical, erasing
-  valleys under nearby hills. **Night shadow colour**: not a brightness bug — the
-  scalar lightmap this client computes is exactly vanilla's blue channel, so red and
-  green read 1.8x too bright; vanilla's lightmap is a genuine RGB colour (blue
-  moonlight, warm torchlight) that this client renders as flat grey. §4 gives
-  minimal, low-risk fixes for both, cheapest first.
 - [Plan: the chunk lifecycle — tickets, status, unloading, async generation (#289, #292, #293, #297)](./plans/chunk-lifecycle.md) —
   The implementation plan for the four chunk-lifecycle issues (#289 ticket/status
   pipeline, #292 unloading and the save-on-unload hook, #293 non-blocking generation,
@@ -2759,6 +641,22 @@ of these caught the *brief* being wrong rather than the code.
   central finding is that the roster **cannot be built first**: eight of the thirteen
   implemented goals are structurally incapable of firing in production today, so this
   plan sequences a perception-and-driver spine ahead of every species unit.
+- [Multi-version protocol dedup: wire eras, a shared packet library, and version-ranged definitions](./plans/multi-version-protocol-dedup.md) —
+  A staged plan to stop paying the full per-family cost for each of the twelve
+  protocol versions still to come. Today every `crates/protocol/vNNN` crate is a
+  near-copy of its neighbour — measured here, at `16b72257`, as **0 byte-identical
+  files but 54–61 of ~80 packet structs identical, 65–70% of adapter dispatch-arm
+  lines identical or near-identical between adjacent legacy families, and 42% of
+  test-function lines near-duplicated** — while the mechanism that would let one
+  definition serve a range of protocols (`#[mc(since = N)]`/`#[mc(until = N)]` in
+  `lodestone-macros`) is implemented, tested, and used by **zero** production packets.
+  The recommended design is: one crate per *wire era* (grouped where adjacent versions
+  agree on ≥85% of packet shapes), a version-free `lodestone-protocol-common` crate
+  holding every era-stable packet **with its lift/lower function and its protocol
+  range**, per-protocol *generated* tables inside the era crate, and a data-driven
+  dispatch table with an enumerated ignore list replacing the `_ =>` island factory.
+  It keeps `cargo check -p lodestone-shell --no-default-features` green at every stage
+  and migrates the four existing families incrementally.
 - [Multi-version protocol: the dispatch plan for epic #343](./plans/multi-version-protocol.md) —
   The implementation plan for epic #343 (every major version 1.7.10 through 26.2,
   children #344–#358): family-per-wire-era with range extension inside an era, a
@@ -2845,13 +743,14 @@ of these caught the *brief* being wrong rather than the code.
   other agents *while this was written*, and one citation went stale between two greps
   minutes apart (noted inline where it happened).
 - [Plan: migrating `lodestone-server` onto its own `bevy_ecs::World` (issue #433)](./plans/server-ecs-migration.md) —
-  The phased migration plan that turns [`docs/server-ecs.md`](../server-ecs.md)'s
-  decision record into dispatchable work: how today's
-  `Arc<Mutex<_>>`-and-`tokio::spawn` server becomes a tick-thread-owned, unlocked
-  `bevy_ecs::World` whose core subsystems are themselves bevy plugins. Written
-  2026-08-04 against a re-verified tree; the state census in "The census" below is the
-  core deliverable, and every phase names its files, its choke-point patch, its gate,
-  its negative control, its performance gate, and the downstream epic it unblocks.
+  The phased migration plan that turns
+  [`docs/server-ecs.md`](../dedicated-server.md)'s decision record into dispatchable
+  work: how today's `Arc<Mutex<_>>`-and-`tokio::spawn` server becomes a
+  tick-thread-owned, unlocked `bevy_ecs::World` whose core subsystems are themselves
+  bevy plugins. Written 2026-08-04 against a re-verified tree; the state census in
+  "The census" below is the core deliverable, and every phase names its files, its
+  choke-point patch, its gate, its negative control, its performance gate, and the
+  downstream epic it unblocks.
 - [Structures: the group S issue tree](./plans/structures.md) — The executable unit
   sequence for unit group **S** of [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its
   U14 row): the structure engine — placement, templates, beardifier, jigsaw and the
