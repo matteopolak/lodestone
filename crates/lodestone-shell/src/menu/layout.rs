@@ -19,7 +19,7 @@
 //! writes absolute positions into the leaves. A screen then walks the leaves with
 //! [`LayoutElement::visit_widgets`] — which is the only way a leaf reaches a draw,
 //! and is why [`SpacerElement`] (whose `visit_widgets` is a no-op, exactly as in
-//! `SpacerElement.java`) occupies space without ever being drawn.
+//! vanilla's own spacer-element type) occupies space without ever being drawn.
 //!
 //! ### The alignment model is padding-aware
 //!
@@ -78,9 +78,9 @@
 //!   dimension.
 //! - **A spanning cell splits its size with a [`Divisor`], not by division.**
 //!   `Divisor` is Mojang's Bresenham-style integer splitter
-//!   (`com/mojang/math/Divisor.java`): 7 over 3 is `2, 2, 3`, not `2.33` three
+//!   (vanilla's own divisor helper's own source file): 7 over 3 is `2, 2, 3`, not `2.33` three
 //!   times. A span only *grows* a row or column if its share exceeds what is
-//!   already there (`Math.max`, `GridLayout.java`), which is why the pause
+//!   already there (`Math.max`, vanilla's own grid-layout type), which is why the pause
 //!   screen's 212 px full-width cell produces two 106 px columns and its 100 px
 //!   icon row (spanning the same two) changes nothing.
 //! - **[`LinearLayout`] is not its own algorithm.** It *wraps* a one-row or
@@ -89,8 +89,8 @@
 //!   horizontal and `rowSpacing` when vertical (`:103-111`). Do not give it
 //!   arithmetic of its own — a bug fixed in `GridLayout` must fix it too.
 //! - **`FrameLayout`'s children default to centred, `GridLayout`'s do not.**
-//!   `FrameLayout.java` is `LayoutSettings.defaults().align(0.5F, 0.5F)`;
-//!   `GridLayout.java` and `EqualSpacingLayout.java` are bare
+//!   vanilla's own frame-layout type is `LayoutSettings.defaults().align(0.5F, 0.5F)`;
+//!   vanilla's own grid-layout type and vanilla's own equal-spacing-layout type are bare
 //!   `LayoutSettings.defaults()`, i.e. top-left. Getting this backwards centres
 //!   or corners a whole screen, and it looks deliberate either way.
 //! - **[`GridLayout::default_cell_setting`] is the live baseline;
@@ -109,7 +109,7 @@
 //!   `LinearLayout`'s, `FrameLayout`'s, `EqualSpacingLayout`'s — passes a
 //!   `copy()`. Of the ~75 `defaultCellSetting`/`defaultChildLayoutSetting` call
 //!   sites in the client, the only one on a `RowHelper` is
-//!   `RealmsResetWorldScreen.java`, and it runs before that helper's first
+//!   vanilla's own Realms reset-world screen, and it runs before that helper's first
 //!   add.
 //!
 //!   One screen *does* mutate a live baseline mid-build — `DisconnectedScreen`
@@ -137,7 +137,7 @@
 //! ## Not here, on purpose
 //!
 //! - **`EqualSpacingLayout`.** One user in the whole client tree
-//!   (`CommonLayouts.java` aside, `screens/` references it once), so porting it
+//!   (vanilla's own common-layouts helper aside, `screens/` references it once), so porting it
 //!   now would be an island. Its only bearing on this file is that its default
 //!   cell settings are top-left, unlike `FrameLayout`'s.
 //! - **`CommonLayouts`.** Two static helpers over `LinearLayout`; they belong with
@@ -185,7 +185,7 @@ pub fn ipx(v: f32) -> i32 {
     v.round() as i32
 }
 
-/// Mojang's `Divisor` (`com/mojang/math/Divisor.java`): splits `numerator` into
+/// Mojang's `Divisor` (vanilla's own divisor helper's own source file): splits `numerator` into
 /// `denominator` integer parts that sum back to it exactly, distributing the
 /// remainder Bresenham-style rather than piling it on one part.
 ///
@@ -831,7 +831,7 @@ impl RowHelper<'_> {
 /// largest padded child)`.
 ///
 /// Its children default to **centred** (`align(0.5, 0.5)`,
-/// `FrameLayout.java`), unlike [`GridLayout`]'s top-left. That default is the
+/// vanilla's own frame-layout type), unlike [`GridLayout`]'s top-left. That default is the
 /// whole reason `HeaderAndFooterLayout` centres a header title without saying so.
 #[derive(Debug)]
 pub struct FrameLayout {
@@ -855,7 +855,7 @@ impl Default for FrameLayout {
             min_width: 0,
             min_height: 0,
             children: Vec::new(),
-            // `FrameLayout.java` — centred, not top-left.
+            // vanilla's own frame-layout type — centred, not top-left.
             default_child_settings: LayoutSettings::defaults().align(0.5, 0.5),
         }
     }
@@ -1599,7 +1599,7 @@ mod tests {
     #[test]
     fn set_y_rounds_where_set_x_truncates() {
         // The asymmetry is in the jar: `setX` casts (`(int)Mth.lerp(..)`,
-        // `AbstractLayout.java`) and `setY` rounds (`Math.round(Mth.lerp(..))`,
+        // vanilla's own abstract-layout base) and `setY` rounds (`Math.round(Mth.lerp(..))`,
         // `:83`). A 20 px child centred in a 25 px box has a half-pixel offset,
         // so the two axes disagree by one.
         let mut frame = FrameLayout::with_min_size(25.0, 25.0);
@@ -1611,7 +1611,7 @@ mod tests {
 
     #[test]
     fn frame_children_default_to_centred_and_grid_children_to_top_left() {
-        // `FrameLayout.java` vs `GridLayout.java`. Getting this backwards
+        // vanilla's own frame-layout type vs vanilla's own grid-layout type. Getting this backwards
         // moves an entire screen and looks intentional in a screenshot.
         let mut frame = FrameLayout::with_min_size(100.0, 100.0);
         frame.add_child(cell(20.0, 20.0));
@@ -1644,7 +1644,7 @@ mod tests {
 
     #[test]
     fn grid_dimensions_are_derived_from_the_highest_occupied_index() {
-        // `GridLayout.java`: nothing declares a row or column count, and
+        // vanilla's own grid-layout type: nothing declares a row or column count, and
         // the cells in between exist at size zero.
         let mut grid = GridLayout::new();
         grid.add_child(cell(30.0, 10.0), 3, 2);
@@ -1666,7 +1666,7 @@ mod tests {
 
     #[test]
     fn divisor_matches_mojangs_bresenham_sequence() {
-        // `com/mojang/math/Divisor.java`. The remainder goes to the *later*
+        // vanilla's own divisor helper's own source file. The remainder goes to the *later*
         // parts, and the parts always sum back to the numerator — which is what
         // stops a spanning cell from being a pixel wider or narrower than its
         // columns.
@@ -1685,7 +1685,7 @@ mod tests {
 
     #[test]
     fn a_spanning_cell_splits_its_size_and_only_grows_a_column_that_is_smaller() {
-        // `GridLayout.java`: the span's share is `Math.max`ed into each
+        // vanilla's own grid-layout type: the span's share is `Math.max`ed into each
         // column, so a wide span sets the columns only when nothing else is
         // wider.
         let mut grid = GridLayout::new();
@@ -1707,7 +1707,7 @@ mod tests {
 
     #[test]
     fn linear_layout_is_a_one_row_or_one_column_grid() {
-        // `LinearLayout.java`, and `spacing` maps to the axis's own
+        // vanilla's own linear-layout type, and `spacing` maps to the axis's own
         // spacing (`:103-111`). Both directions, because a `columnSpacing` set on
         // a vertical layout is a silent no-op.
         let mut column = LinearLayout::vertical().spacing(4);
@@ -1964,7 +1964,7 @@ mod tests {
 
     #[test]
     fn the_default_cell_setting_is_a_live_baseline_and_new_cell_settings_is_a_copy() {
-        // `GridLayout.java`. The baseline is what every subsequent cell
+        // vanilla's own grid-layout type. The baseline is what every subsequent cell
         // inherits; a copy is what one cell adjusts.
         let mut grid = GridLayout::new();
         {
@@ -2039,7 +2039,7 @@ mod tests {
     }
 
     /// Three tabs at 854 px — the width every other geometry test in this
-    /// tree measures against. Hand-derived from `MenuTabBar.java`
+    /// tree measures against. Hand-derived from vanilla's own menu-tab-bar type
     /// rather than round-tripped through [`tab_bar_geometry`] itself:
     /// `tabsWidth = min(400, 854) - 28 = 372`, `tabWidth =
     /// roundToward(372 / 3, 2) = roundToward(124, 2) = 124`, `startX =
