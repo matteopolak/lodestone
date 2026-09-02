@@ -404,6 +404,27 @@ construction-time check makes falsifiable.
 
 ## Stages
 
+**Measured status, not a claim from when this plan was written.** Re-derive it rather than trusting
+this block; the commands are given so you can. Stages 0-3 have landed:
+
+| stage | evidence |
+|---|---|
+| 0 instruments | `cargo xtask protocol-dup`, `connectedness` both run and report |
+| 1 macro + builder | `#[mc(protocols)]` and `lodestone_core::dispatch` are consumed, not shelved |
+| 2 `lodestone-protocol-common` | ~1,500 lines; v47/v340/v735 `pub use` from it (15/21/16 references each) |
+| 3 dispatch tables | v47/v340/v735 carry 59/62/54 `Handler::new` entries and 20/32/52 `IGNORED` ones |
+
+`cargo xtask connectedness` currently reports v47 59/74, v340 62/80, v735 54/92, v770 141/141
+clientbound, with zero decoded-but-stranded in every family.
+
+**v770 has not migrated and that is deliberate** — it is Stage 6, explicitly deferred and not a
+blocker. It still dispatches through the if-arm chain with no `Handler::new` and no `IGNORED` list.
+Since it decodes 141/141, the fallthrough strands nothing today; the cost is that a *future* packet
+added to v770 has no construction-time check to catch it.
+
+An earlier note in this plan said Stage 1 shipped "with no `crates/protocol/*` family converted to
+use either yet". That was true when written and is now stale — the check above is one grep.
+
 Every stage leaves `just health` green; each names what proves it. Sizes are hand-written lines,
 estimated from the measurements above. **Prerequisites for family #5 are marked ★.**
 
