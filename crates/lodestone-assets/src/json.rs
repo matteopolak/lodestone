@@ -11,15 +11,17 @@
 //!
 //! `serde_json::from_slice` requires the input to be *exactly* one value:
 //! anything after the closing brace is `trailing characters at line N column M`.
-//! Vanilla's `GsonHelper.parse` builds a `JsonReader` (in `Strictness.STRICT`,
-//! so the *value itself* is still strict JSON — no comments, no unquoted keys,
-//! no single quotes) and then calls the type adapter's `read` on it **without a
-//! following end-of-document assertion**. A Gson type adapter consumes one value
-//! and stops, so a document with a stray extra `}` after the root object parses
-//! fine in the real client. Note this is specifically the *hand-rolled* reader
-//! path: `Gson.fromJson(Reader, Class)` would have asserted full consumption,
-//! and `GsonHelper` deliberately does not go through it. See
-//! `docs/resource-packs.md` for the citation.
+//! Vanilla's own JSON reader for pack-authored documents runs in a strict
+//! mode (so the *value itself* is still strict JSON — no comments, no
+//! unquoted keys, no single quotes) but then reads exactly one value from it
+//! **without a following end-of-document assertion**. That single-value read
+//! consumes one value and stops, so a document with a stray extra `}` after
+//! the root object parses fine in the real client. Note this is specifically
+//! the *hand-rolled*, tolerant reading path vanilla uses for pack content: a
+//! stricter one-shot parse-and-deserialize call would have asserted full
+//! consumption, and vanilla deliberately routes pack-authored JSON through the
+//! tolerant path instead of that stricter one. See `docs/resource-packs.md`
+//! for more detail.
 //!
 //! That difference is not academic. Measured on a real, widely-used third-party
 //! 16× pack: 23 of its `textures/item/*.png.mcmeta` files end with one extra
@@ -40,7 +42,7 @@
 use serde_json::Value;
 
 /// Parses the first JSON value in `bytes` and ignores anything after it —
-/// vanilla's `GsonHelper.parse` behaviour for pack-authored documents.
+/// vanilla's own tolerant-parsing behaviour for pack-authored documents.
 ///
 /// Strict about the value itself: a truncated or malformed document is still an
 /// error. Only *trailing* content is tolerated.
@@ -103,8 +105,8 @@ mod tests {
         assert!(from_slice_lenient(br#"{"animation": {"#).is_err());
         assert!(from_slice_lenient(b"").is_err());
         assert!(from_slice_lenient(b"   \n\t ").is_err());
-        // Gson's `Strictness.STRICT` still rejects JSON5-isms, and so must this:
-        // the divergence being fixed is trailing content only.
+        // Vanilla's strict value-parsing mode still rejects JSON5-isms, and so
+        // must this: the divergence being fixed is trailing content only.
         assert!(from_slice_lenient(br#"{animation: 1}"#).is_err());
     }
 
