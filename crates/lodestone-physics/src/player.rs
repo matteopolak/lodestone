@@ -1871,12 +1871,12 @@ fn tick_air_among_entities(
     profile: &PhysicsProfile,
     nearby: &[crate::push::NearbyEntity],
 ) {
-    // `LocalPlayer.aiStep`'s auto-jump spend (`LocalPlayer.java:784-789`): a
-    // decision made by [`update_auto_jump`] at the end of the *previous* tick's
-    // move is spent here as a forced jump, one tick later, via the same
-    // `this.input.makeJump()` deferral vanilla uses. The forced flag flows
-    // through the ordinary jump block below (and into `AirTravelContext`'s
-    // `jumping`, which is exactly what `makeJump` does in vanilla).
+    // Vanilla's own auto-jump spend: a decision made by [`update_auto_jump`]
+    // at the end of the *previous* tick's move is spent here as a forced
+    // jump, one tick later, via the same synthetic jump-key deferral vanilla
+    // uses. The forced flag flows through the ordinary jump block below (and
+    // into `AirTravelContext`'s `jumping`, which is exactly what vanilla's
+    // own deferral does).
     let mut input = input;
     if state.auto_jump_time > 0 {
         state.auto_jump_time -= 1;
@@ -1891,24 +1891,24 @@ fn tick_air_among_entities(
     let (xxa, zza) = set_sprint_and_modify_input(state, input, profile);
 
     // --- jump -----------------------------------------------------------------
-    // `LivingEntity.aiStep`'s jump block is `if (this.jumping &&
-    // this.isAffectedByFluids())` (`LivingEntity.java:3089`) — and
-    // `Player.isAffectedByFluids()` is `!abilities.flying`. So a **flying player
-    // never jumps from the ground at all**; the `else` arm runs and clears
-    // `noJumpDelay`.
+    // Vanilla's own jump block is `if (this.jumping &&
+    // this.isAffectedByFluids())` — and the player's fluid-affected check is
+    // `!abilities.flying`. So a **flying player never jumps from the ground
+    // at all**; the `else` arm runs and clears `noJumpDelay`.
     //
-    // This conjunct is easy to miss because `isAffectedByFluids` reads like it
-    // should only guard the *fluid* sub-branches, and because vanilla's own
-    // creative-flight feel is unaffected in the common case (you are rarely
-    // `onGround` while flying). It matters at ground level: without it, holding
-    // jump while hovering just above the floor would add `jumpFromGround`'s `0.42`
-    // *on top of* the `flyingSpeed * 3` vertical impulse the driver applies, and
-    // launch the player at three times vanilla's climb rate.
+    // This conjunct is easy to miss because the fluid-affected check reads
+    // like it should only guard the *fluid* sub-branches, and because
+    // vanilla's own creative-flight feel is unaffected in the common case
+    // (you are rarely `onGround` while flying). It matters at ground level:
+    // without it, holding jump while hovering just above the floor would
+    // add the ground-jump impulse's `0.42` *on top of* the `flyingSpeed * 3`
+    // vertical impulse the driver applies, and launch the player at three
+    // times vanilla's climb rate.
     //
-    // The one-shot hop vanilla *does* perform when flight is **engaged** while
-    // standing (`LocalPlayer.aiStep`'s `if (abilities.flying && this.onGround())
-    // this.jumpFromGround();`) is the driver's, not this function's — it fires on
-    // the toggle edge, before `super.aiStep()`.
+    // The one-shot hop vanilla *does* perform when flight is **engaged**
+    // while standing (its own per-tick client update: if flying and on the
+    // ground, jump from the ground) is the driver's, not this function's —
+    // it fires on the toggle edge, before the rest of its per-tick update.
     let affected_by_fluids = !state.flying;
     if affected_by_fluids && input.jump && state.on_ground && state.no_jump_delay == 0 {
         jump_from_ground(state, view, profile);
@@ -1917,15 +1917,16 @@ fn tick_air_among_entities(
         state.no_jump_delay = 0;
     }
 
-    // `LivingEntity.handleOnClimbable`'s `resetFallDistance()` — evaluated once,
-    // pre-move, and reused (`travel_in_air` below re-derives the same `climbing`
-    // test for its own velocity clamp; both read the pre-move position, so the two
-    // checks agree). Only `travelInAir` reaches `handleOnClimbable`
-    // (`LivingEntity.java:2666-2669`), so this is `tick_air`-only, matching vanilla.
+    // Vanilla's own on-climbable fall-distance reset — evaluated once,
+    // pre-move, and reused (`travel_in_air` below re-derives the same
+    // `climbing` test for its own velocity clamp; both read the pre-move
+    // position, so the two checks agree). Only vanilla's own airborne
+    // travel step reaches this reset, so this is `tick_air`-only, matching
+    // vanilla.
     //
-    // `Player.onClimbable()` is `abilities.flying ? false : super.onClimbable()`
-    // (`Player.java:2025`), so flight detaches the player from ladders entirely —
-    // both this reset and `travel_in_air`'s clamp/steady-climb.
+    // Vanilla's own "on climbable" check is `abilities.flying ? false :
+    // super.onClimbable()`, so flight detaches the player from ladders
+    // entirely — both this reset and `travel_in_air`'s clamp/steady-climb.
     if on_climbable(state, view) {
         state.fall_distance = 0.0;
     }
@@ -1933,8 +1934,9 @@ fn tick_air_among_entities(
     // --- travelInAir ----------------------------------------------------------
     // The gravity + drag + collision core is the entity-agnostic `travel_in_air`
     // seam (shared with mobs); the player supplies only the transformed input,
-    // `getSpeed()`, and its per-situation flags. Thread the player's motion state
-    // through `EntityMotion` and back so the arithmetic is byte-identical.
+    // its own effective speed, and its per-situation flags. Thread the
+    // player's motion state through `EntityMotion` and back so the
+    // arithmetic is byte-identical.
     let old_x = state.position.x;
     let old_y = state.position.y;
     let old_z = state.position.z;
