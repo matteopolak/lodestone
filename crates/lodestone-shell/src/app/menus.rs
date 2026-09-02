@@ -5,8 +5,8 @@
 use super::*;
 
 /// Whether `modifiers` holds the platform's edit-shortcut key —
-/// `InputQuirks.EDIT_SHORTCUT_KEY_MODIFIER`'s own split
-/// (`Screen.hasControlDown`): Cmd (`SUPER`) on macOS, Ctrl everywhere else.
+/// vanilla's own platform edit-shortcut-modifier split: Cmd (`SUPER`) on
+/// macOS, Ctrl everywhere else.
 /// Must agree with `focus::EDIT_SHORTCUT_MODIFIER`, which is what
 /// `is_select_all`/`is_copy`/`is_cut`/`is_paste` test once the `MenuKey` this
 /// produces reaches `KeyEvent::from_menu_key` — the two sides of the same
@@ -93,8 +93,9 @@ impl WindowApp {
                 KeyCode::Tab => return Some(MenuKey::Tab),
                 KeyCode::Backspace => return Some(MenuKey::Backspace),
                 KeyCode::Delete => return Some(MenuKey::Delete),
-                // F5 refreshes the multiplayer list (#396), which is
-                // `JoinMultiplayerScreen.keyPressed`'s only key. It has to be here
+                // F5 refreshes the multiplayer list, which is
+                // vanilla's own multiplayer-screen key-press handler's only
+                // key. It has to be here
                 // rather than falling through to the text path below: a function
                 // key has no `text`, so without this it would reach nothing.
                 KeyCode::F5 => return Some(MenuKey::Refresh),
@@ -159,7 +160,7 @@ impl WindowApp {
         match action {
             MenuAction::None => {}
             MenuAction::Singleplayer(config) => {
-                // A real integrated server (#287), not the old offline demo
+                // A real integrated server, not the old offline demo
                 // world. `Sim::new` no longer builds one (see its docs): a client
                 // holds the server's world or none at all, and a demo world left
                 // resident under a later multiplayer join is the two-worlds defect
@@ -167,7 +168,7 @@ impl WindowApp {
                 // takes the *same* path a join does, so there is only ever one
                 // world and it always came off the wire.
                 //
-                // Issue #468's reading (2): the payload is a
+                // The payload is a
                 // `menu::nav::SingleplayerLaunch`, naming a **world directory**
                 // that already exists. `Open` is `Screen::WorldSelect`'s Play
                 // Selected World (the world's stored seed wins, so none travels);
@@ -198,7 +199,7 @@ impl WindowApp {
             MenuAction::Reprobe(None) => {
                 self.statuses.refresh(self.nav.list().entries());
             }
-            // F5 or the Refresh button (#396). `refresh_all`, not `refresh`:
+            // F5 or the Refresh button. `refresh_all`, not `refresh`:
             // `refresh` skips any address it already has a result for, so it would
             // make the button do nothing at all.
             MenuAction::RefreshList => {
@@ -231,13 +232,13 @@ impl WindowApp {
             }
             MenuAction::QuitToTitle => {
                 // `UiState` has already moved to `MainMenu` — `nav.rs`'s
-                // `key_paused` (and, issue #103, `key_death`) calls
+                // `key_paused` (and `key_death`) calls
                 // `ui.quit_to_title()` before returning this action. What is
                 // left is tearing down whatever live session is attached to
                 // `Sim` so a fresh connect afterward starts clean; see
                 // `Sim::end_session` for exactly what resets vs. persists.
                 self.sim.end_session();
-                // Issue #535: there is no hosted world any more, so Open to LAN
+                // There is no hosted world any more, so Open to LAN
                 // must stop claiming there is one. Cleared here rather than in
                 // `end_session` because `Sim` does not know how the session was
                 // obtained — that is exactly what this field records.
@@ -254,8 +255,8 @@ impl WindowApp {
             // costs nothing. `UiState` stays on `Screen::Death` until
             // `net::NetUpdate::Respawned` arrives; see `drive_ui_from_session`.
             MenuAction::Respawn => self.sim.respawn(),
-            // The command-block screen's Done button:
-            // `populateAndSendPacket` (`CommandBlockEditScreen.java`).
+            // The command-block screen's Done button: vanilla's own
+            // populate-and-send-packet routine.
             //
             // `into_action` is the one step `MenuAction`'s `Eq` derive cannot
             // cross — `ClientAction` holds a float in a sibling variant, so
@@ -274,7 +275,7 @@ impl WindowApp {
             // makes it reachable. The two landed separately, and this comment
             // used to end "Nothing opens `Screen::CommandBlock` from a real
             // interaction yet — no command-block block-entity NBT decode, no
-            // `interact.rs` trigger. That is issue #442." — true when written,
+            // `interact.rs` trigger." — true when written,
             // stale now: `crate::command_block_source` reads the payload the
             // chunk already carries, and the trigger is in `try_use` rather
             // than `interact.rs` for the reason that method's doc gives.
@@ -301,7 +302,7 @@ impl WindowApp {
             // to_save_action`/`to_sign_action` before closing the screen, so
             // this payload is all that is left of the widget state by the
             // time this arm runs. Sends [`ClientAction::EditBook`] —
-            // issue #613's producer for a packet that previously had none.
+            // producer for a packet that previously had none.
             MenuAction::EditBook(submit) => {
                 if let Some(net) = self.sim.net() {
                     net.send_action(submit.into_action());
@@ -344,8 +345,8 @@ impl WindowApp {
                     net.respond_to_resource_pack(id, accept);
                 }
             }
-            // The Spectator Menu's a player row was activated (issue #613's
-            // `TeleportToEntity` remainder — see
+            // The Spectator Menu's a player row was activated (`TeleportToEntity`
+            // remainder — see
             // `crate::menu::spectator_menu`'s module doc): the screen has
             // already closed (`MenuNav::activate_spectator_menu_row`), and
             // this is the one send `ClientAction::SpectatorAction`'s own
@@ -446,12 +447,8 @@ impl WindowApp {
 
     /// The slider track fraction for `row` at physical cursor `(x, y)`.
     ///
-    /// Vanilla's `AbstractSliderButton.setValueFromMouse`
-    /// (`AbstractSliderButton.java`), verbatim:
-    ///
-    /// ```java
-    /// this.setValue((event.x() - (this.getX() + 4)) / (this.width - 8));
-    /// ```
+    /// Vanilla's own slider-button "set value from mouse" routine, verbatim:
+    /// the new fraction is `(cursor_x - (slider_x + 4)) / (width - 8)`.
     ///
     /// The `4` is `HANDLE_HALF_WIDTH` and the `8` is `HANDLE_WIDTH`: the handle's
     /// *centre* tracks the cursor, so the usable travel is the track minus one
@@ -565,7 +562,8 @@ impl WindowApp {
     ///
     /// # Order, which is the whole of the suggestion dropdown's key routing
     ///
-    /// `ChatScreen.keyPressed` gives `CommandSuggestions.keyPressed` **first
+    /// Vanilla's own chat-screen key-press handler gives its own command-suggestions
+    /// key-press handler **first
     /// refusal** on every key, before Enter, Escape or anything else. That is
     /// what makes Escape close the popup rather than the box, and it is why the
     /// popup arm below sits above the `Escape` arm rather than beside it.
@@ -602,7 +600,8 @@ impl WindowApp {
         // in the frame loop.
         self.pump_command_suggestions();
         if let PhysicalKey::Code(code) = physical_key {
-            // `CommandSuggestions.keyPressed`'s first refusal, above every arm
+            // Vanilla's own command-suggestions key-press handler's first
+            // refusal, above every arm
             // below. Only Escape has anything to consume here; Tab is handled in
             // its own arm because it also has a job with no popup up.
             if code == KeyCode::Escape && self.chat_input.suggestion_escape() {
@@ -680,7 +679,8 @@ impl WindowApp {
         }
     }
 
-    /// `ChatScreen.onEdited` — the `EditBox` responder, run after every edit to
+    /// Vanilla's own chat-screen "on edited" — the `EditBox` responder, run
+    /// after every edit to
     /// the line.
     ///
     /// **Every edit path must call this**, and it is the difference between a
@@ -867,17 +867,18 @@ impl WindowApp {
         let _ = self.chat_input.apply_suggestions(&response);
     }
 
-    /// `key.use` in the world — vanilla's `Minecraft.startUseItem`, plus the one
+    /// `key.use` in the world — vanilla's own start-use-item routine, plus the one
     /// block whose right-click is resolved **entirely client-side**.
     ///
     /// # Why the command block forks here rather than in `interact.rs`
     ///
     /// Every other right-click in this client is a packet: `drive_placement`
     /// resolves the intent, sends `UseItemOn`, and the server decides. A
-    /// command block is different in vanilla too — `CommandBlock.useWithoutItem`
-    /// calls `player.openCommandBlock(be)`, which is a no-op on the server and
-    /// is overridden by `LocalPlayer` to open the screen locally
-    /// (`CommandBlock.java`, `LocalPlayer.openCommandBlock`). The data comes
+    /// command block is different in vanilla too — vanilla's own
+    /// use-without-item routine
+    /// calls the local player's open-command-block hook, which is a no-op on
+    /// the server and
+    /// is overridden by the local player to open the screen locally. The data comes
     /// from the block entity the client already has, not from a response.
     ///
     /// So this is not a shortcut around `interact.rs`; it is the client-side
@@ -886,10 +887,10 @@ impl WindowApp {
     /// looks at the clicked block, so a right-click with an empty hand — the
     /// normal way to open a command block — never reaches its body.
     ///
-    /// Closes issue #47's last hop: `UiState::open_command_block` and
+    /// Closes last hop: `UiState::open_command_block` and
     /// `MenuNav::open_command_block` had **zero production callers**, so the
     /// screen, its layout and its completion were real, unit-tested and
-    /// unreachable. Tracked on #436.
+    /// unreachable.
     pub(super) fn try_use(&mut self) {
         // Only from the world. `Screen::Playing` is `open_command_block`'s own
         // guard as well, so this is belt-and-braces rather than the only check
@@ -898,12 +899,12 @@ impl WindowApp {
         if self.ui.screen() == crate::menu::Screen::Playing
             && let Some(open) = self.sim.targeted_command_block()
         {
-            // Vanilla returns `InteractionResult.SUCCESS` and sends no use
+            // Vanilla returns a success result and sends no use
             // packet for this block, so the ordinary path is skipped, not run
             // as well: running both would place a block against the command
             // block behind the screen that just opened.
             self.sim.input_mut(InputState::release_all);
-            // Issue #471 step 2: hand the screen the tree the server actually
+            // Hand the screen the tree the server actually
             // sent, so its Tab key and its suggestion popup are computed from
             // real data. `MenuNav` is pure and holds no client handle, so the
             // push has to happen here, where one is in scope; doing it at open
@@ -915,8 +916,8 @@ impl WindowApp {
             self.set_grab(false);
             return;
         }
-        // Issue #613's `EditBook` remainder: `minecraft:writable_book` opens
-        // vanilla's `BookEditScreen` the instant it is used, entirely
+        // `EditBook` remainder: `minecraft:writable_book` opens
+        // vanilla's own book-edit screen the instant it is used, entirely
         // client-side — no server round trip, the same shape the command
         // block fork immediately above has. See `crate::menu::book_edit`'s
         // module doc.
@@ -929,14 +930,15 @@ impl WindowApp {
             self.set_grab(false);
             return;
         }
-        // The signed book's half of the same fork: `WrittenBookItem.use`
-        // calls `player.openItemGui(...)` and returns
-        // `InteractionResult.SUCCESS`, so vanilla opens `BookViewScreen`
+        // The signed book's half of the same fork: vanilla's own written-book
+        // use routine
+        // calls its own open-item-GUI hook and returns
+        // a success result, so vanilla opens its own book-view screen
         // and never reaches the generic use either. Its
-        // `InteractionResult` is `SUCCESS` with a `CLIENT` swing source,
+        // result is success with a client-side swing source,
         // and `generic_use_swings` lists `written_book` for exactly that
         // reason — but the return below means the swing is not reached from
-        // here, matching vanilla, whose `startUseItem` for a book is
+        // here, matching vanilla, whose start-use-item routine for a book is
         // answered entirely by the screen opening. See
         // `crate::menu::book_view`'s module doc.
         if self.ui.screen() == crate::menu::Screen::Playing
