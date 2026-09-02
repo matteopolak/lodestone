@@ -1,44 +1,32 @@
 //! Redstone torches (the torch half of the redstone family): the 2-tick-delayed
 //! on/off inversion — powered means unlit, unpowered means lit.
 //!
-//! # Cited directly
+//! # Transcribed from the real torch block
 //!
-//! `RedstoneTorchBlock.hasNeighborSignal`/`neighborChanged`/`tick`:
+//! The real standing torch's has-neighbor-signal, neighbor-changed and
+//! scheduled-tick hooks, transcribed as the rules they implement:
 //!
-//! ```text
-//! protected boolean hasNeighborSignal(final Level level, final BlockPos pos, final BlockState state) {
-//!    return level.hasSignal(pos.below(), Direction.DOWN);
-//! }
-//! protected void neighborChanged(...) {
-//!    if (state.getValue(LIT) == this.hasNeighborSignal(level, pos, state) && !level.getBlockTicks().willTickThisTick(pos, this)) {
-//!       level.scheduleTick(pos, this, 2);
-//!    }
-//! }
-//! protected void tick(...) {
-//!    boolean neighborSignal = this.hasNeighborSignal(level, pos, state);
-//!    ...
-//!    if (state.getValue(LIT)) {
-//!       if (neighborSignal) { level.setBlock(pos, state.setValue(LIT, false), 3); ...toggle-frequency bookkeeping... }
-//!    } else if (!neighborSignal && !isToggledTooFrequently(level, pos, false)) {
-//!       level.setBlock(pos, state.setValue(LIT, true), 3);
-//!    }
-//! }
-//! ```
+//! Has-neighbor-signal: whether the block directly below has a signal
+//! pointing down into this position.
 //!
-//! `RedstoneWallTorchBlock.hasNeighborSignal` overrides only which
-//! neighbour is checked (the block it's mounted against, not "below"):
+//! On a neighbor change: if the current lit state already agrees with
+//! has-neighbor-signal (i.e. the torch is stale relative to its input) and
+//! no tick is already pending, schedule one two ticks out.
 //!
-//! ```text
-//! protected boolean hasNeighborSignal(final Level level, final BlockPos pos, final BlockState state) {
-//!    Direction opposite = state.getValue(FACING).getOpposite();
-//!    return level.hasSignal(pos.relative(opposite), opposite);
-//! }
-//! ```
+//! On the scheduled tick: read has-neighbor-signal fresh. If currently lit
+//! and there is now a neighbor signal, unlight it (plus toggle-frequency
+//! bookkeeping). Otherwise, if currently unlit, there is no neighbor signal,
+//! and the anti-oscillation burnout guard does not trip, light it.
+//!
+//! The real wall torch's has-neighbor-signal override only changes which
+//! neighbour is checked (the block it's mounted against, not "below"): it
+//! is whether the block opposite this torch's facing direction has a signal
+//! pointing back at it.
 //!
 //! # Named deviation: the anti-oscillation "burnout" guard is not modeled
 //!
-//! `RedstoneTorchBlock.isToggledTooFrequently`/`RECENT_TOGGLES`/`RESTART_DELAY`
-//! is vanilla's defence against a torch clock (a redstone circuit that
+//! The real torch's toggle-frequency tracking
+//! is the real engine's defence against a torch clock (a redstone circuit that
 //! flips a torch every 2 ticks forever): after 8 toggles within 60 ticks, the
 //! torch locks unlit for 160 ticks. This crate has no per-level, per-position
 //! toggle-history table (nothing else in this crate keeps one either), and a
@@ -81,8 +69,8 @@ pub fn set_lit(state: &str, lit: bool) -> String {
     }
 }
 
-/// `RedstoneTorchBlock.hasNeighborSignal`/`RedstoneWallTorchBlock.hasNeighborSignal`
-/// — see this module's own doc comment for the full citation of both.
+/// The real standing/wall torch has-neighbor-signal checks
+/// — see this module's own doc comment for the full derivation of both.
 #[must_use]
 pub fn has_neighbor_signal<F>(lookup: &F, pos: BlockPos, state: &str) -> bool
 where
@@ -93,16 +81,19 @@ where
 }
 
 /// `true` iff a scheduled recheck should be queued right now — the
-/// `neighborChanged` gate (`state.LIT == hasNeighborSignal`, before the
-/// `willTickThisTick` de-dup, which [`crate::scheduled_tick::ScheduledTickQueue::has_scheduled`]
+/// real neighbor-changed hook's gate (lit state equals has-neighbor-signal,
+/// before the
+/// pending-tick de-dup, which [`crate::scheduled_tick::ScheduledTickQueue::has_scheduled`]
 /// already provides at the call site).
 #[must_use]
 pub fn should_schedule_check(state: &str, has_signal: bool) -> bool {
     torch_lit(state) == has_signal
 }
 
-/// The delayed flip itself (`tick()`), evaluated against a **freshly
-/// re-read** `has_signal` (vanilla re-derives `neighborSignal` when the
+/// The delayed flip itself (the real scheduled-tick hook), evaluated against
+/// a **freshly
+/// re-read** `has_signal` (the real engine re-derives the neighbor signal
+/// when the
 /// scheduled tick actually runs, not when it was scheduled two ticks
 /// earlier) — `None` if the signal changed back in the meantime and neither
 /// branch applies (a real, faithful no-op: the recheck simply finds nothing
@@ -174,8 +165,8 @@ mod tests {
     #[test]
     fn wall_torch_detects_signal_from_its_own_mount_face_not_below() {
         let torch_pos = pos(0, 5, 0);
-        // `RedstoneWallTorchBlock.hasNeighborSignal` checks
-        // `pos.relative(FACING.getOpposite())` — for `facing = north` that is
+        // The real wall torch's has-neighbor-signal check checks
+        // the position opposite its facing — for `facing = north` that is
         // the block to the SOUTH (the wall the torch is mounted against),
         // not north (an earlier version of this fixture checked the wrong
         // side and failed the assertion below).
