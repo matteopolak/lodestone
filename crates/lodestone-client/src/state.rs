@@ -425,8 +425,7 @@ impl Default for SharedState {
         // systems as well as `IngestPlugin`'s, so this `World` folds the session
         // read-model too. It needs one entity to hang those components off.
         let world = Arc::new(RwLock::new(World::new()));
-        let (session, game_event_bus_enabled) = {
-            let mut world_ecs = ecs.write();
+        let (session, game_event_bus_enabled) = lodestone_ecs::hold_write(&ecs, |world_ecs| {
             world_ecs.insert_resource(WorldTime::default());
             // Stage 4 (§4.1(d)): the chunk store is a resource, and it is the
             // *same* store `world_write` hands the adapter — one `Arc`, two
@@ -438,7 +437,7 @@ impl Default for SharedState {
             // sanctioned route (`ChunkWorldWrite`) instead of reaching for the
             // raw lock `world_write` guards.
             world_ecs.insert_resource(ChunkWorldWrite::from_shared(Arc::clone(&world)));
-            let session = lodestone_ecs::spawn_session(&mut world_ecs);
+            let session = lodestone_ecs::spawn_session(world_ecs);
             // Issue #104: `new_ingest_handle()` above never adds
             // `GameEventBusPlugin`, so this is `false` for every
             // `SharedState::default` today — a bot/test that wants the bus
@@ -446,7 +445,7 @@ impl Default for SharedState {
             // follow-up rather than solved here.
             let bus_enabled = world_ecs.contains_resource::<lodestone_ecs::GameEventBus>();
             (session, bus_enabled)
-        };
+        });
         Self {
             inner: Arc::new(RwLock::new(LocalEcho::default())),
             world,
@@ -731,62 +730,63 @@ impl SharedState {
     #[must_use]
     pub(crate) fn player(&self) -> PlayerSnapshot {
         let echo = self.local_echo();
-        let world = self.ecs.read();
-        let vitals = world
-            .get::<Vitals>(self.session)
-            .copied()
-            .unwrap_or_default();
-        let xp = world.get::<Xp>(self.session).and_then(|xp| xp.0);
-        PlayerSnapshot {
-            entity_id: world.get::<ServerEntityId>(self.session).and_then(|id| id.0),
-            position: echo.position,
-            rotation: echo.rotation,
-            on_ground: echo.on_ground,
-            // `Vitals` holds one `Option` per field; the snapshot splits it into a
-            // value plus `health_known`, which is the shape `ClientHandle::health`
-            // and the HUD already read. Unreported reads as zero *and*
-            // `health_known == false`, never as a plausible full bar.
-            health: vitals.health.unwrap_or(0.0),
-            food: vitals.food.unwrap_or(0),
-            saturation: vitals.saturation.unwrap_or(0.0),
-            // Unreported reads as full air, not zero — an un-drowning player,
-            // matching `HudState::default`'s own convention, rather than the
-            // "unknown reads as empty" shape `health`/`food` use (those have a
-            // `_known` bit precisely because zero is a plausible real value;
-            // air has no such ambiguity worth a second field for).
-            air: vitals.air.unwrap_or(lodestone_game::player_state::HudState::MAX_AIR),
-            on_fire: vitals.on_fire.unwrap_or(false),
-            health_known: vitals.health.is_some(),
-            game_mode: world.get::<ServerGameMode>(self.session).and_then(|m| m.0),
-            dimension: world
-                .get::<ServerDimension>(self.session)
-                .and_then(|d| d.0.clone()),
-            dimension_type: world
-                .get::<ServerDimensionType>(self.session)
-                .and_then(|d| d.info.clone()),
-            // Absent component reads as *not* flat, which is also the answer
-            // for every protocol family that does not send the flag — and is
-            // the conservative one: it applies vanilla's ordinary 32-block
-            // void fade rather than suppressing it.
-            world_is_flat: world
-                .get::<ServerDimensionType>(self.session)
-                .is_some_and(|d| d.is_flat),
-            // A refcount bump, not a copy of the table — see
-            // [`ServerBiomeSkyColors`]. Absent component reads as "no biome
-            // registry", which the shell renders as its dimension default.
-            biome_sky_colors: world
-                .get::<ServerBiomeSkyColors>(self.session)
-                .map_or_else(|| Arc::from([] as [Option<u32>; 0]), |c| Arc::clone(&c.0)),
-            // Absent component reads as *alive*, matching `ServerAlive::default`:
-            // a client nobody has told otherwise is not dead.
-            alive: world
-                .get::<ServerAlive>(self.session)
-                .is_none_or(|alive| alive.0),
-            xp_progress: xp.map_or(0.0, |(progress, _, _)| progress),
-            xp_level: xp.map_or(0, |(_, level, _)| level),
-            xp_total: xp.map_or(0, |(_, _, total)| total),
-            xp_known: xp.is_some(),
-        }
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            let vitals = world
+                .get::<Vitals>(self.session)
+                .copied()
+                .unwrap_or_default();
+            let xp = world.get::<Xp>(self.session).and_then(|xp| xp.0);
+            PlayerSnapshot {
+                entity_id: world.get::<ServerEntityId>(self.session).and_then(|id| id.0),
+                position: echo.position,
+                rotation: echo.rotation,
+                on_ground: echo.on_ground,
+                // `Vitals` holds one `Option` per field; the snapshot splits it into a
+                // value plus `health_known`, which is the shape `ClientHandle::health`
+                // and the HUD already read. Unreported reads as zero *and*
+                // `health_known == false`, never as a plausible full bar.
+                health: vitals.health.unwrap_or(0.0),
+                food: vitals.food.unwrap_or(0),
+                saturation: vitals.saturation.unwrap_or(0.0),
+                // Unreported reads as full air, not zero — an un-drowning player,
+                // matching `HudState::default`'s own convention, rather than the
+                // "unknown reads as empty" shape `health`/`food` use (those have a
+                // `_known` bit precisely because zero is a plausible real value;
+                // air has no such ambiguity worth a second field for).
+                air: vitals.air.unwrap_or(lodestone_game::player_state::HudState::MAX_AIR),
+                on_fire: vitals.on_fire.unwrap_or(false),
+                health_known: vitals.health.is_some(),
+                game_mode: world.get::<ServerGameMode>(self.session).and_then(|m| m.0),
+                dimension: world
+                    .get::<ServerDimension>(self.session)
+                    .and_then(|d| d.0.clone()),
+                dimension_type: world
+                    .get::<ServerDimensionType>(self.session)
+                    .and_then(|d| d.info.clone()),
+                // Absent component reads as *not* flat, which is also the answer
+                // for every protocol family that does not send the flag — and is
+                // the conservative one: it applies vanilla's ordinary 32-block
+                // void fade rather than suppressing it.
+                world_is_flat: world
+                    .get::<ServerDimensionType>(self.session)
+                    .is_some_and(|d| d.is_flat),
+                // A refcount bump, not a copy of the table — see
+                // [`ServerBiomeSkyColors`]. Absent component reads as "no biome
+                // registry", which the shell renders as its dimension default.
+                biome_sky_colors: world
+                    .get::<ServerBiomeSkyColors>(self.session)
+                    .map_or_else(|| Arc::from([] as [Option<u32>; 0]), |c| Arc::clone(&c.0)),
+                // Absent component reads as *alive*, matching `ServerAlive::default`:
+                // a client nobody has told otherwise is not dead.
+                alive: world
+                    .get::<ServerAlive>(self.session)
+                    .is_none_or(|alive| alive.0),
+                xp_progress: xp.map_or(0.0, |(progress, _, _)| progress),
+                xp_level: xp.map_or(0, |(_, level, _)| level),
+                xp_total: xp.map_or(0, |(_, _, total)| total),
+                xp_known: xp.is_some(),
+            }
+        })
     }
 
     /// The local player's own attributes, as `update_attributes` last reported
@@ -805,11 +805,12 @@ impl SharedState {
     /// view of it and must not be taught to.
     #[must_use]
     pub(crate) fn local_attributes(&self) -> Vec<EntityAttributeSnapshot> {
-        self.ecs
-            .read()
-            .get::<lodestone_ecs::entity::Attributes>(self.session)
-            .map(|attributes| attributes.0.clone())
-            .unwrap_or_default()
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            world
+                .get::<lodestone_ecs::entity::Attributes>(self.session)
+                .map(|attributes| attributes.0.clone())
+                .unwrap_or_default()
+        })
     }
 
     /// Returns the block-state id at `pos`, or `None` if the containing chunk is
@@ -995,11 +996,12 @@ impl SharedState {
     /// entity count.
     #[must_use]
     pub(crate) fn entity(&self, entity_id: i32) -> Option<EntityView> {
-        let world = self.ecs.read();
-        let entity = world
-            .resource::<lodestone_ecs::entity::EntityIndex>()
-            .get(entity_id)?;
-        entity_view(world.get_entity(entity).ok()?)
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            let entity = world
+                .resource::<lodestone_ecs::entity::EntityIndex>()
+                .get(entity_id)?;
+            entity_view(world.get_entity(entity).ok()?)
+        })
     }
 
     /// Derives all currently tracked entities from their components.
@@ -1019,18 +1021,19 @@ impl SharedState {
     /// time someone adds one of those components for an unrelated reason.
     #[must_use]
     pub(crate) fn entities(&self) -> Vec<EntityView> {
-        let world = self.ecs.read();
-        world
-            .resource::<lodestone_ecs::entity::EntityIndex>()
-            .iter()
-            .filter_map(|(_, entity)| {
-                let entity = world.get_entity(entity).ok()?;
-                if entity.contains::<lodestone_ecs::LocalPlayer>() {
-                    return None;
-                }
-                entity_view(entity)
-            })
-            .collect()
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            world
+                .resource::<lodestone_ecs::entity::EntityIndex>()
+                .iter()
+                .filter_map(|(_, entity)| {
+                    let entity = world.get_entity(entity).ok()?;
+                    if entity.contains::<lodestone_ecs::LocalPlayer>() {
+                        return None;
+                    }
+                    entity_view(entity)
+                })
+                .collect()
+        })
     }
 
     /// Clones out the current player-list entries as the model's flat wire
@@ -1096,11 +1099,12 @@ impl SharedState {
     /// cannot express).
     #[must_use]
     pub(crate) fn tab_list(&self) -> TabList {
-        self.ecs
-            .read()
-            .get::<SessionTabList>(self.session)
-            .map(|list| list.0.clone())
-            .unwrap_or_default()
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            world
+                .get::<SessionTabList>(self.session)
+                .map(|list| list.0.clone())
+                .unwrap_or_default()
+        })
     }
 
     /// One player's announced chat-signing session, if the tab list has
@@ -1113,11 +1117,12 @@ impl SharedState {
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub(crate) fn chat_session_of(&self, id: &uuid::Uuid) -> Option<lodestone_game::tablist::RemoteChatSession> {
-        self.ecs
-            .read()
-            .get::<SessionTabList>(self.session)
-            .and_then(|list| list.0.get(id))
-            .and_then(|entry| entry.chat_session.clone())
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            world
+                .get::<SessionTabList>(self.session)
+                .and_then(|list| list.0.get(id))
+                .and_then(|entry| entry.chat_session.clone())
+        })
     }
 
     /// Returns `(world_age, time_of_day)`, read from the [`WorldTime`]
@@ -1125,9 +1130,10 @@ impl SharedState {
     /// `docs/bevy-migration.md` deleted `Inner.world_age`/`Inner.time_of_day`.
     #[must_use]
     pub(crate) fn time(&self) -> (i64, i64) {
-        let world = self.ecs.read();
-        let time = world.resource::<WorldTime>();
-        (time.age, time.time_of_day)
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            let time = world.resource::<WorldTime>();
+            (time.age, time.time_of_day)
+        })
     }
 
     /// Clones out the current folded scoreboard (objectives, scores, the
@@ -1138,43 +1144,47 @@ impl SharedState {
     /// `lodestone_shell::sim::Sim::scoreboard` are both gone.
     #[must_use]
     pub(crate) fn scoreboard(&self) -> Scoreboard {
-        self.ecs
-            .read()
-            .get::<SessionScoreboard>(self.session)
-            .map(|board| board.0.clone())
-            .unwrap_or_default()
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            world
+                .get::<SessionScoreboard>(self.session)
+                .map(|board| board.0.clone())
+                .unwrap_or_default()
+        })
     }
 
     /// Clones out the current boss bars in server insertion (render) order.
     #[must_use]
     pub(crate) fn boss_bars(&self) -> BossBarSet {
-        self.ecs
-            .read()
-            .get::<SessionBossBars>(self.session)
-            .map(|bars| bars.0.clone())
-            .unwrap_or_default()
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            world
+                .get::<SessionBossBars>(self.session)
+                .map(|bars| bars.0.clone())
+                .unwrap_or_default()
+        })
     }
 
     /// Clones out the player inventory menu (window 0) in menu-slot order.
     #[must_use]
     pub(crate) fn player_menu(&self) -> Menu {
-        self.ecs
-            .read()
-            .get::<SessionMenus>(self.session)
-            .map_or_else(Menu::player, |menus| menus.0.player().clone())
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            world
+                .get::<SessionMenus>(self.session)
+                .map_or_else(Menu::player, |menus| menus.0.player().clone())
+        })
     }
 
     /// Clones out the currently open non-player menu, if one is active.
     #[must_use]
     pub(crate) fn open_menu(&self) -> Option<OpenMenuSnapshot> {
-        let world = self.ecs.read();
-        let menus = &world.get::<SessionMenus>(self.session)?.0;
-        Some(OpenMenuSnapshot {
-            window_id: menus.opened_window_id()?,
-            menu_type: menus.opened_menu_type()?.clone(),
-            title: menus.opened_title()?.clone(),
-            menu: menus.opened()?.clone(),
-            data: menus.opened_data().to_vec(),
+        lodestone_ecs::hold_read(&self.ecs, |world| {
+            let menus = &world.get::<SessionMenus>(self.session)?.0;
+            Some(OpenMenuSnapshot {
+                window_id: menus.opened_window_id()?,
+                menu_type: menus.opened_menu_type()?.clone(),
+                title: menus.opened_title()?.clone(),
+                menu: menus.opened()?.clone(),
+                data: menus.opened_data().to_vec(),
+            })
         })
     }
 
@@ -1188,14 +1198,13 @@ impl SharedState {
     /// that mutation to land. A caller holding only a snapshot cannot predict
     /// a click; it can only ask this state to do it.
     pub(crate) fn menu_click(&self, click: Click, ctx: PlayerCtx) -> ClientAction {
-        let action = {
-            let mut world = self.ecs.write();
+        let action = lodestone_ecs::hold_write(&self.ecs, |world| {
             world
                 .get_mut::<SessionMenus>(self.session)
                 .expect("the session entity always carries SessionMenus")
                 .0
                 .click_action(click, ctx)
-        };
+        });
         // The prediction just changed slot contents/the carried stack the UI
         // reads every frame; wake any `wait_for` waiter the same way every
         // other mutator on this state does, so a bot awaiting an inventory
@@ -1227,15 +1236,14 @@ impl SharedState {
     /// *driver*-owned component (`lodestone_ecs::SelectedSlot`, on the driver's
     /// local-player entity) and this state holds only [`Self::session`].
     pub(crate) fn drop_selected(&self, selected: usize, all: bool) -> bool {
-        let dropped = {
-            let mut world = self.ecs.write();
+        let dropped = lodestone_ecs::hold_write(&self.ecs, |world| {
             world
                 .get_mut::<SessionMenus>(self.session)
                 .expect("the session entity always carries SessionMenus")
                 .0
                 .drop_selected(selected, all)
                 .is_some()
-        };
+        });
         self.wake();
         dropped
     }
