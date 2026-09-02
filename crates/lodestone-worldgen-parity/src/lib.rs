@@ -9,11 +9,12 @@
 //! 1. **A compact, committed fixture format** (`fixtures/*.txt`) holding a
 //!    real vanilla 26.2 JVM's own generated output for a fixed seed and named
 //!    chunk coordinates, at two pipeline points (`postsurface` — after
-//!    `buildSurface`, before carvers; `postcarve` — after `applyCarvers`, the
+//!    vanilla's own surface-building step, before carvers; `postcarve` — after vanilla's own
+//!    carver-application step, the
 //!    full non-structure/non-feature chunk). Produced by
 //!    `scripts/worldgen-oracle/ComposedChunkOracle.java`, which runs vanilla's
-//!    own `fillFromNoise` + `buildSurface` + `applyCarvers` through the REAL
-//!    `MultiNoiseBiomeSource` (the same 7594-row table `BiomeOracle.java`
+//!    own noise-fill, surface-building and carver-application steps through the REAL
+//!    multi-noise biome source (the same 7594-row table `BiomeOracle.java`
 //!    dumps) — not a biome pinned to a constant, so the biome driving surface
 //!    materials and carver selection is whatever vanilla actually assigns.
 //! 2. **A diff engine** ([`diff_field`]) that compares one of those fixtures
@@ -109,11 +110,11 @@ pub struct ChunkFixture {
     /// [`lodestone_worldgen::overworld::OverworldGenerator::biome_stage`]'s
     /// convention (`crates/lodestone-worldgen/src/overworld.rs`).
     pub biome_quarts: [(String, i32); 16],
-    /// Post-`buildSurface`, pre-carve: the stage the currently-composed Rust
+    /// Post-surface-build, pre-carve: the stage the currently-composed Rust
     /// pipeline (shape + fluid-approx + biome + surface) should be compared
     /// against.
     pub postsurface: BlockField,
-    /// Post-`applyCarvers`: the full non-feature/non-structure vanilla
+    /// Post-carver-application: the full non-feature/non-structure vanilla
     /// chunk — the honest "how far are we" target once #295 lands.
     pub postcarve: BlockField,
     /// Post ore-only decoration of the CENTRE chunk (`ComposedChunkOracle
@@ -132,7 +133,7 @@ pub struct ChunkFixture {
 /// `meta.done cx,cz` terminating each) into a list of [`ChunkFixture`]s.
 /// Tolerant of interleaved JVM log lines (`[main/WARN] ...`) — anything not
 /// matching a known `key value...` line is skipped, not an error, since
-/// `Bootstrap.bootStrap()` logs a couple of harmless warnings to stdout.
+/// vanilla's own registry-bootstrap step logs a couple of harmless warnings to stdout.
 ///
 /// # Panics
 /// Panics on a malformed *matched* line (wrong token count, unparseable

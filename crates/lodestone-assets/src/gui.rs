@@ -389,7 +389,7 @@ fn corner(
 ///
 /// This function reproduces that split explicitly: `bl`/`br`/`bt`/`bb`/`cw`/
 /// `ch` (declared units, clamped to half the target exactly like vanilla's own
-/// `Math.min(border.left(), width / 2)`) drive every **destination** rect and
+/// min of the left border and half the width) drive every **destination** rect and
 /// the **tile step** of a tiled edge/center, unchanged from before this fix.
 /// Every **source** rect is the same declared-space quantity multiplied by
 /// `sprite_w / nw` (or `sprite_h / nh`) — vanilla's fraction, applied up

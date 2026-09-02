@@ -1937,14 +1937,16 @@ pub enum ClientEvent {
     /// meaning is decided entirely by the entity type, and which each type reads in
     /// its own recreate-from-packet override. Vanilla's own falling-block
     /// entity's is
-    /// `this.blockState = Block.stateById(packet.getData())`. Lowering it as a
+    /// to resolve the packet's Object Data field to a block state by its global
+    /// state id and store it. Lowering it as a
     /// per-type event rather than as an opaque integer on the shared spawn event
     /// keeps the *interpretation* in the adapter that has the version's state table,
     /// which is the same reason [`EntityMetadataUpdated`](Self::EntityMetadataUpdated)
     /// carries resolved fields rather than raw indices.
     ///
     /// **This is the only channel by which the state travels.**
-    /// `FallingBlockEntity.defineSynchedData` registers `DATA_START_POS` and nothing
+    /// Vanilla's own falling-block synced-data registration registers only its
+    /// start-position field and nothing
     /// else, so the block state is never in a `SET_ENTITY_DATA` packet. A consumer
     /// that ignores this draws every falling block as whatever state id `0` happens
     /// to be, with nothing logged anywhere.
@@ -1955,7 +1957,7 @@ pub enum ClientEvent {
         /// Entity id.
         entity_id: i32,
         /// The global block-state id the entity is imitating, as
-        /// `Block.getId(BlockState)` numbers them for this protocol version.
+        /// vanilla's own block-state-to-id registry numbers them for this protocol version.
         block_state_id: u32,
     },
     /// A projectile's **owner** entity id, from its spawn packet's

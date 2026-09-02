@@ -725,8 +725,8 @@ mod tests {
         // "always round up to a byte" guess would give, and not the 6 a
         // floor-only formula (log2 without ceiling) would give.
         assert_eq!(litematica_bits_for(94), 7);
-        // Small palettes floor at 2, matching `LitematicaBitArray`'s own
-        // `Math.max(2, ...)` — never 0 or 1 even for a 1- or 2-entry palette.
+        // Small palettes floor at 2, matching the Litematica format's own
+        // bit-array sizing, which clamps to a floor of 2 — never 0 or 1 even for a 1- or 2-entry palette.
         assert_eq!(litematica_bits_for(1), 2);
         assert_eq!(litematica_bits_for(2), 2);
         assert_eq!(litematica_bits_for(3), 2);

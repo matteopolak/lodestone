@@ -17,15 +17,16 @@ fn sig(bytes: &[u8]) -> MessageSignature {
 
 // ---------------------------------------------------------------------------
 // Checksum goldens (independently computed; see module doc).
-// MessageSignature::checksum == Java Arrays.hashCode(byte[]); the folded byte ==
+// MessageSignature::checksum == the standard byte-array hash (fold each byte
+// as acc = 31*acc + byte, starting from 1); the folded byte ==
 // vanilla's own last-seen-messages checksum step, with 0 remapped to 1.
 // ---------------------------------------------------------------------------
 
 #[test]
-fn signature_checksum_matches_java_arrays_hashcode() {
-    // Arrays.hashCode([5]) = 31*1 + 5 = 36.
+fn signature_checksum_matches_the_standard_byte_array_hash() {
+    // hash([5]) = 31*1 + 5 = 36.
     assert_eq!(sig(&[5]).checksum(), 36);
-    // Arrays.hashCode([1,2]) = 31*(31*1+1)+2 = 31*32+2 = 994.
+    // hash([1,2]) = 31*(31*1+1)+2 = 31*32+2 = 994.
     assert_eq!(sig(&[1, 2]).checksum(), 994);
     // Sign extension: byte 200 is -56 in Java. 31*1 + (-56) = -25.
     assert_eq!(sig(&[200]).checksum(), -25);
@@ -33,7 +34,7 @@ fn signature_checksum_matches_java_arrays_hashcode() {
 
 #[test]
 fn last_seen_checksum_goldens() {
-    // computeChecksum begins at 1; an empty list stays 1.
+    // The checksum fold begins at 1; an empty list stays 1.
     assert_eq!(tracker_checksum(&[]), 1);
     // [5]: 31*1 + 36 = 67.
     assert_eq!(tracker_checksum(&[&[5]]), 67);
