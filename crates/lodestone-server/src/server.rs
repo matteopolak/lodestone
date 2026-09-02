@@ -3732,9 +3732,8 @@ where
                 .await?;
 
                 // Full clock sync at join, mirroring vanilla's
-                // `ServerClockManager::createFullSyncPacket`, sent by
-                // `PlayerList.sendLevelInfo` before chunk streaming starts
-                // (`PlayerList.java:648-651`).
+                // own clock-manager's own "create full sync packet" step, sent by
+                // its own "send level info" step before chunk streaming starts.
                 //
                 // Issue #323: the **world's** clock, not `(0, 0)`. A join no longer
                 // resets the sky to dawn, and a world loaded off disk starts wherever
@@ -3801,8 +3800,8 @@ where
                 // Now only the innermost [`JOIN_PRESTREAM_RADIUS`] rings go out
                 // here; the rest becomes a `JoinChunkStream` that `serve_play`
                 // drains from a `select!` branch beside its socket read. Vanilla's
-                // shape: `PlayerList.placeNewPlayer` adds the player to the level
-                // and `PlayerChunkSender` feeds chunks over subsequent ticks — the
+                // shape: its own "place new player" step adds the player to the level
+                // and its own player-chunk-sender feeds chunks over subsequent ticks — the
                 // client holds its own loading screen until it has what it needs,
                 // but the server is not blocked.
                 // **The join centre, and it has to be derived here rather than
@@ -4072,8 +4071,8 @@ where
                 // store for this connection, created at the Play handoff and
                 // carried into `serve_play` so the per-packet flush and the
                 // `REQUEST_STATS` reply can reach it. The first packet is sent
-                // here, at join, exactly where vanilla's
-                // `PlayerAdvancements.flushDirty` first-packet path fires:
+                // here, at join, exactly where vanilla's own per-player
+                // advancements tracker's own "flush dirty" first-packet path fires:
                 // `reset` true, the whole builtin tree as `added`, and every
                 // advancement's (currently empty) progress — the client builds
                 // its screen from this one packet and nothing after it until a
@@ -4084,8 +4083,8 @@ where
                 let mut advancements = AdvancementManager::builtin();
                 let initial = advancements.initial_update(player_uuid, true);
                 apply(conn, &mut state, proto.encode_update_advancements(&initial)).await?;
-                // Issue #547: the recipe book, `replace: true` — vanilla's
-                // `ServerPlayer.initMenu`/`RecipeBookMenu` join path sends the
+                // Issue #547: the recipe book, `replace: true` — vanilla's own
+                // per-player "init menu"/recipe-book-menu join path sends the
                 // whole book once. **This is what hands out `RecipeDisplayId`s**,
                 // so without it `PLACE_RECIPE` is not merely unimplemented but
                 // unreachable: the id a client echoes back is a position in this
@@ -4251,7 +4250,7 @@ where
 }
 
 /// The neighbour cell one step off `pos` in `face`'s direction — vanilla's
-/// `BlockPos.relative(Direction)`, used below to find the placement cell when
+/// own generic block-position "relative" helper, used below to find the placement cell when
 /// the directly clicked block cannot be replaced.
 fn relative(pos: BlockPos, face: BlockFace) -> BlockPos {
     let (dx, dy, dz) = match face {
@@ -4298,10 +4297,11 @@ struct OpenContainer {
     /// on [`PlayerInventory::table_crafting`].
     shape: MenuKind,
     container_size: usize,
-    /// Vanilla's `AbstractContainerMenu.stateId`, wrapping at `32767`
-    /// (`AbstractContainerMenu::incrementStateId`). Bumped by every content/
+    /// Vanilla's own generic container-menu state-id field, wrapping at `32767`
+    /// (its own "increment state id" helper). Bumped by every content/
     /// slot send (this struct's own [`next_state_id`](Self::next_state_id)),
-    /// never by a `container_set_data` send — vanilla's `broadcastChanges`
+    /// never by a `container_set_data` send — vanilla's own "broadcast
+    /// changes" step
     /// does not touch `stateId` for a data-only change either. This crate
     /// does not validate a click's echoed value against it (see
     /// `docs/server-inventory.md`'s existing scope note for window `0`,
