@@ -87,7 +87,7 @@ fn attribute_ranges_cross_check_vendor() {
     let list = data.as_array().expect("array of attributes");
 
     // minecraft-data lags the latest snapshot. Known, source-verified drift
-    // where the decompiled 26.2 `Attributes.java` disagrees with vendor 1.21.5:
+    // where the decompiled 26.2 source disagrees with vendor 1.21.5:
     //   knockback_resistance: 26.2 widened min to -2.0; vendor still says 0.0.
     // We exclude these so the detector stays live for *unexpected* drift.
     let known_vendor_lag = ["minecraft:knockback_resistance"];

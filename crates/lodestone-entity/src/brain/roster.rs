@@ -81,8 +81,8 @@ use super::Brain;
 pub const SCAFFOLD_STROLL_SPEED: f32 = 1.0;
 
 /// How far the scaffold's look behaviour will track a player, in blocks. Vanilla's
-/// brain mobs use `8.0F` for the generic `SetEntityLookTarget` player row, the
-/// same figure the goal system's `LookAtPlayerGoal(Player.class, 8.0F)` uses.
+/// brain mobs use `8.0F` for the generic look-target behaviour's player row, the
+/// same figure the goal system's own look-at-player goal uses.
 pub const SCAFFOLD_LOOK_DISTANCE: f32 = 8.0;
 
 /// The resource-key **paths** of every concrete 26.2 mob that runs on a
@@ -460,8 +460,8 @@ const ALLAY_DELIVER_CLOSE_ENOUGH: i32 = 2;
 /// **False.** `crate::redstone_note_block`'s own module doc made exactly
 /// this claim about `RandomTickEvent` (a redstone-specific carrier), and it
 /// was accurate about *that one type* — but a general "post a world event,
-/// let any listener resolve it" seam already existed for the warden (issue
-/// #459's vibration substrate, `MobSim::post_vibration`/`nearest_listenable`),
+/// let any listener resolve it" seam already existed for the warden (the
+/// vibration substrate, `MobSim::post_vibration`/`nearest_listenable`),
 /// built independently of the redstone engine and with no note-block
 /// producer wired to it. The capability was real; nothing had called it for
 /// this event. See `crate::redstone_note_block`'s own updated module doc for
@@ -1442,7 +1442,7 @@ mod tests {
         }
     }
 
-    /// Issue #459 step 3's pursuit half, driven through `brain_for("warden")`
+    /// The warden's pursuit half, driven through `brain_for("warden")`
     /// — the exact production path — rather than constructing
     /// [`warden_brain`]/[`WalkToPoi`] by hand. A warden with a live
     /// [`BrainMob::angry_target`](super::super::mob::BrainMob::angry_target)
@@ -1576,7 +1576,7 @@ mod tests {
         }
     }
 
-    /// Issue #230's remaining sniffer gap, driven through
+    /// The sniffer's dig-target gap, driven through
     /// `brain_for("sniffer")` — the exact production path — rather than
     /// constructing [`sniffer_brain`]/[`WalkToPoi`] by hand. A sniffer with a
     /// live [`BrainMob::sniffer_dig_target`](super::super::mob::BrainMob::sniffer_dig_target)

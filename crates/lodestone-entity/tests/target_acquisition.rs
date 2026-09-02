@@ -196,8 +196,8 @@ fn an_unprovoked_zombie_closes_on_a_player_it_was_never_told_about() {
 
     let Some((t, gap_at_acquire)) = r.acquired_at else {
         panic!(
-            "the zombie never acquired the player in {ticks} ticks. This is #455 \
-             itself: find_nearest_target must read the perception feed, not the \
+            "the zombie never acquired the player in {ticks} ticks: \
+             find_nearest_target must read the perception feed, not the \
              attack target the calling goal writes"
         )
     };
@@ -355,8 +355,8 @@ fn a_pursued_player_is_tracked_while_in_range_and_released_when_it_leaves() {
         mob.attack_target(),
         Some(moved),
         "the creeper is still holding the position the player left; vanilla's \
-         target is a live entity reference (TargetGoal.java:70 re-writes it \
-         every tick)"
+         own target-goal base class re-writes it \
+         every tick from a live entity reference"
     );
 
     // Now the player leaves follow range entirely.

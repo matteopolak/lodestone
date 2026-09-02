@@ -135,15 +135,15 @@ pub trait BrainMob {
     }
 
     /// The position of whatever this mob holds a persistent grudge against —
-    /// the Brain-system read of [`MobController::angry_target`], issue
-    /// #458's shared anger primitive. Defaults to `None` so every existing
+    /// the Brain-system read of [`MobController::angry_target`], the
+    /// shared anger primitive. Defaults to `None` so every existing
     /// implementor (including hermetic test doubles) keeps compiling; only
     /// [`NavigatingMob`](crate::ai::NavigatingMob) overrides it, delegating
     /// to the identical field [`MobController::angry_target`] reads — one
     /// primitive, two seams onto it, matching
     /// [`last_hurt_by`](Self::last_hurt_by)'s own shape. A warden's own
-    /// anger tracking (`SimMob::warden_anger`/`warden_anger_target`, issue
-    /// #459) is a *separate* host-side mechanism from this field — the host
+    /// anger tracking (`SimMob::warden_anger`/`warden_anger_target`)
+    /// is a *separate* host-side mechanism from this field — the host
     /// resolves the warden's tracked target id to a live position and feeds
     /// it through the same [`MobController::set_angry_target`] setter every
     /// goal-driven neutral species already uses, so this is one field with
