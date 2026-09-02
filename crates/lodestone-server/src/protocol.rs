@@ -1053,7 +1053,7 @@ pub enum ServerBound {
     RecipePlaced {
         /// The window the recipe should be laid into.
         window_id: i32,
-        /// `RecipeDisplayId.index`.
+        /// Vanilla's own recipe-display-id index.
         recipe_index: i32,
         /// `useMaxItems` — shift-clicking the recipe, which fills as many rounds as
         /// the inventory allows.
@@ -1090,7 +1090,7 @@ pub enum ServerBound {
     ///
     /// `using_secondary_action` is the packet's trailing boolean (the shift
     /// modifier), carried rather than dropped because vanilla's own
-    /// `mobInteract` chain consults it — `AbstractHorse.mobInteract`'s
+    /// `mobInteract` chain consults it — vanilla's own abstract-horse mob-interact routine's
     /// `isTamed() && player.isSecondaryUseActive()` opens the inventory instead
     /// of mounting. Nothing reads it yet; it is on the wire and dropping it
     /// would have to be undone.
@@ -1133,7 +1133,7 @@ pub enum ServerBound {
     ///
     /// Vanilla's bow fires from here, not from the `USE_ITEM` that started the
     /// draw, and the arrow's power comes from how long the two were apart —
-    /// `BowItem.getPowerForTime`. That interval is counted in **server ticks**, so
+    /// vanilla's own bow-item power-for-time routine. That interval is counted in **server ticks**, so
     /// the consumer reads `MobSim::tick_count` rather than a wall clock: this crate
     /// links into a wasm32 bundle where `Instant::now()` compiles and then panics
     /// at runtime with no log line.
@@ -1142,7 +1142,7 @@ pub enum ServerBound {
     /// `SWAP_ITEM_WITH_OFFHAND` ordinal, `6`) — see `crate::server`'s own
     /// `ServerBound::SwapItemInHand` dispatch arm for the consumer.
     ///
-    /// `ServerGamePacketListenerImpl.handlePlayerAction`'s `SWAP_ITEM_WITH_OFFHAND`
+    /// Vanilla's own player-action handler's `SWAP_ITEM_WITH_OFFHAND`
     /// arm swaps `getItemInHand(MAIN_HAND)` with `getItemInHand(OFF_HAND)` and calls
     /// `stopUsingItem()`; the stop-using half is not modelled here (this crate has
     /// no in-progress "using item" state to cancel — see [`ReleaseUseItem`](Self::ReleaseUseItem)'s
@@ -1157,8 +1157,8 @@ pub enum ServerBound {
     /// (`ServerboundMoveVehiclePacket`), once per tick while mounted.
     ///
     /// **This is not a request — it is authoritative.**
-    /// `Entity.isClientAuthoritative()` delegates to the controlling passenger and
-    /// `Player.isClientAuthoritative()` returns `true`, so the server's own
+    /// Vanilla's own base-entity is-client-authoritative check delegates to the controlling passenger and
+    /// its own player-level is-client-authoritative check returns `true`, so the server's own
     /// `travelRidden` takes the `setDeltaMovement(Vec3.ZERO)` branch and its only
     /// job is to accept this and relay it. A server that also simulated the boat
     /// would fight the player.
@@ -1203,8 +1203,8 @@ pub enum ServerBound {
         /// The uuid of the entity to teleport to.
         uuid: Uuid,
     },
-    /// The client swung its arm (`ServerboundSwingPacket`). Vanilla's
-    /// `LivingEntity.swing` (called from `handleAnimate`) broadcasts a
+    /// The client swung its arm (`ServerboundSwingPacket`). Vanilla's own
+    /// entity swing routine (called from `handleAnimate`) broadcasts a
     /// `ClientboundAnimatePacket` to every player *tracking* the swinger —
     /// **not** back to the swinger itself, which already plays the animation
     /// locally the instant it sends this packet.
