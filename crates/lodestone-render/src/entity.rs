@@ -348,12 +348,12 @@ fn canonical_model_name(type_path: &str) -> Option<&'static str> {
 /// **This is the one alias family the corpus cannot answer for itself.** The
 /// registry has twenty types — nine wood species × (boat, chest boat), plus
 /// `bamboo_raft` and `bamboo_chest_raft` (`lodestone_data::entity_types`, and
-/// `lodestone_data::entity_census`'s per-type Java class column, which names them
-/// `Boat`/`ChestBoat`/`Raft`/`ChestRaft`) — while the corpus carries exactly four
-/// rigs, one per *class*, because that is how vanilla builds them: the species is
-/// a texture, not geometry (`BoatRenderer` takes its `ModelLayerLocation` from the
-/// boat's `getVariant()` and its model from `BoatModel`/`ChestBoatModel`/
-/// `RaftModel`/`ChestRaftModel`). With no alias, `model_for_type("oak_boat")`
+/// `lodestone_data::entity_census`'s per-type renderer-class column, which
+/// groups them into four renderer classes) — while the corpus carries exactly
+/// four rigs, one per *class*, because that is how vanilla builds them: the
+/// species is a texture, not geometry (vanilla's own boat renderer takes its
+/// model-layer location from the boat's own variant and its model from one of
+/// four boat/raft model classes). With no alias, `model_for_type("oak_boat")`
 /// returned `None` and the renderer skipped the entity entirely — a placed boat
 /// was invisible.
 ///
@@ -571,7 +571,7 @@ pub fn renderer_is_avatar(type_path: &str) -> bool {
 // aggressive, `-PI/2.25`). That was a second island — the field existed on
 // `AnimInput` and every shell call site passed `false`.
 
-/// Which [`HandPoseOverride`] a model's `translateToHand` needs, keyed by the
+/// Which [`HandPoseOverride`] a model's own hand-translate step needs, keyed by the
 /// same [`entity_models`] name [`humanoid_arms_for`] reads. The five corpus
 /// models with an override; see [`HandPoseOverride`] and
 /// `held_item_matrix`'s doc comment for the source table this was read from.
@@ -867,7 +867,7 @@ pub struct EntityMesh {
     pub local_min: Vec3,
     /// Local-space AABB maximum (model frame, blocks), at rest.
     pub local_max: Vec3,
-    /// This model's `translateToHand` override, if vanilla's subclass departs
+    /// This model's own hand-translate override, if vanilla's subclass departs
     /// from the base humanoid model's. See [`HandPoseOverride`] and
     /// [`hand_pose_override_for`]; consumed by [`EntityInstance::new`] to fill
     /// [`EntityInstance::hand_transforms`].
@@ -1213,7 +1213,7 @@ pub fn non_living_vehicle_matrix(
 }
 
 /// The extra pitch, in degrees, a projectile rig needs on top of the entity's
-/// own `xRot` — or `None` for a model that is **not** placed by
+/// own pitch — or `None` for a model that is **not** placed by
 /// [`projectile_model_matrix`].
 ///
 /// This is the one switch that decides which of the two placements a corpus
@@ -1229,7 +1229,7 @@ pub fn non_living_vehicle_matrix(
 ///   tippable and spectral arrow variants). Pitch about the Z axis with
 ///   **no** offset: the arrow model's shaft already lies along `+X`.
 /// * `trident` — the thrown-trident renderer applies a Z-axis rotation of
-///   `xRot + 90`. The trident model's pole lies along `Y` with the spikes at
+///   `pitch + 90`. The trident model's pole lies along `Y` with the spikes at
 ///   negative `Y`; the `+90°` is exactly what rotates that axis onto the
 ///   arrow's `+X`, so one matrix serves both rigs and the whole difference
 ///   between them is this number.
@@ -1243,7 +1243,7 @@ pub fn projectile_pitch_offset_deg(model_name: &str) -> Option<f32> {
         "arrow" | "spectral_arrow" => Some(0.0),
         "trident" => Some(90.0),
         // A llama spit's renderer is this placement term for term —
-        // `Ry(yRot - 90°)` then `Rz(xRot)`, no flip and no feet lift — so it
+        // `Ry(yaw - 90°)` then `Rz(pitch)`, no flip and no feet lift — so it
         // belongs here rather than on the mob path, with no offset for the same
         // reason as the arrow: its cluster is authored around the shot axis.
         //
@@ -1263,8 +1263,8 @@ pub fn projectile_pitch_offset_deg(model_name: &str) -> Option<f32> {
 ///
 /// ```text
 ///   translate(pos)                       // move to the entity's position
-///   rotateY(yRot - 90°)                  // face travel direction
-///   rotateZ(xRot + pitch_offset)         // pitch about Z, not X
+///   rotateY(yaw - 90°)                   // face travel direction
+///   rotateZ(pitch + pitch_offset)        // pitch about Z, not X
 /// ```
 ///
 /// # Why this is not [`entity_model_matrix`] with a pitch bolted on
@@ -1289,20 +1289,20 @@ pub fn projectile_pitch_offset_deg(model_name: &str) -> Option<f32> {
 ///
 /// # Rotations, and why the axis matters
 ///
-/// `pos` is the entity's world position, `yaw_deg` its `yRot` and `pitch_deg` its
-/// `xRot` — both as the server reports them, both derived by vanilla from
-/// `atan2` on the projectile's own velocity when it is shot, which is *not*
+/// `pos` is the entity's world position, `yaw_deg` its own yaw and `pitch_deg` its
+/// own pitch — both as the server reports them, both derived by vanilla from
+/// its own `atan2` on the projectile's own velocity when it is shot, which is *not*
 /// the yaw convention a mob's body uses: vanilla's shoot step sets
-/// `yRot = atan2(mx, mz)`, so a projectile fired by a player looking at yaw
-/// `Y` carries `yRot = -Y`. `Ry(yRot - 90°)` maps model
+/// `yaw = atan2(mx, mz)`, so a projectile fired by a player looking at yaw
+/// `Y` carries `yaw = -Y`. `Ry(yaw - 90°)` maps model
 /// `+X` to `(sin yRot, 0, cos yRot)`, which is exactly that motion direction —
 /// the two conventions agree only because both halves are taken from vanilla
 /// together.
 ///
 /// Both signs are the **opposite** of a player's, so they were measured against
 /// Mojang's own 26.2 server over RCON rather than only read: `+X` motion gives
-/// `yRot = +90` (a player facing `-X` has yaw `+90`), and *rising* motion gives a
-/// **positive** `xRot` (a player looking up has a *negative* pitch). Nine
+/// `yaw = +90` (a player facing `-X` has yaw `+90`), and *rising* motion gives a
+/// **positive** pitch (a player looking up has a *negative* pitch). Nine
 /// direction cases, nine exact matches — see `docs/projectile-renderers.md`,
 /// which also records why the first run of that probe read zero for all nine.
 ///
@@ -1331,7 +1331,7 @@ pub struct EntityInstance {
     /// `transform * part_matrix`. Drawing part `p`'s index range instanced over
     /// `part_transforms[p]` is what makes a limb swing.
     pub part_transforms: Vec<Mat4>,
-    /// The `entity → world` `translateToHand` matrix for `[Arm::Right,
+    /// The `entity → world` hand-translate matrix for `[Arm::Right,
     /// Arm::Left]`, honoring this model's [`HandPoseOverride`] — `None` for an
     /// arm the model doesn't have.
     ///
@@ -1339,7 +1339,7 @@ pub struct EntityInstance {
     /// `skeleton.index_of(arm.part_name())` when placing a held item.** For
     /// [`HandPoseOverride::Structural`] the two are numerically identical, but
     /// for the five corpus models with a real override they are not, and
-    /// cannot be made to be: the override is scoped to `translateToHand`
+    /// cannot be made to be: the override is scoped to the hand-translate step
     /// alone, while `part_transforms[arm]` is shared with the whole-body
     /// instanced draw and also places the arm's own visible mesh. See
     /// [`HandPoseOverride`]'s doc comment for why folding the override into
@@ -1546,7 +1546,7 @@ impl EntityInstance {
         }
     }
 
-    /// The `entity → world` `translateToHand` matrix for `arm`, honoring this
+    /// The `entity → world` hand-translate matrix for `arm`, honoring this
     /// model's [`HandPoseOverride`]. `None` only if the model has no such arm
     /// at all. See [`Self::hand_transforms`]'s doc for why this is not the
     /// same value as `part_transforms[skeleton.index_of(arm.part_name())]` for
@@ -1725,8 +1725,8 @@ impl EntityModelSet {
     /// direction of that offset, which is not the one it looks like.
     ///
     /// `yaw_deg`/`pitch_deg` are the entity's own reported rotation. For a
-    /// projectile those are vanilla's velocity-derived `yRot`/`xRot`
-    /// (recomputed from `atan2` on the projectile's own velocity every tick,
+    /// projectile those are vanilla's velocity-derived yaw/pitch
+    /// (recomputed from its own `atan2` on the projectile's own velocity every tick,
     /// and the server broadcasts the result), *not* a body yaw and a head
     /// pitch — the two use different conventions and
     /// [`projectile_model_matrix`] documents the one it expects.
@@ -1994,9 +1994,10 @@ pub fn plan_entities(instances: &[EntityInstance], frustum: &Frustum) -> EntityF
 //
 // Vanilla does this too, and does it by a route we cannot copy: the armour
 // model is an instance of the wearer's own model *class*
-// (`AbstractZombieRenderer` builds an `ArmorModelSet<M extends ZombieModel>`),
-// and `submitModel` calls `setupAnim` on it with the wearer's render state. A
-// zombie's chestplate therefore reaches out in front with `animateZombieArms`,
+// (vanilla's own zombie renderer builds an armour-model-set generic over the
+// zombie model type), and its own submit step calls the wearer's own
+// animation-setup on it with the wearer's render state. A zombie's chestplate
+// therefore reaches out in front with the wearer's own zombie-arm animation,
 // because the chestplate ran the same animator.
 //
 // Here there is one animator per *mesh*, so the faithful equivalent is to skip
@@ -2350,7 +2351,7 @@ impl SheepWoolModelSet {
 }
 
 // ---------------------------------------------------------------------------
-// The player's cape (`PlayerCapeModel`/`CapeLayer`)
+// The player's cape
 // ---------------------------------------------------------------------------
 //
 // Structurally the same "second, independently-baked mesh posed off the
@@ -2724,11 +2725,11 @@ pub const fn elytra_wing_y(crouching: bool) -> f32 {
 ///
 /// # The right wing
 ///
-/// Vanilla's per-frame animation step gives it `yRot = -left.yRot` and
-/// `zRot = -left.zRot`, and
-/// leaves `xRot` and `y` shared. Two of three negated, and it is the two that
+/// Vanilla's per-frame animation step gives it `rot_y = -left.rot_y` and
+/// `rot_z = -left.rot_z`, and
+/// leaves `rot_x` and `y` shared. Two of three negated, and it is the two that
 /// are *not* negated that make a "just mirror everything" version wrong: a
-/// mirrored `xRot` pitches one wing up and the other down.
+/// mirrored `rot_x` pitches one wing up and the other down.
 #[must_use]
 pub fn elytra_wing_transform(
     wing: ElytraWing,
@@ -3062,7 +3063,7 @@ pub fn rendered_amount(count: u32) -> u32 {
 /// plus its damage value, which we cannot observe. So this hashes `(entity_id, copy)` for
 /// the same *property* — no two drops and no two copies scatter in lockstep —
 /// rather than chasing bytes we have no way to reproduce. `copy == 0` is exactly
-/// zero, matching vanilla's unperturbed first `submit`.
+/// zero, matching vanilla's unperturbed first submit call.
 ///
 /// `extent` is the half-range on each axis: `0.15` for a solid model (all three
 /// axes), `0.075` for a flat sprite (x and y only, hence the zero `z` the caller
@@ -3101,7 +3102,7 @@ pub fn item_hover_lift(quads: &[BakedQuad], ground: &DisplayTransform) -> f32 {
 /// ```
 ///
 /// `position` is the item entity's reported world position, `age_ticks` its
-/// continuous age (`ageInTicks`, fractional between server ticks), `bob_offset`
+/// continuous age (vanilla's own fractional age, between server ticks), `bob_offset`
 /// its per-entity phase ([`item_bob_offset`]) and `hover_lift`
 /// [`item_hover_lift`] for the same quads and transform.
 ///
@@ -3355,9 +3356,9 @@ pub(crate) fn mesh_item_quads_with_light(
 // the 26.2 client's thrown-item renderer, whose whole submit step is
 //
 // ```text
-// poseStack.scale(scale, scale, scale);
-// poseStack.mulPose(camera.orientation);
-// state.item.submit(...)                  // resolved in the ground display context
+// scale(scale, scale, scale)
+// mulPose(camera.orientation)
+// submit(...)                              // resolved in the ground display context
 // ```
 //
 // with the entity's position already on the pose stack by the dispatcher. The
@@ -3418,7 +3419,7 @@ pub struct ThrownItem {
 ///
 ///   The note this replaced said the orientation "needs a velocity the draw
 ///   record does not carry". That was the wrong conclusion from a true premise:
-///   vanilla derives `yRot`/`xRot` from `atan2` on velocity, but it does so on
+///   vanilla derives its own yaw/pitch from `atan2` on velocity, but it does so on
 ///   the *server* too (in its projectile-shoot and arrow-tick logic) and then
 ///   broadcasts the result as ordinary entity rotation. The draw record's
 ///   existing `yaw`/`pitch` **are** those velocity-derived angles, so no velocity
@@ -3493,7 +3494,7 @@ pub fn thrown_item_for(type_path: &str) -> Option<ThrownItem> {
 ///
 /// Every hand-written form of this was wrong on the first try, in a different way
 /// each time, because three conventions stack: vanilla's own quaternion is
-/// `rotationYXZ(π - yRot, -xRot, 0)` (note the `π -`, which exists because MC's
+/// `rotationYXZ(π - yaw, -pitch, 0)` (note the `π -`, which exists because MC's
 /// camera space is rotated 180° from its world space), `glam`'s right-handed view
 /// looks down **-Z**, and [`Camera::forward`](crate::Camera::forward) is
 /// Minecraft's convention (`yaw 0` faces `+Z`). Taking the view matrix and
@@ -3529,7 +3530,7 @@ pub fn camera_orientation(view_matrix: Mat4) -> Mat4 {
 ///
 /// `orientation` is [`camera_orientation`]`(camera.view_matrix())` and `ground`
 /// the item's own [`ground_transform`] — the `GROUND` display context
-/// `extractRenderState` resolves the item in.
+/// vanilla's own render-state extraction resolves the item in.
 ///
 /// **No bob, no spin, no hover lift.** Those three are vanilla's dropped-item renderer's and
 /// are the tempting thing to reuse from [`dropped_item_matrix`]; a bobbing,
@@ -3556,7 +3557,7 @@ pub fn thrown_item_matrix(
 ///
 /// `light` is the packed sky/block sample at the projectile, or
 /// [`GUI_ITEM_LIGHT`](crate::GUI_ITEM_LIGHT) when [`ThrownItem::full_bright`] is
-/// set — vanilla's `getBlockLightLevel` override returns `15` for the fireballs
+/// set — vanilla's own block-light-level override returns `15` for the fireballs
 /// and the eye of ender, which is what makes a fireball readable against a dark
 /// Nether ceiling.
 #[must_use]
@@ -3592,7 +3593,7 @@ pub fn thrown_item_mesh(
 // which is the point: a chest and a pickaxe must bob, spin and hang on identical
 // arcs. See `docs/held-block-entity-items.md`.
 
-/// Vanilla's `minOffsetY` for a **rig** rather than a quad list: the lift that
+/// Vanilla's own minimum-Y offset for a **rig** rather than a quad list: the lift that
 /// puts the posed rig's lowest point [`ITEM_MIN_HOVER_HEIGHT`] above the drop's
 /// own position.
 ///
@@ -3640,7 +3641,7 @@ const ITEM_FRAME_CONTENT_LIFT: f32 = 0.4375;
 /// wall behind it.
 const ITEM_FRAME_INVISIBLE_CONTENT_LIFT: f32 = 0.5;
 
-/// `poseStack.scale(0.5F, 0.5F, 0.5F)` in vanilla's item-frame renderer submit function's item
+/// `scale(0.5F, 0.5F, 0.5F)` in vanilla's item-frame renderer submit function's item
 /// branch — the one number here a reader is likely to assume is `1.0` from the
 /// framed *map* path. A map is drawn a full block across by its own separate
 /// branch, and copying that would draw a chest twice the size of the frame
@@ -3652,25 +3653,25 @@ const FRAMED_ITEM_SCALE: f32 = 0.5;
 /// item branch.
 const FRAMED_ITEM_ROTATION_STEP_DEG: f32 = 45.0;
 
-/// The frame's own rotation: `Rx(xRot) · Ry(yRot)` exactly as
+/// The frame's own rotation: `Rx(pitch) · Ry(yaw)` exactly as
 /// vanilla's item-frame renderer submit function pushes it, re-expressed in the `(yaw, pitch)` the
 /// wire actually carries.
 ///
 /// # Why `180 - yaw`, and why the pitch passes through unchanged
 ///
 /// The renderer derives its two angles from the frame's facing direction, which is not
-/// on the wire; vanilla's frame direction-setter derives the entity's own `yRot`/`xRot`
+/// on the wire; vanilla's frame direction-setter derives the entity's own yaw/pitch
 /// from that same direction, and those *are*. Composing the two derivations
 /// eliminates it:
 ///
 /// | direction | renderer | entity |
 /// |---|---|---|
-/// | horizontal | `xRot = 0`, `yRot = 180 - dir.toYRot()` | `xRot = 0`, `yRot = dir.get2DDataValue() * 90` |
-/// | vertical | `xRot = -90 * step`, `yRot = 180` | `xRot = -90 * step`, `yRot = 0` |
+/// | horizontal | `pitch = 0`, `yaw = 180 - dir_yaw` | `pitch = 0`, `yaw = dir.2d_index() * 90` |
+/// | vertical | `pitch = -90 * step`, `yaw = 180` | `pitch = -90 * step`, `yaw = 0` |
 ///
-/// Vanilla's direction-to-yaw conversion **is** `get2DDataValue() * 90`, so the horizontal row is
-/// `yRot_render = 180 - yRot_entity`; and the vertical row's `yRot_entity` is `0`,
-/// so `180 - yRot_entity` is `180` there too. One expression covers both, and the
+/// Vanilla's direction-to-yaw conversion **is** `dir.2d_index() * 90`, so the horizontal row is
+/// `yaw_render = 180 - yaw_entity`; and the vertical row's `yaw_entity` is `0`,
+/// so `180 - yaw_entity` is `180` there too. One expression covers both, and the
 /// pitch is the entity's own in either case.
 ///
 /// The `180 -` is the half of this that a reader will want to drop, because
@@ -3699,7 +3700,7 @@ pub fn item_frame_facing_step(yaw_deg: f32, pitch_deg: f32) -> Vec3 {
 
 /// The frame's own space: origin at the **centre of its attachment block**, `+z`
 /// into the wall behind it, in the `(packet_anchor, yaw, pitch)` terms the shell
-/// has for a `HangingEntity`.
+/// has for vanilla's own hanging-entity base class.
 ///
 /// ```text
 /// T(floor(packet_anchor) + (0.5, 0.5, 0.5)) · Rx(pitch) · Ry(180 - yaw)
@@ -3707,8 +3708,8 @@ pub fn item_frame_facing_step(yaw_deg: f32, pitch_deg: f32) -> Vec3 {
 ///
 /// Everything vanilla's item-frame renderer submit function draws is posed relative to this: the
 /// body at `T(-0.5, -0.5, -0.5)` (block models are corner-origin), the contents
-/// at `T(0, 0, 0.4375)`. Vanilla's item-frame spawn-packet builder sends `getPos()` — the
-/// integer attachment `BlockPos` — rather than the entity centre created by
+/// at `T(0, 0, 0.4375)`. Vanilla's item-frame spawn-packet builder sends its own
+/// position accessor — the integer attachment `BlockPos` — rather than the entity centre created by
 /// its bounding-box recalculation. The dispatcher offset and the renderer's matching
 /// negative offset cancel, then the renderer's `direction * .46875` cancels the
 /// entity-centre displacement, leaving exactly this block centre.
@@ -3754,8 +3755,8 @@ pub fn item_frame_culling_aabb(
 /// The world placement for the frame **body** — the wooden border and back
 /// plate — as a transform over block-local `0.0..=1.0` model quads.
 ///
-/// Vanilla's item-frame renderer submit function's `pushPose(); translate(-0.5, -0.5, -0.5);
-/// frameModel.submitWithZOffset(...)`. The `-0.5`s are the block model's
+/// Vanilla's item-frame renderer submit function's push-pose, translate(-0.5, -0.5, -0.5),
+/// then submit-with-Z-offset. The `-0.5`s are the block model's
 /// corner-origin convention, not a centring fudge — the same pair
 /// `falling_block_pose` applies for the same reason.
 #[must_use]
@@ -4000,9 +4001,9 @@ pub fn experience_orb_mesh(icon: u32) -> (Vec<ModelVertex>, Vec<u32>) {
 /// order rather than as a vanished quad.
 #[must_use]
 pub fn experience_orb_matrix(feet: Vec3, orientation: Mat4) -> Mat4 {
-    /// `poseStack.scale(0.3F, 0.3F, 0.3F)`.
+    /// `scale(0.3F, 0.3F, 0.3F)`.
     const ORB_SCALE: f32 = 0.3;
-    /// `poseStack.translate(0.0F, 0.1F, 0.0F)`.
+    /// `translate(0.0F, 0.1F, 0.0F)`.
     const ORB_LIFT: f32 = 0.1;
     Mat4::from_translation(feet + Vec3::new(0.0, ORB_LIFT, 0.0))
         * orientation
@@ -4068,10 +4069,10 @@ pub fn experience_orb_light(packed: u8) -> u8 {
 // separate (`held_item_matrix` vs `first_person_arm_pose`) because vanilla's are:
 // one hangs off the third-person part hierarchy, the other replaces it entirely.
 
-/// Which arm of a humanoid rig something is attached to — vanilla's
-/// `HumanoidArm`.
+/// Which arm of a humanoid rig something is attached to — vanilla's own
+/// arm enum.
 ///
-/// A mob's `getMainArm()` is `RIGHT` for every `Mob` (only a `Player` can be
+/// A mob's own main-arm accessor is `RIGHT` for every mob (only a `Player` can be
 /// left-handed), so the wire's `MainHand` maps to [`Arm::Right`] and `OffHand`
 /// to [`Arm::Left`]. That mapping belongs to the caller, not here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -4110,7 +4111,7 @@ impl Arm {
         matches!(self, Arm::Left)
     }
 
-    /// Vanilla's `invert`/`isLeftHand ? -1 : 1` sign, used for every mirrored
+    /// Vanilla's own left-hand sign (`isLeftHand ? -1 : 1`), used for every mirrored
     /// term in both chains below.
     #[must_use]
     pub const fn invert(self) -> f32 {
@@ -4133,14 +4134,14 @@ impl Arm {
 }
 
 /// Vanilla's held-item hand-layer submit function's adult hand offset, in model texels
-/// (`offsetX`, `offsetY`, `offsetZ`). `x` is mirrored by [`Arm::invert`].
+/// (offset_x, offset_y, offset_z). `x` is mirrored by [`Arm::invert`].
 ///
 /// Read from 26.2's decompiled source, where the three
 /// values are `1.0F`, `2.0F` and `-10.0F` and the translate is
 /// `((isLeftHand ? -1 : 1) * offsetX / 16, offsetY / 16, offsetZ / 16)`.
 pub const HELD_ITEM_OFFSET_TEXELS: [f32; 3] = [1.0, 2.0, -10.0];
 
-/// The same offsets for a **baby** (`useBabyOffset`): `0.0`, `1.0`, `-4.5`.
+/// The same offsets for a **baby** (vanilla's own baby-offset flag): `0.0`, `1.0`, `-4.5`.
 ///
 /// Vanilla's predicate is `state.isBaby && state.entityType != ARMOR_STAND`; an
 /// armour stand is never a baby in the shell's data, so the caller's
@@ -4175,7 +4176,7 @@ pub fn hand_transform(
 ///                      · display_matrix_for_hand(thirdperson_?hand, is_left)
 /// ```
 ///
-/// `arm_transform` is vanilla's `translateToHand(arm)` result, an
+/// `arm_transform` is vanilla's own hand-translate result, an
 /// **entity→world** matrix: [`EntityInstance::hand_transform`]`(arm)` — *not*
 /// `part_transforms[skeleton.index_of(arm.part_name())]`, which is the same
 /// value only for the models with no override (see the table below and
@@ -4287,12 +4288,12 @@ pub fn held_item_mesh(
     mesh_item_quads_with_light(quads, pose, gui_light, light)
 }
 
-/// The arm's forced `zRot` in vanilla's first-person hand render function, in **radians**
-/// (`model.rightArm.zRot = 0.1F`, `model.leftArm.zRot = -0.1F`). Mirrored by
+/// The arm's forced roll in vanilla's first-person hand render function, in **radians**
+/// (right arm `rot_z = 0.1F`, left arm `rot_z = -0.1F`). Mirrored by
 /// [`Arm::invert`].
 pub const FIRST_PERSON_ARM_Z_ROT: f32 = 0.1;
 
-/// Vanilla's first-person player-arm render function's `inverseArmHeight` coefficient on `y`
+/// Vanilla's first-person player-arm render function's equip-height coefficient on `y`
 /// (`ARM_HEIGHT_SCALE = -0.6F`).
 ///
 /// Numerically equal to [`FIRST_PERSON_ITEM_EQUIP_DIP`], and deliberately a
@@ -4304,8 +4305,8 @@ pub const FIRST_PERSON_ARM_EQUIP_DIP: f32 = -0.6;
 /// Vertical FOV the first-person arm is projected with, in degrees.
 ///
 /// **Not the player's FOV.** Vanilla's level-render function sets a *separate*
-/// projection for the hand — `hudProjection.setupPerspective(0.05F, 100.0F,
-/// cameraState.hudFov, w, h)` — and vanilla's hud-fov calculation is a hard-coded
+/// projection for the hand — its own hud projection's perspective setup with
+/// `(0.05F, 100.0F, cameraState.hud_fov, w, h)` — and vanilla's hud-fov calculation is a hard-coded
 /// `70.0F` passed through its death/fluid FOV modifier. So the arm keeps a
 /// constant apparent size while the world FOV changes (sprinting, the FOV
 /// slider), which is exactly the behaviour players expect and would be lost by
@@ -4319,15 +4320,16 @@ pub const HAND_NEAR: f32 = 0.05;
 /// render-distance-derived far plane).
 pub const HAND_FAR: f32 = 100.0;
 
-/// The projection the first-person arm is drawn with: vanilla's `hudProjection`.
+/// The projection the first-person arm is drawn with: vanilla's own hud projection.
 ///
 /// This is the **whole** transform for the hand pass. Vanilla's held-item-in-hand
 /// render function
-/// does `poseStack.mulPose(modelViewMatrix.invert())` while pushing
-/// `modelViewStack.mul(modelViewMatrix)`, and the shader multiplies
-/// `Proj · ModelViewStack · PoseStack` — so the view rotation cancels exactly and
-/// the arm pose is already in **camera space**. `modelViewMatrix` there is
-/// `cameraState.viewRotationMatrix`, rotation-only, which is why nothing has to
+/// does a pose-stack multiply by the inverse of its own model-view matrix while
+/// pushing that model-view matrix onto a separate stack, and the shader
+/// multiplies `Proj · ModelViewStack · PoseStack` — so the view rotation
+/// cancels exactly and
+/// the arm pose is already in **camera space**. That model-view matrix there is
+/// the camera state's own view-rotation matrix, rotation-only, which is why nothing has to
 /// undo a camera translation either.
 ///
 /// A view matrix is orthonormal-plus-translation, so `det(view) = +1` and
@@ -4364,7 +4366,7 @@ pub fn hand_projection(aspect: f32) -> Mat4 {
 /// builds, driven by
 /// `attack_anim`.
 ///
-/// `attack_anim` is vanilla's `attackValue` — its player attack-swing progress accessor,
+/// `attack_anim` is vanilla's own attack-swing progress accessor,
 /// i.e. swing progress in `0.0..=1.0`, interpolated from the **tick** clock
 /// (`lodestone_entity::pose::EntityPose::attack_anim_lerp`). `0.0` is a fully
 /// rested arm and reproduces this function's behaviour before the swing existed,
@@ -4374,12 +4376,12 @@ pub fn hand_projection(aspect: f32) -> Mat4 {
 /// it silently animates something else.
 ///
 /// ```text
-/// s  = sqrt(a)                     -- `Mth.sqrt(attackValue)`
+/// s  = sqrt(a)                     -- vanilla's own float sqrt
 /// xs = -0.3 · sin(s·π)
 /// ys =  0.4 · sin(s·2π)
 /// zs = -0.4 · sin(a·π)
-/// yr =  sin(s·π)                   -- `ySwingRotation`
-/// zr =  sin(a²·π)                  -- `zSwingRotation`
+/// yr =  sin(s·π)                   -- the y-swing rotation term
+/// zr =  sin(a²·π)                  -- the z-swing rotation term
 ///
 /// T(i·(xs + 0.64000005), ys - 0.6, zs - 0.71999997)
 ///   · Ry(i·45°) · Ry(i·yr·70°) · Rz(i·zr·-20°)
@@ -4391,23 +4393,24 @@ pub fn hand_projection(aspect: f32) -> Mat4 {
 /// # The `sqrt` is the shape of the animation, not a detail
 ///
 /// Three of the five terms are driven by `sqrt(a)` and one by `a²`, and only
-/// `zSwingPosition` is linear in `a`. `sin(sqrt(a)·π)` rises far faster than
+/// the z-swing position term is linear in `a`. `sin(sqrt(a)·π)` rises far faster than
 /// `sin(a·π)` and decays slowly — the arm snaps out and eases back, which is what
 /// a swing *reads* as. Substituting a linear ramp gives a symmetric, sluggish
 /// pendulum that is visibly not Minecraft, so this is transcribed term by term
 /// from vanilla's first-person player-arm render function's decompiled source
 /// rather than eyeballed.
 ///
-/// Note `ySwingPosition` uses `2π`, not `π`: over one swing the arm's vertical
+/// Note the y-swing position term uses `2π`, not `π`: over one swing the arm's vertical
 /// offset goes up, back through zero, and down again, rather than making a single
 /// hump like `x` and `z`.
 ///
 /// The dropped terms and why:
 ///
-/// * Vanilla's hands-with-items submit function prefixes `Rx((viewXRot - xBob) · 0.1°)` and
-///   `Ry((viewYRot - yBob) · 0.1°)`, and its held-item-in-hand render function prefixes `bobHurt` and
-///   `bobView`. All four need state the shell does not have (`xBob`/`yBob`, hurt
-///   time, walk distance); all four are the identity when standing still.
+/// * Vanilla's hands-with-items submit function prefixes `Rx((view_pitch - x_bob) · 0.1°)` and
+///   `Ry((view_yaw - y_bob) · 0.1°)`, and its held-item-in-hand render function prefixes its own
+///   hurt-bob and view-bob terms. All four need state the shell does not have
+///   (`x_bob`/`y_bob`, hurt time, walk distance); all four are the identity
+///   when standing still.
 /// * Vanilla's item-arm attack-transform function — the *item*-in-hand swing (`45° + yr·-20°`,
 ///   `zr'·-20°`, `xzr·-80°`) — is a **different** chain for the case where the
 ///   main hand is not empty and vanilla draws the item instead of the arm. It is
@@ -4427,11 +4430,11 @@ pub fn first_person_arm_chain(arm: Arm, attack_anim: f32) -> Mat4 {
     first_person_arm_chain_with_equip(arm, attack_anim, 0.0)
 }
 
-/// [`first_person_arm_chain`] with vanilla's `inverseArmHeight` — the equip/swap
+/// [`first_person_arm_chain`] with vanilla's own equip-height term — the equip/swap
 /// dip (issue #366).
 ///
 /// Vanilla's first-person player-arm render function translates `y` by
-/// `ySwingPosition + -0.6F + inverseArmHeight * -0.6F`, so the dip coefficient is
+/// `y_swing_position + -0.6F + inverse_arm_height * -0.6F`, so the dip coefficient is
 /// [`FIRST_PERSON_ARM_EQUIP_DIP`] and it is **the same `-0.6`** the item chain uses
 /// ([`FIRST_PERSON_ITEM_EQUIP_DIP`]) even though the two chains' *base* offsets
 /// differ (`-0.6` here against the item's `-0.52`). Two constants rather than one
@@ -4473,7 +4476,7 @@ pub fn first_person_arm_chain_with_equip(
         * Mat4::from_translation(Vec3::new(i * 5.6, 0.0, 0.0))
 }
 
-/// The five scalars vanilla's first-person player-arm render function derives from `attackValue`, split out from
+/// The five scalars vanilla's first-person player-arm render function derives from `attack_value`, split out from
 /// [`first_person_arm_chain`] so the *shaping* can be asserted against
 /// hand-evaluated vanilla values on its own. Buried inside the matrix product,
 /// swapping a `sqrt(a)` for an `a` is invisible: the matrix still moves, still has
@@ -4482,15 +4485,15 @@ pub fn first_person_arm_chain_with_equip(
 /// Every field is `0.0` at `attack_anim == 0.0`, which is what makes the swing
 /// purely additive on top of the rest chain.
 struct ArmSwingTerms {
-    /// `xSwingPosition`, pre-`invert`: `-0.3 · sin(sqrt(a)·π)`.
+    /// The x-swing position term, pre-`invert`: `-0.3 · sin(sqrt(a)·π)`.
     x_position: f32,
-    /// `ySwingPosition`: `0.4 · sin(sqrt(a)·2π)` — note the `2π`.
+    /// The y-swing position term: `0.4 · sin(sqrt(a)·2π)` — note the `2π`.
     y_position: f32,
-    /// `zSwingPosition`: `-0.4 · sin(a·π)`, the one linear-in-`a` term.
+    /// The z-swing position term: `-0.4 · sin(a·π)`, the one linear-in-`a` term.
     z_position: f32,
-    /// `ySwingRotation`: `sin(sqrt(a)·π)`, scaled by `70°` at the call site.
+    /// The y-swing rotation term: `sin(sqrt(a)·π)`, scaled by `70°` at the call site.
     y_rotation: f32,
-    /// `zSwingRotation`: `sin(a²·π)`, scaled by `-20°` at the call site.
+    /// The z-swing rotation term: `sin(a²·π)`, scaled by `-20°` at the call site.
     z_rotation: f32,
 }
 
@@ -4519,8 +4522,8 @@ impl ArmSwingTerms {
 /// first_person_arm_chain(arm, attack_anim) · rest_pose()[arm] · Rz(±0.1)
 /// ```
 ///
-/// Vanilla's first-person hand-render function calls `arm.resetPose()` and then forces
-/// `zRot = ±0.1F`, so the arm part itself is drawn from its **authored rest pose**
+/// Vanilla's first-person hand-render function calls its own arm reset-pose and then forces
+/// `rot_z = ±0.1F`, so the arm part itself is drawn from its **authored rest pose**
 /// with one rotation replaced — never from the third-person pose-setup result.
 /// That is why this is a separate function from [`EntityInstance::part_transforms`]
 /// and must stay one: the third-person player body needs the animated chain
@@ -4548,7 +4551,7 @@ pub fn first_person_arm_pose(mesh: &EntityMesh, arm: Arm, attack_anim: f32) -> O
     first_person_arm_pose_with_equip(mesh, arm, attack_anim, 0.0)
 }
 
-/// [`first_person_arm_pose`] with vanilla's `inverseArmHeight` equip dip — see
+/// [`first_person_arm_pose`] with vanilla's own equip-height dip — see
 /// [`first_person_arm_chain_with_equip`] (issue #366).
 #[must_use]
 pub fn first_person_arm_pose_with_equip(
@@ -4590,15 +4593,15 @@ pub fn first_person_arm_parts(mesh: &EntityMesh, arm: Arm) -> Vec<usize> {
 //
 // Vanilla draws the arm **or** the item, never both: its held-item hand-layer
 // submit function branches
-// on `itemStack.isEmpty()` and calls the arm-render function only in the empty case.
+// on whether the item stack is empty and calls the arm-render function only in the empty case.
 // So this is not a layer on top of `first_person_arm_chain` — it is the *other*
 // branch, with its own translation and its own swing shaping, and folding one into
 // the other produces a plausible-looking wrong pose. The two share only the
-// `attackValue` scalar.
+// attack-animation scalar.
 
 /// Vanilla's item-arm transform function's translation, in blocks
 /// (`invert * 0.56F`, `-0.52F`, `-0.72F`). `x` is mirrored by [`Arm::invert`] and
-/// `y` additionally takes `inverseArmHeight * -0.6F`.
+/// `y` additionally takes `inverse_arm_height * -0.6F`.
 ///
 /// Note these are **not** [`first_person_arm_chain`]'s `0.64000005 / -0.6 /
 /// -0.71999997`. The two chains are 0.08 blocks apart in `x`, which is small
@@ -4606,21 +4609,21 @@ pub fn first_person_arm_parts(mesh: &EntityMesh, arm: Arm) -> Vec<usize> {
 /// an item held in view and one clipping the frame edge.
 pub const FIRST_PERSON_ITEM_OFFSET: [f32; 3] = [0.56, -0.52, -0.72];
 
-/// Vanilla's item-arm transform function's `inverseArmHeight` coefficient on `y` (`-0.6F`).
+/// Vanilla's item-arm transform function's equip-height coefficient on `y` (`-0.6F`).
 pub const FIRST_PERSON_ITEM_EQUIP_DIP: f32 = -0.6;
 
-/// The three scalars vanilla's item swing-arm function derives from `attackValue`.
+/// The three scalars vanilla's item swing-arm function derives from `attack_value`.
 ///
 /// **Different coefficients from [`ArmSwingTerms`]** (`-0.4 / 0.2 / -0.2` against
 /// the arm's `-0.3 / 0.4 / -0.4`) and no rotation terms of its own — the rotation
 /// comes from [`first_person_item_attack_chain`]. Kept as its own type so the two
 /// cannot be swapped by autocomplete.
 struct ItemSwingTerms {
-    /// `xSwingPosition`, pre-`invert`: `-0.4 · sin(sqrt(a)·π)`.
+    /// The x-swing position term, pre-`invert`: `-0.4 · sin(sqrt(a)·π)`.
     x_position: f32,
-    /// `ySwingPosition`: `0.2 · sin(sqrt(a)·2π)` — the `2π`, as in the arm chain.
+    /// The y-swing position term: `0.2 · sin(sqrt(a)·2π)` — the `2π`, as in the arm chain.
     y_position: f32,
-    /// `zSwingPosition`: `-0.2 · sin(a·π)`.
+    /// The z-swing position term: `-0.2 · sin(a·π)`.
     z_position: f32,
 }
 
@@ -4671,14 +4674,14 @@ pub fn first_person_item_attack_chain(arm: Arm, attack_anim: f32) -> Mat4 {
 ///   · T(i·xs, ys, zs) · applyItemArmAttackTransform(arm, a)   -- swingArm
 /// ```
 ///
-/// `inverse_arm_height` is vanilla's `inverseArmHeight` — the equip/swap dip,
+/// `inverse_arm_height` is vanilla's own equip-height term — the equip/swap dip,
 /// `swapAnimationScale(item) · (1 - lerp(oHeight, height))`. Pass `0.0` for a
 /// fully-equipped hand; the shell tracks neither height, the same gap
 /// [`first_person_arm_chain`] documents.
 ///
-/// # The three swing animation types, and why `WHACK` is the one modelled
+/// # The three swing animation types, and why the melee one is the one modelled
 ///
-/// 26.2 branches on `itemStack.getSwingAnimation().type()`: the melee ("whack")
+/// 26.2 branches on the item stack's own swing-animation type: the melee ("whack")
 /// case runs
 /// vanilla's item swing-arm function, the stab case runs vanilla's first-person
 /// spear-attack animation, and the "none" case runs
@@ -4729,7 +4732,7 @@ pub fn first_person_item_matrix(
         * display_matrix_for_hand(transform, arm.is_left())
 }
 
-/// Vanilla's first-person eat-transform function's `Math.pow(scaledUsageTime, 27.0)`.
+/// Vanilla's first-person eat-transform function's `Math.pow(scaled_usage_time, 27.0)`.
 ///
 /// The exponent is the whole character of the animation and the one number a
 /// "reasonable" simplification destroys. `1 - t` (a linear approach) and `1 - t^27`
@@ -4740,21 +4743,23 @@ pub fn first_person_item_matrix(
 /// there within about two ticks and then bobs.
 pub const EAT_JIGGLE_EXPONENT: f64 = 27.0;
 
-/// Vanilla's first-person eat-transform function's `scaledUsageTime < 0.8F` gate on the vertical bob.
+/// Vanilla's first-person eat-transform function's `scaled_usage_time < 0.8F` gate on the vertical bob.
 ///
 /// **This is a bound on *remaining* time, so it opens *late*, not early.**
-/// `scaledUsageTime` is `currUsageTime / useDuration` where `currUsageTime` counts
+/// `scaled_usage_time` is `curr_usage_time / use_duration` where `curr_usage_time` counts
 /// **down**, so the bob is suppressed for the first 20% of a use and runs for the
 /// last 80% of it. Reading the comparison as "only near the start" — the natural
 /// reading of `< 0.8` — inverts the animation and is invisible in a still frame.
 pub const EAT_BOB_SCALED_LIMIT: f32 = 0.8;
 
-/// Vanilla's first-person eat-transform function's `currUsageTime`:
-/// `player.getUseItemRemainingTicks() - frameInterp + 1.0F`.
+/// Vanilla's first-person eat-transform function's `curr_usage_time`:
+/// vanilla's own remaining-use-ticks accessor minus the frame interpolation
+/// fraction, plus `1.0F`.
 ///
-/// Named rather than inlined because the `+ 1.0` and the sign of `frameInterp` are
-/// both easy to lose and neither is checkable from a screenshot: the result is a
-/// bob one tick out of phase. Note it can exceed `useDuration` on the first tick of
+/// Named rather than inlined because the `+ 1.0` and the sign of the frame
+/// interpolation fraction are both easy to lose and neither is checkable from
+/// a screenshot: the result is a bob one tick out of phase. Note it can
+/// exceed `use_duration` on the first tick of
 /// a use (`remaining == duration` gives `duration + 1`), which makes
 /// `scaledUsageTime > 1` and the jiggle **negative** for that instant. That is
 /// vanilla, not a clamp we forgot — the item flicks away from the mouth before
@@ -4765,7 +4770,7 @@ pub fn eat_usage_time(remaining_ticks: u32, partial_tick: f32) -> f32 {
 }
 
 /// Vanilla's first-person eat-transform function, transcribed: it computes a
-/// remaining-use fraction (`currUsageTime / useDuration`), applies a small
+/// remaining-use fraction (`curr_usage_time / use_duration`), applies a small
 /// vertical bob while that fraction is below 0.8 (an absolute cosine of the
 /// time, scaled), then derives a "jiggle" fraction as `1 - fraction^27`. The
 /// jiggle drives a translate (sideways by arm, down, and — the z term is
@@ -4774,16 +4779,16 @@ pub fn eat_usage_time(remaining_ticks: u32, partial_tick: f32) -> f32 {
 ///
 /// # Vanilla has no third-person counterpart
 ///
-/// This is the *entire* eating animation. Vanilla's own humanoid arm-pose enum has no `EAT` or
-/// `DRINK` variant and its arm-pose selection logic omits both from its chain, so
+/// This is the *entire* eating animation. Vanilla's own humanoid arm-pose enum has no EAT or
+/// DRINK variant and its arm-pose selection logic omits both from its chain, so
 /// another player eating is drawn with the ordinary [`ArmPose::Item`](crate::ArmPose::Item)
 /// raise plus crumbs. The dip, the twist and the bob exist only here.
 ///
-/// # `EAT` and `DRINK` are the same transform
+/// # EAT and DRINK are the same transform
 ///
 /// They are one `switch` case in vanilla's held-item hand-layer submit function, so a potion and a carrot move
 /// identically in the hand. The two animations differ only in duration (via the
-/// item's `consumeSeconds`), sound, and whether particles are emitted at all.
+/// item's own consume-seconds property), sound, and whether particles are emitted at all.
 ///
 /// # The `z` term is `eatJiggle * 0.0F`
 ///
@@ -4795,7 +4800,7 @@ pub fn first_person_eat_transform(arm: Arm, curr_usage_time: f32, use_duration: 
     let i = arm.invert();
     let scaled = curr_usage_time / use_duration.max(1) as f32;
     let bob = if scaled < EAT_BOB_SCALED_LIMIT {
-        // `Mth.abs(Mth.cos(currUsageTime / 4.0F * PI) * 0.1F)` — a 8-tick period,
+        // vanilla's own abs(cos(curr_usage_time / 4.0F * PI) * 0.1F) — an 8-tick period,
         // and the absolute value is what makes it a *bounce* rather than a
         // sinusoid: it never goes below the resting height.
         let height = ((curr_usage_time / 4.0 * std::f32::consts::PI).cos() * 0.1).abs();
@@ -4818,21 +4823,22 @@ pub fn first_person_eat_transform(arm: Arm, curr_usage_time: f32, use_duration: 
 /// [`first_person_item_chain`] for as long as the use lasts.
 ///
 /// ```text
-/// applyEatTransform(arm, currUsageTime, useDuration)
-///   · T(i·0.56, -0.52 + h·-0.6, -0.72)      -- applyItemArmTransform
+/// the eat-transform (arm, curr_usage_time, use_duration)
+///   · T(i·0.56, -0.52 + h·-0.6, -0.72)      -- the item-arm transform step
 /// ```
 ///
 /// # Two differences from [`first_person_item_chain`], both from the same `switch`
 ///
 /// * **Vanilla's item-arm transform function comes *last*, not first.** The
-///   eat/drink use-animation states have `hasCustomArmTransform() == true`, so
+///   eat/drink use-animation states have their own custom-arm-transform flag
+///   set to true, so
 ///   the held-item hand-layer submit function skips the
 ///   pre-switch item-arm transform step and the case applies it *after*
 ///   the eat-transform step. Putting the offset first instead — the order every other
 ///   pose here uses — rotates the item about the camera rather than about the hand,
 ///   which swings it across the whole screen.
 /// * **There is no swing.** The `player.isUsingItem()` branch never reaches
-///   `swingArm`, so [`ItemSwingTerms`] and [`first_person_item_attack_chain`] do not
+///   vanilla's own swing-arm step, so [`ItemSwingTerms`] and [`first_person_item_attack_chain`] do not
 ///   apply. Left-clicking while eating must not move the item.
 #[must_use]
 pub fn first_person_eat_chain(
@@ -4911,8 +4917,8 @@ pub fn first_person_bow_power(held_ticks: f32) -> f32 {
 ///
 /// Vanilla's held-item hand-layer submit function applies the item-arm
 /// transform step **before** entering the
-/// use-animation switch for every animation whose `hasCustomArmTransform()` is
-/// false, and the bow state's is false — only eat, drink and spear opt out, and the
+/// use-animation switch for every animation whose own custom-arm-transform
+/// flag is false, and the bow state's is false — only eat, drink and spear opt out, and the
 /// first two then re-apply it themselves *after* their own transform (which is
 /// why [`first_person_eat_chain`] composes it last and this one composes it
 /// first). Starting the chain at the BOW-specific translation therefore drops
@@ -4920,16 +4926,17 @@ pub fn first_person_bow_power(held_ticks: f32) -> f32 {
 /// the instant the use begins rather than being drawn in the wrong place, which
 /// is what makes the omission read as a use-state bug.
 ///
-/// `inverse_arm_height` is vanilla's `inverseArmHeight`, the same equip/swap dip
+/// `inverse_arm_height` is vanilla's own equip-height term, the same equip/swap dip
 /// [`first_person_item_chain`] takes; a charging bow still dips while swapping.
 ///
 /// # The shake follows the rotations
 ///
-/// Vanilla's `poseStack.translate(0, shake · 0.004, 0)` sits *after* the three
-/// `mulPose` calls, so it displaces the bow along the **rotated** local Y, not
-/// along camera-space Y. Folding it into the leading translation's `y` — the
-/// arithmetically tempting simplification, since it is the only non-zero
-/// component — tilts the wobble into the wrong plane. `Mth.sin` rather than
+/// Vanilla's own pose-stack translate by `(0, shake · 0.004, 0)` sits *after*
+/// the three rotation multiplies, so it displaces the bow along the
+/// **rotated** local Y, not along camera-space Y. Folding it into the
+/// leading translation's `y` — the arithmetically tempting simplification,
+/// since it is the only non-zero component — tilts the wobble into the wrong
+/// plane. Vanilla's own sine LUT rather than
 /// `f32::sin`: vanilla's is a quantized lookup table and this repo's ported
 /// trigonometry goes through `lodestone_physics::mth` for that reason.
 #[must_use]
@@ -5119,7 +5126,7 @@ mod tests {
     /// **The mask must sit exactly where the boat itself is drawn, not merely
     /// somewhere plausible.** Vanilla's base boat renderer submit function calls
     /// its type-additions submit step (the water-patch submit) *inside* the same
-    /// `pushPose`/`popPose` block as the main model, after the identical
+    /// push/pop pose block as the main model, after the identical
     /// bob/rotate/flip/spin sequence — so the two must share one placement
     /// transform, not two similar ones. Both hypotheses are checked: the
     /// right one (`"boat_water_patch"` joins `non_living_vehicle_placement`'s
@@ -5324,7 +5331,7 @@ mod tests {
         assert_eq!(armour_layers(ArmourSlot::Head, "diamond_helmet").len(), 1);
         assert_eq!(armour_layers(ArmourSlot::Head, "turtle_helmet").len(), 1);
         // A helmet forced into the boots slot draws nothing, as
-        // `shouldRender`'s slot equality demands.
+        // vanilla's own should-render slot-equality check demands.
         assert!(armour_layers(ArmourSlot::Feet, "diamond_helmet").is_empty());
         // Not armour at all.
         assert!(armour_layers(ArmourSlot::Head, "carved_pumpkin").is_empty());
@@ -5364,9 +5371,9 @@ mod tests {
         // unmistakable.
         let dye = Some(0x0000_FFFF_u32);
         assert_eq!(armour_layer_tint_with_dye(&leather[0], dye), [0x00, 0xFF, 0xFF]);
-        // The overlay has no `dyeable` block: vanilla's per-layer colour function
+        // The overlay has no dyeable block: vanilla's per-layer colour function
         // never reads
-        // `dyeColor` for it.
+        // its dye-colour field for it.
         assert_eq!(armour_layer_tint_with_dye(&leather[1], dye), [255, 255, 255]);
     }
 
@@ -5404,7 +5411,7 @@ mod tests {
     }
 
     /// A non-dyeable layer ignores `dyed_color` even when one is present —
-    /// vanilla's per-layer colour function's `else` branch never reads `dyeColor` at all, so
+    /// vanilla's per-layer colour function's `else` branch never reads its dye-colour field at all, so
     /// a diamond helmet dyed (nonsensically) any colour still draws white.
     #[test]
     fn non_dyeable_layers_ignore_a_present_dye() {
@@ -5523,8 +5530,8 @@ mod tests {
     /// the plain `minecart`), so a chest/furnace/tnt/hopper minecart streamed
     /// correctly and drew nothing — `resolve_animated` silently skips any
     /// `type_path` with no baked model. All four now share the plain cart's
-    /// `"minecart"` rig, matching vanilla's `AbstractMinecartRenderer` reusing
-    /// one `MinecartModel` for every subclass.
+    /// `"minecart"` rig, matching vanilla's own abstract minecart renderer reusing
+    /// one minecart model class for every subclass.
     ///
     /// All six subclasses, including `spawner_minecart` and
     /// `command_block_minecart`. Those two used to be a negative control here,
@@ -6404,8 +6411,8 @@ mod tests {
                 "yaw {yaw}: expected {expected}, got {got}"
             );
         }
-        // Vanilla's down direction has `getAxisDirection().getStep() == -1`, so its
-        // `xRot` is `+90` — a pitch-90 frame faces down.
+        // Vanilla's down direction has its own axis-direction step == -1, so its
+        // pitch is `+90` — a pitch-90 frame faces down.
         assert!(
             (item_frame_facing_step(0.0, 90.0) - Vec3::new(0.0, -1.0, 0.0)).length() < 1.0e-5,
             "pitch 90 must face DOWN, got {}",
@@ -6710,7 +6717,7 @@ mod tests {
     ///
     /// Vanilla's wolf-variant registration function (26.2 decompile), which is both halves of
     /// the answer and neither is guessable from the other: it builds the wild sheet
-    /// as `"entity/wolf/" + fileName`, and it registers `fileName` against a
+    /// as `"entity/wolf/" + file_name`, and it registers that file name against a
     /// **registry key** — `register(context, ASHEN, "wolf_ashen", …)`, with
     /// `ASHEN = createKey("ashen")`. So the wire's `minecraft:ashen` holder maps to
     /// the stem `wolf_ashen`, and `PALE` maps to the bare `wolf` rather than to
@@ -7549,8 +7556,8 @@ mod tests {
             "expected 375.0 degrees at (37, 0.5), got {deg}"
         );
         // Two continuous samples one tick apart must differ by exactly
-        // VAULT_SPIN_DEGREES_PER_TICK, matching `updateDisplayItemSpin`'s
-        // constant per-tick step.
+        // VAULT_SPIN_DEGREES_PER_TICK, matching vanilla's own display-item spin
+        // update's constant per-tick step.
         let a = vault_spin_degrees(100, 0.25);
         let b = vault_spin_degrees(101, 0.25);
         assert!(
@@ -7925,8 +7932,8 @@ mod tests {
 
     #[test]
     fn the_first_person_arm_lands_in_the_bottom_right_of_frame() {
-        // Hand-computed from `renderPlayerArm`'s chain with attack = 0 and
-        // inverseArmHeight = 0, in camera space (x right, y up, -z forward):
+        // Hand-computed from vanilla's own player-arm render chain with attack = 0 and
+        // inverse_arm_height = 0, in camera space (x right, y up, -z forward):
         // the arm cube spans roughly x 0.33..0.91, y -0.99..-0.29, z -1.19..-0.44.
         // The load-bearing claims are the *signs*: right of centre, below the
         // eye, and in front of it. A missing rotation in the chain flips one.
@@ -8263,7 +8270,7 @@ mod tests {
     }
 
     /// Vanilla draws two layers per limb: the base skin cube, and a slightly
-    /// `grow`n overlay (`hat`/`jacket`/`right_sleeve`/`left_sleeve`/
+    /// grown (scaled-up) overlay (`hat`/`jacket`/`right_sleeve`/`left_sleeve`/
     /// `right_pants`/`left_pants`) parented to it at `PartPose::ZERO`.
     /// Omitting the overlay looks like a missing-skin-layer bug, not a missing
     /// feature, so this pins that every overlay part is (a) present in the
