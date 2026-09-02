@@ -45,9 +45,9 @@ pub const MAX_HEAD_YAW: f32 = 75.0;
 pub const MAX_HEAD_PITCH: f32 = 40.0;
 /// Default arm-swing duration in ticks for an empty hand.
 ///
-/// 26.2 moved this onto the held stack: `LivingEntity.getCurrentSwingDuration`
-/// reads `handStack.getSwingAnimation().duration()`, and
-/// `SwingAnimation.DEFAULT` is `(WHACK, 6)` — so `6` is the *component default*,
+/// 26.2 moved this onto the held stack: vanilla's own swing-duration getter
+/// reads the held stack's own swing-animation component, and
+/// its own default swing animation is `(WHACK, 6)` — so `6` is the *component default*,
 /// not a hard-coded constant, and an item shipping its own `swing_animation`
 /// component swings for a different number of ticks. Nothing in this engine
 /// decodes that component yet; see [`swing_duration`].

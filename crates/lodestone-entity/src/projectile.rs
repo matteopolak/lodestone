@@ -159,23 +159,24 @@ impl Projectile {
 // Launch: turning a facing and a charge into an initial velocity
 // ---------------------------------------------------------------------------
 
-/// `BowItem.MAX_DRAW_DURATION`, the ticks of draw at which a bow reaches full
+/// Vanilla's own bow max-draw-duration constant, the ticks of draw at which a bow reaches full
 /// power.
 pub const BOW_MAX_DRAW_TICKS: i32 = 20;
 
-/// `BowItem.releaseUsing`'s `pow * 3.0F` — the multiplier from normalised bow
+/// Vanilla's own bow release step's `pow * 3.0F` — the multiplier from normalised bow
 /// power to blocks per tick.
 pub const BOW_ARROW_SPEED: f64 = 3.0;
 
-/// `BowItem.releaseUsing`'s `if (pow < 0.1) return false` — below this the shot is
+/// Vanilla's own bow release step's minimum-power gate — below this the shot is
 /// not taken at all.
 pub const BOW_MIN_POWER: f64 = 0.1;
 
-/// `SnowballItem.PROJECTILE_SHOOT_POWER` / `EggItem` / `EnderpearlItem` — all
+/// Vanilla's own throw-power constant, shared by the snowball, egg and ender
+/// pearl — all
 /// three throw at `1.5` blocks per tick, with no charge.
 pub const THROWABLE_SHOOT_POWER: f64 = 1.5;
 
-/// `ThrowablePotionItem.PROJECTILE_SHOOT_POWER` — a thrown potion is slower than
+/// Vanilla's own thrown-potion throw-power constant — a thrown potion is slower than
 /// a snowball, and is the one throwable with a non-zero pitch offset.
 pub const POTION_SHOOT_POWER: f64 = 0.5;
 
@@ -322,10 +323,10 @@ pub struct ImpactEffect {
     pub consumed: bool,
 }
 
-/// `AbstractArrow.ARROW_BASE_DAMAGE` — the `baseDamage` field's initialiser.
+/// Vanilla's own arrow base-damage constant — the `baseDamage` field's initialiser.
 pub const ARROW_BASE_DAMAGE: f64 = 2.0;
 
-/// `TridentItem.BASE_DAMAGE`, the `baseDamage` a thrown trident carries. Flat,
+/// Vanilla's own trident base-damage constant, the `baseDamage` a thrown trident carries. Flat,
 /// not tier-derived, and **not** the same as the arrow's.
 pub const TRIDENT_BASE_DAMAGE: f64 = 8.0;
 
