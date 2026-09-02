@@ -15,8 +15,9 @@
 //! colours, block-state properties) are runtime state this GPU-free crate does
 //! not own. Parsing never evaluates a predicate itself.
 //!
-//! Faithful to `net/minecraft/client/renderer/item` (`ItemModels`,
-//! `RangeSelectItemModel`, `SelectItemModel`, `CompositeModel`) in the decompiled
+//! Faithful to vanilla's own item-renderer package (its own item-models,
+//! range-select-item-model, select-item-model, composite-model classes) in
+//! the decompiled
 //! 26.2 client. Unknown node types are preserved as [`ItemModelNode::Other`]
 //! rather than rejected, so a newer pack's node cannot fail the whole parse.
 
@@ -43,10 +44,11 @@ pub enum ItemModelNode {
         /// Every `"transformation"` on the path from the definition's root down
         /// to this node, **outermost first** — the same chain
         /// [`ItemModelNode::Special::transformation`] carries, for the same
-        /// reason: `"transformation"` is a field of *every* `ItemModel.Unbaked`
-        /// record, not of `SpecialModelWrapper.Unbaked` alone, and
-        /// `BlockModelWrapper.bake` composes the accumulated parent matrix onto
-        /// this node's own exactly as `SpecialModelWrapper.bake` does — see
+        /// reason: `"transformation"` is a field of *every* unbaked item-model
+        /// record, not of the special-model-wrapper's unbaked variant alone, and
+        /// vanilla's own block-model-wrapper bake step composes the accumulated
+        /// parent matrix onto
+        /// this node's own exactly as the special-model-wrapper's own bake step does — see
         /// [`ItemModelNode::Special::transformation`]'s doc for the full
         /// derivation and the composition order a caller must use.
         ///
@@ -113,14 +115,14 @@ pub enum ItemModelNode {
         ///
         /// # Why a chain and not this node's own field
         ///
-        /// `"transformation"` is a field of *every* `ItemModel.Unbaked` record,
-        /// not of `SpecialModelWrapper.Unbaked` alone: `bake(context,
+        /// `"transformation"` is a field of *every* unbaked item-model record,
+        /// not of the special-model-wrapper's unbaked variant alone: `bake(context,
         /// transformation)` takes the accumulated parent matrix, and each node
-        /// composes `Transformation.compose(parent, this.transformation)` before
+        /// composes a transformation-compose step `(parent, this.transformation)` before
         /// handing it to its children. Reading only the `special` node's own
         /// field silently drops an ancestor's — which is exactly what happened
-        /// to `minecraft:shield`, whose `scale [1, -1, -1]` (vanilla's
-        /// `ShieldSpecialRenderer` flip, hoisted into data) sits on the
+        /// to `minecraft:shield`, whose `scale [1, -1, -1]` (vanilla's own
+        /// shield-special-renderer flip, hoisted into data) sits on the
         /// enclosing `minecraft:condition` node. See
         /// `docs/banner-shield-patterns.md` for the pixel-level consequence.
         ///
@@ -137,8 +139,8 @@ pub enum ItemModelNode {
     },
 }
 
-/// One node's `"transformation"` field — vanilla's `Transformation` record
-/// (`com.mojang.math.Transformation`): a TRS composed as `translation *
+/// One node's `"transformation"` field — vanilla's own transformation record
+/// (in its own math package): a TRS composed as `translation *
 /// left_rotation * scale * right_rotation`, with a *quaternion pair* rather
 /// than the Euler-angle rotation [`DisplayTransform`] uses.
 ///
@@ -151,16 +153,17 @@ pub enum ItemModelNode {
 ///
 /// Stored as raw JSON numbers, same convention as [`DisplayTransform`]:
 /// units are already blocks (no vanilla `/16` here — that division is
-/// specific to `ItemTransform`'s deserializer, not `Transformation`'s), and
-/// no clamp is applied, because `Transformation`'s own codec has none.
+/// specific to vanilla's own item-transform deserializer, not the
+/// transformation record's), and
+/// no clamp is applied, because the transformation record's own codec has none.
 ///
 /// # How a caller must compose this
 ///
-/// `SpecialModelWrapper.Unbaked.bake` computes
-/// `Transformation.compose(transformation, this.transformation)`, which is
-/// `Transformation.compose(final Matrix4fc parent, Optional<Transformation>
-/// transform)` → `parent.mul(transform.getMatrix())` when present. JOML's
-/// `Matrix4f.mul` multiplies as `this * other`, and applying a column-vector
+/// Vanilla's own special-model-wrapper unbaked-bake step computes
+/// its own transformation-compose step `(transformation, this.transformation)`, which is
+/// its own transformation-compose step `(final Matrix4fc parent, Optional<Transformation>
+/// transform)` → `parent.mul(transform.getMatrix())` when present. JOML's own
+/// matrix-multiply step multiplies as `this * other`, and applying a column-vector
 /// matrix product right-to-left means `other` (this node's own transform) is
 /// applied to the model *first*, and `parent` (the display-context transform
 /// already in effect — vanilla's `display.gui`/`display.firstperson_*`/etc.,
@@ -191,7 +194,7 @@ pub struct ItemNodeTransform {
 }
 
 impl Default for ItemNodeTransform {
-    /// `Transformation.IDENTITY`: zero translation, identity rotations, unit
+    /// Vanilla's own transformation-identity constant: zero translation, identity rotations, unit
     /// scale.
     fn default() -> Self {
         Self {
@@ -226,8 +229,8 @@ pub struct RangeEntry {
 /// [`item_tint::resolve`](crate::item_tint::resolve), which needs runtime state
 /// (the stack's components, the pack's grass colormap) this parser does not own.
 ///
-/// Faithful to `net.minecraft.client.color.item.ItemTintSources`'s eight
-/// registrations (`ItemTintSources.bootstrap`).
+/// Faithful to vanilla's own item-tint-sources registration class's eight
+/// registrations (its own bootstrap step).
 #[derive(Debug, Clone, PartialEq)]
 pub struct TintSource {
     /// The tint type id (e.g. `minecraft:dye`, `minecraft:grass`).
@@ -249,15 +252,15 @@ pub struct TintSource {
     /// a source carrying neither is already handled (the tint applies nothing)
     /// and a source carrying the wrong one is a pack bug we need not punish.
     ///
-    /// Also accepts `ExtraCodecs.RGB_COLOR_CODEC`'s `[r, g, b]` float-triple
+    /// Also accepts vanilla's own RGB-color-codec `[r, g, b]` float-triple
     /// alternative, converted by
     /// [`item_tint::color_from_float`](crate::item_tint::color_from_float). No
     /// vanilla file uses that form; resource packs may.
     pub default: Option<i32>,
     /// `minecraft:grass`'s climate inputs, `[temperature, downfall]`, which index
-    /// the grass colormap (`GrassColorSource.calculate`). Both are required
+    /// the grass colormap (vanilla's own grass-color-source "calculate" step). Both are required
     /// fields on that source; `None` means the JSON omitted them, and
-    /// `item_tint` then substitutes `GrassColorSource`'s own no-argument default
+    /// `item_tint` then substitutes vanilla's own grass-color-source no-argument default
     /// of `[0.5, 1.0]` — which is also the value
     /// all six vanilla `grass` item definitions carry.
     ///
@@ -383,7 +386,7 @@ fn parse_node(value: &Value) -> Result<ItemModelNode, ItemModelError> {
         .and_then(Value::as_str)
         .ok_or_else(|| ItemModelError::BadField("model node missing \"type\"".into()))?;
 
-    // `"transformation"` is a field of every `ItemModel.Unbaked` record, not of
+    // `"transformation"` is a field of every unbaked item-model record, not of
     // `special` alone (see `ItemModelNode::Special::transformation`). The
     // `special` arm below consumes its own; every other arm's is pushed into the
     // subtree at the end of this function.
@@ -548,8 +551,8 @@ fn parse_node_body(
 /// `node`'s subtree, so a `Special` ends up holding the whole root-to-node
 /// chain outermost-first.
 ///
-/// This is `ItemModel.Unbaked.bake`'s `Transformation.compose(parent,
-/// this.transformation)` done once at parse time rather than per resolve: the
+/// This is vanilla's own unbaked item-model bake step's own transformation-compose
+/// step `(parent, this.transformation)` done once at parse time rather than per resolve: the
 /// accumulation is static (it does not depend on which branch a predicate
 /// picks), exactly as vanilla's is, so there is nothing to defer.
 ///
@@ -593,7 +596,8 @@ fn prepend_node_transform(node: &mut ItemModelNode, outer: ItemNodeTransform) {
         // (`ItemModelOutput::Model` carried no such field), which was the
         // same defect the shield fix closed one variant over: `bake(context,
         // transformation)` threads the parent matrix down to *every*
-        // `ItemModel.Unbaked`, not `SpecialModelWrapper.Unbaked` alone.
+        // unbaked item-model record, not the special-model-wrapper's unbaked
+        // variant alone.
         ItemModelNode::Model { transformation, .. } => transformation.insert(0, outer),
         ItemModelNode::Empty | ItemModelNode::Other { .. } => {}
     }
@@ -664,10 +668,10 @@ fn parse_tint(value: &Value) -> TintSource {
     }
 }
 
-/// `ExtraCodecs.RGB_COLOR_CODEC`:
+/// Vanilla's own RGB-color codec:
 /// `Codec.withAlternative(Codec.INT, VECTOR3F, …)` — a signed int, or an
 /// `[r, g, b]` float triple folded through
-/// `ARGB.colorFromFloat(1.0F, r, g, b)`.
+/// vanilla's own ARGB "color from float" step `(1.0F, r, g, b)`.
 fn parse_rgb_color(value: &Value) -> Option<i32> {
     if let Some(i) = value.as_i64() {
         return Some(i as i32);
