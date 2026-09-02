@@ -51,8 +51,8 @@
 //! Their *shaders* are not identical, and the difference is not cosmetic —
 //! see the light section below, which is why the see-through range is
 //! partitioned by a flag this pass reads rather than merely drawn last.
-//! `TextDisplayRenderer.submitInner` hands the
-//! background quad to `RenderTypes.textBackground()` —
+//! Vanilla's own text-display renderer's submit-inner routine hands the
+//! background quad to its own text-background render type —
 //! `RenderPipelines.TEXT_BACKGROUND`, whose depth state is the plain
 //! `DepthStencilState.DEFAULT` — and every line of text to
 //! `Font.DisplayMode.POLYGON_OFFSET`, which resolves to
@@ -196,7 +196,8 @@
 //! escapes it *only* under the transparency post chain (Fabulous graphics),
 //! where translucent terrain goes to `LevelRenderer`'s separate `translucent`
 //! target whose depth was copied from main **before** the translucent features
-//! ran; with the chain off, `ChunkSectionLayerGroup.TRANSLUCENT.outputTarget()`
+//! ran; with the chain off, vanilla's own translucent chunk-section-layer-group's
+//! output-target accessor
 //! falls back to the main target and vanilla has the artefact too. So this is
 //! the Fabulous behaviour, reproduced in a single-target renderer by the one
 //! means available.
@@ -251,7 +252,7 @@
 //!   and `useDefaultBackground`. Three entries left this list; treat a
 //!   remaining one as a defect report rather than a note.
 //!   `Style::shadow_color` (vanilla's explicit per-style shadow override, the
-//!   *other* branch of `Font.java::getShadowColor`) is genuinely absent —
+//!   *other* branch of its own get-shadow-color accessor) is genuinely absent —
 //!   this tree's `TextStyle` has no such field, so there is nothing to read.
 //! - **Per-run style is modelled** (colour — hex included, bold, italic,
 //!   underline, strikethrough), via `gpu/nametag.rs::layout_styled_ink_runs`
@@ -263,16 +264,16 @@
 //!   directly — no `to_legacy_string`/`from_legacy` round trip, so a hex
 //!   colour (which legacy `§` codes cannot express) survives all the way to
 //!   the drawn vertex. `textOpacity << 24 | 0xFFFFFF`
-//!   (`TextDisplayRenderer.submitInner`, see
+//!   (vanilla's own text-display renderer's submit-inner routine, see
 //!   [`lodestone_render::display::text_glyph_color`]'s doc) is real, but it
-//!   is only the **fallback** tint fed to `Font.java::getTextColor` for a
+//!   is only the **fallback** tint fed to vanilla's own get-text-color accessor for a
 //!   span whose own colour is unspecified.
 //! - **A per-line width computed from *unstyled* advances mis-centres a
 //!   line whose real (styled) content is wider — e.g. a bold run.** This was
 //!   the file's own alignment defect: centring used
 //!   `gpu/nametag.rs::layout_styled_ink_runs`'s plain-codepoint width, which cannot
-//!   see a bold run's extra advance (`GlyphInfo.getAdvance(bold)`,
-//!   `Font.java`), so a two-line block whose second line carried a wider
+//!   see a bold run's extra advance (vanilla's own glyph-info advance accessor
+//!   at bold weight), so a two-line block whose second line carried a wider
 //!   (bold, once style survives the upstream flatten above) run centred
 //!   against too-small a width and read as shifted right. Switching to
 //!   [`super::nametag::layout_styled_ink_runs`] for width too closes this,
@@ -720,13 +721,13 @@ impl DisplayTextRenderer {
     /// [`prepare`](Self::prepare) always returns all zeroes there).
     ///
     /// Panels **before** glyphs, matching
-    /// `TextDisplayRenderer.submitInner`'s own
+    /// Vanilla's own text-display renderer's submit-inner routine's own
     /// `submitNodeCollector.order(backgroundColor != 0 ? 1 : 0)` — the text
     /// is explicitly ordered after the background it sits on. The
     /// see-through range comes last because it neither tests nor writes
     /// depth, so it must not be able to occlude the three that do.
     ///
-    /// Shadows **before** ink, the same order `Font.java` uses within one
+    /// Shadows **before** ink, the same order vanilla's own font rendering uses within one
     /// `drawInBatch`, and the same order `gpu/nametag.rs::push_entity_quads`
     /// uses: a later glyph's ink must sit on top of an earlier glyph's
     /// shadow. Unlike that pass, the two here also differ in pipeline — see
@@ -1024,7 +1025,7 @@ fn push_text_display_quads(
     let alpha = text_glyph_color(draw.text_opacity)[3];
     // `Display.TextDisplay.FLAG_SHADOW`, threaded to
     // `textCollector.submitText(…, shadow, …)` and from there to
-    // `Font.java`'s `drawShadow`. Gated on the flag, unlike a nametag (which
+    // vanilla's own font rendering's `drawShadow`. Gated on the flag, unlike a nametag (which
     // vanilla always shadows) — the accessor's own default is `(byte)0`, so
     // a display that never reported style flags draws no shadow, exactly as
     // in vanilla.
@@ -1066,8 +1067,8 @@ fn push_text_display_quads(
             let lx = rect.x + offset;
             let ly = rect.y + y_line;
             if shadow {
-                // `Font.java::getShadowColor`'s no-explicit-colour branch:
-                // `ARGB.scaleRGB(textColor, 0.25F)` — the glyph's **own**
+                // Vanilla's own get-shadow-color accessor's no-explicit-colour branch:
+                // its own ARGB-scale-RGB helper applied to `(textColor, 0.25F)` — the glyph's **own**
                 // resolved colour at a quarter brightness with its alpha
                 // untouched, so a red run's shadow is dark red rather than
                 // flat grey. `Style::shadow_color` (vanilla's explicit
@@ -1485,7 +1486,7 @@ mod tests {
     }
 
     /// **The alignment control.** Bold widens a glyph's *advance*
-    /// (`GlyphInfo.getAdvance(bold)`), so a bold run must measure wider than
+    /// (vanilla's own glyph-info advance accessor at bold weight), so a bold run must measure wider than
     /// the identical codepoints unstyled — checked against
     /// [`super::super::nametag::layout_styled_ink_runs`], the exact
     /// expression `push_text_display_quads` itself calls through
@@ -1581,8 +1582,8 @@ mod tests {
     /// * the flag **doubles** the ink (every rect drawn twice), and its
     ///   absence draws each rect exactly once;
     /// * the shadow copy is a quarter-brightness **red** for a `§c` run, not
-    ///   a flat grey — `Font.java::getShadowColor`'s
-    ///   `ARGB.scaleRGB(textColor, 0.25F)`, so a hardcoded dark constant
+    ///   a flat grey — vanilla's own get-shadow-color accessor's
+    ///   ARGB-scale-RGB helper applied to `(textColor, 0.25F)`, so a hardcoded dark constant
     ///   fails here;
     /// * the shadow is emitted **before** the ink, since with `LessEqual` and
     ///   no separation between the two copies paint order is the only thing
@@ -1857,7 +1858,7 @@ mod tests {
              the pre-fix behaviour"
         );
 
-        // `Brightness.pack()` is `block << 4 | sky << 20`; sky 15, block 15.
+        // Vanilla's own brightness-pack helper is `block << 4 | sky << 20`; sky 15, block 15.
         let mut overridden = plain.clone();
         overridden.brightness_override = Some((15 << 4) | (15 << 20));
         assert_eq!(
