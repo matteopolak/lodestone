@@ -1,6 +1,6 @@
 //! Sensors: the perception step that populates memory before behaviours run.
 //!
-//! Faithful to vanilla's `Sensor`. Each tick, before any behaviour starts, every
+//! Faithful to vanilla's own sensor model. Each tick, before any behaviour starts, every
 //! sensor writes what the mob currently perceives into memory
 //! (`NEAREST_VISIBLE_PLAYER`, nearby entities, and so on). Behaviours then read
 //! only memory, never the world directly — so the world coupling lives entirely
@@ -55,13 +55,13 @@ impl Sensor for NearestPlayerSensor {
 }
 
 /// Writes [`MemoryModuleType::HURT_BY`] from [`BrainMob::last_hurt_by`],
-/// clearing it once that expires. Vanilla's own `HurtBySensor` also records
-/// the *damage source* (used by [`super::behaviors::Panic`]'s jar original to
+/// clearing it once that expires. Vanilla's own equivalent sensor also records
+/// the *damage source* (used by [`super::behaviors::Panic`]'s vanilla original to
 /// filter which damage types cause a flee) — not modelled here, because
 /// [`BrainMob::last_hurt_by`] carries only a position, the same cut
 /// [`super::mob::BrainMob`]'s own doc discloses for every hurt-adjacent
 /// reading on this seam. Every hurt is panic-causing here, broader than
-/// vanilla's `DamageTypeTags.PANIC_CAUSES`.
+/// vanilla's own panic-causing damage-type tag.
 #[derive(Debug, Default)]
 pub struct HurtBySensor;
 
@@ -109,22 +109,21 @@ impl Sensor for AngerTargetSensor {
 
 /// Writes [`MemoryModuleType::NEAREST_HOSTILE`] from the nearest hostile
 /// entity in [`BrainMob::nearby_entities`], within [`RANGE`](Self::RANGE)
-/// blocks — vanilla's `NearestHostileSensor`, restricted to the one question
-/// its own consumers ask (`VillagerPanicTrigger.hasHostile`): is there a
+/// blocks — vanilla's own equivalent sensor, restricted to the one question
+/// its own consumers ask (a villager's panic-trigger check): is there a
 /// hostile nearby, and which one is closest.
 ///
-/// Unmodelled next to the jar original: no line-of-sight test (this crate's
+/// Unmodelled next to the vanilla original: no line-of-sight test (this crate's
 /// perception seam has no ray-cast, the same cut every other brain sensor
-/// here discloses) and no `SENSOR_TAG` per-species exclusion list — every
+/// here discloses) and no per-species sensor-tag exclusion list — every
 /// entity [`BrainMob::nearby_entities`] marks `hostile` counts.
 #[derive(Debug, Default)]
 pub struct NearestHostileSensor;
 
 impl NearestHostileSensor {
-    /// `NearestHostileSensor.frequencyFilter` runs the search on a cadence,
-    /// not the *entity* radius; the radius itself is vanilla's `8.0` (used
-    /// throughout `Sensor`'s living-entity subclasses' default `getSensorTargets`
-    /// cut). This crate's sensors have no cadence knob today, so the radius
+    /// Vanilla's own equivalent sensor throttles the search on a cadence,
+    /// not the *entity* radius; the radius itself is vanilla's `8.0` (its
+    /// default living-entity sensor-target radius). This crate's sensors have no cadence knob today, so the radius
     /// alone is what this type contributes; the host is expected to have
     /// already coarsely filtered [`BrainMob::nearby_entities`] to something
     /// reasonable (a chunk-local set, say), same as
@@ -160,16 +159,16 @@ impl Sensor for NearestHostileSensor {
 
 /// Writes [`MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES`] from every
 /// entity in [`BrainMob::nearby_entities`] within [`RANGE`](Self::RANGE)
-/// blocks, nearest first — vanilla's `NearestLivingEntitiesSensor`, the feed
-/// `PrepareRamNearestTarget` reduces to a single ram candidate via its own
-/// `TargetingConditions`.
+/// blocks, nearest first — vanilla's own equivalent sensor, the feed the
+/// goat's ram-target-preparation goal reduces to a single ram candidate via
+/// its own targeting-condition filter.
 ///
 /// **No hostility, species or line-of-sight filter** — every entity
 /// [`BrainMob::nearby_entities`] reports counts, unlike
 /// [`NearestHostileSensor`], which keeps only the `hostile`-flagged ones.
 /// That is deliberate: vanilla's own sensor is unfiltered too (the exclusion
 /// — "not another goat", "respect the world border" — lives entirely in the
-/// *consumer's* `TargetingConditions`), and this crate's
+/// *consumer's* own targeting-condition filter), and this crate's
 /// [`NearbyBrainEntity`](super::mob::NearbyBrainEntity) carries no species
 /// tag a consumer could filter on even if this sensor tried, so a goat ram
 /// candidate found through this feed is not excluded from being another
@@ -180,7 +179,7 @@ impl Sensor for NearestHostileSensor {
 pub struct NearestVisibleLivingEntitiesSensor;
 
 impl NearestVisibleLivingEntitiesSensor {
-    /// Wide enough to cover a goat's `RAM_MAX_DISTANCE` (7 blocks) with
+    /// Wide enough to cover a goat's own maximum ram distance (7 blocks) with
     /// margin — this crate's sensors have no cadence knob, so (as
     /// [`NearestHostileSensor::RANGE`]'s own doc notes for its figure) the
     /// host is expected to have already coarsely filtered
@@ -202,7 +201,7 @@ impl Sensor for NearestVisibleLivingEntitiesSensor {
         let ids: Vec<i32> = nearby.into_iter().map(|(id, _)| id).collect();
         // `Memories::set` already clears the slot for an empty collection
         // (`MemoryValue::is_empty_collection`), matching vanilla's own
-        // `isEmptyCollection` coercion — no separate erase branch needed.
+        // empty-collection coercion — no separate erase branch needed.
         mem.set(
             MemoryModuleType::NEAREST_VISIBLE_LIVING_ENTITIES,
             MemoryValue::Entities(ids),
@@ -224,12 +223,11 @@ impl Sensor for NearestVisibleLivingEntitiesSensor {
 /// analogue of [`HurtBySensor`]: a host tracks the claim ledger, this sensor
 /// only copies the answer into memory each tick.
 ///
-/// Vanilla feeds these through `AcquirePoi`/`YieldJobSite` behaviours writing
-/// straight into the brain rather than a `Sensor`; this crate's `BrainMob`
-/// seam has no reference back into a live claim ledger for a behaviour to
-/// call, so a sensor is the seam this port has instead — the same
-/// substitution `NearestHostileSensor` makes for vanilla's own imperative
-/// writers.
+/// Vanilla feeds these through claim/yield behaviours writing straight into
+/// the brain rather than a sensor; this crate's `BrainMob` seam has no
+/// reference back into a live claim ledger for a behaviour to call, so a
+/// sensor is the seam this port has instead — the same substitution
+/// [`NearestHostileSensor`] makes for vanilla's own imperative writers.
 #[derive(Debug, Default)]
 pub struct VillagerPoiSensor;
 
@@ -287,14 +285,13 @@ impl Sensor for NearestVisibleZombifiedSensor {
     }
 }
 
-/// `FrogAttackablesSensor` (`world/entity/ai/sensing/FrogAttackablesSensor.java`)
-/// — narrowed to a position, the same [`NearestVisibleZombifiedSensor`]
-/// shape and for the same reason: this crate's [`BrainMob`] seam has no
-/// entity handle or species tag a sensor could filter on itself (unlike the
-/// real jar's `Frog.canEat`/size-1 check, run against a live `LivingEntity`),
-/// so the host resolves the species/liveness/range filter and hands back
-/// only whether *something* eligible exists nearby — see
-/// [`BrainMob::nearest_attackable_food`]'s own doc.
+/// Vanilla's own frog-attackables sensor, narrowed to a position, the same
+/// [`NearestVisibleZombifiedSensor`] shape and for the same reason: this
+/// crate's [`BrainMob`] seam has no entity handle or species tag a sensor
+/// could filter on itself (unlike vanilla's own frog-can-eat/size-1 check,
+/// run against a live entity), so the host resolves the species/liveness/
+/// range filter and hands back only whether *something* eligible exists
+/// nearby — see [`BrainMob::nearest_attackable_food`]'s own doc.
 #[derive(Debug, Default)]
 pub struct NearestAttackableFoodSensor;
 
