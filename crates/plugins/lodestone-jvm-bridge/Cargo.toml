@@ -1,0 +1,59 @@
+# The Java-plugin bridge: host-side machinery for backing Paper's own NMS calls
+# with Rust. See `docs/java-plugin-bridge.md` for the design, the licensing
+# decision and the measured census that sizes the work.
+#
+# **Licence: MIT OR Apache-2.0, deliberately, and this is a decision rather than
+# an inherited default.** Paper is GPL-3.0. Nothing in this crate is derived
+# from Paper: it contains no Paper source, no Paper bytecode, and no
+# transcription of either. The copyleft question is about *distribution of a
+# derivative work*, and this crate distributes neither Paper nor anything
+# derived from it — the user supplies their own Paper jar. See the doc's
+# "Licensing" section for what is settled, and for the two questions that are
+# explicitly for counsel rather than engineering.
+#
+# **This crate is not a dependency of anything.** Nothing in the workspace names
+# it, by design — the whole point is that a user who loads no Java plugin pays
+# nothing. `tests/zero_cost_graph.rs` is the guard on that, with a control.
+#
+# **No `jni`, and nothing that links `libjvm`.** Not "not yet enabled" — not
+# present. `jni` already appears in this workspace's `Cargo.lock` via Android
+# transitives (`android-activity`, `cpal`, `hickory-*`), so a lockfile grep is
+# NOT a valid check here and would report a violation that does not exist;
+# `tests/zero_cost_graph.rs` explains what to check instead.
+[package]
+name = "lodestone-jvm-bridge"
+version.workspace = true
+edition.workspace = true
+license = "MIT OR Apache-2.0"
+
+[lints]
+workspace = true
+
+[dependencies]
+# The sanctioned plugin surface, and nothing above it.
+#
+# The two crates that can hand code a real `EcsHandle` (the shell and the
+# client) must never appear in this file — naming either would give this crate
+# a route to the world lock, which is the one thing the threading design exists
+# to prevent. `tests/reentrancy.rs` enforces that with
+# `lodestone-plugin-support`'s own static check.
+#
+# Note that check is a TEXT SCAN of this manifest, not a TOML parse, so it
+# matches a crate name in a COMMENT just as readily as in a dependency table.
+# That is why the sentence above describes those two crates instead of naming
+# them: an explanatory comment naming them would fail the very gate it explains.
+lodestone-ecs.workspace = true
+
+[dev-dependencies]
+# `assert_ecs_only_dependency_graph` and `within_budget`: the shared reentrancy
+# harness. Reused rather than restated, per this repo's doctrine of one
+# mechanism per invariant — re-deriving a lock rule is exactly how the
+# `thread::scope` hazard got discovered and fixed twice with nothing connecting
+# the two sites.
+#
+# It is worth knowing that this crate reaches an HTTP/TLS/OS-keychain stack
+# transitively, which looks alarming in a crate whose thesis is "pay nothing you
+# do not use". It is not: a dev-dependency is absent from the production
+# dependency graph entirely, so it cannot affect the zero-cost property that
+# `tests/zero_cost_graph.rs` guards. It costs test build time and nothing else.
+lodestone-plugin-support = { path = "../lodestone-plugin-support" }
