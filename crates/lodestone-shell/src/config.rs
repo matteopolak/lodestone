@@ -8,8 +8,7 @@
 //!
 //! ## GUI scale
 //!
-//! [`calculate_gui_scale`] reproduces vanilla's `Window.calculateScale`
-//! (`.cache/mc/26.2/client-src/com/mojang/blaze3d/platform/Window.java`)
+//! [`calculate_gui_scale`] reproduces vanilla's own gui-scale calculation
 //! exactly: an integer scale, `0` meaning "auto" (pick the largest scale that
 //! still fits a minimum logical size), clamped so the framebuffer is never
 //! divided into less than that minimum. See the function's own docs for the
@@ -32,8 +31,8 @@ use crate::keybinds::Keybinds;
 /// Matches vanilla's own auto-gui-scale sentinel.
 pub const AUTO_GUI_SCALE: u32 = 0;
 
-/// Default look sensitivity — vanilla's own (`Options.java`,
-/// `UnitDouble`, `0.5`), and already what [`Config::default`] used before
+/// Default look sensitivity — vanilla's own persisted-options declarations
+/// (a unit-interval double, default `0.5`), and already what [`Config::default`] used before
 /// [`Options::sensitivity`] existed, so the migration in issue #443 changes
 /// nothing for an untouched install.
 pub const DEFAULT_SENSITIVITY: f32 = 0.5;
@@ -50,8 +49,8 @@ pub const DEFAULT_SENSITIVITY: f32 = 0.5;
 /// reach 12 or 32 — this is the starting point, not a ceiling.
 pub const DEFAULT_RENDER_DISTANCE: u32 = 8;
 
-/// Vanilla's `renderDistance` minimum (`Options.java`,
-/// `IntRange(2, …)`). The clamp is load-bearing rather than cosmetic: 0 or 1
+/// Vanilla's `renderDistance` minimum (an int range starting at 2 in its own
+/// persisted-options declarations). The clamp is load-bearing rather than cosmetic: 0 or 1
 /// reaches `sim/build.rs`'s world radius and would generate nothing.
 pub const MIN_RENDER_DISTANCE: u32 = 2;
 
@@ -60,7 +59,7 @@ pub const MIN_RENDER_DISTANCE: u32 = 2;
 /// client takes that branch unconditionally — there is no JVM heap cap to ask.
 pub const MAX_RENDER_DISTANCE: u32 = 32;
 
-/// Vanilla's `weatherRadius` bounds and default — `IntRange(3, 10, true)`
+/// Vanilla's `weatherRadius` bounds and default — a clamped range `3..=10`
 /// defaulting to `10`. The same pair
 /// `menu::options::INT_RANGE_SLIDERS`' `"weatherRadius"` row places the handle
 /// with, so the value a drag can reach and the track it draws on are one fact.
@@ -73,7 +72,7 @@ pub const MIN_WEATHER_RADIUS: i32 = 3;
 /// See [`MIN_WEATHER_RADIUS`].
 pub const MAX_WEATHER_RADIUS: i32 = lodestone_render::DEFAULT_WEATHER_RADIUS;
 
-/// Vanilla's `biomeBlendRadius` bounds and default — `IntRange(0, 7)`
+/// Vanilla's `biomeBlendRadius` bounds and default — a clamped range `0..=7`
 /// defaulting to `2`. The same pair
 /// `menu::options::INT_RANGE_SLIDERS`' `"biomeBlendRadius"` row places the
 /// handle with.
@@ -94,7 +93,7 @@ pub const MAX_BIOME_BLEND_RADIUS: i32 = lodestone_assets::tint::MAX_BLEND_RADIUS
 pub const DEFAULT_BIOME_BLEND_RADIUS: i32 = lodestone_render::biome_tint::BLEND_RADIUS;
 
 /// Vanilla's `menuBackgroundBlurriness` bounds and default —
-/// `IntRange(0, 10)` defaulting to `BLURRINESS_DEFAULT_VALUE = 5`
+/// a clamped range `0..=10` defaulting to `BLURRINESS_DEFAULT_VALUE = 5`
 ///. The same pair
 /// `menu::options::INT_RANGE_SLIDERS`' `"menuBackgroundBlurriness"` row places
 /// the handle with.
@@ -106,15 +105,15 @@ pub const DEFAULT_BIOME_BLEND_RADIUS: i32 = lodestone_render::biome_tint::BLEND_
 pub const MIN_MENU_BACKGROUND_BLURRINESS: u32 = 0;
 /// See [`MIN_MENU_BACKGROUND_BLURRINESS`].
 pub const MAX_MENU_BACKGROUND_BLURRINESS: u32 = 10;
-/// See [`MIN_MENU_BACKGROUND_BLURRINESS`] — vanilla's
-/// `Options.BLURRINESS_DEFAULT_VALUE`.
+/// See [`MIN_MENU_BACKGROUND_BLURRINESS`] — vanilla's own
+/// shipped default.
 pub const DEFAULT_MENU_BACKGROUND_BLURRINESS: u32 = 5;
 
 /// Vanilla clamps the auto-picked (and any manual) scale so the resulting
 /// *scaled* GUI resolution never drops below this many logical pixels wide —
-/// `Window.calculateScale`'s `>= 320` check.
+/// its own gui-scale calculation's `>= 320` check.
 pub const MIN_SCALED_WIDTH: u32 = 320;
-/// As [`MIN_SCALED_WIDTH`], vertical — `Window.java`'s `>= 240`.
+/// As [`MIN_SCALED_WIDTH`], vertical — vanilla's own gui-scale calculation's `>= 240`.
 ///
 /// Public because it is a **floor on the logical canvas**, not just an input to
 /// [`calculate_gui_scale`]: a screen that has to fit its content into the band
@@ -124,8 +123,8 @@ pub const MIN_SCALED_WIDTH: u32 = 320;
 pub const MIN_SCALED_HEIGHT: u32 = 240;
 
 /// Highest `gui_scale` the settings screen will manually cycle to. Vanilla's
-/// own ceiling is effectively unbounded (`Options.MAX_GUI_SCALE_INCLUSIVE` =
-/// `2147483646`, `Options.java`) and its slider's *dynamic* max is
+/// own ceiling is effectively unbounded (its own persisted-options
+/// declarations put the manual maximum at `2147483646`) and its slider's *dynamic* max is
 /// `calculate_gui_scale(AUTO_GUI_SCALE, ..)` for the live window
 /// — but that means threading the live framebuffer
 /// size into the menu's pure, GPU-free navigation layer just to bound a
@@ -135,14 +134,13 @@ pub const MIN_SCALED_HEIGHT: u32 = 240;
 /// doing anything unsafe or even visible.
 pub const MAX_MANUAL_GUI_SCALE: u32 = 8;
 
-/// Vanilla's `fov` bounds and default (`Options.java`:
-/// `IntRange(30, 110)`, default `70`).
+/// Vanilla's `fov` bounds and default (its own persisted-options
+/// declarations: an int range 30 to 110, default `70`).
 ///
-/// **An `IntRange`, not a `UnitDouble`** — the trap this triple exists to close.
-/// The `Codec.DOUBLE.xmap` sitting between those two lines is a *persistence*
-/// codec on the 7-argument `OptionInstance` overload, not a `ValueSet::xmap`, so
-/// it touches neither the stored int nor the slider; reading it as one puts the
-/// value at `70 * 40 + 70`. The same pair is in
+/// **An int-valued range, not a unit-interval double** — the trap this triple exists to close.
+/// A persistence-only codec sits between the stored int and the double the
+/// slider's value-set actually walks, so reading the value-set's transform as
+/// the persistence one puts the value at `70 * 40 + 70`. The same pair is in
 /// `menu::options::INT_RANGE_SLIDERS` under the `"fov"` accessor, which is where
 /// the slider handle comes from.
 pub const MIN_FOV: u32 = 30;
@@ -188,7 +186,7 @@ pub fn cloud_status_from_name(name: &str) -> Option<lodestone_render::CloudStatu
 /// Vanilla's `ParticleStatus`, the
 /// `options.particles` cycle.
 ///
-/// Three states in declaration order, which is `CycleButton`'s visiting order
+/// Three states in declaration order, which is also its own cycle-button's visiting order
 /// and the order of the enum's ids `0, 1, 2`: `ALL`, `DECREASED`, `MINIMAL`.
 /// `ALL` is vanilla's default and is what this client did unconditionally
 /// before the row went live.
@@ -240,7 +238,7 @@ pub fn particle_level_from_name(name: &str) -> Option<ParticleLevel> {
 /// Vanilla's `AttackIndicatorStatus`, the
 /// `options.attackIndicator` cycle.
 ///
-/// Three states in **declaration order**, which is also `CycleButton`'s visiting
+/// Three states in **declaration order**, which is also its own cycle-button's visiting
 /// order and the order of the enum's own ids `0, 1, 2`:
 /// `OFF`, `CROSSHAIR`, `HOTBAR`. `CROSSHAIR` is vanilla's default and is what
 /// this client drew unconditionally before the row went live.
@@ -328,17 +326,17 @@ pub fn inactivity_fps_limit_from_name(name: &str) -> Option<InactivityFpsLimit> 
     }
 }
 
-/// Vanilla's `Options.UNLIMITED_FRAMERATE_CUTOFF`: the
-/// stored `framerateLimit` value at and above which `Minecraft.runTick`
-/// never calls `FramerateLimiter.limitDisplayFPS`
+/// Vanilla's own unlimited-framerate cutoff: the
+/// stored `framerateLimit` value at and above which vanilla's own per-tick
+/// loop never applies its own frame-rate limiter
 /// at all — "Unlimited" is a *sentinel value*, not a special-cased "no limit"
-/// state, and `260` is chosen so the row's own `IntRange(1, 26).xmap(*10)`
+/// state, and `260` is chosen so the row's own bucket range `1..=26`, scaled by `*10`,
 /// makes it the slider's last bucket.
 pub const UNLIMITED_FRAMERATE_CUTOFF: u32 = 260;
 
-/// Vanilla's `framerateLimit` floor — `Codec.intRange(10, 260)`
-///. The slider's own `IntRange(1, 26)` pre-image floor
-/// (bucket `1`) maps to this through the `*10` xmap.
+/// Vanilla's `framerateLimit` floor — its own persisted-options declarations
+/// clamp the stored value to 10..=260. The slider's own pre-image floor
+/// (bucket `1` of 26) maps to this through the `*10` transform.
 pub const MIN_FRAMERATE_LIMIT: u32 = 10;
 
 /// Vanilla's shipped default `framerateLimit`, `120` —
@@ -420,8 +418,8 @@ pub fn graphics_preset_from_name(name: &str) -> Option<GraphicsPreset> {
     }
 }
 
-/// Vanilla's eleven `SoundSource` names, in `SoundSource` declaration order —
-/// the strings `SoundSource.getName()` returns.
+/// Vanilla's eleven sound-category names, in its own declaration order —
+/// the strings its own sound-category name lookup returns.
 ///
 /// Three different things are keyed off this one list, which is why it is a
 /// constant rather than three literals: the `options.soundSource.<name>`
@@ -441,8 +439,8 @@ pub const SOUND_CATEGORY_NAMES: [&str; 11] = [
 ];
 
 /// Vanilla's `mouseWheelSensitivity` slider bounds:
-/// `logMouse(-200)` and `logMouse(100)`, i.e. `10^(-200/100)` and
-/// `10^(100/100)` (`Options.java`, `:1195-1196`).
+/// its own log-mapped sensitivity at slider positions `-200` and `100`, i.e. `10^(-200/100)` and
+/// `10^(100/100)`.
 pub const MIN_MOUSE_WHEEL_SENSITIVITY: f32 = 0.01;
 /// See [`MIN_MOUSE_WHEEL_SENSITIVITY`].
 pub const MAX_MOUSE_WHEEL_SENSITIVITY: f32 = 10.0;
@@ -455,11 +453,11 @@ pub const MAX_MOUSE_WHEEL_SENSITIVITY: f32 = 10.0;
 /// or hundreds.
 pub const MOUSE_WHEEL_SENSITIVITY_STEP: f32 = 0.25;
 
-/// The step one settings-row click moves an `OptionInstance.UnitDouble` option
+/// The step one settings-row click moves a unit-interval-double option
 /// by — every chat and text-background option is one of these.
 ///
 /// As with [`MOUSE_WHEEL_SENSITIVITY_STEP`] this is not vanilla's own
-/// granularity: `UnitDouble` is a *drag*, continuous over `[0, 1]`, and this
+/// granularity: vanilla's own version of the option is a *drag*, continuous over `[0, 1]`, and this
 /// client's settings rows activate as a click rather than a drag (see
 /// `menu::options::SettingsOutcome::Cycle`). `0.1` is chosen to match the
 /// granularity vanilla's own percent-value label displays — it prints
@@ -467,7 +465,7 @@ pub const MOUSE_WHEEL_SENSITIVITY_STEP: f32 = 0.25;
 /// the whole range is ten clicks.
 pub const UNIT_DOUBLE_STEP: f32 = 0.1;
 
-/// Advances a `UnitDouble` option one click, wrapping past the top back to `0`.
+/// Advances a unit-interval double option one click, wrapping past the top back to `0`.
 ///
 /// Additive on the **continuous** value rather than a round-trip through a
 /// quantized step index, for exactly the reason
@@ -497,9 +495,8 @@ pub fn step_unit_double(value: f32, delta: i32) -> f32 {
     wrapped.clamp(0.0, 1.0)
 }
 
-/// Reproduces `Window.calculateScale(maxScale, enforceUnicode)`
-/// (`.cache/mc/26.2/client-src/com/mojang/blaze3d/platform/Window.java`)
-/// exactly, **minus** the legacy `enforceUnicode` even-scale rounding:
+/// Reproduces vanilla's own gui-scale calculation exactly, **minus** the
+/// legacy even-scale rounding it applies for its old unicode-font mode:
 /// Lodestone has no unicode-font mode to enforce (that option exists in
 /// vanilla only for a legacy glyph-page font), so the branch is dropped
 /// rather than wired to a setting that would always read `false`.
@@ -514,12 +511,12 @@ pub fn step_unit_double(value: f32, delta: i32) -> f32 {
 ///
 /// `framebuffer_width`/`framebuffer_height` must be **physical** pixels — what
 /// winit calls `PhysicalSize`, i.e. already DPI-scaled — matching vanilla's
-/// `Window.framebufferWidth/Height`. That is the only place a display's DPI
+/// own physical framebuffer dimensions. That is the only place a display's DPI
 /// factor enters this model: there is no separate "DPI scale" input, because
 /// on a Retina/HiDPI display the physical framebuffer size already *is* the
 /// logical window size times the OS scale factor. Dividing the framebuffer by
-/// the returned integer scale (what vanilla calls `guiScaledWidth/Height`,
-/// `Window.java`) is what turns a fixed-pixel-sized menu layout into
+/// the returned integer scale (what vanilla calls its own scaled logical
+/// dimensions) is what turns a fixed-pixel-sized menu layout into
 /// the right *visual* size instead of half-size on a 2x display.
 #[must_use]
 pub fn calculate_gui_scale(desired: u32, framebuffer_width: u32, framebuffer_height: u32) -> u32 {
@@ -572,20 +569,21 @@ pub struct Options {
     /// have to change.
     pub keybinds: Keybinds,
     /// Vanilla's **View Bobbing** option (`options.viewBobbing`,
-    /// `Options.java`, `OptionInstance.createBoolean(..., true)`), which
+    /// vanilla's own persisted-options declarations, a boolean option defaulting to on), which
     /// lives on the Accessibility screen in 26.2.
     ///
-    /// Gates the walking bob only. `GameRenderer.renderLevel` (`:534-536`)
-    /// applies `bobHurt` **unconditionally** and only `bobView` behind this flag,
+    /// Gates the walking bob only. Vanilla's own per-frame render pass
+    /// applies its damage-tilt bob **unconditionally** and only the walking bob behind this flag,
     /// so a player who turns bobbing off still gets the damage tilt — that is
     /// vanilla's split, not an oversight here. The damage tilt has its own
     /// separate accessibility option — [`Self::damage_tilt_strength`].
     ///
     /// Default **on**, matching vanilla. See `docs/view-bobbing.md`.
     pub view_bobbing: bool,
-    /// Vanilla's **Damage Tilt** accessibility option (`Options::damageTiltStrength`,
+    /// Vanilla's **Damage Tilt** accessibility option (its own persisted-options
+    /// declarations name it `damageTiltStrength`,
     /// a `0.0..=1.0` unit double defaulting to `1.0`), which scales
-    /// `GameRenderer.bobHurt`'s tilt linearly.
+    /// vanilla's own damage-hit tilt linearly.
     ///
     /// `0.0` must genuinely disable the tilt rather than merely shrink it — that is
     /// the accessibility contract, and it is what
@@ -596,8 +594,8 @@ pub struct Options {
     /// than vanilla can, and a negative value would tilt the camera the wrong way.
     pub damage_tilt_strength: f32,
     /// Vanilla's **Panorama Scroll Speed** accessibility option
-    /// (`Options::panoramaSpeed`, a `0.0..=1.0` unit double defaulting to `1.0`
-    /// with the plain `percentValueLabel`), which scales the title screen's
+    /// (its own persisted-options declarations name it `panoramaSpeed`, a `0.0..=1.0` unit double defaulting to `1.0`
+    /// with the plain percent-value label), which scales the title screen's
     /// cubemap yaw rate.
     ///
     /// `0.0` is a *stationary* panorama, which is the point of the option — the
@@ -610,21 +608,21 @@ pub struct Options {
     /// for `damage_tilt_strength`'s reason: vanilla cannot produce a rate outside
     /// this range, and a negative one would spin the sky backwards.
     pub panorama_speed: f32,
-    /// Vanilla's `key.sneak` toggle option (`Options::toggleCrouch`,
-    /// `Options.java`, issue #202): sneak is hold-to-activate when
+    /// Vanilla's `key.sneak` toggle option (its own persisted-options
+    /// declarations name it `toggleCrouch`, issue #202): sneak is hold-to-activate when
     /// `false` (vanilla's own default) and press-to-toggle when `true`. Fed to
     /// [`lodestone_controller::InputState::set_toggle_modes`].
     pub toggle_sneak: bool,
-    /// As [`Self::toggle_sneak`], for `key.sprint`/`Options::toggleSprint`.
+    /// As [`Self::toggle_sneak`], for `key.sprint` (vanilla's own `toggleSprint`).
     pub toggle_sprint: bool,
-    /// As [`Self::toggle_sneak`], for `key.attack`/`Options::toggleAttack`.
+    /// As [`Self::toggle_sneak`], for `key.attack` (vanilla's own `toggleAttack`).
     pub toggle_attack: bool,
-    /// As [`Self::toggle_sneak`], for `key.use`/`Options::toggleUse`.
+    /// As [`Self::toggle_sneak`], for `key.use` (vanilla's own `toggleUse`).
     pub toggle_use: bool,
     /// Vanilla's `options.autoJump`, default `false`.
     pub auto_jump: bool,
     /// Vanilla's `options.sprintWindow`, an
-    /// `IntRange(0, 10)` with default `7`. `0` disables double-tap sprint.
+    /// a clamped range `0..=10` with default `7`. `0` disables double-tap sprint.
     pub sprint_window_ticks: u8,
     /// Vanilla's `options.invertMouseX`, default `false`.
     /// Fed to [`lodestone_controller::apply_look_inverted`].
@@ -657,17 +655,16 @@ pub struct Options {
     /// pose-scale multiplier on the chat log and input line.
     pub chat_scale: f32,
     /// Vanilla's `options.chat.width`, `0.0..=1.0`,
-    /// default `1.0`. Fed through `ChatComponent.getWidth`
-    /// (`ChatComponent.java`, reproduced as
-    /// `crate::hud::chat_width_px`) to size the chat box.
+    /// default `1.0`. Fed through vanilla's own chat-width calculation, reproduced as
+    /// `crate::hud::chat_width_px`, to size the chat box.
     pub chat_width: f32,
     /// Vanilla's `options.chat.height.unfocused`,
-    /// `0.0..=1.0`, default `ChatComponent.defaultUnfocusedPct()` =
+    /// `0.0..=1.0`, default vanilla's own unfocused-height fraction =
     /// `70.0/160.0` — how tall the scrollback
     /// is while the chat box is **closed**.
     pub chat_height_unfocused: f32,
     /// As [`Self::chat_height_unfocused`], while the chat box is **open**
-    /// (`options.chat.height.focused`, `Options.java`). Default `1.0`.
+    /// (`options.chat.height.focused`, vanilla's own persisted-options declarations). Default `1.0`.
     pub chat_height_focused: f32,
     /// Vanilla's `options.chat.line_spacing`,
     /// `0.0..=1.0`, default `0.0`. Extra fraction of a line's height inserted
@@ -685,7 +682,7 @@ pub struct Options {
     pub chat_background_opacity: f32,
     /// Vanilla's `options.chat.color`, default `true`.
     /// `false` strips every legacy `§` code before drawing a scrollback line
-    /// (`ComponentRenderUtils.stripColor`, `ComponentRenderUtils.java`) —
+    /// (matching vanilla's own color-code-stripping helper) —
     /// it does not affect the input line, which never carries codes.
     pub chat_colors: bool,
     /// Vanilla's own subtitle-caption toggle, default `false` —
@@ -694,7 +691,7 @@ pub struct Options {
     /// Accessibility, both writing this one field.
     pub show_subtitles: bool,
     /// Vanilla's look **sensitivity** (`options.sensitivity`,
-    /// `Options.java`): `UnitDouble`, `0.0..=1.0`, default `0.5`. The
+    /// vanilla's own persisted-options declarations): a unit-interval double, `0.0..=1.0`, default `0.5`. The
     /// displayed label is `percentValueLabel(caption, 2.0 * value)`, so the
     /// default reads **100%** and the maximum **200%** — the stored number is
     /// half the percentage a player sees.
@@ -710,9 +707,11 @@ pub struct Options {
     /// [`Config::resolve_persisted`].
     pub sensitivity: f32,
     /// Vanilla's `options.renderDistance`:
-    /// `IntRange(2, largeDistances ? 32 : 16, false)`, default `12` chunks.
+    /// a clamped range from 2 to either 32 or 16 depending on whether the large-distances
+    /// branch is taken, default `12` chunks.
     ///
-    /// The `false` is `applyValueImmediately`, i.e. vanilla commits this one
+    /// Vanilla does not apply the value on every frame the slider moves —
+    /// it commits this one
     /// **600 ms after the drag stops** rather than per-frame, because each
     /// change reloads chunks. This client applies it on the next launch instead
     /// (see [`Config::resolve_persisted`]) — a real difference from vanilla,
@@ -743,16 +742,16 @@ pub struct Options {
     ///
     /// Default `false`, matching vanilla's boot value.
     pub advanced_item_tooltips: bool,
-    /// F3+P — `Options.pauseOnLostFocus`: whether losing window focus pauses
-    /// the game (`KeyboardHandler.java`'s `keyDebugFocusPause` arm). Read by
+    /// F3+P — vanilla's own pause-on-lost-focus option: whether losing window focus pauses
+    /// the game (vanilla's own debug-key handling has a dedicated arm for the chord). Read by
     /// `WindowEvent::Focused(false)` in `app/lifecycle.rs`, which otherwise
     /// pauses unconditionally.
     ///
     /// Default `true`, matching vanilla's boot value — the client pauses on
     /// focus loss unless a player explicitly turns it off with the chord.
     pub pause_on_lost_focus: bool,
-    /// Vanilla's eleven `soundSource.*` sliders (`Options.java`'s
-    /// `createSoundSliderOptionInstance`, a `UnitDouble` defaulting to `1.0` for
+    /// Vanilla's eleven `soundSource.*` sliders (vanilla's own persisted-options declarations
+    /// build each as a unit-interval double defaulting to `1.0` for
     /// every bus), indexed by
     /// `lodestone_model::event::SoundCategory::ordinal` — see
     /// [`SOUND_CATEGORY_NAMES`] for the order and the file keys.
@@ -769,8 +768,8 @@ pub struct Options {
     /// is not squared).
     pub sound_volumes: [f32; 11],
     /// Vanilla's **FOV** option, the vertical field of
-    /// view in **degrees** — an `IntRange(30, 110)` defaulting to `70`, not a
-    /// `UnitDouble`. See [`MIN_FOV`].
+    /// view in **degrees** — an a clamped range `30..=110` defaulting to `70`, not a
+    /// a unit-interval double. See [`MIN_FOV`].
     ///
     /// Reaches `lodestone_render::Camera::fov_y_degrees` through
     /// `Sim::set_fov_y_degrees` → `camera_rig::build_camera`, which pinned it to
@@ -788,7 +787,7 @@ pub struct Options {
     /// wrong.
     pub fov: u32,
     /// Vanilla's **Glint Speed** accessibility option, a
-    /// `UnitDouble` defaulting to `0.5` — how fast the enchantment shimmer scrolls
+    /// a unit-interval double defaulting to `0.5` — how fast the enchantment shimmer scrolls
     /// across an item.
     ///
     /// The default is not incidental: it is the same number as
@@ -802,17 +801,17 @@ pub struct Options {
     /// [`Self::damage_tilt_strength`] zero is not an off state.
     pub glint_speed: f32,
     /// Vanilla's **Glint Strength** accessibility option,
-    /// a `UnitDouble` defaulting to `0.75` — the shimmer's alpha
+    /// a unit-interval double defaulting to `0.75` — the shimmer's alpha
     /// (`GlintAlpha`), matching `lodestone_render::glint::DEFAULT_STRENGTH`.
     ///
     /// `0.0` removes the shimmer entirely, which is what a player sensitive to it
     /// wants; there is no separate on/off toggle in vanilla either.
     pub glint_strength: f32,
-    /// Vanilla's **Clouds** option (`Options.java`, a `CycleButton` over
-    /// `CloudStatus`, default `FANCY`) — off, fast, or fancy.
+    /// Vanilla's **Clouds** option (vanilla's own persisted-options declarations,
+    /// a cycle button over its own cloud-status enum, default `FANCY`) — off, fast, or fancy.
     ///
     /// Persisted as the string `"off"`/`"fast"`/`"fancy"`, matching vanilla's own
-    /// `CloudStatus.getSerializedName`, rather than as the enum's ordinal: the file
+    /// serialized-name lookup, rather than as the enum's ordinal: the file
     /// is hand-editable, and a number would make the three states unguessable *and*
     /// silently remap if a variant were ever inserted.
     ///
@@ -824,10 +823,10 @@ pub struct Options {
     /// the shell's pass; that enum's own doc records why.
     pub cloud_status: lodestone_render::CloudStatus,
     /// Vanilla's **Max Framerate** option (`options.framerateLimit`,
-    /// `Options.java`): `Codec.intRange(10, 260)`, default `120`, where
+    /// vanilla's own persisted-options declarations): a clamped range `10..=260`, default `120`, where
     /// `260` ([`UNLIMITED_FRAMERATE_CUTOFF`]) means "Unlimited" — a sentinel
-    /// value, not a special enum state (`Minecraft.runTick`'s own
-    /// `if (framerateLimit < 260)` gate).
+    /// value, not a special enum state (vanilla's own per-tick loop gates its
+    /// frame-rate limiter on `framerateLimit < 260`).
     ///
     /// This is the **raw stored fps**, not the slider's `1..=26` pre-image —
     /// see `menu::options::INT_RANGE_SLIDERS`'s `"framerateLimit"` row for the
@@ -838,9 +837,9 @@ pub struct Options {
     /// target the frame pacer schedules against — see that function's doc for
     /// why the two compose rather than one overriding the other.
     pub framerate_limit: u32,
-    /// Vanilla's **VSync** option (`options.vsync`, `Options.java`),
-    /// default `true`. Vanilla's `onChange` calls
-    /// `Minecraft.invalidateSurfaceConfiguration()`; this client's equivalent
+    /// Vanilla's **VSync** option (`options.vsync`, vanilla's own persisted-options declarations),
+    /// default `true`. Vanilla reacts to a change by invalidating its own
+    /// surface configuration; this client's equivalent
     /// is `WindowApp::sync_vsync_present_mode`, which polls this field once per
     /// presented frame and hands it to
     /// `lodestone_render::SurfaceTarget::set_present_mode` — see that method's
@@ -848,9 +847,9 @@ pub struct Options {
     /// equality guard inside it).
     ///
     /// **Composes with [`Self::framerate_limit`], it does not gate it**:
-    /// vanilla applies `FramerateLimiter.limitDisplayFPS` whenever
+    /// vanilla applies its own frame-rate limiter whenever
     /// `framerateLimit < 260` **unconditionally**, vsync on or off
-    /// (`Minecraft.java` has no vsync check at all) — the two are
+    /// — vanilla's own client entry point has no vsync check at all — the two are
     /// independent throttles the client is subject to simultaneously, and this
     /// client reproduces that rather than inventing a precedence between them.
     pub enable_vsync: bool,
@@ -858,11 +857,11 @@ pub struct Options {
     /// See [`InactivityFpsLimit`]'s own doc for what it actually gates here.
     pub inactivity_fps_limit: InactivityFpsLimit,
     /// Vanilla's **Preset** slider (`options.graphics.preset`,
-    /// `Options.java`), default `Fancy`. See [`GraphicsPreset`]'s doc
+    /// vanilla's own persisted-options declarations), default `Fancy`. See [`GraphicsPreset`]'s doc
     /// for the three fields this client's preset actually writes, and why.
     pub graphics_preset: GraphicsPreset,
     /// Vanilla's **See-Through Leaves** option (`options.cutoutLeaves`,
-    /// `Options.java`), default `true` (holes visible — vanilla's
+    /// vanilla's own persisted-options declarations), default `true` (holes visible — vanilla's
     /// FANCY/FABULOUS behaviour).
     ///
     /// `false` is vanilla's FAST behaviour: leaves render through the *solid*
@@ -876,7 +875,7 @@ pub struct Options {
     /// `operateOnLevelExtractor(LevelExtractor::allChanged)`.
     pub cutout_leaves: bool,
     /// Vanilla's **Mipmap Levels** option (`options.mipmapLevels`,
-    /// `Options.java`): `IntRange(0, 4)`, default
+    /// vanilla's own persisted-options declarations): a clamped range `0..=4`, default
     /// [`lodestone_render::texture::BLOCK_ATLAS_MIP_LEVELS`] — the same number
     /// this field defaults to, so a fresh install's stored value and the
     /// render crate's own fallback constant are one fact, not two.
@@ -892,7 +891,7 @@ pub struct Options {
     /// side.
     pub mipmap_levels: u32,
     /// Vanilla's **Entity Shadows** option (`options.entityShadows`,
-    /// `Options.java`), default `true`.
+    /// vanilla's own persisted-options declarations), default `true`.
     ///
     /// Reaches `RenderState::set_entity_shadows_enabled`, polled every frame
     /// exactly like [`Self::cutout_leaves`] (`app/redraw.rs`, beside
@@ -901,7 +900,7 @@ pub struct Options {
     /// own doc explains is not needed here.
     pub entity_shadows: bool,
     /// Vanilla's **Weather Effect Radius** option (`options.weatherRadius`,
-    /// `Options.java`): `IntRange(3, 10)`, default `10`, measured in **blocks**
+    /// vanilla's own persisted-options declarations): a clamped range `3..=10`, default `10`, measured in **blocks**
     /// (`en_us.json`'s `options.blocks` is `"%s Blocks"`, not `"%s Chunks"` —
     /// its neighbour `cloudRange` is the chunk-denominated one).
     ///
@@ -917,7 +916,7 @@ pub struct Options {
     /// the wrong distance.
     pub weather_radius: i32,
     /// Vanilla's **Menu Background Blur** option
-    /// (`options.menuBackgroundBlurriness`, `Options.java`): `IntRange(0, 10)`,
+    /// (`options.menuBackgroundBlurriness`, vanilla's own persisted-options declarations): a clamped range `0..=10`,
     /// default `5`. Placed on **two** pages, Video and Accessibility, exactly as
     /// vanilla places it — both rows drive this one field.
     ///
@@ -930,7 +929,7 @@ pub struct Options {
     /// radius into `config_h`/`config_v`" — this is that.
     pub menu_background_blurriness: u32,
     /// Vanilla's **Attack Indicator** option (`options.attackIndicator`,
-    /// `Options.java`), default [`AttackIndicator::Crosshair`].
+    /// vanilla's own persisted-options declarations), default [`AttackIndicator::Crosshair`].
     ///
     /// Reaches `hud::HudFrame::attack_indicator`, which the crosshair and hotbar
     /// draw sites in `hud::HudGeometry::build_inner` each gate on — vanilla's own
@@ -939,7 +938,7 @@ pub struct Options {
     /// though the option were pinned to `Crosshair`, which the draw site's own
     /// comment said in as many words.
     pub attack_indicator: AttackIndicator,
-    /// Vanilla's **Particles** option (`options.particles`, `Options.java`),
+    /// Vanilla's **Particles** option (`options.particles`, vanilla's own persisted-options declarations),
     /// default [`ParticleLevel::All`].
     ///
     /// Pushed into the sim by `Sim::set_particle_level` once per presented
@@ -949,7 +948,7 @@ pub struct Options {
     /// and its `overrideLimiter` bypass) and was missing only the level test.
     pub particles: ParticleLevel,
     /// Vanilla's **Biome Blend** option (`options.biomeBlendRadius`,
-    /// `Options.java`): `IntRange(0, 7)`, default `2`. The stored number is the
+    /// vanilla's own persisted-options declarations): a clamped range `0..=7`, default `2`. The stored number is the
     /// window **radius**; the row's label shows the width `2r + 1`.
     ///
     /// The half-width of the square of biomes each tinted vertex averages its
@@ -1168,11 +1167,11 @@ impl Options {
             .get("show_subtitles")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
-        // A `UnitDouble`, so the same `0.0..=1.0` rule as the chat sliders —
+        // A unit-interval double, so the same `0.0..=1.0` rule as the chat sliders —
         // reusing `unit` rather than restating the range, because a hand-written
         // second copy is how the two would drift.
         let sensitivity = unit("sensitivity", DEFAULT_SENSITIVITY);
-        // Clamped to vanilla's own `IntRange(2, 32)` rather
+        // Clamped to vanilla's own a clamped range `2..=32` rather
         // than merely parsed: an out-of-range value here reaches
         // `sim/build.rs`'s world radius and `sim/camera.rs`'s fog, and a 0 would
         // generate no chunks at all — a hand-edited file must not be able to
@@ -1188,13 +1187,13 @@ impl Options {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
         // Absent or malformed is **on** — vanilla's own default
-        // (`Options.java`'s `pauseOnLostFocus = true`).
+        // (vanilla's own persisted-options declarations's `pauseOnLostFocus = true`).
         let pause_on_lost_focus = obj
             .get("pause_on_lost_focus")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
         // The eleven sound sliders, through the same `unit` rule as the chat
-        // ones: every bus is a `UnitDouble` defaulting to `1.0`, so an absent,
+        // ones: every bus is a unit-interval double defaulting to `1.0`, so an absent,
         // non-finite or out-of-range value degrades to full volume rather than
         // to silence. Silence is the wrong degradation here for the reason
         // `chat_colors` documents in reverse — a mangled file must not leave a
@@ -1214,7 +1213,7 @@ impl Options {
             .and_then(|v| u32::try_from(v).ok())
             .filter(|v| (MIN_FOV..=MAX_FOV).contains(v))
             .unwrap_or(DEFAULT_FOV);
-        // Both `UnitDouble`s, so the chat sliders' `unit` rule applies. The
+        // Both unit-interval doubles, so the chat sliders' `unit` rule applies. The
         // defaults come from `lodestone_render::glint`'s own constants rather than
         // from literals here, because those constants *are* vanilla's shipped
         // option values — a second copy would be a fact declared twice.
@@ -1231,7 +1230,7 @@ impl Options {
             .and_then(serde_json::Value::as_str)
             .and_then(cloud_status_from_name)
             .unwrap_or_default();
-        // Clamped to vanilla's own `Codec.intRange(10, 260)` — a mangled file
+        // Clamped to vanilla's own persisted-options range `10..=260` — a mangled file
         // must not be able to produce a limit below the floor, and rounding to
         // the nearest `*10` bucket keeps a hand-edited value that fell between
         // two buckets from silently teleporting the slider handle.
@@ -1264,7 +1263,7 @@ impl Options {
             .get("cutout_leaves")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
-        // Clamped to vanilla's own `IntRange(0, 4)` — the same bound
+        // Clamped to vanilla's own a clamped range `0..=4` — the same bound
         // `menu::options::INT_RANGE_SLIDERS`' `"mipmapLevels"` row places the
         // handle with, and the same one `crate::resources::set_mipmap_levels`
         // enforces on the live-write side. A hand-edited out-of-range value
@@ -1282,7 +1281,7 @@ impl Options {
             .get("entity_shadows")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(true);
-        // Clamped to vanilla's own `IntRange(3, 10)` — `mipmap_levels`' reason
+        // Clamped to vanilla's own a clamped range `3..=10` — `mipmap_levels`' reason
         // above. A hand-edited `0` would otherwise reach `extract_columns` and
         // silently stop all precipitation drawing, which reads as a render bug
         // rather than as a settings-file mistake.
@@ -1293,7 +1292,7 @@ impl Options {
             .map_or(MAX_WEATHER_RADIUS, |v| {
                 v.clamp(MIN_WEATHER_RADIUS, MAX_WEATHER_RADIUS)
             });
-        // Clamped to vanilla's own `IntRange(0, 10)`, `weather_radius`'s reason
+        // Clamped to vanilla's own a clamped range `0..=10`, `weather_radius`'s reason
         // above — a hand-edited 200 would reach the blur shader's inner loop as
         // a 401-tap filter per pass, six passes deep.
         let menu_background_blurriness = obj
@@ -1320,7 +1319,7 @@ impl Options {
             .and_then(serde_json::Value::as_str)
             .and_then(particle_level_from_name)
             .unwrap_or_default();
-        // Clamped to vanilla's own `IntRange(0, 7)` — which is also
+        // Clamped to vanilla's own a clamped range `0..=7` — which is also
         // `BlendRowCursor`'s ring capacity, so this clamp is a memory bound as
         // well as a fidelity one. `BlendedTintCursor::new` clamps again on its
         // own side; both are cheap and neither is the other's excuse.
@@ -2684,7 +2683,7 @@ mod tests {
     #[test]
     fn sprint_window_default_is_vanish_and_round_trips_clamped_to_ten() {
         let path = temp_options_path("sprint-window");
-        // Boots at vanilla's shipped 7 (Options.java, IntRange(0,10)).
+        // Boots at vanilla's shipped 7 (its own persisted-options declarations, a clamped range 0..=10).
         assert_eq!(
             Options::default().sprint_window_ticks,
             lodestone_controller::SPRINT_TRIGGER_WINDOW_TICKS
@@ -2818,7 +2817,7 @@ mod tests {
     // -- `fov` --------------------------------------------------------------
 
     /// `fov` round-trips, stays out of an untouched file, and rejects rather than
-    /// clamps a value outside vanilla's `IntRange(30, 110)`.
+    /// clamps a value outside vanilla's a clamped range `30..=110`.
     ///
     /// Rejecting to the **default** rather than to a nearer endpoint is the same
     /// choice `render_distance` makes, and for the same reason: landing on 70 tells
@@ -3347,7 +3346,7 @@ mod tests {
     /// A hand-edited or corrupt file must not be able to produce a black screen.
     ///
     /// `render_distance` reaches `sim/build.rs`'s world radius, so 0 would
-    /// generate no chunks at all. The clamp is to vanilla's own `IntRange(2, 32)`
+    /// generate no chunks at all. The clamp is to vanilla's own a clamped range `2..=32`
     /// rather than to "something positive", and each rejected value is checked to
     /// land on the **default** rather than on a silently clamped neighbour, which
     /// is what tells a reader the value was rejected rather than adjusted.
@@ -3367,7 +3366,7 @@ mod tests {
             let json = format!("{{\"render_distance\": {good}}}");
             assert_eq!(Options::from_json(&json).render_distance, good);
         }
-        // And sensitivity, a `UnitDouble`, follows the chat sliders' rule.
+        // And sensitivity, a unit-interval double, follows the chat sliders' rule.
         for bad in ["-0.5", "1.5", "\"loud\""] {
             let json = format!("{{\"sensitivity\": {bad}}}");
             assert_eq!(
