@@ -36,23 +36,13 @@
 //! # The ordering constraint that is not optional
 //!
 //! **A real client silently drops an `ADD_ENTITY` for a player it has no
-//! `PlayerInfo` for.** From the jar, not inferred —
-//! `ClientPacketListener.createEntityFromPacket`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/multiplayer/ClientPacketListener.java:591-604`):
+//! player-info entry for.** From the real client's entity-creation-from-packet
+//! step, transcribed as the rule it implements, not inferred: when the
+//! spawned type is a player, look up its player-info entry by UUID; if none
+//! exists, log a warning and refuse to construct the entity at all;
+//! otherwise build the remote player from that info's profile.
 //!
-//! ```text
-//! if (type == EntityTypes.PLAYER) {
-//!    PlayerInfo playerInfo = this.getPlayerInfo(packet.getUUID());
-//!    if (playerInfo == null) {
-//!       LOGGER.warn("Server attempted to add player prior to sending player info (Player id {})", packet.getUUID());
-//!       return null;
-//!    } else {
-//!       return new RemotePlayer(this.level, playerInfo.getProfile());
-//!    }
-//! }
-//! ```
-//!
-//! It returns `null`, `handleAddEntity` logs "Skipping Entity with id" and the
+//! It returns nothing usable, the add-entity handler logs "Skipping Entity with id" and the
 //! entity is **never added to the level**. So a server that streams a perfect
 //! `ADD_ENTITY` and no `player_info_update` reaches zero pixels while every
 //! wire in `cargo xtask connectedness` reads green — exactly this repo's
@@ -74,7 +64,7 @@
 //!   `Option<Rotation>` (`Some` only for `move_player_pos_rot`),
 //!   [`PlayerRotated`](crate::ServerBound::PlayerRotated) carries angles with
 //!   no position, and [`PlayerStatusOnly`](crate::ServerBound::PlayerStatusOnly)
-//!   carries neither. Vanilla's `LocalPlayer.sendPosition` sends exactly one
+//!   carries neither. The real client's own send-position step sends exactly one
 //!   of the four per tick, so they partition the movement stream rather than
 //!   overlapping: if you add a field here, work out which of the four
 //!   actually carries it before wiring one arm and assuming the rest follow.
@@ -112,8 +102,9 @@ use crate::server::EntitySource;
 ///
 /// A disjoint range is the honest fix available without reaching into the mob
 /// simulation: `1 << 30` leaves the mob allocator over a billion ids before it
-/// could ever reach here, and leaves this allocator another billion. Vanilla
-/// has no such split — `Entity.ENTITY_COUNTER` is one `AtomicInteger` for every
+/// could ever reach here, and leaves this allocator another billion. The
+/// real engine
+/// has no such split — its own entity counter is one shared atomic integer for every
 /// entity in the level — so the *real* fix is one shared allocator when the
 /// server-ECS migration (#433) gives both a common owner. Until then this
 /// constant is what stops the aliasing, and it is asserted disjoint from the
@@ -142,10 +133,11 @@ struct TrackedPlayer {
     /// The network entity id other connections address this player by.
     entity_id: i32,
     /// The profile UUID. This is the uuid the client presented at
-    /// `LoginStart` and that
+    /// login and that
     /// [`ServerProtocol::login_success`](crate::ServerProtocol::login_success)
     /// echoed back, so the entity's uuid, the tab-list entry's uuid and the
-    /// uuid the client believes is its own all agree. (Vanilla in offline mode
+    /// uuid the client believes is its own all agree. (The real engine in
+    /// offline mode
     /// instead *derives* it from the username and ignores what the client
     /// sent; matching that would mean changing `login_success` too, which is a
     /// separate change — and any divergence between the two would be a bug, so
@@ -263,13 +255,12 @@ pub struct ChatLine {
 }
 
 impl ChatLine {
-    /// Vanilla's rendered form for the default chat type: `chat.type.text` is
-    /// `"<%s> %s"` (`assets/minecraft/lang/en_us.json`, bound to
-    /// `ChatType.CHAT` by `ChatType.DEFAULT_CHAT_DECORATION`,
-    /// `ChatType.java:30/44`).
+    /// The real rendered form for the default chat type: `chat.type.text` is
+    /// `"<%s> %s"`, bound to the default chat type by the real engine's
+    /// default chat decoration.
     ///
     /// This crate broadcasts chat as a `system_chat` component rather than a
-    /// real `player_chat` packet, so the decoration vanilla's client would
+    /// real `player_chat` packet, so the decoration the real client would
     /// apply from the chat-type registry has to be applied here instead. See
     /// [`PlayerRegistry::say`] for why that trade was made.
     #[must_use]
@@ -339,9 +330,9 @@ impl PlayerRegistry {
     /// everything and a second sees nothing — fatal for a broadcast).
     ///
     /// **Every connection reads every line, including the sender's own.**
-    /// That is vanilla: `PlayerList.broadcastChatMessage`
-    /// (`PlayerList.java:738-753`) loops `for (ServerPlayer player :
-    /// this.players)` with no sender exclusion, and a vanilla client does not
+    /// That is real behaviour: the real per-world broadcast-chat-message
+    /// step loops over every player
+    /// with no sender exclusion, and a real client does not
     /// echo its own chat locally — it waits for the server. Excluding the
     /// sender here would make their own messages invisible to them.
     pub fn say(&self, sender: &str, message: &str) {
@@ -394,7 +385,7 @@ impl PlayerRegistry {
     ///
     /// Unlike [`say`](Self::say), the *reader* excludes the sender
     /// (`swings_since`'s callers filter `entity_id != player_entity_id`) —
-    /// vanilla's own `sendToTrackingPlayers` never sends to the swinger,
+    /// the real engine's own "send to tracking players" step never sends to the swinger,
     /// which already animates locally the instant it sent the packet. The
     /// log itself carries the sender so each reader can make that
     /// per-connection decision; it does not decide for them.
@@ -499,8 +490,8 @@ impl PlayerRegistry {
     /// the reason [`set_position`](Self::set_position) is.
     ///
     /// Separate from `set_position` rather than folded into it because the
-    /// two arrive on genuinely different packets: vanilla's
-    /// `LocalPlayer.sendPosition` picks one of four movement packets per tick
+    /// two arrive on genuinely different packets: the real client's own
+    /// send-position step picks one of four movement packets per tick
     /// based on which of position/look is dirty, so a turn on the spot
     /// (`move_player_rot`) updates rotation with no position to offer, and a
     /// walk in a straight line (`move_player_pos`) the reverse. A combined
@@ -564,17 +555,19 @@ impl PlayerRegistry {
                     // is what the streamer sends anyway.
                     velocity: Vec3::new(0.0, 0.0, 0.0),
                     // No player metadata is modelled yet. Adding any means
-                    // running `EntityDataIndexOracle.java` first — index 8 is
-                    // `LivingEntity.DATA_LIVING_ENTITY_FLAGS` *and*
-                    // `AbstractArrow.ID_FLAGS`, and a player is a
-                    // `LivingEntity`, so the census column that separates the
+                    // running the entity-data index oracle first — index 8 is
+                    // shared by living entities' own flags field *and*
+                    // an arrow's flags field, and a player is a
+                    // living entity, so the census column that separates the
                     // claimants is not guessable from the previous
                     // collision's guard.
                     metadata: Vec::new(),
-                    // `Player` does not override `getAddEntityPacket`, so the
+                    // The real player entity does not override the
+                    // add-entity-packet builder, so the
                     // Object Data field is `0`.
                     object_data: 0,
-                    // `Leashable` is never implemented by `Player` in vanilla — a
+                    // The real leashable interface is never implemented by
+                    // the player entity — a
                     // player cannot be the *leashed* end of a lead, only a holder
                     // (see `crates/lodestone-server/src/mobs/mod.rs`'s
                     // `LeashHolder::Player`).
@@ -614,10 +607,10 @@ impl PlayerRegistry {
     /// so `/xp query` run from another connection can read it — the same
     /// producer/mirror split [`set_game_mode`](Self::set_game_mode) already
     /// documents, called at every site that already sends
-    /// `ClientboundSetExperiencePacket` (`join_experience`'s own doc: "send
+    /// the set-experience packet (`join_experience`'s own doc: "send
     /// once at join, and send after every mutation" — this is that same
     /// convention, extended to the registry). `points` is the *query*
-    /// formula (`Mth.floor(experienceProgress * getXpNeededForNextLevel())`),
+    /// formula (floor of experience progress times the xp needed for the next level),
     /// not the lifetime total — see [`crate::commands::PlayerCandidate::xp_points`]'s
     /// own doc. A no-op for an unregistered uuid, for the same reason
     /// [`set_position`](Self::set_position) is.
@@ -795,7 +788,7 @@ impl PlayerListStreamer {
     ///
     /// Adds come **first** in the returned vector, and the caller must emit
     /// this whole vector before the entity diff — see the module docs on why a
-    /// client drops an `ADD_ENTITY` that precedes its `PlayerInfo`.
+    /// client drops an `ADD_ENTITY` that precedes its player-info entry.
     pub fn sync<P: ServerProtocol>(
         &mut self,
         proto: &P,
