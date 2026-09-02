@@ -3418,7 +3418,7 @@ fn held_item_overlay_reaches_pixels_and_keys_on_identity_not_slot() {
     assert_eq!(name, "Dirt");
     assert_eq!(
         alpha, 1.0,
-        "Hud.java: a freshly triggered highlight is at full opacity, no fade-in"
+        "vanilla's own hud rendering: a freshly triggered highlight is at full opacity, no fade-in"
     );
 
     // Run past the hold phase into the fade so alpha is measurably below
@@ -3447,7 +3447,7 @@ fn held_item_overlay_reaches_pixels_and_keys_on_identity_not_slot() {
     assert!(
         after_switch <= faded_alpha,
         "switching between two slots holding the same item must not restart the \
-         timer (Hud.java's item-and-hover-name identity check, not slot \
+         timer (vanilla's own hud rendering's item-and-hover-name identity check, not slot \
          equality) — alpha went from {faded_alpha} to {after_switch}, which only \
          happens if it retriggered"
     );
@@ -3886,7 +3886,7 @@ fn tick_nearby_entities_resolves_a_neighbours_scoreboard_team() {
     let carol = Uuid::from_u128(102);
 
     // The tab list carries the account name a scoreboard team's member list
-    // actually keys on (`Player.getScoreboardName()`) — see
+    // actually keys on (vanilla's own player scoreboard-name override) — see
     // `crate::sim::collide::scoreboard_holder`.
     ingest(
         &mut sim,
@@ -4476,7 +4476,8 @@ fn sprinting_underwater_enters_the_swim_pose_and_drops_the_camera() {
         sim.camera(1.0).position.y - sim.player().position.y as f32
     };
 
-    // **The camera must NOT have snapped.** `Camera.tick()` eases its own eye
+    // **The camera must NOT have snapped.** Vanilla's own per-tick camera
+    // update eases its own eye
     // height toward the entity's — `eyeHeight += (target - eyeHeight) * 0.5F` —
     // so one tick after the pose flips it is still most of the way up at the
     // standing height. This is the assertion that proves `Sim::camera` reads
@@ -5565,8 +5566,8 @@ fn a_placeable_item_on_a_block_does_not_also_send_the_generic_use() {
 // -----------------------------------------------------------------------
 //
 // Right-clicking an armour piece from the hotbar with nothing under the
-// crosshair lands in `use_item_generic` — vanilla's `Item.use()` →
-// `Equippable.swapWithEquipmentSlot` — the same landing site
+// crosshair lands in `use_item_generic` — vanilla's own item `use()` falling
+// into its own equip-swap component logic — the same landing site
 // `use_item_live_sends_generic_use_with_no_target_at_all` already proves for
 // a bow. Before `predict_equip_swap` existed that method sent `UseItem` and
 // wrote nothing locally, so the helmet only appeared once the server's own
@@ -5721,8 +5722,8 @@ fn throwing_a_snowball_with_no_target_swings_the_arm() {
 /// interactable) while throwing. A snowball is not a block, so it can never
 /// take the placement path, and vanilla's `case BLOCK` falls through to the
 /// same generic use as the no-target case whenever the block declines the
-/// click (`Minecraft.java`'s `useResult instanceof InteractionResult.Fail`
-/// `return`s, but a plain block's `useItemOn` is `PASS`, not `Fail`).
+/// click (vanilla's own client entry point's use-item dispatch returns early
+/// only on an outright fail result, but a plain block's `useItemOn` is `PASS`, not a fail).
 #[test]
 fn throwing_a_snowball_at_a_plain_block_still_swings_the_arm() {
     let (net, actions, _feed) = NetClient::loopback_with_feed();
@@ -6505,8 +6506,8 @@ fn crit_particles_do_not_spawn_while_sprinting() {
     );
 }
 
-/// **Negative control.** A dropped item is not a `LivingEntity`
-/// (`Player.java`'s `entity instanceof LivingEntity` clause) —
+/// **Negative control.** A dropped item is not a living entity
+/// (vanilla's own can-crit check's living-entity clause) —
 /// vanilla never plays a crit sparkle on a punched item stack.
 #[test]
 fn crit_particles_do_not_spawn_against_a_non_living_target() {
@@ -6663,11 +6664,11 @@ fn ray_target_for_type(entity_type: &str, entity_id: i32) -> Option<i32> {
 ///
 /// Killing a mob spawns its drops and its orbs inside the hitbox the mob just
 /// vacated, so before this fix the next left-click picked one of them and sent
-/// an attack naming it. `ServerGamePacketListenerImpl.handleAttack` treats an
-/// `ItemEntity` or `ExperienceOrb` target as a protocol violation and
+/// an attack naming it. Vanilla's own server-side attack handling treats a
+/// dropped item or an experience orb target as a protocol violation and
 /// disconnects with `multiplayer.disconnect.invalid_entity_attacked` — the
 /// reported "Attempting to attack an invalid entity". Vanilla never sends it
-/// because `Entity.isPickable()` is `false` and neither class overrides it.
+/// because vanilla's own is-pickable check is `false` for both and neither overrides it.
 ///
 /// The pig arm is the control and it is load-bearing: it proves this ray does
 /// cross a box at that position, so a `None` from the other two arms is the
@@ -6718,11 +6719,11 @@ fn the_pick_predicate_matches_the_vanilla_entity_census() {
 
     let mut wrong = Vec::new();
     for (name, expected) in [
-        // Rejected by `handleAttack` — these two are the reported kick.
+        // Rejected by vanilla's own server-side attack handling — these two are the reported kick.
         ("minecraft:item", false),
         ("minecraft:experience_orb", false),
-        // `AbstractArrow.isPickable()` is `super.isPickable() && !isInGround()`,
-        // and that `super` is `Projectile`'s `redirectable_projectile` tag test,
+        // Vanilla's own arrow-family is-pickable check falls back to its
+        // projectile base's own redirectable-projectile tag test,
         // which no arrow type is in. So arrows are never pickable at all.
         ("minecraft:arrow", false),
         ("minecraft:spectral_arrow", false),
@@ -7431,12 +7432,12 @@ fn spyglass_scoping_zooms_the_render_camera_by_exactly_a_tenth() {
 /// (`-|cos|`, one-way) while the sway is a full sine (both ways). A gate that
 /// only asked "did the frame change" passes on a bob with the wrong
 /// amplitude, the wrong phase or the wrong axis; every number below is
-/// predicted from `GameRenderer.bobView`'s constants before it is measured.
+/// predicted from vanilla's own walk-bob render pass's constants before it is measured.
 #[test]
 fn the_walk_bob_reaches_the_projection_at_vanillas_own_magnitude_and_axis() {
     /// Vanilla's walking speed, blocks per tick: `4.317 m/s / 20`.
     const WALK_BLOCKS_PER_TICK: f32 = 0.2159;
-    /// `AbstractClientPlayer.updateBob`'s `Math.min(0.1F, ...)` ceiling,
+    /// Vanilla's own player-bob update's `Math.min(0.1F, ...)` ceiling,
     /// which a walking player saturates.
     const BOB_CEILING: f32 = 0.1;
     /// The nominal viewport the pixel predictions below are stated for.
@@ -7964,9 +7965,9 @@ fn a_real_text_display_folded_through_ingest_and_extract_reaches_sim_display_dra
 /// **Vanilla's border-warning formula, against values computed outside this
 /// code.**
 ///
-/// `Hud.extractVignette` on a *static* border reduces
+/// Vanilla's own hud-vignette-strength extraction on a *static* border reduces
 /// to `warningDistance == warningBlocks` exactly, because
-/// `StaticBorderExtent.getLerpSpeed()` returns `0.0`
+/// vanilla's own static-border-extent lerp speed is `0.0`
 /// and `max(warningBlocks, 0)` is
 /// `warningBlocks`. That makes the arithmetic hand-checkable:
 ///
