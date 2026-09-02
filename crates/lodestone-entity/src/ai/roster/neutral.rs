@@ -4,14 +4,14 @@
 //! # What it is
 //!
 //! One [`Registration`] table per species, transcribed from that species'
-//! `registerGoals()` in `.cache/mc/26.2/src/net/minecraft/world/entity/`.
+//! own goal-registration method in the vanilla source.
 //!
 //! **Read the next section before adding behaviour here.** As written, the four
 //! headline mechanisms this family exists to cover — enderman teleport-on-stare,
 //! zombified-piglin group aggro, bee sting-then-die, wolf pack aggro — were
 //! **not** [`Coverage::Modelled`] rows, each blocked on a primitive absent from
-//! [`MobController`](super::MobController). **All four are now landed** (issue
-//! #233): the sections below are kept as the record of *why* they were blocked
+//! [`MobController`](super::MobController). **All four are now landed** — the
+//! sections below are kept as the record of *why* they were blocked
 //! and exactly what closed each gap, because the next reader arriving via a
 //! stale copy of this doc is the failure mode CLAUDE.md's evidence standards
 //! warn about — re-verify against the tables, not this paragraph.
@@ -21,7 +21,7 @@
 //! A roster entry can only be as good as the goals it can build, and a goal can
 //! only ask [`MobController`](super::MobController) questions it has methods
 //! for. Measured against the trait, **five primitives were absent** and between
-//! them accounted for every one of the four. All five landed (issue #458); the
+//! them accounted for every one of the four. All five have since landed; the
 //! table is kept as the record of what each needed:
 //!
 //! | absent primitive | blocked | landed as |
@@ -46,14 +46,14 @@
 //! 2. **`MobSim::attack`'s pack-alert census** (`alert_species`, in
 //!    `lodestone_server::mobs`) propagates a fresh grudge to nearby same-species
 //!    mobs — the piglin and wolf group-aggro half — the instant the victim's own
-//!    grudge is newly set, mirroring vanilla's `alertOthers` being called from
-//!    `HurtByTargetGoal.start()`/`customServerAiStep` rather than every tick.
+//!    grudge is newly set, mirroring vanilla's own alert mechanism firing once
+//!    when a mob newly acquires a target rather than every tick.
 //! 3. **The bee's sting hook and self-destruct roll**, in `MobSim::tick`'s own
 //!    mob loop (`stung_at`, `bee_sting_death_roll`) — see `BEE`'s doc comment.
-//! 4. **`Bee.BeeAttackGoal`**, registered as a bare `MeleeAttackGoal` — safe
+//! 4. **The bee's own melee row**, registered as a bare `MeleeAttackGoal` — safe
 //!    *because* this table registers no other target-acquisition row, so
 //!    `attack_target` is only ever set while angry; see that row's own comment
-//!    for why this also covers `!hasStung()` without a second guard.
+//!    for why this also covers the sting-survival guard without a second check.
 //!
 //! **The enderman's stare and teleport are `Coverage::Modelled`** below:
 //! `EndermanFreezeWhenLookedAt` (goal priority 1) pins the head while stared at,
@@ -65,11 +65,9 @@
 //! # The trap that decided the target rows, and why it is now safe to cross
 //!
 //! Three of these species register a player-targeting goal whose last argument is
-//! an **anger predicate**: `NearestAttackableTargetGoal<>(this, Player.class, 10,
-//! true, false, this::isAngryAt)` (`ZombifiedPiglin.addBehaviourGoals`,
-//! `Wolf.registerGoals`, and via `Bee.BeeBecomeAngryTargetGoal`
-//! in `Bee.registerGoals`, whose `Bee.BeeBecomeAngryTargetGoal.beeCanTarget` is
-//! `isAngry() && !hasStung()`).
+//! an **anger predicate** — vanilla's own zombified-piglin, wolf and bee
+//! goal-registration methods all pass one, the bee's arriving through its own
+//! angry-target goal whose eligibility check is "angry, and not yet stung".
 //!
 //! **That predicate is the entire difference between a neutral mob and a hostile
 //! one.** The plain [`NearestAttackableTargetGoal`](super::nearest_attackable_target)
@@ -78,7 +76,7 @@
 //! strictly worse than the mob doing nothing, and worse than vanilla in a way a
 //! priority gate cannot see. This was written down while
 //! `NavigatingMob::find_nearest_target` still returned `self.attack_target`
-//! instead of searching (issue #455), so no `NearestAttackableTargetGoal` of
+//! instead of searching, so no `NearestAttackableTargetGoal` of
 //! either form could fire in production and the predicate-free constructor was
 //! inert rather than actively wrong.
 //!
@@ -129,33 +127,29 @@
 //! ## Gotchas
 //!
 //! * **This family is not uniform, and the exception is the interesting one.**
-//!   `ZombifiedPiglin` declares **no** `registerGoals`; it overrides
-//!   `ZombifiedPiglin.addBehaviourGoals`, the hook `Zombie.registerGoals` calls.
-//!   Its table is therefore Zombie's own three rows **plus**
-//!   its six, and because its override does not call `super`, Zombie's
-//!   `MoveThroughVillageGoal` is *dropped* and `SpearUseGoal` moves from priority
-//!   2 to 1. Transcribing only the method that carries the species' name would
-//!   miss three rows and mis-number two.
-//! * **`adjustedTickDelay` halves every delay it wraps.**
-//!   `Goal.adjustedTickDelay` is `requiresUpdateEveryTick() ? ticks :
-//!   reducedTickDelay(ticks)` and `Goal.reducedTickDelay`
-//!   is `Mth.positiveCeilDiv(ticks, 2)`. Neither
-//!   `NearestAttackableTargetGoal`, `TargetGoal` nor
-//!   `EnderMan.EndermanLookForPlayerGoal` overrides `requiresUpdateEveryTick`, so
-//!   the enderman's aggro delay is **3** ticks, not the literal 5, and its
-//!   teleport-towards delay is **15**, not 30. Any future enderman work that
-//!   transcribes the literal will be off by a factor of two.
-//! * **The grudge is an absolute timestamp in 26.2, not a countdown.**
-//!   `NeutralMob.setTimeToRemainAngry(remaining)` stores
-//!   `level.getGameTime() + remaining` and `NeutralMob.isAngry()`
-//!   compares against the clock. A countdown field is the pre-26.2
+//!   The zombified piglin declares no goal-registration method of its own; it
+//!   overrides the hook its zombie parent's registration method calls partway
+//!   through. Its table is therefore the zombie's own three rows **plus**
+//!   its six, and because its override does not call through to the parent's
+//!   own hook, the zombie's village-pathing goal is *dropped* and the spear-use
+//!   row moves from priority 2 to 1. Transcribing only the method that carries
+//!   the species' name would miss three rows and mis-number two.
+//! * **Vanilla halves every non-per-tick goal delay it wraps.** A goal that
+//!   does not opt into running every tick has its delay constants halved
+//!   (rounded up) before use. Neither the target-acquisition goals nor the
+//!   enderman's own look-for-player goal opt in, so the enderman's aggro delay
+//!   is **3** ticks, not the literal 5, and its teleport-towards delay is
+//!   **15**, not 30. Any future enderman work that transcribes the literal will
+//!   be off by a factor of two.
+//! * **The grudge is an absolute timestamp in 26.2, not a countdown.** Vanilla
+//!   stores the game-time deadline the grudge expires at, and compares the
+//!   live clock against it. A countdown field is the pre-26.2
 //!   model; porting it would drift against a paused or stepped tick loop.
 //! * **The alert box is a box, not a sphere, and its vertical extent is a flat
-//!   10.** `HurtByTargetGoal.alertOthers` inflates by
-//!   `(followRange, 10.0, followRange)` (`HurtByTargetGoal.ALERT_RANGE_Y`, the
-//!   flat `10`), and the piglin's own `ZombifiedPiglin.alertOthers` uses the same
-//!   shape. Collapsing it to one radius is wrong in
-//!   the corners in both directions.
+//!   10.** Vanilla's own pack-alert search inflates the follow-range box by a
+//!   flat `10` on the vertical axis rather than scaling it with follow range,
+//!   and the piglin's own override of that search uses the same shape.
+//!   Collapsing it to one radius is wrong in the corners in both directions.
 
 use crate::ai::goal::Goal;
 use crate::ai::goals::{
@@ -189,28 +183,26 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
     }
 }
 
-/// `EnderMan.registerGoals`.
+/// Vanilla's own enderman goal-registration method.
 ///
-/// Attributes from `EnderMan.createAttributes` — `MAX_HEALTH 40.0`, `MOVEMENT_SPEED 0.3F`,
+/// Attributes from vanilla's own enderman attribute-builder — `MAX_HEALTH 40.0`, `MOVEMENT_SPEED 0.3F`,
 /// `ATTACK_DAMAGE 7.0`, `FOLLOW_RANGE 64.0`.
 ///
 /// The stare is two goals, not one, and both are [`Coverage::Modelled`] below.
 /// `EndermanFreezeWhenLookedAt` at goal priority 1 stops the navigation while
-/// a player within 16 blocks (`distanceToSqr <= 256.0`, in
-/// `EnderMan.EndermanFreezeWhenLookedAt.canUse`) is staring.
+/// a player within 16 blocks is staring.
 /// `EndermanLookForPlayerGoal` at target priority 1 does the aggro/teleport —
 /// see its own doc comment for the port and its disclosed narrowings. Both
-/// route through `EnderMan.isBeingStaredBy`, which is
-/// `LivingEntity.PLAYER_NOT_WEARING_DISGUISE_ITEM` (a carved
-/// pumpkin, via `ItemTags.GAZE_DISGUISE_EQUIPMENT`, defeats the stare — **not
-/// modelled**, `PlayerPerception` carries no armour-slot data) **and**
-/// `isLookingAtMe(player, 0.025, true, false, getEyeY())`.
+/// route through vanilla's own disguise/gaze check: a carved
+/// pumpkin defeats the stare — **not
+/// modelled**, `PlayerPerception` carries no armour-slot data — **and**
+/// a line-of-sight-plus-cone gaze test.
 ///
 /// That gaze test has a real geometric definition worth citing rather than
-/// approximating (`LivingEntity.isLookingAtMe`): with the player's normalised
+/// approximating: with the player's normalised
 /// view vector `look` and the normalised offset `dir` from player eyes to the
 /// enderman, a stare is `look.dot(dir) > 1.0 - coneSize / dist` plus line of
-/// sight. `coneSize` is `0.025` and `adjustForDistance` is `true`, so the
+/// sight. `coneSize` is `0.025` and the distance adjustment is enabled, so the
 /// tolerance is **divided by distance** — the required precision *increases*
 /// the further away the player stands (the same offset that reads as a stare
 /// up close reads as a near-miss at range), which is the opposite of the
@@ -219,7 +211,7 @@ pub fn lookup(species: &str) -> Option<&'static [Registration]> {
 /// the worked example.
 pub static ENDERMAN: &[Registration] = &[
     Registration::goal(0, "FloatGoal", float_goal),
-    // `EnderMan.EndermanFreezeWhenLookedAt`, flags `{JUMP, MOVE}`.
+    // Vanilla's own stare-freeze goal, flags `{JUMP, MOVE}`.
     // Built on `MobController::is_being_stared_at` — see
     // `EndermanFreezeWhenLookedAt`'s own doc comment for the port. The host
     // feed that computes the boolean from a real player view vector has
@@ -231,19 +223,17 @@ pub static ENDERMAN: &[Registration] = &[
     // module's own tests.
     Registration::goal(1, "EnderMan.EndermanFreezeWhenLookedAt", freeze_when_looked_at),
     Registration::goal(2, "MeleeAttackGoal", melee_attack),
-    // `WaterAvoidingRandomStrollGoal(this, 1.0, 0.0F)`. The third argument is
-    // vanilla's probability of preferring a dry destination; ours has no such
+    // Vanilla's own water-avoiding stroll goal takes a third argument, the
+    // probability of preferring a dry destination; ours has no such
     // parameter (see `super::stroll`), so only the 1.0 speed factor transcribes.
     Registration::goal(7, "WaterAvoidingRandomStrollGoal", stroll),
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(8, "RandomLookAroundGoal", random_look_around),
-    // Carrying and placing blocks — `DATA_CARRY_STATE`
-    // (`EnderMan.setCarriedBlock`/`EnderMan.getCarriedBlock`) plus a
-    // block-placement path the AI seam has no access to.
+    // Carrying and placing blocks — a piece of per-entity carried-block state
+    // plus a block-placement path the AI seam has no access to.
     Registration::missing(Selector::Goal, 10, "EnderMan.EndermanLeaveBlockGoal"),
     Registration::missing(Selector::Goal, 11, "EnderMan.EndermanTakeBlockGoal"),
-    // `EnderMan.EndermanLookForPlayerGoal(this, this::isAngryAt)` — the
-    // teleport-on-stare goal. `Coverage::Modelled` now: see
+    // Vanilla's own teleport-on-stare goal. `Coverage::Modelled` now: see
     // `EndermanLookForPlayerGoal`'s own doc comment for the port and its
     // disclosed narrowings (no per-player identity, no line of sight, no
     // landing check on the teleport).
@@ -255,12 +245,12 @@ pub static ENDERMAN: &[Registration] = &[
         3,
         "NearestAttackableTargetGoal(Endermite)",
     ),
-    // `ResetUniversalAngerTargetGoal<>(this, false)`. Re-verified rather than
+    // Vanilla's own universal-anger reset goal. Re-verified rather than
     // assumed: both an anger timer (`SimMob::anger`) and a `universal_anger`
     // gamerule (`game_rules.rs`, default `false`, matching vanilla) exist now
     // — an earlier version of this comment said neither did, and that was
     // stale. Still `Missing` because the behaviour itself has nowhere to
-    // land: under `universal_anger`, `NeutralMob::forgetCurrentTargetAndRefreshUniversalAnger`
+    // land: under `universal_anger`, vanilla's own reset step
     // nulls the *specific* target identity while keeping the timer alive, so
     // any nearby player becomes valid — but this crate's anger state
     // (`Anger { end_time, target: Vec3 }`) has no target-identity concept to
@@ -269,39 +259,38 @@ pub static ENDERMAN: &[Registration] = &[
     Registration::missing(Selector::Target, 4, "ResetUniversalAngerTargetGoal"),
 ];
 
-/// `Zombie.registerGoals`'s three rows **plus**
-/// `ZombifiedPiglin.addBehaviourGoals`'s six.
+/// Vanilla's own zombie goal-registration method's three rows **plus**
+/// its zombified-piglin override's own six.
 ///
-/// The non-uniform species in this family. `ZombifiedPiglin` declares no
-/// `registerGoals`; it overrides `ZombifiedPiglin.addBehaviourGoals`, which
-/// `Zombie.registerGoals` calls after adding three rows of
+/// The non-uniform species in this family. The zombified piglin declares no
+/// goal-registration method of its own; it overrides the hook the zombie's
+/// registration method calls after adding three rows of
 /// its own. Those three are inherited verbatim and open this table.
-/// The override does **not** call `super.addBehaviourGoals()`, so Zombie's
-/// `MoveThroughVillageGoal` is absent here — correctly, not
-/// by oversight — and `SpearUseGoal`/`ZombieAttackGoal` sit at 1/2 rather than
-/// Zombie's 2/3.
+/// The override does **not** call through to the parent's own hook, so the
+/// zombie's village-pathing goal is absent here — correctly, not
+/// by oversight — and the spear-use/melee rows sit at 1/2 rather than
+/// the zombie's 2/3.
 ///
-/// Attributes from `Zombie.createAttributes()` plus
+/// Attributes from vanilla's own zombie attribute-builder plus
 /// `SPAWN_REINFORCEMENTS_CHANCE 0.0`, `MOVEMENT_SPEED 0.23F`,
-/// `ATTACK_DAMAGE 5.0`. `FOLLOW_RANGE 35.0` is inherited from `Zombie.createAttributes` and
+/// `ATTACK_DAMAGE 5.0`. `FOLLOW_RANGE 35.0` is inherited from that same builder and
 /// is what sizes the alert box below.
 ///
 /// Group aggro is modelled now, in **both** of its independent vanilla
 /// halves, neither of which is a row in this table (both live in
 /// `lodestone_server::mobs::MobSim`, a host-side census rather than a goal):
 ///
-/// 1. **`HurtByTargetGoal(this).setAlertOthers()`** (registered above, target
-///    priority 1) fires its inherited `alertOthers()` once, from `start()`,
-///    the instant the piglin newly acquires a target — no line-of-sight
-///    check anywhere in that method. This is the half
+/// 1. **The retaliation goal's own alert flag** (registered above, target
+///    priority 1) fires once, the instant the piglin newly acquires a
+///    target — no line-of-sight check anywhere in vanilla's own version of
+///    that step. This is the half
 ///    `lodestone_server::mobs::MobSim::attack`'s `alert_species` census
 ///    models, gated on the victim's grudge being *new* (never re-alerting
 ///    mid-grudge), which matches vanilla's own "once per acquisition" shape
 ///    exactly rather than approximating it.
-/// 2. **`ZombifiedPiglin.customServerAiStep`'s private `maybeAlertOthers`** —
-///    a second, wholly separate mechanism: every tick the piglin has a
-///    target, throttled by its own `ALERT_INTERVAL = TimeUtil.rangeOfSeconds(4,
-///    6)` = **[80, 120]-tick** timer (distinct from the shared
+/// 2. **A second, wholly separate mechanism specific to the piglin** —
+///    every tick the piglin has a
+///    target, throttled by its own **[80, 120]-tick** timer (distinct from the shared
 ///    grudge-duration window), gated on live line of sight to the piglin's
 ///    current target. This is what makes a real piglin pack keep growing
 ///    every few seconds while chasing you, not just once at the first hit.
@@ -315,23 +304,22 @@ pub static ENDERMAN: &[Registration] = &[
 /// box of `(FOLLOW_RANGE, 10.0, FOLLOW_RANGE)` = **±35 XZ, ±10 Y** that has no
 /// live grudge yet has one set on it, matching the alerting mob's own. The
 /// *acquisition* half — a piglin turning its fresh grudge into an actual
-/// `attack_target` — is `NearestAttackableTargetGoal(Player,isAngryAt)`
+/// `attack_target` — is the anger-gated target row
 /// below, `Coverage::Modelled` via `anger_gated_target`.
 pub static ZOMBIFIED_PIGLIN: &[Registration] = &[
-    // Inherited from `Zombie.registerGoals`.
+    // Inherited from vanilla's own zombie goal-registration method.
     Registration::missing(Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
     Registration::goal(8, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(8, "RandomLookAroundGoal", random_look_around),
-    // `ZombifiedPiglin.addBehaviourGoals` from here down.
-    // `SpearUseGoal<>(this, 1.0, 1.0, 10.0F, 2.0F)` — a ranged goal, so it
-    // belongs to the ranged-attack family, not this one.
+    // The piglin's own override adds the rows from here down.
+    // A ranged goal, so it belongs to the ranged-attack family, not this one.
     Registration::missing(Selector::Goal, 1, "SpearUseGoal"),
-    // `ZombieAttackGoal(this, 1.0, false)` extends `MeleeAttackGoal`, adding only
-    // the raised-arms metadata flag while it runs.
+    // Vanilla's own melee goal for this species extends the shared melee
+    // goal, adding only the raised-arms metadata flag while it runs.
     Registration::goal(2, "ZombieAttackGoal", melee_attack),
     Registration::goal(7, "WaterAvoidingRandomStrollGoal", stroll),
-    // `HurtByTargetGoal(this).setAlertOthers()`. Retaliation is modelled; the
-    // same-type alert is not — see this table's doc comment.
+    // Retaliation is modelled; the same-type alert is not — see this table's
+    // doc comment.
     Registration::target(1, "HurtByTargetGoal", hurt_by_target),
     // The anger predicate is what makes a piglin neutral; see the module doc.
     // `Coverage::Modelled` now: `NearestAttackableTargetGoal::anger_gated()`
@@ -346,27 +334,27 @@ pub static ZOMBIFIED_PIGLIN: &[Registration] = &[
     Registration::missing(Selector::Target, 3, "ResetUniversalAngerTargetGoal"),
 ];
 
-/// `Bee.registerGoals`.
+/// Vanilla's own bee goal-registration method.
 ///
-/// Seventeen registrations, of which this repo builds seven. Note that the
-/// `beePollinateGoal`, `goToHiveGoal` and `goToKnownFlowerGoal` field
-/// assignments inside `Bee.registerGoals` are field assignments rather than
-/// `addGoal` calls — a line-count transcription of that block gets twenty
+/// Seventeen registrations, of which this repo builds seven. Note that
+/// vanilla's own pollinate/go-to-hive/go-to-flower rows are
+/// field assignments rather than
+/// goal registrations in that method — a line-count transcription of that block gets twenty
 /// rows and three of them are not registrations.
 ///
-/// Attributes from `Bee.createAttributes()` — `Animal.createAnimalAttributes()` plus
+/// Attributes from vanilla's own bee attribute-builder — the shared animal base plus
 /// `MAX_HEALTH 10.0`, `FLYING_SPEED 0.6F`, `MOVEMENT_SPEED 0.3F`,
 /// `ATTACK_DAMAGE 2.0`.
 ///
 /// **Sting-then-die is not "die on stinging", and the difference is the whole
-/// mechanism — modelled now, both halves.** `Bee.doHurtTarget` deals
+/// mechanism — modelled now, both halves.** Vanilla's own sting-resolution step deals
 /// `(int)ATTACK_DAMAGE` = 2, applies poison for 0/10/18 seconds by difficulty,
-/// then sets `hasStung` and calls `stopBeingAngry()` — the bee survives the
-/// sting. Death comes later and stochastically, in `Bee.customServerAiStep`:
-/// once `hasStung`, `timeSinceSting++` each tick and every fifth
+/// then marks the bee as having stung and clears its anger — the bee survives the
+/// sting. Death comes later and stochastically, in vanilla's own per-tick AI step:
+/// once stung, a tick counter increments each tick and every fifth
 /// tick the bee kills itself with probability
 /// `1 / clamp(1200 - timeSinceSting, 1, 1200)`. The clamp is what bounds it — at
-/// `timeSinceSting == 1200` the divisor is 1 and `nextInt(1) == 0` always, and
+/// `timeSinceSting == 1200` the divisor is 1 and the roll always lands, and
 /// 1200 is a multiple of 5, so **a stung bee is certainly dead by 1200 ticks
 /// after the sting and certainly alive one tick after it.**
 ///
@@ -380,16 +368,18 @@ pub static ZOMBIFIED_PIGLIN: &[Registration] = &[
 /// `MobController::damage_self` through the same primitive the module doc
 /// names. **Not modelled**: the poison application (no status-effect producer
 /// reads a bee's sting here) — a disclosed simplification, not a silent one.
-/// Setting `stung_at` also clears `anger` (`stopBeingAngry()`), which is what
+/// Setting the sting flag also clears the bee's anger, which is what
 /// makes the anger-gated target row below stop re-acquiring without a second
-/// `!hasStung()` check — see that row's own comment.
+/// sting check — see that row's own comment.
 pub static BEE: &[Registration] = &[
-    // `Bee.BeeAttackGoal(this, 1.4F, true)` extends
-    // `MeleeAttackGoal`, but its `Bee.BeeAttackGoal.canUse` adds `isAngry() && !hasStung()`.
+    // Vanilla's own bee melee goal extends
+    // the shared melee goal, but adds an eligibility check requiring the bee
+    // be angry and not yet stung.
     // `Coverage::Modelled` now, as a bare `MeleeAttackGoal` — safe rather than
     // "two wrongs" because *this table registers no other target-acquisition
     // row*: `attack_target` is only ever set by `anger_gated_target` below,
-    // which is itself `isAngry()`. And `!hasStung()` needs no separate guard
+    // which is itself angry-gated. And the sting half of the guard needs no
+    // separate check
     // here either, for the reason `anger_gated_target`'s row comment gives —
     // a sting clears the grudge, so `attack_target` clears with it inside a
     // tick and `MeleeAttackGoal.can_continue_to_use` (which requires a live
@@ -397,10 +387,11 @@ pub static BEE: &[Registration] = &[
     Registration::goal(0, "Bee.BeeAttackGoal", bee_attack),
     Registration::missing(Selector::Goal, 1, "Bee.BeeEnterHiveGoal"),
     Registration::goal(2, "BreedGoal", breed_1_0),
-    // `TemptGoal(this, 1.25, i -> i.is(ItemTags.BEE_FOOD), false)`. The goal is
+    // Vanilla's own tempt goal for this species, gated on the bee-food tag.
+    // The goal is
     // real; whether a held item tempts a bee is perception, and `mobs.rs`'s
-    // interim `tempt_food` has no `bee` arm yet — B2 owns the generated tag
-    // table that fixes that for every species at once.
+    // interim `tempt_food` has no `bee` arm yet — a generated tag
+    // table would fix that for every species at once.
     Registration::goal(3, "TemptGoal(BEE_FOOD)", tempt_1_25),
     Registration::missing(Selector::Goal, 3, "Bee.ValidateHiveGoal"),
     Registration::missing(Selector::Goal, 3, "Bee.ValidateFlowerGoal"),
@@ -410,20 +401,22 @@ pub static BEE: &[Registration] = &[
     Registration::missing(Selector::Goal, 5, "Bee.BeeGoToHiveGoal"),
     Registration::missing(Selector::Goal, 6, "Bee.BeeGoToKnownFlowerGoal"),
     Registration::missing(Selector::Goal, 7, "Bee.BeeGrowCropGoal"),
-    // `Bee.BeeWanderGoal` picks a destination in flight and hands it to a flying
+    // Vanilla's own bee-wander goal picks a destination in flight and hands it to a flying
     // navigation. Our `RandomStrollGoal` drives the ground A*, so it is not an
     // equivalent — a bee is not a mob that walks somewhere slowly.
     Registration::missing(Selector::Goal, 8, "Bee.BeeWanderGoal"),
     Registration::goal(9, "FloatGoal", float_goal),
-    // `Bee.BeeHurtByOtherGoal(this).setAlertOthers()` extends
-    // `HurtByTargetGoal`; it overrides only `canContinueToUse`, adding
-    // `isAngry()`. `canUse` — the retaliation trigger — is inherited unchanged,
+    // Vanilla's own bee retaliation goal extends
+    // the shared hurt-by-target goal; it overrides only the continue check, adding
+    // an anger requirement. The retaliation trigger itself
+    // is inherited unchanged,
     // so ours is a faithful stand-in for the part that fires.
     Registration::target(1, "Bee.BeeHurtByOtherGoal", hurt_by_target),
-    // `Bee.BeeBecomeAngryTargetGoal` — gated on `isAngry() && !hasStung()`.
+    // Vanilla's own bee target-acquisition goal — gated on being angry and not
+    // yet stung.
     // `Coverage::Modelled` now via `anger_gated_target`, same as the piglin
-    // and wolf rows. The `!hasStung()` half of the guard is not a second
-    // condition to add here: `Bee.doHurtTarget` calls `stopBeingAngry()` the
+    // and wolf rows. The sting half of the guard is not a second
+    // condition to add here: vanilla's own sting-resolution step clears the anger the
     // instant the sting connects (see `BEE`'s own doc comment and
     // `MobSim`'s sting resolution), which clears the grudge
     // `angry_target` reads — so a stung bee's `can_use` already returns
@@ -433,12 +426,12 @@ pub static BEE: &[Registration] = &[
     Registration::missing(Selector::Target, 3, "ResetUniversalAngerTargetGoal"),
 ];
 
-/// `Wolf.registerGoals`.
+/// Vanilla's own wolf goal-registration method.
 ///
-/// Attributes from `Wolf.createAttributes()` — `Animal.createAnimalAttributes()` plus
+/// Attributes from vanilla's own wolf attribute-builder — the shared animal base plus
 /// `MOVEMENT_SPEED 0.3F`, `MAX_HEALTH 8.0`, `ATTACK_DAMAGE 4.0`;
-/// `Wolf.applyTamingSideEffects` raises `MAX_HEALTH` to `40.0` on taming
-/// and drops it back to `8.0`. `FOLLOW_RANGE` is the `Mob.createMobAttributes`
+/// taming raises `MAX_HEALTH` to `40.0`
+/// and drops it back to `8.0` if untamed again. `FOLLOW_RANGE` is the generic mob
 /// default `16.0`, which sizes the pack-alert box.
 ///
 /// **Eight of the twenty rows needed an owner**, and until `lodestone_server`
@@ -448,9 +441,8 @@ pub static BEE: &[Registration] = &[
 /// `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` are built on it and appear
 /// below as real rows — the ownership half of the gap is closed for all four.
 ///
-/// `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` (`ai/goal/target/
-/// OwnerHurtByTargetGoal.java`, `OwnerHurtTargetGoal.java`) read
-/// `owner.getLastHurtByMob()`/`owner.getLastHurtMob()` — **who last hurt the
+/// `OwnerHurtByTargetGoal`/`OwnerHurtTargetGoal` read
+/// whoever last hurt the owner and whoever the owner last hurt — **who last hurt the
 /// owner** and **who the owner last hurt**. Both facts now have real
 /// producers: `crate::server::apply_attack`'s caller already threads the
 /// attacking player's `PlayerIdentity` into `MobSim::attack_from_player`
@@ -463,56 +455,54 @@ pub static BEE: &[Registration] = &[
 /// `self.mobs` for pets owned by that player's uuid and calls
 /// `set_owner_hurt_by`. Both rows read `MobController::owner_hurt_by`/
 /// `owner_hurt_target`, which decay on the same 100-tick window vanilla's
-/// own `lastHurtByMob`/`lastHurtMob` do (they *are* those fields, just read
+/// own equivalent fields do (they *are* those fields, just read
 /// off the owner's entity rather than this mob's).
 ///
 /// The remaining four are still `Missing`, but **not for an ownership
 /// reason**, and re-reading this comment instead of the table is exactly the
 /// kind of staleness this repo's evidence standards warn about:
 ///
-/// * `BegGoal` and `Wolf.WolfAvoidEntityGoal(Llama)` both gate on `isTame()`
-///   (`ai/goal/BegGoal.java`, `Wolf.WolfAvoidEntityGoal.canUse`), which is answerable
+/// * The beg goal and the llama-avoidance goal both gate on tameness, which is answerable
 ///   today — but neither has a goal *type* in this crate yet (begging for food,
 ///   and fleeing a llama with a strength-gated roll), so they are `Missing` for
 ///   an ordinary "we have no such goal" reason now, not an ownership one.
-/// * Both `NonTameRandomTargetGoal`s gate on `!isTame()` and otherwise pick a
+/// * Both untamed-random-target goals gate on the wolf being untamed and otherwise pick a
 ///   random same-class target — also answerable, also no goal type here yet.
 ///
-/// Pack aggro — `HurtByTargetGoal(this).setAlertOthers()` at target priority
+/// Pack aggro — the retaliation goal's own alert flag at target priority
 /// 3 — is modelled now, via the same census `alert_species` describes for the
-/// piglin: `HurtByTargetGoal.alertOthers` filters same-class neighbours in a
-/// `(16.0, 10.0, 16.0)` box, and for a `TamableAnimal` additionally requires
-/// **`tamable.getOwner() == other.getOwner()`** — a wolf pack only rallies for
+/// piglin: vanilla's own alert step filters same-class neighbours in a
+/// `(16.0, 10.0, 16.0)` box, and for a tamed animal additionally requires
+/// the two mobs share an owner — a wolf pack only rallies for
 /// wolves sharing its owner, which
 /// `lodestone_server::mobs::MobSim::attack`'s census enforces by comparing
 /// `SimMob::owner_uuid()` on both sides (`None == None` included, so a pack of
 /// *wild* wolves still rallies together, matching vanilla's own null-owner
 /// case). The acquisition half — a rallied wolf turning its fresh grudge into
-/// an `attack_target` — is `NearestAttackableTargetGoal(Player,isAngryAt)`
+/// an `attack_target` — is the anger-gated target row
 /// below, `Coverage::Modelled`. What remains genuinely `Missing`: line of
 /// sight on the alert itself (not modelled anywhere in this census), and the
 /// four goal-type gaps the bullets above already name.
 pub static WOLF: &[Registration] = &[
     Registration::goal(1, "FloatGoal", float_goal),
-    // `TamableAnimal.TamableAnimalPanicGoal(1.5, DamageTypeTags.PANIC_ENVIRONMENTAL_CAUSES)`
-    // extends `PanicGoal`, narrowing it to environmental damage types. Our
+    // Vanilla's own tamed-animal panic goal extends
+    // the shared panic goal, narrowing it to environmental damage types. Our
     // `PanicGoal` reads `is_panicking()`, which `MobSim` sets from *any* damage
     // (`SimMob::apply_damage` → `note_hurt`), so ours panics on a strict superset
     // of vanilla's causes. A disclosed over-eagerness, not a missing goal — and
     // the priority is what matters here, see the gates below.
     Registration::goal(1, "TamableAnimal.TamableAnimalPanicGoal", panic_1_5),
     Registration::goal(2, "SitWhenOrderedToGoal", sit_when_ordered),
-    // `Wolf.WolfAvoidEntityGoal<>(this, Llama.class, 24.0F, 1.5, 1.5)`.
-    // Not merely an `AvoidEntityGoal` with a 24-block radius: its
-    // `canUse` requires `!wolf.isTame()` (answerable now through
-    // `MobController::is_tame`) and rolls against the llama's strength
-    // in `Wolf.WolfAvoidEntityGoal.avoidLlama`. The remaining gap is a goal
+    // Vanilla's own llama-avoidance goal for this species, a 24-block radius.
+    // Not merely an `AvoidEntityGoal` with that radius: its
+    // eligibility check requires the wolf be untamed (answerable now through
+    // `MobController::is_tame`) and rolls against the llama's strength.
+    // The remaining gap is a goal
     // *type*: no llama-strength roll exists in this crate, not the tame flag.
     Registration::missing(Selector::Goal, 3, "Wolf.WolfAvoidEntityGoal(Llama)"),
     Registration::missing(Selector::Goal, 4, "LeapAtTargetGoal"),
-    // `MeleeAttackGoal(this, 1.0, true)`.
     Registration::goal(5, "MeleeAttackGoal", melee_attack),
-    // `FollowOwnerGoal(this, 1.0, 10.0F, 2.0F)` (`animal/wolf/Wolf.java`). The
+    // Vanilla's own follow-owner goal for this species. The
     // two distances are the wolf's own — a cat's are `(10, 5)` and a parrot's
     // `(5, 1)`, so they are constructor arguments rather than constants.
     Registration::goal(6, "FollowOwnerGoal", follow_owner_10_2),
@@ -521,23 +511,22 @@ pub static WOLF: &[Registration] = &[
     Registration::missing(Selector::Goal, 9, "BegGoal"),
     Registration::goal(10, "LookAtPlayerGoal(Player)", look_at_player_8),
     Registration::goal(10, "RandomLookAroundGoal", random_look_around),
-    // `OwnerHurtByTargetGoal` (`ai/goal/target/OwnerHurtByTargetGoal.java`):
-    // targets whoever `owner.getLastHurtByMob()` names. `MobSim::tick`'s
+    // Targets whoever last hurt the owner. `MobSim::tick`'s
     // hostile-melee-against-player resolution now also walks the owner's
     // tamed pets and calls `NavigatingMob::set_owner_hurt_by` on each — see
     // this table's own doc for the fuller account.
     Registration::target(1, "OwnerHurtByTargetGoal", owner_hurt_by_target),
-    // `OwnerHurtTargetGoal` (`ai/goal/target/OwnerHurtTargetGoal.java`): targets
-    // whoever `owner.getLastHurtMob()` names, i.e. joins a fight the owner
+    // Targets
+    // whoever the owner last hurt, i.e. joins a fight the owner
     // started. `MobSim::attack_from_player` now resolves the attacking
     // player's tamed pets and calls `set_owner_hurt_target` on each — see
     // this table's own doc for the fuller account.
     Registration::target(2, "OwnerHurtTargetGoal", owner_hurt_target),
-    // `.setAlertOthers()` — the pack half is `Missing`; see this table's doc.
+    // The pack half is `Missing`; see this table's doc.
     Registration::target(3, "HurtByTargetGoal", hurt_by_target),
     // `Coverage::Modelled` now — see the piglin row's identical comment and
     // `anger_gated_target`'s own doc. The wolf's pack-alert half
-    // (`HurtByTargetGoal.alertOthers`' owner-matched propagation) is modelled
+    // (vanilla's own owner-matched alert propagation) is modelled
     // in `MobSim::attack`, not here — a same-species census is a host
     // question, per this module's own doc.
     Registration::target(
@@ -560,31 +549,30 @@ pub static WOLF: &[Registration] = &[
 // The factors live here rather than in `super` because no other family
 // registers these three goals at these multipliers.
 
-/// `EnderMan.EndermanFreezeWhenLookedAt(this)` takes no constructor arguments.
+/// Vanilla's own stare-freeze goal for this species takes no constructor arguments.
 fn freeze_when_looked_at(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(EndermanFreezeWhenLookedAt::new())
 }
 
-/// `EnderMan.EndermanLookForPlayerGoal(this, this::isAngryAt)` takes no
+/// Vanilla's own teleport-on-stare goal for this species takes no
 /// per-species argument this port carries — see the goal's own doc comment.
 fn look_for_player(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(EndermanLookForPlayerGoal::new())
 }
 
-/// `TamableAnimal.TamableAnimalPanicGoal(1.5, …)` — the wolf's panic speed
-/// factor, from `Wolf.registerGoals`. Vanilla's own `PanicGoal` speed argument
+/// The wolf's panic speed
+/// factor, from vanilla's own wolf goal-registration method. Vanilla's own `PanicGoal` speed argument
 /// is a `MOVEMENT_SPEED` multiplier.
 fn panic_1_5(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(PanicGoal::new(ctx.speed * 1.5))
 }
 
-/// `TemptGoal(this, 1.25, BEE_FOOD, false)`, from `Bee.registerGoals`.
+/// The bee's tempt-goal speed factor, from vanilla's own bee goal-registration method.
 fn tempt_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(TemptGoal::new(ctx.speed * 1.25))
 }
 
-/// `NearestAttackableTargetGoal<>(this, Player.class, 10, true, false,
-/// this::isAngryAt)` — the piglin, wolf and bee's own anger-gated
+/// The piglin, wolf and bee's own anger-gated
 /// registration, shared here because all three cite the identical
 /// constructor shape and read the identical seam method.
 ///
@@ -594,26 +582,26 @@ fn tempt_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
 /// acquires nothing. See that constructor's own doc comment for why a
 /// predicate-free registration here would have made three neutral species
 /// hostile on sight, and this module's own doc for why that self-loop
-/// (#455) is now fixed, making this the correct row to build rather than a
+/// is now fixed, making this the correct row to build rather than a
 /// row to keep deferring.
 fn anger_gated_target(_ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(NearestAttackableTargetGoal::anger_gated())
 }
 
-/// `Bee.BeeAttackGoal(this, 1.4F, true)` — the bee's melee speed multiplier.
+/// The bee's melee speed multiplier, from vanilla's own bee goal-registration method.
 /// See `BEE`'s own row comment for why a bare `MeleeAttackGoal` is a safe
-/// stand-in despite carrying neither half of vanilla's `isAngry() &&
-/// !hasStung()` guard directly.
+/// stand-in despite carrying neither half of vanilla's angry-and-not-stung
+/// guard directly.
 fn bee_attack(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(MeleeAttackGoal::new(ctx.speed * 1.4, ctx.attack_reach))
 }
 
-/// `FollowOwnerGoal(this, 1.0, 10.0F, 2.0F)` — the wolf's follow distances.
+/// The wolf's follow distances, from vanilla's own wolf goal-registration method.
 fn follow_owner_10_2(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FollowOwnerGoal::new(ctx.speed, 10.0, 2.0))
 }
 
-/// `FollowParentGoal(this, 1.25)`, from `Bee.registerGoals`.
+/// The bee's follow-parent speed factor, from vanilla's own bee goal-registration method.
 fn follow_parent_1_25(ctx: &SpeciesContext) -> Box<dyn Goal> {
     Box::new(FollowParentGoal::new(ctx.speed * 1.25))
 }
@@ -635,10 +623,10 @@ mod tests {
     /// them the generic registry default instead. That gap is real and is
     /// reported with this unit — it does not change what the multiplier below
     /// must be, which is what these gates measure.
-    const ENDERMAN_SPEED: f64 = 0.3; // `EnderMan.createAttributes`
-    const PIGLIN_SPEED: f64 = 0.23; // `ZombifiedPiglin.createAttributes`
-    const BEE_SPEED: f64 = 0.3; // `Bee.createAttributes`
-    const WOLF_SPEED: f64 = 0.3; // `Wolf.createAttributes`
+    const ENDERMAN_SPEED: f64 = 0.3; // vanilla's own enderman attribute-builder
+    const PIGLIN_SPEED: f64 = 0.23; // vanilla's own zombified-piglin attribute-builder
+    const BEE_SPEED: f64 = 0.3; // vanilla's own bee attribute-builder
+    const WOLF_SPEED: f64 = 0.3; // vanilla's own wolf attribute-builder
 
     // -- table transcription --------------------------------------------------
 
@@ -653,10 +641,9 @@ mod tests {
     #[test]
     fn every_table_matches_the_jars_addgoal_block() {
         type Row = (Selector, i32, &'static str);
-        let cases: &[(&str, &str, &[Row])] = &[
+        let cases: &[(&str, &[Row])] = &[
             (
                 "enderman",
-                "monster/EnderMan.java:93-106",
                 &[
                     (Selector::Goal, 0, "FloatGoal"),
                     (Selector::Goal, 1, "EnderMan.EndermanFreezeWhenLookedAt"),
@@ -674,8 +661,6 @@ mod tests {
             ),
             (
                 "zombified_piglin",
-                "monster/zombie/Zombie.java:113-115 (inherited registerGoals) + \
-                 monster/zombie/ZombifiedPiglin.java:72-77 (addBehaviourGoals)",
                 &[
                     (Selector::Goal, 4, "Zombie.ZombieAttackTurtleEggGoal"),
                     (Selector::Goal, 8, "LookAtPlayerGoal(Player)"),
@@ -694,7 +679,6 @@ mod tests {
             ),
             (
                 "bee",
-                "animal/bee/Bee.java:174-195",
                 &[
                     (Selector::Goal, 0, "Bee.BeeAttackGoal"),
                     (Selector::Goal, 1, "Bee.BeeEnterHiveGoal"),
@@ -717,7 +701,6 @@ mod tests {
             ),
             (
                 "wolf",
-                "animal/wolf/Wolf.java:128-149",
                 &[
                     (Selector::Goal, 1, "FloatGoal"),
                     (Selector::Goal, 1, "TamableAnimal.TamableAnimalPanicGoal"),
@@ -752,7 +735,7 @@ mod tests {
         ];
 
         let mut rows_checked = 0usize;
-        for &(species, cite, want) in cases {
+        for &(species, want) in cases {
             let table = registrations_for(species);
             let got: Vec<Row> = table
                 .iter()
@@ -761,8 +744,8 @@ mod tests {
             assert_eq!(
                 got,
                 want.to_vec(),
-                "{species}'s table does not match {cite} — re-read the jar before \
-                 editing either side of this"
+                "{species}'s table does not match vanilla's own goal-registration \
+                 method — re-read the jar before editing either side of this"
             );
             rows_checked += got.len();
         }
@@ -775,10 +758,11 @@ mod tests {
     }
 
     /// The piglin's inheritance is a claim about the jar, so it is asserted as
-    /// one: it must **not** share `zombie`'s table (it overrides
-    /// `addBehaviourGoals`), it must carry Zombie's three `registerGoals` rows,
-    /// and it must **not** carry the `MoveThroughVillageGoal` its parent's
-    /// `addBehaviourGoals` registers at priority 6.
+    /// one: it must **not** share `zombie`'s table (it overrides its parent's
+    /// own goal-registration hook), it must carry the zombie's three inherited
+    /// rows,
+    /// and it must **not** carry the village-pathing goal its parent's
+    /// override registers at priority 6.
     ///
     /// This is the assertion that would have caught transcribing only the method
     /// named after the species.
@@ -788,8 +772,8 @@ mod tests {
         let piglin = registrations_for("zombified_piglin");
         assert!(
             !std::ptr::eq(zombie.as_ptr(), piglin.as_ptr()),
-            "a zombified piglin overrides addBehaviourGoals \
-             (ZombifiedPiglin.java:71-78), so it must not share Zombie's table"
+            "a zombified piglin overrides its parent's own goal-registration \
+             hook, so it must not share the zombie's table"
         );
 
         let names = |t: &[Registration]| -> Vec<&'static str> {
@@ -797,7 +781,7 @@ mod tests {
         };
         let piglin_names = names(piglin);
 
-        // Inherited from `Zombie.registerGoals`.
+        // Inherited from vanilla's own zombie goal-registration method.
         for inherited in [
             "Zombie.ZombieAttackTurtleEggGoal",
             "LookAtPlayerGoal(Player)",
@@ -805,20 +789,21 @@ mod tests {
         ] {
             assert!(
                 piglin_names.contains(&inherited),
-                "{inherited} is registered by Zombie.registerGoals, which the \
+                "{inherited} is registered by vanilla's own zombie \
+                 goal-registration method, which the \
                  piglin does not override, so it must appear in the piglin's table"
             );
         }
 
-        // Dropped: the override does not call `super.addBehaviourGoals()`.
+        // Dropped: the override does not call through to the parent's own hook.
         assert!(
             !piglin_names.contains(&"MoveThroughVillageGoal"),
-            "ZombifiedPiglin.addBehaviourGoals does not call super, so Zombie's \
-             MoveThroughVillageGoal must NOT appear"
+            "the piglin's override does not call through to its parent, so the \
+             zombie's village-pathing goal must NOT appear"
         );
         assert!(
             names(zombie).contains(&"MoveThroughVillageGoal"),
-            "precondition: Zombie's own table must carry the row the piglin drops, \
+            "precondition: the zombie's own table must carry the row the piglin drops, \
              or the assertion above proves nothing"
         );
 
@@ -1087,7 +1072,7 @@ mod tests {
     }
 
     /// Predicts the exact tick the stare turns into an attack target — vanilla's
-    /// `aggroTime = adjustedTickDelay(5)`, counted down once per `tick()` — not
+    /// own aggro-delay field, counted down once per tick — not
     /// merely "eventually acquires one". Driven directly against the real
     /// [`EndermanLookForPlayerGoal`] (not through a `GoalSelector`, so nothing
     /// else perturbs `attack_target` or moves the mob), matching this module's
@@ -1130,18 +1115,18 @@ mod tests {
         );
     }
 
-    /// Predicts the landing point of `EnderMan::teleportTowards` to within
+    /// Predicts the landing point of vanilla's own far-teleport step to within
     /// its own real jitter bounds, not merely "the enderman moved" or "moved
     /// closer" — both the *magnitude* species of vacuous test this repo's
     /// evidence standards name explicitly. `teleport_time` must reach
-    /// vanilla's `adjustedTickDelay(30)` while the target stays farther than
-    /// 16 blocks (`distanceToSqr > 256.0`) and the enderman is *not*
+    /// vanilla's own halved teleport-delay threshold while the target stays farther than
+    /// 16 blocks and the enderman is *not*
     /// currently stared at (the sibling branch, exercised separately below).
     ///
     /// **The landing point is anchored on the enderman's own pre-teleport
-    /// position, not the target's** — `EnderMan::teleportTowards`'s real
-    /// formula is `this.getX() + jitter - dir.x * 16.0` where `dir =
-    /// normalize(this.pos - target.pos)`, i.e. "step 16 blocks from where I
+    /// position, not the target's** — vanilla's real
+    /// formula steps a fixed 16 blocks plus jitter from the enderman's own
+    /// position, in the direction away from the target, i.e. "step 16 blocks from where I
     /// am, toward the target", not "land within 16 blocks of the target
     /// regardless of how far I started". A previous version of the goal's
     /// `tick` computed the latter, and this test's own expected value was
@@ -1150,8 +1135,7 @@ mod tests {
     /// own doc comment for the fix and the exact numbers this bug produced.
     ///
     /// Exact to within vanilla's own random jitter (`±4.0` on X/Z,
-    /// `[-8.0, 7.0]` on Y — `(random - 0.5) * 8.0` and `randomInt(16) - 8`
-    /// respectively), rather than to the bit, because `NavigatingMob`'s own
+    /// `[-8.0, 7.0]` on Y), rather than to the bit, because `NavigatingMob`'s own
     /// seeded RNG stream is not independently replicated here; the *bounds*
     /// are still an outside-derived prediction, not merely "not zero".
     #[test]
@@ -1192,8 +1176,8 @@ mod tests {
         // being stared at (the sibling blink branch is the stared-at one).
         mob.set_stared_at(false);
 
-        // Vanilla's gate is a Java post-increment, `teleportTime++ >= 30`:
-        // the comparison reads the value *before* incrementing, so the first
+        // Vanilla's gate reads the counter's value *before* incrementing it, so
+        // the first
         // tick that reads 30 is the 31st call (ticks 1..=30 leave
         // teleport_time at 1..=30 without ever comparing a value >= 30 — the
         // comparison on tick 30 sees the pre-increment 29). 30 ticks must
@@ -1209,7 +1193,7 @@ mod tests {
         // The 31st tick crosses the gate.
         goal.tick(&mut mob);
 
-        // Independently derived expectation: `EnderMan::teleportTowards`'s
+        // Independently derived expectation: vanilla's own teleport-towards
         // direction here is exactly -X (`dir = normalize(start - far_target)
         // = (-1, 0, 0)`), so the landing point is `start.x + jitter_x -
         // (-1 * 16) = start.x + 16 + jitter_x`, jitter_x in `[-4.0, 4.0]`;
@@ -1249,8 +1233,8 @@ mod tests {
     }
 
     /// The sibling branch: a target *closer* than 16 blocks while actively
-    /// stared at must trigger vanilla's evasive blink
-    /// (`EnderMan::teleport`, ±32 blocks XZ and `nextInt(64) - 32` on Y) —
+    /// stared at must trigger vanilla's own evasive blink
+    /// (±32 blocks XZ and a matching spread on Y) —
     /// and, as the control, a target beyond 16 blocks while stared at must
     /// hold still (the far branch is gated on *not* being stared at).
     #[test]
@@ -1284,12 +1268,12 @@ mod tests {
         assert_ne!(
             mob.position(),
             start,
-            "a close, stared-at target must trigger the evasive blink \
-             (EnderMan::teleport), but the position never changed"
+            "a close, stared-at target must trigger the evasive blink, but the \
+             position never changed"
         );
 
         // Control: the same close distance, but not stared at — the blink is
-        // gated on `isBeingStaredBy`, so this must hold still (it takes the
+        // gated on the gaze check, so this must hold still (it takes the
         // far/near-walk branch instead, which does not fire under 256 sqr
         // distance either).
         let mut control = NavigatingMob::new(
@@ -1331,10 +1315,10 @@ mod tests {
     ///
     /// This test **replaces** `no_anger_gated_target_row_is_modelled`, which
     /// used to require these three rows stay `Coverage::Missing` while
-    /// `NavigatingMob::find_nearest_target`'s self-loop (#455) meant a
+    /// `NavigatingMob::find_nearest_target`'s self-loop meant a
     /// predicate-free row would have made every neutral mob hostile. That
-    /// self-loop is fixed (confirmed against the tree — `#455`'s own issue
-    /// record and this module's own doc), so landing these three rows now is
+    /// self-loop is fixed (confirmed against the tree and this module's own
+    /// doc), so landing these three rows now is
     /// a deliberate, cited change, not a relaxation of the old guard to dodge
     /// a failure it was catching. The old guard's actual concern — an open
     /// hostile search reaching a neutral mob's target row — is exactly what
@@ -1352,7 +1336,7 @@ mod tests {
                 assert!(
                     matches!(r.coverage, Coverage::Modelled(_)),
                     "{species}'s {} is gated on isAngryAt in the jar and should be \
-                     Modelled via anger_gated_target now that #455 is fixed",
+                     Modelled via anger_gated_target now that the seam's search self-loop is fixed",
                     r.vanilla
                 );
                 let build = r.build().expect("a Modelled row must build something");
@@ -1486,9 +1470,9 @@ mod tests {
     fn transcribed_speed_multipliers_land_on_the_jars_value() {
         // (species, base speed, vanilla row, jar factor)
         let cases: &[(&str, f64, &str, f64)] = &[
-            // `Wolf.registerGoals` — the one non-unit factor in this family.
+            // Vanilla's own wolf goal-registration method — the one non-unit factor in this family.
             ("wolf", WOLF_SPEED, "TamableAnimal.TamableAnimalPanicGoal", 1.5),
-            // `Bee.registerGoals`'s `TemptGoal` and `FollowParentGoal` rows.
+            // Vanilla's own bee goal-registration method's tempt and follow-parent rows.
             ("bee", BEE_SPEED, "TemptGoal(BEE_FOOD)", 1.25),
             ("bee", BEE_SPEED, "FollowParentGoal", 1.25),
             // Unit factors, still asserted: a builder that multiplied by the
@@ -1654,8 +1638,8 @@ mod tests {
     }
 
     /// A hurt wolf must **run away first and fight afterwards**, because its
-    /// table carries a panic goal (`Wolf.registerGoals`'s
-    /// `TamableAnimal.TamableAnimalPanicGoal` row) alongside its
+    /// table carries a panic goal (vanilla's own tamed-animal panic
+    /// row) alongside its
     /// melee goal (the `MeleeAttackGoal` row) and both claim MOVE.
     ///
     /// This is behavioural: it asserts where the wolf *is* and whether it
@@ -1664,12 +1648,11 @@ mod tests {
     ///
     /// * `is_panicking()` is `damage_ticks > 0`, and `note_hurt` sets it to
     ///   [`crate::ai::navigating_mob::PANIC_DAMAGE_TICKS`] = 40, vanilla's own
-    ///   figure via `LivingEntity.getLastDamageSource`, which `PanicGoal.shouldPanic`
-    ///   reads. So panic owns MOVE for the first 40
+    ///   figure for how long a fresh hit is remembered. So panic owns MOVE for the first 40
     ///   ticks.
     /// * `HurtByTargetGoal::start` sets the attack target from `last_hurt_by`,
     ///   which persists [`crate::ai::navigating_mob::LAST_HURT_BY_TICKS`] = 100,
-    ///   vanilla's own figure via `LivingEntity.baseTick` — long enough to still
+    ///   vanilla's own figure for how long a grudge persists — long enough to still
     ///   be hunting when panic ends.
     ///
     /// # What this gate does and does not detect — measured, not assumed
@@ -1731,7 +1714,8 @@ mod tests {
     }
 
     /// The same scenario for a zombified piglin, whose table has **no** panic
-    /// goal — `Zombie.registerGoals`/`addBehaviourGoals` register none — so it
+    /// goal — neither vanilla's own zombie goal-registration method nor the
+    /// piglin's override registers one — so it
     /// must close immediately instead of fleeing.
     ///
     /// This is the species-separating half. Both mobs run the same harness with
@@ -1773,10 +1757,9 @@ mod tests {
     }
 
     /// `FloatGoal` is a real per-species difference, not boilerplate: the
-    /// enderman, bee and wolf register one (in `EnderMan.registerGoals`,
-    /// `Bee.registerGoals` and
-    /// `Wolf.registerGoals`) and the zombified piglin does not, because it inherits
-    /// `Zombie`'s table and zombies sink and walk along the bottom.
+    /// enderman, bee and wolf each register one in vanilla's own
+    /// goal-registration method, and the zombified piglin does not, because it inherits
+    /// the zombie's table and zombies sink and walk along the bottom.
     ///
     /// Asserted as behaviour — does the mob try to jump in water — with the
     /// piglin as the negative control in the same water.
