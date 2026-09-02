@@ -129,7 +129,7 @@ fn read_bounds_number(reader: &mut StringReader) -> Option<String> {
     Some(source.chars().skip(start).take(reader.cursor() - start).collect())
 }
 
-/// `StringReader.peek(offset)`, which `lodestone-command`'s reader does not
+/// A lookahead-by-offset peek, which `lodestone-command`'s reader does not
 /// expose. Implemented by cursor arithmetic rather than by widening that crate's
 /// API: this is the only caller, and `peek_at` is exactly the shape a future
 /// `peek_n` would take if a second one appears.

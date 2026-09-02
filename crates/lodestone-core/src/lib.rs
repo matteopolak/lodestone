@@ -256,7 +256,8 @@ pub enum Nbt {
     List {
         /// Element tag as it arrived on the wire. Authoritative only for an
         /// **empty** list; for a non-empty one the encoder re-derives the tag
-        /// from the elements themselves, exactly as vanilla's `ListTag` (which
+        /// from the elements themselves, exactly as vanilla's own NBT list
+        /// type (which
         /// stores no tag at all) does.
         element_type: NbtTag,
         /// List element payloads.
@@ -414,18 +415,18 @@ fn read_nbt_list(r: &mut Reader<'_>, depth: usize) -> Result<Nbt> {
     })
 }
 
-/// NBT's single-key `""` wrapper, undone — `ListTag.addAndUnwrap`/`tryUnwrap`.
+/// NBT's single-key `""` wrapper, undone — vanilla's own add-and-unwrap/try-unwrap steps.
 ///
 /// A `TAG_List` carries one element tag id for the whole list, so a
 /// **heterogeneous** list has no honest id to write. Vanilla's answer is to
 /// declare the list `TAG_Compound` and box every element that is not already a
 /// plain compound into `{"": element}` on the way out
-/// (`ListTag.write`/`wrapIfNeeded`), then strip that box on the way back in.
+/// (vanilla's own list-tag write step's wrap-if-needed helper), then strip that box on the way back in.
 /// The wrapper is therefore part of the *format*, not of any one schema, and
 /// nothing above this layer should ever see it.
 ///
 /// **Not hypothetical, and it silently deleted text.** A sign's `messages` is
-/// `ComponentSerialization.CODEC.listOf()`, whose encoder collapses an unstyled
+/// encoded through vanilla's own component-serialization codec's list form, whose encoder collapses an unstyled
 /// component to a bare `TAG_String` and emits a `TAG_Compound` for a styled
 /// one. Colour one line of a four-line sign and the list is mixed, so a real
 /// vanilla 26.2 server sends
@@ -538,7 +539,7 @@ fn write_nbt_list(
         });
     }
 
-    // `ListTag.identifyRawElementType`: an empty list keeps whatever tag it
+    // Vanilla's own raw-element-type identification step: an empty list keeps whatever tag it
     // declares (so a round trip cannot lose it), a homogeneous one writes its
     // elements' shared tag, and a **mixed** one writes `TAG_Compound` and boxes
     // every element — the format's own answer to a list header that can only
@@ -567,7 +568,7 @@ fn write_nbt_list(
     Ok(())
 }
 
-/// `ListTag.wrapIfNeeded` — the encode half of [`unwrap_list_element`].
+/// Vanilla's own wrap-if-needed step — the encode half of [`unwrap_list_element`].
 ///
 /// `Some(boxed)` when this element has to be written as `{"": element}`,
 /// `None` when it goes out as-is. Only a list whose written element tag is
@@ -1914,7 +1915,7 @@ mod tests {
     fn nbt_writer_rejects_non_empty_end_lists_and_re_derives_a_stale_tag() {
         let mut writer = Writer::default();
         // A declared tag that disagrees with the elements is no longer an
-        // error: `ListTag` stores no tag at all, so the elements are the truth
+        // error: vanilla's own NBT list type stores no tag at all, so the elements are the truth
         // and the header is re-derived from them. Byte-checked, because "it
         // does not error" would also be satisfied by writing the wrong id.
         let stale_tag = Nbt::List {
@@ -1942,7 +1943,8 @@ mod tests {
     }
 
     /// The `{"": element}` box a mixed `TAG_List` is written through, both
-    /// ways — `ListTag.wrapIfNeeded` on the way out and `addAndUnwrap` on the
+    /// ways — vanilla's own wrap-if-needed step on the way out and its own
+    /// add-and-unwrap step on the
     /// way back in.
     ///
     /// The expected bytes are **not** produced by this encoder. They are the
