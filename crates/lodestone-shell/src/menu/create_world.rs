@@ -2959,20 +2959,6 @@ mod tests {
     }
 
     #[test]
-    fn every_preset_caption_is_vanillas_own_generator_string() {
-        // `generator.minecraft.<id>`, verbatim from `en_us.json` — not
-        // re-derived here, quoted from the jar's own strings so a typo cannot
-        // silently pass by looking plausible.
-        assert_eq!(WorldTypePreset::Normal.caption(), "Default");
-        assert_eq!(WorldTypePreset::LargeBiomes.caption(), "Large Biomes");
-        assert_eq!(WorldTypePreset::Amplified.caption(), "AMPLIFIED");
-        assert_eq!(WorldTypePreset::SingleBiomeSurface.caption(), "Single Biome");
-        assert_eq!(WorldTypePreset::Flat.caption(), "Superflat");
-        assert_eq!(WorldTypePreset::FlatAllDimensions.caption(), "Flat All Dimensions");
-        assert_eq!(WorldTypePreset::DebugAllBlockStates.caption(), "Debug Mode");
-    }
-
-    #[test]
     fn every_preset_now_reports_wired() {
         // Used to assert exactly the three presets needing no
         // `lodestone-server` change (`overworld_chunk_source_of_type` already

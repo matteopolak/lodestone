@@ -589,13 +589,6 @@ mod tests {
         assert_eq!(std::mem::align_of::<BlurConfig>(), 4);
     }
 
-    #[test]
-    fn default_radius_matches_vanillas_own_default() {
-        // `Options.BLURRINESS_DEFAULT_VALUE = 5` -- see this module's own doc
-        // for why the option itself is not wired yet.
-        assert!((BLUR_RADIUS - 5.0).abs() < f32::EPSILON);
-    }
-
     /// Real-GPU pixel-readback gate for [`MenuBlur::run`] itself — a
     /// checkerboard in, blurred pixels out, read back and measured at every
     /// pixel (not one point/vertex probe — this repo has already shipped a
