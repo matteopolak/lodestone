@@ -3,67 +3,66 @@
 //!
 //! Every family in this module is a *passive* redstone consumer — it never
 //! emits signal, so it is not part of `crate::redstone`'s source/conductor
-//! model. What all three share is the same `neighborChanged` shape: read
+//! model. What all three share is the same neighbor-changed shape: read
 //! whether the block is redstone-powered, and if that differs from the
 //! stored `powered` property, write both `open` and `powered` to the new
-//! value. Nothing is scheduled — vanilla flips these inline in
-//! `neighborChanged` (flag 2, `UPDATE_CLIENTS` without `UPDATE_NEIGHBORS`),
+//! value. Nothing is scheduled — the real engine flips these inline in
+//! the neighbor-changed hook (a client-update flag without a
+//! neighbor-update flag),
 //! unlike the torch/diode/observer delayed-recheck families.
 //!
-//! # Cited directly
+//! # Transcribed from the real openable blocks
 //!
-//! `DoorBlock.neighborChanged`:
+//! The real door's neighbor-changed hook, transcribed as the rule it
+//! implements: the signal is whether this position has a neighbor signal, or
+//! (for a door specifically) whether the *other* half of the door does — the
+//! cell above if this is the lower half, or below if this is the upper half.
+//! If the changed block is not itself a door, and that signal differs from
+//! the stored powered property, play a sound if open/closed is about to
+//! change, then write both `powered` and `open` to the new signal value.
 //!
-//! ```text
-//! boolean signal = level.hasNeighborSignal(pos)
-//!    || level.hasNeighborSignal(pos.relative(state.getValue(HALF) == DoubleBlockHalf.LOWER ? Direction.UP : Direction.DOWN));
-//! if (!this.defaultBlockState().is(block) && signal != state.getValue(POWERED)) {
-//!    if (signal != state.getValue(OPEN)) { ...sound... }
-//!    level.setBlock(pos, state.setValue(POWERED, signal).setValue(OPEN, signal), 2);
-//! }
-//! ```
+//! The real trapdoor's and fence gate's neighbor-changed hooks are the
+//! same shape minus the two-high half: the signal is whether this position
+//! has a neighbor signal; if that differs from the stored powered property,
+//! write both `powered` and `open` to it.
 //!
-//! `TrapDoorBlock.neighborChanged` and
-//! `FenceGateBlock.neighborChanged` are the
-//! same shape minus the two-high half: `boolean signal =
-//! level.hasNeighborSignal(pos); if (signal != state.getValue(POWERED)) {
-//! level.setBlock(pos, state.setValue(POWERED, signal).setValue(OPEN, signal),
-//! 2); }`.
-//!
-//! `hasNeighborSignal` is `SignalGetter.getBestNeighborSignal(pos) > 0`
-//! (`SignalGetter.hasNeighborSignal`) — the [`redstone::best_neighbor_signal`] query
+//! The real has-neighbor-signal check is the best-neighbor-signal query
+//! being above zero — the [`redstone::best_neighbor_signal`] query
 //! already ported in `crate::redstone`.
 //!
 //! # The door's two halves, and the one deviation
 //!
-//! A door occupies two cells (`HALF` = `lower`/`upper`), and vanilla checks
+//! A door occupies two cells (`HALF` = `lower`/`upper`), and the real engine
+//! checks
 //! both halves' neighbours when either one is notified. The halves stay in
-//! sync through `DoorBlock.updateShape`, which
+//! sync through the real door's own shape-update hook, which
 //! copies the *whole* neighbour half's state (`OPEN`, `POWERED`, `FACING`,
 //! `HINGE`) over whenever the other half's cell changes shape — reached via
-//! `Level.setBlock`'s shape-update pass, which runs
-//! even for flag 2. **This crate has no `updateShape` mechanism at all**
-//! (`crate::random_tick`'s reaction dispatch is `neighborChanged`-shaped and
-//! nothing here implements the shape pass), so the half-sync vanilla performs
+//! the real block-write function's shape-update pass, which runs
+//! even for the client-update-only flag. **This crate has no shape-update
+//! mechanism at all**
+//! (`crate::random_tick`'s reaction dispatch is neighbor-changed-shaped and
+//! nothing here implements the shape pass), so the half-sync the real
+//! engine performs
 //! there is done explicitly here: [`react_to_notification`]'s door arm writes
 //! *both* halves when either is notified, and returns no cascade so the other
-//! half is not re-notified — the same no-fan-out a flag-2 `setBlock` has in
-//! vanilla. [`other_door_half_pos`] is the pure piece the wiring uses for
+//! half is not re-notified — the same no-fan-out a client-update-only block
+//! write has in
+//! the real engine. [`other_door_half_pos`] is the pure piece the wiring uses for
 //! that.
 //!
 //! # Named omissions
 //!
-//! - **Hand interaction** (`useWithoutItem`) is not modelled: this crate has
+//! - **Hand interaction** (the real "use without item" hook) is not modelled: this crate has
 //!   no right-click-to-toggle path for these families (placement
 //!   `placed_block_state` in `crate::server` only knows the three redstone
 //!   directional families), and the redstone half of the issue does not need
 //!   it. Iron blocks being power-only (no hand open) is a property of that
 //!   omitted path, not of the redstone response — every family here responds
 //!   to power identically.
-//! - **The door's `!this.defaultBlockState().is(block)` guard** (skip reacting
-//!   when the changed block is itself a door) is omitted: its only purpose in
-//!   vanilla is to stop a door half reacting to the other half's own
-//!   flag-3 `setBlockAndUpdate` change, and this crate's door arm writes both
+//! - **The door's "changed block is not itself a door" guard** is omitted: its only purpose in
+//!   the real engine is to stop a door half reacting to the other half's own
+//!   flag-3 block-and-update write, and this crate's door arm writes both
 //!   halves itself and returns no cascade, so the trigger it guards against
 //!   cannot occur.
 //! - **Sound/game-event emission** on open/close is out of scope (the crate
@@ -75,7 +74,7 @@
 //! `_trapdoor`, `_fence_gate`) rather than an enumerated species list — the
 //! same convention `crate::growth_tick`'s `is_sapling`/`is_leaves`
 //! uses. All vanilla species (oak, iron,
-//! acacia, mangrove, bamboo, crimson, …) share the `neighborChanged` shape,
+//! acacia, mangrove, bamboo, crimson, …) share the same neighbor-changed shape,
 //! so a suffix is the honest classifier and an enumerated list would rot as
 //! new wood types land.
 
@@ -112,22 +111,23 @@ fn base_name(state: &str) -> &str {
     state.split('[').next().unwrap_or(state)
 }
 
-/// The door's `HALF` property (`DoubleBlockHalf`, `lower`/`upper`). Defaults
+/// The door's `HALF` property (the real double-block-half enum, `lower`/`upper`). Defaults
 /// to `"lower"` for a state that does not name it — a bare
 /// `minecraft:oak_door` (the only form worldgen/placement could write today,
 /// see the module doc's placement note) is a bottom half by that default,
-/// matching `DoorBlock`'s own constructor, `registerDefaultState(... HALF, LOWER)`.
+/// matching the real door block's own constructor registering its default
+/// state with the lower half.
 #[must_use]
 pub fn door_half(state: &str) -> &str {
     get_str_property(state, "half").unwrap_or("lower")
 }
 
-/// The `POWERED` block-state property — vanilla's
-/// `BlockStateProperties.POWERED`. Defaults to `false`, matching each
-/// family's default state. This is the property every `neighborChanged`
+/// The `POWERED` block-state property — the real shared power property.
+/// Defaults to `false`, matching each
+/// family's default state. This is the property every neighbor-changed hook
 /// gates on (`signal != POWERED`); the `OPEN` property needs no standalone
 /// reader because all three families write `open` and `powered` to the same
-/// value and only ever *read* `powered` to decide — vanilla reads `OPEN`
+/// value and only ever *read* `powered` to decide — the real engine reads `OPEN`
 /// solely for its sound-emission decision, which this crate omits.
 #[must_use]
 pub fn powered(state: &str) -> bool {
@@ -137,8 +137,7 @@ pub fn powered(state: &str) -> bool {
 /// `state` with both `open` and `powered` set to `v`, every other property
 /// preserved verbatim (via [`redstone::with_property`]) and appended when
 /// absent. Setting both to the same value is the whole contract of all three
-/// `neighborChanged` bodies — `setValue(POWERED, signal).setValue(OPEN,
-/// signal)`.
+/// real neighbor-changed hook bodies.
 #[must_use]
 pub fn with_open_and_powered(state: &str, v: bool) -> String {
     let value = if v { "true" } else { "false" };
@@ -147,8 +146,9 @@ pub fn with_open_and_powered(state: &str, v: bool) -> String {
 }
 
 /// The position of the *other* half of a two-high door, or `None` for a
-/// non-door (trapdoor/fence gate are single-block) — `Half.LOWER ? UP : DOWN`
-/// from the `DoorBlock.neighborChanged` citation above.
+/// non-door (trapdoor/fence gate are single-block) — the same "lower half
+/// looks up, upper half looks down" rule
+/// from the real door's neighbor-changed hook, transcribed above.
 #[must_use]
 pub fn other_door_half_pos(pos: BlockPos, state: &str) -> Option<BlockPos> {
     if !is_door(state) {
@@ -158,8 +158,8 @@ pub fn other_door_half_pos(pos: BlockPos, state: &str) -> Option<BlockPos> {
     Some(direction.relative(pos))
 }
 
-/// `SignalGetter.hasNeighborSignal` as the three
-/// `neighborChanged` bodies read it: the best neighbour signal is positive.
+/// The real has-neighbor-signal check as the three
+/// real neighbor-changed hook bodies read it: the best neighbour signal is positive.
 /// For a door, both halves are checked (`hasNeighborSignal(pos) ||
 /// hasNeighborSignal(otherHalf)`) — the "respond to power at either half"
 /// property this module models; trapdoor/fence gate check only the one
@@ -178,14 +178,13 @@ where
     }
 }
 
-/// The pure flip decision — vanilla's `signal != POWERED` gate, shared by
-/// `DoorBlock.neighborChanged`, `TrapDoorBlock.neighborChanged` and
-/// `FenceGateBlock.neighborChanged`:
+/// The pure flip decision — the real `signal != POWERED` gate, shared by
+/// the real door's, trapdoor's and fence gate's neighbor-changed hooks:
 /// when the incoming signal differs from the stored `powered`, return the new
 /// state with both `open` and `powered` set to `signal`; otherwise `None`.
 ///
 /// Deliberately **immediate**: unlike the torch/diode/observer families there
-/// is no `scheduleTick` anywhere in these three `neighborChanged` bodies, so
+/// is no scheduled tick anywhere in these three real neighbor-changed hook bodies, so
 /// the caller writes the result right away (the way `crate::random_tick`'s
 /// hopper arm already treats an immediate reaction).
 #[must_use]
