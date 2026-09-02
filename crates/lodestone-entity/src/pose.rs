@@ -163,7 +163,7 @@ impl WalkAnimation {
     }
 
     /// The interpolated, scaled phase for a partial tick, matching
-    /// `WalkAnimationState.position(partialTicks)`.
+    /// vanilla's own walk-animation-state position step.
     #[must_use]
     pub fn position_lerp(&self, partial_tick: f32) -> f32 {
         (self.position - self.speed * (1.0 - partial_tick)) * self.position_scale

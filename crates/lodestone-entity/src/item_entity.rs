@@ -119,7 +119,7 @@ pub fn make_infinite(mut lifecycle: ItemLifecycle) -> ItemLifecycle {
 /// Returns `Some((new_to, new_from))` when a merge is possible, transferring
 /// as much as fits into `to` (capped at `to.max_stack_size`). Only the
 /// surviving `to` side picks up the other's state, exactly like
-/// `ItemEntity.merge(toItem, toStack, fromItem, fromStack)`
+/// vanilla's own item-merge step
 /// (the four-argument overload): `to.pickup_delay` becomes
 /// `max(to.pickup_delay, from.pickup_delay)` and `to.age` becomes
 /// `min(to.age, from.age)` (vanilla resets the survivor to the younger of the

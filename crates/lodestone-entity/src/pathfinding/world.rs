@@ -272,15 +272,15 @@ impl MobShape {
             .unwrap_or_else(|| kind.malus())
     }
 
-    /// Integer BB extent used to iterate the mob's occupied cells
-    /// (`Mth.floor(width + 1)`).
+    /// Integer BB extent used to iterate the mob's occupied cells,
+    /// matching vanilla's own floor-plus-one step.
     #[must_use]
     pub fn cell_width(&self) -> i32 {
         (self.width + 1.0).floor() as i32
     }
 
-    /// Integer BB height used to iterate the mob's occupied cells
-    /// (`Mth.floor(height + 1)`).
+    /// Integer BB height used to iterate the mob's occupied cells,
+    /// matching vanilla's own floor-plus-one step.
     #[must_use]
     pub fn cell_height(&self) -> i32 {
         (self.height + 1.0).floor() as i32

@@ -354,8 +354,8 @@ pub const WITHER_SKULL_DAMAGE: f32 = 8.0;
 /// the direct hit.
 pub const LARGE_FIREBALL_DAMAGE: f32 = 6.0;
 
-/// An arrow-family impact's damage, `AbstractArrow.onHitEntity`:
-/// `Mth.ceil(Mth.clamp(speed * baseDamage, 0, Integer.MAX_VALUE))`.
+/// An arrow-family impact's damage, from vanilla's own arrow-hit step:
+/// speed-scaled base damage, clamped to a non-negative whole number.
 ///
 /// **Speed-scaled and then rounded up to a whole number.** Both halves matter:
 /// an arrow that has slowed to a drift does proportionally less damage, and the
