@@ -940,7 +940,7 @@ impl Sim {
         camera_yaw: f32,
     ) -> Vec<crate::hud::locator::LocatorDot> {
         // The local player's own waypoint, when the server tracks one for
-        // them — `LocatorBar.java`'s own exclusion. `local_uuid()` is the
+        // them — matching vanilla's own locator-bar exclusion. `local_uuid()` is the
         // connecting session's identity, not a per-entity component, which
         // is why this reads it through `NetClient` rather than the ECS
         // world the rest of this method touches.
@@ -987,7 +987,7 @@ impl Sim {
     }
 
     /// Whether the local player's server-authoritative game mode is
-    /// `Spectator` — `MultiPlayerGameMode.isSpectator()`. A public mirror of
+    /// `Spectator` — vanilla's own is-spectator check. A public mirror of
     /// `sim::actions::Sim::is_spectator` (private to that module): the
     /// Spectator Menu's hotbar-key intercept (issue #613's
     /// `TeleportToEntity` remainder) is gated from `app/input.rs`, which has
@@ -1019,9 +1019,8 @@ impl Sim {
     }
 
     /// The ticks a fresh attack must wait before it is back at full strength —
-    /// vanilla's `getCurrentItemAttackStrengthDelay`, `(1.0 /
-    /// getAttributeValue(Attributes.ATTACK_SPEED)) * 20.0`
-    /// (`Player.java`, `.cache/mc/26.2/src`).
+    /// vanilla's own current-item-attack-strength-delay calculation: `(1.0 /
+    /// getAttributeValue(Attributes.ATTACK_SPEED)) * 20.0`.
     ///
     /// Reads `minecraft:attack_speed` off the local player's own
     /// [`Attributes`] snapshot — the same server-fed, per-item-aware value
@@ -1095,8 +1094,8 @@ impl Sim {
     /// `getAttackStrengthScale(a)` with the partial
     /// tick argument exposed, because vanilla itself calls this with two
     /// different values for two different purposes: `0.0F` for the crosshair
-    /// indicator ([`Self::attack_strength_scale`], `Hud.java`) and `0.5F`
-    /// for `Player.attack`'s own `fullStrengthAttack` gate
+    /// indicator ([`Self::attack_strength_scale`], vanilla's own hud rendering) and `0.5F`
+    /// for vanilla's own attack path's own `fullStrengthAttack` gate
     ///, which [`Self::maybe_spawn_crit_particles`]
     /// needs. One private helper rather than two public accessors that would
     /// otherwise duplicate the ticker read and delay computation.
@@ -1179,9 +1178,9 @@ impl Sim {
         })
     }
 
-    /// `Player.hasInfiniteMaterials()` — `Abilities.instabuild`
-    /// (`Player.java`; `AnvilMenu.mayPickup` and
-    /// `EnchantmentScreen.java` both gate on it). Used by
+    /// Vanilla's own has-infinite-materials check — `Abilities.instabuild`
+    /// (vanilla's own anvil-menu pickup gate and its own enchantment-screen
+    /// handling both gate on it). Used by
     /// `app.rs`'s `ContainerFrame::with_cost_context` for the anvil/enchanting
     /// affordability colours — see `docs/container-cost-screens.md`.
     #[must_use]
@@ -1299,7 +1298,7 @@ impl Sim {
     /// `active_container_menu`, the key-dispatch gate, the container draw — stayed
     /// convinced a menu was open.
     ///
-    /// Vanilla's `Player.closeContainer()` clears the client's own menu immediately
+    /// Vanilla's own close-container call clears the client's own menu immediately
     /// and *then* notifies the server, which is what this now mirrors. The local
     /// clear reuses [`ClientEvent::ScreenClosed`] rather than poking the component,
     /// so the close travels the same fold as a server-driven one and cannot drift
@@ -1786,7 +1785,7 @@ impl Sim {
     }
 
     /// Select a merchant trade row — vanilla's `ServerboundSelectTradePacket`
-    /// (`MerchantScreen.postButtonClick`, `MerchantScreen.java`), sent
+    /// (vanilla's own merchant-screen button-click handling), sent
     /// when the player clicks a trade-list row (UI half).
     ///
     /// [`ClientAction::SelectTrade`] was already encoded by every protocol
@@ -1804,8 +1803,8 @@ impl Sim {
     }
 
     /// Confirm a beacon's primary/secondary power selection — vanilla's
-    /// `ServerboundSetBeaconPacket` (`BeaconConfirmButton.onPress`,
-    /// `BeaconScreen.java`), sent when the player presses the beacon
+    /// `ServerboundSetBeaconPacket` (its own beacon-confirm-button press
+    /// handling), sent when the player presses the beacon
     /// screen's confirm button (`SetBeaconEffects` remainder).
     ///
     /// [`ClientAction::SetBeaconEffects`] was already encoded by every
@@ -1820,8 +1819,8 @@ impl Sim {
     /// send via its own `container_set_data` broadcast.
     /// Press one of the enchanting table's three enchant-offer buttons —
     /// vanilla's `ServerboundContainerButtonClickPacket`
-    /// (`EnchantmentScreen.mouseClicked` → `Minecraft.gameMode.
-    /// handleInventoryButtonClick`, `EnchantmentScreen.java`), sent when the
+    /// (its own enchantment-screen click handling, routed through its own
+    /// client-side inventory-button-click dispatch), sent when the
     /// player clicks an offer row the client-side gate already accepted
     /// (`ContainerButtonClick` remainder).
     ///
@@ -2161,17 +2160,13 @@ impl Sim {
     /// The world border's warning-overlay strength for this frame, in `0.0..=1.0`
     /// — `SessionWorldBorder` island reaching pixels.
     ///
-    /// A direct port of `Hud.extractVignette` (`Hud.java`,
-    /// `.cache/mc/26.2/client-src`):
-    ///
-    /// ```text
-    /// distToBorder         = worldBorder.getDistanceToBorder(camera)
-    /// movingBlocksThreshold = min(getLerpSpeed() * getWarningTime(),
-    ///                             abs(getLerpTarget() - getSize()))
-    /// warningDistance      = max(getWarningBlocks(), movingBlocksThreshold)
-    /// strength             = distToBorder < warningDistance
-    ///                        ? 1 - distToBorder / warningDistance : 0
-    /// ```
+    /// A direct port of vanilla's own hud-vignette-strength extraction: the
+    /// distance from the camera to the border, a moving-blocks threshold
+    /// (the smaller of the lerp speed times the warning time, and the gap
+    /// between the lerp target and the current size), a warning distance
+    /// (the larger of the configured warning-blocks and that threshold), and
+    /// finally a strength of `1 - distance / warningDistance` when the
+    /// distance is inside the warning band, else `0`.
     ///
     /// # The clock is `FrameClock`, deliberately
     ///
@@ -2196,7 +2191,7 @@ impl Sim {
     /// an incoming shrink is short. What would falsify it: a live server
     /// shrinking a border and a measurement of when the tint first appears. The
     /// static case, which is what the gates pin, is exact either way because
-    /// `StaticBorderExtent.getLerpSpeed()` returns `0.0`
+    /// vanilla's own static-border-extent lerp speed is always `0.0`
     /// and the floor wins outright.
     /// The command block the crosshair is on, resolved into the edit screen's
     /// opening state — missing trigger, tracked on #436.
@@ -2348,7 +2343,7 @@ pub(crate) fn border_warning(
 ) -> (f64, f64, f32) {
     use lodestone_game::worldborder::BorderExtent;
 
-    // `StaticBorderExtent.getLerpSpeed()` is `0.0`; only a moving border has a
+    // Vanilla's own static-border-extent lerp speed is `0.0`; only a moving border has a
     // speed at all.
     let lerp_speed = match border.extent {
         BorderExtent::Static { .. } => 0.0,
@@ -2377,8 +2372,8 @@ pub(crate) fn border_warning(
     }
     // Vanilla does not clamp the low end here, but `distance_to_border` goes
     // negative outside the border, which would push this above 1.0. Vanilla
-    // clamps immediately afterwards (`Mth.clamp(borderWarningStrength, 0, 1)`,
-    // `Hud.java`), so clamping here is the same answer one step earlier.
+    // clamps immediately afterwards, in its own hud rendering, so clamping
+    // here is the same answer one step earlier.
     #[allow(clippy::cast_possible_truncation)]
     let strength = (1.0 - dist / warning_distance).clamp(0.0, 1.0) as f32;
     (dist, warning_distance, strength)
