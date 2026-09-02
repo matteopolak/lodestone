@@ -189,7 +189,7 @@ fn a_source_with_air_above_still_averages_and_is_not_flattened() {
 }
 
 /// A cell whose horizontal neighbours are themselves full columns already
-/// short-circuited before this change, via `corner_height`'s own
+/// short-circuited, via `corner_height`'s own
 /// `edge_a >= 1.0` arm.
 ///
 /// This is the input the pre-existing coverage was built on, and it is why nothing
