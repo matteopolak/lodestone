@@ -14652,7 +14652,7 @@ where
                 }
 
                 // Beacons — issue #616's remainder. Vanilla's own 80-tick
-                // world-time gate (`BeaconBlockEntity.tick`'s
+                // world-time gate (its own beacon-block-entity tick's
                 // `level.getGameTime() % 80L == 0L`), run per-connection
                 // rather than from a global tick loop: `effects`/the wire
                 // notify below are per-connection state, the same
@@ -14728,11 +14728,11 @@ where
                 }
 
                 // Issue #241's raid trigger, traced through the decompile:
-                // `BadOmenMobEffect.applyEffectTick` converts Bad Omen into Raid
+                // Vanilla's own bad-omen mob-effect apply-effect-tick routine converts Bad Omen into Raid
                 // Omen the moment its carrier (not a spectator, not on Peaceful)
                 // stands near an occupied village POI, remembering *where* that
-                // happened (`raid_omen_position`); `RaidOmenMobEffect
-                // .applyEffectTick`, on Raid Omen's own last tick, spends that
+                // happened (`raid_omen_position`); its own raid-omen mob-effect
+                // apply-effect-tick routine, on Raid Omen's own last tick, spends that
                 // remembered position on `Raids.createOrExtendRaid`
                 // (`MobSim::create_or_extend_raid`) — a flat 64-block radius query
                 // over occupied `#village` POIs, **not** `isVillage`'s own
@@ -14793,7 +14793,7 @@ where
                     }
                 }
 
-                // Issue #246's remaining gap, closed: `Raid.tick`'s own
+                // Issue #246's remaining gap, closed: vanilla's own per-raid tick's own
                 // `hero.addEffect(HERO_OF_THE_VILLAGE, 48000, raidOmenLevel - 1)`
                 // loop, fired the moment a raid this player earned a killing
                 // blow in reaches `RaidStatus::Victory`. That transition
@@ -14845,7 +14845,8 @@ where
                             destination.set_block(pos.x, pos.y, pos.z, state);
                         }
                         if death.outcome.place_dragon_egg {
-                            // `EnderDragonFight.setDragonKilled`'s own
+                            // Vanilla's own end-dimension fight controller's
+                            // dragon-killed routine's own
                             // `level.getHeightmapPos(MOTION_BLOCKING,
                             // EndPodiumFeature.getLocation(origin))` — the
                             // highest solid block in the podium's own
@@ -14883,7 +14884,7 @@ where
                 }
 
                 // Status effects, ahead of hunger — vanilla ticks `activeEffects` in
-                // `LivingEntity.aiStep` before `ServerPlayer.tick` reaches
+                // its own per-tick AI step before its own per-player tick reaches
                 // `foodData.tick`, and the order matters for one arm: `hunger`
                 // charges exhaustion, so it must land before the exhaustion is spent
                 // rather than a tick late.
@@ -14947,8 +14948,8 @@ where
                 }
 
                 // Hunger, after the air block — vanilla's own order
-                // (`LivingEntity.baseTick`'s water-breath block, then
-                // `ServerPlayer.tick`'s `foodData.tick`). Runs whether or not a
+                // (its own base-tick routine's water-breath block, then
+                // its own per-player tick routine's `foodData.tick`). Runs whether or not a
                 // position has been reported, unlike drowning: hunger needs no
                 // terrain, only the difficulty and a game rule, and a player who
                 // has not moved since joining still starves.
