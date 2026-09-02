@@ -4,7 +4,7 @@
 
 The feasibility census issue [#341](https://github.com/matteopolak/lodestone/issues/341) asked
 for before any design: what it would take to run real, unmodified Bukkit/Spigot/Paper plugin jars
-against this server by supplying `net.minecraft.*`-shaped classes backed by Rust. The verdict is
+against this server by supplying vanilla-internal-shaped classes backed by Rust. The verdict is
 **viable only as the last plugin, not the first**: every seam the JVM tier needs is a seam the
 public bevy-plugin API must expose anyway, none of those seams is reachable today, and the JVM
 tier itself should not start until the adjudication window and player registry exist.
@@ -49,29 +49,30 @@ Paper jar avoids redistributing derived bytecode).
 ### Sizing
 
 The Java side is grounded in the decompiled Mojang-mapped 26.2 source at `.cache/mc/26.2/src`
-(the only version under `.cache/mc/` with decompiled source at all): **4,839 `.java` files under
-`net/minecraft`**. The surface Paper's implementation layer touches is dominated by six classes:
+(the only version under `.cache/mc/` with decompiled source at all): **4,839 internal source
+files**. The surface Paper's implementation layer touches is dominated by six vanilla-internal
+types:
 
-| class | public+protected members |
+| what it is | public+protected members |
 |---|---|
-| `net.minecraft.world.entity.Entity` | 560 (4,183 lines) |
-| `net.minecraft.server.MinecraftServer` | 211 |
-| `net.minecraft.server.level.ServerPlayer` | 175 |
-| `net.minecraft.world.level.Level` | 154 |
-| `net.minecraft.server.level.ServerLevel` | 146 |
-| `net.minecraft.world.item.ItemStack` | 120 |
+| the base entity type | 560 (4,183 lines) |
+| the dedicated-server singleton | 211 |
+| the server-side player type | 175 |
+| the world/level interface | 154 |
+| the server-side level type | 146 |
+| the item-stack type | 120 |
 
 These numbers are the honest scope figure the bucket counts below should be read against — and
 they are members *declared*, not members Paper *references*; the bytecode census the issue asks
 for (scan Paper's constant pool) is still the instrument that turns this into a ranked worklist.
 
-26.2-specific signature drift a plan written from older knowledge would get wrong:
-`AbstractContainerMenu.clicked`'s third parameter is a `ContainerInput` object, not the older
-`ClickType`; `ServerPlayerGameMode.destroyAndAck` gained an `exitId` String parameter; and
-**`ItemStack` has no `save`/`parse`** — serialization is purely codec-based (`MAP_CODEC`,
-`CODEC`, `STREAM_CODEC`), with the generic save layer being `ValueOutput`/`ValueInput`
-(`TagValueOutput`), and `Entity.save`/`load` take `ValueOutput`/`ValueInput` with no
-`CompoundTag` in the signature.
+26.2-specific signature drift a plan written from older knowledge would get wrong: the menu-click
+entry point's third parameter is now a structured input object, not the older simple click-type
+enum; the block-destroy-acknowledgement entry point gained a string exit-id parameter; and **the
+item-stack type has no save/parse methods any more** — serialization is purely codec-based, with
+the generic save layer built on a value-output/value-input pair, and the base entity type's own
+save/load methods take that same value-output/value-input pair, with no NBT compound type in the
+signature.
 
 ### Reachability buckets
 
@@ -89,22 +90,22 @@ is crate-internal with no public seam in front of it.
 
 ### The seam table
 
-| # | Java seam (26.2 signature) | Rust today | gap | bucket |
+| # | capability needed | Rust today | gap | bucket |
 |---|---|---|---|---|
-| 1 | Block read: `Level.getBlockState(BlockPos) → BlockState`; `BlockState` is an interned flyweight (`BlockBehaviour.BlockStateBase extends StateHolder<Block, BlockState>`, ~25 precomputed `private final` fields, `boolean[] faceSturdy` cache) compared **by identity** in vanilla code | The server's world model is canonical block-state **`String`s** in a per-column `Vec<String>` palette — `lodestone-server` does **not** depend on `lodestone-world` (dev-dep only, `crates/lodestone-server/Cargo.toml`); the client separately uses `u32` state ids via `lodestone_ecs::ChunkWorld` | Two disconnected Rust representations, neither identity-interned; a shim needs a stable palette-id ↔ interned-Java-object mapping, not a struct copy | (b) |
-| 2 | Block write: `Level.setBlock(BlockPos, BlockState, int flags)` | `set_block` exists only inside `apply_block_action` (`crates/lodestone-server/src/server.rs`), inline in the connection task, veto-free | No public write API server-side (client-side counterpart is [#129](https://github.com/matteopolak/lodestone/issues/129)); the #433 migration's scheduled apply is the planned seam | (b) |
-| 3 | Chunk access: `ServerChunkCache.getChunk(x, z, status, create)` — synchronous load-or-generate | `lodestone-worldgen` generates columns; no on-demand public chunk API, no load/unload lifecycle a plugin can observe | Worldgen is a bit-exact oracle library ([#132](https://github.com/matteopolak/lodestone/issues/132) flags whether a plugin seam is even compatible with that guarantee) | (b) |
-| 4 | Entity manipulation: `Entity` (560 members), `ServerLevel.addFreshEntity(Entity) → boolean`, `Entity.hurtServer`, teleport, remove | `MobSim` (`crates/lodestone-server/src/mobs/mod.rs`); the **only** dynamic-dispatch extension point in the crate is `SimMob::add_goal(priority, Box<dyn Goal>)` (`mobs/mod.rs`) | No public spawn/remove/mutate seam; server-side counterpart of [#138](https://github.com/matteopolak/lodestone/issues/138) | (b) |
-| 5 | Player object model: `ServerPlayer` (175 members, `connection`/`containerMenu` fields), `PlayerList` broadcast, lookup by name | **No player entities, no player registry, no broadcast.** Every send is against one `&mut Connection<T>` owned by one connection task; `IntegratedServer::bind` retains no handle to any connection. Filed as [#438](https://github.com/matteopolak/lodestone/issues/438); `docs/server-ecs.md`'s vitals row records that a player is not yet server-`World` state | The whole Bukkit `Player`/`Bukkit.broadcastMessage`/`getOnlinePlayers` surface sits behind #438 | (b) |
-| 6 | Inventory/menus: `AbstractContainerMenu.clicked(int, int, ContainerInput, Player)`, `broadcastChanges`, `containerListeners` | Per-connection container sync (`CONTAINER_SYNC_INTERVAL`, `server.rs`); block entities server-side are four Rust structs — `Furnace`, `Hopper`, `Composter`, `BrewingStand` — no chests | No synthetic-menu path (client counterpart [#145](https://github.com/matteopolak/lodestone/issues/145)); container state is replication-classified per-connection today, needs the simulation/replication reclassification of #433 | (b) |
-| 7 | Items: `ItemStack` (120 members) over `PatchedDataComponentMap` — an **identity-keyed** fastutil `Reference2ObjectMap<DataComponentType<?>, Optional<?>>` patch, copy-on-write over a `prototype` | `lodestone_model::ItemStack` is a **closed struct of known fields** (`crates/lodestone-model/src/item.rs`, `ItemComponents` in the same file); components a build does not model are **dropped** | An `ItemMeta`/custom-NBT plugin round-trips components we discard — silently lossy, which violates the loud-failure rule by construction | **(c)** until `ItemComponents` carries unknown components opaquely; then (b) |
-| 8 | Scheduling: `MinecraftServer extends ReentrantBlockableEventLoop<TickTask>`; `execute`/`submit` gated by `BlockableEventLoop.isSameThread()` — the main-thread contract Bukkit's scheduler is built on | `run_tick_loop` (`crates/lodestone-server/src/tick.rs`) is `pub(crate)`, 8 fixed concrete params, hardcoded straight-line body — no way to register per-tick work | Bukkit `runTaskLater`/`runTaskTimer` ([#113](https://github.com/matteopolak/lodestone/issues/113) client-side) have nowhere to attach; the #433 schedule **is** the planned registration mechanism | (b) |
-| 9 | Packet send: `ServerGamePacketListenerImpl.send(Packet<?>)` → `Connection.send(Packet<?>, ChannelFutureListener, boolean flush)` — netty (`ChannelFutureListener`, `ByteBuf` in `Packet.codec`) is in the signature | `ServerDirective` (`crates/lodestone-server/src/protocol.rs`) carries only `Send`/`SetState`/`SetCompression`/`None`; `ServerProtocol` (`protocol.rs`) is a closed, hand-enumerated encoder list, one method per packet, defaulted no-op bodies, ~24 implemented (`crates/protocol/v770/src/server_protocol.rs`'s `impl ServerProtocol for V770ServerProtocol`) | *Typed* sends can shim onto encoders — (b), behind #438 for addressing a player. *Arbitrary* `Packet` objects and pipeline injection: see row 11 | (b) |
-| 10 | NBT/serialization: `CompoundTag`, codec-based `ValueOutput`/`ValueInput` save layer | NBT lives in `lodestone-core` (`NbtTag` `:100`, `Nbt` `:173`, `Compound(Vec<(String, Nbt)>)`) and **`lodestone-server` never touches it** — block entities are plain Rust structs; NBT block entities exist client-side only | A `CompoundTag` shim can wrap `lodestone_core::Nbt` cheaply, but the server has no NBT-shaped state for it to address | (b) |
-| 11 | Raw packet interception (ProtocolLib-class): netty pipeline injection via reflection into `Connection.channel` | Inbound `ServerBound` (`protocol.rs`) is a closed 21-variant enum ending in `Ignored` with **no raw-packet passthrough**; no netty, no channel, no pipeline exists to inject into | Inherits [#156](https://github.com/matteopolak/lodestone/issues/156)/[#157](https://github.com/matteopolak/lodestone/issues/157)'s unresolved design — the one place `docs/roadmap/plugin-framework.md`'s audit says "not currently known to be buildable" | **(c)** |
-| 12 | Events: **there is no event bus anywhere in `net/minecraft`** — the only listener-shaped hooks in vanilla are `AbstractContainerMenu.containerListeners` and `SyncedDataHolder`. The entire Bukkit event surface is Paper's own patches (see the cut line below) | **No event bus, no cancellation, no hook registration of any kind server-side.** `dispatch_play_packet` (`server.rs`) matches `ServerBound` and calls `apply_*` helpers inline with no interception point; `apply_block_action` (`server.rs`) breaks unconditionally — `set_block(AIR)` → `reg.remove` → `encode_block_update`; `apply_attack` (`server.rs`) calls `sim.attack` directly | Every Bukkit event needs the `Adjudicate` window, which exists only as design in `docs/server-ecs.md` | (b) — **the load-bearing row** |
+| 1 | Block read: reading a block's state at a position returns an interned flyweight object (~25 precomputed fields plus a face-sturdiness cache) compared **by identity** in vanilla code | The server's world model is canonical block-state **`String`s** in a per-column `Vec<String>` palette — `lodestone-server` does **not** depend on `lodestone-world` (dev-dep only, `crates/lodestone-server/Cargo.toml`); the client separately uses `u32` state ids via `lodestone_ecs::ChunkWorld` | Two disconnected Rust representations, neither identity-interned; a shim needs a stable palette-id ↔ interned-Java-object mapping, not a struct copy | (b) |
+| 2 | Block write: setting a block's state at a position, with a flags bitmask controlling update/notification behaviour | `set_block` exists only inside `apply_block_action` (`crates/lodestone-server/src/server.rs`), inline in the connection task, veto-free | No public write API server-side (client-side counterpart is [#129](https://github.com/matteopolak/lodestone/issues/129)); the #433 migration's scheduled apply is the planned seam | (b) |
+| 3 | Chunk access: a synchronous load-or-generate call for a chunk at given coordinates, up to a given generation stage | `lodestone-worldgen` generates columns; no on-demand public chunk API, no load/unload lifecycle a plugin can observe | Worldgen is a bit-exact oracle library ([#132](https://github.com/matteopolak/lodestone/issues/132) flags whether a plugin seam is even compatible with that guarantee) | (b) |
+| 4 | Entity manipulation: the base entity type (560 members), a level-level add-entity call, a server-side hurt call, teleport, remove | `MobSim` (`crates/lodestone-server/src/mobs/mod.rs`); the **only** dynamic-dispatch extension point in the crate is `SimMob::add_goal(priority, Box<dyn Goal>)` (`mobs/mod.rs`) | No public spawn/remove/mutate seam; server-side counterpart of [#138](https://github.com/matteopolak/lodestone/issues/138) | (b) |
+| 5 | Player object model: the server-side player type (175 members, including its connection and open-container-menu fields), a server-wide player-list broadcast, lookup by name | **No player entities, no player registry, no broadcast.** Every send is against one `&mut Connection<T>` owned by one connection task; the singleplayer server retains no handle to any connection. Filed as [#438](https://github.com/matteopolak/lodestone/issues/438); `docs/server-ecs.md`'s vitals row records that a player is not yet server-`World` state | The whole Bukkit player/broadcast-message/online-players surface sits behind #438 | (b) |
+| 6 | Inventory/menus: a click entry point (slot, button, a structured input, the clicking player), a broadcast-changes call, a listener-registration list | Per-connection container sync (`CONTAINER_SYNC_INTERVAL`, `server.rs`); block entities server-side are four Rust structs — `Furnace`, `Hopper`, `Composter`, `BrewingStand` — no chests | No synthetic-menu path (client counterpart [#145](https://github.com/matteopolak/lodestone/issues/145)); container state is replication-classified per-connection today, needs the simulation/replication reclassification of #433 | (b) |
+| 7 | Items: the item-stack type (120 members) over an identity-keyed, copy-on-write component map layered on a shared prototype | `lodestone_model::ItemStack` is a **closed struct of known fields** (`crates/lodestone-model/src/item.rs`, `ItemComponents` in the same file); components a build does not model are **dropped** | A custom-item-data plugin round-trips components we discard — silently lossy, which violates the loud-failure rule by construction | **(c)** until `ItemComponents` carries unknown components opaquely; then (b) |
+| 8 | Scheduling: the dedicated-server singleton extends a reentrant main-thread task queue; its execute/submit calls are gated on a same-thread check — the main-thread contract Bukkit's scheduler is built on | `run_tick_loop` (`crates/lodestone-server/src/tick.rs`) is `pub(crate)`, 8 fixed concrete params, hardcoded straight-line body — no way to register per-tick work | Bukkit's delayed/repeating-task scheduler calls ([#113](https://github.com/matteopolak/lodestone/issues/113) client-side) have nowhere to attach; the #433 schedule **is** the planned registration mechanism | (b) |
+| 9 | Packet send: a per-connection packet-listener send call that hands off to the network-connection layer, with network-library types (a channel-future listener, a byte buffer) in the signature | `ServerDirective` (`crates/lodestone-server/src/protocol.rs`) carries only `Send`/`SetState`/`SetCompression`/`None`; `ServerProtocol` (`protocol.rs`) is a closed, hand-enumerated encoder list, one method per packet, defaulted no-op bodies, ~24 implemented (`crates/protocol/v770/src/server_protocol.rs`'s `impl ServerProtocol for V770ServerProtocol`) | *Typed* sends can shim onto encoders — (b), behind #438 for addressing a player. *Arbitrary* packet objects and pipeline injection: see row 11 | (b) |
+| 10 | NBT/serialization: a generic compound-tag container, plus a codec-based value-output/value-input save layer | NBT lives in `lodestone-core` (`NbtTag` `:100`, `Nbt` `:173`, `Compound(Vec<(String, Nbt)>)`) and **`lodestone-server` never touches it** — block entities are plain Rust structs; NBT block entities exist client-side only | A compound-tag shim can wrap `lodestone_core::Nbt` cheaply, but the server has no NBT-shaped state for it to address | (b) |
+| 11 | Raw packet interception (ProtocolLib-class): network-library pipeline injection via reflection into the connection's channel | Inbound `ServerBound` (`protocol.rs`) is a closed 21-variant enum ending in `Ignored` with **no raw-packet passthrough**; no network-library dependency, no channel, no pipeline exists to inject into | Inherits [#156](https://github.com/matteopolak/lodestone/issues/156)/[#157](https://github.com/matteopolak/lodestone/issues/157)'s unresolved design — the one place `docs/roadmap/plugin-framework.md`'s audit says "not currently known to be buildable" | **(c)** |
+| 12 | Events: **there is no event bus anywhere in vanilla's own internals** — the only listener-shaped hooks in vanilla are a container's own listener list and a small synced-data-holder interface. The entire Bukkit event surface is Paper's own patches (see the cut line below) | **No event bus, no cancellation, no hook registration of any kind server-side.** `dispatch_play_packet` (`server.rs`) matches `ServerBound` and calls `apply_*` helpers inline with no interception point; `apply_block_action` (`server.rs`) breaks unconditionally — `set_block(AIR)` → `reg.remove` → `encode_block_update`; `apply_attack` (`server.rs`) calls `sim.attack` directly | Every Bukkit event needs the `Adjudicate` window, which exists only as design in `docs/server-ecs.md` | (b) — **the load-bearing row** |
 | 13 | Commands: Brigadier dispatcher, per-node permission predicate | `lodestone-command` (1,388 lines) is a self-declared island with zero consumers; its `Node.permission: Option<NodeId>` field is read by nothing | Server-side dispatch is [#48](https://github.com/matteopolak/lodestone/issues/48); plugin registration [#118](https://github.com/matteopolak/lodestone/issues/118) | (b) |
-| 14 | Permissions/ops: vanilla `Permissions.COMMANDS_GAMEMASTER` checks; Bukkit permission nodes on top | **No permission model or op system exists at all** — `dispatch_play_packet`'s `ChangeGameMode` arm says so explicitly; the gamemaster check is deliberately skipped and every connection is treated as the singleplayer owner (`apply_difficulty_change`'s own doc comment) | Entirely behind [#125](https://github.com/matteopolak/lodestone/issues/125)/[#127](https://github.com/matteopolak/lodestone/issues/127) | (b) |
+| 14 | Permissions/ops: vanilla's own gamemaster-command permission check; Bukkit permission nodes on top | **No permission model or op system exists at all** — `dispatch_play_packet`'s `ChangeGameMode` arm says so explicitly; the gamemaster check is deliberately skipped and every connection is treated as the singleplayer owner (`apply_difficulty_change`'s own doc comment) | Entirely behind [#125](https://github.com/matteopolak/lodestone/issues/125)/[#127](https://github.com/matteopolak/lodestone/issues/127) | (b) |
 
 **Census size: 14 seam categories. Bucket (a): 0. Bucket (b): 12. Bucket (c): 2** (raw-packet
 interception; lossless item components — the second is fixable by opening `ItemComponents`, the
@@ -119,31 +120,32 @@ but in every case it is crate-internal, veto-free, and reachable by nothing outs
 **This is the centrepiece finding, and it kills the issue's cleanest framing.** #341's design
 premise is that "Paper's own bytecode does all the Bukkit translation for us — including the
 event bus, listener priorities, and cancellation semantics." That is true of the *wrapper* layer
-(`CraftPlayer` → `ServerPlayer`, `CraftWorld` → `ServerLevel`). It is **not** true of the event
-bus, because Bukkit events do not fire from a layer above NMS — they fire from **inside Paper's
-patched NMS method bodies**. Verified against Paper's own patch file
-([`paper-server/patches/sources/net/minecraft/server/level/ServerPlayerGameMode.java.patch`](https://github.com/PaperMC/Paper/blob/main/paper-server/patches/sources/net/minecraft/server/level/ServerPlayerGameMode.java.patch)):
-Paper inserts `CraftEventFactory.callPlayerInteractEvent(...)` and
-`new org.bukkit.event.block.BlockBreakEvent(...)` directly into
-`handleBlockBreakAction`/`destroyBlock`/`useItemOn`, checks `event.isCancelled()` inline, and
-sends the corrective `ClientboundBlockUpdatePacket` from inside the same body. Corroborated from
-the vanilla side: the 26.2 decompile has **no event bus anywhere in `net/minecraft`** — so there
+(a player wrapper delegating to its internal counterpart, a world wrapper delegating to its
+internal counterpart). It is **not** true of the event
+bus, because Bukkit events do not fire from a layer above vanilla's own internals — they fire from
+**inside Paper's patched internal method bodies**. Verified against Paper's own patch set for the
+internal block-break/game-mode handling class:
+Paper inserts its own event-construction calls and a real `org.bukkit.event.block.BlockBreakEvent`
+directly into the internal block-break-handling, block-destroy and use-item entry points, checks
+the event's cancelled flag inline, and
+sends the corrective block-update packet from inside the same body. Corroborated from
+the vanilla side: the 26.2 decompile has **no event bus anywhere in vanilla's own internals** — so there
 is no vanilla seam that firing events "falls out of."
 
-Consequence: backing NMS *leaves* (block storage, entity fields, sends) with Rust does not buy
+Consequence: backing vanilla's own internal *leaves* (block storage, entity fields, sends) with Rust does not buy
 the event bus, and the compat plugin must choose one of two cuts:
 
 1. **Drive Paper's patched game-logic bodies from the adjudication window** — call
-   `ServerPlayerGameMode.handleBlockBreakAction` in the JVM and let Paper's patched body fire the
-   event, check cancellation, and call down into `Level.setBlock` shims. This gets
+   the internal block-break-handling entry point in the JVM and let Paper's patched body fire the
+   event, check cancellation, and call down into the internal block-write shim. This gets
    vanilla-plus-Paper semantics verbatim, and it is a trap: the JVM then *re-executes game logic
    our Rust server also implements* — two simulations of one world, with the JVM's copy calling
-   back into Rust leaves on hot paths (`getBlockState` in loops is exactly where per-call JNI
+   back into Rust leaves on hot paths (a block-state read in a loop is exactly where per-call JNI
    overhead is catastrophic), and every behavioural divergence between the two is a
    consistency bug with no owner.
 2. **Fire Bukkit events from our adjudication system** — the compat plugin's own adjudication
-   system constructs the Bukkit event objects (playing the role Paper's `CraftEventFactory`
-   plays), dispatches them through Paper's real event bus (`SimplePluginManager`/listener
+   system constructs the Bukkit event objects (playing the role Paper's own internal
+   event-construction helper plays), dispatches them through Paper's real event bus (its listener
    registration — Paper's bytecode, unmodified), reads the verdict, and returns allow/deny to the
    `Adjudicate` set. Paper's bytecode is used for the wrapper layer, the event bus, the plugin
    loader, and the Bukkit API classes; Paper's patched *NMS game-logic bodies are never driven*.
@@ -162,7 +164,8 @@ whole of `paper-server`).
 **Evidence asymmetry, stated plainly:** there is **no Bukkit/CraftBukkit/Paper source anywhere
 under `.cache`** — zero files matching `org.bukkit`; `.cache/mc/26.2/libraries/org` holds only
 `apache`, `joml`, `jspecify`, `slf4j`. Every claim in this document about Paper's side —
-the patch mechanism, `CraftEventFactory`, the wrapper structure, GPL-3.0 licensing, Paper
+the patch mechanism, Paper's own internal event-construction helper, the wrapper structure,
+GPL-3.0 licensing, Paper
 running Mojang-mapped at runtime — rests on Paper's public repository
 ([PaperMC/Paper](https://github.com/PaperMC/Paper)) and the owner's issue text, **not on a local
 artifact**. The Java-side census above is verified locally; the Paper-side claims are external
@@ -184,9 +187,9 @@ lock to deadlock on, and also no lock to hand a foreign thread. The analysis und
   the `World`, valid only for the duration of the dispatch — set on entry, cleared on exit.
   Bukkit's synchronous read-your-writes contract (`block.setType(STONE)` then
   `block.getType() == STONE`) holds *for free*, because the imperative call really did mutate the
-  authoritative `World` mid-dispatch. This mirrors Java's own contract exactly:
-  `BlockableEventLoop.isSameThread()` gating `execute`/`submit` is the same affinity rule with a
-  queue behind it.
+  authoritative `World` mid-dispatch. This mirrors Java's own contract exactly: vanilla's own
+  same-thread check gating its main-thread task queue's execute/submit calls is the same affinity
+  rule with a queue behind it.
 - **Off-thread access throws; it cannot block.** A Bukkit async task calling a world method gets
   an `IllegalStateException` naming the thread — Paper's own behaviour for async world access.
   It must *never* wait for the tick thread: the tick thread does not yield mid-tick, so a
@@ -196,9 +199,9 @@ lock to deadlock on, and also no lock to hand a foreign thread. The analysis und
 - **Object identity and lifetime.** Plugins hold `Player`/`World`/`Block` references across
   ticks. Shim objects wrap **handles, never pointers**: `bevy_ecs::Entity` is already a
   generational index, which is precisely the fail-gracefully-when-gone shape the issue asked
-  for — a stale handle throws, naming the entity. `BlockState` needs more: vanilla and plugin
-  code compare states **by identity** (`==`), so the Java side must intern one shim `BlockState`
-  object per state, keyed by a stable id — and our tree currently has *two* disconnected state
+  for — a stale handle throws, naming the entity. The block-state flyweight needs more: vanilla
+  and plugin code compare states **by identity** (`==`), so the Java side must intern one shim
+  block-state object per state, keyed by a stable id — and our tree currently has *two* disconnected state
   models to key against (the server's canonical `String` palette and the client's `u32` ids; see
   seam 1). The interning registry forces that unification question early, which is a benefit in
   disguise.
@@ -211,11 +214,11 @@ lock to deadlock on, and also no lock to hand a foreign thread. The analysis und
   binds only crates opting into workspace lints — an external plugin crate sets its own
   (`docs/plugin-api.md` §"two Stage-1 constraints"), which is what makes a JNI crate under
   `crates/plugins/` legal at all.
-- **What is structurally impossible**, not merely hard: (1) **netty pipeline injection** — the
-  `Connection.send(Packet<?>, ChannelFutureListener, boolean)` signature carries netty types, and
-  we have no channel, no pipeline, no `ByteBuf`; a shim can accept *typed* packets and translate
+- **What is structurally impossible**, not merely hard: (1) **network-library pipeline injection** —
+  vanilla's own per-connection send call carries network-library types in its signature, and
+  we have no channel, no pipeline, no byte-buffer type; a shim can accept *typed* packets and translate
   to `ServerDirective::Send` where an encoder exists, but a ProtocolLib-class plugin reflecting
-  into `Connection.channel` has nothing to find, and `ServerBound`'s closed 21-variant enum with
+  into the connection's channel has nothing to find, and `ServerBound`'s closed 21-variant enum with
   no raw passthrough means inbound interception is equally closed (this is #156/#157 restated,
   not dodged). (2) **Synchronous world access from a foreign thread** — no lock exists to take;
   throw is the only correct answer. (3) **Lossless custom item components** through today's
@@ -243,8 +246,8 @@ doctrine changes server-side" did the server-side mapping; this maps Bukkit onto
    API the owning systems use. Ambiguity detection (`LogLevel::Error`, already the client's
    standard) is the gate that keeps this honest.
 3. **Refusal is always observable** — the loud-failure rule is this clause applied to the compat
-   layer: `UnsupportedOperationException("ServerLevel#getChunkSource not implemented by
-   lodestone")` is refusal-made-observable for a calling plugin, and the corrective packet
+   layer: an exception naming the specific unimplemented member (e.g. the server-level chunk-source
+   accessor) is refusal-made-observable for a calling plugin, and the corrective packet
    (`docs/server-ecs.md` clause 3) is refusal-made-observable for the remote client.
 4. **Server-side, the plugin outranks the client** — the inversion `docs/server-ecs.md` records
    is *exactly* Bukkit's cancellation model: `event.setCancelled(true)` is a plugin overruling a
@@ -299,7 +302,8 @@ Scope comparison, honestly quantified: #77's native path is ~48 open issues of R
 #341 adds, *on top of that same surface*: an in-process JVM host, a shim-class generator driven
 by the bytecode census (the six-class core above is ~1,400 members before Paper's wrapper needs
 narrow it), an interning/handle registry, the event-construction layer replacing
-`CraftEventFactory`, classloader interception, and a behaviour-diff harness against real Paper.
+Paper's own internal event-construction helper, classloader interception, and a behaviour-diff
+harness against real Paper.
 It is strictly additive work for one payoff native plugins cannot deliver: running *unmodified
 Java jars*. Whether that payoff is worth the tier is the owner's call; this census's finding is
 only that it costs nothing to *defer* — every prerequisite is work already scheduled for native
@@ -314,7 +318,7 @@ packet-injection archetypes — the same two rows `docs/roadmap/plugin-framework
 port-feasibility table already flags for native plugins. Not startable now: bucket (a) is empty
 because the server has no plugin registration point at all.
 
-**The single strongest piece of evidence:** the event-bus finding. Vanilla `net/minecraft` has
+**The single strongest piece of evidence:** the event-bus finding. Vanilla's own internals have
 no event bus (verified locally, 4,839 files); our server has no event bus, no cancellation, and
 no hook registration of any kind (verified locally — `dispatch_play_packet` applies inline,
 veto-free); Bukkit's event bus lives in Paper's patched NMS bodies (verified against Paper's
@@ -331,7 +335,7 @@ are the real next steps and are already queued.
 
 **Dispatchable for #341 itself, when wanted:** the bytecode census. Obtain a real Paper jar for
 the current line plus 3–5 real plugin jars (one protection, one economy, one kitchen-sink); scan
-constant pools and method refs for `net.minecraft.*` members; rank by reference count; check the
+constant pools and method refs for vanilla-internal members; rank by reference count; check the
 result against this document's seam table. First fact to verify: that Paper has a Mojang-mapped
 26.2 release at all — asserted by the issue, unverifiable from `.cache`.
 
@@ -339,13 +343,13 @@ result against this document's seam table. First fact to verify: that Paper has 
 protection-style plugin jar (compiled against the Bukkit API, *not* against our shims — evidence
 must originate outside the code under test) whose `BlockBreakEvent` listener cancels breaks
 inside a region. JVM in-process, Paper's plugin loader and event bus running Paper's own
-bytecode, our adjudication system firing the event, one NMS seam backed
-(`ServerLevel`/`Level.getBlockState` for the listener's region check). **Gate:** a break inside
+bytecode, our adjudication system firing the event, one internal seam backed
+(the server-level/block-state-read seam, for the listener's region check). **Gate:** a break inside
 the region leaves the server's world unchanged and a corrective block update reaches the wire; a
 break outside applies. **Negative control:** the same run with the listener unregistered must
 break the block inside the region — proving the veto path, not the apply path, is what the gate
-measures. **Loudness control:** the plugin calling any unimplemented NMS member must produce
-`UnsupportedOperationException` naming the member — asserted in the harness, not described.
+measures. **Loudness control:** the plugin calling any unimplemented vanilla-internal member must
+produce an exception naming the member — asserted in the harness, not described.
 
 ## The closing argument: our own systems are the proof
 
@@ -366,8 +370,9 @@ defect in the surface, per the doctrine's own rule.
 
 External (no local Paper artifact exists to verify against — see "Evidence asymmetry"):
 
-- [Paper's `ServerPlayerGameMode.java.patch`](https://github.com/PaperMC/Paper/blob/main/paper-server/patches/sources/net/minecraft/server/level/ServerPlayerGameMode.java.patch) —
-  Bukkit event calls, cancellation checks and corrective sends inserted into NMS method bodies.
+- [Paper's own patch for the internal block-break/game-mode handling class](https://github.com/PaperMC/Paper/blob/main/paper-server/patches/sources/net/minecraft/server/level/ServerPlayerGameMode.java.patch) —
+  Bukkit event calls, cancellation checks and corrective sends inserted into vanilla's own internal
+  method bodies.
 - [PaperMC/Paper](https://github.com/PaperMC/Paper) — patch-based architecture, GPL-3.0.
 
 Local: `.cache/mc/26.2/src` (decompiled Mojang-mapped 26.2), the Lodestone tree as of
