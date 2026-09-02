@@ -34,11 +34,11 @@ geometry beyond the chunk-derived inner band, no caves or overhangs at distance.
 
 - **A per-column height query already exists and never generates a chunk.** The private
   `preliminary_surface_level(sample_x, sample_z)` in `crates/lodestone-worldgen/src/surface/mod.rs`
-  is the port of vanilla's `NoiseChunk.preliminarySurfaceLevel` (cited per the docs-only
-  rule): it evaluates the `preliminary_surface_level` density router for one (x, z) and
+  is our own port of the same early-estimate technique real generation uses for surface rules:
+  it evaluates the `preliminary_surface_level` density router for one (x, z) and
   returns a surface Y. It is exactly the seam this design needs, and — like the generator
-  stage seam the progressive plan found — it exists but has no public name. Vanilla itself
-  uses this estimate for surface rules, so its error against the real surface is bounded by
+  stage seam the progressive plan found — it exists but has no public name. Real generation
+  uses this same estimate for surface rules, so its error against the real surface is bounded by
   construction, but **the bound is unmeasured here** (aquifers, carvers and surface rules
   all act after it). Stage 0 measures it.
 - **Biome and sea level are queryable without generation**: `OverworldGenerator::biome_at_quart`
