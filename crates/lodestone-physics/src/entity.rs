@@ -66,9 +66,10 @@ pub struct EntityDimensions {
     /// Standing bounding-box height.
     pub height: f32,
     /// Auto-step height — how far up a ledge the entity climbs without jumping.
-    /// The **resolved** `STEP_HEIGHT` attribute, narrowed to `f32` exactly as
-    /// vanilla's `maxUpStep()` `(float)` cast does. The `RangedAttribute` default
-    /// is `0.6` (so an ordinary mob steps like a player, not `0.0`); some types
+    /// The **resolved** step-height attribute, narrowed to `f32` exactly as
+    /// vanilla's own max-up-step accessor's `(float)` cast does. The
+    /// ranged-attribute default is `0.6` (so an ordinary mob steps like a
+    /// player, not `0.0`); some types
     /// raise it (a horse is `1.0`), and a modifier can shift it further — which is
     /// why this is sourced from the attribute map, not a static table.
     pub step_height: f32,
@@ -97,7 +98,7 @@ impl EntityDimensions {
     /// The axis-aligned bounding box for an entity whose feet (box centre on the
     /// horizontal axes, box *bottom* on Y) are at `feet`.
     ///
-    /// This mirrors vanilla's `makeBoundingBox`: `half = width / 2`, spanning
+    /// This mirrors vanilla's own bounding-box construction: `half = width / 2`, spanning
     /// `feet.y ..= feet.y + height`. The `width / 2` division is done in `f64`
     /// after widening the `f32` width, exactly as the player path did before this
     /// value moved out of the profile.
@@ -116,7 +117,7 @@ impl EntityDimensions {
 }
 
 /// The mutable motion state that vanilla's own entity move step reads and
-/// writes: world position, velocity (`deltaMovement`), the ground/collision
+/// writes: world position, velocity (vanilla's own velocity field), the ground/collision
 /// flags, and the pending stuck-speed multiplier consumed at the top of a
 /// move.
 ///
@@ -127,14 +128,14 @@ impl EntityDimensions {
 pub struct EntityMotion {
     /// World position of the entity's feet.
     pub position: Vec3d,
-    /// Velocity (`deltaMovement`). [`move_entity`] moves the entity by this
+    /// Velocity (vanilla's own velocity field). [`move_entity`] moves the entity by this
     /// vector, then rewrites it via the collision restitution — exactly as
     /// vanilla's `travel()` calls `move(SELF, getDeltaMovement())`.
     pub velocity: Vec3d,
-    /// Whether the entity is supported from below (`verticalCollisionBelow`). This
+    /// Whether the entity is supported from below (vanilla's own vertical-collision-below flag). This
     /// is the flag the client transmits; see [`crate::player::PlayerState`].
     pub on_ground: bool,
-    /// Whether the entity hit a wall this move (`horizontalCollision`).
+    /// Whether the entity hit a wall this move (vanilla's own horizontal-collision flag).
     pub horizontal_collision: bool,
     /// A pending stuck-in-block multiplier (cobweb, powder snow, sweet berry
     /// bush) recorded on the *previous* tick and consumed at the top of the next
@@ -161,8 +162,9 @@ impl EntityMotion {
 /// motion itself.
 ///
 /// `slow_falling` is the Slow Falling status effect, which lowers descent gravity
-/// in `getEffectiveGravity` and so affects the land-bounce branch of restitution.
-/// `suppress_bounce` is `isSuppressingBounce()` (true for a sneaking player),
+/// in vanilla's own effective-gravity check and so affects the land-bounce
+/// branch of restitution. `suppress_bounce` is vanilla's own "is suppressing
+/// bounce" check (true for a sneaking player),
 /// which both zeroes the base entity restitution and vetoes the slime/bed bounce.
 /// A plain mob passes `MoveContext::default()` (all inert).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -171,7 +173,7 @@ pub struct MoveContext {
     pub slow_falling: bool,
     /// The entity is suppressing bounces (a sneaking player).
     pub suppress_bounce: bool,
-    /// Which `maybeBackOffFromEdge` override this entity has. Defaults to
+    /// Which edge-back-off override this entity has. Defaults to
     /// [`EdgeBackOff::Entity`], the identity base implementation, so a mob or a
     /// dropped item is inert by construction.
     pub edge_back_off: EdgeBackOff,
@@ -243,14 +245,14 @@ pub fn move_entity_among_entities(
     ctx: MoveContext,
     entity_colliders: &[Aabb],
 ) {
-    // `deltaMovement` at the top of vanilla's own move step.
+    // The entity's own velocity at the top of vanilla's own move step.
     let delta = motion.velocity;
 
     // Consume a pending stuck-speed multiplier (cobweb, powder snow, sweet berry
     // bush) *before* collision. Vanilla scales the local movement `delta` in
-    // place, then calls `setDeltaMovement(Vec3.ZERO)` — so the scaled vector
-    // drives this tick's sweep, but the velocity that
-    // `restituteMovementAfterCollisions` later reads is **zero**, not the scaled
+    // place, then zeroes its own velocity field outright — so the scaled vector
+    // drives this tick's sweep, but the velocity that vanilla's own
+    // post-collision restitution step later reads is **zero**, not the scaled
     // value. Keep those two roles as distinct locals so the arithmetic matches
     // rather than reusing `delta` for both. When not stuck (the default), both
     // equal `delta` and the result is byte-identical to the un-stuck path.
@@ -277,8 +279,9 @@ pub fn move_entity_among_entities(
     // the tick" shortcut would get wrong. It runs *after* the stuck multiplier, so
     // a cobweb-slowed delta is what gets probed and stepped. And it rewrites only
     // this local candidate: `pre_collision_velocity` is deliberately left alone,
-    // because vanilla never calls `setDeltaMovement` here, so the velocity that
-    // `restituteMovementAfterCollisions` reads keeps its un-backed-off value.
+    // because vanilla never rewrites its own velocity field here, so the
+    // velocity that vanilla's own post-collision restitution step reads keeps
+    // its un-backed-off value.
     move_delta = maybe_back_off_from_edge(
         move_delta,
         ctx.edge_back_off,
@@ -312,11 +315,12 @@ pub fn move_entity_among_entities(
         motion.position = motion.position.add(resolved);
     }
 
-    // Vanilla keeps `deltaMovement == delta` through `collide`, then only
-    // `restituteMovementAfterCollisions` rewrites it — and *that* is what zeroes
-    // a blocked axis (restitution 0) or reverses it into a bounce (slime). Read
-    // `pre_collision_velocity` (zeroed above when stuck) as vanilla's
-    // `getDeltaMovement()`, and query the post-move position for the bounce block.
+    // Vanilla keeps its own velocity field equal to `delta` through its own
+    // collide step, then only its own post-collision restitution step
+    // rewrites it — and *that* is what zeroes a blocked axis (restitution 0)
+    // or reverses it into a bounce (slime). Read `pre_collision_velocity`
+    // (zeroed above when stuck) as vanilla's own velocity accessor, and query
+    // the post-move position for the bounce block.
     let mut velocity = pre_collision_velocity;
     if (moved_vertically && vertical_collision) || motion.horizontal_collision {
         velocity = restitute_movement_after_collisions(
@@ -335,10 +339,11 @@ pub fn move_entity_among_entities(
     }
     motion.velocity = velocity;
 
-    // Block speed factor (soul sand 0.4, honey 0.4), applied last as in `move`.
-    // `getBlockSpeedFactor`: query `blockPosition()` (floor of the feet) first,
-    // and only if that is 1.0 fall through to the block below that affects
-    // movement (`getOnPos(0.500001)`).
+    // Block speed factor (soul sand 0.4, honey 0.4), applied last as in
+    // vanilla's own move step. Vanilla's own block-speed-factor accessor
+    // queries the block at the entity's own floored feet position first,
+    // and only if that is 1.0 falls through to the block below that affects
+    // movement (a small downward probe from the feet).
     let block_speed_factor = if ctx.suppress_block_speed_factor {
         // Vanilla's own block-speed-factor accessor short-circuits to `1.0F`
         // while flying or gliding — the block is never queried at all.
@@ -364,7 +369,7 @@ pub fn move_entity_among_entities(
 /// snapshot at the point the movement sweep begins.
 ///
 /// The query uses the current hitbox expanded toward the current velocity, just
-/// like vanilla's `getEntityCollisions`. A pending stuck multiplier can only
+/// like vanilla's own nearby-entity-collisions query. A pending stuck multiplier can only
 /// shrink that velocity inside [`move_entity_among_entities`], so querying with
 /// the unscaled vector is a conservative superset and cannot introduce a false
 /// collision: the axis sweep still rejects every box the actual move does not
@@ -390,8 +395,8 @@ pub(crate) fn move_entity_with_nearby(
 }
 
 /// Per-entity / per-situation inputs to [`travel_in_air`] that are not part of
-/// the core [`EntityMotion`] — the flags and effects vanilla's `travelInAir`
-/// branches on. A plain falling mob passes `AirTravelContext { yaw, ..default }`;
+/// the core [`EntityMotion`] — the flags and effects vanilla's own airborne
+/// travel step branches on. A plain falling mob passes `AirTravelContext { yaw, ..default }`;
 /// the player pipeline fills in the sneak- and effect-driven fields.
 ///
 /// Everything here is a plain scalar/bool so the seam stays free of any
@@ -400,7 +405,8 @@ pub(crate) fn move_entity_with_nearby(
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct AirTravelContext {
     /// Body yaw in degrees, used to rotate the relative input into world space
-    /// (`moveRelative`). Mobs supply their AI-driven yaw; the player its facing.
+    /// (vanilla's own relative-move step). Mobs supply their AI-driven yaw;
+    /// the player its facing.
     pub yaw: f32,
     /// The jump key is held / the mob is jumping this tick. Feeds the climbable
     /// "steady climb-up" branch (`(horizontalCollision || jumping) && onClimbable`).
@@ -410,8 +416,9 @@ pub struct AirTravelContext {
     pub levitation: Option<u32>,
     /// Slow Falling reduces descent gravity to `min(gravity, 0.01)`.
     pub slow_falling: bool,
-    /// Suppress the ladder slide-down (`isSuppressingSlidingDownLadder()`), which
-    /// vanilla gates on `this instanceof Player`; a mob always passes `false`.
+    /// Suppress the ladder slide-down (vanilla's own "is suppressing sliding
+    /// down ladder" check), which vanilla gates on `this instanceof Player`;
+    /// a mob always passes `false`.
     ///
     /// This is the *sneak* input alone, not the full vanilla conjunct: the
     /// scaffolding exception (`!getInBlockState().is(Blocks.SCAFFOLDING)`,
@@ -420,21 +427,23 @@ pub struct AirTravelContext {
     /// [`CollisionView`] call this context struct has none of — see that
     /// function's climbing block.
     pub suppress_ladder_slide: bool,
-    /// `isSuppressingBounce()` (a sneaking player) — vetoes slime/bed bounce.
+    /// Vanilla's own "is suppressing bounce" check (a sneaking player) —
+    /// vetoes slime/bed bounce.
     pub suppress_bounce: bool,
-    /// `omnidirectionalAirMover()` — a handful of entities drag their vertical
-    /// velocity by the *horizontal* air drag (`0.91`) instead of `0.98`. False
-    /// for players and ordinary mobs.
+    /// Vanilla's own "omnidirectional air mover" check — a handful of
+    /// entities drag their vertical velocity by the *horizontal* air drag
+    /// (`0.91`) instead of `0.98`. False for players and ordinary mobs.
     pub omnidirectional_air_mover: bool,
-    /// `shouldDiscardFriction()` — when true vanilla skips the drag multiply
-    /// entirely for this tick. False for players and ordinary mobs.
+    /// Vanilla's own "should discard friction" check — when true vanilla
+    /// skips the drag multiply entirely for this tick. False for players
+    /// and ordinary mobs.
     pub discard_friction: bool,
-    /// Which `maybeBackOffFromEdge` override this entity has, forwarded to
+    /// Which edge-back-off override this entity has, forwarded to
     /// [`MoveContext`]. Defaults to the inert [`EdgeBackOff::Entity`].
     pub edge_back_off: EdgeBackOff,
     /// This entity's own flying-speed value — the value vanilla's own
-    /// friction-influenced speed step substitutes for `getSpeed()`
-    /// **whenever it is airborne**.
+    /// friction-influenced speed step substitutes for vanilla's own speed
+    /// accessor **whenever it is airborne**.
     ///
     /// `None` means "use [`PhysicsProfile::flying_speed`]", i.e. vanilla's
     /// own unridden flying-speed default of `0.02F`. That is the
@@ -448,8 +457,9 @@ pub struct AirTravelContext {
     pub flying_speed: Option<f32>,
     /// Forwarded to [`MoveContext::suppress_block_speed_factor`].
     pub suppress_block_speed_factor: bool,
-    /// Force `onClimbable()` to `false`, detaching the entity from ladders and
-    /// vines: no pre-move velocity clamp and no steady climb-up.
+    /// Force vanilla's own "on climbable" check to `false`, detaching the
+    /// entity from ladders and vines: no pre-move velocity clamp and no
+    /// steady climb-up.
     ///
     /// Vanilla's own player override is `abilities.flying ? false :
     /// super.onClimbable()`. `false` for mobs, whose "on climbable" check
@@ -464,14 +474,15 @@ pub struct AirTravelContext {
 ///
 /// The caller supplies the *already-transformed* relative move amounts
 /// (`input = (xxa, zza)`, vanilla's own relative-move input, produced by the
-/// player's keyboard transform or a mob's AI vector) and `getSpeed()` as
+/// player's keyboard transform or a mob's AI vector) and vanilla's own speed accessor as
 /// `speed`. The friction-influenced rescale, climbable clamp, the shared
 /// [`move_entity`] collision sweep, gravity and drag all live *inside* the
 /// seam so their order — which is observable — is fixed in one place.
 ///
 /// Order (each cited against the jar):
-/// 1. `blockFriction` from the block below (vanilla's own "block below that
-///    affects my movement" lookup + its friction modifier), or `1.0F` when
+/// 1. The block-friction value from the block below (vanilla's own "block
+///    below that affects my movement" lookup + its friction modifier), or
+///    `1.0F` when
 ///    airborne.
 /// 2. Relative-move at the friction-influenced speed, then the ladder clamp
 ///    — both before the move.
@@ -526,8 +537,9 @@ pub(crate) fn travel_in_air_among_entities(
 
     // Ladder/vine handling: clamp horizontal + downward speed before the move,
     // and force a steady climb-up after it if pushing into (or jumping against)
-    // the climbable. `onClimbable` tests the block at the feet block position;
-    // we evaluate it once (pre-move) and reuse it, as the current player path
+    // the climbable. Vanilla's own "on climbable" check tests the block at
+    // the feet block position; we evaluate it once (pre-move) and reuse it,
+    // as the current player path
     // does, rather than re-querying the post-move position.
     let climb_x = mth::floor(motion.position.x);
     let climb_y = mth::floor(motion.position.y);
@@ -565,9 +577,9 @@ pub(crate) fn travel_in_air_among_entities(
 
     // gravity on the post-move Y.
     //
-    // `travelInAir` chooses one of two mutually-exclusive vertical updates:
+    // Vanilla's own airborne travel step chooses one of two mutually-exclusive vertical updates:
     // Levitation *replaces* gravity with a pull toward `0.05*(amp+1)`; otherwise
-    // it subtracts `getEffectiveGravity()`, which Slow Falling reduces while
+    // it subtracts vanilla's own effective-gravity value, which Slow Falling reduces while
     // descending. `falling` is read from the post-move Y (== `movement.y`).
     let movement_y = if let Some(amp) = ctx.levitation {
         movement.y + (0.05 * f64::from(amp + 1) - movement.y) * 0.2
