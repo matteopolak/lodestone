@@ -132,6 +132,7 @@ pub mod chunks;
 pub mod commands;
 pub mod egress;
 pub mod entity;
+pub mod entity_spawn;
 pub mod events;
 mod handle;
 pub mod ingest;
@@ -178,6 +179,11 @@ pub use commands::{
     RegisteredCommand, choice_argument, command_tree_for, dispatch, player_argument, suggest,
 };
 pub use egress::{EgressFilterPlugin, EgressFilters, EgressStats, Verdict};
+pub use entity_spawn::{
+    CustomEntityKind, CustomEntityRegistry, CustomEntityTypeError, CustomEntityTypesExt,
+    EntitySpawn, EntitySpawnPlugin, PluginEntityIds, UnknownCustomEntityType, despawn_entity,
+    is_plugin_entity_id, spawn_custom_entity, spawn_entity,
+};
 pub use input::{
     KeyInterceptMode, PendingPluginKeyEvents, PhysicalKey, PluginKeyEvent, PluginKeybinds,
 };

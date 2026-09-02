@@ -1,0 +1,29 @@
+# A minigame/mob-farm-class plugin: queued spawn/despawn requests for a
+# non-networked entity, plus one custom entity type registered at startup —
+# the real consumer of `lodestone_ecs::entity_spawn`.
+#
+# "Everything a Bukkit `World.spawnEntity`/`Entity.remove()` caller would want
+# from a plugin, minus the wire — a real target for a minigame manager that
+# spawns a training dummy, or a disguise plugin that wants a fake mob with no
+# server involved."
+[package]
+name = "lodestone-mob-spawner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# `spawn_entity`/`despawn_entity`/`spawn_custom_entity`, `EntityIndex`,
+# `PluginEntityIds`, `CustomEntityRegistry` and the `CustomEntityTypesExt`
+# registration trait — the whole surface this plugin drives.
+lodestone-ecs = { workspace = true }
+# `ResourceKey`, `Vec3`, `Rotation` — the value types a spawn request carries.
+lodestone-model = { workspace = true }
+# Direct, for `#[derive(Resource)]`'s absolute `bevy_ecs::` paths — see
+# `docs/plugin-api.md`'s "how to change it" and every sibling plugin's
+# `Cargo.toml` for the same note.
+bevy_ecs = { workspace = true }
+bevy_app = { workspace = true }
