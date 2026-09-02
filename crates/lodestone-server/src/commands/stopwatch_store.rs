@@ -1,5 +1,5 @@
-//! The `/stopwatch` registry (issue #48's remainder) — vanilla's
-//! `Stopwatches`/`Stopwatch`, behind [`StopwatchHandle`]. `/stopwatch` and
+//! The `/stopwatch` registry — the real stopwatch record, behind
+//! [`StopwatchHandle`]. `/stopwatch` and
 //! `/execute if`/`unless stopwatch` are its two consumers.
 //!
 //! # How it works
@@ -11,11 +11,11 @@
 //! inside [`crate::world_state::WorldStateHandle`] as a sibling field for the
 //! identical reachability reason those two document.
 //!
-//! A [`Stopwatch`] is vanilla's own `creation_time` field — see that type's
-//! own doc for why the real record's second field, `accumulated_elapsed`, is
-//! not carried here at all. `restart` replaces the whole record with a fresh
-//! one (a hard reset, not a pause/resume — vanilla's own `RestartStopwatch`
-//! does the identical `new Stopwatch(currentTime)`).
+//! A [`Stopwatch`] is the real record's `creation_time` field — see that
+//! type's own doc for why the real record's second field,
+//! `accumulated_elapsed`, is not carried here at all. `restart` replaces the
+//! whole record with a fresh one (a hard reset, not a pause/resume — the
+//! real restart rule does the identical fresh-record replacement).
 //!
 //! **The clock is [`crate::chat_session::now_millis`], not
 //! `std::time::SystemTime::now()`** — this crate links into the wasm32
@@ -25,8 +25,8 @@
 //!
 //! # What is not built
 //!
-//! **No persistence.** Vanilla's `Stopwatches` is a `SavedData` written into
-//! the world's `data/stopwatches.dat`; this store is process-lifetime only,
+//! **No persistence.** The real stopwatch registry is a piece of saved data
+//! written into the world's `data/stopwatches.dat`; this store is process-lifetime only,
 //! the same disclosed gap [`crate::chunk::ChunkSource::claim_dragon_fight_start`]'s
 //! own doc already accepts for the End-fight flag, for the identical reason
 //! (this crate persists scalars through
@@ -43,10 +43,10 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// `net.minecraft.world.Stopwatch`, narrowed to `creation_time` alone.
+/// The real stopwatch record, narrowed to `creation_time` alone.
 ///
-/// The real record also carries `accumulated_elapsed` — nonzero only after a
-/// `Stopwatches.unpack` seeds it from a **persisted** value on world load, so
+/// The real record also carries `accumulated_elapsed` — nonzero only after
+/// the real load-from-disk rule seeds it from a **persisted** value on world load, so
 /// a fresh `creationTime` can keep counting forward from where a previous
 /// session's elapsed time left off. This module builds no persistence (see
 /// the module doc), so that field would carry exactly one value, `0`,
@@ -65,14 +65,14 @@ impl Stopwatch {
         Self { creation_time: now }
     }
 
-    /// `Stopwatch.elapsedMilliseconds`, minus the always-zero
+    /// The real elapsed-milliseconds rule, minus the always-zero
     /// `accumulated_elapsed` term this module does not carry — see this
     /// struct's own doc.
     fn elapsed_millis(&self, now: i64) -> i64 {
         now - self.creation_time
     }
 
-    /// `Stopwatch.elapsedSeconds` — `elapsedMilliseconds / 1000.0`.
+    /// The real elapsed-seconds rule — elapsed milliseconds divided by 1000.0.
     fn elapsed_seconds(&self, now: i64) -> f64 {
         self.elapsed_millis(now) as f64 / 1000.0
     }
@@ -86,9 +86,9 @@ impl Stopwatch {
 pub struct StopwatchHandle(Arc<Mutex<HashMap<String, Stopwatch>>>);
 
 impl StopwatchHandle {
-    /// `StopwatchCommand.createStopwatch` — `Stopwatches.add`. `true` on a
+    /// The real create-stopwatch rule. `true` on a
     /// fresh id, `false` when one already exists by that name (the caller's
-    /// own `ERROR_ALREADY_EXISTS`, not reported here).
+    /// own "already exists" error, not reported here).
     pub fn create(&self, id: &str) -> bool {
         let now = crate::chat_session::now_millis();
         let mut store = self.0.lock().expect("stopwatch registry lock poisoned");
@@ -100,9 +100,9 @@ impl StopwatchHandle {
         }
     }
 
-    /// `StopwatchCommand.queryStopwatch`'s own read, and `checkStopwatch`'s —
-    /// `None` for an id that does not exist, matching both callers' own
-    /// `stopwatches.get(id) == null` check.
+    /// The real query-stopwatch rule's own read, and the real check-stopwatch
+    /// rule's — `None` for an id that does not exist, matching both callers'
+    /// own not-found check.
     #[must_use]
     pub fn elapsed_seconds(&self, id: &str) -> Option<f64> {
         let now = crate::chat_session::now_millis();
@@ -110,10 +110,10 @@ impl StopwatchHandle {
         store.get(id).map(|stopwatch| stopwatch.elapsed_seconds(now))
     }
 
-    /// `StopwatchCommand.restartStopwatch` — `Stopwatches.update`, replacing
+    /// The real restart-stopwatch rule, replacing
     /// the whole record (see this module's own doc for why that zeroes
     /// `accumulated_elapsed` too, unlike a pause/resume). `false` for an
-    /// unknown id, the caller's own `ERROR_DOES_NOT_EXIST`.
+    /// unknown id, the caller's own "does not exist" error.
     pub fn restart(&self, id: &str) -> bool {
         let now = crate::chat_session::now_millis();
         let mut store = self.0.lock().expect("stopwatch registry lock poisoned");
@@ -126,7 +126,7 @@ impl StopwatchHandle {
         }
     }
 
-    /// `StopwatchCommand.removeStopwatch` — `Stopwatches.remove`. `false`
+    /// The real remove-stopwatch rule. `false`
     /// for an unknown id.
     pub fn remove(&self, id: &str) -> bool {
         let mut store = self.0.lock().expect("stopwatch registry lock poisoned");
