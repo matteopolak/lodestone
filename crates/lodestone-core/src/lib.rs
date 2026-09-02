@@ -1,5 +1,7 @@
 //! Core protocol codecs for Lodestone's Minecraft Java Edition client.
 
+pub mod dispatch;
+
 /// Protocol context threaded through every codec call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Ctx {
@@ -53,6 +55,17 @@ pub enum Error {
         /// Maximum permitted nesting depth.
         limit: usize,
     },
+    /// A container's `#[mc(protocols = "a..=b")]` range excluded the protocol
+    /// version an encode or decode was attempted against.
+    #[error("{name} is not valid for protocol {version} (declared for {range})")]
+    PacketOutOfProtocolRange {
+        /// Name of the Rust type the range was declared on.
+        name: &'static str,
+        /// Protocol version that was rejected.
+        version: i32,
+        /// The container's declared range.
+        range: ProtocolRange,
+    },
 }
 
 /// Connection state (protocol phase).
@@ -79,6 +92,49 @@ pub enum Bound {
     Server,
 }
 
+/// Inclusive range of Minecraft protocol versions a packet definition covers.
+///
+/// Surfaced by `#[derive(Packet)]`'s `#[mc(protocols = "a..=b")]` container
+/// attribute (`lodestone-macros`). A definition that does not declare a range
+/// gets [`ProtocolRange::ALL`], which is every packet in `crates/protocol/*`
+/// today — each still hand-copied per family rather than shared across a
+/// declared range. There is deliberately no `Default` impl: the derive always
+/// fills this const explicitly (`ALL` or a parsed range), so nothing can
+/// silently inherit an unreviewed range through a trait default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProtocolRange {
+    /// Lowest protocol version this definition serves, inclusive.
+    pub start: i32,
+    /// Highest protocol version this definition serves, inclusive.
+    pub end: i32,
+}
+
+impl ProtocolRange {
+    /// No declared restriction: every protocol version.
+    pub const ALL: Self = Self {
+        start: i32::MIN,
+        end: i32::MAX,
+    };
+
+    /// Builds a range from an inclusive `start..=end` pair.
+    #[must_use]
+    pub const fn new(start: i32, end: i32) -> Self {
+        Self { start, end }
+    }
+
+    /// Whether `version` falls within this inclusive range.
+    #[must_use]
+    pub const fn contains(&self, version: i32) -> bool {
+        version >= self.start && version <= self.end
+    }
+}
+
+impl core::fmt::Display for ProtocolRange {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "{}..={}", self.start, self.end)
+    }
+}
+
 /// Compile-time metadata for a protocol packet.
 pub trait Packet {
     /// Stable Mojang resource name, e.g. `"minecraft:intention"`.
@@ -89,6 +145,10 @@ pub trait Packet {
 
     /// Direction this packet travels.
     const BOUND: Bound;
+
+    /// Inclusive protocol-version range this definition covers. See
+    /// [`ProtocolRange`].
+    const PROTOCOLS: ProtocolRange;
 }
 
 /// Maximum nesting depth permitted when decoding untrusted NBT input.
@@ -1570,11 +1630,23 @@ mod tests {
             const NAME: &'static str = "minecraft:intention";
             const STATE: State = State::Handshaking;
             const BOUND: Bound = Bound::Server;
+            const PROTOCOLS: ProtocolRange = ProtocolRange::ALL;
         }
 
         assert_eq!(<SomeTestStruct as Packet>::NAME, "minecraft:intention");
         assert_eq!(<SomeTestStruct as Packet>::STATE, State::Handshaking);
         assert_eq!(<SomeTestStruct as Packet>::BOUND, Bound::Server);
+        assert_eq!(<SomeTestStruct as Packet>::PROTOCOLS, ProtocolRange::ALL);
+    }
+
+    #[test]
+    fn protocol_range_contains_is_inclusive_at_both_ends() {
+        let range = ProtocolRange::new(47, 754);
+        assert!(!range.contains(46));
+        assert!(range.contains(47));
+        assert!(range.contains(400));
+        assert!(range.contains(754));
+        assert!(!range.contains(755));
     }
 
     fn push_name(bytes: &mut Vec<u8>, name: &str) {
