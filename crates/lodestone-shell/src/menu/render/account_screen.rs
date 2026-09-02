@@ -37,7 +37,7 @@ const ACCOUNTS_HEADER_H: f32 = 33.0;
 /// where the key-hint line sits (see [`accounts_hint_dy`]). A 33 px band would
 /// put that line off the bottom of the canvas.
 pub(super) const ACCOUNTS_FOOTER_H: f32 = 60.0;
-/// `LinearLayout.horizontal().spacing(4)` — [`SERVER_LIST_FOOTER_SPACING`].
+/// Vanilla's own horizontal linear layout at spacing 4 — [`SERVER_LIST_FOOTER_SPACING`].
 pub(super) const ACCOUNTS_FOOTER_SPACING: i32 = 4;
 /// One footer button: [`SERVER_LIST_LOWER_BUTTON_W`]'s 74, so the four of them
 /// measure `4 * 74 + 3 * 4 = 308` — the same footer column width the

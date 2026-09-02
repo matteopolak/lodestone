@@ -51,7 +51,7 @@
 //!   categories the issue's own research names, without reimplementing
 //!   `SpectatorMenu`'s exact category-construction algorithm.
 //! - **Opened by any of the 1-9 hotbar keys**, not vanilla's per-slot
-//!   category binding (`SpectatorGui.onHotbarSelected(slot)` reopens
+//!   category binding (vanilla's own spectator-gui hotbar-selected handling reopens
 //!   whichever category slot `slot` was last bound to) — this client has
 //!   only one category tree to open, so every key opens the same root.
 //! - **No scrolling.** A root or expanded list past

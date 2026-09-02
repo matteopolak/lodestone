@@ -15,7 +15,8 @@
 //!
 //! Vanilla gates the whole screen on session kind
 //! (`multiplayer.socialInteractions.not_available = "Social Interactions are
-//! only available in Multiplayer worlds"`, `SocialInteractionsScreen.java`'s
+//! only available in Multiplayer worlds"`, vanilla's own social-interactions
+//! screen's
 //! own singleplayer branch) — this client's only "world" is the bundled
 //! singleplayer one today, so [`frame`]'s early-return "unavailable"
 //! branch (guarded by [`available_for`]) is the one a player reaches every

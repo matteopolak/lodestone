@@ -291,7 +291,7 @@ const ACCOUNTS_ENTRY_MARGIN: f32 = 4.0;
 /// `paddingLeft`/`paddingTop` because the default `xAlignment` is 0 — and with
 /// `padding(4, 4, 4, 0)` a full-width button's `mostOffset` is also 4, so
 /// alignment could not move it anyway. The icon row is the one centred cell
-/// (`alignHorizontallyCenter`, `PauseScreen.java`):
+/// (`alignHorizontallyCenter`, vanilla's own pause-screen rendering):
 /// `lerp(0.5, 4, 212 - 92 - 4) = 60`, and its own `LinearLayout` spaces four
 /// 20 px children 4 px apart from there — 60, 84, 108, 132.
 ///
@@ -375,7 +375,7 @@ pub fn pause_slot(button: PauseButton, published: bool) -> Slot {
 ///. Both buttons share `x`; only `y` differs.
 ///
 /// `height / 4 + 72` and `+ 96` are `Origin::TitleTop`'s own anchor
-/// (`height / 4 + 48`, `TitleScreen.java`) plus `24`/`48` — the death
+/// (`height / 4 + 48`, vanilla's own title-screen rendering) plus `24`/`48` — the death
 /// screen and the title screen both lay their stacks out from
 /// `this.height / 4`, so reusing that origin here rather than adding a
 /// second one is deliberate, not a coincidence to "clean up".

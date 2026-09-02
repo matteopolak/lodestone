@@ -184,7 +184,7 @@ const ICON_DY: f32 = 5.0;
 const HIT_SIZE: f32 = 26.0;
 
 /// `advancements/title_box`, the description panel behind the hover tooltip
-/// (`AdvancementWidget.java`, blitted at `:233`/`:235`).
+/// (vanilla's own advancement-widget rendering, blitted at `:233`/`:235`).
 const SPRITE_TITLE_BOX: &str = "advancements/title_box";
 /// `AdvancementWidgetType::boxSprite` — the hover tooltip's *title bar*, which
 /// splits into an obtained and an unobtained half at the progress fraction.
@@ -1051,8 +1051,8 @@ pub fn advancements_geometry(
     );
     let dim_floats = b.verts.len();
 
-    // Unselected tabs first — vanilla's own order (`AdvancementsScreen.java:
-    // 206-215`), so an unselected tab is partly covered by the window edge and
+    // Unselected tabs first — vanilla's own order (its own advancements-screen
+    // rendering), so an unselected tab is partly covered by the window edge and
     // the selected one is not.
     for (i, rect) in layout.tabs.iter().enumerate() {
         if i == layout_tab(layout) {

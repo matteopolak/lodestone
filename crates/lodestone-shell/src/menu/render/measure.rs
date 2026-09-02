@@ -218,7 +218,7 @@ pub fn row_rect(rows: &[MenuRow], i: usize, width: f32, height: f32) -> Option<(
 }
 
 /// An [`EditBox`] row's **box** height: vanilla's own 20
-/// (`EditBox.java`, `Button.DEFAULT_HEIGHT`), taken off the *top* of the
+/// (vanilla's own edit-box widget, `Button.DEFAULT_HEIGHT`), taken off the *top* of the
 /// 40 px [`LIST_ROW_H`] the row occupies so its `detail` hint still fits
 /// underneath.
 ///
@@ -263,7 +263,7 @@ const MANAGE_SERVER_CANCEL_DY: f32 = 90.0;
 pub(super) const MANAGE_SERVER_TITLE_Y: f32 = 20.0;
 
 /// One [`super::Screen::ServerEdit`] widget's [`Slot`] — vanilla's rects at
-/// `ManageServerScreen.java`, read out of the constants above rather
+/// its own manage-server screen rendering, read out of the constants above rather
 /// than resolved by hand, so a click, a hover and the draw cannot disagree.
 /// Row indices are [`super::nav::NAME_FIELD`] and its siblings.
 #[must_use]
@@ -328,7 +328,7 @@ pub fn field_rect(
 }
 
 /// The two [`super::Screen::ServerEdit`] field rects at a given canvas —
-/// vanilla's own `ManageServerScreen.java` rects, through
+/// vanilla's own manage-server screen rendering's rects, through
 /// [`manage_server_slot`].
 ///
 /// Exists so [`super::nav::EditForm::adding`] can seed its two `EditBox`es'
