@@ -1465,7 +1465,7 @@ impl ViewTracker {
 /// integers derived from the player's pose.
 ///
 /// Vanilla spirals outward for the same reason, and its priority *is* the ticket
-/// level (`ChunkTaskDispatcher.java:62-69`), so there is no separate heuristic
+/// level (vanilla's own chunk-task dispatcher), so there is no separate heuristic
 /// invented here. This is a slice of issue #289's U4/U5 rather than new design.
 ///
 /// # Determinism
@@ -1521,8 +1521,8 @@ fn join_view_rings(view_radius: i32) -> Vec<Vec<(i32, i32)>> {
 /// # Why not `0`, and why not more
 ///
 /// Vanilla's answer is essentially "the player's own chunk, then keep sending":
-/// `PlayerList.placeNewPlayer` adds the player to the level and
-/// `PlayerChunkSender` feeds the rest over subsequent ticks. The extra ring here
+/// vanilla's own "place new player" step adds the player to the level and
+/// its own player-chunk-sender feeds the rest over subsequent ticks. The extra ring here
 /// is the spawn-safety story this crate already paid for once — an earlier defect
 /// spawned the player above terrain, let them fall, and reached zero health with
 /// no death screen — so the ground the player stands on *and* the eight columns
@@ -1691,8 +1691,8 @@ pub enum ServerError {
     ClosedBeforeLogin,
     /// The client did not echo the server's keep-alive challenge before the
     /// next one was due (a fixed 15-second interval, matching vanilla's
-    /// `TIMEOUT_DISCONNECTION_MESSAGE` disconnect path —
-    /// `ServerCommonPacketListenerImpl.java:121-129`). Native-only in
+    /// own timeout-disconnect-message path —
+    /// its own generic per-connection packet listener). Native-only in
     /// practice: nothing constructs this on `wasm32`, since that build never
     /// starts the keep-alive timer in the first place (see
     /// `serve_play`'s doc comment).
@@ -1701,11 +1701,9 @@ pub enum ServerError {
     /// The connection completed a server-list status exchange and was
     /// terminated (issue #277). **Not a failure**: vanilla itself ends a status
     /// connection exactly this way, and calls it a disconnect —
-    /// `ServerStatusPacketListenerImpl` closes the channel with reason
+    /// vanilla's own status packet listener closes the channel with reason
     /// `multiplayer.status.request_handled` after answering a ping, and also
-    /// after a *second* status request on one connection
-    /// (`net/minecraft/server/network/ServerStatusPacketListenerImpl.java:14,
-    /// 34-47`).
+    /// after a *second* status request on one connection.
     ///
     /// It is an `Err` rather than an `Ok` only because [`ServeSummary`] is
     /// shaped around a session that logged in: a status connection has no
@@ -1715,7 +1713,7 @@ pub enum ServerError {
     #[error("server-list status request handled; connection closed (not an error)")]
     StatusRequestHandled,
     /// The client presented a username vanilla's own server would refuse
-    /// (`StringUtil.isValidPlayerName` — see [`is_valid_player_name`]), and was
+    /// (vanilla's own "is valid player name" check — see [`is_valid_player_name`]), and was
     /// sent a login-phase disconnect explaining so (issue #279).
     #[error("login rejected: invalid username")]
     InvalidUsername,
@@ -1731,7 +1729,8 @@ pub enum ServerError {
     /// The client's RSA-encrypted verify-token echo did not match the
     /// challenge the server generated (issue #273) — either tampering, or a
     /// client answering a stale `EncryptionRequest` after the server moved
-    /// on. Vanilla's equivalent is `ServerboundKeyPacket.isChallengeValid`
+    /// on. Vanilla's equivalent is its own serverbound key-packet's own
+    /// "is challenge valid" check
     /// returning false, treated as a hard protocol error there too.
     ///
     /// Not `cfg`-gated, unlike its online-mode siblings below: it names no
@@ -1745,8 +1744,8 @@ pub enum ServerError {
     /// `EncryptionRequest` outstanding on this connection — either this
     /// host is not in online mode (always true on `wasm32`, see
     /// [`VerifyTokenMismatch`](Self::VerifyTokenMismatch)'s doc comment), or
-    /// the client already completed one handshake. Vanilla's
-    /// `Validate.validState(this.state == KEY, ...)` is the same guard.
+    /// the client already completed one handshake. Vanilla's own validation
+    /// helper's own "state equals KEY" check is the same guard.
     #[error("encryption handshake failed: no encryption request was outstanding")]
     UnexpectedEncryptionResponse,
     /// The session server says this client never proved ownership of this
