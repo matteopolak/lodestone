@@ -4,9 +4,9 @@
 //! `std::fs`, so it lives in the device-free core and runs identically on native
 //! and `wasm32`. The decoder is [`lewton`], a pure-Rust Vorbis implementation.
 //!
-//! Vanilla decodes Vorbis with JOrbis to signed 16-bit PCM at the stream's
-//! native sample rate and channel count (`JOrbisAudioStream`), keeping mono
-//! mono and stereo stereo. We decode to the same native layout but store `f32`
+//! Vanilla decodes Vorbis with the JOrbis library, through its own audio-stream
+//! wrapper, to signed 16-bit PCM at the stream's native sample rate and
+//! channel count, keeping mono mono and stereo stereo. We decode to the same native layout but store `f32`
 //! in `[-1, 1]` for lossless mixing; the `i16 -> f32` scaling is `/ 32768.0`.
 
 use crate::error::AudioError;

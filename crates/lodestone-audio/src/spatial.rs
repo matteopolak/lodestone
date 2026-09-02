@@ -35,14 +35,15 @@
 
 use glam::Vec3;
 
-/// Whether and how a sound attenuates with distance, mirroring vanilla's
-/// `SoundInstance.Attenuation`.
+/// Whether and how a sound attenuates with distance, mirroring vanilla's own
+/// per-sound-instance attenuation setting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Attenuation {
     /// No distance attenuation; plays at full gain regardless of position
-    /// (vanilla `Attenuation.NONE` / `Channel.disableAttenuation`).
+    /// (vanilla's "none" attenuation, which also disables the channel's
+    /// attenuation outright).
     None,
-    /// Linear distance attenuation (vanilla `Attenuation.LINEAR`).
+    /// Linear distance attenuation (vanilla's "linear" attenuation).
     Linear,
 }
 
@@ -62,8 +63,8 @@ pub struct Listener {
 }
 
 impl Default for Listener {
-    /// At the origin, looking down `-Z` with `+Y` up (vanilla's initial
-    /// `ListenerTransform`-style convention).
+    /// At the origin, looking down `-Z` with `+Y` up (vanilla's own initial
+    /// listener-transform convention).
     fn default() -> Self {
         Self {
             position: Vec3::ZERO,
