@@ -7,10 +7,10 @@
 //!
 //! # What is being anchored
 //!
-//! `SnowAndFreezeFeature.place` — vanilla's
+//! Vanilla's own snow-and-freeze feature's place step — vanilla's
 //! whole `TOP_LAYER_MODIFICATION` step — reads exactly four per-state facts, and
 //! the world generator cannot answer any of them from `blocks.json`:
-//! `Block.isFaceFull(collisionShape, UP)` (column `U`),
+//! vanilla's own "is face full" check against the collision shape and up (column `U`),
 //! `!getFluidState().isEmpty()` (`L`), `getFluidState().is(Fluids.WATER) &&
 //! block instanceof LiquidBlock` (`W`), and
 //! `hasProperty(BlockStateProperties.SNOWY)` (`Y`). A fifth column, `D`
@@ -36,7 +36,7 @@
 //!   [`water_source_is_the_only_freezable_state`] and
 //!   [`snowy_property_belongs_to_exactly_three_blocks`] can *name* what they
 //!   found instead of asserting a bare count.
-//! * `N <block>` — the `dynamicShape()` census, which bounds column `U`'s known
+//! * `N <block>` — the dynamic-shape census, which bounds column `U`'s known
 //!   scope (shapes are read with no neighbours) to a checkable set rather than a
 //!   claim ([`powder_snow_is_the_only_dynamic_shape_block_worldgen_exposes`]).
 //!
@@ -99,7 +99,7 @@ struct Dump {
     block_count: usize,
     /// `B` rows: first state id of each block, ascending.
     blocks: Vec<(usize, String)>,
-    /// `N` rows: blocks declaring `dynamicShape()`.
+    /// `N` rows: blocks declaring a dynamic shape.
     dynamic_shape: BTreeSet<String>,
     /// `K` rows: the JVM's own popcount per column.
     counts: BTreeMap<char, usize>,
@@ -249,7 +249,7 @@ fn generate(dump: &Dump) -> String {
         let packed = pack(bits);
         let set = bits.iter().filter(|&&b| b).count();
         let expression = match kind {
-            'U' => "`Block.isFaceFull(state.getCollisionShape(empty, ZERO), Direction.UP)`",
+            'U' => "vanilla's own is-face-full check against the collision shape and up",
             'L' => "`!state.getFluidState().isEmpty()`",
             'W' => "`state.getFluidState().is(Fluids.WATER) && block instanceof LiquidBlock`",
             'Y' => "`state.hasProperty(BlockStateProperties.SNOWY)`",
@@ -349,10 +349,10 @@ fn committed_table_matches_dump() {
 // What the columns actually say — the claims `crate::snow_support`'s doc makes
 // ---------------------------------------------------------------------------
 
-/// `Biome.shouldFreeze`'s block condition is true for **exactly one** state,
+/// Vanilla's own biome "should freeze" check's block condition is true for **exactly one** state,
 /// `minecraft:water[level=0]`. This is the fact most likely to be got wrong by
-/// hand ("is it water?"): flowing water is `Fluids.FLOWING_WATER` and fails
-/// `is(Fluids.WATER)`, and a waterlogged block is not a `LiquidBlock`. A port
+/// hand ("is it water?"): flowing water is the flowing-water fluid and fails
+/// the source-fluid identity test, and a waterlogged block is not a liquid block. A port
 /// that freezes any water block ices over waterfalls vanilla leaves running.
 #[test]
 fn water_source_is_the_only_freezable_state() {
@@ -517,17 +517,18 @@ fn face_full_up_disagrees_with_a_unit_box_derivation() {
     );
 }
 
-/// The one `dynamicShape()` block world generation actually places at a surface
+/// The one dynamic-shape block world generation actually places at a surface
 /// top is `powder_snow` (snowy slopes, groves, frozen peaks), and its `U` bit is
 /// **false** — so a snow layer does not survive on powder snow.
 ///
-/// That is not a limitation of this dump: `SnowLayerBlock.canSurvive` reads
+/// That is not a limitation of this dump: vanilla's own snow-layer block's own
+/// "can survive" check reads
 /// `belowState.getCollisionShape(level, pos.below())`, the two-argument overload,
 /// which is `getCollisionShape(level, pos, CollisionContext.empty())`. The oracle
 /// calls the same overload, so a context-dependent shape resolves the same way
 /// here as it does in the feature. The `N` census exists to make that a bounded,
 /// named set rather than an assumption — and it corrected two guesses on first
-/// run: `chorus_plant` is **not** `dynamicShape()`, and `powder_snow` is.
+/// run: `chorus_plant` is **not** dynamic-shape, and `powder_snow` is.
 #[test]
 fn powder_snow_is_the_only_dynamic_shape_block_worldgen_exposes() {
     let dump = parse_dump(DUMP);
@@ -602,14 +603,14 @@ fn powder_snow_is_the_only_dynamic_shape_block_worldgen_exposes() {
     );
 }
 
-/// Four `canSurvive` inputs that a hand-written table gets wrong, each read
+/// Four "can survive" inputs that a hand-written table gets wrong, each read
 /// straight out of the dump. Every one of these was a wrong guess before the
 /// oracle ran, and each produces visibly wrong terrain on its own:
 ///
 /// * **`snow[layers=8]` has `U == false`.** All eight snow states do. That is
-///   why `SnowLayerBlock.canSurvive` carries an explicit
-///   `|| belowState.is(this) && belowState.getValue(LAYERS) == 8` clause
-///   (in `SnowLayerBlock.canSurvive`) — the geometry alone never satisfies it, because
+///   why vanilla's own snow-layer block's own "can survive" check carries an explicit
+///   `|| belowState.is(this) && belowState.getValue(LAYERS) == 8` clause — the
+///   geometry alone never satisfies it, because
 ///   a full snow layer is 14/16 tall.
 /// * **`ice` and `packed_ice` have `U == true`** and are in
 ///   `cannot_support_snow_layer`. So the tag check must run **before** the
