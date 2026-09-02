@@ -1,11 +1,11 @@
 //! The merchant/trading screen's trade-list layout, prices and click
-//! hit-test (that fix's UI half).
+//! hit-test.
 //!
 //! ## What it is
 //!
-//! `MerchantScreen`'s left-hand trade list: seven scrollable rows of
-//! cost/result icons that are **not menu slots** — vanilla calls them "fake
-//! items" (`graphics.fakeItem`), rendered at fixed pixel offsets rather than
+//! Vanilla's own merchant screen's left-hand trade list: seven scrollable
+//! rows of cost/result icons that are **not menu slots** — vanilla calls them
+//! "fake items", rendered at fixed pixel offsets rather than
 //! through [`super::layout::slot_layout`]. The three *real* slots (the two
 //! payment slots and the take-only result) are ordinary
 //! [`lodestone_game::menu::Menu`] slots and draw through the same path every
@@ -15,7 +15,7 @@
 //! ## How it works
 //!
 //! [`row_layout`] and [`button_rect`] are vanilla's own pixel constants from
-//! `MerchantScreen.java`, in **local widget pixels** (add the panel origin to
+//! its own merchant screen, in **local widget pixels** (add the panel origin to
 //! reach the canvas, exactly like [`super::layout::slot_layout`]'s
 //! `SlotRect`s). [`button_hit_test`] resolves a physical cursor position to a
 //! row index the same way [`super::layout::hit_test_with_book`] resolves one
@@ -29,7 +29,7 @@
 //! place in the shell that reaches into `lodestone-data`'s generated
 //! protocol-776 item table rather than reading an already-resolved
 //! [`lodestone_model::ItemStack`] off an event. [`adjusted_cost_a_count`]
-//! ports `MerchantOffer.getModifiedCostCount` (`MerchantOffer.java`),
+//! ports vanilla's own modified-cost-count routine,
 //! the demand/reputation pricing arithmetic that makes cost A's *displayed*
 //! price differ from its base — the discount strikethrough vanilla draws when
 //! they differ.
@@ -38,16 +38,15 @@
 //!
 //! The seven pixel constants below (`BUTTON_*`, `ITEM_*_X`, `OFFER_Y0`,
 //! `ARROW_*`, `STRIKETHROUGH_*`) are transcribed from
-//! `MerchantScreen.java` and its `init`/`extractContents`; re-derive
+//! vanilla's own merchant screen's init/extract-contents routines; re-derive
 //! from `write`/the real screen, never from a summary, per this repo's own
 //! transposition trap. Rows past [`OFFER_ROWS`] (offer index `>= 7`) are a
-//! **named gap**: vanilla's scroller (`SCROLLER_SPRITE` et al.,
-//! `MerchantScreen.java`) is not drawn or interactive here, so
+//! **named gap**: vanilla's own scroller sprite is not drawn or interactive here, so
 //! a merchant with more than seven trades only shows and can only select the
 //! first seven. The experience-bar trio
-//! (`EXPERIENCE_BAR_*`, `extractProgressBar`) is a second named gap: it needs
-//! `VillagerData.getMinXpPerLevel`/`getMaxXpPerLevel`, thresholds this tree
-//! does not carry yet.
+//! (`EXPERIENCE_BAR_*`, vanilla's own progress-bar extract routine) is a
+//! second named gap: it needs vanilla's own min/max XP-per-level lookup,
+//! thresholds this tree does not carry yet.
 //!
 //! ## Configuration
 //!
@@ -64,52 +63,52 @@ use lodestone_model::event::MerchantOffer;
 
 use super::layout::Rect;
 
-/// `MerchantScreen`'s `imageWidth`/`imageHeight` (`MerchantScreen.java`).
+/// Vanilla's own merchant-screen image width/height.
 pub const PANEL_W: f32 = 276.0;
 /// See [`PANEL_W`].
 pub const PANEL_H: f32 = 166.0;
 
-/// `MerchantScreen.NUMBER_OF_OFFER_BUTTONS` — the number of trade rows shown
+/// Vanilla's own trade-button-row count — the number of trade rows shown
 /// at once. See the module doc's "how to change it" for what showing more
 /// than this would need.
 pub const OFFER_ROWS: usize = 7;
 
-/// `TRADE_BUTTON_X`/`TRADE_BUTTON_WIDTH`/`TRADE_BUTTON_HEIGHT`
-/// (`MerchantScreen.java`) and `init`'s own `buttonY = yo + 16 + 2`
-/// (`MerchantScreen.java`), in local widget pixels (panel top-left is
+/// Vanilla's own trade-button x/width/height and its init routine's
+/// `button_y = yo + 16 + 2`, in local widget pixels (panel top-left is
 /// `(0, 0)`).
 const BUTTON_X: f32 = 5.0;
 const BUTTON_Y0: f32 = 18.0;
 const BUTTON_W: f32 = 88.0;
 const BUTTON_H: f32 = 20.0;
-/// Vertical step between rows — both the buttons' `buttonY += 20` and the
-/// items' `offerY += 20` (`MerchantScreen.java`) share this constant.
+/// Vertical step between rows — both the buttons' and the items' own
+/// `+= 20` step share this constant.
 const ROW_STEP: f32 = 20.0;
 
-/// `extractContents`'s `offerY = yo + 16 + 1` then `decorHeight = offerY + 2`
-/// (`MerchantScreen.java`) — the fake items' shared row-0 y. Distinct
+/// Vanilla's own extract-contents routine: `offer_y = yo + 16 + 1` then
+/// `decor_height = offer_y + 2` — the fake items' shared row-0 y. Distinct
 /// from [`BUTTON_Y0`] by one pixel, matching vanilla's own two separate
 /// tracks.
 const OFFER_Y0: f32 = 19.0;
-/// `SELL_ITEM_1_X` plus `extractContents`'s own `+ 5` (`MerchantScreen.java`).
+/// Vanilla's own first sell-item x, plus its extract-contents routine's own
+/// `+ 5`.
 const ITEM_A_X: f32 = 10.0;
-/// `SELL_ITEM_2_X` (`MerchantScreen.java`), relative to the panel (the `xo
-/// + 5 +` in `extractContents` folds to the same `35` offset from
+/// Vanilla's own second sell-item x, relative to the panel (its own `xo
+/// + 5 +` in extract-contents folds to the same `35` offset from
 /// [`ITEM_A_X`]'s own `xo + 5 +`).
 const ITEM_B_X: f32 = 40.0;
-/// `BUY_ITEM_X` (`MerchantScreen.java`), same fold as [`ITEM_B_X`].
+/// Vanilla's own buy-item x, same fold as [`ITEM_B_X`].
 const ITEM_RESULT_X: f32 = 73.0;
-/// `extractButtonArrows`'s `xo + 5 + 35 + 20` (`MerchantScreen.java`).
+/// Vanilla's own button-arrow extract routine's `xo + 5 + 35 + 20`.
 const ARROW_X: f32 = 60.0;
-/// `extractButtonArrows`'s `decorHeight + 3` — offset from a row's own
-/// [`OFFER_Y0`]-based y, not from the panel origin.
+/// Vanilla's own button-arrow extract routine's `decor_height + 3` — offset
+/// from a row's own [`OFFER_Y0`]-based y, not from the panel origin.
 const ARROW_Y_OFFSET: f32 = 3.0;
 /// The trade-arrow sprite's own size — see [`super::geometry`]'s one caller.
 pub const ARROW_W: f32 = 10.0;
 /// See [`ARROW_W`].
 pub const ARROW_H: f32 = 9.0;
-/// `extractAndDecorateCostA`'s `sellItem1X + 7`/`decorHeight + 12`
-/// (`MerchantScreen.java`), offset from [`ITEM_A_X`]/a row's y.
+/// Vanilla's own cost-A extract/decorate routine's `sell_item_1_x + 7`/
+/// `decor_height + 12`, offset from [`ITEM_A_X`]/a row's y.
 const STRIKETHROUGH_X_OFFSET: f32 = 7.0;
 const STRIKETHROUGH_Y_OFFSET: f32 = 12.0;
 /// The discount-strikethrough sprite's own size — see [`super::geometry`]'s
@@ -118,9 +117,8 @@ pub const STRIKETHROUGH_W: f32 = 9.0;
 /// See [`STRIKETHROUGH_W`].
 pub const STRIKETHROUGH_H: f32 = 2.0;
 
-/// `extractBackground`'s out-of-stock overlay,
-/// `this.leftPos + 83 + 99, this.topPos + 35, 28, 21`
-/// (`MerchantScreen.java`) — a single overlay for the **selected** row,
+/// Vanilla's own extract-background routine's out-of-stock overlay,
+/// `left_pos + 83 + 99, top_pos + 35, 28, 21` — a single overlay for the **selected** row,
 /// not one per row, so it is a fixed panel-relative position rather than a
 /// [`row_layout`] field.
 pub const OUT_OF_STOCK_X: f32 = 182.0;
@@ -215,13 +213,11 @@ pub fn button_hit_test(
     hit_test_local(offer_count, x / scale - px, y / scale - py)
 }
 
-/// `MerchantOffer.getModifiedCostCount` (`MerchantOffer.java`) — cost
-/// A's demand/reputation-adjusted price:
-///
-/// ```java
-/// int demandDiff = Math.max(0, Mth.floor(basePrice * this.demand * this.priceMultiplier));
-/// return Mth.clamp(basePrice + demandDiff + this.specialPriceDiff, 1, cost.itemStack().getMaxStackSize());
-/// ```
+/// Vanilla's own modified-cost-count routine — cost
+/// A's demand/reputation-adjusted price: the demand difference is
+/// `max(0, floor(base_price * demand * price_multiplier))`, and the result is
+/// `base_price + demand_diff + special_price_diff` clamped to
+/// `1..=max_stack_size`.
 ///
 /// The clamp's upper bound uses [`DEFAULT_MAX_STACK_SIZE`] rather than the
 /// resolved item's real max stack size: `cost_a`'s wire form has no component
@@ -275,7 +271,7 @@ mod tests {
 
     #[test]
     fn row_layout_matches_vanillas_transcribed_constants() {
-        // Row 0: MerchantScreen.java's own arithmetic with xo/yo = 0.
+        // Row 0: vanilla's own merchant-screen arithmetic with xo/yo = 0.
         let row0 = row_layout(0);
         assert_eq!(row0.cost_a, [10.0, 19.0]);
         assert_eq!(row0.cost_b, [40.0, 19.0]);
