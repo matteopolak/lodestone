@@ -1399,7 +1399,7 @@ pub fn apply_riptide(
 /// imply, and the difference at Riptide III is a full block per tick.
 ///
 /// `level == 0` (no Riptide) is `0.0`, which is exactly the `> 0.0F` test
-/// `TridentItem.releaseUsing` gates the whole launch on.
+/// vanilla's own release-using logic gates the whole launch on.
 #[must_use]
 pub fn riptide_spin_attack_strength(level: u32) -> f32 {
     if level == 0 {
@@ -1408,14 +1408,14 @@ pub fn riptide_spin_attack_strength(level: u32) -> f32 {
     1.5f32 + 0.75f32 * (level as f32 - 1.0)
 }
 
-/// `LivingEntity.canGlide()` (`LivingEntity.java:3205-3217`) with `Player`'s
-/// override (`Player.java:1428-1430`), issue #206.
+/// Vanilla's own "can glide" check, with the player's own override, issue
+/// #206.
 ///
 /// `!flying && !onGround && !isPassenger && !hasEffect(LEVITATION)` plus "some
 /// equipment slot holds a glider". The last conjunct is **not** physics state —
-/// vanilla walks `EquipmentSlot.VALUES` looking for a `DataComponents.GLIDER`
-/// component — so the caller resolves it and passes the answer in, the same
-/// division of labour [`apply_riptide`] uses for the enchantment gate.
+/// vanilla walks every equipment slot looking for a glider component — so
+/// the caller resolves it and passes the answer in, the same division of
+/// labour [`apply_riptide`] uses for the enchantment gate.
 ///
 /// This engine has no riding state on [`PlayerState`], so the `!isPassenger()`
 /// conjunct is the caller's too (the ECS driver holds it as a component); it is
@@ -1428,7 +1428,7 @@ pub fn can_glide(state: &PlayerState, glider_equipped: bool) -> bool {
         && glider_equipped
 }
 
-/// `Player.tryToStartFallFlying()` (`Player.java:1463-1474`), issue #206 — the
+/// Vanilla's own start-fall-flying attempt, issue #206 — the
 /// **client-predicted** start of an elytra glide.
 ///
 /// ```text
@@ -1438,17 +1438,17 @@ pub fn can_glide(state: &PlayerState, glider_equipped: bool) -> bool {
 /// }
 /// ```
 ///
-/// Returns whether the glide started, which is exactly the bit
-/// `LocalPlayer.aiStep` turns into one `START_FALL_FLYING` player command
-/// (`LocalPlayer.java:850-852`) — so a driver should send that command if and
-/// only if this returned `true`.
+/// Returns whether the glide started, which is exactly the bit vanilla's
+/// own per-tick client update turns into one start-fall-flying player
+/// command — so a driver should send that command if and only if this
+/// returned `true`.
 ///
 /// **The start is client-authoritative and the stop is not.** Vanilla's client
-/// sets the shared flag itself here and only then tells the server; the *end* of
-/// a glide is decided server-side by `LivingEntity.updateFallFlying`'s
-/// `!canGlide()` branch (`LivingEntity.java:3183-3189`) and synced back as
-/// entity data. A client that models the start but not the stop glides forever
-/// once it lands, so a driver must also run [`update_fall_flying`] each tick.
+/// sets the shared flag itself here and only then tells the server; the
+/// *end* of a glide is decided server-side by vanilla's own fall-flying
+/// update's "can no longer glide" branch and synced back as entity data. A
+/// client that models the start but not the stop glides forever once it
+/// lands, so a driver must also run [`update_fall_flying`] each tick.
 pub fn try_start_fall_flying(
     state: &mut PlayerState,
     glider_equipped: bool,
@@ -1461,8 +1461,8 @@ pub fn try_start_fall_flying(
     true
 }
 
-/// The half of `LivingEntity.updateFallFlying()` that ends a glide
-/// (`LivingEntity.java:3183-3189`), issue #206.
+/// The half of vanilla's own fall-flying update that ends a glide, issue
+/// #206.
 ///
 /// ```text
 /// if (!this.level().isClientSide()) {
@@ -1477,8 +1477,8 @@ pub fn try_start_fall_flying(
 /// keeps `fall_flying` set after touching down routes every subsequent tick
 /// through [`tick_elytra`] and can never walk again.
 ///
-/// The elytra-durability and `ELYTRA_GLIDE` game-event halves of vanilla's
-/// method are deliberately not modelled — both are `!isClientSide` effects on
+/// The elytra-durability and glide game-event halves of vanilla's own
+/// update are deliberately not modelled — both are server-only effects on
 /// server-owned item state.
 pub fn update_fall_flying(state: &mut PlayerState, glider_equipped: bool) {
     if state.fall_flying && !can_glide(state, glider_equipped) {
@@ -1487,9 +1487,10 @@ pub fn update_fall_flying(state: &mut PlayerState, glider_equipped: bool) {
 }
 
 fn jump_from_ground(state: &mut PlayerState, view: &dyn CollisionView, profile: &PhysicsProfile) {
-    // getJumpPower(): JUMP_STRENGTH * multiplier(1) * getBlockJumpFactor() + getJumpBoostPower().
-    // The block-jump-factor product and the boost are separate terms in one
-    // float expression; honey reduces the former (0.5), Jump Boost adds the latter.
+    // Vanilla's own jump-power expression: jump strength * block-jump
+    // factor + jump-boost power. The block-jump-factor product and the
+    // boost are separate terms in one float expression; honey reduces the
+    // former (0.5), Jump Boost adds the latter.
     let block_jump_factor = block_jump_factor(state.position, view);
     let jump_power =
         profile.jump_power * block_jump_factor + jump_boost_power(state.effects.jump_boost);
