@@ -795,7 +795,7 @@ impl TemplateTable {
 /// climbable column at `(x, z) = (0, 0)`, every `y`, with **no collision
 /// anywhere** — no floor, because a climbing body never stands on one, and
 /// climbable blocks themselves are `blocks_motion == false`
-/// (`crate::graph::stand_surface`'s own doc comment on `forceSolidOff`).
+/// (`crate::graph::stand_surface`'s own doc comment on vanilla's own solidity override).
 ///
 /// Deliberately not [`StencilWorld`]: that type's entire shape is a floor
 /// stepping once in `x`, which has no vertical analogue to parameterise —

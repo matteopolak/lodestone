@@ -126,7 +126,7 @@ fn the_fixture_decodes_to_a_brand_payload_on_the_brand_channel() {
         panic!("expected CustomPayload, got {event:?}");
     };
     assert_eq!(channel.to_string(), "minecraft:brand");
-    // The payload is the *undecoded* `readUtf` body: length byte then bytes.
+    // The payload is the *undecoded* vanilla string-read body: length byte then bytes.
     assert_eq!(data, b"\x07vanilla");
 }
 

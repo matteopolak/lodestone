@@ -777,7 +777,7 @@ pub fn head_room(view: &dyn NavView, x: i32, y: i32, z: i32, surface: f64) -> bo
             return false;
         };
         // A climbable cell's nonzero collision shape (`graph::stand_surface`'s
-        // own doc comment on `forceSolidOff`) does not meaningfully occupy
+        // own doc comment on vanilla's own solidity override) does not meaningfully occupy
         // headroom either — it is a thin sliver against a wall, and a real
         // body's head passes it every time it walks past a ladder or under a
         // vine. Without this, `passable == false` (from the nonzero shape
@@ -1216,7 +1216,7 @@ pub fn fall_step(view: &dyn NavView, from: NavNode, from_surface: f64, dir: Dir4
 /// Like [`Self::Walk`] this has no ascend/descend/jump component: the
 /// destination search below mirrors [`walk_step`]'s exactly, gated by
 /// [`STEP_HEIGHT`]. A diagonal step-up exists in vanilla's own mob evaluator
-/// (via its `jumpSize`) but is deliberately out of scope here.
+/// (via its own jump-size field) but is deliberately out of scope here.
 #[must_use]
 pub fn diagonal_step(
     view: &dyn NavView,
@@ -1267,7 +1267,7 @@ pub fn diagonal_step(
 
 /// `Climb(dir)` out of `from`, or `None` when illegal.
 ///
-/// # Why this needs no support/facing check, unlike vanilla's own `canSurvive`
+/// # Why this needs no support/facing check, unlike vanilla's own survival check
 ///
 /// Vanilla's own ladder support check
 /// requires a sturdy neighbour opposite the ladder's facing, and vanilla's own vine support check
@@ -1275,8 +1275,9 @@ pub fn diagonal_step(
 /// (`crate::facts::BlockFacts`) carries no facing or per-face attachment data —
 /// only tag membership (`climbable: bool`) — so re-deriving either check is not
 /// possible from what is available, and it is also unnecessary: a placed block
-/// that failed its own `canSurvive` would already have reverted to air
-/// (`LadderBlock::updateShape`, `VineBlock::updateShape`) before this ever runs.
+/// that failed its own survival check
+/// would already have reverted to air
+/// (vanilla's own shape-update handling for ladders and vines) before this ever runs.
 /// Trusting a persisted state's own tag membership is the same trust this
 /// crate already places in every other placed block (a gravity-affected block
 /// is never re-derived as "about to fall" either) — legality here is entirely
@@ -1973,7 +1974,8 @@ mod tests {
     /// A ladder that does **not** reach the floor: rungs at `y = 2..=4` in
     /// column `(0, *, 0)`, with one cell of open air (`y = 1`, standable off
     /// the real stone floor at `y = 0`) between the bottom rung and the
-    /// ground. A real, legal placement — `canSurvive` only needs a sturdy
+    /// ground. A real, legal placement — vanilla's own survival check only
+    /// needs a sturdy
     /// block behind a rung, never a floor under it — and the fixture that
     /// makes "climb down onto solid ground below the lowest rung" a genuine
     /// case rather than a degenerate one. A platform at `(1, 4, 0)` (support
