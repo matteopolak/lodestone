@@ -38,8 +38,8 @@
 //! ## Game rules
 //!
 //! [`GameRuleValues`] stores the raw wire strings in an ordered map, with typed
-//! accessors over the top. It is **not** the typed registry of issue #327: that
-//! is a *server-side* 59-rule table specified in `docs/plans/world-state.md:254`
+//! accessors over the top. It is **not** the typed server-side registry: that
+//! is a *server-side* 59-rule table specified in `docs/plans/world-state.md`
 //! and is not built. Storing raw strings and parsing at the accessor is the
 //! honest client-side shape until that registry exists, and it means an unknown
 //! or unparseable rule degrades to "not present" rather than to a wrong default.
@@ -48,9 +48,8 @@
 //! in the plan (`docs/plans/world-state.md:127-154`):
 //!
 //! * **`GAME_RULE_VALUES` is request/response, not broadcast.** Its only vanilla
-//!   send site is `sendGameRuleValues()`
-//!   (`ServerGamePacketListenerImpl.java:1925`), reachable solely via
-//!   `ServerboundClientCommandPacket.REQUEST_GAMERULE_VALUES`. Nothing pushes
+//!   send site is its own send-game-rule-values step, reachable solely via
+//!   the client's own request-game-rule-values command. Nothing pushes
 //!   rule *changes* to clients. So this fold's contents are whatever was last
 //!   asked for, and a client that never asks has an empty table — which is why
 //!   every accessor returns `Option` and no caller may treat absence as a
@@ -58,13 +57,13 @@
 //! * **26.2 renamed most rules to snake_case**, and the renames are silent: the
 //!   1.21 name simply is not present. `doDaylightCycle` is `advance_time`,
 //!   `doImmediateRespawn` is `immediate_respawn`, `randomTickSpeed` is
-//!   `random_tick_speed`. The [`rules`] module holds the ones the plan cites with
-//!   a `GameRules.java` line, so a caller never spells one by hand.
+//!   `random_tick_speed`. The [`rules`] module holds the ones the plan cites,
+//!   so a caller never spells one by hand.
 //!
 //! # How to change it
 //!
 //! Adding a typed accessor: put the key constant in [`rules`] with its
-//! `GameRules.java` cite and its vanilla default *in the doc comment only* — do
+//! vanilla default *in the doc comment only* — do
 //! not bake the default into the accessor. Returning a default from an absent key
 //! would erase the request/response distinction above and make "the server never
 //! told us" look like "the server told us `false`".
@@ -72,8 +71,7 @@
 //! Parsing mirrors vanilla: booleans through the equivalent of
 //! `Boolean.parseBoolean` (case-insensitive `"true"`, everything else `false`),
 //! integers through `Integer.parseInt` with a parse failure treated as absent
-//! (vanilla logs and keeps its default;
-//! `ServerGamePacketListenerImpl.java:799-816`).
+//! (vanilla logs and keeps its default).
 //!
 //! # Dependencies
 //!
@@ -84,43 +82,36 @@ use lodestone_model::ids::{DimensionId, Identifier};
 use lodestone_model::math::BlockPos;
 use std::collections::BTreeMap;
 
-/// The 26.2 game-rule keys this crate names, each with its `GameRules.java`
-/// cite.
+/// The 26.2 game-rule keys this crate names.
 ///
-/// 26.2 moved game rules to `world/level/gamerules/GameRules.java` as registry
+/// 26.2 moved game rules to a registry
 /// entries under `BuiltInRegistries.GAME_RULE`, renamed to snake_case, 59 of
 /// them, only `BOOL` and `INT` types. The renames are the trap: a 1.21 name is
 /// not deprecated, it is simply absent, so a lookup with the old spelling returns
 /// `None` forever and looks like a server that did not report the rule.
 pub mod rules {
     /// `advance_time` — was `doDaylightCycle`. Default `true` in release builds.
-    /// `GameRules.java:24`.
     pub const ADVANCE_TIME: &str = "advance_time";
     /// `advance_weather` — was `doWeatherCycle`. Default `true` in release
-    /// builds. `GameRules.java:25`.
+    /// builds.
     pub const ADVANCE_WEATHER: &str = "advance_weather";
     /// `immediate_respawn` — was `doImmediateRespawn`. Default `false`.
-    /// `GameRules.java:45`.
     pub const IMMEDIATE_RESPAWN: &str = "immediate_respawn";
     /// `keep_inventory` — was `keepInventory`. Default `false`.
-    /// `GameRules.java:46`.
     pub const KEEP_INVENTORY: &str = "keep_inventory";
-    /// `mob_griefing` — was `mobGriefing`. Default `true`. `GameRules.java:61`.
+    /// `mob_griefing` — was `mobGriefing`. Default `true`.
     pub const MOB_GRIEFING: &str = "mob_griefing";
     /// `natural_health_regeneration` — was `naturalRegeneration`. Default
-    /// `true`. `GameRules.java:62`.
+    /// `true`.
     pub const NATURAL_HEALTH_REGENERATION: &str = "natural_health_regeneration";
     /// `players_sleeping_percentage` — was `playersSleepingPercentage`. Default
-    /// `100`. `GameRules.java:70`.
+    /// `100`.
     pub const PLAYERS_SLEEPING_PERCENTAGE: &str = "players_sleeping_percentage";
     /// `random_tick_speed` — was `randomTickSpeed`. Default `3`.
-    /// `GameRules.java:74`.
     pub const RANDOM_TICK_SPEED: &str = "random_tick_speed";
     /// `respawn_radius` — was `spawnRadius`. Default `10`.
-    /// `GameRules.java:76`.
     pub const RESPAWN_RADIUS: &str = "respawn_radius";
     /// `spawn_mobs` — was `doMobSpawning`. Default `true`.
-    /// `GameRules.java:81`.
     pub const SPAWN_MOBS: &str = "spawn_mobs";
 }
 
