@@ -1222,7 +1222,7 @@ pub(crate) fn maybe_back_off_from_edge(
     delta
 }
 
-/// `Player.isAboveGround(float)` (`Player.java:931-933`).
+/// Vanilla's own "above ground" check.
 ///
 /// ```text
 /// this.onGround() || this.fallDistance < maxDownStep
@@ -1233,11 +1233,11 @@ pub(crate) fn maybe_back_off_from_edge(
 /// already fallen, the less additional drop is required to disqualify the
 /// back-off. So `fall_distance` errs in a known direction — supplying `0.0` for a
 /// genuinely-falling entity probes the *full* step height, which is a strictly
-/// weaker `canFallAtLeast`, so the gate opens *more* often than vanilla's. That
+/// weaker fall check, so the gate opens *more* often than vanilla's. That
 /// only reaches the airborne branch: while `on_ground` is set the value is
-/// unread, and the server resets `fallDistance` to `0.0` on every grounded tick
-/// (`Entity.checkFallDamage`, `Entity.java:1569-1581`), so the grounded case — the
-/// entire bridging / sneak-placing use case — is exact with the default.
+/// unread, and the server resets the fall-distance accumulator to `0.0` on
+/// every grounded tick, so the grounded case — the entire bridging /
+/// sneak-placing use case — is exact with the default.
 #[must_use]
 fn is_above_ground(
     bounding_box: Aabb,
@@ -1257,9 +1257,8 @@ fn is_above_ground(
             )
 }
 
-/// `Player.canFallAtLeast(double, double, double)` (`Player.java:935-950`) —
-/// whether a box offset by `(dx, dz)` and hanging `min_height` below the feet
-/// would meet nothing.
+/// Vanilla's own "can fall at least" check — whether a box offset by
+/// `(dx, dz)` and hanging `min_height` below the feet would meet nothing.
 ///
 /// The probe box is **not** uniformly shrunk, and getting this wrong is the
 /// difference between stopping at a ledge and stopping a whole box-width early:
@@ -1282,12 +1281,12 @@ fn is_above_ground(
 /// player therefore walks until their box is flush with the ledge and their
 /// footprint has left the supporting block, not until their centre crosses it.
 ///
-/// **Scope.** Vanilla calls `level.noCollision(this, box)`, which is
-/// `noBlockCollision && noEntityCollision && noBorderCollision`
-/// (`CollisionGetter.java:51-53`). [`no_collision`] is the **block half only** —
-/// this crate has no entity list and no world border — so a box that vanilla would
-/// consider blocked by another entity or by the border reads as free here. Same
-/// documented limitation as the fluid hop-out check.
+/// **Scope.** Vanilla's own no-collision check combines a block check, an
+/// entity check and a world-border check. [`no_collision`] is the **block
+/// half only** — this crate has no entity list and no world border — so a
+/// box that vanilla would consider blocked by another entity or by the
+/// border reads as free here. Same documented limitation as the fluid
+/// hop-out check.
 #[must_use]
 fn can_fall_at_least(
     bounding_box: Aabb,
@@ -1311,18 +1310,17 @@ fn can_fall_at_least(
     )
 }
 
-/// `LivingEntity.jumpFromGround()` including the sprint boost.
-/// `TridentItem.releaseUsing`'s riptide impulse (`TridentItem.java:88-104`),
-/// issue #208.
+/// Vanilla's own ground-jump impulse (including the sprint boost), and
+/// vanilla's own trident-release riptide impulse, issue #208.
 ///
 /// # What this function is, and is not, responsible for
 ///
 /// Vanilla reaches this arithmetic only after three gates this function does
-/// **not** evaluate, because none of them is physics state:
-/// `EnchantmentHelper.getTridentSpinAttackStrength(itemStack, player) > 0.0F`
-/// (equipment/enchantment data), `timeHeld >= THROW_THRESHOLD_TIME` (`10` ticks
-/// — item-use duration, owned by the interaction layer), and
-/// `player.isInWaterOrRain()` (fluid presence **or** weather — this crate's
+/// **not** evaluate, because none of them is physics state: the trident's
+/// resolved spin-attack strength being above zero (equipment/enchantment
+/// data), the item-use hold time reaching its throw threshold (`10` ticks —
+/// item-use duration, owned by the interaction layer), and being in water or
+/// rain (fluid presence **or** weather — this crate's
 /// [`CollisionView::is_water`] answers the first half but has no weather
 /// concept for the second). A driver must evaluate all three itself and call
 /// this only once, on the release edge, with `strength` already resolved to
@@ -1330,21 +1328,20 @@ fn can_fall_at_least(
 ///
 /// What *is* physics, and what this function does:
 ///
-/// 1. **The impulse.** `xd/yd/zd` from yaw/pitch via the sine table
-///    (`Mth.sin`/`Mth.cos`, bit-exact — see [`mth`]), normalised and scaled by
-///    `strength`, added to velocity via `Entity.push` (a plain add,
-///    `Entity.java:1919-1924`).
-/// 2. **The spin-attack state.** `startAutoSpinAttack(20, 8.0F, itemStack)`
-///    reduces, for this crate, to setting
+/// 1. **The impulse.** `xd/yd/zd` from yaw/pitch via the quantized sine
+///    table (bit-exact — see [`mth`]), normalised and scaled by `strength`,
+///    added to velocity via vanilla's own plain velocity-add.
+/// 2. **The spin-attack state.** Vanilla's own 20-tick, power-`8.0F` spin
+///    attack arming reduces, for this crate, to setting
 ///    [`PlayerState::auto_spin_attack_ticks`] to `20` — the damage/held-item
 ///    half is not modelled (see that field's doc).
-/// 3. **The on-ground pop-up.** `if (player.onGround()) player.move(SELF, (0,
-///    1.1999999, 0))` — a real collision-resolving move (so a riptide launched
-///    under a low ceiling stops at the ceiling), reproduced via
+/// 3. **The on-ground pop-up.** If on the ground, vanilla issues a real
+///    collision-resolving move straight up by `1.1999999` (so a riptide
+///    launched under a low ceiling stops at the ceiling), reproduced via
 ///    [`move_entity`] with a synthetic, zeroed `stuck_speed_multiplier`: this
 ///    is a one-off supplementary move outside the tick's own, so nothing
-///    tick-pending should be consumed by it, and vanilla's raw `move()` call
-///    here is likewise independent of `travel()`'s own stuck-multiplier
+///    tick-pending should be consumed by it, and vanilla's own raw move call
+///    here is likewise independent of its travel step's own stuck-multiplier
 ///    handling.
 pub fn apply_riptide(
     state: &mut PlayerState,
@@ -1392,9 +1389,9 @@ pub fn apply_riptide(
 /// `data/minecraft/enchantment/riptide.json` declares
 /// `minecraft:trident_spin_attack_strength` as `{"type": "minecraft:add",
 /// "value": {"type": "minecraft:linear", "base": 1.5,
-/// "per_level_above_first": 0.75}}`, and `EnchantmentHelper.
-/// getTridentSpinAttackStrength` sums that effect over the stack's
-/// enchantments — so a single Riptide N contributes exactly
+/// "per_level_above_first": 0.75}}`, and vanilla's own enchantment-effect
+/// resolution sums that effect over the stack's enchantments — so a single
+/// Riptide N contributes exactly
 /// `1.5 + 0.75 * (N - 1)`: **1.5 / 2.25 / 3.0** for I / II / III.
 ///
 /// Read from the data file rather than from a recollected constant: the
