@@ -1020,7 +1020,7 @@ mod tests {
     use lodestone_physics::Vec3d;
     use lodestone_render::camera::PLAYER_EYE_HEIGHT;
 
-    // --- EyeHeightSmoother: Camera.tick()'s eyeHeight/eyeHeightOld pair. ---
+    // --- EyeHeightSmoother: vanilla's own per-tick eye-height current/previous pair. ---
 
     #[test]
     fn a_fresh_smoother_reports_the_seeded_height_before_any_tick() {
@@ -1965,7 +1965,7 @@ mod tests {
         let zoomed = apply_spyglass_fov(cam, true);
         assert!(
             (zoomed.fov_y_degrees - cam.fov_y_degrees * 0.1).abs() < 1e-6,
-            "AbstractClientPlayer.getFieldOfViewModifier returns 0.1F outright while scoping: \
+            "vanilla's own field-of-view modifier returns 0.1F outright while scoping: \
              expected {}, got {}",
             cam.fov_y_degrees * 0.1,
             zoomed.fov_y_degrees

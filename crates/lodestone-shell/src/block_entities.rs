@@ -29,8 +29,8 @@
 //! The first version of that diagram listed only the chunk packet and
 //! `block_entity_data`, which was accurate and read as exhaustive. It was not:
 //! in vanilla, **writing a block state is what creates a block entity** — no
-//! packet involved (26.2 `LevelChunk.java`,
-//! `((EntityBlock)newBlock).newBlockEntity(pos, state)`) — and
+//! packet involved (26.2's own chunk-level block-state write constructs the
+//! new block's block entity inline) — and
 //! `block_entity_data` is only ever data for an entity that already exists. Our
 //! `block_update` / `section_blocks_update` arms wrote the state and nothing
 //! else, so a freshly placed chest had a state, no record, and this module's
@@ -76,15 +76,15 @@
 //! # The lid animation lives here because nothing else can hold it
 //!
 //! Chest openness is not on the wire. The server sends `BLOCK_EVENT` with
-//! `b0 == 1` and `b1 == viewer count` (`ChestBlockEntity.triggerEvent`, 26.2:
-//! `if (b0 == 1) { this.chestLidController.shouldBeOpen(b1 > 0); }`), and the
+//! `b0 == 1` and `b1 == viewer count` (vanilla's own chest block-event handling
+//! sets the chest-lid controller's should-be-open flag from `b1 > 0`), and the
 //! *client* integrates that into an angle over the following ticks. So the
 //! authoritative value is a client-side accumulator, and [`ChestLids`] is a
-//! direct port of `ChestLidController`:
+//! direct port of vanilla's own chest-lid controller:
 //!
-//! * `tickLid()` ramps `openness` by **±0.1 per tick**, clamped to `0..=1`.
-//! * `getOpenness(a)` is `lerp(a, oOpenness, openness)` — the *previous* tick's
-//!   value interpolated toward the current one by the partial tick.
+//! * Its own tick ramps `openness` by **±0.1 per tick**, clamped to `0..=1`.
+//! * Its own openness lookup is a lerp between the *previous* tick's
+//!   value and the current one by the partial tick.
 //!
 //! Both halves matter. Dropping the ramp gives a lid that teleports open;
 //! dropping the partial-tick lerp gives one that visibly steps at 20 Hz. The
@@ -170,13 +170,13 @@ mod frame_snapshot_tests {
     }
 }
 
-/// Vanilla's per-renderer cutoff: `BlockEntityRenderer.getViewDistance()`
-/// returns `64`, and `shouldRender` compares it against the distance from the
-/// camera to `Vec3.atCenterOf(blockPos)` — the block **centre**, not its corner.
+/// Vanilla's per-renderer cutoff: its own view-distance accessor
+/// returns `64`, and its own should-render check compares it against the distance from the
+/// camera to the block's own center position — the block **centre**, not its corner.
 ///
 /// Ported as the real thing rather than "the render distance" because it is
 /// genuinely a fixed 64 blocks in vanilla regardless of the video setting, and
-/// because the `atCenterOf` offset is the difference between a chest popping in
+/// because the center-of-block offset is the difference between a chest popping in
 /// at 64.0 and at 63.1.
 pub const VIEW_DISTANCE: f32 = 64.0;
 
@@ -558,7 +558,7 @@ impl ChestLids {
         true
     }
 
-    /// Advances every lid one client tick — `ChestLidController.tickLid()`.
+    /// Advances every lid one client tick — vanilla's own chest-lid tick.
     ///
     /// Also garbage-collects lids that are shut and staying shut.
     pub fn tick(&mut self) {
@@ -574,8 +574,8 @@ impl ChestLids {
         });
     }
 
-    /// The interpolated openness at `pos` — `ChestLidController.getOpenness(a)`,
-    /// i.e. `lerp(partial_tick, oOpenness, openness)`.
+    /// The interpolated openness at `pos` — vanilla's own chest-lid openness
+    /// lookup, a lerp between the previous and current openness by the partial tick.
     ///
     /// `0.0` for a position with no entry, which is exactly a shut chest.
     #[must_use]
@@ -599,16 +599,16 @@ impl ChestLids {
     }
 }
 
-/// `BellBlockEntity.DURATION` — a shake runs 50 ticks and then stops
-/// (`BellBlockEntity.tick`: `if (entity.ticks >= 50) { shaking = false; ticks = 0; }`).
+/// Vanilla's own bell shake duration — a shake runs 50 ticks and then stops
+/// (its own per-tick check resets the shake state once the tick counter reaches 50).
 const BELL_SHAKE_DURATION: f32 = 50.0;
 
-/// One bell's shake — `BellBlockEntity`'s `clickDirection` plus its `ticks`
+/// One bell's shake — vanilla's own bell block entity's click direction plus its tick
 /// counter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Shake {
     direction: BellShakeDirection,
-    /// `BellBlockEntity.ticks`, counted up from `0`.
+    /// Vanilla's own bell tick counter, counted up from `0`.
     ticks: f32,
     /// The value at the start of the current tick, for the partial-tick lerp.
     previous: f32,
@@ -636,8 +636,8 @@ impl BellShakes {
     /// Applies one `BLOCK_EVENT` to the bell at `pos`, returning whether it was a
     /// bell event.
     ///
-    /// `BellBlockEntity.triggerEvent` (`:43-53`): only `b0 == 1` is a bell ring,
-    /// and `b1` is `Direction.from3DDataValue(...)` — the *face the bell was hit
+    /// Vanilla's own bell block-event handling: only `b0 == 1` is a bell ring,
+    /// and `b1` is the direction decoded from its 3D data value — the *face the bell was hit
     /// on*, not a viewer count. A ring always restarts the animation from tick 0
     /// even mid-shake, which is why this overwrites rather than merging.
     ///
@@ -651,8 +651,8 @@ impl BellShakes {
             return false;
         }
         let Some(direction) = shake_direction_from_3d(b1) else {
-            // `Direction.from3DDataValue` gives UP/DOWN for `0`/`1`, which
-            // `BellModel.setupAnim` has no rotation for — vanilla stores it and
+            // Vanilla's own direction-from-3D-data-value decode gives UP/DOWN for `0`/`1`, which
+            // vanilla's own bell model animation has no rotation for — vanilla stores it and
             // then multiplies by nothing. Dropping it here is the same picture and
             // keeps the map free of entries that can never move.
             return false;
@@ -680,7 +680,7 @@ impl BellShakes {
     /// The shake at `pos` for this partial tick, or `None` for a bell at rest.
     ///
     /// The tick counter is interpolated because that is what
-    /// `BellRenderer.extractRenderState` passes into `setupAnim` — `ticks +
+    /// vanilla's own bell render-state extraction passes into its animation setup — `ticks +
     /// partialTick`, not the whole number. Interpolating matters here for the same
     /// reason it does for a chest lid: `bell_shake_angle` is a `sin` of it, so a
     /// stepped counter reads as a stutter at 60 fps.
@@ -704,21 +704,20 @@ impl BellShakes {
     }
 }
 
-/// `TheEndGatewayBlockEntity.teleportCooldown`, a per-position
+/// Vanilla's own end-gateway teleport-cooldown counter, a per-position
 /// counter driven by the gateway's own `BLOCK_EVENT` and advanced once per
 /// client tick — the same `b0 == 1` collision [`BellShakes`]'s doc already
 /// names, told apart by the block at the position rather than the packet.
 ///
-/// Mirrors `TheEndGatewayBlockEntity.beamAnimationTick`, the tick function
-/// vanilla's own client actually runs for this block entity (`portalTick` is
-/// the *server's* function, which also reads `Age`'s wall-clock role for the
+/// Mirrors vanilla's own end-gateway beam-animation tick, the tick function
+/// vanilla's own client actually runs for this block entity (a separate,
+/// server-only tick function
+/// is the *server's* function, which also reads `Age`'s wall-clock role for the
 /// rarer spawn arm — see [`end_gateway_beam_spawns`] for why that half is a
 /// stateless per-frame NBT read instead of a second tracked field here):
 ///
-/// ```text
-/// entity.age++;
-/// if (entity.isCoolingDown()) entity.teleportCooldown--;
-/// ```
+/// the age counter increments every tick, and the teleport-cooldown counter
+/// decrements only while it is still cooling down.
 ///
 /// Entries are dropped once `teleportCooldown` reaches `0` — a gateway not
 /// cooling down is indistinguishable from an absent entry, the same
@@ -738,8 +737,8 @@ impl GatewayCooldowns {
     /// Applies one `BLOCK_EVENT` to the gateway at `pos`, returning whether
     /// it was a teleport-cooldown trigger.
     ///
-    /// `TheEndGatewayBlockEntity.triggerEvent`: only `b0 == 1` sets
-    /// `teleportCooldown = 40` (`COOLDOWN_TIME`); `b1` carries nothing for
+    /// Vanilla's own end-gateway block-event handling: only `b0 == 1` sets
+    /// the teleport cooldown to 40 ticks; `b1` carries nothing for
     /// this type (unlike the bell's own `b0 == 1`, which packs the hit
     /// direction into `b1`) and is accepted but ignored, matching every
     /// other tracker offered this same collision.
@@ -780,24 +779,24 @@ impl GatewayCooldowns {
     }
 }
 
-/// `BaseSpawner.DEFAULT_REQUIRED_PLAYER_RANGE` — vanilla's own default for
-/// `isNearPlayer`, applied unconditionally rather than read per-position from
+/// Vanilla's own default required-player-range constant — vanilla's own default for
+/// its near-player check, applied unconditionally rather than read per-position from
 /// `RequiredPlayerRange` NBT (see [`SpawnerSpins`]'s "Simplifications" doc).
 const SPAWNER_REQUIRED_PLAYER_RANGE: f32 = 16.0;
 
-/// `BaseSpawner.DEFAULT_MIN_SPAWN_DELAY` — the fallback when a spawner's own
+/// Vanilla's own default min-spawn-delay constant — the fallback when a spawner's own
 /// `MinSpawnDelay` field is absent from its NBT.
 const SPAWNER_DEFAULT_MIN_SPAWN_DELAY: f32 = 200.0;
 
 /// One spawner/trial-spawner block entity's parsed `SpawnData`: the display
 /// entity's type path (for [`spawner_mob_spawn`]) and `MinSpawnDelay` (for
 /// [`SpawnerSpins`]'s tick-rate formula) — everything this module needs out
-/// of `BaseSpawner.load`'s saved NBT.
+/// of vanilla's own mob-spawner load routine's saved NBT.
 #[derive(Debug, Clone, PartialEq)]
 struct SpawnerData {
     /// `None` when neither `SpawnData` nor the first `SpawnPotentials` entry
-    /// carries an `entity.id` — `BaseSpawner.getOrCreateDisplayEntity`'s own
-    /// "nothing to draw" case (`entityToSpawn.getString("id").isEmpty()`).
+    /// carries an `entity.id` — vanilla's own get-or-create-display-entity's own
+    /// "nothing to draw" case (an empty entity-id string).
     entity_type: Option<String>,
     min_spawn_delay: f32,
 }
@@ -809,9 +808,9 @@ fn nbt_field<'a>(fields: &'a [(String, lodestone_core::Nbt)], key: &str) -> Opti
     fields.iter().find(|(name, _)| name == key).map(|(_, v)| v)
 }
 
-/// Any NBT integer type widened to `i64` — `BaseSpawner.load` reads
-/// `MinSpawnDelay` with `getIntOr`, but `BaseSpawner.save` always writes it
-/// with `putShort`, so the tag actually on the wire is a `Short`; this
+/// Any NBT integer type widened to `i64` — vanilla's own mob-spawner load reads
+/// `MinSpawnDelay` with an int-or-default read, but its own save routine always writes it
+/// as a short, so the tag actually on the wire is a `Short`; this
 /// accepts any integer width rather than assuming which.
 fn nbt_as_i64(v: &lodestone_core::Nbt) -> Option<i64> {
     use lodestone_core::Nbt;
@@ -824,7 +823,7 @@ fn nbt_as_i64(v: &lodestone_core::Nbt) -> Option<i64> {
     }
 }
 
-/// `SpawnData`'s own shape (`SpawnData.CODEC`): `{ entity: { id: "...", .. },
+/// `SpawnData`'s own shape (vanilla's own spawn-data codec): `{ entity: { id: "...", .. },
 /// custom_spawn_rules?, equipment? }`. Reads just the `entity.id` this module
 /// needs to pick a model.
 fn spawn_data_entity_id(spawn_data: &lodestone_core::Nbt) -> Option<String> {
@@ -841,8 +840,8 @@ fn spawn_data_entity_id(spawn_data: &lodestone_core::Nbt) -> Option<String> {
     }
 }
 
-/// `BaseSpawner.load`'s saved NBT (mob spawner) **or**
-/// `TrialSpawnerStateData.getUpdateTag`'s (trial spawner), parsed into what
+/// Vanilla's own mob-spawner load routine's saved NBT (mob spawner) **or**
+/// its own trial-spawner-state-data update-tag routine's (trial spawner), parsed into what
 /// this module needs. The two block types disagree on almost everything
 /// about this NBT — the field name's case, whether a weighted-list fallback
 /// exists, whether `MinSpawnDelay` exists at all — but never on the same
@@ -850,24 +849,24 @@ fn spawn_data_entity_id(spawn_data: &lodestone_core::Nbt) -> Option<String> {
 /// function trying every key in turn is simpler than branching the caller on
 /// block identity first.
 ///
-/// * **Entity type**: `SpawnData` (`BaseSpawner.nextSpawnData`, PascalCase)
+/// * **Entity type**: `SpawnData` (vanilla's own next-spawn-data field, PascalCase)
 ///   first, falling back to the first `SpawnPotentials` weighted entry
-///   (`Weighted<SpawnData>`'s own `data`/`weight` shape) — the mob spawner's
-///   own fallback order (`BaseSpawner.getOrCreateNextSpawnData`). Then
-///   `spawn_data` (`TrialSpawnerStateData.TAG_SPAWN_DATA`, snake_case) — the
+///   (a weighted entry's own `data`/`weight` shape) — the mob spawner's
+///   own fallback order (vanilla's own get-or-create-next-spawn-data). Then
+///   `spawn_data` (vanilla's own trial-spawner spawn-data tag, snake_case) — the
 ///   trial spawner's sole source; it has **no** synced weighted-list
-///   fallback, because `TrialSpawnerConfig`'s `spawn_potentials_definition`
-///   is a datapack-defined resource never sent to the client at all
-///   (`TrialSpawnerStateData.getUpdateTag` writes only `spawn_data` and
+///   fallback, because the trial-spawner config's own spawn-potentials
+///   definition is a datapack-defined resource never sent to the client at all
+///   (vanilla's own trial-spawner-state-data update-tag writes only `spawn_data` and
 ///   `next_mob_spawns_at`). A trial spawner nobody has stood near long
 ///   enough to roll a `spawn_data` therefore has no display entity, matching
-///   `getOrCreateDisplayEntity`'s own `entityToSpawn.getString("id").isEmpty()`
+///   vanilla's own get-or-create-display-entity's own empty-entity-id-string
 ///   miss.
 /// * **`min_spawn_delay`**: `MinSpawnDelay`, mob-spawner-only —
 ///   [`SPAWNER_DEFAULT_MIN_SPAWN_DELAY`] otherwise, which covers the trial
 ///   spawner too (see [`SpawnerSpins`]'s "Simplifications" doc for why its
 ///   spin envelope reuses the mob spawner's constant rather than porting
-///   `TrialSpawner.tickClient`'s timestamp-difference formula).
+///   vanilla's own trial-spawner client-tick timestamp-difference formula).
 #[must_use]
 fn spawner_data(nbt: &lodestone_core::Nbt) -> SpawnerData {
     use lodestone_core::Nbt;
@@ -901,7 +900,7 @@ fn spawner_data(nbt: &lodestone_core::Nbt) -> SpawnerData {
     }
 }
 
-/// `TrialSpawnerBlock.STATE`'s `trial_spawner_state` property value, or
+/// Vanilla's own trial-spawner block state's `trial_spawner_state` property value, or
 /// `None` for a state with no such property (every mob-spawner state, and
 /// anything that is not a spawner at all).
 #[must_use]
@@ -913,9 +912,9 @@ fn trial_spawner_state_property(state_id: u32) -> Option<&'static str> {
         .map(|(_, value)| *value)
 }
 
-/// `TrialSpawnerState.spinningMobSpeed()`/`hasSpinningMob()` — vanilla's
+/// Vanilla's own trial-spawner-state spin-speed and has-spinning-mob accessors —
 /// per-state numerator for the spin-rate formula, `None` for a state with no
-/// spinning mob at all (`spinningMobSpeed() < 0.0`). Only
+/// spinning mob at all (a negative spin speed). Only
 /// `waiting_for_players` (`200.0`) and `active` (`1000.0`) qualify;
 /// `inactive`, `waiting_for_reward_ejection`, `ejecting_reward` and
 /// `cooldown` all draw an empty cage regardless of whether NBT still names a
@@ -970,9 +969,9 @@ struct Spin {
     /// partial-tick lerp — same convention as [`Lid::previous`]/
     /// [`Shake::previous`].
     previous: f32,
-    /// `BaseSpawner.spawnDelay`, decremented while near a player with a
+    /// Vanilla's own mob-spawner spawn-delay field, decremented while near a player with a
     /// display entity, and reset to `min_spawn_delay` by a `BLOCK_EVENT`
-    /// `b0 == 1` (`onEventTriggered`).
+    /// `b0 == 1` (vanilla's own event-triggered handling).
     spawn_delay: f32,
     min_spawn_delay: f32,
 }
@@ -988,8 +987,9 @@ impl Default for Spin {
     }
 }
 
-/// Per-position spawner/trial-spawner spin state — `BaseSpawner.clientTick`,
-/// advanced once per client tick, plus its `onEventTriggered` `BLOCK_EVENT`
+/// Per-position spawner/trial-spawner spin state — vanilla's own mob-spawner
+/// client tick,
+/// advanced once per client tick, plus its own event-triggered `BLOCK_EVENT`
 /// reset. The spawner sibling of [`ChestLids`]/[`BellShakes`], but its tick
 /// needs the **world** (a proximity test and the NBT-derived
 /// `MinSpawnDelay`) rather than the packet stream alone — see
@@ -1011,7 +1011,7 @@ impl Default for Spin {
 ///   display entity either way, the two are visually indistinguishable, and
 ///   folding them keeps [`Self::tick`] a single `if` rather than three arms.
 /// * **The trial spawner's real spin-rate formula is not ported.**
-///   `TrialSpawner.tickClient` computes `spawnDelay` from
+///   Vanilla's own trial-spawner client tick computes its spawn delay from
 ///   `max(0, nextMobSpawnsAt - level.getGameTime())` — a difference against
 ///   the **server's** absolute world age, which this client does not track
 ///   in sync with the server's clock (the local tick counter
@@ -1039,7 +1039,7 @@ impl SpawnerSpins {
         Self::default()
     }
 
-    /// `BaseSpawner.onEventTriggered`: `id == 1` resets `spawnDelay` to
+    /// Vanilla's own mob-spawner event-triggered handling: `id == 1` resets `spawnDelay` to
     /// `minSpawnDelay`. Returns whether this was a spawner event; every other
     /// `b0` belongs to some other block type and is ignored here, matching
     /// the sibling trackers' own `apply_block_event`.
@@ -1057,7 +1057,7 @@ impl SpawnerSpins {
     /// `tracked` is every spawner/trial-spawner candidate this tick — see
     /// [`spawner_tick_candidates`] — as `(pos, near_player, min_spawn_delay,
     /// has_display_entity, speed)`. `speed` is the formula's numerator
-    /// (`BaseSpawner`'s constant `1000.0`, or
+    /// (vanilla's own mob-spawner constant `1000.0`, or
     /// [`trial_spawner_spin_speed`]'s per-state `200.0`/`1000.0`) — see
     /// [`spawner_spin_speed`]. A position absent from `tracked` is dropped:
     /// the same eviction [`ChestLids`]/[`BellShakes`] apply, bounded here by
@@ -1115,10 +1115,10 @@ impl SpawnerSpins {
 /// speed)` — see [`SpawnerSpins::tick`] for the shape.
 ///
 /// **`near` means different things for the two block families.**
-/// `BaseSpawner.clientTick` really does gate a mob spawner's advance on
-/// `isNearPlayer` (within [`SPAWNER_REQUIRED_PLAYER_RANGE`]); a trial
-/// spawner has no such gate at all — `TrialSpawner.tickClient` advances
-/// unconditionally whenever `currentState.hasSpinningMob()` — so `near` is
+/// Vanilla's own mob-spawner client tick really does gate a mob spawner's advance on
+/// its near-player check (within [`SPAWNER_REQUIRED_PLAYER_RANGE`]); a trial
+/// spawner has no such gate at all — vanilla's own trial-spawner client tick advances
+/// unconditionally whenever the current state has a spinning mob — so `near` is
 /// simply `true` there whenever [`spawner_spin_speed`] returns a rate.
 /// Folding both into one `near` bool rather than a `bool` and a separate
 /// `state_permits_spin` bool is what lets a single [`SpawnerSpins::tick`]
@@ -1208,10 +1208,10 @@ fn spawner_candidates(
 /// One candidate resolved into a [`lodestone_render::SpawnerMobSpawn`], or
 /// `None` if the state at that position is neither a spawner nor a trial
 /// spawner, it has no display entity to draw
-/// (`SpawnData.getEntityToSpawn().getString("id").isEmpty()`'s own "draw
+/// (vanilla's own spawn-data entity-id lookup returning empty is its own "draw
 /// nothing" case), or — trial spawner only — its current
 /// `trial_spawner_state` has no spinning mob at all
-/// (`TrialSpawnerState.hasSpinningMob()`; see [`spawner_spin_speed`]). That
+/// (vanilla's own has-spinning-mob check; see [`spawner_spin_speed`]). That
 /// last clause is real state gating the draw, not just the rate: an
 /// `inactive`/`waiting_for_reward_ejection`/`ejecting_reward`/`cooldown`
 /// trial spawner must draw an empty cage even if its NBT still names a
@@ -1311,7 +1311,7 @@ mod spawner_tests {
     }
 
     /// With no `SpawnData`, the first `SpawnPotentials` entry's `data.entity.id`
-    /// is the fallback — `BaseSpawner.getOrCreateNextSpawnData`'s own order.
+    /// is the fallback — vanilla's own get-or-create-next-spawn-data's own order.
     #[test]
     fn spawner_data_falls_back_to_the_first_spawn_potential() {
         let potentials = lodestone_core::Nbt::List {
@@ -1351,7 +1351,7 @@ mod spawner_tests {
     }
 
     /// Vanilla's own two spinning states and their numerators
-    /// (`TrialSpawnerState.spinningMobSpeed()`), predicted from the enum
+    /// (its own spinning-mob-speed accessor), predicted from the enum
     /// constants read out of the real jar source, not a remembered pair.
     #[test]
     fn trial_spawner_spin_speed_matches_the_two_spinning_states() {
@@ -1442,7 +1442,7 @@ mod spawner_tests {
         let pos = [1, 2, 3];
         // First tick: spawn_delay starts at min_spawn_delay (200), so the
         // formula's own first step decrements it to 199 *before* dividing —
-        // `BaseSpawner.clientTick`'s `if (spawnDelay > 0) spawnDelay--;` runs
+        // vanilla's own mob-spawner client tick decrements the spawn delay
         // before the `spin +=` line, not after.
         spins.tick(&[(pos, true, 200.0, true, 1000.0)]);
         let (_, spin_after_one) = spins.raw(pos);
@@ -1471,7 +1471,8 @@ mod spawner_tests {
     }
 
     /// A far mob spawner (not near) freezes: `spin` does not move, matching
-    /// `BaseSpawner.clientTick`'s `oSpin = spin;` branch.
+    /// vanilla's own mob-spawner client tick's "not near" branch, which
+    /// leaves the previous spin equal to the current one.
     #[test]
     fn a_spawner_nobody_is_near_freezes() {
         let mut spins = SpawnerSpins::new();
@@ -1484,8 +1485,8 @@ mod spawner_tests {
     }
 }
 
-/// `EnchantingTableBlockEntity.bookAnimationTick`'s trigger radius, in blocks:
-/// `level.getNearestPlayer(x + 0.5, y + 0.5, z + 0.5, 3.0, false)`.
+/// Vanilla's own enchanting-table-block-entity book-animation tick's trigger radius, in blocks:
+/// its own nearest-player search from the block's own center point.
 ///
 /// Measured from the block **centre** to the player's position, in three
 /// dimensions — not horizontally, so a player on the floor below a table on a
@@ -1618,7 +1619,8 @@ impl Book {
 /// [`lodestone_render::enchanting_table_book_openness`] zero, and
 /// `book_part_poses` at openness `0` poses `left_lid` at `PI` against
 /// `right_lid` at `0` — a **closed** book, which is a real six-part model
-/// hovering above the table, not nothing. `EnchantTableRenderer.submit` has no
+/// hovering above the table, not nothing. Vanilla's own enchant-table render
+/// submission has no
 /// early return: vanilla draws the book for every enchanting-table block entity
 /// it renders, and the near-player test only decides whether it is *open*.
 ///
@@ -1645,7 +1647,7 @@ impl EnchantingTableBooks {
     /// The RNG seed is a fixed constant rather than a clock read, for the reason
     /// `docs/`'s evidence rules give: a test that seeds from the wall clock cannot
     /// be reproduced, and nothing about a page-flip phase benefits from being
-    /// unpredictable across runs. Vanilla's own `RandomSource.create()` is
+    /// unpredictable across runs. Vanilla's own default random source is
     /// time-seeded, but it is a *shared static* across every enchanting table in
     /// the world, which is the property that actually matters and which this keeps.
     #[must_use]
@@ -1700,7 +1702,8 @@ impl EnchantingTableBooks {
     ///
     /// Returns `(y_rot, time, open, flip)` ready for
     /// [`lodestone_render::EnchantingTableSpawn`]. The `y_rot` lerp is
-    /// **shortest-arc**, matching `EnchantTableRenderer.extractRenderState`'s three
+    /// **shortest-arc**, matching vanilla's own enchant-table render-state
+    /// extraction's three
     /// `while` loops rather than a plain `lerp`.
     #[must_use]
     pub fn state(&self, pos: [i32; 3], partial_tick: f32) -> Option<(f32, f32, f32, f32)> {
@@ -1733,7 +1736,7 @@ impl EnchantingTableBooks {
     }
 }
 
-/// `Direction.from3DDataValue(b1)`, narrowed to the four horizontal directions
+/// Vanilla's own direction-from-3D-data-value decode of `b1`, narrowed to the four horizontal directions
 /// [`BellShakeDirection`] models: `0` down, `1` up, `2` north, `3` south, `4`
 /// west, `5` east.
 ///
@@ -1934,7 +1937,7 @@ fn skull_orientation(state_id: u32) -> Option<SkullOrientation> {
 }
 
 /// Resolves one block state id into a skull/head type, or `None` if the block
-/// is not a skull at all. All seven of vanilla's `SkullBlock.Types` resolve —
+/// is not a skull at all. All seven of vanilla's own skull-block types resolve —
 /// see [`lodestone_render::SkullType::from_block_path`].
 #[must_use]
 fn skull_type_for_state(state_id: u32) -> Option<SkullType> {
@@ -2055,7 +2058,7 @@ fn skull_candidates(
 ///
 /// No lid-style animation state gathered here. No skull type poses its *head*,
 /// and the two that do pose a child part — the dragon's jaw, the piglin's ears
-/// — are driven by `SkullBlockEntity.getAnimation`, a counter that only
+/// — are driven by vanilla's own skull-block-entity animation accessor, a counter that only
 /// advances while the block is redstone-`powered`. This client carries no such
 /// per-position tracker, so every skull draws at
 /// [`lodestone_render::SKULL_RESTING_ANIMATION_POS`] and there is nothing here
@@ -2202,7 +2205,8 @@ pub(crate) fn bell_spawns_from_snapshot(
 /// nothing and draw every box undyed.
 ///
 /// `facing` defaults to [`ShulkerFacing::Up`] when the property is missing, which
-/// is `ShulkerBoxRenderer.extractRenderState`'s own `getValueOrElse(FACING, UP)`
+/// is vanilla's own shulker-box render-state extraction's own facing-property
+/// default of up
 /// — unlike a chest, where a missing `facing` is treated as a failure, because a
 /// shulker box genuinely has a sensible default and vanilla uses it.
 #[must_use]
@@ -2287,8 +2291,8 @@ pub(crate) fn shulker_spawns_from_snapshot(
 ///   degrades to "no books on lecterns", not to a hole in the world.
 ///
 /// `facing_yaw_deg` goes through [`horizontal_facing_clockwise_yaw`] and not
-/// [`horizontal_facing_yaw`]: `LecternRenderer.extractRenderState` stores
-/// `FACING.getClockWise().toYRot()`, and the plain facing lays the book across
+/// [`horizontal_facing_yaw`]: vanilla's own lectern render-state extraction stores
+/// the facing rotated clockwise, and the plain facing lays the book across
 /// the shelf at right angles to the reader.
 #[must_use]
 pub fn lectern_spawn(block: [i32; 3], state_id: u32, light: u8) -> Option<LecternSpawn> {
@@ -2344,7 +2348,7 @@ pub(crate) fn lectern_spawns_from_snapshot(
 ///
 /// One block, no properties that matter: an enchanting table has **no `facing`**
 /// and no other state at all in 26.2. That absence is load-bearing — the book's
-/// angle is client-simulated (`EnchantingTableBlockEntity.rot`), so there is
+/// angle is client-simulated (vanilla's own enchanting-table rotation field), so there is
 /// nothing on the block state a facing could have been read from, and a port that
 /// looks for one finds nothing and draws no book.
 #[must_use]
@@ -2410,7 +2414,8 @@ pub fn enchanting_table_positions(
 /// Unlike every other gather here the *appearance* comes from `books` rather than
 /// from the world: the block state says only "there is a table", and all four
 /// animated values are client-simulated. A table the fold has no entry for still
-/// gets a spawn, at the shut rest pose: `EnchantTableRenderer.submit` draws the
+/// gets a spawn, at the shut rest pose: vanilla's own enchant-table render
+/// submission draws the
 /// book unconditionally, and openness `0` is a closed book rather than an absent
 /// one. That case is transient by construction — [`EnchantingTableBooks::tick`]
 /// gathers at the same [`VIEW_DISTANCE`] this does — so it lasts at most the one
@@ -2504,19 +2509,19 @@ fn campfire_smoke_source(block: [i32; 3], state_id: u32) -> Option<([i32; 3], bo
 
 /// The occupied cooking slots in a campfire's NBT, as `(slot, item id)`.
 ///
-/// `ContainerHelper.saveAllItems` writes an `Items` list of
-/// `ItemStackWithSlot.CODEC`, i.e. `{Slot: <unsigned byte>, id: <item id>,
+/// Vanilla's own container-helper item-list save writes an `Items` list of
+/// its own slot-tagged item-stack codec, i.e. `{Slot: <unsigned byte>, id: <item id>,
 /// count: <int>}` — so the slot is an explicit field and **the list index is not
 /// the slot**. A campfire holding one steak in its third slot writes a
 /// single-element list with `Slot: 2`; reading the index instead would cook it in
 /// the wrong corner, and with a full campfire the two agree, so the bug hides
 /// until a partial one.
 ///
-/// `count` is not read: `CampfireRenderer` draws one copy per slot regardless
+/// `count` is not read: vanilla's own campfire renderer draws one copy per slot regardless
 /// (a campfire slot holds at most one item anyway).
 ///
 /// An entry whose `Slot` is out of range is dropped rather than clamped, matching
-/// `ItemStackWithSlot.isValidInContainer`.
+/// vanilla's own slot-tagged item-stack container-validity check.
 #[must_use]
 fn campfire_items(nbt: &lodestone_core::Nbt) -> Vec<(usize, lodestone_assets::ResourceLocation)> {
     use lodestone_core::Nbt;
@@ -2536,10 +2541,10 @@ fn campfire_items(nbt: &lodestone_core::Nbt) -> Vec<(usize, lodestone_assets::Re
                 return None;
             };
             let field = |key: &str| entry.iter().find(|(name, _)| name == key).map(|(_, v)| v);
-            // `ExtraCodecs.UNSIGNED_BYTE` — an `Nbt::Byte`, not an int.
+            // Vanilla's own unsigned-byte codec — an `Nbt::Byte`, not an int.
             let slot = match field("Slot") {
                 Some(Nbt::Byte(slot)) => usize::try_from(*slot).ok()?,
-                // Vanilla's `optionalAlwaysPresentFieldOf(.., "Slot", 0)`
+                // Vanilla's own codec helper for an optional-but-defaulted field
                 // defaults a missing slot to zero rather than dropping the item.
                 None => 0,
                 _ => return None,
@@ -3034,7 +3039,7 @@ fn banner_attachment(state_id: u32, is_wall: bool) -> Option<BannerAttachment> {
 
 /// The block entity's stored pattern stack, parsed out of its NBT.
 ///
-/// `BannerPatternLayers.Layer.CODEC` is `{pattern: <id>, color: <dye name>}` and
+/// Vanilla's own banner-pattern-layers codec is `{pattern: <id>, color: <dye name>}` and
 /// the list key is `patterns`. Both fields are namespaced ids on the wire, so the
 /// namespace is stripped — [`lodestone_assets::banner_pattern_atlas`] keys its
 /// sprites on the **bare** asset id (`"creeper"`), and passing
@@ -3192,12 +3197,12 @@ pub fn banner_spawns(
 // --- decorated pot ---------------------------------------------------------
 
 /// The decorated pot's stored sherds, parsed out of its NBT —
-/// `PotDecorations.CODEC` (`DecoratedPotBlockEntity.TAG_SHERDS`, key
+/// vanilla's own pot-decorations codec (its own sherds tag, key
 /// `"sherds"`): a plain 4-element list of item ids in **`[back, left, right,
-/// front]`** order (`PotDecorations`'s own record field order, and
-/// `ordered()`'s `Stream.of(back, left, right, front)`), with
-/// `minecraft:brick` the empty sentinel (`PotDecorations.getItem`'s `item ==
-/// Items.BRICK` check). A side whose id fails to parse, or is the sentinel,
+/// front]`** order (vanilla's own record field order, and
+/// its own ordered stream of back, left, right, front), with
+/// `minecraft:brick` the empty sentinel (vanilla's own pot-decorations item
+/// lookup treats a brick as the empty case). A side whose id fails to parse, or is the sentinel,
 /// is `None` — the same "drop rather than default" rule [`banner_patterns`]
 /// documents, and the namespace is stripped for the same reason
 /// [`banner_patterns`] strips one: [`decorated_pot_pattern_texture_stem`]
@@ -3264,7 +3269,8 @@ fn decorated_pot_candidates(
 /// at that position is not a decorated pot.
 ///
 /// `facing_yaw_deg` reads the block's own `facing` property —
-/// `DecoratedPotRenderer.extractRenderState`'s `Direction.toYRot()` — the same
+/// vanilla's own decorated-pot render-state extraction converts that same
+/// direction to a yaw — the same
 /// [`horizontal_facing_yaw`] [`banner_attachment`]'s wall arm already uses.
 #[must_use]
 fn decorated_pot_spawn(
@@ -3363,7 +3369,7 @@ fn block_state_at(world: &World, x: i32, y: i32, z: i32) -> u32 {
     chunk.column.get_block(local_x, y, local_z)
 }
 
-/// `Level.isWaterAt`/`getFluidState(pos).is(FluidTags.WATER)` —
+/// Vanilla's own is-water-at check, testing the fluid state against the water tag —
 /// [`conduit_frame_scan`]'s inner-cube predicate. True for the water block
 /// itself (source or flowing share one block name here) and for any other
 /// block reporting `waterlogged=true`, matching vanilla's fluid-tag reading
@@ -3445,7 +3451,7 @@ pub fn conduit_scan_frame(handle: &SharedHandle, pos: [i32; 3]) -> ConduitFrame 
     )
 }
 
-/// `ConduitBlockEntity.clientTick`'s own rescan cadence — `gameTime % 40L ==
+/// Vanilla's own conduit-block-entity client-tick's own rescan cadence — `gameTime % 40L ==
 /// 0L` gates a fresh shape scan rather than running one every tick. This
 /// module has no shared world-time clock to gate on (every other animation
 /// fold here — [`ChestLids`], [`BellShakes`], [`EnchantingTableBooks`] —
@@ -3600,7 +3606,7 @@ pub(crate) fn conduit_spawns_from_snapshot(
     out
 }
 
-/// `PistonMovingBlockEntity.tick`'s ramp: `progress += 0.5F` per tick, so with
+/// Vanilla's own piston-moving-block-entity tick's ramp: `progress += 0.5F` per tick, so with
 /// `TICKS_TO_EXTEND = 2` a whole push lasts **two ticks** — a tenth of a second.
 ///
 /// The shortest animation in this module by a factor of five (a chest lid is ten
@@ -3609,8 +3615,8 @@ pub(crate) fn conduit_spawns_from_snapshot(
 /// mid-animation frame.
 const PISTON_PROGRESS_SPEED: f32 = 0.5;
 
-/// One moving piston's animation clock — `PistonMovingBlockEntity`'s `progress`
-/// and `progressO`.
+/// One moving piston's animation clock — vanilla's own piston-moving-block-entity's
+/// current and previous progress fields.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct PistonMove {
     progress: f32,
@@ -3625,10 +3631,10 @@ struct PistonMove {
 ///
 /// # Why a client-side clock is needed at all
 ///
-/// `PistonMovingBlockEntity.getUpdateTag` is `saveCustomOnly`, so the wire does
+/// Vanilla's own piston-moving-block-entity update-tag is a custom-only save, so the wire does
 /// carry a `progress` — but it is `progressO`, the value at the *start* of the tick
 /// the block entity was created on, and it is sent once. Vanilla's client then runs
-/// `PistonMovingBlockEntity.tick` locally, adding [`PISTON_PROGRESS_SPEED`] each
+/// its own piston-moving-block-entity tick locally, adding [`PISTON_PROGRESS_SPEED`] each
 /// tick. Without that local ramp every push would draw at its seed value for its
 /// whole two-tick life, and the seed is normally `0.0` — which
 /// [`piston_head_pose`](crate::gpu) turns into a displacement of one **whole** cell
@@ -3656,7 +3662,7 @@ impl PistonMoves {
         Self::default()
     }
 
-    /// Advances every tracked piston one client tick — `PistonMovingBlockEntity.tick`.
+    /// Advances every tracked piston one client tick — vanilla's own piston-moving-block-entity tick.
     ///
     /// `present` is every `moving_piston` block entity the world still holds,
     /// paired with the `progress` its NBT carries — [`moving_piston_seeds`] builds
@@ -3716,14 +3722,15 @@ impl PistonMoves {
     }
 }
 
-/// One `moving_piston` block entity's NBT, decoded — `PistonMovingBlockEntity`'s
-/// five `loadAdditional` fields.
+/// One `moving_piston` block entity's NBT, decoded — vanilla's own
+/// piston-moving-block-entity's
+/// five load fields.
 #[derive(Debug, Clone, PartialEq)]
 struct MovingPistonNbt {
     /// `blockState`, resolved through [`lodestone_data::block_states::state_id`].
     moved_state: u32,
-    /// `facing`, as a unit step. `Direction.LEGACY_ID_CODEC` is `Codec.BYTE` over
-    /// `get3DDataValue`, so this is an [`lodestone_core::Nbt::Byte`], **not** an
+    /// `facing`, as a unit step. Vanilla's own legacy direction-id codec is a byte over
+    /// the 3D data value, so this is an [`lodestone_core::Nbt::Byte`], **not** an
     /// int — reading it as one silently defaults every piston to `DOWN`.
     direction: [i32; 3],
     /// `progress`, which vanilla writes as `progressO`. Seeds
@@ -3735,13 +3742,13 @@ struct MovingPistonNbt {
     source: bool,
 }
 
-/// `Direction.from3DDataValue`'s unit step, for the byte
-/// `Direction.LEGACY_ID_CODEC` stores.
+/// Vanilla's own direction-from-3D-data-value's unit step, for the byte
+/// its own legacy direction-id codec stores.
 ///
 /// The order is `DOWN, UP, NORTH, SOUTH, WEST, EAST` — vanilla's own enum
 /// declaration order, which is *not* alphabetical and not the horizontal-facing
 /// order the sign and chest gathers use. `None` rather than a wrapping index for
-/// anything out of range: vanilla's `BY_ID` wraps, but a wrapped facing here would
+/// anything out of range: vanilla's own by-id lookup wraps, but a wrapped facing here would
 /// silently push a contraption sideways.
 #[must_use]
 fn direction_step_from_3d(id: i8) -> Option<[i32; 3]> {
@@ -3756,7 +3763,7 @@ fn direction_step_from_3d(id: i8) -> Option<[i32; 3]> {
     })
 }
 
-/// Renders a `BlockState.CODEC` NBT compound — `{Name: "...", Properties: {...}}`
+/// Renders vanilla's own block-state codec's NBT compound — `{Name: "...", Properties: {...}}`
 /// — as the canonical state string [`lodestone_data::block_states::state_id`]
 /// parses.
 ///
@@ -3862,14 +3869,14 @@ fn state_property(state_id: u32, key: &str) -> Option<&'static str> {
         .map(|(_, value)| *value)
 }
 
-/// `PistonHeadRenderer.extractRenderState`'s three-way branch: which state to draw
+/// Vanilla's own piston-head render-state extraction's three-way branch: which state to draw
 /// offset, and whether a *second*, unoffset state (the retracting source piston's
 /// own base) draws with it.
 ///
 /// # The three arms, and why two of them synthesise a state
 ///
 /// 1. **The moved state already is a `piston_head`** — the arm a plain extension
-///    takes, because `PistonBaseBlock` pushes a head state into the cell in front
+///    takes, because vanilla's own piston-base block pushes a head state into the cell in front
 ///    of it. Vanilla rewrites `short` from the progress. Its guard is `progress <=
 ///    4.0F`, which is *always* true (progress is `0..=1`); it is not ported as a
 ///    condition because a condition that cannot be false reads as one that can.
@@ -3901,7 +3908,7 @@ fn moving_piston_states(nbt: &MovingPistonNbt, progress: f32) -> Option<(u32, Op
         ));
     }
     if nbt.source && !nbt.extending {
-        // `PistonType.DEFAULT`'s serialized name is `"normal"`, not `"default"`.
+        // Vanilla's own default piston-type's serialized name is `"normal"`, not `"default"`.
         let head_type = if moved_name == "minecraft:sticky_piston" {
             "sticky"
         } else {
@@ -4359,8 +4366,8 @@ mod skull_tests {
         }
     }
 
-    /// [`EVERY_SKULL_BLOCK_PATH`] really is every one — vanilla's seven
-    /// `SkullBlock.Types` in a floor and a wall variant each — checked against
+    /// [`EVERY_SKULL_BLOCK_PATH`] really is every one — vanilla's own seven
+    /// skull-block types in a floor and a wall variant each — checked against
     /// the 26.2 state table itself rather than against a second hand-written
     /// list. A vanilla skull block missing from that constant would otherwise
     /// be silently unguarded: the gate above only proves the paths it is given
@@ -4563,7 +4570,7 @@ mod bell_tests {
         assert!(x_rot.abs() > 0.0001, "a shaking bell must be rotated: {x_rot}");
         assert_eq!(z_rot, 0.0, "a north hit swings on x only");
 
-        // And it ends: `BellBlockEntity.tick` clears at 50.
+        // And it ends: vanilla's own bell block-entity tick clears at 50.
         for _ in 0..45 {
             shakes.tick();
         }
@@ -5295,13 +5302,13 @@ mod piston_tests {
             }
         }
         assert!(wrong.is_empty(), "{wrong:?}");
-        // Vanilla's `BY_ID` wraps out-of-range ids. Wrapping here would push a
+        // Vanilla's own by-id lookup wraps out-of-range ids. Wrapping here would push a
         // contraption along an axis nobody asked for, so this declines.
         assert_eq!(direction_step_from_3d(6), None);
         assert_eq!(direction_step_from_3d(-1), None);
     }
 
-    /// `BlockState.CODEC`'s compound renders as the canonical state string, and the
+    /// Vanilla's own block-state codec's compound renders as the canonical state string, and the
     /// rendered string resolves against the **real 26.2 table** — not a fixture.
     ///
     /// The expected id is derived from `lodestone_data`'s own table on the other
@@ -5402,13 +5409,13 @@ mod piston_tests {
         assert!(wrong.is_empty(), "{wrong:?}");
     }
 
-    /// `extractRenderState`'s branch 2: a retracting **source** piston synthesises a
+    /// Vanilla's own render-state extraction's branch 2: a retracting **source** piston synthesises a
     /// head from its base block and draws its base as well.
     ///
     /// Three separate claims, each of which a plausible port gets wrong on its own:
     ///
     /// * the head's `type` is `sticky` for a sticky base and `normal` — **not**
-    ///   `default` — for a plain one, because `PistonType.DEFAULT`'s serialized name
+    ///   `default` — for a plain one, because vanilla's own default piston-type's serialized name
     ///   is `normal`;
     /// * the head's `short` uses `>= 0.5`, the **opposite** comparison to branch 1,
     ///   so at `0.25` it is `false` where branch 1 would say `true`;
@@ -5708,13 +5715,13 @@ mod piston_tests {
     }
 }
 
-/// The beacon light-beam gather — `BeaconBlockEntity.tick`'s base-pyramid and
+/// The beacon light-beam gather — vanilla's own beacon-block-entity tick's base-pyramid and
 /// beam-colour scans, run to completion against the client's own loaded world
 /// rather than paced at `BLOCKS_CHECK_PER_TICK` (10) blocks per tick the way
 /// vanilla's server-authoritative tick does.
 ///
-/// **This needs no new packet.** In vanilla, `BeaconBlockEntity.tick` is an
-/// ordinary block-entity ticker, which `Level.tickBlockEntities` runs on
+/// **This needs no new packet.** In vanilla, its own beacon-block-entity tick is an
+/// ordinary block-entity ticker, which vanilla's own block-entity tick dispatch runs on
 /// *both* sides — the same mechanism that lets a furnace's flame flicker
 /// client-side with no server round trip. `levels` and `beamSections` are
 /// pure functions of block state the client already has loaded (the base
@@ -5738,7 +5745,7 @@ mod piston_tests {
 ///
 /// # Base pyramid census — `minecraft:beacon_base_blocks`, five members
 ///
-/// `BeaconBlockEntity.updateBase` gates against a five-member tag
+/// Vanilla's own beacon-base update check gates against a five-member tag
 /// (`data/minecraft/tags/block/beacon_base_blocks.json` in the real jar:
 /// iron, gold, diamond, emerald and netherite blocks). No tag table exists
 /// anywhere in this workspace's shell-reachable crates, so — per
@@ -5748,7 +5755,8 @@ mod piston_tests {
 ///
 /// # The beam-colour scan's one real quirk
 ///
-/// `BeaconBlockEntity.tick`'s `checkingBeamSections.size() <= 1` guard is
+/// Vanilla's own beacon-block-entity tick's checking-beam-sections size-at-most-one
+/// guard is
 /// not "is this the first block": it means the **first two** beam blocks a
 /// scan encounters each start their own section even when same-coloured —
 /// only from the third one onward does a same-colour run merge or a
@@ -5762,8 +5770,8 @@ mod piston_tests {
 ///
 /// # What is not ported
 ///
-/// `BeaconBlockEntity.tick`'s scan stops at
-/// `level.getHeight(Heightmap.Types.WORLD_SURFACE, x, z)` — vanilla's own
+/// Vanilla's own beacon-block-entity tick's scan stops at
+/// its own motion-blocking-heightmap-based world-surface height query — vanilla's own
 /// motion-blocking heightmap. This gather has no heightmap and instead scans
 /// until [`lodestone_world::World::block_state_at`] returns `None`, which
 /// happens at the loaded column's own height ceiling or past an unloaded
@@ -5818,9 +5826,9 @@ fn beacon_levels(world: &World, pos: [i32; 3]) -> i32 {
     levels
 }
 
-/// `BeaconBlockEntity.tick`'s beam-colour scan, starting at the beacon's own
+/// Vanilla's own beacon-block-entity tick's beam-colour scan, starting at the beacon's own
 /// position (the beacon block is itself a beam block — `DyeColor::White`,
-/// `BeaconBlock.getColor()`) and walking straight up. See the module doc for
+/// vanilla's own beacon-block color accessor) and walking straight up. See the module doc for
 /// the `size() <= 1` quirk this ports literally, and for why the loaded
 /// column's own height ceiling stands in for vanilla's heightmap.
 fn beacon_beam_scan(world: &World, pos: [i32; 3]) -> Vec<BeamSection> {
@@ -5868,8 +5876,8 @@ fn beacon_beam_scan(world: &World, pos: [i32; 3]) -> Vec<BeamSection> {
 /// (unlike every other `*_spawn` in this file) because a beacon has no block
 /// state this pass declines on; the caller has already checked the block
 /// name is `minecraft:beacon`. `sections` is empty when `levels == 0`,
-/// mirroring `BeaconBlockEntity.getBeamSections()`'s own
-/// `this.levels == 0 ? ImmutableList.of() : this.beamSections` gate — a
+/// mirroring vanilla's own beam-sections accessor, which returns an empty
+/// list rather than the stored sections whenever the level count is zero — a
 /// coloured run can scan perfectly clean above an incomplete base and still
 /// must not render.
 fn beacon_spawn(world: &World, block: [i32; 3], eye: Vec3, animation_time: f32) -> BeaconSpawn {
@@ -5911,7 +5919,7 @@ pub fn beacon_spawns(handle: &SharedHandle, eye: Vec3, game_time: i64, partial_t
     let store = client.chunk_world();
     let chunks = client.loaded_chunks();
 
-    // `BeaconRenderer.extract`: `floorMod(gameTime, 40) + partialTicks`.
+    // Vanilla's own beacon-renderer extraction: `floorMod(gameTime, 40) + partialTicks`.
     let animation_time = game_time.rem_euclid(40) as f32 + partial_tick;
 
     let mut out = Vec::new();
@@ -5970,7 +5978,7 @@ pub fn end_portal_spawns(handle: &SharedHandle, eye: Vec3) -> Vec<EndPortalSpawn
     out
 }
 
-/// `Block.shouldRenderFace(state, neighborState, direction)`, restated over
+/// Vanilla's own should-render-face check, restated over
 /// this crate's own "does this state fully block light" census
 /// (`lodestone_data::light_props::dampening(state) >= 15`) rather than the
 /// real jar's `VoxelShape` face-occlusion cache — the same stand-in
@@ -6117,17 +6125,17 @@ mod beacon_tests {
 
 // --- vault ---------------------------------------------------------------
 
-/// `shared_data.display_item.{id, count}`, out of a vault's `BlockEntity.nbt`
-/// — `VaultSharedData.CODEC`'s `display_item` field, an ordinary
-/// `ItemStack.CODEC` (`{id: <string>, count: <int, default 1>, components:
+/// `shared_data.display_item.{id, count}`, out of a vault's block-entity NBT
+/// — vanilla's own vault shared-data codec's `display_item` field, an ordinary
+/// item-stack codec (`{id: <string>, count: <int, default 1>, components:
 /// <compound, optional>}`; `components` is not read here, the same limitation
 /// [`campfire_items`]' doc names for its own item id).
 ///
 /// `None` for a missing `shared_data` compound, a missing `display_item`, a
 /// `display_item` with no `id`, or `id == "minecraft:air"` — all of these are
-/// `VaultSharedData`'s own "no display item" cases
-/// (`ItemStack.isEmpty()`/`lenientOptionalFieldOf`'s absent-field default),
-/// and `VaultBlockEntity.Client.shouldDisplayActiveEffects` draws nothing for
+/// vanilla's own vault shared-data "no display item" cases
+/// (an empty item stack, or the codec's absent-field default),
+/// and vanilla's own vault client-side active-effects check draws nothing for
 /// any of them.
 #[must_use]
 fn vault_display_item(nbt: &lodestone_core::Nbt) -> Option<(lodestone_assets::ResourceLocation, u32)> {
@@ -6153,7 +6161,7 @@ fn vault_display_item(nbt: &lodestone_core::Nbt) -> Option<(lodestone_assets::Re
     if id == "minecraft:air" {
         return None;
     }
-    // `ExtraCodecs.optionalAlwaysPresentFieldOf(.., "count", 1)`: a missing
+    // Vanilla's own codec helper for an optional-but-defaulted field: a missing
     // field defaults to one copy, not zero.
     let count = match field("count") {
         Some(Nbt::Int(n)) => u32::try_from(*n).ok().filter(|n| *n > 0)?,
@@ -6211,7 +6219,7 @@ fn vault_candidates(
 /// [`crate::gpu::RenderState::set_vault_source`]. A vault with no display
 /// item (`VaultState::INACTIVE`, or any state before the server has rolled
 /// one) contributes nothing, matching
-/// `VaultBlockEntity.Client.shouldDisplayActiveEffects`'s guard.
+/// vanilla's own vault client-side active-effects-display guard.
 ///
 /// `spin_deg` is resolved once here from `(game_time, partial_tick)` — see
 /// [`vault_spin_degrees`]'s doc for why every vault in this client shares one
@@ -6269,7 +6277,7 @@ mod vault_tests {
         )
     }
 
-    /// The shape `VaultSharedData.CODEC` actually writes:
+    /// The shape vanilla's own vault shared-data codec actually writes:
     /// `{shared_data: {display_item: {id, count}, connected_players: [...],
     /// connected_particles_range: <double>}}`. Parsed straight through, not a
     /// hand-restated literal.
@@ -6300,7 +6308,7 @@ mod vault_tests {
     }
 
     /// A missing `count` field defaults to one copy —
-    /// `ExtraCodecs.optionalAlwaysPresentFieldOf(.., "count", 1)`, not zero
+    /// vanilla's own codec helper for an optional-but-defaulted field, not zero
     /// and not "absent".
     #[test]
     fn a_missing_count_defaults_to_one() {
@@ -6326,7 +6334,7 @@ mod vault_tests {
         assert!(vault_display_item(&compound(vec![])).is_none());
     }
 
-    /// `minecraft:air` is `ItemStack.EMPTY`'s real registry id — a vault whose
+    /// `minecraft:air` is vanilla's own empty-item-stack's real registry id — a vault whose
     /// display item was explicitly cleared must read the same as one that
     /// never had `shared_data` at all, not as "an air block floating in a
     /// cage".
@@ -6382,18 +6390,20 @@ fn block_entity_direction_from_legacy_id(id: i8) -> Option<lodestone_assets::Dir
     })
 }
 
-/// A brushable block's NBT, decoded — `BrushableBlockEntity.getUpdateTag`'s two
+/// A brushable block's NBT, decoded — vanilla's own brushable-block-entity
+/// update-tag's two
 /// optional fields.
 ///
-/// `hit_direction` is `Direction.LEGACY_ID_CODEC` (`Codec.BYTE`), so this reads
+/// `hit_direction` is vanilla's own legacy direction-id codec (a byte), so this reads
 /// an [`lodestone_core::Nbt::Byte`], **not** an int — the same trap
 /// [`MovingPistonNbt`]'s doc names for its own `direction` field. `item` is an
-/// ordinary `ItemStack.CODEC` compound (`{id, count, components}`); only `id`
+/// ordinary item-stack codec compound (`{id, count, components}`); only `id`
 /// is read, matching [`vault_display_item`]'s own limitation for the same
 /// codec shape.
 ///
 /// Returns `None` unless **both** fields are present — vanilla's own guard in
-/// `BrushableBlockRenderer.submit` (`hitDirection != null && !itemState.isEmpty()`)
+/// its own brushable-block render submission (both a hit direction and a
+/// non-empty item state must be present)
 /// — so a freshly placed, never-brushed block contributes nothing rather than
 /// a stack drawn in a default direction.
 #[must_use]
@@ -6422,8 +6432,8 @@ fn brushable_item(nbt: &lodestone_core::Nbt) -> Option<(lodestone_assets::Direct
 }
 
 /// The block state's own `dusted` property (`0..=3`) —
-/// `BrushableBlockEntity.getCompletionState()`'s range, already reflected in
-/// the state the server sends rather than re-derived from `brushCount` (not
+/// vanilla's own brushable-block-entity completion-state range, already reflected in
+/// the state the server sends rather than re-derived from its own brush-count field (not
 /// on the wire).
 #[must_use]
 fn brushable_dust_progress(state_id: u32) -> u8 {
@@ -6482,8 +6492,8 @@ fn brushable_candidates(
 /// Every brushable block's revealed item to draw this frame, for
 /// [`crate::gpu::RenderState::set_brushable_source`]. A block that has never
 /// been brushed, or whose loot table has not yet rolled an item, contributes
-/// nothing — matching `BrushableBlockRenderer.submit`'s three-part guard
-/// (`dustProgress > 0 && hitDirection != null && !itemState.isEmpty()`).
+/// nothing — matching vanilla's own brushable-block render submission's three-part guard
+/// (a positive dust progress, a hit direction, and a non-empty item state).
 ///
 /// No clock captured, like [`campfire_spawns`]: nothing about a revealed item
 /// animates.
@@ -6544,7 +6554,7 @@ mod brushable_tests {
         )
     }
 
-    /// The shape `BrushableBlockEntity.getUpdateTag` actually writes:
+    /// The shape vanilla's own brushable-block-entity update-tag actually writes:
     /// `{hit_direction: <byte>, item: {id, count}}`.
     #[test]
     fn parses_a_real_brushable_shape() {
@@ -6664,11 +6674,11 @@ fn shelf_facing_yaw(state_id: u32) -> Option<f32> {
         .and_then(|(_, value)| horizontal_facing_yaw(value))
 }
 
-/// `ShelfBlockEntity.getAlignItemsToBottom()`'s own NBT flag —
+/// Vanilla's own shelf-block-entity align-items-to-bottom accessor's own NBT flag —
 /// `align_items_to_bottom`, an ordinary boolean (`Nbt::Byte`, `!= 0`).
 /// Missing entirely (a freshly placed shelf whose block entity has never
 /// been re-saved) defaults to `false`, matching
-/// `ValueInput.getBooleanOr(.., false)`.
+/// vanilla's own boolean-with-default NBT read.
 #[must_use]
 fn shelf_align_to_bottom(nbt: &lodestone_core::Nbt) -> bool {
     use lodestone_core::Nbt;
@@ -6685,7 +6695,7 @@ fn shelf_align_to_bottom(nbt: &lodestone_core::Nbt) -> bool {
 }
 
 /// The occupied slots in a shelf's NBT, as `(slot, item id)` — the same
-/// `ItemStackWithSlot.CODEC` shape [`campfire_items`] already parses
+/// slot-tagged item-stack codec shape [`campfire_items`] already parses
 /// (`Items` list, `Slot` an unsigned byte, **not** the list index), narrowed
 /// to [`SHELF_SLOTS`] rather than [`lodestone_render::CAMPFIRE_SLOTS`].
 #[must_use]
@@ -6770,7 +6780,7 @@ fn shelf_candidates(
 
 /// Every shelf's occupied-slot items to draw this frame, for
 /// [`crate::gpu::RenderState::set_shelf_source`]. An empty shelf contributes
-/// nothing, matching `ShelfRenderer.submit`'s per-slot null guard.
+/// nothing, matching vanilla's own shelf render submission's per-slot null guard.
 ///
 /// No clock captured, like [`campfire_spawns`]: nothing about a shelved item
 /// animates.
@@ -6831,7 +6841,7 @@ mod shelf_tests {
         )
     }
 
-    /// The shape `ShelfBlockEntity.saveAdditional` actually writes:
+    /// The shape vanilla's own shelf-block-entity save routine actually writes:
     /// `{Items: [{Slot, id, count}, ...], align_items_to_bottom: <byte>}`.
     #[test]
     fn parses_a_real_shelf_shape() {
@@ -6903,7 +6913,7 @@ mod shelf_tests {
     }
 
     /// A `Slot` at or past [`SHELF_SLOTS`] is dropped, matching
-    /// `ItemStackWithSlot.isValidInContainer`.
+    /// vanilla's own slot-tagged item-stack container-validity check.
     #[test]
     fn an_out_of_range_slot_is_dropped() {
         let nbt = compound(vec![(
@@ -7125,8 +7135,8 @@ mod copper_golem_statue_tests {
 /// fast the beam grows toward whatever height is actually visible.
 const END_GATEWAY_SPAWN_BEAM_DISTANCE: f32 = 320.0;
 
-/// `TheEndGatewayBlockEntity.saveAdditional`'s `Age` — an `Nbt::Long` — or
-/// `0` when absent, matching `input.getLongOr("Age", 0L)`.
+/// Vanilla's own end-gateway-block-entity save routine's `Age` — an `Nbt::Long` — or
+/// `0` when absent, matching vanilla's own long-or-default NBT read.
 #[must_use]
 fn end_gateway_age(nbt: &lodestone_core::Nbt) -> i64 {
     use lodestone_core::Nbt;
@@ -7178,8 +7188,9 @@ fn end_gateway_beam_candidates(
     candidates
 }
 
-/// Every end gateway's teleport beam to draw this frame — vanilla's
-/// `TheEndGatewayRenderer.submit`'s `BeaconRenderer.submitBeaconBeam` call,
+/// Every end gateway's teleport beam to draw this frame — vanilla's own
+/// end-gateway render submission's call into the shared beacon-beam
+/// submission,
 /// shown while `isSpawning()` (real `Age` NBT, read fresh each frame — a
 /// **stateless** per-frame computation, unlike `teleportCooldown` below)
 /// or `isCoolingDown()` (`cooldowns`, [`GatewayCooldowns`] — a real
