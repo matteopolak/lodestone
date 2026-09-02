@@ -13,7 +13,7 @@
 //!
 //! # What this does not model
 //!
-//! Two things `LocatorBar.java` reads that this module deliberately leaves
+//! Two things vanilla's own locator-bar rendering reads that this module deliberately leaves
 //! out, named here rather than silently approximated:
 //!
 //! * **Per-distance sprite selection.** Vanilla resolves a
@@ -37,12 +37,13 @@
 //! # The colour hash
 //!
 //! An icon with no server-set colour falls back to a hash of its identity
-//! (`ARGB.setBrightness(ARGB.color(255, uuid.hashCode()), 0.9F)` for an
+//! (vanilla's own ARGB set-brightness helper applied to its own ARGB color
+//! helper's `(255, uuid.hashCode())`, at `0.9F`, for an
 //! entity waypoint, `.hashCode()` on the name for a named one). The hash
 //! functions themselves are ported exactly — `java_string_hash` and
 //! `java_uuid_hash` below reproduce `String.hashCode()`/`UUID.hashCode()`
 //! bit for bit, both being simple, specified algorithms rather than JVM
-//! internals — but **`ARGB.setBrightness`'s RGB→HSB→RGB normalisation is
+//! internals — but **vanilla's own ARGB set-brightness's RGB→HSB→RGB normalisation is
 //! not ported**; the raw hashed RGB is used as-is. The colour is
 //! decoration that tells two waypoints apart, not a wire fact, so a
 //! deterministic-but-dimmer hash is the honest partial rather than a
@@ -92,9 +93,9 @@ fn wrap_degrees(angle: f32) -> f32 {
 /// not model" — a `NaN`-driven vanilla edge case, not a feature).
 ///
 /// `camera_pos`/`target` are world coordinates; the block-centre offset
-/// (`+0.5`) matches `Vec3.atCenterOf`, and the `Vec3iWaypoint` variant's
+/// (`+0.5`) matches vanilla's own at-center-of helper, and the `Vec3iWaypoint` variant's
 /// short-range "is this an entity's own eye position" branch
-/// (`TrackedWaypoint.java`'s `Vec3iWaypoint::position`) is not reproduced —
+/// (vanilla's own tracked-waypoint declarations' `Vec3iWaypoint::position`) is not reproduced —
 /// this always aims at the reported block position, which is exact for
 /// every non-entity waypoint and correct for an entity one to within its
 /// own last-reported position.
@@ -116,7 +117,8 @@ fn yaw_angle_to_camera(
         }
         WaypointPosition::Chunk(chunk) => {
             // `ChunkWaypoint::position(positionY)` ->
-            // `Vec3.atCenterOf(chunkPos.getMiddleBlockPosition((int) positionY))`:
+            // vanilla's own at-center-of helper applied to the chunk position's
+            // own middle-block-position accessor at `(int) positionY`:
             // the chunk's centre **block**, `+0.5` on every axis including Y,
             // at the *camera's* current height truncated to an int (Java's
             // `(int) positionY` cast) rather than the camera's own
@@ -174,7 +176,7 @@ fn java_uuid_hash(id: uuid::Uuid) -> i32 {
 }
 
 /// The un-normalised hash colour for a waypoint with no server-set tint —
-/// `ARGB.color(255, id.hashCode())` without the `setBrightness` pass; see
+/// vanilla's own ARGB color helper applied to `(255, id.hashCode())` without the `setBrightness` pass; see
 /// the module doc.
 fn hash_color(id: &WaypointId) -> [f32; 4] {
     let hash = match id {
@@ -193,7 +195,7 @@ fn hash_color(id: &WaypointId) -> [f32; 4] {
 /// zero-length, matching vanilla drawing nothing for either case.
 ///
 /// `local_id` excludes the camera-entity's own waypoint
-/// (`LocatorBar.java`'s `!waypoint.id().left().map(uuid ->
+/// (vanilla's own locator-bar rendering's `!waypoint.id().left().map(uuid ->
 /// uuid.equals(cameraEntity.getUUID()))` check) — `None` when the local
 /// player has no known waypoint identity (the common case: vanilla only
 /// tracks a waypoint for a player carrying specific items, and this build
