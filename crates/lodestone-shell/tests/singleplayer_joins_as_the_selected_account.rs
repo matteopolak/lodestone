@@ -65,14 +65,17 @@ fn the_scan_can_see_the_production_join_constructors() {
 }
 
 /// The defect, pinned: no join constructor may resolve the offline identity by
-/// itself.
+/// itself, and the four that must route through `join_identity` still do.
 ///
 /// `connect_as` is the one exception and it is exempt by *expression*, not by
 /// name — it builds `OfflineIdentity::from_username_unchecked(..)` from the
 /// username a live gate passed in, which is a different call and is what keeps
-/// every gate off the developer's premium player file.
+/// every gate off the developer's premium player file. Both counts (rather
+/// than a `contains`) live in one test: moving one constructor back to the
+/// offline identity while another still calls the ladder correctly cannot
+/// pass either check.
 #[test]
-fn no_join_constructor_loads_the_offline_identity_directly() {
+fn no_join_constructor_bypasses_the_join_identity() {
     let production = production_half();
     assert_eq!(
         production.matches("OfflineIdentity::load()").count(),
@@ -81,16 +84,6 @@ fn no_join_constructor_loads_the_offline_identity_directly() {
          `join_identity::join_identity()`; that is the bug where selecting a \
          Microsoft account changed the skin and not the player"
     );
-}
-
-/// The positive half: four constructors resolve the ladder.
-///
-/// A count rather than a `contains`, so moving one constructor back to the
-/// offline identity while another still calls it cannot pass — a `contains`
-/// would stay green until the last one went.
-#[test]
-fn every_production_join_constructor_resolves_the_join_identity() {
-    let production = production_half();
     assert_eq!(
         production.matches("join_identity::join_identity()").count(),
         4,
