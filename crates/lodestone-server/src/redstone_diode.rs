@@ -1,111 +1,72 @@
-//! Repeaters and comparators — both `DiodeBlock` subclasses in
-//! the jar, sharing the input/side-input read `crate::redstone` already
+//! Repeaters and comparators — both real diode-block subclasses,
+//! sharing the input/side-input read `crate::redstone` already
 //! provides ([`crate::redstone::input_signal`]/[`crate::redstone::alternate_signal`]).
 //!
-//! # Repeaters, cited directly
+//! # Repeaters, transcribed from the real diode block
 //!
-//! `RepeaterBlock.getDelay`/`isLocked`:
+//! The real repeater's delay and lock queries, transcribed as the rules
+//! they implement: the tick delay is the block's own `DELAY` property times
+//! two; it is locked iff its alternate (side) signal is above zero; and it
+//! only ever considers *diode* side inputs, never a lever or torch.
 //!
-//! ```text
-//! protected int getDelay(final BlockState state) { return state.getValue(DELAY) * 2; }
-//! public boolean isLocked(...) { return this.getAlternateSignal(level, pos, state) > 0; }
-//! protected boolean sideInputDiodesOnly() { return true; }
-//! ```
-//!
-//! `DELAY` is `1..=4` (vanilla default `1`), so the real tick delay is
-//! `2, 4, 6, 8`. `sideInputDiodesOnly() == true` is why [`is_locked`] passes
+//! `DELAY` is `1..=4` (real default `1`), so the real tick delay is
+//! `2, 4, 6, 8`. That diodes-only side input is why [`is_locked`] passes
 //! `only_diodes = true` into [`crate::redstone::alternate_signal`] — a lever
 //! or torch beside a repeater cannot lock it, only another diode's output
 //! can.
 //!
-//! `DiodeBlock.tick`/`checkTickOnNeighbor`:
+//! The real diode's scheduled-tick and neighbor-check hooks, transcribed as
+//! the rules they implement:
 //!
-//! ```text
-//! protected void tick(...) {
-//!    if (!this.isLocked(level, pos, state)) {
-//!       boolean on = state.getValue(POWERED);
-//!       boolean shouldTurnOn = this.shouldTurnOn(level, pos, state);
-//!       if (on && !shouldTurnOn) { level.setBlock(pos, state.setValue(POWERED, false), 2); }
-//!       else if (!on) {
-//!          level.setBlock(pos, state.setValue(POWERED, true), 2);
-//!          if (!shouldTurnOn) { level.scheduleTick(pos, this, this.getDelay(state), TickPriority.VERY_HIGH); }
-//!       }
-//!    }
-//! }
-//! protected void checkTickOnNeighbor(...) {
-//!    if (!this.isLocked(level, pos, state)) {
-//!       boolean on = state.getValue(POWERED);
-//!       boolean shouldTurnOn = this.shouldTurnOn(level, pos, state);
-//!       if (on != shouldTurnOn && !level.getBlockTicks().willTickThisTick(pos, this)) {
-//!          TickPriority priority = TickPriority.HIGH;
-//!          if (this.shouldPrioritize(level, pos, state)) { priority = TickPriority.EXTREMELY_HIGH; }
-//!          else if (on) { priority = TickPriority.VERY_HIGH; }
-//!          level.scheduleTick(pos, this, this.getDelay(state), priority);
-//!       }
-//!    }
-//! }
-//! ```
+//! On the scheduled tick, if not locked: read the current powered state and
+//! recompute whether it should turn on. If it is on and should not be,
+//! unlock it to off. If it is off (regardless of what it should become),
+//! turn it on — and if it should *not* actually be on, immediately
+//! reschedule another tick at very-high priority, one delay period later.
 //!
-//! `tick()`'s `!on` branch is the "pulse quantization" quirk: an off
+//! On a neighbor change, if not locked: read the current powered state and
+//! recompute whether it should turn on. If those two disagree and no tick
+//! is already pending, schedule one at the block's own delay — at
+//! extremely-high priority if the diode should be prioritized (see below),
+//! else very-high priority if currently on, else high priority.
+//!
+//! The scheduled-tick's "turn on regardless" branch is the "pulse
+//! quantization" quirk: an off
 //! repeater that receives its scheduled tick **always** turns on for one
-//! full `getDelay` period, even if the input already dropped again by the
+//! full delay period, even if the input already dropped again by the
 //! time the tick fires — that is what makes a repeater's output pulse never
 //! shorter than its own delay. [`run_scheduled_tick`] is this, verbatim.
 //!
-//! `DiodeBlock.shouldPrioritize`:
+//! The real diode's should-prioritize check, transcribed as the rule it
+//! implements: look at the block directly behind this one (opposite its
+//! facing); it should be prioritized iff that neighbour is also a diode and
+//! that neighbour's own facing does not point back at this one.
 //!
-//! ```text
-//! public boolean shouldPrioritize(...) {
-//!    Direction direction = state.getValue(FACING).getOpposite();
-//!    BlockState oppositeState = level.getBlockState(pos.relative(direction));
-//!    return isDiode(oppositeState) && oppositeState.getValue(FACING) != direction;
-//! }
-//! ```
+//! # Comparators, transcribed from the real comparator block
 //!
-//! # Comparators, cited directly
+//! The real comparator's delay, output-signal and should-turn-on queries,
+//! transcribed as the rules they implement:
 //!
-//! `ComparatorBlock.calculateOutputSignal`/`shouldTurnOn`/`getDelay`:
+//! The tick delay is a flat `2`. The output signal is: zero if the main
+//! input signal is zero; otherwise zero if the alternate (side) signal
+//! exceeds the input; otherwise, in subtract mode, the input minus the
+//! alternate, or in compare mode, the input unchanged. It should turn on
+//! when the input is non-zero and either strictly exceeds the alternate
+//! signal, or equals it while in compare mode.
 //!
-//! ```text
-//! protected int getDelay(final BlockState state) { return 2; }
-//! private int calculateOutputSignal(...) {
-//!    int inputSignal = this.getInputSignal(level, pos, state);
-//!    if (inputSignal == 0) { return 0; }
-//!    int alternateSignal = this.getAlternateSignal(level, pos, state);
-//!    if (alternateSignal > inputSignal) { return 0; }
-//!    return state.getValue(MODE) == ComparatorMode.SUBTRACT ? inputSignal - alternateSignal : inputSignal;
-//! }
-//! protected boolean shouldTurnOn(...) {
-//!    int input = this.getInputSignal(level, pos, state);
-//!    if (input == 0) { return false; }
-//!    int sideInput = this.getAlternateSignal(level, pos, state);
-//!    return input > sideInput ? true : input == sideInput && state.getValue(MODE) == ComparatorMode.COMPARE;
-//! }
-//! ```
+//! The real comparator's neighbor-check, refresh and scheduled-tick hooks,
+//! transcribed as the rules they implement:
 //!
-//! `ComparatorBlock.checkTickOnNeighbor`/`refreshOutputState`/`tick`:
+//! On a neighbor change, if no tick is already pending: recompute the
+//! output signal, and if it differs from the currently banked one, or the
+//! powered state disagrees with the should-turn-on check, schedule a tick
+//! two ticks out — at high priority if the diode should be prioritized,
+//! else normal priority.
 //!
-//! ```text
-//! protected void checkTickOnNeighbor(...) {
-//!    if (!level.getBlockTicks().willTickThisTick(pos, this)) {
-//!       int outputValue = this.calculateOutputSignal(level, pos, state);
-//!       int oldValue = ...comparatorBlockEntity.getOutputSignal() (or 0);
-//!       if (outputValue != oldValue || state.getValue(POWERED) != this.shouldTurnOn(level, pos, state)) {
-//!          TickPriority priority = this.shouldPrioritize(...) ? TickPriority.HIGH : TickPriority.NORMAL;
-//!          level.scheduleTick(pos, this, 2, priority);
-//!       }
-//!    }
-//! }
-//! private void refreshOutputState(...) {
-//!    int outputValue = this.calculateOutputSignal(level, pos, state);
-//!    ...comparatorBlockEntity.setOutputSignal(outputValue);
-//!    if (oldValue != outputValue || state.getValue(MODE) == ComparatorMode.COMPARE) {
-//!       ...set POWERED if it disagrees with shouldTurnOn...
-//!       this.updateNeighborsInFront(level, pos, state);
-//!    }
-//! }
-//! protected void tick(...) { this.refreshOutputState(level, pos, state); }
-//! ```
+//! The refresh step: recompute the output signal and bank it on the block
+//! entity; if it changed, or the comparator is in compare mode, correct the
+//! powered state to match the should-turn-on check and notify the blocks in
+//! front of it. The scheduled tick itself is just this refresh step.
 //!
 //! The `|| MODE == COMPARE` clause is a genuine, cite-able quirk: a
 //! comparator in **compare** mode always re-notifies its front neighbour
@@ -117,20 +78,20 @@
 //!
 //! # The named gap: container/analog-output reading
 //!
-//! `ComparatorBlock.getInputSignal` additionally reads a
-//! two-away block's `getAnalogOutputSignal` (a hopper/chest's fill level)
+//! The real comparator's input-signal query additionally reads a
+//! two-away block's analog output signal (a hopper/chest's fill level)
 //! or an item frame's rotation, when the immediate target is itself a
 //! redstone conductor — the "comparator reads a hopper's contents"
 //! behaviour is the trap most
 //! likely to be skipped while looking done. It **is** skipped here, and
-//! explicitly, not silently: this module's `getInputSignal` equivalent is
+//! explicitly, not silently: this module's real input-signal-query equivalent is
 //! [`crate::redstone::input_signal`], the same reduced function repeaters
 //! use, which has no block-entity or entity query reachable from
 //! `crates/lodestone-server/src/redstone.rs` (`crate::block_entities`
 //! exists in this crate but nothing in this module's call chain threads a
 //! `BlockEntityRegistry` through it — doing so is real, bounded future
-//! work, not a design dead end: `ComparatorBlockEntity` would only need a
-//! `getOutputSignal`-shaped read from whatever container type sits at
+//! work, not a design dead end: the real comparator block entity would only need a
+//! banked-output-signal-shaped read from whatever container type sits at
 //! `target_pos.relative(facing)`). Every comparator circuit in this
 //! module's own tests reads only redstone-native inputs (dust, torches,
 //! other diodes) — container-facing comparators are a real, named,
@@ -166,7 +127,8 @@ fn with_repeater_locked(state: &str, locked: bool) -> String {
 }
 
 /// Builds the canonical block-state string for a comparator — `output` is
-/// this module's stand-in for `ComparatorBlockEntity.outputSignal`, see this
+/// this module's stand-in for the real comparator block entity's own banked
+/// output signal, see this
 /// module's own doc comment and [`crate::redstone::comparator_output`]'s.
 #[must_use]
 pub fn set_comparator(facing: Direction, subtract: bool, powered: bool, output: u8) -> String {
@@ -179,15 +141,15 @@ pub fn set_comparator(facing: Direction, subtract: bool, powered: bool, output: 
     )
 }
 
-/// `getDelay` for a repeater — `DELAY * 2`, so `2, 4, 6, 8` for
+/// The real delay query for a repeater — `DELAY * 2`, so `2, 4, 6, 8` for
 /// `DELAY = 1..=4`.
 #[must_use]
 pub fn repeater_delay(state: &str) -> u32 {
     repeater_delay_ticks(state) * 2
 }
 
-/// `DiodeBlock.shouldPrioritize` — see this module's own doc comment for the
-/// full citation.
+/// The real diode's should-prioritize check — see this module's own doc
+/// comment for the full derivation.
 #[must_use]
 pub fn should_prioritize<F>(lookup: &F, pos: BlockPos, facing: Direction) -> bool
 where
@@ -198,7 +160,7 @@ where
     is_diode(&opposite_state) && diode_facing(&opposite_state) != direction
 }
 
-/// `RepeaterBlock.isLocked` — `alternate_signal` with `only_diodes = true`.
+/// The real repeater's is-locked check — `alternate_signal` with `only_diodes = true`.
 #[must_use]
 pub fn is_locked<F>(lookup: &F, pos: BlockPos, facing: Direction) -> bool
 where
@@ -207,9 +169,10 @@ where
     redstone::alternate_signal(lookup, pos, facing, true) > 0
 }
 
-/// A repeater has no analog side-channel — `shouldTurnOn` reduces to
-/// `getInputSignal(...) > 0` (`DiodeBlock.shouldTurnOn`,
-/// unmodified by `RepeaterBlock`).
+/// A repeater has no analog side-channel — the real should-turn-on check
+/// reduces to
+/// "input signal above zero" (the base diode's own check,
+/// unmodified by the real repeater block).
 #[must_use]
 pub fn repeater_should_turn_on<F>(lookup: &F, pos: BlockPos, facing: Direction) -> bool
 where
@@ -218,16 +181,17 @@ where
     redstone::input_signal(lookup, pos, facing) > 0
 }
 
-/// `true` iff a delayed recheck should be scheduled — `on != shouldTurnOn`,
+/// `true` iff a delayed recheck should be scheduled — the powered state
+/// disagrees with the should-turn-on check,
 /// only evaluated when not locked (a locked repeater ignores front-input
-/// changes entirely, per `DiodeBlock.checkTickOnNeighbor`'s own
-/// `if (!this.isLocked(...))` guard).
+/// changes entirely, per the real diode's own neighbor-check hook's
+/// not-locked guard).
 #[must_use]
 pub fn should_schedule_repeater_check(state: &str, should_turn_on: bool) -> bool {
     !repeater_locked(state) && diode_powered(state) != should_turn_on
 }
 
-/// `DiodeBlock.checkTickOnNeighbor`'s priority selection.
+/// The real diode's neighbor-check hook's priority selection.
 #[must_use]
 pub fn repeater_schedule_priority<F>(lookup: &F, pos: BlockPos, facing: Direction, currently_on: bool) -> TickPriority
 where
@@ -245,7 +209,7 @@ where
 /// The outcome of one repeater [`run_scheduled_tick`] call.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RepeaterTickOutcome {
-    /// Locked: `DiodeBlock.tick`'s entire body is skipped.
+    /// Locked: the real diode's scheduled-tick body is skipped entirely.
     Locked,
     /// Already in the state its own input demands — a real no-op (only
     /// reachable if the input reverted between scheduling and running).
@@ -254,13 +218,13 @@ pub enum RepeaterTickOutcome {
     TurnedOff(String),
     /// Was off: turns on unconditionally for one full delay period.
     /// `reschedule` is `true` when the input had *already* dropped again by
-    /// the time this tick ran (`!shouldTurnOn`) — the "pulse quantization"
+    /// the time this tick ran (the should-turn-on check now says no) — the "pulse quantization"
     /// quirk cited in this module's own doc comment.
     TurnedOn { new_state: String, reschedule: bool },
 }
 
-/// `DiodeBlock.tick` for a repeater — see this module's own doc comment for
-/// the full citation.
+/// The real diode's scheduled-tick hook for a repeater — see this module's
+/// own doc comment for the full derivation.
 #[must_use]
 pub fn run_scheduled_tick(state: &str, should_turn_on: bool) -> RepeaterTickOutcome {
     if repeater_locked(state) {
@@ -279,10 +243,10 @@ pub fn run_scheduled_tick(state: &str, should_turn_on: bool) -> RepeaterTickOutc
     }
 }
 
-/// Recomputes `LOCKED` immediately (vanilla's `RepeaterBlock.updateShape`-triggered
+/// Recomputes `LOCKED` immediately (the real repeater's own shape-update-triggered
 /// recompute) — `Some(new_state)` iff the value
 /// actually changed. Deliberately unconditional on which neighbour changed
-/// (vanilla gates this on the *axis* of the changed neighbour being
+/// (the real engine gates this on the *axis* of the changed neighbour being
 /// perpendicular to `FACING`; this crate has no cheap way to know which
 /// specific neighbour triggered a given notification at this call site, so
 /// it is recomputed on every notification instead — a named, harmless
@@ -307,8 +271,8 @@ where
 // Comparators
 // ---------------------------------------------------------------------------
 
-/// `ComparatorBlock.calculateOutputSignal` — see this module's own doc
-/// comment for the full citation.
+/// The real comparator's calculate-output-signal query — see this module's
+/// own doc comment for the full derivation.
 #[must_use]
 pub fn calculate_comparator_output(input: u8, side: u8, subtract: bool) -> u8 {
     if input == 0 {
@@ -322,7 +286,7 @@ pub fn calculate_comparator_output(input: u8, side: u8, subtract: bool) -> u8 {
     }
 }
 
-/// `ComparatorBlock.shouldTurnOn`.
+/// The real comparator's should-turn-on check.
 #[must_use]
 pub fn comparator_should_turn_on(input: u8, side: u8, subtract: bool) -> bool {
     if input == 0 {
@@ -334,7 +298,7 @@ pub fn comparator_should_turn_on(input: u8, side: u8, subtract: bool) -> bool {
     }
 }
 
-/// `ComparatorBlock.checkTickOnNeighbor`'s scheduling condition.
+/// The real comparator's neighbor-check hook's scheduling condition.
 #[must_use]
 pub fn should_schedule_comparator_check(state: &str, input: u8, side: u8) -> bool {
     let subtract = comparator_mode_subtract(state);
@@ -343,7 +307,7 @@ pub fn should_schedule_comparator_check(state: &str, input: u8, side: u8) -> boo
     output != comparator_output(state) || diode_powered(state) != should_be_on
 }
 
-/// `ComparatorBlock.checkTickOnNeighbor`'s priority selection (`HIGH`/`NORMAL`,
+/// The real comparator's neighbor-check hook's priority selection (`HIGH`/`NORMAL`,
 /// distinct from the repeater's own three-way choice above).
 #[must_use]
 pub fn comparator_schedule_priority<F>(lookup: &F, pos: BlockPos, facing: Direction) -> TickPriority
@@ -357,9 +321,10 @@ where
     }
 }
 
-/// `ComparatorBlock.tick`/`refreshOutputState` — see this module's own doc
+/// The real comparator's scheduled-tick hook and its refresh-output-state
+/// step — see this module's own doc
 /// comment for why the `!subtract` disjunct (compare mode always cascades)
-/// is real and cited, not an approximation.
+/// is real and derived, not an approximation.
 #[must_use]
 pub fn run_scheduled_comparator_tick(state: &str, input: u8, side: u8) -> Option<String> {
     let subtract = comparator_mode_subtract(state);
@@ -510,7 +475,7 @@ mod tests {
         assert_eq!(calculate_comparator_output(0, 5, true), 0);
     }
 
-    /// `shouldTurnOn`'s compare/subtract split at the tie (`input == side`):
+    /// The real should-turn-on check's compare/subtract split at the tie (`input == side`):
     /// compare mode still turns on, subtract mode does not (its own output
     /// would be exactly zero).
     #[test]
