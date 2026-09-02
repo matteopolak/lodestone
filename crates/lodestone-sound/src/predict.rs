@@ -48,7 +48,7 @@
 //! above applies. There is no configuration reachable today that double-plays.
 //!
 //! [`PredictionLedger`] therefore exists as **defence in depth, not a fix**: it costs
-//! a small ring buffer, and it means a future server-side `playSound` that forgets
+//! a small ring buffer, and it means a future server-side play-sound call that forgets
 //! the exclusion degrades to "correct" rather than "everything doubled". Its gate
 //! includes the control that matters — that it does not suppress an *unrelated*
 //! server sound, because a de-duplicator which swallows everything passes a
@@ -60,7 +60,8 @@ use std::collections::VecDeque;
 use glam::{DVec3, Vec3};
 use lodestone_audio::JavaRandom;
 
-/// Vanilla's own movement-emission-and-play-sound routine's `moveDistScale`. Distance travelled is
+/// Vanilla's own movement-emission-and-play-sound routine's own
+/// move-distance-scale constant. Distance travelled is
 /// scaled by this before accumulating, so the step threshold of 1.0 corresponds to
 /// `1 / 0.6 ≈ 1.667` blocks of travel.
 pub const MOVE_DIST_SCALE: f32 = 0.6;
@@ -154,7 +155,8 @@ impl StepAccumulator {
     ///
     /// This only reports the crossing; call [`StepAccumulator::consume`] once a sound
     /// has actually been produced. The split is faithful — vanilla re-arms
-    /// `nextStep` only when `producedSideEffects` (or it is in water), so a crossing
+    /// its own next-step threshold only when a side effect was actually
+    /// produced (or it is in water), so a crossing
     /// over a block that makes no sound leaves the threshold armed.
     pub fn advance(&mut self, moved: DVec3, climbing: bool, supporting_is_air: bool) -> bool {
         let full = (moved.length() * f64::from(MOVE_DIST_SCALE)) as f32;

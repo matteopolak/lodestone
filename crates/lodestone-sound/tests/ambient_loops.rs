@@ -658,7 +658,8 @@ fn the_step_threshold_rearms_to_the_next_integer_not_to_plus_one() {
 }
 
 /// A crossing that produced no sound leaves the threshold armed
-/// (vanilla's own movement-emission-and-play-sound routine only re-arms on `producedSideEffects`), which is why
+/// (vanilla's own movement-emission-and-play-sound routine only re-arms
+/// when a side effect was actually produced), which is why
 /// `advance` and `consume` are separate.
 #[test]
 fn a_silent_crossing_leaves_the_threshold_armed() {

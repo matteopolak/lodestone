@@ -35,7 +35,7 @@
 //!    vanilla's own background-music selection with the creative/underwater flags, which may be `None`.
 //! 3. Otherwise (no player — the title screen): [`musics::MENU`].
 //!
-//! `isCreative` is **`instabuild && mayfly`**, in vanilla's own situational-music selection, not
+//! Vanilla's own "is creative" flag is **`instabuild && mayfly`**, in vanilla's own situational-music selection, not
 //! "gamemode == creative"; that distinction is why it is a separate flag on
 //! [`MusicSituation`] rather than a gamemode enum.
 //!
@@ -55,7 +55,8 @@
 //! | `GAME` | 12000 | 24000 | no | vanilla's own GAME music constant, via vanilla's own game-music helper |
 //!
 //! and the scheduler's own: [`STARTING_DELAY`] is 100 ticks
-//! (vanilla's own starting-delay constant, and `nextSongDelay` is initialised to it in the
+//! (vanilla's own starting-delay constant, and its own next-song-delay
+//! field is initialised to it in the
 //! field declaration); [`MusicFrequency`] converts *minutes* to ticks as
 //! `minutes * 1200` in vanilla's own frequency enum's constructor, giving
 //! 24000 / 12000 / 0 ticks.
@@ -69,10 +70,11 @@
 //!
 //! It is, and pleasingly it is *vanilla's own* outcome rather than a bespoke
 //! degradation. vanilla's own start-playing routine assigns
-//! `currentMusic` **before** playing and switches on the result: `STARTED` shows
+//! its own current-music field **before** playing and switches on the result: `STARTED` shows
 //! the now-playing toast, `STARTED_SILENTLY` does not — and either way
-//! `nextSongDelay` becomes `Integer.MAX_VALUE`. On the following tick the
-//! `!isActive(currentMusic)` branch of vanilla's own tick routine clears `currentMusic` and recomputes
+//! its own next-song-delay field becomes `Integer.MAX_VALUE`. On the following tick the
+//! "current music is no longer active" branch of vanilla's own tick routine
+//! clears the current-music field and recomputes
 //! the delay from [`MusicFrequency::next_song_delay`]. So a track that does not
 //! start behaves exactly like a track that finished instantly: the manager
 //! re-arms a normal 12000..=24000-tick countdown and tries again later.
@@ -88,7 +90,7 @@ use std::borrow::Cow;
 use lodestone_audio::JavaRandom;
 
 /// vanilla's own starting-delay constant. Also the initial value
-/// of the `nextSongDelay` field, the floor vanilla's own tick routine applies when
+/// of its own next-song-delay field, the floor vanilla's own tick routine applies when
 /// nothing is selected, the flat delay vanilla's own frequency-based next-song-delay computation
 /// returns for `CONSTANT`, and the `+ 100` vanilla's own stop-playing routine adds
 /// when music is stopped explicitly.
@@ -293,7 +295,7 @@ impl MusicFrequency {
         }
     }
 
-    /// `maxFrequency`, in ticks: `minutes * 1200`, computed in
+    /// Vanilla's own max-frequency field, in ticks: `minutes * 1200`, computed in
     /// vanilla's own frequency enum's constructor. 24000 / 12000 / 0.
     pub const fn max_frequency(self) -> i32 {
         self.minutes() * TICKS_PER_MINUTE
@@ -461,8 +463,9 @@ pub trait MusicSink {
 ///
 /// The tick is a faithful transcription and the *order* inside it is
 /// load-bearing in a way that reads like a bug. On a replacing selection vanilla
-/// stops the old track and sets `nextSongDelay = nextInt(0, min_delay/2)`, but it
-/// does **not** clear `currentMusic`; the very next `if` therefore sees an
+/// stops the old track and sets its own next-song-delay field to a random
+/// value in `[0, min_delay/2)`, but it
+/// does **not** clear its own current-music field; the very next `if` therefore sees an
 /// inactive track and clears it *and* `min`s the delay again with
 /// [`MusicFrequency::next_song_delay`]. Both assignments land in one tick, so the
 /// post-replace delay is the *smaller* of the two draws, consuming **two** RNG
@@ -554,7 +557,7 @@ impl MusicManager {
         };
 
         if let Some(current) = self.current.clone() {
-            // vanilla's own tick routine's `canReplace` branch.
+            // vanilla's own tick routine's replace-check branch.
             if music.can_replace(&current) {
                 sink.stop();
                 self.next_song_delay = next_int(rng, 0, music.min_delay / 2);
@@ -585,8 +588,8 @@ impl MusicManager {
     /// vanilla's own start-playing routine.
     ///
     /// `current` is set from the *requested* track regardless of the sink's
-    /// answer, exactly as vanilla assigns `currentMusic` before consulting
-    /// `play`'s result. That is what makes [`MusicStart::Silent`] recover through
+    /// answer, exactly as vanilla assigns its own current-music field before consulting
+    /// its own play call's result. That is what makes [`MusicStart::Silent`] recover through
     /// the ordinary "track finished" path instead of needing one of its own.
     pub fn start_playing(&mut self, music: &Music, sink: &mut impl MusicSink) -> MusicStart {
         let started = sink.start(music);
