@@ -33,6 +33,7 @@
 //! `#[ignore]`d, so running it is an explicit opt-in; once opted in, a missing
 //! adapter or a missing `client.jar` is a **failure**, never a skip.
 
+#[path = "../gate_harness/mod.rs"]
 mod gate_harness;
 
 use glam::Vec3;
