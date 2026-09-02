@@ -1,5 +1,5 @@
 //! NBT **structure templates** — the reader, the rotation/mirror transform, and
-//! the write into a chunk's block grid (issue #514's S2).
+//! the write into a chunk's block grid.
 //!
 //! # What it is
 //!
@@ -689,9 +689,9 @@ impl StructureTemplate {
     ///
     /// This is not a defensive stub; it is vanilla's own behaviour for a dangling
     /// reference, and vanilla's own data has one —
-    /// `AncientCityStructurePools.java:113` names
+    /// vanilla's own ancient-city structure-pool data names
     /// `ancient_city/walls/intact_horizontal_wall_stairs_5`, of which only `_1`
-    /// through `_4` ship. `getOrCreate` logs, caches an empty template, and the
+    /// through `_4` ship. Its own get-or-create call logs, caches an empty template, and the
     /// element stays in its pool with a degenerate box and no jigsaw blocks, so it
     /// is offered by the pool's shuffle (consuming the draws) and never attaches.
     /// Refusing the pool instead would delete the whole structure.
@@ -710,7 +710,7 @@ impl StructureTemplate {
     /// of `(position, palette index)` pairs — no NBT decode in the loop.
     ///
     /// For a plugin constructing a structure programmatically rather than
-    /// shipping a `.nbt` file (issue #136's other origin for a template,
+    /// shipping a `.nbt` file (this change's other origin for a template,
     /// alongside [`Self::parse`]), and for tests that want a template with a
     /// known, hand-written shape. Every block gets no attached `nbt`
     /// compound — a plugin that needs a data marker (a jigsaw block, a

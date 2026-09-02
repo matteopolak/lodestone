@@ -41,12 +41,12 @@
 pub enum GeneratedBlockEntity {
     /// `BeehiveBlockEntity` for a freshly generated `bee_nest`.
     ///
-    /// Field names and shapes come from `BeehiveBlockEntity.Occupant`
-    /// (`.cache/mc/26.2/.../BeehiveBlockEntity.java:366`) —
+    /// Field names and shapes come from vanilla's own beehive-block-entity
+    /// occupant record —
     /// `{entity_data, ticks_in_hive, min_ticks_in_hive}` under a `bees` list — not
     /// from memory. `entity_data` is not modelled per-occupant because
-    /// `Occupant.create` builds it from an empty `CompoundTag` plus
-    /// `EntityTypes.BEE`, so every generated occupant's is the same value: the
+    /// vanilla's own occupant-create call builds it from an empty `CompoundTag` plus
+    /// the bee entity type, so every generated occupant's is the same value: the
     /// consumer writes `{id: "minecraft:bee"}`.
     Beehive {
         x: i32,

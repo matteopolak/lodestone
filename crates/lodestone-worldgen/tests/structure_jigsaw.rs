@@ -1,4 +1,4 @@
-//! Jigsaw structures reach **blocks** (issue #514's S4).
+//! Jigsaw structures reach **blocks**.
 //!
 //! The `where` comes from outside this repo: the two `minecraft:village_plains`
 //! starts below are read out of the vanilla-authored survival oracle world's own
@@ -186,9 +186,9 @@ fn the_jigsaw_structures_s4_models_are_not_on_the_ledger() {
         ("block_entity:append_loot", "append_loot"),
         // Vanilla's own data references
         // `ancient_city/walls/intact_horizontal_wall_stairs_5`
-        // (`AncientCityStructurePools.java:113`), of which only `_1`..`_4` ship in
+        // (vanilla's own ancient-city structure-pool data), of which only `_1`..`_4` ship in
         // `.cache/mc/26.2/src/data/minecraft/structure/`. Vanilla tolerates it
-        // because `StructureTemplateManager.getOrCreate` invents an *empty*
+        // because its own template-manager get-or-create call invents an *empty*
         // template; so does this engine, and it says so here rather than deleting
         // the structure. The row exists **and** `ancient_city` is supported — both
         // halves matter.

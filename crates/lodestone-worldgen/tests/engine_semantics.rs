@@ -271,8 +271,8 @@ fn flat_cache_snaps_xz_to_the_quart_grid_and_ignores_y() {
 // =========================================================================
 
 /// `cache_2d` is **transparent in both evaluators**, which is what vanilla's
-/// unwrapped `DensityFunctions.Marker.compute` does
-/// (`return this.wrapped.compute(context);`, `DensityFunctions.java:793-797`).
+/// unwrapped marker-node compute does
+/// (`return this.wrapped.compute(context);`).
 ///
 /// This gate used to assert the opposite for the point interpreter, because that
 /// interpreter carried a single-slot last-`(x, z)` memo. §12.132 retired it: over a
