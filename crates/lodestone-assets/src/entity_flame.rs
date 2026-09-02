@@ -1,7 +1,6 @@
-//! The two textures vanilla's mob-fire billboard alternates between
-//! (`FlameFeatureRenderer.buildGroup`: `ModelBakery.FIRE_0`/`FIRE_1`, resolved
+//! The two textures vanilla's mob-fire billboard alternates between, resolved
 //! against the block atlas as `textures/block/fire_0.png` /
-//! `textures/block/fire_1.png`).
+//! `textures/block/fire_1.png`.
 //!
 //! Loaded here as two plain, unatlased [`Image`]s and combined into one
 //! side-by-side texture — the same "standalone strip, not the shared block
@@ -10,9 +9,9 @@
 //! the model pipeline's atlas for one small texture would cost either a fifth
 //! bind group or plumbing a texture view across an unrelated module boundary.
 //! This module is independent of `screen_effects` (which only ever needed
-//! `fire_1`) because the mob billboard alternates *both* sprites per quad
-//! (`FlameFeatureRenderer.prepare`) and `screen_effects` should not gain a
-//! second texture just to feed a different render pass.
+//! `fire_1`) because the mob billboard alternates *both* sprites per quad and
+//! `screen_effects` should not gain a second texture just to feed a different
+//! render pass.
 
 use crate::error::EntityFlameAssetError;
 use crate::manager::ResourceManager;

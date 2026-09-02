@@ -1,6 +1,6 @@
-//! The two full-screen overlay textures vanilla draws from `ScreenEffectRenderer`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/ScreenEffectRenderer.java`):
-//! the underwater tint texture and the fire-overlay sprite strip.
+//! The two full-screen overlay textures vanilla's own screen-effect renderer
+//! draws every frame: the underwater tint texture and the fire-overlay sprite
+//! strip.
 //!
 //! Both are loaded as plain, unatlased [`Image`]s, the same way [`crate::sky::load_cloud_texture`]
 //! loads `clouds.png` — each is sampled with its own wraparound/strip addressing
@@ -28,8 +28,7 @@ fn load_plain(
 }
 
 /// Loads `textures/misc/underwater.png` (16x16 in vanilla), the texture the
-/// underwater overlay tiles 4x4 and scrolls by look direction — see
-/// `ScreenEffectRenderer.submitWater`.
+/// underwater overlay tiles 4x4 and scrolls by look direction.
 ///
 /// # Errors
 ///
@@ -46,17 +45,17 @@ pub fn load_underwater_texture(manager: &ResourceManager) -> Result<Image, Scree
 /// The fixed frame size (both width and height) of `fire_1.png`'s animation
 /// strip. Vanilla's animated textures are always square frames stacked
 /// vertically; there is no metadata field carrying this, it is inferred from
-/// `width == 16` the same way vanilla's own `SpriteContents` does.
+/// `width == 16` the same way vanilla's own sprite-metadata handling does.
 pub const FIRE_FRAME_SIZE: u32 = 16;
 
 /// Loads `textures/block/fire_1.png` (16x512 in vanilla: 32 stacked 16x16
-/// frames), the sprite `ScreenEffectRenderer.submitFire` draws — see
-/// `ModelBakery.FIRE_1`. This is the *block-atlas* fire sprite the fire block
-/// itself renders with, loaded here as its own standalone strip rather than
-/// through the block atlas: the overlay pass is deliberately a separate, tiny
-/// pipeline kept off the model pipeline's already-full four bind groups (see
-/// `crates/lodestone-render/src/screen_effects.rs`), so reaching into
-/// `ModelRenderer`'s atlas would mean either a fifth bind group or plumbing a
+/// frames), the sprite the fire overlay pass draws. This is the *block-atlas*
+/// fire sprite the fire block itself renders with, loaded here as its own
+/// standalone strip rather than through the block atlas: the overlay pass is
+/// deliberately a separate, tiny pipeline kept off the model pipeline's
+/// already-full four bind groups (see
+/// `crates/lodestone-render/src/screen_effects.rs`), so reaching into the
+/// model renderer's atlas would mean either a fifth bind group or plumbing a
 /// texture view across an unrelated module boundary for one small texture.
 ///
 /// # Errors
@@ -85,9 +84,8 @@ pub fn fire_frame_count(image: &Image) -> u32 {
 /// hardcoded in vanilla's renderer at all: it is the `camera_overlay` field of
 /// `carved_pumpkin`'s `minecraft:equippable` data component
 /// (`.cache/mc/26.2/generated/reports/minecraft/components/item/carved_pumpkin.json`,
-/// `"camera_overlay": "minecraft:misc/pumpkinblur"`), drawn generically for
-/// *any* equipped item that declares one by
-/// `Hud.extractCameraOverlays`/`extractTextureOverlay` —
+/// `"camera_overlay": "minecraft:misc/pumpkinblur"`), drawn generically by the
+/// HUD for *any* equipped item that declares one —
 /// carved pumpkin is simply the only item that ships with the field set.
 /// Loaded here as its own standalone plain texture for the same reason
 /// underwater/fire are: this pass is deliberately kept off the model
@@ -107,9 +105,8 @@ pub fn load_pumpkin_overlay_texture(manager: &ResourceManager) -> Result<Image, 
 }
 
 /// Loads `textures/misc/powder_snow_outline.png` (256x256 in vanilla), the
-/// freezing vignette `Hud.extractCameraOverlays` draws whenever
-/// `player.getTicksFrozen() > 0`, at alpha `player.getPercentFrozen()`,
-/// via `Hud.extractTextureOverlay`.
+/// freezing vignette the HUD draws whenever the player has any freeze ticks
+/// accumulated, at alpha equal to the player's freeze percentage.
 ///
 /// # Errors
 ///
@@ -124,10 +121,9 @@ pub fn load_freeze_overlay_texture(manager: &ResourceManager) -> Result<Image, S
 }
 
 /// Loads `textures/misc/spyglass_scope.png` (256x256 in vanilla), the lens
-/// texture `Hud.extractSpyglassOverlay` blits at the screen centre while
-/// scoping. The four black letterbox bars
-/// around it are not a texture at all in vanilla (`graphics.fill`, a flat
-/// colour) — see `spyglass_letterbox_triangles` in
+/// texture the HUD blits at the screen centre while scoping. The four black
+/// letterbox bars around it are not a texture at all in vanilla (a flat-colour
+/// fill) — see `spyglass_letterbox_triangles` in
 /// `crates/lodestone-render/src/screen_effects.rs`, which reuses the
 /// pipeline's own procedural 1x1 white texture rather than loading a second
 /// asset for a solid fill.
@@ -145,8 +141,8 @@ pub fn load_spyglass_scope_texture(manager: &ResourceManager) -> Result<Image, S
 }
 
 /// Loads `textures/misc/nausea.png` (256x256 in vanilla), the confusion
-/// overlay `Hud.extractConfusionOverlay` draws while the Nausea effect is
-/// active and the screen-effect-scale option is below `1.0`.
+/// overlay the HUD draws while the Nausea effect is active and the
+/// screen-effect-scale option is below `1.0`.
 ///
 /// # Errors
 ///
@@ -162,18 +158,16 @@ pub fn load_nausea_overlay_texture(manager: &ResourceManager) -> Result<Image, S
 
 /// Loads `textures/block/nether_portal.png` (16x512 in vanilla: 32 stacked
 /// 16x16 frames, `{"animation": {}}` — the exact same animated-strip shape as
-/// [`load_fire_texture`]/[`fire_frame_count`], see both docs), the sprite
-/// `Hud.extractPortalOverlay` draws while `Entity.portalEffectIntensity > 0`.
+/// [`load_fire_texture`]/[`fire_frame_count`], see both docs), the sprite the
+/// HUD draws while the entity's portal-effect intensity is greater than zero.
 ///
-/// Vanilla reaches this texture through the *block-atlas particle material*
-/// for `Blocks.NETHER_PORTAL`
-/// (`getModelManager().getBlockStateModelSet().getParticleMaterial(...)`),
-/// which is how its atlas-driven animation advances; this port loads the raw
-/// strip standalone instead, for the identical reason `load_fire_texture`
-/// gives (this pass is deliberately kept off the model pipeline's four
-/// bind groups) — [`fire_frame_count`] already generalises over any strip
-/// whose height is a multiple of 16, so no second frame-count function is
-/// needed here.
+/// Vanilla reaches this texture through the block-atlas particle material for
+/// the nether portal block, which is how its atlas-driven animation advances;
+/// this port loads the raw strip standalone instead, for the identical reason
+/// `load_fire_texture` gives (this pass is deliberately kept off the model
+/// pipeline's four bind groups) — [`fire_frame_count`] already generalises
+/// over any strip whose height is a multiple of 16, so no second frame-count
+/// function is needed here.
 ///
 /// # Errors
 ///
