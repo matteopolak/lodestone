@@ -1,5 +1,5 @@
-//! A plugin-facing registry of custom dimensions (issue #134), built on
-//! issue #132's [`lodestone_worldgen::generator::ChunkGenerator`] seam. See
+//! A plugin-facing registry of custom dimensions, built on
+//! [`lodestone_worldgen::generator::ChunkGenerator`]'s seam. See
 //! `docs/plugin-worldgen-api.md` for the full design and, in particular, its
 //! "What this does not do" section — the honest boundary of what registering
 //! a dimension here actually gets a plugin.
@@ -25,9 +25,8 @@
 //! **primary** integrated-server world with —
 //! `IntegratedServer::open_in_memory_with_entities`/
 //! `open_persistent_with_mobs` are already generic over `S: ChunkSource`, so
-//! this closes blocker #2 from issue #132's decision comment ("no per-world
-//! generator selection mechanism exists") with zero changes to
-//! `crate::integrated`. What it does **not** yet do is make a
+//! this closes the "no per-world generator selection mechanism exists" gap
+//! with zero changes to `crate::integrated`. What it does **not** yet do is make a
 //! registered dimension reachable as a **second**, portal-travel dimension
 //! alongside a running Overworld — that is the wire-registry work described
 //! above, tracked as future scope rather than silently half-built here.
@@ -40,52 +39,49 @@ use lodestone_worldgen::generator::ChunkGenerator;
 use crate::chunk::ChunkSource;
 use crate::plugin_worldgen::PluginChunkSource;
 
-/// The subset of vanilla's `DimensionType` record a plugin decides for its
+/// The subset of the real per-dimension-type record a plugin decides for its
 /// own custom dimension — everything a **server** can honour on its own,
 /// without a client-visible `dimension_type` registry entry (ambient light,
 /// sky/ceiling rendering and the exact fog curve are wire concerns; see the
 /// module doc's boundary note).
 #[derive(Debug, Clone)]
 pub struct DimensionProperties {
-    /// `DimensionType.minY` — the lowest world `y` a column in this
-    /// dimension covers.
+    /// The lowest world `y` a column in this dimension covers.
     pub min_y: i32,
-    /// `DimensionType.height` — the number of `y` levels a chunk covers.
+    /// The number of `y` levels a chunk covers.
     pub height: i32,
-    /// `DimensionType.logicalHeight` — the highest `y` anything may be
-    /// placed at.
+    /// The highest `y` anything may be placed at.
     pub logical_height: i32,
-    /// `DimensionType.coordinateScale` — vanilla's Nether/Overworld 8:1 ratio,
+    /// The real Nether/Overworld 8:1 coordinate-scale ratio,
     /// generalised. `1.0` for a dimension with no special scaling.
     pub coordinate_scale: f64,
-    /// `DimensionType.natural` — whether a compass spins erratically and a
-    /// bed/respawn-anchor explosion rule based on "is this the Overworld"
-    /// applies the vanilla way.
+    /// Whether a compass spins erratically and a bed/respawn-anchor
+    /// explosion rule based on "is this the Overworld" applies the real way.
     pub natural: bool,
-    /// `DimensionType.bedWorks`.
+    /// Whether a bed can be used to sleep/set spawn here.
     pub bed_works: bool,
-    /// `DimensionType.respawnAnchorWorks`.
+    /// Whether a respawn anchor can be used to set spawn here.
     pub respawn_anchor_works: bool,
-    /// `DimensionType.piglinSafe`.
+    /// Whether piglins are immune to zombification here.
     pub piglin_safe: bool,
-    /// `DimensionType.ultrawarm` — affects water evaporation and lava spread
+    /// Affects water evaporation and lava spread
     /// speed rules a plugin dimension may want to opt into.
     pub ultrawarm: bool,
-    /// `DimensionType.hasSkylight` — kept here for a plugin's own server-side
+    /// Kept here for a plugin's own server-side
     /// logic (e.g. deciding whether to run a day/night mob-spawning rule for
     /// this dimension); **not** what a real joined client's sky rendering
     /// reads, since that comes from the wire `dimension_type` registry entry
     /// (see the module doc).
     pub has_skylight: bool,
-    /// `DimensionType.hasCeiling` — same caveat as `has_skylight`.
+    /// Same caveat as `has_skylight`.
     pub has_ceiling: bool,
 }
 
 impl Default for DimensionProperties {
-    /// Vanilla's `minecraft:overworld` entry — the safest default for a
+    /// The real `minecraft:overworld` entry — the safest default for a
     /// plugin dimension that wants ordinary player rules (beds, respawn
     /// anchors that don't explode, full vertical build range) and differs
-    /// from vanilla only in its terrain.
+    /// from the real overworld only in its terrain.
     fn default() -> Self {
         Self {
             min_y: -64,

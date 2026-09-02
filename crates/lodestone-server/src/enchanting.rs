@@ -3,23 +3,20 @@
 //!
 //! # What it is
 //!
-//! A port of `EnchantingTableBlock`'s bookshelf-detection shape
-//! (`.cache/mc/26.2/src/net/minecraft/world/level/block/EnchantingTableBlock.java`),
-//! `EnchantmentHelper.getEnchantmentCost`/`selectEnchantment`/
-//! `getAvailableEnchantmentResults` and `EnchantmentMenu.slotsChanged`'s own
-//! per-slot orchestration
-//! (`.cache/mc/26.2/src/net/minecraft/world/inventory/EnchantmentMenu.java`),
+//! A port of the enchanting table block's bookshelf-detection shape, the
+//! real enchantment-helper's cost/select/available-results rules and the
+//! real enchantment menu's own per-slot orchestration,
 //! reading [`crate::enchantment_data`] for the weight/cost-curve/exclusivity
 //! table the selection loop draws against.
 //!
 //! # How it works
 //!
-//! [`bookshelf_power`] walks vanilla's real 32-position ring
-//! (`BOOKSHELF_OFFSETS`: the border of a 5×5 square at both `y=0` and `y=1`
+//! [`bookshelf_power`] walks the real 32-position ring
+//! (the border of a 5×5 square at both `y=0` and `y=1`
 //! relative to the table, **not** "count nearby bookshelves" — a solid block
 //! diagonally adjacent counts for nothing if the direct line to it is
 //! blocked) and each offset additionally requires the **walkway cell** between
-//! the table and that shelf to be open. Vanilla's transmitter test is
+//! the table and that shelf to be open. The real transmitter test is
 //! `#minecraft:replaceable` (a wide tag: air, water, lava, snow layers,
 //! several plants); this build approximates it with
 //! [`crate::chunk::is_air_or_fluid`], the same air-or-fluid scope cut
@@ -27,28 +24,28 @@
 //! replaceable" — see that function's doc comment for why air-or-fluid is
 //! this generator's whole practical set today.
 //!
-//! [`cost_for_slot`] is `EnchantmentHelper.getEnchantmentCost`: a per-slot
+//! [`cost_for_slot`] is the real per-slot cost rule: a per-slot
 //! `[1, 8] + bookcases/2 + [0, bookcases]` roll, min-1 for slot 0 and
 //! `max(_, bookcases*2)` for slot 2 — the shape that makes slot 2 the only one
 //! that can reach a level-30 offer at 15 bookshelves. [`select_enchantments`]
-//! is `selectEnchantment`: seed the roll with the item's own `enchantable`
+//! is the real select-enchantment rule: seed the roll with the item's own `enchantable`
 //! value, pick one enchantment by weight, then keep rolling `while
 //! next_int(50) <= cost` for more (each successive filtered to
 //! [`crate::enchantment_data::compatible`] with what was already picked).
 //!
-//! # RNG: same shape as vanilla, not the same bit stream
+//! # RNG: same shape as the real rule, not the same bit stream
 //!
 //! [`SpawnRng`] is this crate's existing non-JVM RNG (`crate::mob_spawn`,
 //! already the loot-table/spawn-cluster generator) — **draw order and count**
-//! match vanilla's `selectEnchantment` exactly (this is the part the workstation
+//! match the real select-enchantment rule exactly (this is the part the workstation
 //! brief calls "part of the specification": a reordered draw gives plausible
-//! but non-vanilla offers), but the underlying bit stream is not
-//! `java.util.Random`-compatible, the same documented, accepted gap
+//! but non-authentic offers), but the underlying bit stream is not
+//! bit-compatible with the real one, the same documented, accepted gap
 //! `crate::loot`'s own module doc carries for the same reason.
 //!
 //! # A known gap: the offer can be *shown* but not *taken*
 //!
-//! Choosing an enchantment offer is vanilla's `ServerboundContainerButtonClickPacket`
+//! Choosing an enchantment offer is the real container-button-click packet
 //! (`ClientAction::ContainerButtonClick`). `crates/protocol/v770/src/server_protocol.rs`
 //! currently decodes and **discards** that packet (`ServerBound::Ignored`), so
 //! it never reaches this crate at all — a `crates/protocol/v770` gap outside
@@ -66,7 +63,7 @@ use crate::chunk::{ChunkSource, is_air_or_fluid};
 use crate::enchantment_data::{self, EnchantmentDef};
 use crate::mob_spawn::SpawnRng;
 
-/// `EnchantingTableBlock.BOOKSHELF_OFFSETS`: every `(x, z)` with `y` in `0..=1`
+/// The real bookshelf-offset table: every `(x, z)` with `y` in `0..=1`
 /// where `|x| == 2 || |z| == 2` — the border of a 5×5 square, both floors of
 /// the table's bookshelf ring. 32 offsets total (16 unique `(x, z)` × 2 `y`).
 fn bookshelf_offsets() -> impl Iterator<Item = (i32, i32, i32)> {
@@ -75,7 +72,7 @@ fn bookshelf_offsets() -> impl Iterator<Item = (i32, i32, i32)> {
     })
 }
 
-/// `EnchantingTableBlock.isValidBookShelf` — the shelf cell itself is
+/// The real valid-bookshelf rule — the shelf cell itself is
 /// `minecraft:bookshelf`, and the walkway cell between the table and the
 /// shelf (`offset / 2`, Java truncating-toward-zero division) is open.
 fn is_valid_bookshelf(source: &dyn ChunkSource, pos: BlockPos, offset: (i32, i32, i32)) -> bool {
@@ -88,7 +85,7 @@ fn is_valid_bookshelf(source: &dyn ChunkSource, pos: BlockPos, offset: (i32, i32
     is_air_or_fluid(&walkway)
 }
 
-/// `bookcases` in `EnchantmentMenu.slotsChanged` — `0..=15` (vanilla's own
+/// `bookcases` in the real per-slot orchestration — `0..=15` (the real
 /// `bookcases > 15` clamp; a table can never see more than one full ring).
 #[must_use]
 pub fn bookshelf_power(source: &dyn ChunkSource, pos: BlockPos) -> u32 {
@@ -98,17 +95,17 @@ pub fn bookshelf_power(source: &dyn ChunkSource, pos: BlockPos) -> u32 {
         .min(15) as u32
 }
 
-/// `EnchantmentHelper.getEnchantmentCost` for `slot` (`0..3`) at `bookcases`
+/// The real per-slot enchantment-cost rule for `slot` (`0..3`) at `bookcases`
 /// power, seeded by `rng` — the caller reseeds `rng` from the table's
 /// `enchantmentSeed` once per evaluation and calls this three times in slot
 /// order (order matters: the draw is one shared roll per slot, not three
-/// independent ones — see [`EnchantmentMenu`]'s own loop, which draws once
+/// independent ones — the real per-slot loop draws once
 /// and derives the other two slots' displayed costs from the *same* `selected`
 /// value via arithmetic, not three separate `nextInt` calls).
 ///
 /// `bookcases` is pre-clamped by [`bookshelf_power`]; this function clamps it
-/// again defensively so a caller feeding a raw value cannot exceed vanilla's
-/// own bound.
+/// again defensively so a caller feeding a raw value cannot exceed the real
+/// bound.
 #[must_use]
 pub fn cost_for_slot(rng: &mut SpawnRng, slot: u32, bookcases: u32, enchantable_value: Option<u32>) -> i32 {
     if enchantable_value.is_none() {
@@ -123,10 +120,10 @@ pub fn cost_for_slot(rng: &mut SpawnRng, slot: u32, bookcases: u32, enchantable_
     }
 }
 
-/// All three slot costs in one call, matching `EnchantmentMenu.slotsChanged`'s
+/// All three slot costs in one call, matching the real per-slot orchestration's
 /// own draw order: seed once, then draw slot 0, 1, 2 in that order from the
-/// **same** `rng` stream (vanilla's `this.random.setSeed(seed)` once, then
-/// three sequential `getEnchantmentCost` calls) — a slot whose result is `<
+/// **same** `rng` stream (a seed set once, then
+/// three sequential cost-roll calls) — a slot whose result is `<
 /// slot_index + 1` is floored to `0` (unaffordable-looking offers are hidden
 /// entirely rather than shown at a cost below their own slot index).
 #[must_use]
@@ -144,18 +141,18 @@ pub fn table_costs(seed: i64, bookcases: u32, item: &ItemStack) -> [i32; 3] {
     costs
 }
 
-/// One rolled enchantment: `EnchantmentInstance(enchantment, level)`.
+/// One rolled enchantment: an (enchantment, level) instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EnchantmentOffer {
     pub key: &'static str,
     pub level: u32,
 }
 
-/// `EnchantmentHelper.getAvailableEnchantmentResults`: every `(enchantment,
-/// level)` in vanilla's pool whose `[min_cost(level), max_cost(level)]` window
-/// contains `value` — highest matching level first per enchantment (vanilla's
-/// own `for (level = max; level >= min; level--)` break-on-first-match), and
-/// gated on `isPrimaryItem`/being a book (vanilla's `#minecraft:non_treasure`
+/// The real available-enchantment-results rule: every `(enchantment,
+/// level)` in the real pool whose `[min_cost(level), max_cost(level)]` window
+/// contains `value` — highest matching level first per enchantment (the real
+/// rule's own `for (level = max; level >= min; level--)` break-on-first-match), and
+/// gated on being a primary item or a book (the real `#minecraft:non_treasure`
 /// table pool, [`enchantment_data::non_treasure`]).
 fn available_results(value: i32, item: &ItemStack, is_book: bool) -> Vec<(&'static EnchantmentDef, u32)> {
     let item_name = item.item.to_string();
@@ -175,7 +172,7 @@ fn available_results(value: i32, item: &ItemStack, is_book: bool) -> Vec<(&'stat
     results
 }
 
-/// `EnchantmentHelper.selectEnchantment`: seeds a per-item cost spread from
+/// The real select-enchantment rule: seeds a per-item cost spread from
 /// [`enchantment_data::enchantable_value`], picks one enchantment by weight,
 /// then keeps drawing (each new candidate filtered to
 /// [`enchantment_data::compatible`] with everything already chosen) while
@@ -213,7 +210,7 @@ pub fn select_enchantments(rng: &mut SpawnRng, item: &ItemStack, mut cost: i32) 
     results
 }
 
-/// `WeightedRandom.getRandomItem`: roll `[0, total_weight)`, walk the list
+/// The real weighted-random-pick rule: roll `[0, total_weight)`, walk the list
 /// subtracting each entry's weight until the roll goes negative.
 fn weighted_pick(rng: &mut SpawnRng, candidates: &[(&'static EnchantmentDef, u32)]) -> Option<(&'static EnchantmentDef, u32)> {
     let total: u32 = candidates.iter().map(|(def, _)| def.weight).sum();
