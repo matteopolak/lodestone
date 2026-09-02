@@ -75,7 +75,8 @@ fluid surfaces through a completely separate path.
 Vanilla's lightmap curve — `get_brightness(level) = level / (4 - 3·level)` — is
 applied to the raw sky/block levels, **then** the sky half is scaled by the
 time-of-day factor (`SkyFactor`, i.e. `sky_darken`, see below), the two channels are
-combined, and the whole thing is finally lifted by `notGamma` at `Options.gamma`'s
+combined, and the whole thing is finally lifted by vanilla's own inverse-gamma curve at its
+gamma option's
 default of `0.5` — never applied in the opposite order, and never skipped. A flat
 20%-floor linear ramp (`0.2 + 0.8 * level`) shipped here for a long time; the curve
 and the linear ramp agree exactly at both endpoints and diverge in the middle,
@@ -179,7 +180,8 @@ centre outward, not from vertex colours — `skyEnd` (where the gradient reaches
 fog) is the render distance in blocks, clamped, not the attribute's raw registered
 default; getting that clamp wrong stretches the gradient 4× too far at a small
 render distance. Sky, fog and cloud colours all come from real vanilla keyframe
-timelines (`ARGB.multiply`/`srgbLerp` — gamma-space byte multiplies and lerps, per
+timelines (vanilla's own byte-wise colour multiply and lerp helpers — gamma-space byte
+multiplies and lerps, per
 the project's standing colour-space rule, never linear). Void fog below the world's
 negative build limit is a quadratic falloff over an onset range that depends on
 whether the level is flat (`1.0` block) or not (`32.0` blocks) — getting the flat
@@ -299,7 +301,7 @@ frames instead of stalling one.
 
 - No player-facing options for AO, the light ramp, or client relight (`AO_OCCLUDED`,
   `SMOOTH_LIGHT_MIN_CENTRE`, `BRIGHTNESS_FACTOR` are vanilla-derived constants, not
-  meant to be tuned); `BRIGHTNESS_FACTOR` is `Options.gamma`'s **default** value —
+  meant to be tuned); `BRIGHTNESS_FACTOR` is vanilla's own gamma option's **default** value —
   wiring a real brightness slider means threading it through the shared uniform's
   two remaining free lanes.
 - `Config::render_distance` is the only input to the overworld fog ramp.

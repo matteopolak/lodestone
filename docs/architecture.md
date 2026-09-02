@@ -161,7 +161,7 @@ constant 0.21600002 — all unchanged since 1.8. What changes across versions is
 `PhysicsProfile` (constants + capability bitflags + a `PhysicsHooks` escape hatch) supplied by the
 version crate.
 
-**Bit-exact parity.** Vanilla's `Mth.sin` is a 65536-entry `float` LUT, not `f32::sin`, and everything
+**Bit-exact parity.** Vanilla's own sine helper is a 65536-entry `float` LUT, not `f32::sin`, and everything
 downstream of it (movement vectors, rotation) depends on the exact values. Rust reproduces the table
 bit-exactly (FNV-1a `3563566116167745249`, matching the JVM on all 65,536 entries). The table is checked
 into the repo and a unit test asserts the runtime-computed hash matches, so parity never depends on

@@ -147,11 +147,13 @@ only off an activator rail, 80-tick fuse into the same detonation pipeline as pr
 right-click a rail, or a dispenser loaded with one (falls back to a plain toss with no rail ahead). No
 rider-movement nudge, no auto-mount; chest/hopper carts are real storage with no GUI.
 
-**Boat placement and boarding.** `BoatItem.use` runs its own raytrace, not a block-relative placement:
+**Boat placement and boarding.** Vanilla's own boat-item-use handler runs its own raytrace, not a
+block-relative placement:
 outline shapes (grass, flowers, lily pads are hittable), any fluid shape (open water lands a boat at
 `y + 8/9`), the player's own yaw, reach 4.5 (+0.5 creative). Boats are a separate `TrackedVehicle`
 registry, not routed through mob simulation (which would wander it) — the passenger lives on the vehicle
-so the tick can skip simulating a ridden hull. Boarding is `player.startRiding`, ahead of the generic mob
+so the tick can skip simulating a ridden hull. Boarding is vanilla's own start-riding call, ahead of
+the generic mob
 interact chain, and respects the sneak-click "don't board" flag. Dismounting searches a real point
 outside the hull against real collision shapes, falling back to the hull's own top; only boats use this
 resolver. Placement's obstruction test doesn't check other entities (a boat can overlap a mob), there's

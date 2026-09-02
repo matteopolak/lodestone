@@ -15,17 +15,18 @@ identity is the sheet's own **frame sequence**, not just its pixels — two shee
 textures and differ only in playback order, e.g. ascending vs descending); `Behaviour` names a per-type
 tick/quad-size/layer override shared across every vanilla particle *class* it corresponds to (several
 registry types share one Java class and therefore one `Behaviour`); `emit` holds one function per class,
-transcribed from vanilla's own `net.minecraft.client.particle.*` source. `Particles::spawn_one`
+transcribed from vanilla's own client-side particle package. `Particles::spawn_one`
 (`crates/lodestone-shell/src/particles.rs`) is the single place that maps a decoded registry name to an
 emitter call.
 
-The wire path is: a `ClientboundLevelParticlesPacket` decode → `ClientEvent::Particles` →
+The wire path is: a clientbound level-particles packet decode → `ClientEvent::Particles` →
 `NetUpdate::Particles` in `sim.rs` → `Particles::spawn_particles` → `spawn_one`'s dispatch. Any type
 wired into that dispatch renders correctly for **any** producer of that packet (a `/particle` command, a
 datapack, a plugin), independent of whether this codebase also predicts that type's usual in-game trigger
 locally.
 
-Some particle-carrying types have **no** network path at all — vanilla's `Level.addParticle` is a no-op
+Some particle-carrying types have **no** network path at all — vanilla's own generic add-particle call is
+a no-op
 on the server and is only ever real on the client, so gameplay code that calls it directly (breeding
 hearts, note-block chimes, totem-of-undying flashes) needs its own client-side trigger (a block-action
 replay, a per-entity synced-state predictor), not a packet decoder. Wiring the generic dispatch arm is
@@ -71,7 +72,8 @@ image, so a resolved-UV counter alone cannot prove the right atlas was ever boun
 
 **Adding a new particle type end to end:**
 
-1. Find its vanilla class under `net/minecraft/client/particle/` and check `ParticleResources.java` for
+1. Find its vanilla class under vanilla's own client-side particle package and check its per-type
+   registration table for
    which class actually renders it — several registry names share one class.
 2. Read that type's own `assets/minecraft/particles/<name>.json` for which physical sheet it samples.
    **Never assume the sheet stem matches the registry name** (`witch` and `instant_effect` both sample
