@@ -50,7 +50,7 @@ pub fn screenshot_dir() -> PathBuf {
 /// same-second collision so an existing file is never overwritten.
 ///
 /// **In UTC, not local time** — a named divergence from
-/// `Util.getFilenameFormattedDateTime()`, which uses the local clock. Worth
+/// vanilla's own filename-formatted-date-time helper, which uses the local clock. Worth
 /// revisiting if a calendar crate ever lands in this workspace for another
 /// reason; hand-rolling one timezone database for one filename is not worth it.
 #[must_use]

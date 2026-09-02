@@ -109,9 +109,9 @@ pub struct RemoteSkin {
     pub cape: Option<String>,
     /// The built-in identity sheet to draw while [`Self::url`] has no bind
     /// group — a corpus reference like `entity/player/slim/ari`, resolved by
-    /// `DefaultPlayerSkin.get(uuid)`'s hash pick.
+    /// vanilla's own default-player-skin lookup's hash pick.
     ///
-    /// **Not a fallback for failure only.** Vanilla's `SkinManager` resolves a
+    /// **Not a fallback for failure only.** Vanilla's own skin manager resolves a
     /// `PlayerSkin` whose texture is the default one until the fetched sheet
     /// lands, so this is what a player looks like for the first few frames after
     /// they come into view, as well as forever on an offline-mode server (which
@@ -349,7 +349,7 @@ pub fn skin_for_textures_property(value: &str) -> Option<RemoteSkin> {
                     url: skin.url,
                     model: skin.model,
                     cape: textures.cape,
-                    // `DefaultPlayerSkin.getDefaultSkin()` — vanilla's own
+                    // Vanilla's own default-player-skin default-skin accessor — vanilla's own
                     // answer when no uuid is in hand, which is exactly this
                     // function's situation: it is keyed by the property value
                     // and shared with placed player heads, which carry a

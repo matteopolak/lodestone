@@ -514,13 +514,13 @@ mod tests {
     // Every box below is hand-transcribed from 26.2's own source, so the
     // expected geometry originates outside this module:
     //
-    // * Vanilla's own carpet block — `SHAPE = Block.column(16.0, 0.0, 1.0)`, i.e.
+    // * Vanilla's own carpet block — a 16-wide, 0-to-1-tall column, i.e.
     //   x/z `0..16` and y `0..1` in sixteenths: **1/16 of a block tall**.
     //   Vanilla's own leaf-litter block is the same height via its own
     //   shape-height getter (`= 1.0`), over a
     //   quarter of the cell per segment.
-    // * Vanilla's own stair block — `SHAPE_OUTER = or(column(16, 0, 8),
-    //   box(0, 8, 0, 8, 16, 8))` and `SHAPE_STRAIGHT` unions its 90° rotation:
+    // * Vanilla's own stair block — its outer shape is a half-height column
+    //   unioned with an upper-step box, and its straight shape unions its 90° rotation:
     //   a full-width **half-height slab** plus a **half-width upper step**, two
     //   disjoint boxes.
     //
@@ -532,7 +532,7 @@ mod tests {
     const LITTER_TOP: f64 = 1.0 / 16.0;
 
     /// A single `1/16`-tall box filling cell `(0, 0, 0)` in x and z, and nothing
-    /// anywhere else. Vanilla `Block.column(16.0, 0.0, 1.0)`.
+    /// anywhere else. Vanilla's own 16-wide, 0-to-1-tall column.
     fn flat_litter(x: i32, y: i32, z: i32, out: &mut Vec<PickBox>) {
         if [x, y, z] == [0, 0, 0] {
             out.push(PickBox {

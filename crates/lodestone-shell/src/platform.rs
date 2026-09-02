@@ -280,7 +280,7 @@ pub mod assets {
 }
 
 /// The system clipboard, for `menu::edit_box::EditBox`'s copy/cut/paste
-/// (`Minecraft.keyboardHandler.getClipboard`/`setClipboard`).
+/// (vanilla's own keyboard-handler clipboard get/set).
 ///
 /// # Native vs. browser
 ///

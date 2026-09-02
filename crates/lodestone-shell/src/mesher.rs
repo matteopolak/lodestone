@@ -1517,7 +1517,8 @@ impl FluidSectionView for SnapshotFluidView<'_> {
     /// `partial_occluder_y_range_at`'s single-box reduction would have declined.
     ///
     /// Cheap for ordinary water: `minecraft:water`'s own outline shape is empty
-    /// (vanilla's own liquid-block shape getter is `Shapes.empty()`) *and* its layer is
+    /// (vanilla's own liquid-block shape getter returns its own empty-shape
+    /// sentinel) *and* its layer is
     /// `Translucent`, so an open ocean's cells leave on the first branch.
     fn self_occlusion_at(&self, x: i32, y: i32, z: i32) -> lodestone_assets::fluid::SelfOcclusion {
         use lodestone_assets::fluid::SelfOcclusion;
@@ -2830,8 +2831,8 @@ impl TerrainMesh {
     ///
     /// **Vanilla's rule, and the reason it has two halves.**
     /// Vanilla's own level-extractor extract routine compiles a dirty section when
-    /// `section.sectionMesh.get() != CompiledSectionMesh.UNCOMPILED ||
-    /// sectionUpdateTracker.hasAllNeighbors(level, node)`. The first clause is
+    /// it already has a compiled mesh, or its section-update tracker reports
+    /// every neighbour present. The first clause is
     /// what stops the deferral from being a *regression*: a section already on
     /// screen rebuilds unconditionally, so a chunk unloading at the far edge of
     /// the view does not blink out the ring beside it, and a block edit next to
