@@ -85,7 +85,7 @@ impl RenderLayer {
     ///
     /// This is a heuristic, and the report says so: vanilla's authoritative
     /// source is a hardcoded per-block `RenderType` in version-specific Java
-    /// (`Blocks.java`), which is **not** in any generated data report. The alpha
+    /// (`Blocks`'s own decompiled source), which is **not** in any generated data report. The alpha
     /// scan agrees with it on the common cases (opaque cubes → Solid; leaves and
     /// panes → Cutout; water and stained glass → Translucent), but cannot see
     /// vanilla's overrides — e.g. a block vanilla forces onto the translucent

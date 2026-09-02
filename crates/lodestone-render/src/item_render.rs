@@ -15,7 +15,7 @@
 //!    outside it), `+X` east, `+Y` up, `+Z` south, exactly as in the world.
 //! 2. **GUI pixel space** — `x` right, `y` **down** from the top-left of the
 //!    render target, `z` growing *towards the viewer*. This is vanilla's GUI
-//!    space: `GuiGraphics.renderItem` does `translate(x + 8, y + 8, 150)` then
+//!    space: its GUI-graphics item-render function does `translate(x + 8, y + 8, 150)` then
 //!    `scale(16, -16, 16)`, and vanilla's GUI ortho is set up so a larger `z` is
 //!    nearer. [`gui_item_pose`] maps model space here.
 //! 3. **Clip space** — `wgpu` NDC with `y` up and depth in `0..1`, `0` nearest.
@@ -104,8 +104,8 @@ pub fn display_matrix(transform: &DisplayTransform) -> Mat4 {
 
 /// [`display_matrix`], with vanilla's **left-hand fix** optionally applied.
 ///
-/// `ItemTransform.apply(applyLeftHandFix, pose)` (26.2,
-/// `client/resources/model/cuboid/ItemTransform.java`) negates exactly three
+/// `ItemTransform.apply(applyLeftHandFix, pose)` (26.2's decompiled
+/// item-transform apply function) negates exactly three
 /// numbers when the display context is a left-hand one: `translation.x`,
 /// `rotation.y` and `rotation.z`. Everything else is untouched.
 ///
@@ -198,10 +198,10 @@ pub fn node_transform_matrix(t: &ItemNodeTransform) -> Mat4 {
 ///
 /// # Why right-multiply, not left
 ///
-/// `SpecialModelWrapper.Unbaked.bake` computes
+/// Vanilla's unbaked special-model-wrapper bake function computes
 /// `Transformation.compose(transformation, this.transformation)`, which is
-/// `Transformation.compose(Matrix4fc parent, Optional<Transformation>
-/// transform)` → `parent.mul(transform.getMatrix())`. JOML's `Matrix4f.mul`
+/// vanilla's transformation-record compose function (`Matrix4fc parent, Optional<Transformation>
+/// transform`) → `parent.mul(transform.getMatrix())`. JOML's `Matrix4f.mul`
 /// is `this * other`; applied to a column vector right-to-left, `other` (the
 /// node's own transform) acts on the model *first*, `parent` (the
 /// already-built outer placement — `display.<context>`, or the world/hand/
@@ -308,7 +308,7 @@ pub fn gui_ortho(width_px: u32, height_px: u32) -> Mat4 {
 /// `minecraft:crossbow/pull`'s denominator: `CrossbowItem.getChargeDuration` with
 /// **no Quick Charge**, `floor(1.25 * 20)`.
 ///
-/// Read from `CrossbowItem.java:245-248`
+/// Read from vanilla's crossbow-item charge-duration function
 /// (`Mth.floor(EnchantmentHelper.modifyCrossbowChargingTime(stack, user, 1.25F) * 20.0F)`),
 /// not guessed. The enchantment level is not modelled anywhere on this side of the
 /// wire — `RenderEquipment` narrows a stack to a bare item id long before a draw —

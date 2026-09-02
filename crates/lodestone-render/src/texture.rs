@@ -66,7 +66,7 @@ use crate::caps::GpuCapabilities;
 pub const MEASURED_MAX_ARRAY_LAYERS: u32 = 2048;
 
 /// Requested mip depth for the block/model atlases, matching vanilla's
-/// `mipmapLevels` default (`Options.java`: `IntRange(0, 4)`, default `4`).
+/// `mipmapLevels` default (`Options`'s own decompiled source: `IntRange(0, 4)`, default `4`).
 ///
 /// This is the depth `BlockAtlas::build` (this crate's `block_resolver`) uses
 /// for a session that has never touched the setting, and it is also the

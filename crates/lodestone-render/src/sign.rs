@@ -9,10 +9,9 @@
 //! *model* is empty and a `BlockEntityRenderer` supplies the missing cuboid
 //! geometry. A sign is the opposite case: `assets/minecraft/blockstates/
 //! oak_sign.json` maps every `rotation` value to a real `block/
-//! oak_sign_rot_N` model, and `StandingSignRenderer` declares **no model at
+//! oak_sign_rot_N` model, and vanilla's standing-sign renderer declares **no model at
 //! all** — only text transformations
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/
-//! StandingSignRenderer.java`). So this module has no [`crate::block_entity::
+//! (26.2's decompiled block-entity-renderer source). So this module has no [`crate::block_entity::
 //! BlockEntityMesh`], no [`crate::block_entity::plan_block_entities`] batch,
 //! and does not touch [`crate::entity::bake_entity_parts`] at all — the
 //! sign's board is already in the terrain mesh the block model produces, and
@@ -24,21 +23,21 @@
 //! reinventing.
 //!
 //! **Hanging signs are the same story, not a second one.** In 26.2
-//! `HangingSignRenderer` is `AbstractSignRenderer` plus a single
+//! vanilla's hanging-sign renderer is its base sign-renderer class plus a single
 //! `textTransformation` and **no model** either — the board, bar and chains
 //! come from `block/template_hanging_sign_rot_N` and
 //! `block/template_wall_hanging_sign`, real block models the terrain mesher
 //! already draws. So both sign families are text-only here and the whole
 //! difference between them is the four numbers in [`SignKind`]'s table plus
 //! two text metrics. (This was worth measuring rather than inheriting: 1.20's
-//! `HangingSignRenderer` *did* own a rig, and
+//! hanging-sign renderer *did* own a rig, and
 //! `docs/block-entity-renderers.md` recorded the 1.20 shape as if it were
 //! 26.2's.)
 //!
 //! # The placement matrix, ported term for term
 //!
-//! `StandingSignRenderer.textTransformation`
-//! (`StandingSignRenderer.java:53-65`) builds, for one text side:
+//! Vanilla's standing-sign renderer's text-transformation function
+//! builds, for one text side:
 //!
 //! ```text
 //! Matrix4f result = new Matrix4f()
@@ -81,22 +80,23 @@
 //! carries the raw segment rather than a pre-converted angle so that fact
 //! stays in one place.
 //!
-//! # Colour, ported from `AbstractSignRenderer`/`DyeColor`/`ARGB`
+//! # Colour, ported from vanilla's base sign-renderer/dye-colour/packed-colour
+//! helpers
 //!
 //! Non-glowing text is `ARGB.scaleRGB(dye.getTextColor(), 0.4F)`
-//! (`AbstractSignRenderer.getDarkColor`, `.../AbstractSignRenderer.java:97-
-//! 100`) — **per-channel integer truncation**, `(channel * 0.4) as i32`
+//! (vanilla's base sign-renderer's dark-colour function) — **per-channel
+//! integer truncation**, `(channel * 0.4) as i32`
 //! clamped `0..255`
-//! (`.cache/mc/26.2/client-src/net/minecraft/util/ARGB.java:108-114`), not a
+//! (vanilla's packed-colour scale helper), not a
 //! float multiply carried through — and per `CLAUDE.md`'s rendering
 //! constraints this is a **gamma-space** multiply, the same as tint/shade
 //! everywhere else in this codebase. Glowing text uses the dye's own
-//! `getTextColor()` unscaled. [`DyeColor.java:30-45`] is the source for
+//! `getTextColor()` unscaled. Vanilla's dye-colour registration is the source for
 //! every constant in [`dye_text_color_rgb`] — transcribed, not derived.
 //!
 //! # Glowing text: the outline is the whole visual difference
 //!
-//! `AbstractSignRenderer.submitSignText` branches once on
+//! Vanilla's base sign-renderer's text-submit function branches once on
 //! `signText.hasGlowingText()`, and the branch decides three things at once:
 //!
 //! | | plain | glowing |
@@ -143,17 +143,17 @@ use lodestone_world::{SignDyeColor, SignSide};
 use crate::entity::ENTITY_FULLBRIGHT;
 
 /// Which of vanilla's **two** sign renderers a block uses. Both are
-/// text-only — `StandingSignRenderer` and `HangingSignRenderer` each declare
+/// text-only — the standing-sign and hanging-sign renderers each declare
 /// no model whatsoever (verified against
-/// `.cache/mc/26.2/client-src/net/minecraft/client/renderer/blockentity/
-/// HangingSignRenderer.java`, which is `AbstractSignRenderer` plus one
+/// 26.2's decompiled hanging-sign-renderer source, which is the base
+/// sign-renderer class plus one
 /// `textTransformation`) — and the hanging board, its bar and its chains are
 /// all real block-model geometry
 /// (`assets/minecraft/models/block/oak_hanging_sign_rot_0.json` parents
 /// `block/template_hanging_sign_rot_0`, which has genuine elements). **The
 /// note in `docs/block-entity-renderers.md` calling hanging signs "a
 /// different model set again (chains, a bar)" was reasoning from 1.20, where
-/// `HangingSignRenderer` really did own a `HangingSignModel`; in 26.2 there
+/// the hanging-sign renderer really did own a rig; in 26.2 there
 /// is no rig to port and the only difference is four numbers.**
 ///
 /// Those four numbers, and nothing else:
@@ -247,8 +247,8 @@ pub enum SignOrientation {
 }
 
 /// The world placement matrix for one text side of a sign —
-/// `StandingSignRenderer.textTransformation` for [`SignKind::Plain`] and
-/// `HangingSignRenderer.textTransformation` for [`SignKind::Hanging`], see
+/// vanilla's standing-sign renderer's text-transformation function for [`SignKind::Plain`] and
+/// its hanging-sign renderer's text-transformation function for [`SignKind::Hanging`], see
 /// the module doc and [`SignKind`] for the term-by-term port and the four
 /// numbers that differ. Feed it a local point in **font-pixel space**
 /// (`x` right, `y` down from the block of text's own top, `z = 0`); the
@@ -304,8 +304,8 @@ pub fn sign_text_transform(
     m * Mat4::from_translation(text_offset) * Mat4::from_scale(Vec3::new(s, -s, s))
 }
 
-/// `DyeColor.getTextColor()`, transcribed from
-/// `.cache/mc/26.2/client-src/net/minecraft/world/item/DyeColor.java:30-45`
+/// `DyeColor.getTextColor()`, transcribed from vanilla's dye-colour
+/// registration table (26.2's decompiled source)
 /// (the last constructor argument on each line) — 0xRRGGBB, gamma-space.
 #[must_use]
 pub const fn dye_text_color_rgb(color: SignDyeColor) -> u32 {
@@ -330,7 +330,7 @@ pub const fn dye_text_color_rgb(color: SignDyeColor) -> u32 {
 }
 
 /// `ARGB.scaleRGB(rgb, 0.4)` — per-channel `(channel * scale) as i32`,
-/// clamped `0..255` (`ARGB.java:108-114`), **not** a float multiply carried
+/// clamped `0..255` (vanilla's packed-colour scale helper), **not** a float multiply carried
 /// through: vanilla truncates in integer space before the result is ever
 /// treated as a colour again, so this port truncates too rather than
 /// rounding.
@@ -378,12 +378,13 @@ pub fn sign_side_color(side: &SignSide) -> [f32; 4] {
 /// separate.
 pub const BLACK_TEXT_OUTLINE_RGB: u32 = 0x00F0_EBCC;
 
-/// `Mth.square(16)` — `AbstractSignRenderer.OUTLINE_RENDER_DISTANCE`, the
+/// `Mth.square(16)` — vanilla's base sign-renderer's outline-render-distance
+/// constant, the
 /// squared block distance from the camera to the sign's block *centre* within
 /// which a glowing (non-black) side draws its outline.
 pub const OUTLINE_RENDER_DISTANCE_SQUARED: f32 = 256.0;
 
-/// `AbstractSignRenderer.getDarkColor`, whole — the dye's text colour scaled
+/// Vanilla's base sign-renderer's dark-colour function, whole — the dye's text colour scaled
 /// by `0.4`, **except** for a black side with glowing text, which yields
 /// [`BLACK_TEXT_OUTLINE_RGB`] instead. Packed 0xRRGGBB.
 ///
@@ -469,7 +470,7 @@ pub struct SignSpawn {
     /// `gpu/sign_text.rs` multiplies the lightmap texel for this byte into
     /// every glyph and outline vertex of a **non-glowing** side; a glowing
     /// side substitutes full bright and ignores it, per
-    /// `AbstractSignRenderer.submitSignText`. Filled by
+    /// vanilla's base sign-renderer's text-submit function. Filled by
     /// `block_entities::sign_spawns` from `net::entity_light_at`.
     pub light: u8,
 }
@@ -617,7 +618,7 @@ mod tests {
         assert!((bright[0] - 1.0).abs() < 1e-4, "{bright:?}");
     }
 
-    /// Hand-computed from `HangingSignRenderer.textTransformation`'s own
+    /// Hand-computed from vanilla's hanging-sign renderer's text-transformation function's own
     /// expression at angle `0`, where every step is a plain translate:
     /// `y = 0.9375 - 0.3125 - 0.32 = 0.305`, `z = 0.5 + 0.073 = 0.573`.
     /// Pinned exactly, and **the plain hypothesis is computed alongside and

@@ -20,8 +20,8 @@
 //!
 //! # Blend: doubled multiply, not alpha
 //!
-//! Vanilla's `pipeline/crumbling` (`RenderPipelines.CRUMBLING` in
-//! `net.minecraft.client.renderer`) blends colour as
+//! Vanilla's `pipeline/crumbling` (`RenderPipelines.CRUMBLING`, its
+//! render-pipeline registration table) blends colour as
 //! `src_factor = DST_COLOR, dst_factor = SRC_COLOR, op = Add` — i.e.
 //! `out = dst*src + src*dst = 2 * src * dst`, a doubled multiply that can only
 //! ever darken the surface underneath, never lighten it. Alpha blending (the
@@ -210,7 +210,7 @@ impl CrackPipeline {
                 // `DepthStencilState(GREATER_THAN_OR_EQUAL, false, 1.0F, 10.0F)`
                 // is `(depthTest, writeDepth, depthBiasScaleFactor,
                 // depthBiasConstant)` — scale factor *then* constant, verified
-                // against `VulkanRenderPipeline.java` where
+                // against `VulkanRenderPipeline`'s own decompiled source where
                 // `depthBiasConstantFactor` reads `.depthBiasConstant()` and
                 // `depthBiasSlopeFactor` reads `.depthBiasScaleFactor()`. So
                 // vanilla's actual bias is slope=1.0, constant=10.0 (easy to get

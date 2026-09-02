@@ -374,7 +374,7 @@ impl GuiAtlas {
     /// a larger sheet, which [`build_with_extras`](Self::build_with_extras)
     /// stitches in whole: the recipe book's panel is
     /// `blit(RECIPE_BOOK_LOCATION, xo, yo, 1.0F, 1.0F, 147, 166, 256, 256)`
-    /// (`RecipeBookComponent.java:305`) — a `147×166` window at `(1, 1)` of a
+    /// (vanilla's recipe-book component) — a `147×166` window at `(1, 1)` of a
     /// `256×256` sheet. Passing that sheet to `geometry` would *stretch* all
     /// 256×256 of it into a 147×166 rect instead.
     ///
@@ -772,7 +772,7 @@ mod tests {
 
     /// The recipe book panel's own worked example, reproduced as a gate: a
     /// `147×166` window at `(1, 1)` of a sheet **declared** `256×256`
-    /// (`RecipeBookComponent.java`'s `blit(RECIPE_BOOK_LOCATION, xo, yo, 1.0F,
+    /// (vanilla's recipe-book component's `blit(RECIPE_BOOK_LOCATION, xo, yo, 1.0F,
     /// 1.0F, 147, 166, 256, 256)`), built once at 256×256 real pixels (a
     /// 16x-equivalent pack, where declared and real coincide) and once at
     /// 512×512 (32x). A sub-rect genuinely smaller than the whole sheet is

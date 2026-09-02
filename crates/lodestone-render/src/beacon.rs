@@ -1,4 +1,4 @@
-//! The beacon light beam — `BeaconRenderer.java`, ported. Not a cuboid rig:
+//! The beacon light beam — `BeaconRenderer`'s own decompiled source, ported. Not a cuboid rig:
 //! vanilla builds this geometry procedurally every frame (a rotating
 //! diamond-section "core" plus an axis-aligned glow square, both scrolling a
 //! shared texture vertically), so this module has no `EntityModelDef` the
@@ -177,7 +177,7 @@ pub fn beacon_beam_color(block_path: &str) -> Option<u32> {
     DyeColor::from_name(name).map(DyeColor::packed_rgb)
 }
 
-/// `ARGB.average(lhs, rhs)` (`ARGB.java`) — per-channel integer average,
+/// `ARGB.average(lhs, rhs)` (`ARGB`'s own decompiled source) — per-channel integer average,
 /// alpha included for fidelity though every caller here hands it two
 /// already-opaque `0x00RRGGBB` values (alpha is implicitly `0xFF` on both
 /// sides, so it stays `0xFF` and is dropped from the packed result the same

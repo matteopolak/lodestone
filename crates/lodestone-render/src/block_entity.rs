@@ -1182,7 +1182,7 @@ pub enum ShulkerFacing {
 }
 
 impl ShulkerFacing {
-    /// `Direction.getRotation()` (`Direction.java:144-153`) as a rotation matrix.
+    /// `Direction.getRotation()` (vanilla's direction-to-rotation function) as a rotation matrix.
     ///
     /// `rotationXYZ(x, y, z)` is JOML's **X then Y then Z** intrinsic order, which
     /// for the four horizontals here is `Mat4::from_rotation_z * from_rotation_x`
@@ -1270,8 +1270,8 @@ pub const DECORATED_POT_SIDE_DEFAULT_TEXTURE_STEM: &str =
 /// `"angler_pottery_sherd"`) to the sherd's own pattern texture stem —
 /// `DecoratedPotPatterns.itemToPatternMappings` plus
 /// `DecoratedPotPattern.assetId()`/`Sheets.DECORATED_POT_MAPPER`, transcribed
-/// from `.cache/mc/26.2/client-src/net/minecraft/world/level/block/entity/
-/// DecoratedPotPatterns.java`'s own `bootstrap` — the pattern's registered
+/// from vanilla's decorated-pot-patterns class's own `bootstrap` (26.2's
+/// decompiled source) — the pattern's registered
 /// asset id, not a guess from the sherd's own name (they happen to share a
 /// `<name>_pottery_pattern`/`<name>_pottery_sherd` stem, but that is a jar
 /// convention this reads off the real registration, not an assumption).
@@ -5434,7 +5434,7 @@ mod tests {
     #[test]
     fn every_shulker_stem_is_in_the_preload_list_in_dye_ordinal_order() {
         // `DyeColor`'s first four and last, from the enum's own declaration order
-        // (`DyeColor.java`), not from this table.
+        // (vanilla's dye-colour registration), not from this table.
         assert_eq!(
             &SHULKER_COLOURS[..4],
             &["white", "orange", "magenta", "light_blue"]

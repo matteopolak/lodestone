@@ -929,7 +929,7 @@ pub struct ModelSharedCameraUniform {
     pub fog: crate::fog::FogUniform,
 }
 
-/// Vanilla's `chunkSectionFadeInTime` default (`Options.java`'s
+/// Vanilla's `chunkSectionFadeInTime` default (`Options`'s own decompiled source's
 /// `OptionInstance<Double>` of that name: range `0.0..=2.0` seconds, shipped
 /// default `0.75`). This client has no video-settings UI to expose the option
 /// yet, so it is hardcoded exactly like `model.wgsl`'s own `BRIGHTNESS_FACTOR`
@@ -1168,7 +1168,7 @@ mod tests {
             "fluid.wgsl does not declare `{decl}` — the shader and \
              SECTION_FADE_DURATION_SECS have drifted apart"
         );
-        // Vanilla's real default (`Options.java`'s `chunkSectionFadeInTime`,
+        // Vanilla's real default (`Options`'s own decompiled source's `chunkSectionFadeInTime`,
         // 0.75 of its 0.0..=2.0 range) — not a plausible round number typed
         // from memory.
         assert_eq!(SECTION_FADE_DURATION_SECS, 0.75);
