@@ -3,4 +3,5 @@
 
 pub mod login;
 pub mod player_info;
+pub mod position;
 pub mod status;
