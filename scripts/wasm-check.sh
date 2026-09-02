@@ -189,7 +189,7 @@ CRATES=(
   # The portable clock seam (issue #552): nearly every crate below depends on
   # this one, so a regression here would otherwise surface only transitively,
   # attributed to whichever dependent happened to fail first. Listed first for
-  # the same reason lodestone-data is listed separately from v770.
+  # the same reason lodestone-data is listed separately from v26-2.
   "lodestone-time"
   "lodestone-core"
   "lodestone-model"
@@ -202,16 +202,16 @@ CRATES=(
   # The event→sound bridge. Its default build is device-free and version-free
   # (deps: lodestone-audio, lodestone-assets, lodestone-model, glam, thiserror —
   # all wasm-safe); the live gate's client/tokio/registry deps are gated behind
-  # the off-by-default `live-v770` feature, so the wasm build never pulls them.
+  # the off-by-default `live-v26-2` feature, so the wasm build never pulls them.
   "lodestone-sound"
   # The canonical 26.2 game-data censuses (issue #361), extracted out of
-  # lodestone-v770. Depends on nothing but lodestone-model, so it was already
-  # wasm-safe transitively via lodestone-v770's own row below; listed
+  # lodestone-v26-2. Depends on nothing but lodestone-model, so it was already
+  # wasm-safe transitively via lodestone-v26-2's own row below; listed
   # separately so a future regression here is unambiguous rather than only
-  # surfacing through v770.
+  # surfacing through v26-2.
   "lodestone-data"
-  "lodestone-v770"
-  "lodestone-v47"
+  "lodestone-v26-2"
+  "lodestone-v1-8"
   "lodestone-net|--features ws-web"
   # docs/bevy-migration.md Stage 0's single biggest go/no-go: bevy_ecs must be
   # wasm32-clean, or the whole migration stops here. Placed after
@@ -488,19 +488,28 @@ CONFINEMENT_RULES=(
   # `std::time::Instant::now()` in that same test module does not go red either.
   "lodestone-ecs instant-ban|crates/lodestone-ecs/src|std::time::Instant|async_task.rs"
   "lodestone-ecs systemtime-ban|crates/lodestone-ecs/src|std::time::SystemTime|async_task.rs"
+  # `lodestone-auth` joined this qualified-pattern bucket once `flow.rs` (which
+  # now compiles and runs on wasm32 — see that module's doc) took a
+  # `lodestone-time` dependency for a real wall-clock deadline
+  # (`PendingLogin::is_expired`). Empty allowlist: neither `browser_login.rs`
+  # nor `migrate.rs` (both still native-only) spells the type fully qualified —
+  # both reach it through a bare `use std::time::{..., Instant};` import, which
+  # this qualified substring does not match at all. Its `systemtime-ban`
+  # sibling stays in the bare-pattern bucket below: `lodestone-time` has no
+  # `SystemTime` re-export at all, so there is still no legitimate qualified
+  # `lodestone_time::SystemTime::now()` spelling in this crate to protect.
+  "lodestone-auth instant-ban|crates/lodestone-auth/src|std::time::Instant|"
   # --- crates outside the wasm build, tightened toward "no crate but
   # lodestone-time may name std::time's clocks" ---
   #
-  # None of these four crates appears in the CRATES compile subset above: each is
+  # None of these three crates appears in the CRATES compile subset above: each is
   # either dev-dependency-only (lodestone-testsupport, confirmed: every one of its
   # dependents lists it under [dev-dependencies], so its lib target is never
   # linked into a --lib build, wasm or native), a native-only bin nothing depends
   # on (lodestone-allocbench — a standalone allocator benchmark, already excluded
   # from the workspace-wide --all-features sweep for its allocator-feature
-  # mutual-exclusion), or reaches wasm only PARTIALLY, with its clock call sites
-  # confined behind a module-level `#[cfg(not(target_arch = "wasm32"))]`
-  # (lodestone-auth's `browser_login`/`migrate` modules) or a `#[cfg(test)]`
-  # module that never enters a `--lib` build either way (lodestone-world's
+  # mutual-exclusion), or reaches wasm only via a `#[cfg(test)]` module that
+  # never enters a `--lib` build either way (lodestone-world's
   # `fill_region_lock_hold_time_on_a_large_synthetic_fill` benchmark-style test).
   #
   # Rules for them still earn their keep: a rule here is what turns "this file
@@ -508,16 +517,21 @@ CONFINEMENT_RULES=(
   # on every run, and it is what stops a NEW file in one of these crates from
   # growing an ungated clock call unnoticed.
   #
-  # PATTERN CHOICE: none of these four crates depends on `lodestone-time`, so
+  # PATTERN CHOICE: none of these three crates depends on `lodestone-time`, so
   # there is no legitimate `lodestone_time::Instant::now()` call anywhere in them
-  # to avoid catching — unlike lodestone-server/worldgen/particle/net/ecs above,
-  # which must use the qualified `std::time::` path specifically so a legitimate
-  # `lodestone_time::Instant::now()` elsewhere in the same crate does not false-
-  # positive. These four instead use the bare `Instant::now(`/`SystemTime::now(`
-  # method-call spelling (as lodestone-audio/lodestone-sound do for the same
-  # "no legitimate caller exists" reason) because their actual call sites are a
-  # mix of qualified and unqualified spellings and the bare form catches both.
-  "lodestone-auth instant-ban|crates/lodestone-auth/src|Instant::now(|browser_login.rs,migrate.rs"
+  # to avoid catching — unlike lodestone-server/worldgen/particle/net/ecs/auth
+  # above, which must use the qualified `std::time::` path specifically so a
+  # legitimate `lodestone_time::Instant::now()` elsewhere in the same crate does
+  # not false-positive. These three instead use the bare
+  # `Instant::now(`/`SystemTime::now(` method-call spelling (as
+  # lodestone-audio/lodestone-sound do for the same "no legitimate caller
+  # exists" reason) because their actual call sites are a mix of qualified and
+  # unqualified spellings and the bare form catches both.
+  #
+  # `lodestone-auth systemtime-ban` lives here too, for its own reason (see the
+  # comment on `lodestone-auth instant-ban` above) rather than this bucket's:
+  # it did not move buckets because `lodestone-time` has no `SystemTime`
+  # re-export for it to false-positive against.
   "lodestone-auth systemtime-ban|crates/lodestone-auth/src|SystemTime::now(|browser_login.rs,migrate.rs"
   "lodestone-world instant-ban|crates/lodestone-world/src|Instant::now(|world.rs"
   "lodestone-world systemtime-ban|crates/lodestone-world/src|SystemTime::now(|world.rs"
