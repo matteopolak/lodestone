@@ -102,9 +102,9 @@ impl CrackResolver {
     ///
     /// Empty for air, for a state id past the table, and for any block whose model
     /// bakes no faces. Callers should treat empty as "draw nothing", never as an
-    /// error: `RenderShape.INVISIBLE` blocks legitimately have no quads, and
-    /// `FallingBlockRenderer.submit` guards on exactly that
-    /// (`blockState.getRenderShape() == RenderShape.MODEL`).
+    /// error: an invisible-render-shape block legitimately has no quads, and the
+    /// falling-block renderer guards on exactly that (it only draws a shape that
+    /// is a real model).
     ///
     /// Unlike [`mesh_for`](Self::mesh_for) this keeps the quads' **own** UVs, tint
     /// index, shade flag and animation slot — the crack path replaces the UVs with

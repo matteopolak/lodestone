@@ -8,7 +8,7 @@
 //! texture per layer (the real banner-pattern atlas is `lodestone-assets`
 //! work not done in this pass — see that doc's "jar ships individual sprite
 //! PNGs" section) and assert (a) the blend is genuinely translucent —
-//! predicted from the two layers' tints and the `ALPHA_BLENDING` formula,
+//! predicted from the two layers' tints and the standard alpha-blending formula,
 //! not merely "some pixels changed" — and (b) two layers submitted in
 //! opposite orders produce different composited colour.
 //!
@@ -24,10 +24,11 @@
 //! # Predicting the blend — and a measured surprise that changed the design
 //!
 //! `entity_depth_coincident_pixels.rs` hand-derives the diffuse term
-//! (`0.739546`) from `Lighting.java`'s two lights and predicts an exact
-//! byte. A first version of this gate tried the same shape for the blend —
+//! (`0.739546`) from vanilla's fixed two-light entity lighting setup and
+//! predicts an exact byte. A first version of this gate tried the same shape
+//! for the blend —
 //! measure each tint alone at full alpha, then predict the composite via
-//! `ALPHA_BLENDING`'s textbook `src * a + dst * (1 - a)` evaluated in linear
+//! the standard alpha-blending textbook `src * a + dst * (1 - a)` evaluated in linear
 //! light. **That formula's `a` was wrong on this machine's backend
 //! (Metal).** A 12-point sweep of the fragment's raw alpha byte against the
 //! *implied* linear-space mixing factor (solved from each measured
@@ -67,12 +68,12 @@
 //!
 //! # Order-dependence, isolated from the blend
 //!
-//! At full alpha (`a = 1.0`), `ALPHA_BLENDING`'s own formula collapses to a
-//! pure overwrite (`src * 1 + dst * 0 = src`), so which layer is visible is
-//! decided purely by **submission order**, not by depth or blending — this
-//! is the same "translucent, depth-write-off" pipeline vanilla uses for
-//! `submitPatterns`' opaque interior mask texels (most of a mask's own
-//! coverage is `alpha = 1`; only its antialiased edge is partial). The two
+//! At full alpha (`a = 1.0`), the standard alpha-blending formula collapses
+//! to a pure overwrite (`src * 1 + dst * 0 = src`), so which layer is visible
+//! is decided purely by **submission order**, not by depth or blending — this
+//! is the same "translucent, depth-write-off" pipeline vanilla uses for a
+//! banner pattern layer's own opaque interior mask texels (most of a mask's
+//! own coverage is `alpha = 1`; only its antialiased edge is partial). The two
 //! orderings must produce the complementary result, and each must be
 //! byte-identical to that layer drawn alone — the same anti-vacuity control
 //! the coincident-depth gate already uses, so a "survivor" that is secretly
@@ -639,7 +640,7 @@ fn two_full_alpha_layers_composite_by_submission_order_not_by_colour() {
     let red_alone = render(&gpu, &[Layer { tint: RED, alpha: 255 }]);
     let blue_alone = render(&gpu, &[Layer { tint: BLUE, alpha: 255 }]);
 
-    // At full alpha, `ALPHA_BLENDING` collapses to a pure overwrite, so
+    // At full alpha, standard alpha blending collapses to a pure overwrite, so
     // whichever layer is submitted *last* must win outright — and the
     // result must be byte-identical to that layer drawn alone (the same
     // anti-vacuity control `each_tint_rendered_alone_is_the_byte_the_
