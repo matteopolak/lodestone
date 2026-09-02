@@ -1,4 +1,4 @@
-//! The per-player `.dat` container — 26.2's `PlayerDataStorage`.
+//! The per-player `.dat` container, as 26.2 stores it.
 //!
 //! # What it is
 //!
@@ -23,8 +23,8 @@
 //!
 //! # The `_old` sibling
 //!
-//! Vanilla writes `<uuid>.dat_old` next to the live file: `PlayerDataStorage`
-//! writes a temp file, moves the current file to `.dat_old`, then moves the temp
+//! Vanilla writes `<uuid>.dat_old` next to the live file: a real save writes
+//! a temp file, moves the current file to `.dat_old`, then moves the temp
 //! into place, so a crash mid-write costs the *previous* save rather than both.
 //! 46 of the oracle world's 287 players have one. [`write_to_file`] does the
 //! same three-step dance for the same reason — a half-written player file is
@@ -122,9 +122,9 @@ pub fn write_to_file(root: &Nbt, path: &Path) -> Result<()> {
     let temp = path.with_extension("dat_tmp");
     std::fs::write(&temp, &bytes).map_err(Error::Io)?;
     let old = path.with_extension("dat_old");
-    // Vanilla's `PlayerDataStorage.save` ignores a failure to shuffle the
-    // previous file aside (there may not be one), and so do we: the rename
-    // below is what has to succeed.
+    // A real save ignores a failure to shuffle the previous file aside
+    // (there may not be one), and so do we: the rename below is what has to
+    // succeed.
     let _ = std::fs::rename(path, &old);
     std::fs::rename(&temp, path).map_err(Error::Io)
 }

@@ -9,25 +9,23 @@
 //!
 //! # Field names, from the real codec
 //!
-//! `SignText.DIRECT_CODEC` is `{ messages: [Component; 4],
+//! One side's record is `{ messages: [Component; 4],
 //! filtered_messages?: [Component; 4], color: DyeColor = black,
-//! has_glowing_text: bool = false }`, and `SignBlockEntity.saveAdditional`
+//! has_glowing_text: bool = false }`, and a sign block entity's save routine
 //! stores one of these per side under `front_text`/`back_text`, plus a
 //! sibling `is_waxed` boolean. `filtered_messages` is the server's
-//! profanity-filter shadow copy for chat-filtering clients
-//! (`SignText.getMessages(shouldFilter)`); this port has no client-side text
-//! filtering setting (Minecraft's own default is *off*), so it is not parsed
-//! — [`SignSide::lines`] always reads `messages`, matching vanilla's
+//! profanity-filter shadow copy for chat-filtering clients; this port has no
+//! client-side text filtering setting (the real default is *off*), so it is
+//! not parsed — [`SignSide::lines`] always reads `messages`, matching the
 //! unfiltered default.
 //!
 //! # Messages are structural NBT components, not JSON — and this file said
 //! the opposite until a live server proved otherwise
 //!
-//! `SignText.LINES_CODEC` is `ComponentSerialization.CODEC.listOf()`, and
-//! that codec's encoder is
-//! `component -> { String text = component.tryCollapseToString(); return
-//! text != null ? Either.left(Either.left(text)) : Either.right(component); }`.
-//! Under `NbtOps` that means exactly two shapes per element:
+//! Each `messages` element is encoded by first trying to collapse the
+//! component to a bare string (no siblings, no style at all); only when that
+//! fails does the encoder fall back to the component's full structural form.
+//! Under NBT encoding that means exactly two shapes per element:
 //!
 //! * a component that collapses — plain text, no siblings, **empty style** —
 //!   is an `Nbt::String` holding the text **verbatim**. Not JSON: a line
@@ -54,11 +52,10 @@
 //! [`append_component_spans`] walks the structural form: a `String` is its
 //! own literal, a `Compound` contributes its own `text` styled by its own
 //! fields plus whatever it inherited and then recurses into `extra`, and a
-//! `List` is `ComponentSerialization::createFromList` — element `0` is the
-//! root and the rest are its siblings, so they inherit element `0`'s
-//! resolved style, not the enclosing one. Style inheritance is vanilla's
-//! `Style.inherit`: a child's own value wins where it has one, otherwise the
-//! parent's survives.
+//! `List`'s element `0` is the root and the rest are its siblings, so they
+//! inherit element `0`'s resolved style, not the enclosing one. Style
+//! inheritance follows one rule throughout: a child's own value wins where it
+//! has one, otherwise the parent's survives.
 //!
 //! Not modelled: `translatable`, `keybind`, `score`, `selector`, `nbt` and
 //! `object` contents. A `Compound` carrying one of those and no `text` field
@@ -101,9 +98,8 @@
 
 use lodestone_core::Nbt;
 
-/// One dyed colour a sign's text can use — `DyeColor`'s sixteen enum
-/// constants, the type [`SignSide::color`] resolves `SignText`'s `color`
-/// field into.
+/// One dyed colour a sign's text can use — the sixteen dye colours, the
+/// type [`SignSide::color`] resolves a side's own `color` field into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SignDyeColor {
     /// `minecraft:white`.
@@ -141,8 +137,8 @@ pub enum SignDyeColor {
 }
 
 impl SignDyeColor {
-    /// Resolves `DyeColor.CODEC`'s serialized name, or `None` for anything
-    /// else — a malformed or future value degrades to
+    /// Resolves the codec's serialized dye-colour name, or `None` for
+    /// anything else — a malformed or future value degrades to
     /// [`SignDyeColor::Black`] at the call site, the codec's own default,
     /// rather than here, so a caller can tell "absent" from "unrecognised"
     /// if it ever needs to.
@@ -178,14 +174,13 @@ impl SignDyeColor {
 /// `color` is `None` when neither this JSON node nor any of its ancestors up
 /// to the message root specified a colour. **`None` means "draw in the
 /// side's own dye colour", not "draw black" or "draw white" — the dye colour
-/// is a run's *default*, not an override.** This is
-/// `AbstractSignRenderer.submitSignText` passing the side's resolved colour
-/// as `Font`'s own default-colour argument, and `Font.java::getTextColor`
-/// only substituting a glyph's own `Style` colour when that style actually
-/// carries one — the identical "child wins when specified, otherwise inherit
-/// the surface's own base" rule [`lodestone_model::text`]'s `resolved_rgb`
-/// already applies for nametags and `text_display`. A run whose own colour
-/// *is* specified always wins over the dye, at any brightness.
+/// is a run's *default*, not an override.** The side's resolved dye colour is
+/// passed down as the text-drawing routine's own default colour, substituted
+/// only when a glyph's own resolved style actually carries an explicit one —
+/// the identical "child wins when specified, otherwise inherit the surface's
+/// own base" rule [`lodestone_model::text`]'s `resolved_rgb` already applies
+/// for nametags and `text_display`. A run whose own colour *is* specified
+/// always wins over the dye, at any brightness.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SignTextSpan {
     /// This run's plain text. Never empty — a JSON node whose own text is
@@ -196,8 +191,8 @@ pub struct SignTextSpan {
     /// colour or a `#rrggbb` hex literal. `None` means unspecified — see the
     /// type doc.
     pub color: Option<u32>,
-    /// Bold, fully resolved (defaults to `false` at the message root, same
-    /// as vanilla's `Style.EMPTY`).
+    /// Bold, fully resolved (defaults to `false` at the message root, the
+    /// same as an entirely unstyled component's default style).
     pub bold: bool,
     /// Italic, fully resolved.
     pub italic: bool,
@@ -207,28 +202,28 @@ pub struct SignTextSpan {
     pub strikethrough: bool,
 }
 
-/// One face's text — `SignText`'s `messages`, `color` and `hasGlowingText`
-/// fields, minus `filteredMessages` (see the module doc).
+/// One face's text — the `messages`, `color` and `has_glowing_text` fields
+/// of a side's record, minus the profanity-filter shadow copy (see the
+/// module doc).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignSide {
-    /// One entry per line, top to bottom. Always four — vanilla's
-    /// `SignText.LINES = 4`. An empty `Vec` is a blank line, not "no line".
+    /// One entry per line, top to bottom. Always four, the fixed line count
+    /// a side's record carries. An empty `Vec` is a blank line, not "no
+    /// line".
     pub lines: [Vec<SignTextSpan>; 4],
-    /// `has_glowing_text` (`SignText.hasGlowingText`) — full-bright dye
-    /// colour instead of the darkened default when set.
+    /// `has_glowing_text` — full-bright dye colour instead of the darkened
+    /// default when set.
     pub glowing: bool,
-    /// `color` (`SignText.color`), defaulting to
-    /// [`SignDyeColor::Black`] exactly as the codec's own
-    /// `optionalAlwaysPresentFieldOf(..., DyeColor.BLACK)` does.
+    /// `color`, defaulting to [`SignDyeColor::Black`] exactly as the
+    /// codec's own always-present-with-default field does.
     pub color: SignDyeColor,
 }
 
 impl Default for SignSide {
-    /// Four empty lines, black, not glowing — vanilla's own
-    /// `new SignText()` no-arg constructor default, and what a sign
-    /// block entity with no NBT at all (a freshly-placed sign the server
-    /// has not yet sent text for) should draw: nothing, rather than an
-    /// error.
+    /// Four empty lines, black, not glowing — the real no-argument default,
+    /// and what a sign block entity with no NBT at all (a freshly-placed
+    /// sign the server has not yet sent text for) should draw: nothing,
+    /// rather than an error.
     fn default() -> Self {
         SignSide {
             lines: Default::default(),
@@ -247,11 +242,11 @@ pub struct SignText {
     pub front: SignSide,
     /// The side a player reading the sign from behind sees.
     pub back: SignSide,
-    /// `is_waxed` — disables further editing server-side. No render effect
-    /// in vanilla (`SignBlockEntity` carries it purely for interaction
-    /// gating; there is no `WaxedSignRenderer` or visual overlay), parsed
-    /// here for completeness rather than left silently unavailable to a
-    /// future interaction system.
+    /// `is_waxed` — disables further editing server-side. No render effect:
+    /// the real game carries it purely for interaction gating, with no
+    /// visual overlay for it at all, and it is parsed here for completeness
+    /// rather than left silently unavailable to a future interaction
+    /// system.
     pub waxed: bool,
 }
 
@@ -309,8 +304,7 @@ const MAX_DEPTH: usize = 64;
 /// Style attributes accumulated while walking one JSON component tree —
 /// every field `None`/unset until a node along the walk specifies it, then
 /// carried down to that node's `extra` children by [`ResolvedStyle::inherit`]
-/// exactly as `Style.inherit` (child wins when specified, otherwise the
-/// parent's value survives).
+/// (child wins when specified, otherwise the parent's value survives).
 #[derive(Debug, Clone, Copy, Default)]
 struct ResolvedStyle {
     color: Option<u32>,
@@ -322,8 +316,8 @@ struct ResolvedStyle {
 
 impl ResolvedStyle {
     /// The style fields this `Compound` carries in its own right, before
-    /// inheritance — `Style.Serializer.MAP_CODEC`'s own field names, read
-    /// off an [`Nbt`] compound rather than a JSON object.
+    /// inheritance — the real style record's own field names, read off an
+    /// [`Nbt`] compound rather than a JSON object.
     fn own_from_compound(fields: &[(String, Nbt)]) -> Self {
         ResolvedStyle {
             color: find(fields, "color")
@@ -364,14 +358,13 @@ impl ResolvedStyle {
     }
 }
 
-/// The sixteen legacy chat-colour names' RGB values
-/// (`0x00rrggbb`), transcribed from `ChatFormatting.java`'s constructor
-/// arguments — the same table `lodestone_model::text::TextColor::rgb`
-/// carries, duplicated here rather than depended on (see the module doc) —
-/// plus `#rrggbb` hex, `TextColor.java`'s modern colour form. `None` for
-/// anything else, including the pseudo-colour `"reset"` (a style reset, not
-/// a colour — sign text has nothing above the message root to reset to, so
-/// this parse has no use for it).
+/// The sixteen legacy chat-colour names' RGB values (`0x00rrggbb`) — the
+/// same table `lodestone_model::text::TextColor::rgb` carries, duplicated
+/// here rather than depended on (see the module doc) — plus `#rrggbb` hex,
+/// the modern colour form. `None` for anything else, including the
+/// pseudo-colour `"reset"` (a style reset, not a colour — sign text has
+/// nothing above the message root to reset to, so this parse has no use for
+/// it).
 fn parse_text_color_name(name: &str) -> Option<u32> {
     if let Some(hex) = name.strip_prefix('#') {
         return (hex.len() == 6)
@@ -405,17 +398,17 @@ fn parse_text_color_name(name: &str) -> Option<u32> {
 /// already performs for chat and entity metadata, over the same [`Nbt`].
 ///
 /// * [`Nbt::String`] is a **collapsed literal** — the text verbatim, styled
-///   by whatever it inherited. This is `ComponentSerialization.CODEC`'s own
-///   `tryCollapseToString` branch and it is the shape a player-typed sign
-///   line always arrives in.
+///   by whatever it inherited. This is the encoder's own
+///   collapse-to-plain-string branch and it is the shape a player-typed
+///   sign line always arrives in.
 /// * [`Nbt::Compound`] contributes its own `text` (styled by its own fields
 ///   over the inherited ones) and then recurses into `extra` with that
 ///   resolved style as the new parent.
-/// * [`Nbt::List`] is `ComponentSerialization::createFromList`: element `0`
-///   is the root and every later element is *appended to it* as a sibling,
-///   so the rest inherit element `0`'s resolved style rather than the
-///   enclosing one. Getting this wrong is invisible for the common
-///   single-element case and wrong for every styled list.
+/// * [`Nbt::List`]: element `0` is the root and every later element is
+///   *appended to it* as a sibling, so the rest inherit element `0`'s
+///   resolved style rather than the enclosing one. Getting this wrong is
+///   invisible for the common single-element case and wrong for every
+///   styled list.
 fn append_component_spans(
     nbt: &Nbt,
     parent: ResolvedStyle,
@@ -507,9 +500,8 @@ mod tests {
         }
     }
 
-    /// A `Compound` component node, built from the field names
-    /// `Style.Serializer.MAP_CODEC` and `ComponentSerialization`'s own
-    /// record use.
+    /// A `Compound` component node, built from the real style record's and
+    /// component record's own field names.
     fn compound(fields: Vec<(&str, Nbt)>) -> Nbt {
         Nbt::Compound(fields.into_iter().map(|(k, v)| (k.to_owned(), v)).collect())
     }
@@ -543,9 +535,9 @@ mod tests {
     }
 
     /// The shape a **real** server sends for a sign a player typed: every
-    /// line collapses to a bare `Nbt::String` holding the text verbatim
-    /// (`ComponentSerialization.CODEC`'s `tryCollapseToString` branch), with
-    /// no JSON quoting anywhere.
+    /// line collapses to a bare `Nbt::String` holding the text verbatim (the
+    /// encoder's collapse-to-plain-string branch), with no JSON quoting
+    /// anywhere.
     #[test]
     fn a_players_plain_sign_arrives_as_collapsed_string_literals() {
         let nbt = compound(vec![
@@ -666,12 +658,12 @@ mod tests {
         }
     }
 
-    /// A `messages` element that is itself a **list** is
-    /// `ComponentSerialization::createFromList`: element `0` is the root and
-    /// the rest are appended to it as siblings, so they inherit element
-    /// `0`'s style — **not** the (empty) enclosing one. The discriminating
-    /// fixture styles only element `0`; a parse that passed the enclosing
-    /// style to every element would leave the sibling unstyled.
+    /// A `messages` element that is itself a **list**: element `0` is the
+    /// root and the rest are appended to it as siblings, so they inherit
+    /// element `0`'s style — **not** the (empty) enclosing one. The
+    /// discriminating fixture styles only element `0`; a parse that passed
+    /// the enclosing style to every element would leave the sibling
+    /// unstyled.
     #[test]
     fn a_list_message_makes_its_first_element_the_parent_of_the_rest() {
         let node = list(vec![

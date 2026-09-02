@@ -1,9 +1,10 @@
-//! Auto-generated Minecraft `Mth.SIN` lookup table (65,536 entries).
+//! Auto-generated sine lookup table (65,536 entries), matching vanilla's own
+//! quantized-trigonometry table bit-for-bit.
 //!
 //! Generated once and checked in; DO NOT edit by hand. Regenerate with the
 //! documented procedure in `mth.rs`. Each entry is the raw IEEE-754 `f32` bit
-//! pattern of `(float)Math.sin(i / 10430.378350470453)`, matching vanilla
-//! `net.minecraft.util.Mth`'s table construction exactly.
+//! pattern of `(float)Math.sin(i / 10430.378350470453)`, matching vanilla's
+//! own table construction exactly.
 //!
 //! Validated **element-wise against the real JVM** (`eclipse-temurin:25-jdk`,
 //! the runtime vanilla 26.2 uses): see `oracle-java/SinOracle.java` and the

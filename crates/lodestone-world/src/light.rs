@@ -8,10 +8,11 @@
 //! zero block light, and sections above the terrain are uniformly full (15) sky
 //! light. A uniform section is stored as a one-byte tag, not a 2 KiB array.
 //!
-//! This mirrors vanilla's `DataLayer`, whose backing byte array is `null` while
-//! the layer is uniform (`fill(v)` drops the array and remembers a default),
-//! and the light-update packet, which carries a present-section mask, an
-//! empty-section mask, and only the arrays for genuinely non-uniform sections.
+//! This mirrors vanilla's own light-layer storage, whose backing byte array
+//! is absent while the layer is uniform (filling a layer with one value drops
+//! the array and remembers a default instead), and the light-update packet,
+//! which carries a present-section mask, an empty-section mask, and only the
+//! arrays for genuinely non-uniform sections.
 
 use lodestone_core::{Reader, Writer};
 use std::sync::Arc;
@@ -26,7 +27,7 @@ const LIGHT_ARRAY_BYTES: usize = 2048;
 /// Entries are addressed either by flat index (`0..4096`) or by local
 /// coordinates through [`NibbleArray::index`], which uses vanilla's YZX order
 /// (`index = y << 8 | z << 4 | x`). The low nibble of byte `i` holds entry `2i`
-/// and the high nibble holds entry `2i + 1`, matching `DataLayer`.
+/// and the high nibble holds entry `2i + 1`, matching vanilla's own layout.
 ///
 /// The 2 KiB backing store is held behind an [`Arc`] so that a light snapshot
 /// handed to a mesher clones in O(1) (a refcount bump, not a 2 KiB copy) and a
@@ -513,8 +514,8 @@ fn assemble_layer(
     Ok(layer)
 }
 
-/// Writes a bitset as vanilla `writeBitSet` does: a VarInt-prefixed little-word
-/// long array with trailing all-zero words trimmed.
+/// Writes a bitset the way vanilla's own wire encoding does: a VarInt-prefixed
+/// little-word long array with trailing all-zero words trimmed.
 fn write_bitset(w: &mut Writer, bits: &[bool], _count: usize) {
     let mut words: Vec<u64> = Vec::new();
     for (i, &set) in bits.iter().enumerate() {

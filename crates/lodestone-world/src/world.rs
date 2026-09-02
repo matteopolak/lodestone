@@ -94,8 +94,8 @@ impl LoadedChunk {
 ///
 /// Returned rather than discarded because the four cases are the whole contract
 /// and are otherwise indistinguishable from outside: a gate that only inspects
-/// the resulting list cannot tell **kept** (NBT preserved, vanilla's
-/// `isValidBlockState` branch) from **replaced** (NBT cleared), and cannot tell
+/// the resulting list cannot tell **kept** (NBT preserved, the state still
+/// matching the existing record's type) from **replaced** (NBT cleared), and cannot tell
 /// **chunk absent** from **nothing to do** — and "the chunk was not loaded" is
 /// precisely the vacuous-fixture failure that would make a block-update test
 /// prove nothing at all.
@@ -238,8 +238,8 @@ impl LightPatch {
     /// packet (protocol ≥ 1.14, where light travels separately from the chunk).
     ///
     /// This is the version-free half of `light_update` decoding: a version crate
-    /// reads the four wire bitsets as `long[]` (LSB-first, exactly
-    /// `BitSet.toLongArray()`) and the two lists of 2048-byte nibble arrays as
+    /// reads the four wire bitsets as `long[]` (LSB-first, little-endian word
+    /// order) and the two lists of 2048-byte nibble arrays as
     /// [`NibbleArray`]s (via [`NibbleArray::from_bytes`], in wire order), then
     /// hands them here. All three-state light semantics live in this one tested
     /// place so no adapter has to re-derive them:
@@ -395,7 +395,7 @@ pub struct World {
     chunks: HashMap<ChunkPos, LoadedChunk>,
     /// Absolute block positions written since the last relight drain, for
     /// [`run_pending_relight`](World::run_pending_relight) — the client's own
-    /// `LightEngine.checkBlock` queue.
+    /// bounded-box light recompute queue.
     ///
     /// Recorded rather than acted on, because a `/fill` is 4096 writes under one
     /// lock and vanilla batches the same work onto its client tick. A host that
@@ -403,7 +403,7 @@ pub struct World {
     /// exactly the previous behaviour.
     pub(crate) pending_relight: Vec<[i32; 3]>,
     /// Absolute block positions whose orthogonal neighbours are owed
-    /// vanilla's `Block.updateNeighborsAt` fan-out, queued by
+    /// vanilla's own neighbour-update fan-out, queued by
     /// [`set_block_with_physics`](World::set_block_with_physics) when called
     /// with `physics: true` and drained by
     /// [`drain_pending_physics_updates`](World::drain_pending_physics_updates).
@@ -420,7 +420,7 @@ pub struct World {
     /// Diagnostic. It exists because "the server sent a light update for the block
     /// you broke" and "the client relit it itself and nothing corrected it" produce
     /// the same stored light and the same pixels, and a host cannot otherwise tell
-    /// which one it is looking at. Vanilla's `ChunkHolder.broadcastChanges` sends
+    /// which one it is looking at. Vanilla's own tracked-chunk broadcast sends
     /// the light packet only to players for whom the chunk is on the *outer ring*
     /// of their loaded area, so for the breaker this is expected to stay flat —
     /// and a reading where it does **not** means the correction arrived and the
@@ -559,7 +559,7 @@ impl World {
     ///
     /// `physics: true` additionally queues the six orthogonally adjacent
     /// positions onto [`pending_physics_updates`](Self::pending_physics_updates)
-    /// — vanilla's `Block.updateNeighborsAt` fan-out — for a future
+    /// — vanilla's own neighbour-update fan-out — for a future
     /// block-tick/neighbour-update system to drain. **That system does not
     /// exist yet**, so today `physics: true` differs from `physics: false`
     /// only in what gets queued, never in what a plugin observes; this ships
@@ -619,17 +619,17 @@ impl World {
 
     /// Records `(x, y, z)` for the next
     /// [`run_pending_relight`](World::run_pending_relight), which is vanilla's
-    /// `LevelChunk.setBlockState` calling `getLightEngine().checkBlock(pos)`.
+    /// own light-engine recheck run whenever a block state is set.
     ///
     /// Public because not every client write goes through
     /// [`set_block`](World::set_block) — a host that mutates a column directly must
     /// say so, or a block it changed keeps the light of whatever used to be there.
     /// See [`crate::relight`] for why the light cannot simply be recomputed here.
     ///
-    /// Queueing is unconditional rather than gated on the state actually changing
-    /// light properties (vanilla's `LightEngine.hasDifferentLightProperties`): that
-    /// test needs a props lookup and the *old* state, and a redundant relight is a
-    /// no-op diff, not a wrong picture.
+    /// Queueing is unconditional rather than gated on the state actually
+    /// changing light properties (vanilla's own old-versus-new light-property
+    /// comparison): that test needs a props lookup and the *old* state, and a
+    /// redundant relight is a no-op diff, not a wrong picture.
     pub fn queue_relight(&mut self, x: i32, y: i32, z: i32) {
         if self.pending_relight.len() < PENDING_RELIGHT_CAP {
             self.pending_relight.push([x, y, z]);
@@ -832,7 +832,7 @@ impl World {
 
     /// Brings the block-entity record at `(x, y, z)` into agreement with a block
     /// state that has just been written there — creating, keeping, replacing or
-    /// removing it. Vanilla's `LevelChunk.setBlockState` tail, ported.
+    /// removing it. Vanilla's own block-state-write tail, ported.
     ///
     /// `block_entity_type` is the `BLOCK_ENTITY_TYPE` registry id the *new* state
     /// owns, or `None` if it owns none. Resolving a state id to that answer is
@@ -842,28 +842,28 @@ impl World {
     /// # Why this exists at all
     ///
     /// In vanilla, **setting a block state is what creates the block entity** —
-    /// no packet is involved (26.2 `LevelChunk.setBlockState`,
-    /// `blockEntity = ((EntityBlock)newBlock).newBlockEntity(pos, state)`), and
-    /// `block_entity_data` only ever carries *data for an entity that already
-    /// exists*. Lodestone had no equivalent: `block_update` wrote the state and
+    /// no packet is involved: the block itself is asked to construct a fresh
+    /// block entity for the new state right there, and the block-entity-data
+    /// packet only ever carries *data for an entity that already exists*.
+    /// Lodestone had no equivalent: `block_update` wrote the state and
     /// nothing else, so a freshly placed chest had a state, no record, and drew
     /// zero pixels while still opening.
     ///
     /// # The four outcomes, and why removal matters as much as creation
     ///
-    /// Following `LevelChunk.setBlockState`:
+    /// Following vanilla's own block-state-write tail:
     ///
     /// * new state owns type `T`, no record here → **create** one with `T` and
-    ///   [`Nbt::End`] (vanilla's `newBlockEntity` likewise starts with defaults;
-    ///   the server sends a `block_entity_data` afterwards only when there is
-    ///   something to say).
+    ///   [`Nbt::End`] (vanilla's own freshly-constructed block entity likewise
+    ///   starts with defaults; the server sends its data packet afterwards only
+    ///   when there is something to say).
     /// * new state owns type `T`, record here already has type `T` → **keep it
-    ///   untouched**, NBT included. This is vanilla's
-    ///   `blockEntity.isValidBlockState(state)` branch — `isValid` is
-    ///   `validBlocks.contains(state.getBlock())` — and it is why rotating or
+    ///   untouched**, NBT included. This is vanilla's own "does this record
+    ///   still accept this block state" check, and it is why rotating or
     ///   re-sending a chest's state does not wipe its contents.
     /// * new state owns type `T`, record here has some other type → **replace**
-    ///   (vanilla logs "Found mismatched block entity", removes and recreates).
+    ///   (vanilla logs a mismatched-block-entity warning, removes and
+    ///   recreates).
     /// * new state owns nothing → **remove** any record here. Without this half,
     ///   breaking a chest leaves a stale record and the renderer keeps drawing a
     ///   chest in empty air, which is the same class of bug as the missing
@@ -997,9 +997,8 @@ impl World {
     /// its per-section payload carries *only* biomes, no block data at all, so it
     /// cannot go through [`ColumnPatch`] without inventing block states the
     /// packet never sent. Deliberately a **no-op** when the chunk is not loaded —
-    /// vanilla only ever sends this for a chunk a player already has loaded
-    /// (`ChunkMap.resendBiomesForChunks` iterates `getPlayers`), so a column this
-    /// client does not hold has nothing to update, and synthesising one from
+    /// vanilla only ever sends this for a chunk a player already has loaded, so
+    /// a column this client does not hold has nothing to update, and synthesising one from
     /// biomes alone would need a shape (min-Y, section count, palettes) this
     /// patch does not carry.
     pub fn merge_biomes(&mut self, pos: ChunkPos, patch: BiomePatch) {
@@ -1183,7 +1182,7 @@ pub trait WorldSink {
     /// [`set_block`](WorldSink::set_block) / [`set_blocks`](WorldSink::set_blocks),
     /// passing the `BLOCK_ENTITY_TYPE` registry id the new state owns (or `None`).
     /// It is what makes a placed chest exist client-side without a packet, exactly
-    /// as vanilla's `LevelChunk.setBlockState` does — see
+    /// as vanilla's own block-state-write tail does — see
     /// [`World::sync_block_entity`] for the full rule and what this seam's
     /// absence looked like without it.
     ///
@@ -1707,7 +1706,7 @@ mod tests {
         assert_eq!(
             queued, expected,
             "must queue exactly the six orthogonal neighbours, matching \
-             vanilla's Block.updateNeighborsAt fan-out"
+             vanilla's own neighbour-update fan-out"
         );
         assert!(
             world.drain_pending_physics_updates().is_empty(),
@@ -1892,7 +1891,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // sync_block_entity: vanilla's LevelChunk.setBlockState tail
+    // sync_block_entity: vanilla's own block-state-write tail
     // -----------------------------------------------------------------------
 
     /// A block-entity type id standing in for `minecraft:chest` (1 in 26.2), and
@@ -1955,8 +1954,8 @@ mod tests {
         );
     }
 
-    /// Vanilla keeps an existing block entity whose type still matches the state
-    /// (`isValidBlockState`), so re-sending a chest's state must not wipe its
+    /// Vanilla keeps an existing block entity whose type still matches the new
+    /// state, so re-sending a chest's state must not wipe its
     /// contents. Asserted on the **NBT**, because the record's shape alone is
     /// identical either way — this is the difference between `Kept` and
     /// `Replaced`.
@@ -1979,8 +1978,8 @@ mod tests {
         );
     }
 
-    /// A different type at the same position is vanilla's "Found mismatched block
-    /// entity" branch: remove and recreate, so the stale NBT must not survive.
+    /// A different type at the same position is vanilla's mismatched-block-entity
+    /// branch: remove and recreate, so the stale NBT must not survive.
     #[test]
     fn a_mismatched_record_is_replaced_and_its_nbt_cleared() {
         let mut world = World::new();
@@ -2405,8 +2404,7 @@ mod tests {
         let mut patch = BiomePatch::new();
         patch.set_section(0, PalettedContainer::new(PaletteKind::biomes(), 3));
         // Vanilla only ever sends `chunks_biomes` for a chunk a player already
-        // has loaded (`ChunkMap.resendBiomesForChunks` iterates `getPlayers`),
-        // so a chunk we do not hold has nothing to update.
+        // has loaded, so a chunk we do not hold has nothing to update.
         world.merge_biomes(ChunkPos::new(5, 5), patch);
         assert!(
             world.is_empty(),
@@ -2454,7 +2452,7 @@ mod tests {
     }
 
     /// Builds a wire-shaped light mask (`long[]`, LSB-first) from a list of set
-    /// light-section indices, mirroring Minecraft's `BitSet.toLongArray()`.
+    /// light-section indices, mirroring the real wire encoding.
     fn mask_of(bits: &[usize]) -> Vec<u64> {
         let mut m: Vec<u64> = Vec::new();
         for &b in bits {

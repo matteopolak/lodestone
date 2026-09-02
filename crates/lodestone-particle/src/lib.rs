@@ -31,10 +31,10 @@
 //!
 //! # Scope
 //!
-//! The base class ([`Particle`], [`SingleQuadParticle`]) is complete. The
-//! per-type behaviours in [`Behaviour`] cover the ones the client needs to make
-//! block interaction and the water surface read correctly; adding another is a
-//! transcription of one small Java class plus a test, not a design exercise.
+//! The base type ([`Particle`]) is complete. The per-type behaviours in
+//! [`Behaviour`] cover the ones the client needs to make block interaction and
+//! the water surface read correctly; adding another is a transcription of one
+//! small behaviour plus a test, not a design exercise.
 
 pub mod emit;
 pub mod rng;
@@ -43,9 +43,9 @@ use lodestone_physics::collision::collide;
 use lodestone_physics::{Aabb, CollisionView, Vec3d, mth};
 use rng::JavaRandom;
 
-/// `Mth.square(100.0)` — above this speed vanilla skips collision entirely,
-/// because sweeping a very fast particle would gather an enormous block region
-/// for something that lives a fraction of a second.
+/// 100 blocks per tick, squared — above this speed vanilla skips collision
+/// entirely, because sweeping a very fast particle would gather an enormous
+/// block region for something that lives a fraction of a second.
 const MAXIMUM_COLLISION_VELOCITY_SQUARED: f64 = 100.0 * 100.0;
 
 /// Vanilla's fully-lit light coords (`15728880`), used by particles that ignore
@@ -81,23 +81,24 @@ pub enum Sheet {
     Heart,
     /// `particle/effect_0` … `effect_7` — potion and spell effects.
     Effect,
-    /// `particle/glitter_0` … `glitter_7` — `TotemParticle`/`EndRodParticle`.
+    /// `particle/glitter_0` … `glitter_7` — the totem-of-undying burst and the
+    /// end rod's glow.
     Glitter,
-    /// `particle/sweep_0` … `sweep_7` — `AttackSweepParticle`.
+    /// `particle/sweep_0` … `sweep_7` — the melee sweep-attack arc.
     SweepAttack,
-    /// `particle/spell_0` … `spell_7` — `SpellParticle` (witch, instant/mob
-    /// effect). A separate physical sheet from `Effect`: `effect.json` and
+    /// `particle/spell_0` … `spell_7` — the witch and instant/mob-effect
+    /// motes. A separate physical sheet from `Effect`: `effect.json` and
     /// `witch.json` name different textures (`effect_N` vs `spell_N`) even
-    /// though both classes are `SpellParticle`-family.
+    /// though both particle types share the same underlying behaviour family.
     Spell,
-    /// `particle/angry` — `HeartParticle.AngryVillagerProvider`.
+    /// `particle/angry` — the villager "angry" icon.
     Angry,
-    /// `particle/glint` — `SuspendedTownParticle.HappyVillagerProvider`.
+    /// `particle/glint` — the villager "happy" icon.
     Glint,
-    /// `particle/explosion_0` … `explosion_15` — `HugeExplosionParticle`
-    /// (`ParticleTypes.EXPLOSION`). Sixteen frames, confirmed against
-    /// `assets/minecraft/particles/explosion.json`'s own texture list rather
-    /// than assumed from the registry name — the doc's own warning about not
+    /// `particle/explosion_0` … `explosion_15` — the puff a large explosion
+    /// spawns. Sixteen frames, confirmed against the pack's own
+    /// `assets/minecraft/particles/explosion.json` texture list rather than
+    /// assumed from the registry name — the doc's own warning about not
     /// assuming a sheet stem matches the registry name holds here too, it
     /// just happens both to be "explosion" *and* to need its own frame count
     /// (16, not the 8 every other multi-frame sheet in this enum uses).
@@ -135,24 +136,26 @@ pub enum Sheet {
     SonicBoom,
     /// `particle/glow` — the single-frame spark `electric_spark` and `glow` share.
     Glow,
-    /// `particle/spark_0` … `spark_7` — `FireworkParticles.SparkParticle`
-    /// (`ParticleTypes.FIREWORK`). A distinct physical sheet from
-    /// [`Self::Glow`]: `firework.json` names `spark_N` textures, not `glow`,
-    /// so the two spark-ish particles (`firework` and `electric_spark`/`glow`)
-    /// share nothing but a name pattern.
+    /// `particle/spark_0` … `spark_7` — the firework spark particle. A
+    /// distinct physical sheet from [`Self::Glow`]: `firework.json` names
+    /// `spark_N` textures, not `glow`, so the two spark-ish particles
+    /// (`firework` and `electric_spark`/`glow`) share nothing but a name
+    /// pattern.
     Spark,
     /// `particle/damage` — `damage_indicator.json`'s single frame.
     ///
-    /// The damage indicator is a `CritParticle`, but it does **not** share
-    /// [`Self::CriticalHit`]'s sprite: its own definition names `damage`, a
-    /// separate texture. Deriving a sheet from the Java class rather than from
-    /// the pack's `particles/<name>.json` is exactly the mistake
-    /// [`Self::Spell`] documents for the `SpellParticle` family.
+    /// The damage indicator shares its physics with the plain crit sparkle,
+    /// but it does **not** share [`Self::CriticalHit`]'s sprite: its own
+    /// definition names `damage`, a separate texture. Deriving a sheet from
+    /// the behaviour rather than from the pack's `particles/<name>.json` is
+    /// exactly the mistake [`Self::Spell`] documents for the spell-mote
+    /// family.
     Damage,
     /// `particle/infested` — `infested.json`'s single frame.
     ///
-    /// Another `SpellParticle` over a one-frame sheet rather than an
-    /// eight-frame one, so `setSpriteFromAge` is a no-op for it.
+    /// Another member of the spell-mote family over a one-frame sheet rather
+    /// than an eight-frame one, so its age-driven sheet advance is a no-op for
+    /// it.
     Infested,
     /// `particle/raid_omen` — `raid_omen.json`'s single frame.
     RaidOmen,
@@ -172,18 +175,18 @@ pub enum Sheet {
     /// **frame sequence**, not its pixels.
     Generic0,
     /// `particle/copper_fire_flame` — copper fire's own single-frame flame,
-    /// **not** a tint of [`Self::Flame`]. `copper_fire_flame.json` names its own
-    /// texture even though the type is registered against the same
-    /// `FlameParticle.Provider` as `flame` and `soul_fire_flame`.
+    /// **not** a tint of [`Self::Flame`]. `copper_fire_flame.json` names its
+    /// own texture even though the type shares the same flame behaviour as
+    /// `flame` and `soul_fire_flame`.
     CopperFireFlame,
     /// `particle/small_gust_0` … `small_gust_6` — seven frames, ascending.
     ///
-    /// **A different physical sheet from [`Self::Gust`]**, despite
-    /// `ParticleTypes.SMALL_GUST` being registered against the same
-    /// `GustParticle` class. `small_gust.json` names `small_gust_N`, not
-    /// `gust_N`, and it has seven frames rather than twelve — so a small gust
-    /// pointed at `Gust` samples the wrong texture *and* runs off the end of a
-    /// sequence it does not have.
+    /// **A different physical sheet from [`Self::Gust`]**, despite the small
+    /// gust registry type sharing the same particle behaviour as the plain
+    /// gust. `small_gust.json` names `small_gust_N`, not `gust_N`, and it has
+    /// seven frames rather than twelve — so a small gust pointed at `Gust`
+    /// samples the wrong texture *and* runs off the end of a sequence it does
+    /// not have.
     SmallGust,
     /// `particle/lava` — its own single texture.
     Lava,
@@ -243,10 +246,10 @@ impl Sheet {
     /// * **`enchant.json` is not numerically suffixed at all**: its twenty-six
     ///   frames are `sga_a` … `sga_z`, which no format string can express.
     ///
-    /// Read off the real `client.jar` rather than transcribed from memory. A sheet
-    /// whose identity is its *sequence* rather than its pixels is why
-    /// [`Self::Generic`] and [`Self::PortalGeneric`] are two variants over the same
-    /// eight textures.
+    /// Read off the real game data rather than transcribed from memory. A
+    /// sheet whose identity is its *sequence* rather than its pixels is why
+    /// [`Self::Generic`] and [`Self::PortalGeneric`] are two variants over the
+    /// same eight textures.
     #[must_use]
     pub const fn frames(self) -> &'static [&'static str] {
         match self {
@@ -481,12 +484,11 @@ impl Sheet {
         ]
     }
 
-    /// `SpriteSet.get(age, lifetime)` — the frame for a particle at `age` of
-    /// `lifetime`.
+    /// The frame for a particle at `age` of `lifetime`.
     ///
-    /// Vanilla's `MutableSpriteSet.get` is `sprites[age * count / lifetime]`
-    /// clamped into range, and clamps a dead particle (`age >= lifetime`) to the
-    /// last frame rather than wrapping to the first.
+    /// Vanilla's formula is `sprites[age * count / lifetime]` clamped into
+    /// range, and clamps a dead particle (`age >= lifetime`) to the last frame
+    /// rather than wrapping to the first.
     #[must_use]
     pub fn frame_for_age(self, age: i32, lifetime: i32) -> u16 {
         let count = i32::from(self.frame_count());
@@ -515,15 +517,13 @@ pub enum SpriteSource {
         /// Frame index within it.
         frame: u16,
     },
-    /// The particle texture of a block state — `TerrainParticle` takes the
-    /// block's model particle sprite, which is why a broken oak log throws
-    /// bark-coloured fragments rather than generic grey ones. The shell resolves
-    /// the state to a sprite through the block model set.
+    /// The particle texture of a block state — a broken block's own fragments
+    /// take the block's model particle sprite, which is why a broken oak log
+    /// throws bark-coloured fragments rather than generic grey ones. The shell
+    /// resolves the state to a sprite through the block model set.
     BlockState(u32),
-    /// The particle texture of an **item**, by network registry id —
-    /// `BreakingItemParticle`, which vanilla textures from
-    /// `ItemStackRenderState.pickParticleMaterial`, i.e. the item model's own
-    /// sprite.
+    /// The particle texture of an **item**, by network registry id — an
+    /// eaten or broken item's crumbs take the item model's own sprite.
     ///
     /// Carrying the *item* rather than a resolved sprite is what makes eating a
     /// carrot throw orange crumbs and eating a beetroot throw red ones. A generic
@@ -535,9 +535,9 @@ pub enum SpriteSource {
 
 /// Which pass a particle draws in.
 ///
-/// Vanilla's `SingleQuadParticle.Layer`. `Opaque` particles still have an alpha
-/// channel and are alpha-tested; `Translucent` ones are blended and must be
-/// drawn after the world's translucent geometry.
+/// `Opaque` particles still have an alpha channel and are alpha-tested;
+/// `Translucent` ones are blended and must be drawn after the world's
+/// translucent geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
     /// Alpha-tested, depth-writing.
@@ -548,125 +548,119 @@ pub enum Layer {
 
 /// A per-type behaviour override.
 ///
-/// Vanilla expresses these as subclasses overriding `tick`, `getQuadSize`,
-/// `move` and `getLightCoords`. An enum keeps particles in one flat `Vec` with
-/// no per-particle allocation or vtable, which matters when a single explosion
-/// spawns hundreds.
+/// Vanilla expresses these as subclasses each overriding its own per-tick
+/// update, quad-size curve, movement rule and light-sampling behaviour. An
+/// enum keeps particles in one flat `Vec` with no per-particle allocation or
+/// vtable, which matters when a single explosion spawns hundreds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[non_exhaustive]
 pub enum Behaviour {
-    /// `SingleQuadParticle` with no override.
+    /// The base particle type with no override.
     Plain,
-    /// `TerrainParticle` — a fragment of a block, textured from a random quarter
-    /// of the block's particle sprite. `uo`/`vo` are the quarter offsets, each
-    /// drawn from `random.nextFloat() * 3.0`.
+    /// A fragment of a block, textured from a random quarter of the block's
+    /// particle sprite. `uo`/`vo` are the quarter offsets, each drawn as a
+    /// uniform float in `[0, 3)`.
     Terrain {
         /// Horizontal sub-sprite offset in `[0, 3)`.
         uo: f32,
         /// Vertical sub-sprite offset in `[0, 3)`.
         vo: f32,
     },
-    /// `BaseAshSmokeParticle` — smoke, large smoke, campfire smoke, ash.
+    /// Smoke, large smoke, campfire smoke, ash — the shared ash/smoke family.
     AshSmoke,
-    /// `CritParticle` — desaturates towards red as it ages.
+    /// The crit sparkle — desaturates towards red as it ages.
     Crit,
-    /// `FlameParticle` (a `RisingParticle`): ignores collision entirely and
-    /// shrinks quadratically.
+    /// The flame particle: ignores collision entirely and shrinks
+    /// quadratically.
     Flame,
-    /// `WaterDropParticle` / `SplashParticle` — custom tick that dies on contact
-    /// with a surface.
+    /// The rain-splash particle — a custom tick that dies on contact with a
+    /// surface.
     WaterDrop,
-    /// `BubbleParticle` — rises, and dies the moment it leaves water.
+    /// Rises, and dies the moment it leaves water.
     Bubble,
-    /// `SimpleAnimatedParticle` — full-bright, fades out over the back half of
-    /// its life, optionally towards a second colour.
+    /// Full-bright, fades out over the back half of its life, optionally
+    /// towards a second colour.
     SimpleAnimated {
-        /// `setFadeColor` target, if any.
+        /// The colour it fades towards, if any.
         fade: Option<[f32; 3]>,
     },
-    /// `AttackSweepParticle` — a full `tick()` override with no `move()` call
-    /// at all: it never collides, never falls, and just counts down its
+    /// The melee sweep-attack arc — a full tick override with no movement
+    /// call at all: it never collides, never falls, and just counts down its
     /// 4-tick lifetime advancing through its sheet. See
     /// [`Particle::tick_sweep_attack`].
     SweepAttack,
-    /// `NoteParticle` — a note-block chime. Ordinary physics; only the colour
-    /// formula and the fast-fade-in quad size are special.
+    /// A note-block chime. Ordinary physics; only the colour formula and the
+    /// fast-fade-in quad size are special.
     Note,
-    /// `HeartParticle` — breeding hearts and the villager "angry" icon (same
-    /// Java class, different sprite and vertical offset at the emit site).
+    /// Breeding hearts and the villager "angry" icon (the same underlying
+    /// particle, different sprite and vertical offset at the emit site).
     /// Physics-free, like [`Self::Crit`].
     Heart,
-    /// `SuspendedTownParticle` — the villager "happy" icon (and the wider
-    /// family of ambient specks this class covers in vanilla). A full
-    /// `tick()` override: no gravity or friction, a `lifetime`-countdown
-    /// rather than an `age`-increment, and a `move()` that skips collision
-    /// entirely. See [`Particle::tick_suspended`].
+    /// The villager "happy" icon (and the wider family of ambient specks
+    /// vanilla covers with the same behaviour). A full tick override: no
+    /// gravity or friction, a `lifetime`-countdown rather than an
+    /// `age`-increment, and movement that skips collision entirely. See
+    /// [`Particle::tick_suspended`].
     Suspended,
-    /// `SpellParticle` — witch/potion effect motes. Translucent, animates
-    /// through its sheet every tick with no fade.
+    /// Witch/potion effect motes. Translucent, animates through its sheet
+    /// every tick with no fade.
     Spell,
-    /// `HugeExplosionSeedParticle` (`ParticleTypes.EXPLOSION_EMITTER`) — a
-    /// `NoRenderParticle`: never drawn, and its `tick()` is a full override
-    /// that calls neither `super.tick()` nor `move()`. Instead it spawns six
-    /// [`Self::HugeExplosion`] particles per tick for its 8-tick life, at a
-    /// jittered offset with a `size` that grows from `0` to `7/8`. See
-    /// [`Particle::tick_huge_explosion_seed`]. Excluded from
+    /// The explosion-emitter seed — never drawn, and its tick is a full
+    /// override that calls neither the base tick nor movement. Instead it
+    /// spawns six [`Self::HugeExplosion`] particles per tick for its 8-tick
+    /// life, at a jittered offset with a `size` that grows from `0` to
+    /// `7/8`. See [`Particle::tick_huge_explosion_seed`]. Excluded from
     /// [`ParticleEngine::extract`] explicitly, since `layer()` has no "not
     /// drawn at all" value to return.
     HugeExplosionSeed,
-    /// `HugeExplosionParticle` (`ParticleTypes.EXPLOSION`) — the visible
-    /// shockwave puff a seed spawns. Ordinary physics (no override on
-    /// `move`/gravity/friction — vanilla's constructor never touches them),
-    /// full-bright (`getLightCoords` hardcodes `15728880`, `FULL_BRIGHT`),
-    /// opaque, and animates through [`Sheet::Explosion`] every tick via the
-    /// same `setSpriteFromAge` call [`Self::AshSmoke`]/[`Self::Spell`] use.
+    /// The visible shockwave puff a seed spawns. Ordinary physics (no
+    /// override on movement/gravity/friction — vanilla's constructor never
+    /// touches them), full-bright (hardcodes [`FULL_BRIGHT`]), opaque, and
+    /// animates through [`Sheet::Explosion`] every tick the same age-driven
+    /// way [`Self::AshSmoke`]/[`Self::Spell`] do.
     HugeExplosion,
-    /// `PortalParticle` — the nether-portal shimmer, and the one particle here
-    /// whose position is a **closed-form function of age** rather than an
-    /// integration of velocity.
+    /// The nether-portal shimmer, and the one particle here whose position
+    /// is a **closed-form function of age** rather than an integration of
+    /// velocity.
     ///
-    /// Its `tick()` recomputes `x/y/z` from the spawn point every tick:
+    /// Its tick recomputes `x/y/z` from the spawn point every tick:
     /// `pos = age/lifetime`, then `pos = 1 - (-pos + 2*pos²)`, and
     /// `x = xStart + xd*pos` (with `y` additionally taking `+ (1 - age/lifetime)`,
     /// so the mote drifts *up* toward the portal's centre as it converges). Since
-    /// nothing integrates, `gravity` and `friction` are never read, and `move` is
-    /// overridden to skip collision. See [`Particle::tick_portal`].
+    /// nothing integrates, `gravity` and `friction` are never read, and
+    /// movement is overridden to skip collision. See [`Particle::tick_portal`].
     Portal,
-    /// `CampfireSmokeParticle` — the tall lazy column over a campfire, cosy or
-    /// signal.
+    /// The tall lazy column over a campfire, cosy or signal.
     ///
-    /// A full `tick()` override: a *tiny* gravity (`3.0e-6`, five orders of
+    /// A full tick override: a *tiny* gravity (`3.0e-6`, five orders of
     /// magnitude below the ordinary `0.04`) applied to `yd` directly rather than
     /// through the base tick, a per-tick random horizontal nudge that makes the
     /// column wander, no friction at all, and an alpha fade over the **last 60
     /// ticks** rather than the back half of life. Getting the fade wrong is what
     /// makes signal smoke vanish halfway up. See [`Particle::tick_campfire_smoke`].
     CampfireSmoke,
-    /// `DustParticle` (`ParticleTypes.DUST`) via `DustParticleBase` — the
-    /// `minecraft:dust` particle option's colour, randomised once per
+    /// The `minecraft:dust` particle option's colour, randomised once per
     /// particle and held for its whole life. Shares `dust.json`'s sheet
     /// (`generic_0`…`generic_7`, the same eight textures as [`Sheet::Generic`]
     /// itself — confirmed against the real pack rather than assumed from the
     /// registry name) and the same age-driven sheet animation as
     /// [`Self::AshSmoke`]. See [`crate::emit::dust`].
     Dust,
-    /// `DustColorTransitionParticle` (`ParticleTypes.DUST_COLOR_TRANSITION`) —
-    /// the sculk-to-redstone sibling of [`Self::Dust`]. Same physics and
-    /// sheet; the colour itself lerps from `from` to `to` over the particle's
-    /// life instead of staying fixed. Vanilla recomputes the lerp every frame
-    /// from a partial tick (`DustColorTransitionParticle.lerpColors`); this
-    /// port advances it once per game tick instead, the same granularity
-    /// [`Self::Crit`]'s desaturation already uses rather than a per-frame
-    /// interpolation. See [`crate::emit::dust_color_transition`].
+    /// The `minecraft:dust_color_transition` sibling of [`Self::Dust`] — the
+    /// sculk-sensor/sculk-shrieker particle. Same physics and sheet; the
+    /// colour itself lerps from `from` to `to` over the particle's life
+    /// instead of staying fixed. Vanilla recomputes the lerp every frame from
+    /// a partial tick; this port advances it once per game tick instead, the
+    /// same granularity [`Self::Crit`]'s desaturation already uses rather
+    /// than a per-frame interpolation. See
+    /// [`crate::emit::dust_color_transition`].
     DustColorTransition {
-        /// Randomised starting colour (`DustColorTransitionOptions::fromColor`,
-        /// after `DustParticleBase::randomizeColor`).
+        /// Randomised starting colour.
         from: [f32; 3],
         /// Randomised ending colour.
         to: [f32; 3],
     },
-    /// `FlyTowardsPositionParticle` — the enchanting-table glyphs and the
-    /// conduit's `nautilus` mote.
+    /// The enchanting-table glyphs and the conduit's `nautilus` mote.
     ///
     /// The second behaviour here whose position is a **closed-form function of
     /// age** rather than an integration of velocity, and it is *not*
@@ -681,67 +675,69 @@ pub enum Behaviour {
     ///   rise. Reading it as a rise puts the glyphs above the table instead of
     ///   dipping into it.
     ///
-    /// `move()` is overridden to skip collision and nothing integrates, so
+    /// Movement is overridden to skip collision and nothing integrates, so
     /// `gravity` and `friction` are never read. See
     /// [`Particle::tick_fly_towards_position`].
     FlyTowardsPosition,
-    /// Ordinary physics plus `setSpriteFromAge`, and **nothing else** —
-    /// `ExplodeParticle` (`poof`, `spit`) and its siblings.
+    /// Ordinary physics plus an age-driven sheet advance, and **nothing
+    /// else** — the mob-death puff (`poof`, `spit`) and its siblings.
     ///
-    /// Distinct from [`Self::AshSmoke`], which looks like the same thing and is
-    /// not: `BaseAshSmokeParticle` additionally overrides `getQuadSize` with the
-    /// `clamp((age + a) / lifetime * 32, 0, 1)` fade-*in*, and `ExplodeParticle`
-    /// does not. Borrowing `AshSmoke` for a class without that override makes
-    /// every one of its particles start at zero size and swell over the first
-    /// thirty-second of its life — visible on a mob-death puff, and invisible to
-    /// any test that only asks whether a particle exists.
+    /// Distinct from [`Self::AshSmoke`], which looks like the same thing and
+    /// is not: the ash-smoke family additionally fades its quad size in over
+    /// the first thirty-second of its life
+    /// (`clamp((age + a) / lifetime * 32, 0, 1)`), and this family does not.
+    /// Borrowing `AshSmoke` for a type without that fade-in makes every one
+    /// of its particles start at zero size and swell over the first
+    /// thirty-second of its life — visible on a mob-death puff, and
+    /// invisible to any test that only asks whether a particle exists.
     ///
-    /// The layer is a field because the classes in this shape do not agree on
-    /// it: `ExplodeParticle` is `OPAQUE` and `SculkChargePopParticle` is
-    /// `TRANSLUCENT`, and there is nothing else to tell them apart.
+    /// The layer is a field because the types in this shape do not agree on
+    /// it: the mob-death puff is opaque and the sculk-charge-pop burst is
+    /// translucent, and there is nothing else to tell them apart.
     Animated {
-        /// `getLayer()`.
+        /// Which pass this particle draws in.
         layer: Layer,
     },
-    /// `PlayerCloudParticle` — the `cloud` puff and a panda's `sneeze`.
+    /// The `cloud` puff and a panda's `sneeze`.
     ///
-    /// Ordinary physics plus `setSpriteFromAge`, the same `* 32` fade-in
-    /// [`Self::AshSmoke`] has, and a **translucent** layer — the one combination
-    /// no existing variant offers.
+    /// Ordinary physics plus an age-driven sheet advance, the same `* 32`
+    /// fade-in [`Self::AshSmoke`] has, and a **translucent** layer — the one
+    /// combination no existing variant offers.
     ///
-    /// One thing is deliberately not ported: vanilla's `tick` also drags the
-    /// puff down toward the nearest player within two blocks
-    /// (`level.getNearestPlayer(x, y, z, 2.0, false)`), which is what makes an
-    /// area-effect cloud settle around your feet. That needs a player position
-    /// this crate has no access to, and it is a *drift*, not a lifetime or a
-    /// colour, so its absence reads as a slightly less clingy cloud rather than
-    /// a missing particle.
+    /// One thing is deliberately not ported: vanilla's tick also drags the
+    /// puff down toward the nearest player within two blocks, which is what
+    /// makes an area-effect cloud settle around your feet. That needs a
+    /// player position this crate has no access to, and it is a *drift*, not
+    /// a lifetime or a colour, so its absence reads as a slightly less
+    /// clingy cloud rather than a missing particle.
     Cloud,
-    /// `DragonBreathParticle` — the lingering cloud a dragon's breath attack
-    /// and a lingering potion leave on the ground.
+    /// The lingering cloud a dragon's breath attack and a lingering potion
+    /// leave on the ground.
     ///
-    /// A full `tick()` override that never calls `super.tick()`, so none of
+    /// A full tick override that never runs the base tick, so none of
     /// [`Particle::tick_base`]'s gravity, vertical friction or ground drag
     /// applies: it damps `xd`/`zd` only, and accelerates *horizontally* when
-    /// its height stops changing (`if (y == yo) { xd *= 1.1; zd *= 1.1; }`),
-    /// which is what makes the cloud creep outward across a floor rather than
-    /// settling. It also fades **in** over the first thirty-second of its life,
-    /// the same `clamp((age + a) / lifetime * 32, 0, 1)` ramp
-    /// [`Self::Crit`] and [`Self::AshSmoke`] have.
+    /// its height stops changing (equivalent to
+    /// `if y == yo { xd *= 1.1; zd *= 1.1; }`), which is what makes the
+    /// cloud creep outward across a floor rather than settling. It also
+    /// fades **in** over the first thirty-second of its life, the same
+    /// `clamp((age + a) / lifetime * 32, 0, 1)` ramp [`Self::Crit`] and
+    /// [`Self::AshSmoke`] have.
     ///
-    /// `hit_ground` is `DragonBreathParticle.hasHitGround`, which arms the
-    /// `yd += 0.002` lift and the vertical friction. It is transcribed rather
-    /// than dropped even though `hasPhysics = false` means
-    /// [`Particle::move_by`] can never set `on_ground` and so it can never
-    /// become `true` — that is vanilla's own arrangement, and a port that
-    /// silently omits a clause because the clause happens to be unreachable is
-    /// how a later change to one field quietly breaks another.
+    /// `hit_ground` tracks whether the cloud has ever touched a surface,
+    /// which arms the `yd += 0.002` lift and the vertical friction. It is
+    /// transcribed rather than dropped even though `hasPhysics = false`
+    /// means [`Particle::move_by`] can never set `on_ground` and so it can
+    /// never become `true` — that is vanilla's own arrangement, and a port
+    /// that silently omits a clause because the clause happens to be
+    /// unreachable is how a later change to one field quietly breaks
+    /// another.
     DragonBreath {
         /// Whether the cloud has touched a surface.
         hit_ground: bool,
     },
-    /// `LavaParticle` — the pops off a lava surface, and the only particle in
-    /// this crate that spawns a **different type** as it lives.
+    /// The popping embers off a lava surface, and the only particle in this
+    /// crate that spawns a **different type** as it lives.
     ///
     /// Its quad shrinks quadratically (`quadSize * (1 - s²)`, not
     /// [`Self::Flame`]'s `1 - s²/2`), and every tick it rolls
@@ -750,26 +746,27 @@ pub enum Behaviour {
     /// every tick and an old one almost never does. Dropping that roll leaves a
     /// bare orange dot where vanilla has a smoking ember.
     Lava,
-    /// `SquidInkParticle` — a squid's ink cloud and a glow squid's.
+    /// A squid's ink cloud and a glow squid's.
     ///
     /// [`Self::SimpleAnimated`] exactly (its alpha-fade formula is the same
     /// expression, and both are full-bright and translucent) **plus** a
     /// `yd -= 0.0074` sink whenever the cloud is in air rather than water, which
     /// is what makes ink released above the surface fall instead of hanging.
     SquidInk,
-    /// `DripParticle` — the seventeen registry types that make up a drip's
-    /// three-phase life: it hangs under a block, lets go and falls, and splashes
-    /// where it lands.
+    /// The seventeen registry types that make up a drip's three-phase life:
+    /// it hangs under a block, lets go and falls, and splashes where it
+    /// lands.
     ///
     /// **Those three phases are three separate registry types, and vanilla
-    /// chains them from inside `tick()`** — a `dripping_water` particle spawns a
-    /// `falling_water` one when its 40 ticks are up, and that one spawns a
-    /// `splash` when it hits the ground. Modelling only the phase the server
-    /// asked for gives a cave ceiling where drips appear, hang, and blink out of
-    /// existence without ever falling, which is what this client did.
+    /// chains them from inside its own tick** — a `dripping_water` particle
+    /// spawns a `falling_water` one when its 40 ticks are up, and that one
+    /// spawns a `splash` when it hits the ground. Modelling only the phase
+    /// the server asked for gives a cave ceiling where drips appear, hang,
+    /// and blink out of existence without ever falling, which is what this
+    /// client did.
     ///
-    /// Not [`Self::WaterDrop`], which is `WaterDropParticle` — a different class
-    /// with a different tick. See [`Particle::tick_drip`].
+    /// Not [`Self::WaterDrop`], which is the rain-splash particle — a
+    /// different type with a different tick. See [`Particle::tick_drip`].
     Drip {
         /// Which fluid's drip this is, which decides the colour, the gravity,
         /// the lifetime and what the next phase is.
@@ -777,115 +774,112 @@ pub enum Behaviour {
         /// Where in the hang → fall → land chain this particle sits.
         phase: DripPhase,
     },
-    /// `BubbleColumnUpParticle` — the bubbles a soul-sand column drives upward.
+    /// The bubbles a soul-sand column drives upward.
     ///
     /// The base tick plus one clause: it dies the instant it leaves water. Not
-    /// [`Self::Bubble`], which is a different class with a *full* tick override
-    /// (a `lifetime--` countdown and a fixed `yd += 0.002` rise, no gravity
-    /// term at all). This one rises because its `gravity` is **negative**
-    /// (`-0.125`), which the shared `yd -= 0.04 * gravity` turns into lift, and
-    /// so it is genuinely the base tick and not a copy of the bubble's.
+    /// [`Self::Bubble`], which is a different particle with a *full* tick
+    /// override (a `lifetime--` countdown and a fixed `yd += 0.002` rise, no
+    /// gravity term at all). This one rises because its `gravity` is
+    /// **negative** (`-0.125`), which the shared `yd -= 0.04 * gravity` turns
+    /// into lift, and so it is genuinely the base tick and not a copy of the
+    /// bubble's.
     BubbleColumnUp,
-    /// `WaterCurrentDownParticle` — the bubbles a magma-block column drags
-    /// down, spiralling as they sink.
+    /// The bubbles a magma-block column drags down, spiralling as they sink.
     ///
-    /// A full `tick()` override with `hasPhysics = false`, so nothing here
+    /// A full tick override with `hasPhysics = false`, so nothing here
     /// touches block geometry. The spiral is an angle advanced `0.08` rad per
-    /// tick and fed through `Mth.cos`/`Mth.sin` — the **quantized lookup
-    /// table**, not the library trig, which is why this reaches for
-    /// [`lodestone_physics::mth`]. `radius` in vanilla is a local `0.6F` that
-    /// is used directly rather than through the named variable; both spellings
-    /// are the same number.
+    /// tick and fed through a **quantized lookup-table** trig implementation,
+    /// not the standard-library trig, which is why this reaches for
+    /// [`lodestone_physics::mth`]. `radius` is a fixed `0.6` used directly
+    /// rather than through a named variable; both spellings are the same
+    /// number.
     WaterCurrentDown {
         /// The spiral phase, in radians, advanced every tick.
         angle: f32,
     },
-    /// `SnowflakeParticle` — the flakes a powder-snow cauldron and a
-    /// snow-golem's steps throw off.
+    /// The flakes a powder-snow cauldron and a snow-golem's steps throw off.
     ///
-    /// The base tick plus `setSpriteFromAge` and a **per-axis** damping applied
-    /// *after* the base tick's uniform `friction`: `xd *= 0.95`, `yd *= 0.9`,
-    /// `zd *= 0.95`. Its own `friction` is `1.0`, so the base tick's uniform
-    /// damping is the identity and these three are the whole of it — folding
-    /// the vertical `0.9` into `friction` would damp the horizontal axes by the
-    /// same amount and make a flake drop straight down.
+    /// The base tick plus an age-driven sheet advance and a **per-axis**
+    /// damping applied *after* the base tick's uniform `friction`:
+    /// `xd *= 0.95`, `yd *= 0.9`, `zd *= 0.95`. Its own `friction` is `1.0`,
+    /// so the base tick's uniform damping is the identity and these three
+    /// are the whole of it — folding the vertical `0.9` into `friction`
+    /// would damp the horizontal axes by the same amount and make a flake
+    /// drop straight down.
     Snowflake,
-    /// `DustPlumeParticle` — the puff a block landing in a decorated pot or a
-    /// brushed suspicious block throws up.
+    /// The puff a block landing in a decorated pot or a brushed suspicious
+    /// block throws up.
     ///
-    /// [`Self::AshSmoke`] (it extends `BaseAshSmokeParticle`, fade-in and all)
-    /// **plus** a compounding decay applied *before* each tick:
+    /// [`Self::AshSmoke`] (it shares the ash-smoke family's physics, fade-in
+    /// and all) **plus** a compounding decay applied *before* each tick:
     /// `gravity *= 0.88`, `friction *= 0.92`. The plume therefore stalls in
     /// mid-air rather than arcing, which is the whole look of it.
     DustPlume,
-    /// `WakeParticle` — the ring a fishing bobber leaves on the water.
+    /// The ring a fishing bobber leaves on the water.
     ///
-    /// A full `tick()` override whose sprite frame and quad size are both
+    /// A full tick override whose sprite frame and quad size are both
     /// functions of `60 - lifetime`, a value that **counts up** as the
     /// countdown runs down. Nothing else in this crate keys off that quantity,
     /// and the sign is what makes the ring grow rather than shrink.
     Wake,
-    /// `BubblePopParticle` — the five-frame burst a bubble makes at the
-    /// surface.
+    /// The five-frame burst a bubble makes at the surface.
     ///
-    /// A full `tick()` override: no friction, no ground drag, and a `gravity`
+    /// A full tick override: no friction, no ground drag, and a `gravity`
     /// subtracted **raw** rather than through the base tick's `0.04 *` scale.
     BubblePop,
-    /// `FallingLeavesParticle` — `cherry_leaves`, `pale_oak_leaves` and
-    /// `tinted_leaves`, which differ only in their sheet, their provider
-    /// constants and (for the tinted one) a wire colour.
+    /// `cherry_leaves`, `pale_oak_leaves` and `tinted_leaves`, which differ
+    /// only in their sheet, their emitter constants and (for the tinted one)
+    /// a wire colour.
     ///
-    /// A full `tick()` override with a lifetime that **counts down** from 300
+    /// A full tick override with a lifetime that **counts down** from 300
     /// while the drift is driven by the *elapsed* fraction, so the two run in
     /// opposite directions and reading one for the other inverts the whole
     /// motion. Two independent horizontal accelerations, either or both of
-    /// which a provider may enable, are summed before a single `* 0.0025`
+    /// which an emitter may enable, are summed before a single `* 0.0025`
     /// scale.
     FallingLeaves {
-        /// `windBig`, the provider's `sideAcceleration` — the magnitude both
-        /// horizontal terms are scaled by.
+        /// The side-acceleration magnitude both horizontal terms are scaled
+        /// by.
         wind_big: f32,
         /// Whether the swirl term is active (`pale_oak`/`tinted`, not
         /// `cherry`).
         swirl: bool,
         /// Whether the flow-away term is active (`cherry`, not the others).
         flow_away: bool,
-        /// `xaFlowScale`, fixed at construction from one RNG draw.
+        /// Fixed at construction from one RNG draw.
         xa_flow_scale: f64,
-        /// `zaFlowScale`, from the same draw.
+        /// From the same draw.
         za_flow_scale: f64,
-        /// `swirlPeriod`, from the same draw.
+        /// From the same draw.
         swirl_period: f64,
-        /// `rotSpeed`, which accumulates `spinAcceleration / 20` every tick.
+        /// Accumulates `spin_acceleration / 20` every tick.
         rot_speed: f32,
-        /// `spinAcceleration`, fixed at construction.
+        /// Fixed at construction.
         spin_acceleration: f32,
     },
-    /// `FireflyParticle` — the firefly bush's drifting mote.
+    /// The firefly bush's drifting mote.
     ///
     /// The base tick plus three things: it dies the moment it is inside a
     /// non-air block, its alpha follows a fade-in/fade-out ramp over its
     /// lifetime, and roughly one tick in twenty (plus tick 1 unconditionally)
     /// it picks an entirely new velocity.
     ///
-    /// Vanilla also overrides `getLightCoords` here, and that override is
+    /// Vanilla also overrides its light-sampling here, and that override is
     /// **not** a packed light value — it is the same fade fraction scaled by
     /// 255. It is deliberately not ported: this crate's extract step reads
     /// either a bare full-bright constant or the sampled world light, and a
     /// fraction is neither.
     Firefly,
-    /// `FireworkParticles.OverlayParticle` — the `flash` a firework's
-    /// detonation paints over itself.
+    /// The `flash` a firework's detonation paints over itself.
     ///
     /// Four ticks of nothing but the base tick; the whole particle is its size
     /// and alpha curves, both of which are functions of `age - 1` and so are
     /// *negative* on the first tick — vanilla's own arrangement, and what makes
     /// the flash bloom from nothing rather than pop in at full size.
     FireworkFlash,
-    /// `FallingDustParticle` — the mote a sand or gravel column sheds while it
-    /// has nothing under it.
+    /// The mote a sand or gravel column sheds while it has nothing under it.
     ///
-    /// A full `tick()` override, and the two ways it differs from the base tick
+    /// A full tick override, and the two ways it differs from the base tick
     /// are both easy to lose. Its downward acceleration is a **raw**
     /// `yd -= 0.003` applied after the move rather than the base tick's
     /// `yd -= 0.04 * gravity`, and that fall is **terminal-velocity clamped**
@@ -894,14 +888,14 @@ pub enum Behaviour {
     /// `gravity` value would make it fall at a thirteenth of the right speed
     /// *and* remove the clamp.
     ///
-    /// It also spins: `roll` advances by `PI * rotSpeed * 2` every tick and is
-    /// **reset to zero the moment it lands**, which is what stops a settled
-    /// mote from rotating on the floor.
+    /// It also spins: `roll` advances by `PI * rot_speed * 2` every tick and
+    /// is **reset to zero the moment it lands**, which is what stops a
+    /// settled mote from rotating on the floor.
     ///
     /// The quad-size ramp is [`Self::AshSmoke`]'s `* 32` fade-in and the layer
     /// is opaque, so those two are shared rather than duplicated.
     FallingDust {
-        /// `rotSpeed`, fixed at construction from `(nextFloat() - 0.5) * 0.1`.
+        /// Fixed at construction from a jittered draw in `[-0.05, 0.05)`.
         /// Signed: half of all motes spin the other way.
         rot_speed: f32,
     },
@@ -938,26 +932,27 @@ pub enum DripKind {
     DripstoneLava,
     /// `falling_spore_blossom`. Falling phase only.
     ///
-    /// Distinct from `spore_blossom_air`, which is a `SuspendedParticle` and
-    /// merely shares the `drip_fall` texture.
+    /// Distinct from `spore_blossom_air`, which is a different, physics-free
+    /// particle that merely shares the `drip_fall` texture.
     SporeBlossom,
 }
 
 /// Where in the hang → fall → land chain a [`Behaviour::Drip`] sits.
 ///
-/// Vanilla models these as four `DripParticle` subclasses that differ **only**
-/// in their `preMoveUpdate`/`postMoveUpdate` hooks; everything else is shared.
+/// Vanilla models these as four particle types that differ **only** in two
+/// hook points run before and after the shared move step; everything else is
+/// shared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum DripPhase {
-    /// `DripHangParticle` — clinging under a block. Its velocity is damped to a
-    /// **fiftieth** every tick so it does not drift, and when its lifetime
-    /// expires it spawns the falling phase rather than simply dying.
+    /// Clinging under a block. Its velocity is damped to a **fiftieth** every
+    /// tick so it does not drift, and when its lifetime expires it spawns the
+    /// falling phase rather than simply dying.
     Hang,
-    /// `FallingParticle` / `FallAndLandParticle` — in free fall. Removed on
-    /// contact with the ground, spawning the landing phase if its kind has one.
+    /// In free fall. Removed on contact with the ground, spawning the
+    /// landing phase if its kind has one.
     Fall,
-    /// `DripLandParticle` — the splash where it landed. The end of the chain.
+    /// The splash where it landed. The end of the chain.
     Land,
 }
 
@@ -973,7 +968,7 @@ pub enum Spawn {
     HugeExplosion {
         /// Where.
         pos: [f64; 3],
-        /// `HugeExplosionParticle`'s `size` constructor argument.
+        /// The huge-explosion particle's own `size` construction argument.
         size: f32,
     },
     /// The next phase of a [`Behaviour::Drip`]'s chain.
@@ -984,8 +979,8 @@ pub enum Spawn {
         phase: DripPhase,
         /// Where.
         pos: [f64; 3],
-        /// The velocity to inherit. `DripHangParticle` hands its own on;
-        /// `FallAndLandParticle` hands on zero.
+        /// The velocity to inherit. The hanging phase hands its own on; the
+        /// falling phase hands on zero.
         vel: [f64; 3],
     },
     /// The trail a [`Behaviour::Lava`] pop throws, at its own position and
@@ -997,8 +992,8 @@ pub enum Spawn {
         vel: [f64; 3],
     },
     /// A `splash` — what a water drip lands as, instead of a landing phase of
-    /// its own. `SplashParticle` is not a `DripParticle` at all, which is why
-    /// this cannot be a [`Self::Drip`] with a third phase.
+    /// its own. The splash is not part of the drip family at all, which is
+    /// why this cannot be a [`Self::Drip`] with a third phase.
     Splash {
         /// Where.
         pos: [f64; 3],
@@ -1031,11 +1026,11 @@ impl Behaviour {
         }
     }
 
-    /// `getLayer()`.
+    /// Which pass this behaviour draws in.
     ///
     /// [`Self::HugeExplosionSeed`] is never actually asked this — it is
     /// excluded from [`ParticleEngine::extract`] before `layer()` would be
-    /// consulted, since a `NoRenderParticle` has no vanilla `Layer` at all —
+    /// consulted, since it is never drawn at all and so has no real layer —
     /// but the match must still be exhaustive, so it takes the harmless
     /// `Opaque` bucket rather than a wildcard arm that could silently swallow
     /// a real future variant.
@@ -1047,9 +1042,8 @@ impl Behaviour {
             | Self::CampfireSmoke
             | Self::Cloud
             | Self::SquidInk
-            // `FireflyParticle.getLayer` and
-            // `FireworkParticles.OverlayParticle.getLayer` are both
-            // `TRANSLUCENT`; both fade by alpha, which an alpha-tested layer
+            // The firefly and the firework-flash overlay are both
+            // translucent; both fade by alpha, which an alpha-tested layer
             // cannot express.
             | Self::Firefly
             | Self::FireworkFlash => Layer::Translucent,
@@ -1069,24 +1063,19 @@ impl Behaviour {
             | Self::HugeExplosion
             | Self::Portal
             | Self::Dust
-            // `LifetimeAlpha.ALWAYS_OPAQUE` for the two types wired to it
-            // (`enchant`, `nautilus`); the translucent-alpha variant of
-            // `FlyTowardsPositionParticle` is `vault_connection`, which has no
-            // emitter here yet.
+            // Opaque for the two types wired to this behaviour (`enchant`,
+            // `nautilus`); the translucent-alpha sibling of this behaviour
+            // backs a different registry type that has no emitter here yet.
             | Self::FlyTowardsPosition
-            // `ExplodeParticle.getLayer` is `OPAQUE`.
-            // `LavaParticle.getLayer` is `OPAQUE`.
+            // The mob-death puff family and the lava-pop ember are both
+            // opaque.
             | Self::Lava
-            // `DripParticle.getLayer` is `OPAQUE`.
+            // The drip family is opaque.
             | Self::Drip { .. }
-            // `DragonBreathParticle.getLayer` is `OPAQUE` too -- it is a
-            // dense cloud, not a translucent mote.
+            // The dragon-breath cloud is opaque too -- it is a dense cloud,
+            // not a translucent mote.
             | Self::DragonBreath { .. }
-            // Every one of these overrides `getLayer` to `OPAQUE` explicitly:
-            // `BubbleColumnUpParticle`, `WaterCurrentDownParticle`,
-            // `SnowflakeParticle`, `BubblePopParticle`, `WakeParticle` and
-            // `FallingLeavesParticle`. `DustPlumeParticle` inherits
-            // `BaseAshSmokeParticle`'s, which is opaque too.
+            // Every one of these is opaque:
             | Self::BubbleColumnUp
             | Self::WaterCurrentDown { .. }
             | Self::Snowflake
@@ -1094,7 +1083,7 @@ impl Behaviour {
             | Self::Wake
             | Self::BubblePop
             | Self::FallingLeaves { .. }
-            // `FallingDustParticle.getLayer` is `OPAQUE` explicitly.
+            // The falling-dust mote is opaque explicitly.
             | Self::FallingDust { .. }
             | Self::DustColorTransition { .. } => Layer::Opaque,
         }
@@ -1105,8 +1094,8 @@ impl Behaviour {
 ///
 /// Field names and units follow the decompiled source (`xo`/`yo`/`zo` are the
 /// previous tick's position, used for render interpolation; `xd`/`yd`/`zd` are
-/// velocity per tick), so the transcription can be checked line by line against
-/// `Particle.java`.
+/// velocity per tick), so the transcription can be checked line by line
+/// against it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Particle {
     /// Previous-tick position, for interpolation at extract time.
@@ -1174,7 +1163,7 @@ pub struct Particle {
 }
 
 impl Particle {
-    /// `Particle(level, x, y, z)` — the zero-velocity base constructor.
+    /// The zero-velocity base constructor.
     ///
     /// Draws exactly one random number (the lifetime), which matters when
     /// replaying a seeded burst.
@@ -1185,15 +1174,15 @@ impl Particle {
         p
     }
 
-    /// The `Particle(level, x, y, z)` body alone, without
-    /// `SingleQuadParticle`'s `quadSize` draw.
+    /// The zero-velocity constructor body alone, without the quad-size draw
+    /// a full particle also makes.
     ///
-    /// Kept separate because **draw order is part of the reproduction**. Java
-    /// runs `super(...)` before the subclass body, so a particle constructed
-    /// with a velocity draws lifetime, then five velocity numbers, and only
-    /// *then* its quad size. Folding the quad-size draw into the base
-    /// constructor would reorder the stream and silently desynchronise a
-    /// seeded replay.
+    /// Kept separate because **draw order is part of the reproduction**.
+    /// Vanilla runs the base constructor before the subclass body, so a
+    /// particle constructed with a velocity draws lifetime, then five
+    /// velocity numbers, and only *then* its quad size. Folding the
+    /// quad-size draw into the base constructor would reorder the stream and
+    /// silently desynchronise a seeded replay.
     fn base(x: f64, y: f64, z: f64, sprite: SpriteSource, rng: &mut JavaRandom) -> Self {
         let mut p = Self {
             xo: x,
@@ -1240,13 +1229,12 @@ impl Particle {
         p
     }
 
-    /// `SingleQuadParticle`'s `quadSize` initialiser.
+    /// The quad-size initialiser every particle runs after construction.
     fn draw_quad_size(&mut self, rng: &mut JavaRandom) {
         self.quad_size = 0.1 * rng.next_f32().mul_add(0.5, 0.5) * 2.0;
     }
 
-    /// `Particle(level, x, y, z, xa, ya, za)` — the constructor that scatters an
-    /// initial velocity.
+    /// The constructor that scatters an initial velocity.
     ///
     /// The incoming `xa`/`ya`/`za` are *not* used directly: they are jittered,
     /// normalised, rescaled to a random speed and then biased upwards by `0.1`.
@@ -1286,8 +1274,8 @@ impl Particle {
         p
     }
 
-    /// `setPower(float)` — scales the velocity while preserving the `0.1` upward
-    /// bias applied by [`Self::with_velocity`].
+    /// Scales the velocity while preserving the `0.1` upward bias applied by
+    /// [`Self::with_velocity`].
     pub fn set_power(&mut self, power: f32) {
         let power = f64::from(power);
         self.xd *= power;
@@ -1295,14 +1283,14 @@ impl Particle {
         self.zd *= power;
     }
 
-    /// `scale(float)` — grows both the collision box and the drawn quad.
+    /// Grows both the collision box and the drawn quad.
     pub fn scale(&mut self, scale: f32) {
         self.quad_size *= scale;
         self.set_size(0.2 * scale, 0.2 * scale);
     }
 
-    /// `setSize` — resizes the box about its horizontal centre, keeping the
-    /// bottom face fixed.
+    /// Resizes the box about its horizontal centre, keeping the bottom face
+    /// fixed.
     pub fn set_size(&mut self, w: f32, h: f32) {
         if (w - self.bb_width).abs() > f32::EPSILON || (h - self.bb_height).abs() > f32::EPSILON {
             self.bb_width = w;
@@ -1322,7 +1310,7 @@ impl Particle {
         }
     }
 
-    /// `setPos` — moves the particle and rebuilds the box around it.
+    /// Moves the particle and rebuilds the box around it.
     pub fn set_pos(&mut self, x: f64, y: f64, z: f64) {
         self.x = x;
         self.y = y;
@@ -1338,19 +1326,18 @@ impl Particle {
         self.bb
     }
 
-    /// `isAlive()`.
+    /// Whether the particle is still alive.
     #[must_use]
     pub const fn is_alive(&self) -> bool {
         !self.removed
     }
 
-    /// `remove()`.
+    /// Marks the particle for removal.
     pub const fn remove(&mut self) {
         self.removed = true;
     }
 
-    /// `getQuadSize(partialTick)` — the drawn half-extent, which several
-    /// behaviours animate.
+    /// The drawn half-extent, which several behaviours animate.
     #[must_use]
     pub fn quad_size(&self, partial_tick: f32) -> f32 {
         let normalised = || {
@@ -1368,9 +1355,9 @@ impl Particle {
         };
         match self.behaviour {
             // `quadSize * clamp((age + a) / lifetime * 32, 0, 1)` — a fast fade
-            // *in* over the first 1/32 of life, not a fade out. `NoteParticle`
-            // and `HeartParticle` both override `getQuadSize` with this exact
-            // expression too, and so does `DustParticleBase`.
+            // *in* over the first 1/32 of life, not a fade out. The note chime,
+            // the heart icon and the dust family all share this exact
+            // expression.
             Behaviour::Crit
             | Behaviour::AshSmoke
             | Behaviour::Note
@@ -1378,34 +1365,35 @@ impl Particle {
             | Behaviour::Dust
             | Behaviour::Cloud
             | Behaviour::DragonBreath { .. }
-            // `DustPlumeParticle` inherits `BaseAshSmokeParticle.getQuadSize`,
-            // which is this same expression.
+            // The dust-plume mote inherits the ash-smoke family's quad-size
+            // curve, which is this same expression.
             | Behaviour::DustPlume
-            // `FallingDustParticle.getQuadSize` is the same expression again.
+            // The falling-dust mote's is the same expression again.
             | Behaviour::FallingDust { .. }
             | Behaviour::DustColorTransition { .. } => {
                 self.quad_size * (normalised() * 32.0).clamp(0.0, 1.0)
             }
-            // `FireworkParticles.OverlayParticle.getQuadSize`:
-            // `7.1F * Mth.sin((age + a - 1.0F) * 0.25F * PI)`, which ignores
-            // `quadSize` entirely. The `- 1.0` makes the first tick's argument
-            // negative and so the size negative; that is vanilla's own, and it
-            // is what keeps the flash invisible for the tick before it blooms.
-            // `Mth.sin` is the quantized table rather than `f32::sin` — the two
-            // disagree exactly at the zero crossing this expression starts on.
+            // The firework-flash overlay: `7.1 * sin((age + a - 1.0) * 0.25 *
+            // PI)`, which ignores `quadSize` entirely. The `- 1.0` makes the
+            // first tick's argument negative and so the size negative; that is
+            // vanilla's own arrangement, and it is what keeps the flash
+            // invisible for the tick before it blooms. The trig here is the
+            // quantized lookup-table implementation rather than the
+            // standard-library one — the two disagree exactly at the zero
+            // crossing this expression starts on.
             Behaviour::FireworkFlash => {
                 #[expect(
                     clippy::cast_precision_loss,
                     reason = "a flash lives four ticks; mirrors Java's int-to-float promotion"
                 )]
                 let a = self.age as f32 + partial_tick - 1.0;
-                // `Mth.sin` takes a `double` in 26.2 — there is no float
+                // Vanilla's trig here takes a `double` — there is no float
                 // overload — so the argument widens exactly as Java's does.
                 7.1 * mth::sin(f64::from(a * 0.25 * core::f32::consts::PI))
             }
-            // `LavaParticle.getQuadSize`: `quadSize * (1 - s * s)`. Note the
-            // missing `* 0.5F` that `Behaviour::Flame` has — a lava pop shrinks
-            // to nothing over its life where a flame only halves.
+            // The lava-pop ember: `quadSize * (1 - s * s)`. Note the missing
+            // `* 0.5` that `Behaviour::Flame` has — a lava pop shrinks to
+            // nothing over its life where a flame only halves.
             Behaviour::Lava => {
                 let s = normalised();
                 self.quad_size * s.mul_add(-s, 1.0)
@@ -1415,10 +1403,11 @@ impl Particle {
                 let s = normalised();
                 self.quad_size * s.mul_add(-s * 0.5, 1.0)
             }
-            // `PortalParticle.getQuadSize`: `s = 1 - age/lifetime; s *= s;
-            // s = 1 - s` — an ease-*out* growth, so a portal mote appears small,
-            // swells almost immediately and then holds. Reading the two `1 - s`
-            // steps as cancelling gives a linear ramp and a visibly duller portal.
+            // The portal shimmer: `s = 1 - age/lifetime; s *= s; s = 1 - s` —
+            // an ease-*out* growth, so a portal mote appears small, swells
+            // almost immediately and then holds. Reading the two `1 - s`
+            // steps as cancelling gives a linear ramp and a visibly duller
+            // portal.
             Behaviour::Portal => {
                 let s = 1.0 - normalised();
                 self.quad_size * s.mul_add(-s, 1.0)
@@ -1432,7 +1421,7 @@ impl Particle {
     ///
     /// [`Behaviour::Terrain`] takes a random *quarter* of the block's sprite so
     /// that fragments of the same block do not all look identical, and returns
-    /// `u0 > u1` — vanilla's `getU0` is `(uo + 1) / 4` while `getU1` is `uo / 4`,
+    /// `u0 > u1` — vanilla computes `u0` as `(uo + 1) / 4` and `u1` as `uo / 4`,
     /// which mirrors the fragment horizontally. That inversion is intentional;
     /// "fixing" it makes terrain particles subtly disagree with vanilla.
     #[must_use]
@@ -1448,18 +1437,18 @@ impl Particle {
         }
     }
 
-    /// `tick()`.
+    /// Advances the particle by one tick.
     ///
     /// `view` supplies block geometry for collision; a particle with
     /// `has_physics == false` never touches it.
     ///
     /// Returns any `(x, y, z, size)` follow-up spawns this tick produced —
     /// empty for every behaviour except [`Behaviour::HugeExplosionSeed`],
-    /// which is the one particle in this crate whose own `tick()` creates
+    /// which is the one particle in this crate whose own tick creates
     /// more particles. Returning them rather than spawning directly is what
     /// lets [`ParticleEngine::tick`] do it: a `for p in &mut self.particles`
     /// loop already holds `self.particles` mutably borrowed, so a particle
-    /// cannot push a sibling into that same `Vec` from inside its own `tick`.
+    /// cannot push a sibling into that same `Vec` from inside its own tick.
     pub fn tick(&mut self, view: &dyn CollisionView) -> Vec<Spawn> {
         match self.behaviour {
             Behaviour::Drip { kind, phase } => self.tick_drip(view, kind, phase),
@@ -1623,7 +1612,7 @@ impl Particle {
         }
     }
 
-    /// The per-subclass work that runs *after* `super.tick()`.
+    /// The per-behaviour work that runs *after* the base tick.
     fn tick_overrides(&mut self) {
         match self.behaviour {
             Behaviour::Crit => {
@@ -1640,9 +1629,9 @@ impl Particle {
             | Behaviour::Cloud => {
                 self.set_sprite_from_age();
             }
-            // `DustColorTransitionParticle` additionally lerps its colour —
-            // vanilla does this every *frame* from `extract`'s partial tick
-            // (`lerpColors`); this port advances it once per tick instead, at
+            // The dust-colour-transition particle additionally lerps its
+            // colour — vanilla does this every *frame* from `extract`'s
+            // partial tick; this port advances it once per tick instead, at
             // the same granularity `Behaviour::Crit`'s desaturation already
             // uses. `age` runs 1..=lifetime here (checked and incremented at
             // the top of `tick_base` before this runs), matching vanilla's
@@ -1681,22 +1670,14 @@ impl Particle {
         }
     }
 
-    /// `FallingDustParticle.tick()` — a full override that calls neither
-    /// `super.tick()` nor any `gravity` term.
+    /// The falling-dust mote's tick — a full override that calls neither
+    /// the base tick nor any `gravity` term.
     ///
-    /// ```java
-    /// this.xo = this.x; this.yo = this.y; this.zo = this.z;
-    /// if (this.age++ >= this.lifetime) { this.remove(); }
-    /// else {
-    ///    this.setSpriteFromAge(this.sprites);
-    ///    this.oRoll = this.roll;
-    ///    this.roll = this.roll + (float) Math.PI * this.rotSpeed * 2.0F;
-    ///    if (this.onGround) { this.oRoll = this.roll = 0.0F; }
-    ///    this.move(this.xd, this.yd, this.zd);
-    ///    this.yd -= 0.003F;
-    ///    this.yd = Math.max(this.yd, -0.14F);
-    /// }
-    /// ```
+    /// It advances age, checks it against `lifetime`, advances the sheet by
+    /// age, saves the previous roll and spins the current one by
+    /// `PI * rot_speed * 2`, zeroes both the moment it lands, moves by
+    /// velocity, then applies a raw downward acceleration of `0.003` clamped
+    /// to a terminal velocity of `-0.14`.
     ///
     /// Three orderings in there are load-bearing and none of them is
     /// interchangeable with the base tick's. The spin is applied **before** the
@@ -1726,7 +1707,7 @@ impl Particle {
         self.yd = self.yd.max(f64::from(-0.14_f32));
     }
 
-    /// `setSpriteFromAge(SpriteSet)`.
+    /// Advances the sprite to the frame its current age maps to.
     fn set_sprite_from_age(&mut self) {
         if self.removed {
             return;
@@ -1742,20 +1723,12 @@ impl Particle {
     /// `DragonBreathParticle.tick()` — a full override that calls neither
     /// `super.tick()` nor any gravity term.
     ///
-    /// ```java
-    /// this.xo = this.x; this.yo = this.y; this.zo = this.z;
-    /// if (this.age++ >= this.lifetime) { this.remove(); }
-    /// else {
-    ///    this.setSpriteFromAge(this.sprites);
-    ///    if (this.onGround) { this.yd = 0.0; this.hasHitGround = true; }
-    ///    if (this.hasHitGround) { this.yd += 0.002; }
-    ///    this.move(this.xd, this.yd, this.zd);
-    ///    if (this.y == this.yo) { this.xd *= 1.1; this.zd *= 1.1; }
-    ///    this.xd = this.xd * this.friction;
-    ///    this.zd = this.zd * this.friction;
-    ///    if (this.hasHitGround) { this.yd = this.yd * this.friction; }
-    /// }
-    /// ```
+    /// It advances age, checks it against `lifetime`, advances the sheet by
+    /// age, zeroes vertical velocity and arms `hit_ground` on landing, adds
+    /// the `0.002` lift once `hit_ground` is armed, moves by velocity,
+    /// applies the horizontal `1.1` creep when height did not change this
+    /// tick, damps `xd`/`zd` by `friction` unconditionally, and damps `yd` by
+    /// `friction` only once `hit_ground` is armed.
     ///
     /// Two things a reader should not "fix". The horizontal `* 1.1` fires on
     /// `y == yo` — an exact comparison against the *previous* position, so it
@@ -1798,18 +1771,12 @@ impl Particle {
         self.behaviour = Behaviour::DragonBreath { hit_ground };
     }
 
-    /// `PortalParticle.tick()` — a full override that **recomputes** the
+    /// The portal shimmer's tick — a full override that **recomputes** the
     /// position from [`Self::spawn`] rather than integrating velocity.
     ///
-    /// ```java
-    /// float pos = (float)this.age / this.lifetime;
-    /// float a = pos;
-    /// pos = -pos + pos * pos * 2.0F;
-    /// pos = 1.0F - pos;
-    /// this.x = this.xStart + this.xd * pos;
-    /// this.y = this.yStart + this.yd * pos + (1.0F - a);
-    /// this.z = this.zStart + this.zd * pos;
-    /// ```
+    /// `a = age / lifetime`, then `pos = 1 - (-a + a² * 2)`, and
+    /// `x = xStart + xd * pos` (with `y` additionally taking `+ (1 - a)`
+    /// and `z` following `x`'s shape).
     ///
     /// `xd/yd/zd` are therefore an **amplitude**, not a speed, and are never
     /// damped — which is why neither `gravity` nor `friction` is read here. The
@@ -1841,20 +1808,14 @@ impl Particle {
         );
     }
 
-    /// `FlyTowardsPositionParticle.tick()` — a full override, like
-    /// [`Self::tick_portal`]: no `super.tick()`, no `move()`, and the position
-    /// recomputed from [`Self::spawn`] every tick.
+    /// The enchant-glyph/nautilus-mote tick — a full override, like
+    /// [`Self::tick_portal`]: no base tick, no movement call, and the
+    /// position recomputed from [`Self::spawn`] every tick.
     ///
-    /// Java:
-    ///
-    /// ```text
-    /// if (age++ >= lifetime) { remove(); return; }
-    /// pos = 1.0F - (float) age / lifetime;
-    /// pp = 1.0F - pos; pp *= pp; pp *= pp;      // (1 - pos)^4
-    /// x = xStart + xd * pos;
-    /// y = yStart + yd * pos - pp * 1.2F;
-    /// z = zStart + zd * pos;
-    /// ```
+    /// It checks the pre-increment `age` against `lifetime` and removes on
+    /// expiry, then computes `pos = 1 - age / lifetime`, `pp = (1 - pos)⁴`,
+    /// and `x = xStart + xd * pos` (`z` following the same shape, `y`
+    /// additionally subtracting `pp * 1.2`).
     ///
     /// Two things a literal reading gets wrong. `pos` runs from **1 down to 0**,
     /// so the mote starts at the full offset and converges on the spawn point —
@@ -1893,7 +1854,7 @@ impl Particle {
         );
     }
 
-    /// `CampfireSmokeParticle.tick()` — a full override.
+    /// The campfire-smoke column's tick — a full override.
     ///
     /// Three things it does *not* do, each visible if copied from the base tick:
     /// no friction (the column keeps its drift instead of stalling), gravity
@@ -1928,14 +1889,14 @@ impl Particle {
         }
     }
 
-    /// `DripParticle.tick()` — a full override, and the one tick in this crate
+    /// The drip's tick — a full override, and the one tick in this crate
     /// that **continues into another particle**.
     ///
-    /// The shape is `preMoveUpdate → gravity → move → postMoveUpdate → damp →
+    /// The shape is `pre-move hook → gravity → move → post-move hook → damp →
     /// fluid check`, with the two hooks being the entire difference between
-    /// vanilla's four subclasses:
+    /// vanilla's four phase variants:
     ///
-    /// | phase | `preMoveUpdate` | `postMoveUpdate` |
+    /// | phase | pre-move hook | post-move hook |
     /// |---|---|---|
     /// | [`DripPhase::Hang`] | expire → remove **and spawn the falling phase** | damp velocity to a fiftieth |
     /// | [`DripPhase::Fall`] | expire → remove | on ground → remove, and spawn the landing phase if the kind has one |
@@ -1948,16 +1909,15 @@ impl Particle {
     ///   cooling formula below reads that counter directly, so incrementing an
     ///   `age` instead silently inverts the colour ramp.
     /// * **The gravity term is `yd -= gravity`, not `yd -= 0.04 * gravity`.**
-    ///   `DripParticle` applies it raw rather than through the base tick's `0.04`
+    ///   The drip applies it raw rather than through the base tick's `0.04`
     ///   scale, so a drip falls twenty-five times harder than the same `gravity`
     ///   number means anywhere else in this file. That is why the hanging phase's
     ///   value looks absurdly small (`0.0012`, or `1.2e-5` for honey).
-    /// * **Lava's hanging phase cools.** `CoolingDripHangParticle` recomputes
-    ///   `g = 16 / (40 - lifetime + 16)` and `b = 4 / (40 - lifetime + 8)` every
-    ///   tick, so a lava drip starts white-hot (`1, 1, 0.5`) and arrives at
-    ///   exactly the lava tint (`1, 0.2857, 0.0833`) as its 40 ticks run out.
-    ///   The two constants are not interchangeable and neither is derivable from
-    ///   the other.
+    /// * **Lava's hanging phase cools.** It recomputes `g = 16 / (40 - lifetime
+    ///   + 16)` and `b = 4 / (40 - lifetime + 8)` every tick, so a lava drip
+    ///   starts white-hot (`1, 1, 0.5`) and arrives at exactly the lava tint
+    ///   (`1, 0.2857, 0.0833`) as its 40 ticks run out. The two constants are
+    ///   not interchangeable and neither is derivable from the other.
     fn tick_drip(
         &mut self,
         view: &dyn CollisionView,

@@ -1,7 +1,8 @@
 //! Fixed-length array of small unsigned integers packed into `u64` cells.
 //!
-//! This mirrors the storage vanilla calls `SimpleBitStorage`. Each entry uses a
-//! fixed `bits` width. Entries are packed low-bits-first into `u64` cells and,
+//! This mirrors vanilla's own non-spanning packed-long storage. Each entry
+//! uses a fixed `bits` width. Entries are packed low-bits-first into `u64`
+//! cells and,
 //! critically, **never straddle a cell boundary**: a cell holds exactly
 //! `floor(64 / bits)` entries and any leftover high bits are padding. This is
 //! the layout Minecraft has used on the wire and on disk since 1.16.

@@ -1,5 +1,6 @@
-//! Incremental client-side relight: vanilla's `LightEngine.checkBlock`, for a
-//! client that cannot wait for a server to relight for it.
+//! Incremental client-side relight: vanilla's own bounded-box recompute run
+//! on every block change, for a client that cannot wait for a server to
+//! relight for it.
 //!
 //! # What it is
 //!
@@ -11,26 +12,24 @@
 //! # Why it exists
 //!
 //! A real vanilla server does **not** send you a light update for a block you
-//! break. `ChunkHolder.broadcastChanges` sends `ClientboundBlockUpdatePacket` to
-//! `playerProvider.getPlayers(pos, false)` — everyone tracking the chunk — but it
-//! sends `ClientboundLightUpdatePacket` only to `getPlayers(pos, true)`, whose
-//! `borderOnly` arm is `ChunkMap.isChunkOnTrackedBorder`: players for whom that
-//! chunk sits on the **outer ring** of their loaded area. A player standing in a
-//! chunk is never on that chunk's own border, so the breaker gets the block change
-//! and no light with it, ever.
+//! break. The block-update packet goes to everyone tracking the chunk, but the
+//! light-update packet goes only to players for whom that chunk sits on the
+//! **outer ring** of their loaded area. A player standing in a chunk is never
+//! on that chunk's own border, so the breaker gets the block change and no
+//! light with it, ever.
 //!
-//! Vanilla is fine because its client runs the same light engine the server does:
-//! `LevelChunk.setBlockState` calls
-//! `level.getChunkSource().getLightEngine().checkBlock(pos)` whenever
-//! `LightEngine.hasDifferentLightProperties(oldState, newState)`, and `LevelChunk`
-//! is shared between both sides. `ClientLevel.tick` then drains the queued work
-//! through `pollLightUpdates` and `getLightEngine().runLightUpdates()`. Server
-//! light packets are a *correction*, not the mechanism.
+//! Vanilla is fine because its client runs the same light engine the server
+//! does: setting a block state re-checks the light engine at that position
+//! whenever the old and new state's light properties differ, and the world
+//! data structure that carries that check is shared between both sides. The
+//! client's own per-tick loop then drains whatever light work that queued and
+//! runs it through the same engine. Server light packets are a *correction*,
+//! not the mechanism.
 //!
 //! Without this module the symptom is exact, and it is the reported one: a broken
 //! block leaves a **pitch-black hole**. The mesher lights a face from the cell the
-//! face opens into (`SnapshotLight::face_light`, matching vanilla's
-//! `ModelBlockRenderer`), and an opaque cell stores light `0` — so the moment a
+//! face opens into (`SnapshotLight::face_light`, matching vanilla's own
+//! block-face lighting), and an opaque cell stores light `0` — so the moment a
 //! solid becomes air its cell still holds `0`, and every face now exposed to it
 //! renders at the shader's dark floor. The integrated server hides it by relighting
 //! and pushing a `light_update` about a tick later, which is why singleplayer looks
@@ -73,8 +72,8 @@
 //! the world ceiling: **a cell holds sky light 15 if and only if it is a sky
 //! source**, because propagation costs `max(1, dampening)` so a cell that merely
 //! received light tops out at 14. Openness then descends through the box by
-//! `open(y) = open(y + 1) && dampening(y) == 0`, which is
-//! `ChunkSkyLightSources.isEdgeOccluded`'s scalar case.
+//! `open(y) = open(y + 1) && dampening(y) == 0`, the same scalar rule vanilla's
+//! own per-column openness tracking uses.
 //!
 //! # How to change it, and the gotchas
 //!
@@ -89,8 +88,8 @@
 //!   appear at the box boundary instead of at the broken block — much harder to
 //!   attribute to this code.
 //! * **A `Missing` sky section means 15, not 0.** Vanilla elides every sky section
-//!   above the top populated one and `SkyLightSectionStorage.getLightValue` answers
-//!   15 there, while a genuinely dark section is sent as an explicit empty
+//!   above the top populated one and its own light lookup answers 15 there,
+//!   while a genuinely dark section is sent as an explicit empty
 //!   (`Uniform(0)`). Reading `Missing` as darkness blacks out everything above the
 //!   terrain — and it is the same rule the mesher's `SkyDefault` already follows,
 //!   so the two must not disagree.
@@ -439,9 +438,10 @@ fn light_section_of(y: i32, min_y: i32) -> i32 {
 /// A cell whose light moved dirties its own section's mesh, plus every neighbour
 /// section the cell physically touches — smooth light and ambient occlusion sample
 /// across section faces, edges and corners, so a change at local index `0` or `15`
-/// is visible in the section across that boundary. This is vanilla's
-/// `LevelRenderer.setSectionDirtyWithNeighbors`, narrowed by the same per-axis
-/// filter the block-update path uses rather than dirtying all 27 unconditionally.
+/// is visible in the section across that boundary. This is vanilla's own
+/// rule for dirtying a changed section's neighbours, narrowed by the same
+/// per-axis filter the block-update path uses rather than dirtying all 27
+/// unconditionally.
 ///
 /// **The emitted tuple is `(chunk_x, chunk_z, section_y)` — not `(x, y, z)`.** All
 /// three components are `i32` section indices, so writing them in spatial order
@@ -540,10 +540,11 @@ fn flood(scratch: &mut Scratch, has_skylight: bool, job: &mut RelitJob) {
 }
 
 impl World {
-    /// Runs vanilla's `LightEngine.checkBlock` for every block change recorded since
-    /// the last drain, and reports which section meshes that invalidates.
+    /// Runs vanilla's own bounded-box recompute for every block change recorded
+    /// since the last drain, and reports which section meshes that invalidates.
     ///
-    /// Call this once per frame or tick — it is the client's `runLightUpdates`.
+    /// Call this once per frame or tick — it is the client's own per-tick light
+    /// update drain.
     /// `props` must be keyed on the same block-state id space this world's sections
     /// hold; `has_skylight` is the connected dimension's own flag, and getting it
     /// wrong floods the Nether with daylight.

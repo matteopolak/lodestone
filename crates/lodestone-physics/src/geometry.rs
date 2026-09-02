@@ -1,6 +1,8 @@
-//! `Vec3` and `AABB` mirrors, keeping vanilla's exact `f64` expression order.
+//! Our own vector and axis-aligned-bounding-box types, keeping vanilla's exact
+//! `f64` expression order.
 
-/// A double-precision 3-vector, mirroring `net.minecraft.world.phys.Vec3`.
+/// A double-precision 3-vector, mirroring vanilla's own vector type
+/// field-for-field.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Vec3d {
     /// X component.

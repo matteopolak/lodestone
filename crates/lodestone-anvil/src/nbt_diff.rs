@@ -19,7 +19,7 @@
 //! |---|---|
 //! | **Compound field order is not part of the value.** `write_named_nbt` emits [`Nbt::Compound`]'s `Vec` in its in-memory order, and nothing in the format constrains a writer's choice. | two writers agreeing on every field still produce different bytes |
 //! | **Region chunk payloads are compressed**, under whatever `region-file-compression` the *writer* was configured with, at whatever zlib level it chose. | identical NBT compresses to different bytes |
-//! | **Sector placement depends on write order**, not on content ([`crate::region::build_region`]'s first-fit allocator, and vanilla's `RegionBitmap`). | the same chunks land at different offsets |
+//! | **Sector placement depends on write order**, not on content ([`crate::region::build_region`]'s first-fit allocator, and a real save's own sector allocator). | the same chunks land at different offsets |
 //! | **The block-state `data` array's bit width is a function of palette length**, so a writer that orders its palette differently packs different `long`s for the same blocks. | see the note below — this one needs *semantic* decode, not just canonical NBT |
 //!
 //! So [`canonical`] sorts every compound's fields by key, and [`diff`]

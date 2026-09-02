@@ -55,8 +55,8 @@ enum Config {
 /// Vanilla removed the VarInt length prefix in **1.21.5 (snapshot 25w07a,
 /// protocol 770)**: from then on the long count is derived from
 /// `bits_per_entry` and the entry count, and the array is written with a fixed
-/// size. This was confirmed from the 26.2 sources (`PalettedContainer` reads
-/// via `readFixedSizeLongArray`) and corroborated by the Minecraft Wiki and by
+/// size. This was confirmed by reading the real 26.2 decoder and corroborated
+/// by the Minecraft Wiki and by
 /// `vendor/minecraft-data`, which shows the sibling chunk-format break at
 /// exactly 1.21.5 (heightmaps switch from an NBT compound to a typed long-array
 /// list). Confidence: **high**.
