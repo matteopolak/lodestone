@@ -20,7 +20,7 @@
 use glam::{Mat4, Vec3};
 use lodestone_render::{ElytraMesh, ElytraWing, elytra_target_rotations, elytra_wing_transform};
 
-/// `ElytraModel.createLayer` declares `LayerDefinition.create(mesh, 64, 32)`.
+/// Vanilla's elytra model's layer-creation function declares `LayerDefinition.create(mesh, 64, 32)`.
 ///
 /// A 64x64 assumption — the size the *player* sheet uses, and the size the
 /// cape model declares — halves every V and paints the wings with whatever

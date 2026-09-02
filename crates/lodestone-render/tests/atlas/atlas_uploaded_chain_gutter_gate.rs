@@ -203,7 +203,7 @@ fn every_uploaded_level_replicates_the_sprite_edge_into_its_gutter() {
         mismatches
     );
 
-    // Vanilla `TextureAtlas.createTexture(width, height, mipLevel)` asks for
+    // Vanilla's texture-atlas creation function asks for
     // `mipLevel + 1`. Predicted exactly, because the defect this gate was
     // written for uploaded 11 at `mipmapLevels = 0` — a floor of "at least one"
     // would have passed it.
@@ -214,7 +214,7 @@ fn every_uploaded_level_replicates_the_sprite_edge_into_its_gutter() {
     assert_eq!(
         level_counts, expected,
         "mipmapLevels = n must upload exactly n + 1 levels, as vanilla's \
-         TextureAtlas.createTexture(.., mipLevel + 1) does"
+         texture-atlas creation function (.., mipLevel + 1) does"
     );
 }
 

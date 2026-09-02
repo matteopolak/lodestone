@@ -19,8 +19,8 @@
 //! ```
 //!
 //! with `L0 = normalize(0.2, 1.0, -0.7)` and `L1 = normalize(-0.2, 1.0, 0.7)`
-//! (`com.mojang.blaze3d.platform.Lighting.DIFFUSE_LIGHT_0/1`, selected for the
-//! world by `Lighting.updateLevel(DEFAULT)`). Both constants and both vectors are
+//! (`Lighting.DIFFUSE_LIGHT_0/1`, selected for the
+//! world by vanilla's lighting-update function). Both constants and both vectors are
 //! read out of the jar, not out of this repo — see [`vanilla_diffuse`].
 //!
 //! # Why an ordering assertion would be vacuous here
