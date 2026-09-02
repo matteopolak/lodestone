@@ -1,10 +1,10 @@
 //! Beacon pyramid detection, primary/secondary effect selection and periodic
-//! effect application (issue #616's `SET_BEACON` remainder).
+//! effect application (the `SET_BEACON` remainder).
 //!
 //! ## What it is
 //!
-//! The pure derivations `BeaconBlockEntity` bundles with its own tick/menu —
-//! split out here so each is independently testable against a bare
+//! The pure derivations vanilla's own beacon block entity bundles with its own
+//! tick/menu — split out here so each is independently testable against a bare
 //! [`ChunkSource`], with no player, connection or menu state involved.
 //! `crate::server` and `crate::block_entities` own the stateful half: the
 //! `BlockEntity::Beacon` variant, the menu, the payment-slot economy, the
@@ -15,30 +15,30 @@
 //!
 //! ## How it works
 //!
-//! Four independent derivations, each a direct port of one `BeaconBlockEntity`
-//! method:
+//! Four independent derivations, each a direct port of one real beacon-tick
+//! rule:
 //!
-//! - [`beacon_levels`] — `updateBase`: the pyramid tier (0–4) beneath a
+//! - [`beacon_levels`] — the real update-base rule: the pyramid tier (0–4) beneath a
 //!   position, by checking each concentric square layer is entirely
 //!   `minecraft:{iron,gold,emerald,diamond,netherite}_block`.
-//! - [`beam_unobstructed`] — an approximation of `!beamSections.isEmpty()`.
+//! - [`beam_unobstructed`] — an approximation of "the beam has no segments".
 //!   Vanilla tracks the beam as coloured segments (for the render); only
 //!   *emptiness* gates effect application, so this checks "every block from
 //!   directly above the beacon to the scan height is beam-transparent"
-//!   rather than modelling segments or colour at all — `BeaconBlockEntity
-//!   .tickBeam`'s own gate: `state.getLightDampening() >= 15 &&
-//!   !state.is(Blocks.BEDROCK)` blocks; anything else (including every
-//!   `BeaconBeamBlock` — glass/stained-glass/pane/beacon, which all carry
+//!   rather than modelling segments or colour at all — the real tick-beam
+//!   rule's own gate: a block whose light dampening is `>= 15` and is not
+//!   bedrock blocks; anything else (including every beacon-beam-transparent
+//!   block — glass/stained-glass/pane/beacon, which all carry
 //!   `0` dampening anyway) passes. [`is_beam_transparent`] reads the real
 //!   per-block-state [`lodestone_data::light_props::dampening`] census
 //!   (the same table `lodestone-world`'s light engine uses) rather than
 //!   membership in a hand-picked block family, so a low-opacity block
 //!   outside that family — a carpet, a candle, a flower — now agrees with
 //!   vanilla instead of being treated as blocking.
-//! - [`required_levels_for`] / [`validate_beacon_effects`] — `getRequiredLevelsFor`
-//!   / `validateEffects`, clause for clause (see that function's own doc for
-//!   each one named).
-//! - [`beacon_effects`] — `applyEffects`'s arithmetic: range, duration and
+//! - [`required_levels_for`] / [`validate_beacon_effects`] — the real
+//!   required-levels-for / validate-effects rules, clause for clause (see that
+//!   function's own doc for each one named).
+//! - [`beacon_effects`] — the real apply-effects rule's arithmetic: range, duration and
 //!   amplifier for the primary and (level-4-only) secondary application.
 //!   Returns *what* to apply; finding which players are in range and calling
 //!   [`crate::mob_effects::ActiveEffects::apply`] is the caller's job, the
@@ -49,7 +49,7 @@
 //!
 //! [`BASE_BLOCKS`] and [`BEACON_EFFECT_TIERS`] are the two vanilla censuses
 //! this module hardcodes (`minecraft:beacon_base_blocks` and
-//! `BeaconBlockEntity.BEACON_EFFECTS` — see `docs/beacon.md` for both
+//! vanilla's own beacon-effects table — see `docs/beacon.md` for both
 //! citations). Neither is bundled as a data asset the way
 //! `minecraft:beacon_payment_items` is (`crate::crafting::EMBEDDED_ITEM_TAGS`,
 //! reused directly by [`is_beacon_payment_item`] below rather than a second
@@ -80,7 +80,7 @@ pub const BASE_BLOCKS: [&str; 5] = [
 ];
 
 /// The four beacon power tiers, index 0 = the tier a level-1 pyramid unlocks
-/// — vanilla's `BeaconBlockEntity.BEACON_EFFECTS`. Tier 4 (regeneration) is
+/// — vanilla's own beacon-effects table. Tier 4 (regeneration) is
 /// the level-4-only, secondary-only power [`validate_beacon_effects`]'s own
 /// doc names.
 pub const BEACON_EFFECT_TIERS: [&[&str]; 4] = [
@@ -103,8 +103,8 @@ fn is_base_block(state: &str) -> bool {
 }
 
 /// Blocks a beacon's beam continues through, for [`beam_unobstructed`] —
-/// `BeaconBlockEntity.tickBeam`'s own gate, `!(state.getLightDampening() >=
-/// 15 && !state.is(Blocks.BEDROCK))`. `state` carries the full block-state
+/// the real tick-beam rule's own gate: passes unless light dampening is `>= 15`
+/// and the block is not bedrock. `state` carries the full block-state
 /// string [`ChunkSource::block_state`] returns (bare name or
 /// `name[prop=value,...]`), resolved to a global id via
 /// [`lodestone_data::block_states::state_id`] — the same resolution
@@ -124,7 +124,7 @@ fn is_beam_transparent(state: &str) -> bool {
 }
 
 /// The beacon pyramid tier beneath `(x, y, z)` — vanilla's
-/// `BeaconBlockEntity.updateBase`: for `step` `1..=4`, the whole
+/// real update-base rule: for `step` `1..=4`, the whole
 /// `(2*step+1) × (2*step+1)` square at `y - step` must be [`is_base_block`],
 /// and the returned level is the highest `step` for which every layer from
 /// `1` to `step` passed (the loop stops at the first failing layer, so a
@@ -168,10 +168,10 @@ pub fn beam_unobstructed<S: ChunkSource + ?Sized>(source: &S, x: i32, y: i32, z:
     true
 }
 
-/// The pyramid tier `effect` requires — vanilla's `getRequiredLevelsFor`:
-/// the 1-based index of the [`BEACON_EFFECT_TIERS`] entry containing it, or
+/// The pyramid tier `effect` requires — vanilla's real required-levels-for
+/// rule: the 1-based index of the [`BEACON_EFFECT_TIERS`] entry containing it, or
 /// `None` for anything not a beacon power at all (vanilla's own
-/// `Integer.MAX_VALUE` fallback, restated as `None` here because this
+/// max-int fallback, restated as `None` here because this
 /// module has no sentinel level above `4`).
 #[must_use]
 pub fn required_levels_for(effect: &str) -> Option<u8> {
@@ -182,13 +182,13 @@ pub fn required_levels_for(effect: &str) -> Option<u8> {
 }
 
 /// Whether `primary`/`secondary` are a legal selection for a pyramid of
-/// `levels` tiers — vanilla's `BeaconBlockEntity.validateEffects`, every
+/// `levels` tiers — vanilla's real validate-effects rule, every
 /// clause of its own body:
 ///
 /// 1. A secondary pick needs the full level-4 pyramid, whatever it is.
 /// 2. Each pick's own required tier must fit inside `levels` — an effect
 ///    [`required_levels_for`] cannot place (`None`) always fails this, the
-///    same way vanilla's `Integer.MAX_VALUE` always exceeds any real level.
+///    same way vanilla's own max-int fallback always exceeds any real level.
 /// 3. The primary can never be the level-4-only power (tier 4,
 ///    regeneration) — only a *secondary* pick may be.
 /// 4. A secondary, if present, must be either the level-4 power or
@@ -224,7 +224,7 @@ pub struct BeaconEffect {
 
 /// The horizontal reach (blocks) and the primary/secondary applications a
 /// beacon at pyramid tier `levels` grants — vanilla's
-/// `BeaconBlockEntity.applyEffects`'s arithmetic, with no player query: the
+/// real apply-effects rule's arithmetic, with no player query: the
 /// caller finds who is within `range` blocks horizontally (and, per
 /// vanilla's own `expandTowards(0, height, 0)`, anywhere from `range` below
 /// to the top of the world) and calls
@@ -262,7 +262,7 @@ pub fn beacon_effects(levels: u8, primary: Option<&str>, secondary: Option<&str>
     (range, out)
 }
 
-/// `BeaconMenu.encodeEffect`: the `container_set_data` wire form of an
+/// The real beacon-menu encode-effect rule: the `container_set_data` wire form of an
 /// optional effect — `0` for `None`, else the `minecraft:mob_effect`
 /// registry id plus one (`0` is reserved as the "no effect" sentinel, so
 /// every real id shifts up by one).
@@ -273,7 +273,7 @@ pub fn encode_beacon_effect(effect: Option<&str>) -> i32 {
         .map_or(0, |id| id + 1)
 }
 
-/// `BeaconMenu.decodeEffect`, the inverse of [`encode_beacon_effect`].
+/// The real beacon-menu decode-effect rule, the inverse of [`encode_beacon_effect`].
 #[must_use]
 pub fn decode_beacon_effect(value: i32) -> Option<&'static str> {
     if value == 0 {
