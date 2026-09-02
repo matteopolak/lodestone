@@ -1,4 +1,4 @@
-//! Vegetal decoration (issue #406): grass, flowers and trees (oak, birch,
+//! Vegetal decoration: grass, flowers and trees (oak, birch,
 //! spruce, plus spruce's own `pine` sibling since it shares the same
 //! trunk/foliage engine at near-zero extra cost — see "Scope" below).
 //! `GenerationStep.Decoration.VEGETAL_DECORATION` ([`super::STEP_VEGETAL_DECORATION`]),
@@ -12,7 +12,7 @@
 //!
 //! # Scope, named plainly
 //!
-//! **Cross-chunk spill (issue #427): closed.** Vanilla's
+//! **Cross-chunk spill: closed.** Vanilla's
 //! `blockStateWriteRadius(1)` at the FEATURES generation stage
 //! (`ChunkPyramid.java:32-35`, the same limit `docs/worldgen-parity.md`
 //! documents for the ore 3×3 driver) applies to `VEGETAL_DECORATION` too —
@@ -30,7 +30,7 @@
 //! oracle's `FULL3X3` mode.
 //!
 //! [`apply_vegetal_decoration_step`] (the single-source primitive this
-//! module shipped with originally, issue #406) still exists and is still
+//! module shipped with originally, this change) still exists and is still
 //! correct on its own terms — it is simply no longer what
 //! `crate::overworld::OverworldGenerator::vegetation_stage` calls in
 //! production. A write whose final position lands outside whatever
@@ -52,7 +52,7 @@
 //! `scripts/worldgen-oracle/VegetationOracle.java` and
 //! `crates/lodestone-worldgen/tests/vegetation_parity.rs` both exist now, and
 //! the latter diffs this module block-for-block against a real 26.2 server dump
-//! at four fixtures (two plains, two savanna). Issue #478's investigation found
+//! at four fixtures (two plains, two savanna). An investigation found
 //! the stale paragraph still here, steering readers away from the evidence that
 //! had already landed. Corrected rather than deleted, because *which* claim went
 //! stale is itself the useful record — CLAUDE.md's rule 2.
@@ -115,7 +115,7 @@
 //!   `PineFoliagePlacer` — **implemented**, see below) and
 //!   `fallen_spruce_tree` (0.83%) — with pine supported, only the fallen
 //!   branch is a gap, so taiga is ~99.2% supported.
-//! - **acacia/savanna** (`trees_savanna`, issue #428): `acacia_checked`
+//! - **acacia/savanna** (`trees_savanna`, this change): `acacia_checked`
 //!   (80%, [`TrunkPlacerCfg::Forking`]+[`FoliagePlacerCfg::Acacia`] —
 //!   **implemented**) and the default `oak_checked` branch (~19.75%, the
 //!   same straight-trunk oak every other biome already supports) leave only
@@ -128,8 +128,8 @@
 //! is a small, self-contained addition ([`FoliagePlacerCfg::Pine`]) that
 //! turns taiga's honest coverage from ~66% to ~99%, in contrast to oak's
 //! `fancy_oak`/`FallenTreeFeature`, which are structurally different
-//! trunk/foliage/feature families and were out of scope for issue #406's
-//! landing. Acacia (`TrunkPlacerCfg::Forking`) is issue #428's own addition
+//! trunk/foliage/feature families and were out of scope for this change's
+//! landing. Acacia (`TrunkPlacerCfg::Forking`) is this change's own addition
 //! in that same spirit — a real, separate trunk/foliage family (leaning
 //! column + branch, not oak's straight-trunk-plus-variant shape), landed
 //! because savanna is a common, visible biome and `ForkingTrunkPlacer` is
@@ -151,8 +151,8 @@
 //! lean), mega spruce/pine's own foliage (`FoliagePlacerCfg::MegaPine`,
 //! `"mega_pine_foliage_placer"`), and `jungle_bush`'s foliage
 //! (`FoliagePlacerCfg::Bush`, `"bush_foliage_placer"`, paired with the
-//! already-implemented `Straight` trunk) landed in a later pass of issue
-//! #428. `MegaJungleTrunkPlacer extends GiantTrunkPlacer` in real vanilla
+//! already-implemented `Straight` trunk) landed in a later pass of the
+//! savanna/acacia increment. `MegaJungleTrunkPlacer extends GiantTrunkPlacer` in real vanilla
 //! ([`place_mega_jungle_trunk`] literally calls [`place_giant_trunk`] first,
 //! then adds its own radial branches), so porting `Giant` bought
 //! old_growth_spruce_taiga/old_growth_pine_taiga's `mega_spruce`/`mega_pine`
@@ -161,7 +161,7 @@
 //! `trees_jungle`'s own `RandomSelector` is `jungle_bush` 50% +
 //! `mega_jungle_tree_checked` 33.3% + `fancy_oak_checked` 10% +
 //! `fallen_jungle_tree` 1.25% + the default `jungle_tree` branch (already
-//! `Straight`+`Blob`, supported since issue #406) — so this pass closes the
+//! `Straight`+`Blob`, supported since this change) — so this pass closes the
 //! 50%+33.3% majority of jungle/sparse_jungle/bamboo_jungle's own tree gap,
 //! leaving only `fancy_oak_checked` (10%, shared with every other biome's
 //! `"tree: unsupported..."` reason) and `fallen_jungle_tree` (1.25%,
@@ -308,7 +308,7 @@ pub fn apply_vegetal_decoration_step<R: RandomSource>(
     }
 }
 
-/// Issue #513: [`apply_vegetal_decoration_step`] over **every** driven decoration
+/// [`apply_vegetal_decoration_step`] over **every** driven decoration
 /// step, not only `VEGETAL_DECORATION`.
 ///
 /// `features` is [`crate::compose::build_biome_decoration`]'s output —
@@ -368,7 +368,7 @@ pub fn apply_decoration_steps_3x3_per_source<'a, R: RandomSource>(
 }
 
 /// The real vanilla 3×3 neighbourhood driver for `VEGETAL_DECORATION`
-/// (issue #427) — the same `blockStateWriteRadius(1)` limit
+/// — the same `blockStateWriteRadius(1)` limit
 /// `docs/worldgen-parity.md` already documents for the ore engine's own
 /// [`crate::feature::apply_ore_step_3x3_per_source`], applied to this
 /// module's own placement pipeline instead of introducing a second
@@ -475,7 +475,7 @@ fn place_placed_feature<R: RandomSource>(
                     recurse(random, mods, i + 1, next, grid, tags, feature);
                 }
             }
-            // Issue #513's fan-out shape — a *different* position per recursion,
+            // This modifier's fan-out shape — a *different* position per recursion,
             // which is why it is not a `Repeat`. Still depth-first, still in the
             // order the modifier produced.
             Positions::List(list) => {
@@ -539,7 +539,7 @@ fn place_configured_feature<R: RandomSource>(
             place_placed_feature(random, pos, &list[idx], grid, tags);
         }
         // ------------------------------------------------------------------
-        // Issue #513. Bodies in [`features`]; census counters are deliberately
+        // Bodies in [`features`]; census counters are deliberately
         // shared under `other_feature` rather than one field per type — the
         // census exists to answer "did anything place", and 24 new fields would
         // be 24 new things to keep in sync for no extra answer.
@@ -654,7 +654,7 @@ fn place_configured_feature<R: RandomSource>(
             }
         }
         ConfiguredFeature::NoOp => {}
-        // Issue #478: still a no-op — the module's degrade-don't-crash rule —
+        // Still a no-op — the module's degrade-don't-crash rule —
         // but a *counted, named* one. `LODESTONE_VEG_STRICT=1` turns it into a
         // panic naming the reason, for answering "which type is missing here"
         // without adding a print to a hot loop.
@@ -1303,7 +1303,7 @@ mod tests {
     }
 
     /// `GiantTrunkPlacer`+`MegaPineFoliagePlacer` (mega_spruce/mega_pine's
-    /// real placers, issue #428) over flat open ground: the base level
+    /// real placers, this change) over flat open ground: the base level
     /// (dy=0) must be a full 2×2 log footprint, the TOP level (dy=height-1,
     /// `hh < treeHeight - 1` false) must be a single log — the shape
     /// `Straight`/`Forking` cannot produce and [`place_dark_oak_trunk`]'s own
@@ -1371,7 +1371,7 @@ mod tests {
     }
 
     /// `MegaJungleTrunkPlacer`+`MegaJungleFoliagePlacer` (mega_jungle_tree's
-    /// real placers, issue #428): the shared `Giant` 2×2 base must still
+    /// real placers, this change): the shared `Giant` 2×2 base must still
     /// place, AND — with a tree tall enough that `branch_height = tree_height
     /// - 2 - nextInt(4)` is guaranteed `> tree_height / 2` on its first draw
     /// (worst case `nextInt(4) == 3`: `20 - 2 - 3 = 15 > 10`) — at least one
@@ -1439,7 +1439,7 @@ mod tests {
         assert!(branch_log_found, "a 20-tall mega jungle tree must place at least one branch log outside the 2×2 base");
     }
 
-    /// `BushFoliagePlacer` (jungle_bush's real foliage, issue #428) paired
+    /// `BushFoliagePlacer` (jungle_bush's real foliage, this change) paired
     /// with the plain `Straight` trunk placer jungle_bush actually uses
     /// (`base_height: 1, height_rand_a: 0, height_rand_b: 0` — a 1-tall
     /// "trunk"). Must still reach at least one leaf.
@@ -1716,8 +1716,8 @@ mod tests {
         }
     }
 
-    /// `TreeFeature.doPlace`'s `min_clipped_height` acceptance path (issue
-    /// #428's `fancy_oak` increment) — before this, [`place_tree`] rejected
+    /// `TreeFeature.doPlace`'s `min_clipped_height` acceptance path (the
+    /// savanna/acacia increment's `fancy_oak` addition) — before this, [`place_tree`] rejected
     /// any tree whose free-height scan found an obstruction at all, which is
     /// wrong for a species like fancy oak whose `two_layers_feature_size`
     /// carries `min_clipped_height`. Both arms use the SAME config
@@ -2195,7 +2195,7 @@ mod tests {
 
     /// A mangrove `root_placer` shifts the REAL trunk `trunk_offset_y`
     /// blocks above `origin` — [`super::place::place_tree`]'s `trunk_origin`
-    /// wiring, issue #428's mangrove increment. The wrong hypothesis
+    /// wiring, this change's mangrove increment. The wrong hypothesis
     /// (`root_placer` parsed but never consulted, so `trunk_origin ==
     /// origin`) places the first trunk log at `origin.y`; the correct one
     /// places it at `origin.y + trunk_offset_y` and nothing at `origin.y`

@@ -19,7 +19,7 @@ use super::config::is_fluid;
 /// chunk-local (`0..16` × `0..16`, absolute `y`) via [`VegGrid::new`] — see
 /// module doc's "Scope" section for why single-chunk was this module's
 /// original footprint. [`VegGrid::with_footprint`] widens the local bound to
-/// an arbitrary `[lo, hi)` on both axes (issue #427: the real vanilla 3×3
+/// an arbitrary `[lo, hi)` on both axes (this change: the real vanilla 3×3
 /// `blockStateWriteRadius(1)` driver uses [`crate::feature::REGION_MIN`]/
 /// [`crate::feature::REGION_MAX`], the exact constants
 /// [`crate::feature::OreInput::region_local`] already established for the
@@ -56,7 +56,7 @@ pub struct VegGrid {
     /// **That gate was then deleted, and this comment kept naming it** — it read
     /// `lodestone_server::worldgen_data::tests::diagnostic_vegetation_counts_over_plains_sweep`
     /// up to `074b5e9`, by which point no such test existed anywhere in the tree
-    /// (issue #478). So for an unknown span the repo held a written record of a
+    ///. So for an unknown span the repo held a written record of a
     /// regression with nothing watching for its return, and the reference read as
     /// coverage on inspection. The live gate is now
     /// `lodestone_server::worldgen_data::tests::vegetation_reaches_real_blocks_over_a_production_sweep`,
@@ -158,14 +158,14 @@ pub(super)     height: i32,
     /// three integer compares rather than an interner read guard. See
     /// [`Self::is_air_id`] for why an id comparison is exact for air. Unit 8.
     air_ids: [StateId; 3],
-    /// Issue #520: block entities decoration produced, with **absolute** world
+    /// Block entities decoration produced, with **absolute** world
     /// positions, in write order. Alongside [`Self::dirty`] for the same reason
     /// that is a `Vec` and not a map: insertion order carries no ambiguity, and a
     /// generated column has at most a handful.
     ///
     /// Every constructor leaves this empty and only [`Self::push_block_entity`]
     /// ever grows it, so a fixture that never decorates a beehive sees exactly the
-    /// pre-#520 behaviour.
+    /// behaviour from before block-entity decoration existed.
     block_entities: Vec<crate::overworld::block_entities::GeneratedBlockEntity>,
 }
 
@@ -310,7 +310,7 @@ impl VegGrid {
         &self.interner
     }
 
-    /// Issue #520: records a block entity decoration produced, at an **absolute**
+    /// Records a block entity decoration produced, at an **absolute**
     /// world position. Unbounded by the grid's footprint on purpose — the caller
     /// filters to the served chunk, exactly as it does for [`Self::dirty_cells`].
     pub fn push_block_entity(
@@ -547,7 +547,7 @@ impl VegGrid {
 /// so `setFeatureSeed`'s index is the JSON array position, not a filtered
 /// count.
 /// Per-thread census of what the vegetal-decoration placer actually *did* —
-/// issue #478's "make absence loud" half.
+/// this change's "make absence loud" half.
 ///
 /// # Why this exists, and why the existing gate was not enough
 ///
@@ -555,7 +555,7 @@ impl VegGrid {
 /// kind degrades to a silent no-op, never a panic" (see the module doc). That
 /// rule is right — a datapack naming a feature we don't implement must still
 /// produce a world — but on its own it makes *every* quantity of vegetation,
-/// including zero, look identical from the outside. Issue #478 was filed
+/// including zero, look identical from the outside. This was found
 /// against exactly that shape, and the previous instance of the same shape
 /// (the absolute-vs-local `VegGrid` coordinate bug recorded in
 /// [`VegGrid`]'s own doc comment) reached **zero** blocks in every served
@@ -597,7 +597,7 @@ pub mod census {
         pub random_selector: usize,
         /// [`super::ConfiguredFeature::SimpleRandomSelector`] traversals.
         pub simple_random_selector: usize,
-        /// Issue #513: dispatches into any of the 24 feature types added beyond
+        /// Dispatches into any of the 24 feature types added beyond
         /// the original seven, terminals and traversals together. One shared
         /// counter rather than 24 fields — the question this census answers is
         /// "did decoration reach a modelled body", and `unsupported` already

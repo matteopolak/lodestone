@@ -17,10 +17,10 @@ use super::config::{BlockStateProvider, VegTags, try_parse_int_provider};
 use super::grid::VegGrid;
 use super::ids::{Rewrite, Tag};
 
-/// `net.minecraft.world.level.levelgen.feature.trunkplacers.TrunkPlacer` (the
-/// `Straight`/`Forking` subset — issue #428 adds `Forking`, acacia's real
-/// trunk placer, alongside the `Straight` this module shipped with under
-/// #406). Both variants carry the identical `(base_height, height_rand_a,
+/// Vanilla's own trunk-placer base class (the
+/// `Straight`/`Forking` subset — the savanna/acacia increment adds `Forking`, acacia's real
+/// trunk placer, alongside the `Straight` this module shipped with
+/// originally). Both variants carry the identical `(base_height, height_rand_a,
 /// height_rand_b)` triple `TrunkPlacer.getTreeHeight` (a base-class method,
 /// not overridden by either subclass) draws from — kept as one shared shape
 /// rather than duplicating the three fields per variant.
@@ -37,7 +37,7 @@ pub enum TrunkPlacerCfg {
         height_rand_a: i32,
         height_rand_b: i32,
     },
-    /// `ForkingTrunkPlacer` — acacia's real trunk (issue #428): a single
+    /// `ForkingTrunkPlacer` — acacia's real trunk: a single
     /// leaning column, plus (usually) one branch in a different horizontal
     /// direction. See [`place_trunk`] for the port of `placeTrunk` itself.
     Forking {
@@ -45,7 +45,7 @@ pub enum TrunkPlacerCfg {
         height_rand_a: i32,
         height_rand_b: i32,
     },
-    /// `DarkOakTrunkPlacer` — dark oak's real trunk (issue #428): a 2×2 log
+    /// `DarkOakTrunkPlacer` — dark oak's real trunk: a 2×2 log
     /// column (four logs per level) that leans one step for its upper
     /// portion, on a 2×2 `below_trunk_provider` base, plus up to a few short
     /// hanging branches around the canopy top. See [`place_dark_oak_trunk`]
@@ -56,7 +56,7 @@ pub enum TrunkPlacerCfg {
         height_rand_a: i32,
         height_rand_b: i32,
     },
-    /// `GiantTrunkPlacer` — the redwood/giant-spruce trunk (issue #428): a
+    /// `GiantTrunkPlacer` — the redwood/giant-spruce trunk: a
     /// static 2×2 log column, no lean, no anchor gate. Also the base shape
     /// [`Self::MegaJungle`] places via its own `super.placeTrunk` before
     /// adding branches — see [`place_giant_trunk`] for the port.
@@ -65,7 +65,7 @@ pub enum TrunkPlacerCfg {
         height_rand_a: i32,
         height_rand_b: i32,
     },
-    /// `MegaJungleTrunkPlacer` — mega jungle's real trunk (issue #428):
+    /// `MegaJungleTrunkPlacer` — mega jungle's real trunk:
     /// [`Self::Giant`]'s own 2×2 column, then a spiral of short radial
     /// branches. See [`place_mega_jungle_trunk`] for the port.
     MegaJungle {
@@ -74,7 +74,7 @@ pub enum TrunkPlacerCfg {
         height_rand_b: i32,
     },
     /// `FancyTrunkPlacer` — the `fancy_oak_*`/`fancy_oak_checked` branch
-    /// shared by oak, jungle and dark_forest (issue #428's highest-value
+    /// shared by oak, jungle and dark_forest (this change's highest-value
     /// remaining gap). Structurally distinct from every other placer here:
     /// a slim central trunk plus a scattered spray of diagonal limbs, each
     /// walked out from a randomly-angled, randomly-scaled offset and only
@@ -213,7 +213,7 @@ pub(super)     radius_offset: i32,
 pub(super)     double_trunk: bool,
 }
 
-/// `ForkingTrunkPlacer.placeTrunk` — acacia's real trunk (issue #428).
+/// `ForkingTrunkPlacer.placeTrunk` — acacia's real trunk.
 /// Places `placeBelowTrunkBlock(origin.below())` first (matching
 /// `StraightTrunkPlacer`'s own convention, [`place_tree`]'s existing
 /// pre-loop call for the `Straight` case), then a single leaning log column
@@ -334,7 +334,7 @@ pub(super) fn valid_tree_pos(grid: &VegGrid, tags: &VegTags, x: i32, y: i32, z: 
     tags.has(interner, Tag::Air, id) || tags.has(interner, Tag::ReplaceableByTrees, id)
 }
 
-/// `DarkOakTrunkPlacer.placeTrunk` — dark oak's real trunk (issue #428),
+/// `DarkOakTrunkPlacer.placeTrunk` — dark oak's real trunk,
 /// also the trunk of pale oak (both use `dark_oak_trunk_placer`). A 2×2 log
 /// column: four `placeBelowTrunkBlock`s at the origin's `(0,0)`, `east`,
 /// `south`, `south().east()` base, then per level (gated by the anchor's
@@ -458,8 +458,8 @@ pub(super) fn place_dark_oak_trunk<R: RandomSource>(
     placed_any
 }
 
-/// `GiantTrunkPlacer.placeTrunk` — the redwood/giant-spruce trunk (issue
-/// #428), and the shared base [`place_mega_jungle_trunk`] calls via its own
+/// `GiantTrunkPlacer.placeTrunk` — the redwood/giant-spruce trunk (added
+/// with the savanna/acacia increment), and the shared base [`place_mega_jungle_trunk`] calls via its own
 /// `super.placeTrunk`. A static 2×2 log column: four `placeBelowTrunkBlock`s
 /// at the origin's `(0,0)`, east, south, south+east base (the same order as
 /// [`place_dark_oak_trunk`]'s own base), then per level `0..tree_height` a
@@ -539,8 +539,8 @@ pub(super) fn place_giant_trunk<R: RandomSource>(
     placed_any
 }
 
-/// `MegaJungleTrunkPlacer.placeTrunk` — mega jungle's real trunk (issue
-/// #428): [`place_giant_trunk`]'s own 2×2 column (`super.placeTrunk` in real
+/// `MegaJungleTrunkPlacer.placeTrunk` — mega jungle's real trunk (added
+/// with the savanna/acacia increment): [`place_giant_trunk`]'s own 2×2 column (`super.placeTrunk` in real
 /// vanilla — `MegaJungleTrunkPlacer extends GiantTrunkPlacer`), then a spiral
 /// of short radial branches climbing the trunk's upper half.
 ///
@@ -752,7 +752,7 @@ fn trim_branches(height: i32, local_y: i32) -> bool {
 }
 
 /// `FancyTrunkPlacer.placeTrunk` — oak's `fancy_oak_*`/`fancy_oak_checked`
-/// branch (issue #428's highest-value remaining gap): a slim central trunk,
+/// branch (this change's highest-value remaining gap): a slim central trunk,
 /// plus a scattered spray of short diagonal "check" limbs (one candidate
 /// per `relativeY` level counting down from `height - 5`, gated by
 /// [`tree_shape`]'s envelope), each of which only actually grows — as a
@@ -1303,7 +1303,7 @@ pub(super) struct AboveRootPlacementCfg {
 /// `MangroveRootPlacer` subclass — no other
 /// vanilla `RootPlacer` exists as of 26.2, so this is a one-variant enum for
 /// the same reason [`TrunkPlacerCfg`]/[`FoliagePlacerCfg`] started as
-/// one-variant enums under #406). [`super::place::place_roots`] is the port
+/// one-variant enums originally). [`super::place::place_roots`] is the port
 /// of `placeRoots`/`simulateRoots`/`potentialRootPositions`/`placeRoot`.
 #[derive(Clone, Debug)]
 pub(super) enum RootPlacerCfg {
@@ -1459,7 +1459,7 @@ pub(super) fn simulate_roots<R: RandomSource>(
 /// "fresh, undecayed" default) is not what real vanilla ever actually
 /// serves near a trunk — before this function existed, this engine placed
 /// every leaf at the JSON's literal `distance=7` and never corrected it, a
-/// real, measured mismatch found by issue #428's savanna oracle fixtures
+/// real, measured mismatch found by this change's savanna oracle fixtures
 /// (real oak/acacia canopies are NOT reachable at plains' ~5%-per-chunk tree
 /// rate with the two originally-committed fixtures, which is why this
 /// gap was invisible until now — see this module's own parity test's doc
@@ -1646,8 +1646,8 @@ thread_local! {
 
 /// `net.minecraft.world.level.levelgen.feature.foliageplacers.FoliagePlacer`
 /// (the `Blob`/`Spruce`/`Pine`/`Acacia` subset — see module doc's "Named
-/// per-branch gaps" for why `Pine` is here despite not being one of issue
-/// #406's three named species; `Acacia` is issue #428's addition, paired
+/// per-branch gaps" for why `Pine` is here despite not being one of the
+/// three originally-named species; `Acacia` is the savanna/acacia increment's addition, paired
 /// with [`TrunkPlacerCfg::Forking`]).
 #[derive(Clone, Debug)]
 pub enum FoliagePlacerCfg {
@@ -1666,7 +1666,7 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `AcaciaFoliagePlacer` — acacia's real foliage (issue #428). Its
+    /// `AcaciaFoliagePlacer` — acacia's real foliage. Its
     /// `foliageHeight` override always returns the constant `0`, drawing no
     /// RNG at all (unlike `Blob`'s config-constant `height` field or
     /// `Pine`'s sampled one) — see [`Self::foliage_height`]'s own arm.
@@ -1674,7 +1674,7 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `DarkOakFoliagePlacer` — dark oak's real foliage (issue #428), paired
+    /// `DarkOakFoliagePlacer` — dark oak's real foliage, paired
     /// with [`TrunkPlacerCfg::DarkOak`] (and shared with pale oak). Rows are
     /// drawn relative to each [`Attachment`] with radii that depend on
     /// `double_trunk` (`leafRadius + 2/-1`, `leafRadius + 3/0`,
@@ -1686,7 +1686,7 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `BushFoliagePlacer` — jungle_bush's real foliage (issue #428): a
+    /// `BushFoliagePlacer` — jungle_bush's real foliage: a
     /// `BlobFoliagePlacer` subclass (shares its `height` field, parsed the
     /// same way) that overrides both `createFoliage` (a different per-row
     /// radius formula, and no `/2` term) and `shouldSkipLocation` (an
@@ -1698,7 +1698,7 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `MegaJungleFoliagePlacer` — mega jungle's real foliage (issue #428),
+    /// `MegaJungleFoliagePlacer` — mega jungle's real foliage,
     /// paired with [`TrunkPlacerCfg::MegaJungle`]. Registered in vanilla as
     /// `"jungle_foliage_placer"` (not `"mega_jungle_foliage_placer"` — see
     /// `FoliagePlacerType.MEGA_JUNGLE_FOLIAGE_PLACER`'s own registration
@@ -1708,8 +1708,8 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `MegaPineFoliagePlacer` — the redwood/giant-spruce foliage (issue
-    /// #428), paired with [`TrunkPlacerCfg::Giant`] directly (mega_spruce/
+    /// `MegaPineFoliagePlacer` — the redwood/giant-spruce foliage (added
+    /// with the savanna/acacia increment), paired with [`TrunkPlacerCfg::Giant`] directly (mega_spruce/
     /// mega_pine use `giant_trunk_placer`, not `MegaJungleTrunkPlacer`).
     /// `crown_height` replaces the other placers' constant/derived
     /// `foliage_height` with its own sampled `IntProvider`.
@@ -1718,7 +1718,7 @@ pub enum FoliagePlacerCfg {
         radius: IntProvider,
         offset: IntProvider,
     },
-    /// `FancyFoliagePlacer` — oak's `fancy_oak_*` foliage (issue #428),
+    /// `FancyFoliagePlacer` — oak's `fancy_oak_*` foliage,
     /// paired with [`TrunkPlacerCfg::Fancy`]. A `BlobFoliagePlacer`
     /// subclass sharing its `height` field and parse shape (like
     /// [`Self::Bush`]/[`Self::MegaJungle`] above) but overriding both
