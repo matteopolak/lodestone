@@ -1702,8 +1702,8 @@ fn update_auto_jump(
             || segment_intersects(box_, right_begin, right_end)
         {
             obstacle_height = box_.max_y as f32;
-            // `box.getCenter()` is `Mth.lerp(0.5, min, max)` per axis
-            // (`AABB.java:447-449`); `BlockPos.containing` floors it.
+            // Vanilla's own box-centre: lerp(0.5, min, max) per axis, then
+            // floored to a block position.
             let center = Vec3d::new(
                 mth::lerp_f64(0.5, box_.min_x, box_.max_x),
                 mth::lerp_f64(0.5, box_.min_y, box_.max_y),
@@ -1719,8 +1719,8 @@ fn update_auto_jump(
             for steps in 1..(jump_height.ceil() as i32) {
                 let above_y = obstacle_y + steps;
                 if !block_has_no_collision(view, obstacle_x, above_y, obstacle_z) {
-                    // `(float)shape.max(Y) + abovePos.getY()` — the block-local
-                    // top (uncapped) plus the block's own y, in float math.
+                    // Vanilla's own block-local top (uncapped) plus the
+                    // block's own y, in float math.
                     obstacle_height =
                         view.collision_top(obstacle_x, above_y, obstacle_z) as f32 + above_y as f32;
                     if f64::from(obstacle_height) - state.position.y > f64::from(jump_height) {
@@ -1748,10 +1748,9 @@ fn update_auto_jump(
     }
 }
 
-/// `KeyboardInput`'s `moveVector` — `Vec2(leftImpulse, forwardImpulse)`
-/// normalised with `Mth.sqrt` and a `1.0E-4F` zero-threshold
-/// (`Vec2.normalized()`, `Vec2.java:59-62`). `x` is the strafe axis and `y` the
-/// forward axis, matching `MovementInput`'s `strafe`/`forward`.
+/// Vanilla's own input move-vector: `(leftImpulse, forwardImpulse)`
+/// normalised with a `1.0E-4F` zero-threshold. `x` is the strafe axis and
+/// `y` the forward axis, matching `MovementInput`'s `strafe`/`forward`.
 fn normalized_move_vector(input: MovementInput) -> (f32, f32) {
     let dist = (input.strafe * input.strafe + input.forward * input.forward).sqrt();
     if dist < 1.0e-4f32 {
@@ -1761,11 +1760,11 @@ fn normalized_move_vector(input: MovementInput) -> (f32, f32) {
     }
 }
 
-/// `Entity.getForward()` — `Vec3.directionFromRotation(xRot, yRot)`
-/// (`Entity.java:2603-2605`, `Vec3.java:267-273`). Only `x` and `z` are read by
-/// the auto-jump dot product, but the whole expression is reproduced so the
-/// bits match the reference — the `-PI` yaw term and the `-cos(pitch)` x scale
-/// are real float arithmetic, not simplifiable.
+/// Vanilla's own "forward" vector: direction-from-rotation(pitch, yaw). Only
+/// `x` and `z` are read by the auto-jump dot product, but the whole
+/// expression is reproduced so the bits match the reference — the `-PI` yaw
+/// term and the `-cos(pitch)` x scale are real float arithmetic, not
+/// simplifiable.
 fn forward_direction(pitch: f32, yaw: f32) -> Vec3d {
     let y_arg = -yaw * (core::f32::consts::PI / 180.0) - core::f32::consts::PI;
     let x_arg = -pitch * (core::f32::consts::PI / 180.0);
