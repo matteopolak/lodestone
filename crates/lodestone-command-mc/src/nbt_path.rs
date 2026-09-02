@@ -5,10 +5,10 @@
 //!
 //! # `NbtPathArg` is a v1 reduction, and says so
 //!
-//! Vanilla's real `NbtPathArgument` grammar allows a compound-key path
+//! Vanilla's real nbt-path argument grammar allows a compound-key path
 //! segment, an array index (`[3]`), and a *filter* compound after either
 //! (`foo{bar:1}`, matching only entries whose sub-tree contains that
-//! compound) — enough machinery that `NbtPathArgument.NbtPath` is its own
+//! compound) — enough machinery that it is its own
 //! multi-hundred-line class in vanilla. This models the one shape that
 //! covers the dominant real use of `/data storage` (a dotted chain of
 //! compound keys, `foo.bar.baz`) and refuses `[`, `]`, `{` outright rather
@@ -105,7 +105,7 @@ impl McArg for NbtPathArg {
 /// bare namespaced id, defaulted to `minecraft:` with no namespace given,
 /// same rule [`crate::DimensionArg`] applies, but with no census to check
 /// against: a storage id is created by *use*, not registered ahead of time
-/// (`CommandStorage.get` in vanilla creates the backing tag on first write).
+/// (vanilla's own command-storage accessor creates the backing tag on first write).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct StorageIdArg;
 

@@ -1,4 +1,4 @@
-//! `minecraft:gamemode` — `GameModeArgument`.
+//! `minecraft:gamemode` — vanilla's own game-mode argument.
 
 use lodestone_command::{ArgumentType, ParseError, ParseErrorKind, ParsedValue, StringReader};
 use lodestone_model::GameMode;
@@ -6,9 +6,9 @@ use lodestone_model::command_tree::ArgumentParser;
 
 use crate::McArg;
 
-/// The four game-mode names, in `GameType`'s own declaration order
-/// (`GameType.java:17-20`) — which is the order `GameModeArgument.listSuggestions`
-/// offers them in, and the order the client shows them in.
+/// The four game-mode names, in vanilla's own game-mode enum declaration
+/// order — which is the order vanilla's own game-mode-argument suggestion
+/// list offers them in, and the order the client shows them in.
 pub const GAME_MODE_NAMES: [(&str, GameMode); 4] = [
     ("survival", GameMode::Survival),
     ("creative", GameMode::Creative),
@@ -16,13 +16,13 @@ pub const GAME_MODE_NAMES: [(&str, GameMode); 4] = [
     ("spectator", GameMode::Spectator),
 ];
 
-/// `GameModeArgument.gameMode()`.
+/// Vanilla's own game-mode argument.
 ///
 /// # 26.2 accepts the four full names and nothing else
 ///
-/// `GameModeArgument.parse` is `GameType.byName(reader.readUnquotedString(), null)`,
-/// and `GameType.byName` delegates to `StringRepresentable`'s codec — an exact
-/// match against `getSerializedName`. There are **no** `s`/`c`/`a`/`sp`
+/// Vanilla's own game-mode-argument parser reads an unquoted string and
+/// looks it up by name, which delegates to a generic enum-name codec — an
+/// exact match against each variant's serialized name. There are **no** `s`/`c`/`a`/`sp`
 /// abbreviations and **no** numeric ids in 26.2; those were `/gamemode`'s
 /// behaviour years ago and are gone. The hand-rolled `parse_gamemode_command`
 /// this replaced accepted all eight, which is *more* permissive than vanilla
@@ -76,8 +76,8 @@ mod tests {
 
     /// The four names vanilla accepts, and the abbreviations it does **not**.
     ///
-    /// The expected set comes from `GameType.java`'s enum declaration plus
-    /// `byName`'s exact-match codec, read this session — not from memory, which
+    /// The expected set comes from vanilla's own game-mode enum declaration plus
+    /// its exact-match name codec, read this session — not from memory, which
     /// is exactly what got the abbreviations into the code this replaces.
     #[test]
     fn only_the_four_serialized_names_parse() {
@@ -89,7 +89,7 @@ mod tests {
         for rejected in ["s", "c", "a", "sp", "0", "1", "3", "Creative", "wizard", ""] {
             assert!(
                 parse(rejected).is_err(),
-                "26.2's GameType.byName rejects {rejected:?}; this accepted it"
+                "26.2's game-mode name lookup rejects {rejected:?}; this accepted it"
             );
         }
     }

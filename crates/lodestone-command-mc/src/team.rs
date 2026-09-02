@@ -1,8 +1,8 @@
 //! `minecraft:team` and `minecraft:team_color` — `/team`'s own two argument
-//! types (issue #48's remainder). Membership (`<members>`) reuses
+//! types. Membership (`<members>`) reuses
 //! [`crate::ScoreHolderArg`] rather than a third type here: vanilla's own
-//! `TeamCommand` registers `<members>` as `ScoreHolderArgument
-//! .greedyScoreHolder()`, the identical grammar `/scoreboard players`
+//! team command registers `<members>` with the identical greedy
+//! score-holder grammar `/scoreboard players`
 //! already uses, so a selector or a bare "fake player" name works for team
 //! membership exactly as it does for a score.
 
@@ -39,8 +39,8 @@ impl McArg for TeamArg {
 }
 
 /// `minecraft:team_color` — vanilla's `/team modify <team> color <value>`
-/// reuses `ArgumentTypes.color()`, whose value is one of `ChatFormatting`'s
-/// sixteen named colours or `reset`.
+/// reuses its own colour argument, whose value is one of its own
+/// sixteen named legacy colours or `reset`.
 ///
 /// `None` stands for `reset`: [`TextColor`] has no seventeenth variant for
 /// it (the same modelling choice `lodestone_server::commands::team_store`

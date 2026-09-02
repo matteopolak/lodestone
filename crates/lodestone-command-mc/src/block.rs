@@ -1,12 +1,12 @@
-//! `minecraft:block_state` — `BlockStateArgument`, v1.
+//! `minecraft:block_state` — vanilla's own block-state argument, v1.
 //!
 //! # v1 ships without the property list, for the same reason [`crate::item`] does
 //!
-//! Vanilla's `BlockStateParser` accepts `minecraft:furnace[facing=north]` —
+//! Vanilla's own block-state parser accepts `minecraft:furnace[facing=north]` —
 //! properties in brackets, resolved against that block's own state table. This
 //! parses the block id only and refuses a `[` explicitly, exactly as
 //! [`crate::ItemArg`] refuses a component patch: `minecraft:block_state` carries
-//! **no** network payload (`SingletonArgumentInfo`), so the wire node is complete
+//! **no** network payload, so the wire node is complete
 //! now and a property grammar is additive later, not a redesign.
 //!
 //! # The id is validated at parse time
@@ -29,7 +29,7 @@ pub struct BlockInput {
     pub block: ResourceKey,
 }
 
-/// `BlockStateArgument.block()` — `minecraft:block_state`.
+/// Vanilla's own block-state argument — `minecraft:block_state`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BlockArg;
 
@@ -76,7 +76,7 @@ impl McArg for BlockArg {
     }
 }
 
-/// `Identifier.read`'s character class, for a block id.
+/// Vanilla's own resource-location reader's character class, for a block id.
 fn read_block_id(reader: &mut StringReader) -> String {
     let start = reader.cursor();
     while reader.can_read() {

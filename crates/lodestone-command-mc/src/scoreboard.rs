@@ -16,8 +16,8 @@
 //!   criteria *semantics* are modelled anywhere in this server — every score
 //!   is set by a command, never incremented automatically — so this stores
 //!   whatever text was typed and nothing reads it back for meaning.
-//! * [`OperationArg`] — one of vanilla's nine `Operation.OPERATION` tokens
-//!   (`OperationArgument.java`), for `/scoreboard players operation`.
+//! * [`OperationArg`] — one of vanilla's nine operation tokens,
+//!   for `/scoreboard players operation`.
 //! * [`IntRangeArg`] — `minecraft:int_range`, for `/execute if score …
 //!   matches <range>`. Reuses [`crate::Bounds`]'s shape (an inclusive range
 //!   with either end optional) with its own reader, since
@@ -61,7 +61,7 @@ impl McArg for ObjectiveArg {
 }
 
 /// `minecraft:objective_criteria` — a dotted/colon-separated token
-/// (`ObjectiveCriteria.INVALID_NAME` reads up to a `[ \n]`, i.e. one
+/// (vanilla's own invalid-name pattern reads up to a `[ \n]`, i.e. one
 /// argument-length token, more permissive than an unquoted word).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ObjectiveCriteriaArg;
@@ -90,8 +90,7 @@ impl McArg for ObjectiveCriteriaArg {
     }
 }
 
-/// `Operation.OPERATION` — `/scoreboard players operation`'s nine tokens
-/// (`OperationArgument.java`).
+/// Vanilla's own operation tokens — `/scoreboard players operation`'s nine tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScoreOperation {
     /// `=`
@@ -166,7 +165,7 @@ impl McArg for OperationArg {
     }
 }
 
-/// `MinMaxBounds.Ints` — an inclusive `i32` range with either end optional.
+/// Vanilla's own int-bounds shape — an inclusive `i32` range with either end optional.
 /// `5` is `min == max == Some(5)`; `1..3`, `1..`, `..3` are the other three
 /// shapes; both ends absent is a parse error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -300,9 +299,9 @@ impl ArgumentType for ScoreHolderArg {
             return parse_selector(reader, arg)
                 .map(|selector| ParsedValue::dynamic(ScoreHolderInput::Selector(selector)));
         }
-        // `*` is not in `is_allowed_in_unquoted_string`'s set (vanilla's
-        // `StringReader.isAllowedInUnquotedString` excludes it too), so
-        // `ScoreHolderArgument.parse` checks for it explicitly before
+        // `*` is not in `is_allowed_in_unquoted_string`'s set (vanilla's own
+        // unquoted-string character class excludes it too), so
+        // vanilla's own score-holder argument checks for it explicitly before
         // falling back to a plain word — matched here the same way.
         if reader.peek() == Some('*') {
             reader.skip();

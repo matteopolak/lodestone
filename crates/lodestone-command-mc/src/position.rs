@@ -7,7 +7,7 @@
 //! * **`~`-relative** — an *offset from the caller's position*, per component.
 //!   `~` alone is `~0`.
 //! * **`^`-local** — an offset in the caller's own facing frame (right, up,
-//!   forward). `LocalCoordinates` is all-or-nothing: vanilla dispatches on the
+//!   forward). Vanilla's own local-coordinates form is all-or-nothing: vanilla dispatches on the
 //!   first character, so `^1 ~2 3` is a parse error rather than a mixture.
 //!
 //! `~` and `^` are **offsets, not positions**, and [`Coordinates::resolve`]
@@ -18,13 +18,14 @@
 //!
 //! # The centre correction, which is easy to miss and visible in-game
 //!
-//! `Vec3Argument.vec3()` parses `x` and `z` with `centerCorrect = true` and `y`
-//! **without** it (`WorldCoordinates.parseDouble`). A centre-corrected absolute
+//! Vanilla's own vec3-argument parses `x` and `z` with centre-correction on
+//! and `y`
+//! **without** it. A centre-corrected absolute
 //! component with no decimal point gains `+0.5`, so `/tp 10 64 10` puts you in
 //! the middle of the column rather than on its corner — and `y` deliberately
 //! does not, because the corner of a block *is* its floor. A port that applies
 //! the correction uniformly leaves the player half a block inside the ceiling.
-//! `BlockPosArgument` never centre-corrects: its components are integers.
+//! Vanilla's own block-pos argument never centre-corrects: its components are integers.
 
 use lodestone_command::{ArgumentType, ParseError, ParseErrorKind, ParsedValue, StringReader};
 use lodestone_model::command_tree::ArgumentParser;
@@ -80,8 +81,8 @@ impl Coordinates {
     /// Resolve to a world position.
     ///
     /// `rotation` is `(yaw, pitch)` in degrees, and is only read for the local
-    /// dialect. The basis is `Vec3.applyLocalCoordinatesToRotation`
-    /// (`Vec3.java:327-341`) transcribed directly: a forward vector from the
+    /// dialect. The basis is vanilla's own local-to-world coordinate
+    /// rotation, transcribed directly: a forward vector from the
     /// yaw/pitch, an up vector from the same angles with pitch rotated 90°, and
     /// a **left** vector `forwards.cross(up).scale(-1.0)`.
     #[must_use]
@@ -102,7 +103,7 @@ impl Coordinates {
         let (cos_up, sin_up) = (up_pitch_rad.cos(), up_pitch_rad.sin());
         let forward = (cos_yaw * cos_pitch, sin_pitch, sin_yaw * cos_pitch);
         let up = (cos_yaw * cos_up, sin_up, sin_yaw * cos_up);
-        // left = forwards × up, scaled by -1 (`Vec3.java:336`).
+        // left = forwards × up, scaled by -1 (vanilla's own basis construction).
         let left = (
             -(forward.1 * up.2 - forward.2 * up.1),
             -(forward.2 * up.0 - forward.0 * up.2),
@@ -116,23 +117,24 @@ impl Coordinates {
     }
 }
 
-/// `Vec3Argument.vec3()` — `minecraft:vec3`.
+/// Vanilla's own vec3 argument — `minecraft:vec3`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Vec3Arg {
     /// Whether an absolute `x`/`z` with no decimal point gains `+0.5`.
-    /// `Vec3Argument.vec3()` is `true`; `vec3(false)` is the opt-out
+    /// Vanilla's own default constructor sets this `true`; its exact-form
+    /// constructor is the opt-out
     /// (`/spreadplayers`, `/worldborder center`).
     pub centre_correct: bool,
 }
 
 impl Vec3Arg {
-    /// `Vec3Argument.vec3()`.
+    /// Vanilla's own default vec3-argument constructor.
     #[must_use]
     pub const fn new() -> Self {
         Self { centre_correct: true }
     }
 
-    /// `Vec3Argument.vec3(false)`.
+    /// Vanilla's own exact-form vec3-argument constructor.
     #[must_use]
     pub const fn exact() -> Self {
         Self { centre_correct: false }
@@ -169,7 +171,7 @@ impl McArg for Vec3Arg {
     }
 }
 
-/// `BlockPosArgument.blockPos()` — `minecraft:block_pos`.
+/// Vanilla's own block-pos argument — `minecraft:block_pos`.
 ///
 /// Integer components, never centre-corrected. `~`-relative components are still
 /// legal and are still offsets; `^`-local is legal too and resolves through the
@@ -203,7 +205,8 @@ impl McArg for BlockPosArg {
     }
 }
 
-/// `WorldCoordinates.parseDouble` — note the centre correction applies to `x`
+/// Vanilla's own world-coordinates double reader — note the centre
+/// correction applies to `x`
 /// and `z` only.
 fn read_world_double(reader: &mut StringReader, centre_correct: bool) -> Result<Coordinates, ParseError> {
     let x = read_double_component(reader, centre_correct)?;
@@ -214,7 +217,7 @@ fn read_world_double(reader: &mut StringReader, centre_correct: bool) -> Result<
     Ok(Coordinates { x, y, z, local: false })
 }
 
-/// `WorldCoordinates.parseInt`.
+/// Vanilla's own world-coordinates int reader.
 fn read_world_int(reader: &mut StringReader) -> Result<Coordinates, ParseError> {
     let x = read_int_component(reader)?;
     expect_separator(reader)?;
@@ -224,7 +227,7 @@ fn read_world_int(reader: &mut StringReader) -> Result<Coordinates, ParseError> 
     Ok(Coordinates { x, y, z, local: false })
 }
 
-/// `LocalCoordinates.parse` — all three components must carry `^`.
+/// Vanilla's own local-coordinates reader — all three components must carry `^`.
 fn read_local(reader: &mut StringReader) -> Result<Coordinates, ParseError> {
     let x = read_local_component(reader)?;
     expect_separator(reader)?;
@@ -234,7 +237,7 @@ fn read_local(reader: &mut StringReader) -> Result<Coordinates, ParseError> {
     Ok(Coordinates { x, y, z, local: true })
 }
 
-/// `LocalCoordinates.readDouble`.
+/// Vanilla's own local-coordinates double reader.
 fn read_local_component(reader: &mut StringReader) -> Result<Coordinate, ParseError> {
     let position = reader.cursor();
     if !reader.can_read() {
@@ -248,7 +251,7 @@ fn read_local_component(reader: &mut StringReader) -> Result<Coordinate, ParseEr
     Ok(Coordinate::relative(value))
 }
 
-/// `WorldCoordinate.parseDouble`.
+/// Vanilla's own world-coordinate double reader.
 fn read_double_component(reader: &mut StringReader, centre_correct: bool) -> Result<Coordinate, ParseError> {
     let position = reader.cursor();
     if reader.peek() == Some('^') {
@@ -263,7 +266,7 @@ fn read_double_component(reader: &mut StringReader, centre_correct: bool) -> Res
     }
     let start = reader.cursor();
     let value = if has_value_here(reader) { reader.read_double()? } else { 0.0 };
-    // `WorldCoordinate.parseDouble`'s own test is on the *text*: a component
+    // Vanilla's own world-coordinate double reader's own test is on the *text*: a component
     // written without a decimal point is a block reference and gains 0.5.
     // Testing the parsed value instead would centre-correct `10.0`, which
     // vanilla does not.
@@ -275,10 +278,10 @@ fn read_double_component(reader: &mut StringReader, centre_correct: bool) -> Res
     Ok(Coordinate::absolute(corrected))
 }
 
-/// `WorldCoordinate.parseInt`.
+/// Vanilla's own world-coordinate int reader.
 ///
 /// The asymmetry is vanilla's and is easy to miss: an **absolute** component is
-/// `readInt`, but a **relative** one is `readDouble`, so `/setblock ~1.5 ~ ~`
+/// read as an int, but a **relative** one is read as a double, so `/setblock ~1.5 ~ ~`
 /// really is legal and `/setblock 1.5 64 0` really is not.
 fn read_int_component(reader: &mut StringReader) -> Result<Coordinate, ParseError> {
     let position = reader.cursor();
@@ -300,15 +303,15 @@ fn read_int_component(reader: &mut StringReader) -> Result<Coordinate, ParseErro
     Ok(if relative { Coordinate::relative(value) } else { Coordinate::absolute(value) })
 }
 
-/// `reader.canRead() && reader.peek() != ' '` — vanilla's own test for "is there
+/// Vanilla's own test for "is there
 /// a number here", which is *not* "does a digit follow". `~` at end of input or
-/// before a space is `~0`; `~x` is a `readDouble` that fails, and must, rather
+/// before a space is `~0`; `~x` is a double-read that fails, and must, rather
 /// than silently becoming `~0` and desyncing the remaining components.
 fn has_value_here(reader: &StringReader) -> bool {
     reader.can_read() && reader.peek() != Some(' ')
 }
 
-/// `Vec3Argument.ERROR_MIXED_TYPE`.
+/// Vanilla's own mixed-coordinate-type error.
 fn mixed_type(position: usize) -> ParseError {
     ParseError::new(
         position,
@@ -426,7 +429,7 @@ mod tests {
     }
 
     /// A relative block-pos component reads a **double** while an absolute one
-    /// reads an int (`WorldCoordinate.parseInt`'s own asymmetry).
+    /// reads an int (vanilla's own world-coordinate int reader's own asymmetry).
     #[test]
     fn a_relative_block_pos_component_may_be_fractional_but_an_absolute_one_may_not() {
         assert_eq!(block_pos("~1.5 ~ ~").x, Coordinate::relative(1.5));

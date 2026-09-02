@@ -1,14 +1,15 @@
-//! `minecraft:heightmap` — `HeightmapTypeArgument.heightmap()`, `/execute
-//! positioned over <heightmap>` (issue #48's remainder).
+//! `minecraft:heightmap` — vanilla's own heightmap-type argument, `/execute
+//! positioned over <heightmap>`.
 //!
 //! # Four names, not six
 //!
-//! `Heightmap.Types` has six variants, but `HeightmapTypeArgument` filters to
-//! `Heightmap.Types::keepAfterWorldgen` — the two `_WG` (worldgen-only)
+//! Vanilla's own heightmap-type enum has six variants, but the argument filters to
+//! those it keeps after worldgen — the two `_WG` (worldgen-only)
 //! variants are dropped from the argument's own choice set, because they
 //! exist only to seed structure placement mid-generation and are discarded
 //! once a chunk finishes. [`HEIGHTMAP_NAMES`] lists exactly the four survivors,
-//! lower-cased (`HeightmapTypeArgument.convertId`), in `Heightmap.Types`'
+//! lower-cased (matching vanilla's own id-conversion routine), in vanilla's
+//! own heightmap-type enum's
 //! declaration order.
 
 use lodestone_command::{ArgumentType, ParseError, ParseErrorKind, ParsedValue, StringReader};
@@ -17,17 +18,17 @@ use lodestone_model::command_tree::ArgumentParser;
 use crate::McArg;
 
 /// One of the four heightmap types `/execute positioned over` can name —
-/// `Heightmap.Types::keepAfterWorldgen`'s own predicate, evaluated at the
+/// vanilla's own keep-after-worldgen predicate, evaluated at the
 /// call site (`lodestone_server::commands::execute`) against a per-cell
 /// block-state scan rather than a stored per-column table: only
 /// `MOTION_BLOCKING` is ever cached on a generated column, and even that only
 /// for a column fresh off the generator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HeightmapKind {
-    /// `Heightmap.NOT_AIR` — the highest non-air cell, any material.
+    /// Vanilla's own not-air heightmap type — the highest non-air cell, any material.
     WorldSurface,
-    /// `Heightmap.MATERIAL_MOTION_BLOCKING` — the highest cell that
-    /// `blocksMotion()`, excluding fluids (unlike `MotionBlocking` below).
+    /// Vanilla's own material-motion-blocking heightmap type — the highest cell that
+    /// blocks motion, excluding fluids (unlike `MotionBlocking` below).
     OceanFloor,
     /// `state.blocksMotion() || !state.getFluidState().isEmpty()` — the
     /// highest solid-or-fluid cell. The one vanilla's own F3 debug screen and
@@ -40,7 +41,7 @@ pub enum HeightmapKind {
     MotionBlockingNoLeaves,
 }
 
-/// The four surviving names, in `Heightmap.Types`' own declaration order —
+/// The four surviving names, in vanilla's own heightmap-type enum's declaration order —
 /// `WORLD_SURFACE`, `OCEAN_FLOOR`, `MOTION_BLOCKING`, `MOTION_BLOCKING_NO_LEAVES`.
 pub const HEIGHTMAP_NAMES: [(&str, HeightmapKind); 4] = [
     ("world_surface", HeightmapKind::WorldSurface),
@@ -49,7 +50,7 @@ pub const HEIGHTMAP_NAMES: [(&str, HeightmapKind); 4] = [
     ("motion_blocking_no_leaves", HeightmapKind::MotionBlockingNoLeaves),
 ];
 
-/// `HeightmapTypeArgument.heightmap()` — `minecraft:heightmap`.
+/// Vanilla's own heightmap-type argument — `minecraft:heightmap`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct HeightmapArg;
 

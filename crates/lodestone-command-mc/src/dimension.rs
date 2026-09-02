@@ -1,12 +1,15 @@
-//! `minecraft:dimension` — `DimensionArgument.dimension()`, `/execute in
+//! `minecraft:dimension` — vanilla's own dimension argument, `/execute in
 //! <dimension>`.
 //!
 //! # Validated at parse time, against the dimensions this server actually hosts
 //!
-//! `DimensionArgument.parse` reads a resource location and then checks it
-//! against `context.getSource().levelKeys()` — the *registered* level keys, not
-//! merely well-formed syntax — refusing with `ERROR_INVALID_VALUE` for anything
-//! else (`DimensionArgument.java`). This crate hosts exactly one dimension
+//! Vanilla's own dimension-argument parser reads a resource location and
+//! then checks it
+//! against the source's registered level keys — the *registered* level
+//! keys, not
+//! merely well-formed syntax — refusing with an invalid-value error for
+//! anything
+//! else. This crate hosts exactly one dimension
 //! (`crates/lodestone-server/src/commands/mod.rs`'s `overworld_dimension`), so
 //! [`HOSTED_DIMENSIONS`] is a one-entry census rather than a real registry
 //! lookup — the same posture [`crate::BlockArg`]/[`crate::EntityTypeArg`] take
@@ -26,7 +29,7 @@ use crate::McArg;
 /// the check, is the correct response to a second dimension landing.
 pub const HOSTED_DIMENSIONS: &[&str] = &["minecraft:overworld"];
 
-/// `DimensionArgument.dimension()` — `minecraft:dimension`.
+/// Vanilla's own dimension argument — `minecraft:dimension`.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DimensionArg;
 
@@ -63,7 +66,7 @@ impl McArg for DimensionArg {
     }
 }
 
-/// `Identifier.read`'s character class — the same set
+/// Vanilla's own resource-location reader's character class — the same set
 /// [`crate::entity_type::EntityTypeArg`]'s own reader accepts.
 fn read_resource_location(reader: &mut StringReader) -> String {
     let start = reader.cursor();

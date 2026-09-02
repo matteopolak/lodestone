@@ -1,4 +1,4 @@
-//! A textual SNBT parser — `TagParser` (`net.minecraft.nbt.TagParser`), the
+//! A textual SNBT parser — vanilla's own tag parser, the
 //! grammar behind `minecraft:nbt_tag`/`minecraft:nbt_compound_tag` and every
 //! `<nbt>` argument vanilla's tree has that this workspace did not, until
 //! now, have any way to parse. **No textual SNBT parser existed anywhere in
@@ -23,29 +23,28 @@
 //!
 //! # The grammar
 //!
-//! `TagParser.readValue`, ported clause by clause:
+//! Vanilla's own value-reading routine, ported clause by clause:
 //!
 //! * A compound `{key: value, "quoted key": value, …}` — an unquoted key is
-//!   `TagParser`'s own more permissive `readString` charset (letters,
+//!   vanilla's own more permissive unquoted-string charset (letters,
 //!   digits, `_+.-`), a quoted key is a normal quoted string.
 //! * A list `[value, value, …]`, or one of the three typed arrays `[B; 1b,
 //!   2b]`/`[I; 1, 2]`/`[L; 1l, 2l]` — the `;` immediately after `[` and
 //!   before any value is what distinguishes a typed array from a plain
 //!   list, exactly as vanilla's own lookahead does.
 //! * A quoted string (`"…"`/`'…'`, both quote characters, with `\"`/`\\`/…
-//!   escapes) or an unquoted one (`TagParser`'s `isAllowedInUnquotedString`:
+//!   escapes) or an unquoted one (vanilla's own unquoted-string character class:
 //!   `[0-9A-Za-z_.+-]`, the flatter set `lodestone_command`'s own
 //!   `StringReader::is_allowed_in_unquoted_string` already models).
 //! * A number: a run of `[0-9-]` (and at most one `.`, for a float/double),
 //!   optionally suffixed `b`/`s`/`l`/`f`/`d` (byte/short/long/float/double,
 //!   case-insensitive), unsuffixed integral text becomes [`SnbtValue::Int`]
 //!   and unsuffixed text with a `.` becomes [`SnbtValue::Double`] — vanilla's
-//!   own `NUMBER_PATTERN`/suffix-dispatch table in
-//!   `TagParser.readTypedValue`. `true`/`false` are vanilla's own
-//!   `Byte`-valued literals (`1b`/`0b`), not a distinct boolean tag — NBT has
+//!   own number-pattern/suffix-dispatch table. `true`/`false` are vanilla's own
+//!   byte-valued literals (`1b`/`0b`), not a distinct boolean tag — NBT has
 //!   no boolean type.
 //! * Anything else unquoted and not a legal number is a bare string
-//!   (`TagParser`'s own fallback), which is what lets `{a: hello}` work
+//!   (vanilla's own fallback), which is what lets `{a: hello}` work
 //!   without quotes.
 
 use lodestone_command::{ArgumentType, ParseError, ParseErrorKind, ParsedValue, StringReader};
@@ -77,7 +76,7 @@ pub enum SnbtValue {
 }
 
 /// Parses the whole of `text` as one SNBT value, refusing trailing input —
-/// `TagParser.parseAsArgument`'s own top-level entry point, which is what
+/// Vanilla's own top-level entry point, which is what
 /// [`NbtTagArg`]/[`NbtCompoundArg`] call.
 ///
 /// # Errors
@@ -181,7 +180,7 @@ fn read_key(reader: &mut StringReader) -> Result<String, ParseError> {
 
 /// `[…]`, dispatching on the `X;` lookahead that distinguishes a typed array
 /// from a plain list — checked *before* consuming a first element, exactly
-/// as vanilla's own `TagParser.readList` peeks two characters ahead.
+/// as vanilla's own list reader peeks two characters ahead.
 fn read_list_or_array(reader: &mut StringReader) -> Result<SnbtValue, ParseError> {
     expect(reader, '[')?;
     skip_whitespace(reader);

@@ -1,5 +1,5 @@
 //! `minecraft:resource` narrowed to the `minecraft:worldgen/biome` registry —
-//! `ResourceOrTagArgument.resourceOrTag(context, Registries.BIOME)`,
+//! vanilla's own resource-or-tag argument narrowed to the biome registry,
 //! `/execute if`/`unless biome <pos> <biome>`.
 //!
 //! # v1 ships without tag support, for the same reason [`crate::BlockArg`] does
@@ -31,7 +31,7 @@ pub struct BiomeInput {
     pub biome: ResourceKey,
 }
 
-/// `ResourceOrTagArgument.resourceOrTag(.., Registries.BIOME)`, narrowed to
+/// Vanilla's own resource-or-tag argument narrowed to the biome registry, narrowed to
 /// its bare-id case — `minecraft:resource`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BiomeArg;
@@ -71,7 +71,7 @@ impl McArg for BiomeArg {
     }
 }
 
-/// `Identifier.read`'s character class — the same set every other
+/// Vanilla's own resource-location reader's character class — the same set every other
 /// resource-shaped argument in this crate accepts.
 fn read_biome_id(reader: &mut StringReader) -> String {
     let start = reader.cursor();
