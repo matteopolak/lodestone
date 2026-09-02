@@ -3,8 +3,8 @@
 //!
 //! # Why this table exists at all
 //!
-//! In vanilla a block entity is **not** created by a packet. `LevelChunk`'s
-//! `setBlockState` creates one from the state alone (`LevelChunk.setBlockState`):
+//! In vanilla a block entity is **not** created by a packet. Vanilla's own
+//! chunk class's own "set block state" step creates one from the state alone:
 //!
 //! ```text
 //! if (state.hasBlockEntity() && …) {
@@ -25,7 +25,7 @@
 //!
 //! # Data source: the jar, because neither report carries the pairing
 //!
-//! `blocks.json` is block *properties* only — it has no `hasBlockEntity` flag
+//! `blocks.json` is block *properties* only — it has no has-block-entity flag
 //! and no block-entity type. `registries.json` **does** carry the
 //! `minecraft:block_entity_type` registry (all 49 entries with their protocol
 //! ids), but says nothing about which blocks each type covers, and it does not
@@ -33,10 +33,11 @@
 //! the table is generated from a headless 26.2 server dump — see
 //! `tests/block_entity_types.rs` for the generator and drift guard, and
 //! `oracle-java/BlockEntityTypeOracle.java` for why
-//! `BlockEntityType.isValid(state)` is the faithful way to recover it (it *is*
+//! vanilla's own block-entity-type "is valid" check is the faithful way to
+//! recover it (it *is*
 //! `validBlocks.contains(state.getBlock())`, the very set the block's
-//! `newBlockEntity` owner was registered with) rather than constructing 32,366
-//! live `BlockEntity` objects.
+//! own "new block entity" owner was registered with) rather than constructing
+//! 32,366 live block-entity objects.
 //!
 //! # Memory design
 //!
@@ -66,8 +67,8 @@ pub use table::{STATE_COUNT, TYPE_COUNT};
 pub const NO_BLOCK_ENTITY: u16 = u16::MAX;
 
 /// The `minecraft:block_entity_type` registry id owned by block-state `id`, or
-/// `None` when the state owns no block entity — vanilla's
-/// `BlockState.hasBlockEntity()` plus *which* type.
+/// `None` when the state owns no block entity — vanilla's own
+/// "has block entity" check plus *which* type.
 ///
 /// Also `None` for an `id` outside `0..`[`STATE_COUNT`], so an unknown state id
 /// behaves like plain terrain rather than panicking: a hostile or
