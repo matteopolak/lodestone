@@ -47,7 +47,7 @@
 //! into the same set via an explicit `.after()`:
 //!
 //! 1. [`send_abilities`] — the flight/abilities state the server acks.
-//! 2. [`send_sprint_command`] — vanilla's `LocalPlayer.sendIsSprintingIfNeeded`.
+//! 2. [`send_sprint_command`] — vanilla's own send-is-sprinting-if-needed.
 //! 3. [`drive_select_slot`] — a plugin's hotbar-selection wish, the same
 //!    write-plus-echo `Sim::select_slot` uses.
 //! 4. [`drive_mining`] — one tick of the hold-to-mine predictor.
@@ -136,13 +136,13 @@ use crate::sim::{
 ///
 /// Recomputed once per frame by `Sim::update_target` from the *interpolated*
 /// camera, so it tracks the mouse at frame rate rather than tick rate — which is
-/// vanilla's behaviour too (`MouseHandler.turnPlayer` runs off the render loop).
+/// vanilla's behaviour too (vanilla's own mouse-handler turn-player runs off the render loop).
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct RayTarget(pub Option<RayHit>);
 
 /// The living entity the view ray currently points at, for a left-click to
-/// attack — vanilla's `Minecraft.hitResult` resolving to `HitResult.Type.ENTITY`
-/// rather than `BLOCK`.
+/// attack — vanilla's own hit-result field resolving to an entity hit
+/// rather than a block hit.
 ///
 /// Recomputed alongside [`RayTarget`] by `Sim::update_target`, from the same
 /// camera and against a *shorter* range: vanilla's `DEFAULT_ENTITY_INTERACTION_RANGE`
@@ -209,31 +209,34 @@ const NON_LIVING_PICKABLE_PATHS: &[&str] = &[
     "tnt_minecart",
 ];
 
-/// The three `minecraft:redirectable_projectile` members — vanilla's
-/// `Projectile.isPickable()` is exactly `is(EntityTypeTags.REDIRECTABLE_PROJECTILE)`,
+/// The three `minecraft:redirectable_projectile` members — vanilla's own
+/// base projectile is-pickable check is exactly membership in the
+/// redirectable-projectile tag,
 /// and the tag's data file lists these three and nothing else. Kept apart from
 /// [`NON_LIVING_PICKABLE_PATHS`] so the two different vanilla mechanisms stay
 /// visibly different: one is a class override, this one is a datapack tag.
 const REDIRECTABLE_PROJECTILE_PATHS: &[&str] = &["breeze_wind_charge", "fireball", "wind_charge"];
 
-/// Vanilla's `EntitySelector.CAN_BE_PICKED` — the predicate every entity
+/// Vanilla's own entity-selector can-be-picked predicate — the predicate every entity
 /// candidate must pass before the view ray may resolve to it.
 ///
 /// # Why this exists: without it the server kicks us
 ///
-/// `Entity.isPickable()` is **`false`** by default, and `ItemEntity` and
-/// `ExperienceOrb` do not override it — so vanilla's ray never resolves to a
+/// Vanilla's own base is-pickable check is **`false`** by default, and the item
+/// entity and
+/// experience-orb types do not override it — so vanilla's ray never resolves to a
 /// dropped item or an orb, and vanilla therefore never sends an attack naming
 /// one. The server treats that as a protocol violation rather than a no-op:
-/// `ServerGamePacketListenerImpl.handleAttack` disconnects with
+/// vanilla's own attack-packet handling disconnects with
 /// `multiplayer.disconnect.invalid_entity_attacked` ("Attempting to attack an
-/// invalid entity") whenever the named target is an `ItemEntity`, an
-/// `ExperienceOrb`, the player themselves, or a non-attackable `AbstractArrow`.
+/// invalid entity") whenever the named target is an item entity, an
+/// experience orb, the player themselves, or a non-attackable arrow.
 ///
 /// That is the whole reported bug: killing a mob spawns its drops and its
 /// experience orbs inside the hitbox the mob just vacated, so the very next
 /// left-click resolved to a drop and got the session kicked. Note what it is
-/// **not** — a *removed* entity id is harmless, because `handleAttack` looks the
+/// **not** — a *removed* entity id is harmless, because vanilla's own
+/// attack-packet handling looks the
 /// id up first and does nothing at all when it misses. The defect is picking a
 /// live entity vanilla would never have picked, not picking a dead one.
 ///
@@ -241,25 +244,29 @@ const REDIRECTABLE_PROJECTILE_PATHS: &[&str] = &["breeze_wind_charge", "fireball
 ///
 /// Derived by walking each of the 26.2 entity types' implementation classes (the
 /// `impl` column of `lodestone-data`'s committed entity census dump) up to the
-/// nearest class declaring `isPickable()`. Ten declaring classes cover all 159
+/// nearest class declaring an is-pickable override. Ten declaring classes cover all 159
 /// types:
 ///
-/// * `LivingEntity` (`!isRemoved()`), 90 types — every mob, plus `Player` and
-///   `ArmorStand`, which narrow it further (see below). Read here out of the
+/// * The living-entity base (`!isRemoved()`), 90 types — every mob, plus the
+///   player and
+///   armor-stand types, which narrow it further (see below). Read here out of the
 ///   census's own `is_living` column rather than re-listed.
-/// * `AbstractBoat`, `AbstractMinecart`, `FallingBlockEntity`, `PrimedTnt`
-///   (all `!isRemoved()`); `BlockAttachedEntity`, `EndCrystal`, `Interaction`,
-///   `ShulkerBullet` (all `true`) — the 36 entries of
+/// * The boat, minecart, falling-block and primed-TNT bases
+///   (all `!isRemoved()`); the block-attached-entity, end-crystal, interaction and
+///   shulker-bullet types (all `true`) — the 36 entries of
 ///   [`NON_LIVING_PICKABLE_PATHS`].
-/// * `Projectile` — `is(EntityTypeTags.REDIRECTABLE_PROJECTILE)`, i.e.
+/// * The base projectile type — membership in the redirectable-projectile
+///   tag, i.e.
 ///   [`REDIRECTABLE_PROJECTILE_PATHS`]. This is why arrows are excluded:
-///   `AbstractArrow.isPickable()` is `super.isPickable() && !isInGround()`, and
-///   its `super` is that tag test, which no arrow type is a member of — so
+///   the base arrow type's is-pickable check is the base projectile check
+///   ANDed with not-in-ground, and
+///   the base check is that tag test, which no arrow type is a member of — so
 ///   `arrow`, `spectral_arrow` and `trident` are **never** pickable and need no
 ///   in-ground state to decide it.
-/// * `EnderDragon` — overrides to `false`; only its `EnderDragonPart`s are
+/// * The ender-dragon type — overrides to `false`; only its separately
+///   modeled body parts are
 ///   pickable, and this client does not model parts.
-/// * `Entity` — the `false` default: `item`, `experience_orb`,
+/// * The base entity type — the `false` default: `item`, `experience_orb`,
 ///   `area_effect_cloud`, `evoker_fangs`, `eye_of_ender`, `lightning_bolt`,
 ///   `marker`, `ominous_item_spawner` and the three `Display` variants.
 ///
@@ -267,8 +274,8 @@ const REDIRECTABLE_PROJECTILE_PATHS: &[&str] = &["breeze_wind_charge", "fireball
 ///
 /// # Per-instance refinements deliberately not applied
 ///
-/// `Player.isPickable()` also requires `!isSpectator()` and
-/// `ArmorStand.isPickable()` also requires `!isMarker()`. Both are entity
+/// Vanilla's own player is-pickable check also requires not-a-spectator and
+/// its own armor-stand is-pickable check also requires not-a-marker. Both are entity
 /// *state* this client does not track for remote entities, and neither is in
 /// the server's rejection list — attacking a spectator or a marker stand is a
 /// silent no-op server-side, not a kick — so they are reported as pickable
@@ -278,7 +285,7 @@ const REDIRECTABLE_PROJECTILE_PATHS: &[&str] = &["breeze_wind_charge", "fireball
 /// # Default-deny, and why that costs nothing
 ///
 /// A non-`minecraft` namespace, or a path this census has never seen, returns
-/// `false` — matching vanilla's own `Entity.isPickable()` default. That is not
+/// `false` — matching vanilla's own base is-pickable default. That is not
 /// a new restriction: the pick loop already drops any entity
 /// `VersionData::entity_facts` cannot size, and that table is the same 26.2
 /// census, so an unknown type was unpickable before this predicate existed.
@@ -313,11 +320,11 @@ pub struct Attacking(pub bool);
 
 /// Whether the use (right) button has been pressed and not yet released.
 ///
-/// The client-side mirror of vanilla's `Minecraft.java`,
+/// The client-side mirror of vanilla's own client's
 /// `this.player.isUsingItem()`, which gates whether releasing `key.use` sends
-/// `RELEASE_USE_ITEM` (`:1916`, `gameMode.releaseUsingItem`). Vanilla's own
+/// `RELEASE_USE_ITEM` (its own game-mode release-using-item). Vanilla's own
 /// flag comes from a held item's `use()` running identically client- and
-/// server-side (a bow's `use()` calls `LivingEntity.startUsingItem` on both),
+/// server-side (a bow's `use()` calls the living-entity start-using-item on both),
 /// which this client has no local simulation of — there is no item registry
 /// here that can say "yes, that bow just started a held use." So this is an
 /// **input-state** mirror instead: true from [`crate::sim::Sim::use_item`]'s
@@ -326,8 +333,8 @@ pub struct Attacking(pub bool);
 /// path for the next bite, so this is a superset of vanilla's real gate rather
 /// than an exact match.
 ///
-/// That gap is inert, not a wrong state transition: `LivingEntity
-/// .releaseUsingItem` (`.cache/mc/26.2/src/…/LivingEntity.java`)
+/// That gap is inert, not a wrong state transition: vanilla's own
+/// living-entity release-using-item
 /// already no-ops whenever the server itself has no `useItem` in progress, so
 /// a `RELEASE_USE_ITEM` sent while nothing was really being used is a
 /// harmless duplicate. Same shape as [`Attacking`] — a plain press/release
@@ -416,7 +423,7 @@ impl NetHandle {
     }
 }
 
-/// `LocalPlayer.sendIsSprintingIfNeeded`: put the
+/// Vanilla's own send-is-sprinting-if-needed: put the
 /// sprint **edge** on the wire as a `PlayerCommand`.
 ///
 /// The source of truth is [`PhysicsState`]'s `sprinting`, which the physics tick
@@ -476,13 +483,13 @@ pub fn send_sprint_command(
 }
 
 /// `TickSet::Send`: echo creative flight to the server as
-/// [`ClientAction::SetFlying`], mirroring `Player.onUpdateAbilities()` →
+/// [`ClientAction::SetFlying`], mirroring vanilla's own on-update-abilities →
 /// `ServerboundPlayerAbilitiesPacket`.
 ///
 /// # Why this exists, and what it closes
 ///
 /// The flight toggle is **client-authoritative in vanilla**: the client flips
-/// `abilities.flying` locally (`LocalPlayer.aiStep`) and tells the server after
+/// `abilities.flying` locally (vanilla's own client-side player AI-step) and tells the server after
 /// the fact. Without this echo the server keeps simulating a walking player,
 /// its `handleMovePlayer` replay diverges from the position we report, and it
 /// either teleports us back or eventually disconnects us with
@@ -685,11 +692,12 @@ fn resolve_place_intent(
 ///
 /// # Why the chip particle is emitted on an OR of before/after
 ///
-/// Vanilla's `ClientLevel.addBreakingBlockEffect` fires from
-/// `Minecraft.continueAttack` whenever `MultiPlayerGameMode.continueDestroyBlock`
+/// Vanilla's own client-level add-breaking-block-effect fires from
+/// its own continue-attack whenever its own continue-destroy-block
 /// returns `true`, which includes the very tick a fresh dig starts (both
-/// `startAttack` and `continueAttack` run off the same `handleKeybinds` pass, so
-/// `sameDestroyTarget` is already true by the time `continueDestroyBlock` runs).
+/// start-attack and continue-attack run off the same client-side key-handling
+/// pass, so
+/// `sameDestroyTarget` is already true by the time continue-destroy-block runs).
 /// We have one call where vanilla has two, so the tick-one case has to be read off
 /// `Mining::target()` both before and after the call and OR'd. Only
 /// "before none, after none" survives, which is the instant-break-from-idle and
@@ -911,16 +919,17 @@ pub fn drive_mining(
     // The debris burst at the moment a block actually breaks.
     // Keyed on **destruction**, not on the `StopDestroy` packet.
     //
-    // This is the local **prediction** half of vanilla's
-    // `MultiPlayerGameMode.destroyBlock`:
+    // This is the local **prediction** half of vanilla's own
+    // client-side destroy-block handling:
     // it clears the block and throws the destroy-effect debris synchronously
     // on the acting client, without waiting for a server round trip. The
-    // effect hangs off that method, not off any packet — `destroyBlock` calls
-    // `Block.playerWillDestroy` → `spawnDestroyParticles` →
-    // `level.levelEvent(player, 2001, pos, id)`, and on `ClientLevel` that
-    // dispatches **locally** into `LevelEventHandler`'s `case 2001`
-    // (`addDestroyBlockEffect` + the break sound). The `player` argument is why
-    // the server's copy of the same call does not double it: `ServerLevel`
+    // effect hangs off that method, not off any packet — destroy-block calls
+    // its own player-will-destroy hook → spawn-destroy-particles →
+    // its own level-event dispatch with id 2001, and on the client-side level that
+    // dispatches **locally** into the level-event handler's `case 2001`
+    // (its own add-destroy-block-effect + the break sound). The `player` argument is why
+    // the server's copy of the same call does not double it: the server-side
+    // level
     // broadcasts a `levelEvent` to everyone *except* that player.
     //
     // This originally scanned `actions` for `BlockActionKind::StopDestroy`,
@@ -939,12 +948,12 @@ pub fn drive_mining(
     // match, fed by `ClientboundLevelEventPacket` id `2001`) — which
     // structurally **never fires for our own break**, verified against
     // `.cache/mc/26.2/src` rather than assumed:
-    // `ServerPlayerGameMode.destroyBlock` (`ServerPlayerGameMode.java`,
-    // the server's handler for a player's own break) calls
+    // vanilla's own server-side player-game-mode destroy-block (the server's
+    // handler for a player's own break) calls
     // `this.level.removeBlock(pos, false)` — a plain block-state write with no
     // `levelEvent` call anywhere in it. The `2001` particle event instead lives
-    // in the *separate* `Level.destroyBlock(pos, drop, breaker, limit)` method
-    // (`Level.java`, `this.levelEvent(2001, pos, ...)`), which is what a
+    // in the *separate* server-side destroy-block method
+    // (its own level-event call with id 2001), which is what a
     // cascading break (a torch losing support, fire, an explosion) goes through
     // instead — and that call broadcasts to **every** nearby player
     // unconditionally, our own client included, which is exactly the
@@ -964,10 +973,11 @@ pub fn drive_mining(
     //
     // # The local block-edit prediction
     //
-    // Vanilla's `destroyBlock` does not just spawn debris — it first sets the
+    // Vanilla's own client-side destroy-block does not just spawn debris — it
+    // first sets the
     // block to air *locally, synchronously*
-    // (`level.setBlock(pos, fluidState.createLegacyBlock(), 11)`,
-    // `MultiPlayerGameMode.java`), before any server round trip. This shell
+    // (`level.setBlock(pos, fluidState.createLegacyBlock(), 11)`),
+    // before any server round trip. This shell
     // used to predict only the particle burst and leave the actual block-state
     // write to the server's `BLOCK_UPDATE` ack: on a laggy connection that
     // showed the normal break animation completing and then the block vanishing
@@ -1014,14 +1024,16 @@ pub fn drive_mining(
         // there, not the air it just became.
         particles.0.destroy_block(hit.block, id_value, [1.0; 3]);
         // The break sound, predicted locally for the same reason
-        // `drive_placement`'s is: `ServerPlayerGameMode.destroyBlock` calls
+        // `drive_placement`'s is: vanilla's own server-side player-game-mode
+        // destroy-block calls
         // `this.level.removeBlock(pos, false)` with no `levelEvent`/`playSound`
         // anywhere in it (`docs/sound-playback.md`), so a player's own dig never
         // produces a `2001` packet for `NetUpdate::BlockDestroyed` to catch —
-        // vanilla's own client makes it audible by having `ClientLevel.levelEvent`
+        // vanilla's own client makes it audible by having its own client-level
+        // level-event
         // dispatch `case 2001` locally, sound and debris together
-        // (`MultiPlayerGameMode.destroyBlock` → `Block.spawnDestroyParticles` →
-        // `level.levelEvent(player, 2001, …)`). This system could not reach
+        // (its own client-side destroy-block → its own spawn-destroy-particles →
+        // its own level-event call). This system could not reach
         // `ShellAudio` before `AudioEngine` became a resource; now it reads it
         // exactly as `drive_placement` already does. `id_value` — the state that
         // *was* there — not `id::AIR`, matching `sim::actions::Sim::break_block`'s
@@ -1057,7 +1069,7 @@ pub fn drive_mining(
 ///
 /// A human right-click always sends `use_item_on` and lets
 /// [`Placement::use_on`] sort out interact-vs-place-vs-nothing after the
-/// fact — vanilla does the same (`Level.playLocalSound`'s packet always goes
+/// fact — vanilla does the same (its own place-and-use packet always goes
 /// out). A `PlaceIntent` is narrower: it specifically asks to *place*, so
 /// every [`PlaceRejection`] below is checked **before** `use_on` runs and
 /// before anything reaches [`ActionQueue`], rather than folded into a generic
@@ -1285,7 +1297,7 @@ pub fn drive_placement(
     }
     terrain.remesh_around(&chunk_world, block);
     // The placement sound, predicted locally for the same reason
-    // `Sim::use_item_live`'s does — vanilla's own `BlockItem.place` excludes
+    // `Sim::use_item_live`'s does — vanilla's own block-item place excludes
     // the placing player from the server's broadcast, so our copy has to come
     // from here or not at all. Tied to `state_id` (the predicted state), not
     // the held item, because the sound is the *placed* state's `SoundType`.
