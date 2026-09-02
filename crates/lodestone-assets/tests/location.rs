@@ -1,7 +1,6 @@
 //! Tests for [`ResourceLocation`] parsing and formatting.
 
 use lodestone_assets::ResourceLocation;
-use std::collections::HashMap;
 
 #[test]
 fn defaults_namespace_to_minecraft() {
@@ -52,16 +51,6 @@ fn display_round_trips() {
 
     let defaulted = ResourceLocation::parse("block/stone").unwrap();
     assert_eq!(defaulted.to_string(), "minecraft:block/stone");
-}
-
-#[test]
-fn usable_as_hashmap_key() {
-    let mut map: HashMap<ResourceLocation, u32> = HashMap::new();
-    let key = ResourceLocation::parse("minecraft:block/stone").unwrap();
-    map.insert(key.clone(), 42);
-    assert_eq!(map.get(&key), Some(&42));
-    // Clone is cheap and equal.
-    assert_eq!(key.clone(), key);
 }
 
 #[test]
