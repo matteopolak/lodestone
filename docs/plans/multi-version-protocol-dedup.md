@@ -576,8 +576,33 @@ everywhere it appears above; read those names as the Minecraft-version equivalen
 resolves the inconsistency that motivated the question: `v735` never spoke protocol 735, and no
 scheme keyed on a protocol number survives a folder name that is not the protocol.
 
-**2b. Whether 26.2's crate absorbs 1.21.11 is still open, but it is now a measurement, not a
-decision.** Run Mojang's `--reports` on `.cache/mc/1.21.11/server.jar` under `container`, diff
+**2b. Settled: `v770` becomes `26.2`.** The owner's call. It is what that crate serves today, and
+naming it for a version it does not yet implement would be a claim rather than a description. If
+1.21.11 later proves to share ≥85% of its packet shapes and joins the same era crate, the rename to
+`1.21` at that point is cheaper than carrying a speculative name until then — and the measurement
+that settles the grouping (Mojang's reports on `.cache/mc/1.21.11/server.jar`, `packets.json` ids
+diffed against 26.2's) remains worth taking before stage 6 regardless, because it decides whether a
+crate is added or extended.
+
+The full mapping, now fully decided. Directory names carry the dot; package names cannot, so they
+use a hyphen:
+
+| today | directory | package |
+|---|---|---|
+| `crates/protocol/v47` | `crates/versions/1.8` | `lodestone-v1-8` |
+| `crates/protocol/v340` | `crates/versions/1.9` | `lodestone-v1-9` |
+| `crates/protocol/v735` | `crates/versions/1.14` | `lodestone-v1-14` |
+| `crates/protocol/v770` | `crates/versions/26.2` | `lodestone-v26-2` |
+
+**Execution note.** This is one atomic change, not four. It touches ~172 files that name the old
+path, including **91 hardcoded occurrences in `xtask/src/lib.rs`**, the workspace glob
+`crates/protocol/*`, the isolation lint that treats that directory as version-crate space, and
+`check-deletable`/`new-version`/`conformance`. It must land when no sweep is mid-flight: measured
+mid-session, the collision set with running agents was 19 files across `lodestone-game`,
+`lodestone-shell/tests` and `lodestone-entity` alone.
+
+*(Superseded: this section previously recorded 2b as open pending measurement.)*
+ Run Mojang's `--reports` on `.cache/mc/1.21.11/server.jar` under `container`, diff
 `packets.json` ids against 26.2's, then diff the decompiled packet classes for the shared ids.
 Below 85% they are two crates (`v1_21` and `v26_2`); at or above, one crate named `v1_21`. Take
 this measurement before stage 6, since it decides whether that stage carries a rename.
