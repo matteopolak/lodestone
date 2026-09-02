@@ -1,28 +1,24 @@
-//! Public potion id resolution and the `PotionContents` colour-mixing formula.
+//! Public potion id resolution and the `minecraft:potion_contents` colour-mixing formula.
 //!
 //! # What it is
 //!
 //! `minecraft:potion_contents`' `potion` field carries a `minecraft:potion` registry
-//! VarInt id — a fixed, built-in registry (`BuiltInRegistries.POTION`), the same kind
-//! of static id->name table as [`crate::mob_effects`]. [`potion_name`]/[`potion_id`]
-//! resolve it; [`potion_color`] ports `Potion.calculate` / `PotionContents.getColorOr`
-//! / `PotionContents.getColorOptional` (`.cache/mc/26.2/client-src/net/minecraft/client
-//! /color/item/Potion.java`, `.cache/mc/26.2/src/net/minecraft/world/item/alchemy
-//! /PotionContents.java`) — the weighted-average mix a potion bottle's tint is drawn
-//! from.
+//! VarInt id — a fixed, built-in registry, the same kind of static id->name table as
+//! [`crate::mob_effects`]. [`potion_name`]/[`potion_id`] resolve it; [`potion_color`]
+//! implements the weighted-average colour mix a potion bottle's tint is drawn from.
 //!
 //! # How it works
 //!
-//! `getColorOr` checks `customColor` first; failing that, `getColorOptional` folds
-//! every effect in `getAllEffects()` (the potion's own built-in list, from
-//! [`crate::generated_potion_effects::POTION_EFFECTS`], concatenated with any
-//! `customEffects`) into a red/green/blue running sum weighted by `amplifier + 1`,
-//! divides by the total weight, and falls back to `PotionContents.BASE_POTION_COLOR`
+//! The colour resolution checks a custom override colour first; failing that, it folds
+//! every effect in the potion's combined effect list (the potion's own built-in list,
+//! from [`crate::generated_potion_effects::POTION_EFFECTS`], concatenated with any
+//! custom effects) into a red/green/blue running sum weighted by `amplifier + 1`,
+//! divides by the total weight, and falls back to the base potion colour constant
 //! (`-13083194`) when there were no effects at all. Every mob-effect colour is
-//! [`crate::generated_mob_effect_colors::MOB_EFFECT_COLORS`], and a
-//! `MobEffectInstance`'s `effect` field is itself a network `minecraft:mob_effect` id
-//! (`ByteBufCodecs.holderRegistry`, the same 0-based shape `minecraft:potion` uses),
-//! so no extra indirection is needed between a wire effect id and this table's index.
+//! [`crate::generated_mob_effect_colors::MOB_EFFECT_COLORS`], and each effect entry's
+//! own id is itself a network `minecraft:mob_effect` id (the same 0-based registry
+//! shape `minecraft:potion` uses), so no extra indirection is needed between a wire
+//! effect id and this table's index.
 //!
 //! # How to change it
 //!
@@ -38,7 +34,8 @@ use crate::generated_potions::POTION_NAMES;
 pub use crate::generated_potion_effects::POTION_EFFECTS;
 pub use crate::generated_potions::POTION_COUNT;
 
-/// `PotionContents.BASE_POTION_COLOR` (`-13083194`), opaque ARGB.
+/// The base potion colour constant (`-13083194`), opaque ARGB, used when a potion has
+/// no colour-contributing effects.
 pub const BASE_POTION_COLOR: u32 = 0xFF38_5DC6;
 
 /// Resolves a network potion registry id to its canonical `minecraft:*` identifier.
@@ -60,7 +57,7 @@ pub fn potion_id(name: &str) -> Option<i32> {
         .and_then(|index| i32::try_from(index).ok())
 }
 
-/// `ARGB.opaque`: force alpha to `0xFF`.
+/// Forces alpha to `0xFF` (opaque).
 const fn opaque(rgb: u32) -> u32 {
     (rgb & 0x00FF_FFFF) | 0xFF00_0000
 }
@@ -82,17 +79,16 @@ fn accumulate(effect_id: i32, amplifier: u8, red: &mut u32, green: &mut u32, blu
     *weight += w;
 }
 
-/// `Potion.calculate` folded with `PotionContents.getColorOr`/`getColorOptional`:
-/// the opaque ARGB a `minecraft:potion_contents` component resolves to.
+/// The weighted effect-colour average that a `minecraft:potion_contents` component
+/// resolves to, with an explicit custom colour taking precedence over any computed mix.
 ///
 /// `potion` is the wire's `minecraft:potion` registry id (its built-in effect list is
 /// looked up from [`POTION_EFFECTS`]); `custom_color` and `custom_effects` are the
-/// component's own `customColor`/`customEffects` fields, `custom_effects` as
+/// component's own custom-colour and custom-effects fields, `custom_effects` as
 /// `(network mob-effect id, amplifier)` pairs in wire order. `custom_color` wins
-/// outright when present (`getColorOr`'s first branch); otherwise every effect from
-/// both the potion and the custom list is averaged, weighted by `amplifier + 1`
-/// (`getColorOptional`); an empty result (no potion holder, no custom effects) is
-/// [`BASE_POTION_COLOR`], matching `PotionContents.getColor()`'s own no-arg default.
+/// outright when present; otherwise every effect from both the potion and the custom
+/// list is averaged, weighted by `amplifier + 1`; an empty result (no potion holder, no
+/// custom effects) is [`BASE_POTION_COLOR`], matching vanilla's own no-argument default.
 #[must_use]
 pub fn potion_color(potion: Option<i32>, custom_color: Option<u32>, custom_effects: &[(i32, u8)]) -> u32 {
     if let Some(c) = custom_color {
@@ -120,7 +116,7 @@ pub fn potion_color(potion: Option<i32>, custom_color: Option<u32>, custom_effec
     }
 }
 
-/// `Potion.name()` for a network potion registry id — see
+/// The base effect-key name for a network potion registry id — see
 /// [`crate::generated_potion_effect_keys`]'s module doc for why this is not the same
 /// string as [`potion_name`]'s registry path (`long_swiftness`/`strong_swiftness` both
 /// resolve to `"swiftness"` here, matching every duration/potency variant sharing one
@@ -130,13 +126,13 @@ pub fn potion_effect_key(id: i32) -> Option<&'static str> {
     usize::try_from(id).ok().and_then(|index| POTION_EFFECT_KEYS.get(index).copied())
 }
 
-/// `PotionContents.getName(prefix)` (`PotionContents.java`), ported as a literal table
-/// rather than composed from `"<prefix> of <effect>"` — four keys (`water`/`mundane`/
-/// `thick`/`awkward`) don't follow that pattern at all, `turtle_master` inserts `"the"`,
-/// and `tipped_arrow`'s wording ("Arrow of X", "Arrow of Splashing" for `water`) differs
-/// from the three drinkable prefixes. Transcribed verbatim from
-/// `.cache/mc/26.2/client-src/assets/minecraft/lang/en_us.json`'s
-/// `item.minecraft.<base_item>.effect.<key>` entries.
+/// The display-name-with-prefix formula, ported as a literal table rather than
+/// composed from `"<prefix> of <effect>"` — four keys (`water`/`mundane`/`thick`/
+/// `awkward`) don't follow that pattern at all, `turtle_master` inserts `"the"`, and
+/// `tipped_arrow`'s wording ("Arrow of X", "Arrow of Splashing" for `water`) differs
+/// from the three drinkable prefixes. Transcribed verbatim from the game's own English
+/// localisation strings for each base item's per-effect display name
+/// (`item.minecraft.<base_item>.effect.<key>` entries).
 ///
 /// `base_item` is the bare path (`"potion"`, `"splash_potion"`, `"lingering_potion"`,
 /// `"tipped_arrow"`) — a `minecraft:` prefix, if the caller has one, must be stripped
@@ -193,11 +189,11 @@ pub fn potion_item_display_name(base_item: &str, id: i32) -> Option<&'static str
     names.get(index).copied()
 }
 
-/// One line `PotionContents.addPotionTooltip` emits for a single effect: the effect's
-/// own vanilla display name (`effect.minecraft.<path>` in `en_us.json`), its amplifier
-/// (`MobEffectInstance.getAmplifier()` — `0` means no Roman-numeral suffix, matching
-/// `getPotionDescription`'s `amplifier > 0` gate), and its raw, unscaled duration in
-/// ticks (`MobEffectUtil.formatDuration`'s input before `POTION_DURATION_SCALE`).
+/// One line the potion tooltip emits for a single effect: the effect's own vanilla
+/// display name (`effect.minecraft.<path>` in the localisation strings), its amplifier
+/// (`0` means no Roman-numeral suffix, matching the description formatter's
+/// `amplifier > 0` gate), and its raw, unscaled duration in ticks (before the
+/// duration-display scale factor that converts ticks to seconds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PotionEffectEntry {
     /// `effect.minecraft.<path>`'s English text, e.g. `"Swiftness"`.
@@ -205,24 +201,23 @@ pub struct PotionEffectEntry {
     /// `0` renders no numeral; vanilla's `potion.potency.<n>` table (`""`, `"II"`,
     /// `"III"`, …) starts numbering at this same raw amplifier, not `amplifier + 1`.
     pub amplifier: u8,
-    /// Raw duration in ticks, unscaled. Vanilla only prints a duration when
-    /// `!effect.endsWithin(20)`, i.e. `duration_ticks > 20` — an instant effect
+    /// Raw duration in ticks, unscaled. Vanilla only prints a duration when it exceeds
+    /// a 20-tick "ends within" cutoff, i.e. `duration_ticks > 20` — an instant effect
     /// (`healing`/`harming`, `duration_ticks == 1`) prints no duration at all.
     pub duration_ticks: u32,
-    /// `MobEffectCategory.getTooltipFormatting()`: `true` for `HARMFUL`
-    /// (`ChatFormatting.RED`), `false` for `BENEFICIAL`/`NEUTRAL` (both
-    /// `ChatFormatting.BLUE`) — `MobEffects.java`'s own category argument per
-    /// effect, not derived from anything else.
+    /// Vanilla's tooltip-colour category: `true` for a harmful effect (rendered red),
+    /// `false` for a beneficial or neutral one (both rendered blue) — a fixed
+    /// per-effect category, not derived from anything else.
     pub harmful: bool,
 }
 
-/// `effect.minecraft.<path>` plus its `MobEffectCategory` (`en_us.json` and
-/// `MobEffects.java` respectively), for exactly the mob effects a potion in this
-/// build's 46-entry registry can carry — scoped rather than a general
-/// `minecraft:mob_effect` name table, because no other caller in this tree needs a
-/// status effect's *display* name (only [`crate::mob_effects::mob_effect_name`]'s
-/// canonical identifier). Indexed by the same `mob_effect_index` [`POTION_EFFECTS`]
-/// uses. `harmful` is `true` for `MobEffectCategory::HARMFUL`.
+/// Each effect's own display name plus its harmful/beneficial category, for exactly
+/// the mob effects a potion in this build's 46-entry registry can carry — scoped
+/// rather than a general `minecraft:mob_effect` name table, because no other caller in
+/// this tree needs a status effect's *display* name (only
+/// [`crate::mob_effects::mob_effect_name`]'s canonical identifier). Indexed by the same
+/// `mob_effect_index` [`POTION_EFFECTS`] uses. `harmful` is `true` for the harmful
+/// category.
 const EFFECT_DISPLAY_NAMES: &[(usize, &str, bool)] = &[
     (0, "Speed", false),
     (1, "Slowness", true),
@@ -258,12 +253,11 @@ pub fn potion_built_in_effects(id: i32) -> Option<&'static [(usize, u8, u32)]> {
     usize::try_from(id).ok().and_then(|index| POTION_EFFECTS.get(index)).copied()
 }
 
-/// `PotionContents.getAllEffects()` with no `customEffects`, resolved to display data —
-/// a potion registry entry's own built-in effect list, in `Potions.java`'s declaration
-/// order (which is also `addPotionTooltip`'s iteration order). Empty for `water`/
-/// `mundane`/`thick`/`awkward` and for an id outside `0..POTION_COUNT`, matching
-/// `PotionContents.hasEffects() == false` (vanilla's cue to print `"No Effects"`
-/// instead).
+/// A potion's built-in effect list with no custom effects applied, resolved to
+/// display data — in the registry's own declaration order (which is also the
+/// tooltip's iteration order). Empty for `water`/`mundane`/`thick`/`awkward` and for
+/// an id outside `0..POTION_COUNT`, matching vanilla's cue to print `"No Effects"`
+/// instead.
 #[must_use]
 pub fn potion_effect_entries(id: i32) -> Vec<PotionEffectEntry> {
     let Some(effects) = usize::try_from(id).ok().and_then(|index| POTION_EFFECTS.get(index)) else {
@@ -282,8 +276,7 @@ pub fn potion_effect_entries(id: i32) -> Vec<PotionEffectEntry> {
 }
 
 /// One line under `potion.whenDrank` (`"When Applied:"`) — an attribute the effect
-/// modifies while active, already scaled by `MobEffect.AttributeTemplate.create`'s
-/// `amount * (amplifier + 1)`.
+/// modifies while active, already scaled by `amount * (amplifier + 1)`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AttributeModifierEntry {
     /// `attribute.name.<id>`'s English text, e.g. `"Speed"`, `"Attack Damage"`.
