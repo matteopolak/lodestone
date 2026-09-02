@@ -13,12 +13,12 @@
 //! # Two projections, and why the filtered one is what production sends
 //!
 //! [`project`] transmits the whole tree; [`project_filtered`] prunes it the way
-//! vanilla's `Commands.sendCommands` does. Vanilla never sends a player a node
-//! they cannot use: `sendCommands` builds a *copy* through
-//! `Commands.fillUsableCommands`, whose recursion into a child's children sits
-//! **inside** the `child.canUse(source)` branch, so a denied node takes its whole
+//! the real send-commands rule does. The real rule never sends a player a
+//! node they cannot use: it builds a *copy* through a fill-usable-commands
+//! walk, whose recursion into a child's children sits **inside** the "can
+//! this source use it" branch, so a denied node takes its whole
 //! subtree with it. The unfiltered [`project`] remains because the parity gate
-//! wants to compare our declared shape against vanilla's captured one without a
+//! wants to compare our declared shape against the real captured one without a
 //! permission level in the middle, and because `ServerCommands::wire_tree` is its
 //! caller — but the join path uses the filtered one, and a level-0 player really
 //! is sent a tree with no `/gamemode` in it at all.
@@ -34,8 +34,8 @@
 //!
 //! # `restricted` is derived, not declared
 //!
-//! `FLAG_RESTRICTED` (`0x20`) is vanilla's "the server would reject this node
-//! for a permission-lacking sender". A node carrying a permission requirement
+//! The wire's restricted flag (`0x20`) is the real "the server would reject
+//! this node for a permission-lacking sender" bit. A node carrying a permission requirement
 //! sets it — which is what makes the captured `/gamemode` and `/give` root
 //! literals `restricted: true` and their children `false`, since the requirement
 //! sits on the root literal only and pruning is by subtree.
@@ -108,18 +108,19 @@ fn node_kind(node: &lodestone_command::Node, descriptor: Option<&WireDescriptor>
 /// Project `tree` into the wire shape a *particular* subject may see, pruning
 /// every node whose permission `filter` rejects along with its whole subtree.
 ///
-/// This is what the join sequence sends. Two vanilla behaviours are reproduced
+/// This is what the join sequence sends. Two real behaviours are reproduced
 /// and they are separate steps:
 ///
-/// * **Which nodes survive** is `Commands.fillUsableCommands`. The recursion into
-///   a child's own children sits inside the `child.canUse(source)` branch, so a
-///   permitted node under a denied parent is never reached and never sent. That
-///   is why the filter is applied to a node's *permission* only and never to the
-///   subtree beneath it — the pruning is structural.
-/// * **What index each survivor gets** is
-///   `ClientboundCommandsPacket.enumerateNodes`: a breadth-first walk from the
-///   root that enqueues a node's children and then its redirect target, assigning
-///   ids in visit order. The root therefore lands at 0.
+/// * **Which nodes survive** is the real fill-usable-commands walk. The
+///   recursion into a child's own children sits inside the "can this source
+///   use it" branch, so a permitted node under a denied parent is never
+///   reached and never sent. That is why the filter is applied to a node's
+///   *permission* only and never to the subtree beneath it — the pruning is
+///   structural.
+/// * **What index each survivor gets** is the real node-enumeration rule: a
+///   breadth-first walk from the root that enqueues a node's children and
+///   then its redirect target, assigning ids in visit order. The root
+///   therefore lands at 0.
 ///
 /// Indices are *not* the arena's own here, which is the whole difference from
 /// [`project`]: dropping a node has to renumber everything after it, and a
@@ -128,8 +129,8 @@ fn node_kind(node: &lodestone_command::Node, descriptor: Option<&WireDescriptor>
 /// enumeration map, never derived from a `NodeId`.
 ///
 /// A redirect whose target did not survive is dropped rather than left dangling,
-/// matching `fillUsableCommands`' own `converted.get(...)` returning null for an
-/// unconverted target.
+/// matching the real rule's own lookup returning nothing for an unconverted
+/// target.
 ///
 /// # Errors
 ///
@@ -143,8 +144,9 @@ pub fn project_filtered(
 ) -> Result<WireTree, CommandTreeError> {
     let root = tree.root();
 
-    // Phase 1: `Commands.fillUsableCommands`. A node is visible when it is the
-    // root, or when its own permission passes *and* its parent is visible.
+    // Phase 1: the real fill-usable-commands walk. A node is visible when it
+    // is the root, or when its own permission passes *and* its parent is
+    // visible.
     let mut visible: std::collections::HashSet<NodeId> = std::collections::HashSet::new();
     visible.insert(root);
     let mut pending = vec![root];
@@ -161,7 +163,7 @@ pub fn project_filtered(
         }
     }
 
-    // Phase 2: `ClientboundCommandsPacket.enumerateNodes`, over the survivors.
+    // Phase 2: the real node-enumeration rule, over the survivors.
     let mut index_of: HashMap<NodeId, usize> = HashMap::new();
     let mut order: Vec<NodeId> = Vec::new();
     let mut queue: std::collections::VecDeque<NodeId> = std::collections::VecDeque::new();

@@ -1,6 +1,5 @@
-//! `/op`, `/deop` and `/whitelist` — vanilla's `OpCommand`/`DeOpCommand`/
-//! `WhitelistCommand`, the admin surface [`crate::access::AccessLists`]
-//! never had one for.
+//! `/op`, `/deop` and `/whitelist` — the real op/deop/whitelist commands,
+//! the admin surface [`crate::access::AccessLists`] never had one for.
 //!
 //! # What it is
 //!
@@ -60,8 +59,8 @@ use crate::access::MAX_PERMISSION_LEVEL;
 
 use super::registrar::Registrar;
 
-/// `Commands.LEVEL_GAMEMASTERS + 1` — vanilla's own level for `/op`, `/deop`
-/// and `/whitelist`.
+/// The game-masters permission level plus one — the real level for `/op`,
+/// `/deop` and `/whitelist`.
 const ADMIN_LEVEL: u8 = 3;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -84,7 +83,7 @@ fn register_op(registrar: &mut Registrar) {
         };
         let mut opped = Vec::new();
         for target in &targets {
-            // `OpCommand.opPlayer`'s own "nothing changed" refusal: report
+            // The real op-command's own "nothing changed" refusal: report
             // it, don't just silently re-op.
             let already = access.with(|lists| lists.has_permission_level(target.uuid, MAX_PERMISSION_LEVEL));
             if already {

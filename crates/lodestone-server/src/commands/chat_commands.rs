@@ -23,8 +23,9 @@ use super::registrar::Registrar;
 use super::CommandResult;
 use crate::commands::Effect;
 
-/// Vanilla gates `/say` at `Commands.LEVEL_GAMEMASTERS` (2). `/me` and `/msg`
-/// are ungated (level 0) — anyone connected may emote or whisper.
+/// The real rule gates `/say` at the game-masters permission level (2).
+/// `/me` and `/msg` are ungated (level 0) — anyone connected may emote or
+/// whisper.
 const SAY_LEVEL: u8 = 2;
 const ME_LEVEL: u8 = 0;
 const MSG_LEVEL: u8 = 0;
