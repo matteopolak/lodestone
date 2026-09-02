@@ -17,16 +17,16 @@ hooks on `MobSim` in `mobs/mod.rs`.
 ### Professions and workstation/bed/bell claiming
 
 `villager/mod.rs` holds the `Profession` enum, the workstation-block ↔ POI-type ↔ profession
-tables (transcribed from `PoiTypes.bootstrap`/`VillagerProfession.bootstrap`), and leveling
-(transcribed from `VillagerData.java`). Claims are ticket accounting on top of
+tables (transcribed from vanilla's own POI-type and profession bootstrap tables), and leveling
+(transcribed from vanilla's own villager-data leveling table). Claims are ticket accounting on top of
 `crate::poi_storage::PoiRecord` , not a parallel
 claimed-by-uuid table:
 
 | ledger | POI type | tickets | tick driver |
 |---|---|---|---|
 | `WorkstationClaims` | job-site block | 1 | `tick_villager_professions` |
-| `BedClaims` | `PoiTypes.HOME` (`#minecraft:beds`) | 1 | `tick_villager_beds` |
-| `BellClaims` | `PoiTypes.MEETING` (`minecraft:bell`) | 32 (a crowd, not a queue of one) | `tick_villager_bells` |
+| `BedClaims` | home POI kind (`#minecraft:beds`) | 1 | `tick_villager_beds` |
+| `BellClaims` | meeting POI kind (`minecraft:bell`) | 32 (a crowd, not a queue of one) | `tick_villager_bells` |
 
 Each pass runs independently every sim tick (job site, bed and bell are three separate vanilla
 memories): an unclaimed villager whose search cooldown expired scans a bounded cube and claims
@@ -34,7 +34,7 @@ the nearest free one; a claimed villager has its block re-checked every tick and
 the instant it no longer matches (destroyed or replaced) — there is no block-place/break event
 hook, so this re-verification is the only detector, at most one tick of lag. A bed with a free
 ticket is still skipped while its block state reads `occupied=true`. A claimed bed **is**
-vanilla's occupancy signal for raids (`PoiRecord.isOccupied` goes true the moment a ticket is
+vanilla's occupancy signal for raids (occupancy flips true the moment a ticket is
 taken, independent of anyone lying down) — `MobSim::occupied_homes_in_range` is the live query a
 raid trigger reads; bells feed `MEET` only (below) and are not needed for the raid trigger.
 
@@ -97,9 +97,10 @@ charged prices always agree. No offer state persists to disk.
 weight/max/decay constants — `major_positive` never decays. `add`/`decay`/`transfer_from`/
 `reputation` are the primitives everything else builds on; **reputation is the signed-weighted
 sum**, not a raw stored count, since weight can be negative. `SimMob` carries one
-`GossipContainer` per mob plus a 24000-tick decay cadence (`Villager.maybeDecayGossip`, inline in
+`GossipContainer` per mob plus a 24000-tick decay cadence (matching vanilla's own gossip-decay
+cadence, inline in
 the per-mob tick loop). `villager/reputation.rs` has `apply_reputation_event` (the four-branch
-gossip write vanilla's `onReputationEventFrom` does) and `update_special_prices` (the
+gossip write vanilla's own reputation-event handler does) and `update_special_prices` (the
 reputation-discount-plus-Hero-of-the-Village formula feeding `OfferState::add_special_price_diff`).
 The two discounts are independent and additive; Hero of the Village floors at a discount of 1.
 
@@ -108,10 +109,11 @@ all-pairs scan (an approximation of vanilla's Brain-sensor "meet in village" spr
 work is out of scope here); `attack_from_player` (called from `crate::server::apply_attack`)
 writes `VillagerHurt` gossip onto a hurt villager, or `VillagerKilled` onto every nearby
 witnessing villager when one dies; a successful trade calls
-`record_reputation_event(..., Trade, player_uuid)`, matching `Villager.notifyTrade`; curing a
+`record_reputation_event(..., Trade, player_uuid)`, matching vanilla's own trade-notification hook;
+curing a
 zombie villager seeds `ZombieVillagerCured` gossip (below). Iron-golem aggression toward a
-low-reputation player is **not built** — nothing in `IronGolem.java` reads gossip or reputation
-at all, so there is no mechanism to port. Nothing here persists to disk.
+low-reputation player is **not built** — nothing in vanilla's own iron golem reads gossip or
+reputation at all, so there is no mechanism to port. Nothing here persists to disk.
 
 ### Zombie villager curing
 
@@ -168,23 +170,23 @@ position) ports vanilla's 1200-tick poll, 24000-tick base delay, 25%→75% climb
 and 48-block/10-attempt position search exactly, gated on the `spawn_wandering_traders` game
 rule and called once per tick from `run_tick_loop`.
 
-Disclosed gaps: no `PoiTypes.MEETING` search (always around a random online player, never a
+Disclosed gaps: no meeting-POI search (always around a random online player, never a
 village), no biome exclusion, no space/collision check, no despawn timer/wander target/home
 position, no persistence across a restart. **No wares at all** — no merchant-offer/trade-table
 model for the trader, so a spawned one has nothing to trade; a separate feature. The "drinks
-invisibility at night, milk by day" behaviour is a day/night-cycle goal in vanilla
-(`isDarkOutside()`/`isBrightOutside()`), not damage-triggered as sometimes assumed, and is
+invisibility at night, milk by day" behaviour is a day/night-cycle goal in vanilla (a plain
+light-level/time check, not the entity's own state), not damage-triggered as sometimes assumed, and is
 unbuilt — it needs a generic use-item-under-a-predicate goal and a time-of-day read, neither of
 which exist in `lodestone_entity::ai` yet.
 
 ### Golem construction
 
-`MobSim::try_construct_golem` (matching internals in `mobs/golem.rs`) ports vanilla's
-`CarvedPumpkinBlock.trySpawnGolem` and its underlying `BlockPattern`/`BlockPatternBuilder`
+`MobSim::try_construct_golem` (matching internals in `mobs/golem.rs`) ports vanilla's own
+carved-pumpkin golem-summon check and its underlying block-pattern-matching
 engine directly: a pattern is a grid of predicates in local (right, down, forward) axes, and the
 matcher brute-forces every position in a bounded cube against all 24 valid axis orientations —
 not "upright only", since a golem really can be built lying on its side against a wall in
-vanilla. Two patterns, read verbatim from `getOrCreateSnowGolemFull`/`getOrCreateIronGolemFull`:
+vanilla. Two patterns, read verbatim from vanilla's own snow- and iron-golem shape definitions:
 
 | golem | shape | blocks consumed |
 |---|---|---|
@@ -197,7 +199,7 @@ block-lookup oracle; `GolemConstruction::consumed` (which **includes the pumpkin
 report for the caller to clear, not an action — `server.rs`'s `apply_use_item_on` writes those
 cells to air and folds them into the normal block-update notify list. The spawned golem goes
 through the normal `spawn_species` path, so it gets the same goal set as any other spawn.
-`setPlayerCreated(true)` (suppresses the golem attacking the player who angered it) is not
+Vanilla's own player-created flag (suppresses the golem attacking the player who angered it) is not
 modelled — no per-golem flag exists. The vanilla village-POI-count gate does **not** apply here
 at all; that gate belongs to a separate, unbuilt natural village-golem spawn system.
 
