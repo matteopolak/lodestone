@@ -2,35 +2,26 @@
 //!
 //! # What vanilla actually says
 //!
-//! Every entity render type in 26.2 is built from `ENTITY_SNIPPET`, and that
-//! snippet pins the depth state explicitly:
+//! Every entity render type in 26.2 is built from a shared base pipeline
+//! snippet, and that
+//! snippet pins the depth state explicitly: the snippet's builder chain sets
+//! its depth-stencil state to a named default value, and never overrides it
+//! afterward. That default value is defined on a small record type holding
+//! four fields, in this order: a depth-comparison operator, a
+//! write-depth flag, a depth-bias scale factor and a depth-bias constant. The
+//! default value is constructed with only the first two of those four
+//! arguments — comparison operator "greater than or equal", write-depth
+//! `true` — leaving the two bias fields at their zero default, so it sets no
+//! bias at all.
 //!
-//! ```text
-//! vanilla's decompiled render-pipelines source
-//!   private static final RenderPipeline.Snippet ENTITY_SNIPPET = RenderPipeline.builder(...)
-//!      ...
-//!      .withDepthStencilState(DepthStencilState.DEFAULT)
-//!      .buildSnippet();
-//!
-//! vanilla's decompiled depth-stencil-state source
-//!   public record DepthStencilState(CompareOp depthTest, boolean writeDepth,
-//!                                   float depthBiasScaleFactor, float depthBiasConstant) {
-//!      public static final DepthStencilState DEFAULT =
-//!          new DepthStencilState(CompareOp.GREATER_THAN_OR_EQUAL, true);
-//! ```
-//!
-//! `ENTITY_SOLID` (`RenderPipelines`'s own decompiled source), `ENTITY_CUTOUT`
-//! (`:245`), `ENTITY_CUTOUT_CULL` (`:238`) and `ENTITY_TRANSLUCENT` (`:274`)
-//! all inherit it — none of them overrides `withDepthStencilState`. This engine
-//! is reversed-Z like vanilla, so `GREATER_THAN_OR_EQUAL` is
+//! Every one of vanilla's four entity render-pipeline variants (solid, cutout,
+//! cutout-with-culling, and translucent) inherits that snippet — none of them
+//! overrides the depth-stencil state. This engine
+//! is reversed-Z like vanilla, so "greater than or equal" is
 //! `DEPTH_COMPARE_NEARER_OR_EQUAL` here with no sign flip. The base pipeline
 //! shipped the **strict** comparison, which is the one value that is *not*
 //! vanilla: coincident geometry resolves to the **first** draw instead of the
 //! last.
-//!
-//! Note the record's field order while reading that transcription: it is
-//! `(depthTest, writeDepth, depthBiasScaleFactor, depthBiasConstant)`, so a
-//! two-argument `DEFAULT` sets no bias at all.
 //!
 //! # The measurement, and both hypotheses
 //!
@@ -58,12 +49,13 @@
 //! * `lightmap_color(1.0, 0.0)` saturates to `(1, 1, 1)` — ambient `0x0A0A0A`
 //!   plus a full sky contribution clamps at 1.0, and `not_gamma` is the identity
 //!   at 1.0.
-//! * The derived normal is `+Z`. Vanilla's two diffuse lights are
-//!   `Lighting`'s own decompiled source, `(0.2, 1.0, -0.7)` and `(-0.2, 1.0, 0.7)`
+//! * The derived normal is `+Z`. Vanilla's own two fixed diffuse-light
+//!   directions are
+//!   `(0.2, 1.0, -0.7)` and `(-0.2, 1.0, 0.7)`
 //!   normalised, so `d0 = max(-0.7/√1.53, 0) = 0` and `d1 = 0.7/√1.53 =
 //!   0.565910`.
-//! * `light.glsl:3-4` gives `MINECRAFT_LIGHT_POWER 0.6` /
-//!   `MINECRAFT_AMBIENT_LIGHT 0.4`, so
+//! * Vanilla's own lighting shader constants give a light power of `0.6` /
+//!   an ambient light of `0.4`, so
 //!   `diffuse = min(1, 0.565910 * 0.6 + 0.4) = 0.739546`.
 //! * A white texel on an sRGB atlas is `1.0` after `linear_to_srgb`, so the
 //!   surviving channel is `0.739546` in gamma space → **`188.585`**, i.e. byte
@@ -122,8 +114,8 @@ const CLEAR: wgpu::Color = wgpu::Color {
 const RED: [u8; 3] = [255, 0, 0];
 const BLUE: [u8; 3] = [0, 0, 255];
 
-/// `0.739546 * 255`, derived in the module docs from `Lighting`'s own decompiled source and
-/// `light.glsl:3-4`. The GPU's own rounding of the final sRGB encode is the only
+/// `0.739546 * 255`, derived in the module docs from vanilla's own fixed
+/// diffuse-light directions and its own lighting shader constants. The GPU's own rounding of the final sRGB encode is the only
 /// slack allowed.
 const EXPECTED_SURVIVOR_BYTE: i32 = 188;
 const SURVIVOR_TOLERANCE: i32 = 2;

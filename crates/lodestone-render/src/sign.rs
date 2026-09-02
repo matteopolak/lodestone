@@ -6,12 +6,12 @@
 //! # Why this is not `block_entity.rs`, despite being a block entity
 //!
 //! Every type in [`crate::block_entity`] exists because vanilla's block
-//! *model* is empty and a `BlockEntityRenderer` supplies the missing cuboid
-//! geometry. A sign is the opposite case: `assets/minecraft/blockstates/
+//! *model* is empty and a dedicated block-entity renderer type supplies the
+//! missing cuboid geometry. A sign is the opposite case: `assets/minecraft/blockstates/
 //! oak_sign.json` maps every `rotation` value to a real `block/
 //! oak_sign_rot_N` model, and vanilla's standing-sign renderer declares **no model at
 //! all** — only text transformations
-//! (26.2's decompiled block-entity-renderer source). So this module has no [`crate::block_entity::
+//! (26.2's decompiled behaviour). So this module has no [`crate::block_entity::
 //! BlockEntityMesh`], no [`crate::block_entity::plan_block_entities`] batch,
 //! and does not touch [`crate::entity::bake_entity_parts`] at all — the
 //! sign's board is already in the terrain mesh the block model produces, and
@@ -24,7 +24,7 @@
 //!
 //! **Hanging signs are the same story, not a second one.** In 26.2
 //! vanilla's hanging-sign renderer is its base sign-renderer class plus a single
-//! `textTransformation` and **no model** either — the board, bar and chains
+//! text-transformation function override and **no model** either — the board, bar and chains
 //! come from `block/template_hanging_sign_rot_N` and
 //! `block/template_wall_hanging_sign`, real block models the terrain mesher
 //! already draws. So both sign families are text-only here and the whole
@@ -37,17 +37,13 @@
 //! # The placement matrix, ported term for term
 //!
 //! Vanilla's standing-sign renderer's text-transformation function
-//! builds, for one text side:
-//!
-//! ```text
-//! Matrix4f result = new Matrix4f()
-//!     .translate(0.5F, 0.5F, 0.5F)
-//!     .rotate(Axis.YP.rotationDegrees(-angle));
-//! if (attachmentType == WALL) result.translate(0.0F, -0.3125F, -0.4375F);
-//! if (!isFrontText) result.rotate(Axis.YP.rotationDegrees(180.0F));
-//! result.translate(TEXT_OFFSET);              // (0, 0.33333334, 0.046666667)
-//! result.scale(0.010416667F, -0.010416667F, 0.010416667F);
-//! ```
+//! builds, for one text side, an identity matrix composed left-to-right by
+//! five steps applied in this exact order: translate by `(0.5, 0.5, 0.5)`;
+//! rotate about the world `+Y` axis by the negated placement angle; **only
+//! when wall-mounted**, translate by `(0, -0.3125, -0.4375)`; **only for the
+//! back-facing side**, rotate about `+Y` by another 180°; unconditionally
+//! translate by the text-offset term `(0, 0.33333334, 0.046666667)`; and
+//! finally scale by `(0.010416667, -0.010416667, 0.010416667)`.
 //!
 //! JOML's `Matrix4f.translate/.rotate/.scale` right-multiply (`this = this *
 //! op`), so reading the calls top to bottom gives the composition order
@@ -56,7 +52,8 @@
 //! because its input vertices are pre-authored in absolute `0..1` block
 //! space, this local origin is `(0.5, 0.5, 0.5)` reached by translating
 //! *before* rotating — the local input here is small font-pixel offsets
-//! around zero (see `submitSignText`'s `x1 = -font.width(line)/2`), so no
+//! around zero (see vanilla's text-submit function's own halved-negated
+//! line-width computation for the starting `x`), so no
 //! sandwich is needed. [`sign_text_transform`] ports the whole expression
 //! directly, with the block's own world translation folded onto the front
 //! (matching every other placement matrix in this crate).
@@ -71,8 +68,8 @@
 //! [`sign_text_transform`]'s result **unflipped** — flipping it again here
 //! would cancel the scale out.
 //!
-//! `RotationSegment.convertToDegrees(segment)` is `segment * 22.5`
-//! (`SegmentedAnglePrecision(4).toDegrees`, measured against
+//! Vanilla's own segment-to-degrees conversion is `segment * 22.5`
+//! (a 4-bit segmented-angle precision converted to degrees, measured against
 //! [`crate::block_entity::skull_ground_placement_matrix`]'s identical use of
 //! the same formula for a floor skull's `rotation` property — segment `0` is
 //! **north**, the same non-[`crate::block_entity::horizontal_facing_yaw`]
@@ -83,41 +80,45 @@
 //! # Colour, ported from vanilla's base sign-renderer/dye-colour/packed-colour
 //! helpers
 //!
-//! Non-glowing text is `ARGB.scaleRGB(dye.getTextColor(), 0.4F)`
+//! Non-glowing text is the dye's own text colour, run through vanilla's own
+//! packed-colour scale helper at `0.4F`
 //! (vanilla's base sign-renderer's dark-colour function) — **per-channel
 //! integer truncation**, `(channel * 0.4) as i32`
 //! clamped `0..255`
-//! (vanilla's packed-colour scale helper), not a
+//! , not a
 //! float multiply carried through — and per `CLAUDE.md`'s rendering
 //! constraints this is a **gamma-space** multiply, the same as tint/shade
 //! everywhere else in this codebase. Glowing text uses the dye's own
-//! `getTextColor()` unscaled. Vanilla's dye-colour registration is the source for
+//! text colour, unscaled. Vanilla's dye-colour registration is the source for
 //! every constant in [`dye_text_color_rgb`] — transcribed, not derived.
 //!
 //! # Glowing text: the outline is the whole visual difference
 //!
 //! Vanilla's base sign-renderer's text-submit function branches once on
-//! `signText.hasGlowingText()`, and the branch decides three things at once:
+//! whether the sign text has the glowing flag set, and the branch decides
+//! three things at once:
 //!
 //! | | plain | glowing |
 //! |---|---|---|
-//! | glyph colour | `getDarkColor` | `dye.getTextColor()`, unscaled |
-//! | outline colour | none (`0`) | `getDarkColor` |
-//! | light | `state.lightCoords` | `15728880` — full bright |
+//! | glyph colour | dark-colour function | dye's own text colour, unscaled |
+//! | outline colour | none (`0`) | dark-colour function |
+//! | light | the block's own light coordinates | `15728880` — full bright |
 //!
-//! and the outline is gated once more: `drawOutline = textColor ==
-//! DyeColor.BLACK.getTextColor() || state.drawOutline`, where `state.drawOutline`
-//! is `isOutlineVisible` — the camera within `Mth.square(16)` of the block
-//! centre, or a scoping first-person player. So a **black** glowing sign is
+//! and the outline is gated once more: it draws when the resolved text
+//! colour equals black's own text colour, **or** when a separate
+//! outline-visible flag on the render state is set — that flag being the
+//! camera within a squared distance of 16 blocks
+//! of the block centre, or a scoping first-person player. So a **black** glowing sign is
 //! outlined at any range (its glyphs are literally colour `0` and the outline
 //! is the only thing that makes them legible), and every other glowing sign
 //! is outlined within 16 blocks. [`sign_outline_color`] is that whole gate.
 //!
-//! [`sign_dark_color_rgb`] is `getDarkColor` itself, including the
-//! substitution this module used to defer: `color == BLACK && glowing`
-//! yields `BLACK_TEXT_OUTLINE_COLOR = -988212` (`0xFFF0EBCC`, a bone white)
-//! rather than `scaleRGB(0, 0.4) == 0`. That substitution is unreachable
-//! from [`sign_side_color`]'s non-glowing arm, where `hasGlowingText()` is
+//! [`sign_dark_color_rgb`] is that dark-colour function itself, including the
+//! substitution this module used to defer: black colour plus the glowing flag
+//! yields a named outline-colour constant, `-988212` (`0xFFF0EBCC`, a bone white)
+//! rather than the packed-colour scale helper applied to `0` at `0.4`, which is
+//! `0`. That substitution is unreachable
+//! from [`sign_side_color`]'s non-glowing arm, where the glowing flag is
 //! false by construction, so the two functions agree everywhere they overlap.
 //!
 //! **All three arms are now ported**, the light one last. It was reported as
@@ -147,7 +148,7 @@ use crate::entity::ENTITY_FULLBRIGHT;
 /// no model whatsoever (verified against
 /// 26.2's decompiled hanging-sign-renderer source, which is the base
 /// sign-renderer class plus one
-/// `textTransformation`) — and the hanging board, its bar and its chains are
+/// text-transformation function) — and the hanging board, its bar and its chains are
 /// all real block-model geometry
 /// (`assets/minecraft/models/block/oak_hanging_sign_rot_0.json` parents
 /// `block/template_hanging_sign_rot_0`, which has genuine elements). **The
@@ -162,30 +163,31 @@ use crate::entity::ENTITY_FULLBRIGHT;
 /// |---|---|---|
 /// | base translate `y` | `0.5` | `0.9375` |
 /// | pre-offset | `(0, -0.3125, -0.4375)`, **wall only** | `(0, -0.3125, 0)`, **always** |
-/// | `TEXT_OFFSET` | `(0, 0.33333334, 0.046666667)` | `(0, -0.32, 0.073)` |
+/// | text-offset term | `(0, 0.33333334, 0.046666667)` | `(0, -0.32, 0.073)` |
 /// | render scale | `0.010416667` (`0.6666667 / 64`) | `0.0140625` (`0.9 / 64`) |
 ///
 /// plus the two text metrics ([`SignKind::text_line_height`],
 /// [`SignKind::max_text_line_width`]), which live on the **block entity** in
-/// vanilla (`SignBlockEntity` returns `10`/`90`,
-/// `HangingSignBlockEntity` overrides to `9`/`60`) rather than on the
+/// vanilla (the plain sign's block entity returns `10`/`90`,
+/// the hanging sign's block entity overrides to `9`/`60`) rather than on the
 /// renderer. A hanging sign's text is therefore *larger* per glyph and
 /// *narrower* per line than a plain sign's, which reads as a mistake and is
 /// not one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SignKind {
     /// `oak_sign`/`oak_wall_sign` and every other wood —
-    /// `StandingSignRenderer`.
+    /// vanilla's standing-sign renderer.
     #[default]
     Plain,
     /// `oak_hanging_sign`/`oak_wall_hanging_sign` and every other wood —
-    /// `HangingSignRenderer`.
+    /// vanilla's hanging-sign renderer.
     Hanging,
 }
 
 impl SignKind {
-    /// `SignBlockEntity.getTextLineHeight()` (`10`) or
-    /// `HangingSignBlockEntity`'s override (`9`), in font pixels.
+    /// Vanilla's own text-line-height accessor: the plain sign's block
+    /// entity returns `10`, the hanging sign's block entity overrides to
+    /// `9`, in font pixels.
     #[must_use]
     pub const fn text_line_height(self) -> f32 {
         match self {
@@ -194,8 +196,9 @@ impl SignKind {
         }
     }
 
-    /// `SignBlockEntity.getMaxTextLineWidth()` (`90`) or
-    /// `HangingSignBlockEntity`'s override (`60`), in font pixels. Not used
+    /// Vanilla's own max-text-line-width accessor: the plain sign's block
+    /// entity returns `90`, the hanging sign's block entity overrides to
+    /// `60`, in font pixels. Not used
     /// by the placement matrix — this is the width vanilla *splits* a line
     /// at, which this port defers (see the module doc), and the bound a
     /// pixel gate needs for "the widest area this side's text can occupy".
@@ -208,10 +211,11 @@ impl SignKind {
     }
 
     /// The uniform scale in [`sign_text_transform`]'s last term —
-    /// `StandingSignRenderer`'s `0.010416667` or `HangingSignRenderer`'s
-    /// `0.0140625`. Both are `RENDER_SCALE / 64`, transcribed as the literal
-    /// each renderer actually passes rather than recomputed from the
-    /// `RENDER_SCALE`/`TEXT_RENDER_SCALE` field, so a float that does not
+    /// the standing-sign renderer's `0.010416667` or the hanging-sign
+    /// renderer's
+    /// `0.0140625`. Both are a shared render-scale constant divided by `64`, transcribed as the literal
+    /// each renderer actually passes rather than recomputed from that
+    /// constant's own field, so a float that does not
     /// round-trip cannot drift.
     #[must_use]
     pub const fn render_scale(self) -> f32 {
@@ -222,15 +226,16 @@ impl SignKind {
     }
 }
 
-/// Vanilla's `PlainSignBlock.Attachment` (`GROUND`/`WALL`) plus the angle
+/// Vanilla's own two-valued attachment property for a standing sign
+/// (ground/wall) plus the angle
 /// that goes with each, folded into one type the way
 /// [`crate::block_entity::SkullOrientation`] folds skull placement — a real
 /// sign state carries exactly one of `rotation` (ground) or `facing` (wall),
 /// never both.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SignOrientation {
-    /// A standing sign's `rotation` property, `0..16` — vanilla's
-    /// `RotationSegment`. Segment `0` is **north**, not
+    /// A standing sign's `rotation` property, `0..16` — vanilla's own
+    /// segmented-angle type for it. Segment `0` is **north**, not
     /// [`crate::block_entity::horizontal_facing_yaw`]'s south-is-zero
     /// convention (see the module doc).
     Ground {
@@ -241,7 +246,7 @@ pub enum SignOrientation {
     /// A wall sign's `facing` property, already converted by
     /// [`crate::block_entity::horizontal_facing_yaw`].
     Wall {
-        /// `Direction.toYRot()` of the `facing` property.
+        /// Vanilla's own direction-to-yaw conversion of the `facing` property.
         facing_yaw_deg: f32,
     },
 }
@@ -256,8 +261,8 @@ pub enum SignOrientation {
 ///
 /// A hanging sign's `is_wall` is **not** a branch in the matrix: a wall
 /// hanging sign differs from a ceiling one only in where its `angle` comes
-/// from (`WallHangingSignBlock.FACING.toYRot()` versus
-/// `RotationSegment.convertToDegrees(ROTATION)`), which is the caller's
+/// from (a wall hanging sign's own `facing` property converted to yaw versus
+/// a ceiling hanging sign's own segmented rotation converted to degrees), which is the caller's
 /// [`SignOrientation`] and already resolved by the time this runs.
 #[must_use]
 pub fn sign_text_transform(
@@ -281,15 +286,16 @@ pub fn sign_text_transform(
         * Mat4::from_translation(Vec3::new(0.5, base_y, 0.5))
         * Mat4::from_rotation_y(-angle_deg.to_radians());
     match kind {
-        // `if (attachmentType == WALL) result.translate(0, -0.3125, -0.4375)`
-        // — pulls a wall sign's text off the board's own face and onto the
+        // Vanilla's own standing-sign renderer only applies this translate
+        // when the attachment is wall-mounted, and it
+        // pulls a wall sign's text off the board's own face and onto the
         // wall-mounted board's lower, nearer plane.
         SignKind::Plain if is_wall => {
             m *= Mat4::from_translation(Vec3::new(0.0, -0.3125, -0.4375));
         }
-        // `HangingSignRenderer` translates `(0, -0.3125, 0)`
+        // Vanilla's own hanging-sign renderer translates `(0, -0.3125, 0)`
         // unconditionally — no attachment branch at all, even though it
-        // *computes* `state.attachmentType` for the crumbling overlay.
+        // *does* resolve the attachment separately for the crumbling overlay.
         SignKind::Hanging => m *= Mat4::from_translation(Vec3::new(0.0, -0.3125, 0.0)),
         SignKind::Plain => {}
     }
@@ -304,7 +310,7 @@ pub fn sign_text_transform(
     m * Mat4::from_translation(text_offset) * Mat4::from_scale(Vec3::new(s, -s, s))
 }
 
-/// `DyeColor.getTextColor()`, transcribed from vanilla's dye-colour
+/// Vanilla's own per-dye text-colour accessor, transcribed from its dye-colour
 /// registration table (26.2's decompiled source)
 /// (the last constructor argument on each line) — 0xRRGGBB, gamma-space.
 #[must_use]
@@ -329,8 +335,8 @@ pub const fn dye_text_color_rgb(color: SignDyeColor) -> u32 {
     }
 }
 
-/// `ARGB.scaleRGB(rgb, 0.4)` — per-channel `(channel * scale) as i32`,
-/// clamped `0..255` (vanilla's packed-colour scale helper), **not** a float multiply carried
+/// Vanilla's own packed-colour scale helper, applied at `0.4` — per-channel `(channel * scale) as i32`,
+/// clamped `0..255`, **not** a float multiply carried
 /// through: vanilla truncates in integer space before the result is ever
 /// treated as a colour again, so this port truncates too rather than
 /// rounding.
@@ -357,8 +363,9 @@ pub fn sign_side_color(side: &SignSide) -> [f32; 4] {
     let rgb = if side.glowing {
         dye_text_color_rgb(side.color)
     } else {
-        // `getDarkColor` with `hasGlowingText()` false, which can only take
-        // the `scaleRGB` arm — routed through the shared function anyway so
+        // Vanilla's own dark-colour function with the glowing flag false,
+        // which can only take
+        // the scale arm — routed through the shared function anyway so
         // the two cannot drift apart.
         sign_dark_color_rgb(side)
     };
@@ -370,15 +377,16 @@ pub fn sign_side_color(side: &SignSide) -> [f32; 4] {
     ]
 }
 
-/// `AbstractSignRenderer.BLACK_TEXT_OUTLINE_COLOR`, as 0xRRGGBB — vanilla
+/// Vanilla's own named outline-colour constant, as 0xRRGGBB — vanilla
 /// spells it `-988212`, an ARGB `int` whose alpha byte is `0xFF`, so the
-/// colour itself is `0xF0EBCC`. Substituted for `scaleRGB(0, 0.4) == 0` when
+/// colour itself is `0xF0EBCC`. Substituted for the scale-helper result of `0`
+/// scaled by `0.4`, which is `0`, when
 /// a **black** side has glowing text, which is the one case where the plain
 /// formula would make the outline the same colour as the glyphs it exists to
 /// separate.
 pub const BLACK_TEXT_OUTLINE_RGB: u32 = 0x00F0_EBCC;
 
-/// `Mth.square(16)` — vanilla's base sign-renderer's outline-render-distance
+/// A squared-16 constant — vanilla's base sign-renderer's outline-render-distance
 /// constant, the
 /// squared block distance from the camera to the sign's block *centre* within
 /// which a glowing (non-black) side draws its outline.
@@ -403,17 +411,19 @@ pub fn sign_dark_color_rgb(side: &SignSide) -> u32 {
 }
 
 /// The outline colour for one text side, RGBA in `0..=1`, or `None` when this
-/// side draws no outline — `submitSignText`'s `drawOutline ? darkColor : 0`
+/// side draws no outline — vanilla's own text-submit function's "draw the
+/// dark colour when the outline flag is set, otherwise nothing"
 /// with its own gate folded in.
 ///
 /// `distance_squared` is from the camera to the sign block's **centre**
-/// (`Vec3.atCenterOf`), matching `isOutlineVisible`. The scoping-spyglass half
-/// of that method has no equivalent here and is not modelled; it only ever
+/// (vanilla's own "box centre" accessor), matching vanilla's own
+/// outline-visible check. The scoping-spyglass half
+/// of that check has no equivalent here and is not modelled; it only ever
 /// *adds* an outline at long range.
 ///
 /// A non-glowing side is `None` unconditionally — the outline exists solely to
 /// separate full-brightness glyphs from a bright board, and vanilla's plain
-/// arm hardcodes `drawOutline = false`.
+/// arm hardcodes the outline flag to false.
 #[must_use]
 pub fn sign_outline_color(side: &SignSide, distance_squared: f32) -> Option<[f32; 4]> {
     if !side.glowing {
@@ -434,15 +444,15 @@ pub fn sign_outline_color(side: &SignSide, distance_squared: f32) -> Option<[f32
 }
 
 /// A plain sign's text-line height in font pixels
-/// (`SignBlockEntity.getTextLineHeight()`, `10`). **This used to be
+/// (vanilla's own text-line-height accessor, `10`). **This used to be
 /// documented as "always `10` — the per-instance method never varies in the
-/// real jar", which was wrong**: `HangingSignBlockEntity` overrides it to
+/// real jar", which was wrong**: the hanging sign's block entity overrides it to
 /// `9`. Prefer [`SignKind::text_line_height`], which cannot be reached for
 /// the wrong kind.
 pub const TEXT_LINE_HEIGHT: f32 = 10.0;
 
 /// A hanging sign's text-line height in font pixels
-/// (`HangingSignBlockEntity.getTextLineHeight()`, `9`).
+/// (the hanging sign's block entity's own text-line-height override, `9`).
 pub const HANGING_TEXT_LINE_HEIGHT: f32 = 9.0;
 
 /// The version-free description of one sign to draw this frame. The caller
@@ -465,7 +475,7 @@ pub struct SignSpawn {
     /// The side read facing the sign from behind.
     pub back: SignSide,
     /// Packed sky/block light (`sky << 4 | block`) at the sign's own block,
-    /// vanilla's `state.lightCoords`.
+    /// vanilla's own light-coordinates field on the render state.
     ///
     /// `gpu/sign_text.rs` multiplies the lightmap texel for this byte into
     /// every glyph and outline vertex of a **non-glowing** side; a glowing
@@ -497,9 +507,9 @@ impl SignSpawn {
 mod tests {
     use super::*;
 
-    /// Hand-computed from `textTransformation`'s own expression (angle `0`,
+    /// Hand-computed from vanilla's own text-transformation function's expression (angle `0`,
     /// so the rotation is identity and every step is a plain translate):
-    /// `TEXT_OFFSET (0, 0.33333334, 0.046666667)` then the wall offset
+    /// the text-offset term `(0, 0.33333334, 0.046666667)` then the wall offset
     /// `(0, -0.3125, -0.4375)` then the block-centring `(0.5, 0.5, 0.5)` —
     /// `y = 0.5 + 0.33333334 - 0.3125 = 0.52083334`,
     /// `z = 0.5 + 0.046666667 - 0.4375 = 0.109166667`. Pinned to that exact
@@ -520,7 +530,7 @@ mod tests {
     }
 
     /// A ground sign has none of the wall offset, so its origin sits at the
-    /// block's own vertical/horizontal centre (plus the small `TEXT_OFFSET`
+    /// block's own vertical/horizontal centre (plus the small text-offset
     /// nudge) rather than pulled toward one face.
     #[test]
     fn ground_transform_has_no_wall_offset() {
@@ -536,9 +546,9 @@ mod tests {
     }
 
     /// The back side is the front side rotated 180° about the sign's own
-    /// vertical axis, but the rotation happens **before** `TEXT_OFFSET` is
-    /// applied (`if (!isFrontText) result.rotate(...)` precedes
-    /// `result.translate(TEXT_OFFSET)` in `textTransformation`), so the
+    /// vertical axis, but the rotation happens **before** the text-offset term is
+    /// applied (vanilla's own text-transformation function rotates for the
+    /// back side, then translates by the text-offset term, in that order), so the
     /// offset's own `z` component flips sign along with everything drawn
     /// through the matrix. That is not a bug to normalise away: it is what
     /// puts the front and back text on the two opposite faces of the
@@ -567,8 +577,8 @@ mod tests {
         );
     }
 
-    /// `RotationSegment.convertToDegrees` is `segment * 22.5`, the identical
-    /// formula `skull_ground_placement_matrix` already uses for the same
+    /// Vanilla's own segment-to-degrees conversion is `segment * 22.5`, the identical
+    /// formula [`crate::block_entity::skull_ground_placement_matrix`] already uses for the same
     /// property — this pins that the two have not drifted apart, since
     /// nothing in the type system would catch it if they had.
     #[test]
@@ -589,7 +599,7 @@ mod tests {
         assert!(d0.dot(d8) < 0.0, "segment 0 vs 8: {d0:?} / {d8:?}");
     }
 
-    /// `getDarkColor`'s truncation, not rounding: white (255,255,255) scaled
+    /// Vanilla's own dark-colour function truncates, and does not round: white (255,255,255) scaled
     /// by 0.4 must be 102 per channel (`(255*0.4) as i32 == 102`), not 102.5
     /// rounded to 103.
     #[test]
@@ -599,7 +609,7 @@ mod tests {
     }
 
     /// Glowing draws the dye's own full colour; non-glowing draws the
-    /// darkened one. Measured against the real `DyeColor.RED` constant
+    /// darkened one. Measured against vanilla's own red dye-colour constant
     /// (`16_711_680 = 0xFF0000`) rather than restated.
     #[test]
     fn glowing_uses_full_colour_and_non_glowing_uses_the_dark_one() {
@@ -680,7 +690,7 @@ mod tests {
 
     /// The two text metrics really are per-kind, and in *opposite*
     /// directions from the scale — a hanging sign draws bigger glyphs over a
-    /// narrower line. Transcribed from `HangingSignBlockEntity`'s two
+    /// narrower line. Transcribed from the hanging sign's block entity's two
     /// overrides.
     #[test]
     fn hanging_text_metrics_override_the_plain_ones() {
@@ -695,7 +705,7 @@ mod tests {
     /// from `rotation`, but neither adds the plain sign's wall offset — the
     /// hanging branch is unconditional, so the two differ **only** by the
     /// rotation. Ceiling segment `4` is `90°`, the same angle
-    /// `Direction.toYRot()` gives `WEST`.
+    /// vanilla's own direction-to-yaw conversion gives for due west.
     #[test]
     fn a_wall_hanging_sign_differs_from_a_ceiling_one_only_by_its_angle() {
         let ceiling = sign_text_transform(
@@ -726,11 +736,11 @@ mod tests {
         assert!((plain_wall - b).length() > 0.2, "plain {plain_wall:?} vs hanging {b:?}");
     }
 
-    /// `getDarkColor`'s one substitution, and the discriminating input is
-    /// **black plus glowing** — every other combination takes the `scaleRGB`
+    /// Vanilla's own dark-colour function's one substitution, and the discriminating input is
+    /// **black plus glowing** — every other combination takes the scale
     /// arm, so a gate on red or on non-glowing black cannot tell the two
     /// hypotheses apart. Both are computed here and required to differ:
-    /// `scaleRGB(0, 0.4)` is `0`, the substitution is `0xF0EBCC`.
+    /// the scale helper applied to `0` at `0.4` is `0`, the substitution is `0xF0EBCC`.
     #[test]
     fn the_dark_colour_substitutes_bone_white_only_for_black_glowing_text() {
         let side = |color, glowing| SignSide {
@@ -751,7 +761,8 @@ mod tests {
         assert_eq!(sign_dark_color_rgb(&side(SignDyeColor::Red, false)), 0x66_0000);
     }
 
-    /// The outline gate, all three of its arms. `Mth.square(16) == 256`, so a
+    /// The outline gate, all three of its arms. Vanilla's own squared-16
+    /// distance constant is `256`, so a
     /// sign at 15 blocks (225) is inside and one at 17 (289) is outside —
     /// inputs chosen either side of the boundary rather than at it, since the
     /// comparison is strict and a fixture *on* 256 cannot separate `<` from
@@ -775,7 +786,7 @@ mod tests {
         // Glowing and not black: outlined near, bare far.
         let lime = sign_outline_color(&side(SignDyeColor::Lime, true), near)
             .expect("a glowing sign within 16 blocks is outlined");
-        // `scaleRGB(0xBFFF00, 0.4)` is `(76, 102, 0)` — the dark colour, not
+        // The scale helper applied to `0xBFFF00` at `0.4` is `(76, 102, 0)` — the dark colour, not
         // the glyph colour, and computed here from the constant rather than
         // read back off the function under test.
         assert!((lime[0] - 76.0 / 255.0).abs() < 1e-4, "{lime:?}");
@@ -792,8 +803,8 @@ mod tests {
     }
 
     /// Lime's *text* colour is a yellow-green and that is not a bug: vanilla's
-    /// `DyeColor.LIME` carries `textureDiffuseColor = 8439583` (a green) and
-    /// `textColor = 12582656`, which is `0xBFFF00` — 191 red against 255
+    /// own lime dye-colour registration carries a diffuse block colour of `8439583` (a green) and
+    /// a text colour of `12582656`, which is `0xBFFF00` — 191 red against 255
     /// green. A glowing lime sign therefore reads yellowish next to the dyed
     /// *block*, in vanilla exactly as here, and "the dye is not reaching the
     /// glyph" is the wrong diagnosis for it. Pinned against both the packed
