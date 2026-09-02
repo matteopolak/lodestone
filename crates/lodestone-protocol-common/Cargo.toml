@@ -1,0 +1,32 @@
+[package]
+name = "lodestone-protocol-common"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# Version-free by construction, and version-free by *path*: this crate lives
+# under `crates/`, not `crates/protocol/`, so `xtask`'s isolation lint
+# (`package_is_version_crate`, keyed on the `crates/protocol` path prefix)
+# never classifies it as a version crate. It must depend on no
+# `crates/protocol/*` family, and no family may depend on another family
+# through it -- see docs/plans/multi-version-protocol-dedup.md's "version
+# seam" section.
+#
+# Holds packet definitions that are byte-identical (wire shape *and* codec)
+# across two or more of the legacy protocol families, each declaring its own
+# measured `#[mc(protocols = "a..=b")]` range where the derive macro is used,
+# or a doc-comment-stated range where the type is hand-decoded and has no
+# `Packet` derive to carry the attribute (`Position`, `Slot`, `PlayerInfo`).
+# Every packet here was checked against its neighbours' *encode/decode
+# bodies*, not just its field list -- a struct whose field list matches can
+# still disagree at the wire if it embeds a hand-written codec type whose
+# behaviour changed (see `src/packets/position.rs`'s and `src/packets/
+# slot.rs`'s module docs for the two measured instances of this).
+[dependencies]
+lodestone-core = { workspace = true }
+lodestone-macros = { workspace = true }
+lodestone-model = { workspace = true }
+uuid = { workspace = true }
