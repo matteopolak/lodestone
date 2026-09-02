@@ -1727,6 +1727,7 @@ name = "lodestone-assets"
 version = "0.1.0"
 dependencies = [
  "fontdue",
+ "lodestone-javarandom",
  "lodestone-model",
  "png",
  "serde_json",
@@ -1821,6 +1822,7 @@ name = "lodestone-fuzz-targets"
 version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
+ "lodestone-anvil",
  "lodestone-assets",
  "lodestone-core",
  "lodestone-data",
@@ -1839,6 +1841,13 @@ dependencies = [
  "lodestone-model",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "lodestone-javarandom"
+version = "0.1.0"
+dependencies = [
+ "lodestone-time",
 ]
 
 [[package]]
@@ -1942,6 +1951,7 @@ version = "0.1.0"
 dependencies = [
  "lodestone-canonical",
  "lodestone-core",
+ "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-world",
@@ -1954,6 +1964,7 @@ name = "lodestone-v735"
 version = "0.1.0"
 dependencies = [
  "lodestone-core",
+ "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-world",
@@ -1984,7 +1995,6 @@ name = "lodestone-world"
 version = "0.1.0"
 dependencies = [
  "lodestone-core",
- "serde_json",
  "thiserror",
 ]
 

@@ -45,6 +45,12 @@ lodestone-data = { path = "../crates/lodestone-data" }
 lodestone-worldgen-core = { path = "../crates/lodestone-worldgen-core" }
 lodestone-assets = { path = "../crates/lodestone-assets" }
 serde_json = "1"
+# Added for issue #549's remaining "obvious first targets": chunk/region
+# deserialization (`RegionFile::parse` + `read_chunk_nbt_bytes`) and the
+# text-component JSON/NBT front-ends in `lodestone-model` (`Text::from_json`,
+# `Text::from_nbt`) — the latter already depended on via `lodestone-model`
+# above.
+lodestone-anvil = { path = "../crates/lodestone-anvil" }
 
 [[bin]]
 name = "v770_clientbound_decode"
@@ -98,6 +104,27 @@ bench = false
 [[bin]]
 name = "unihex_font"
 path = "fuzz_targets/unihex_font.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "anvil_region_parse"
+path = "fuzz_targets/anvil_region_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text_chat_json"
+path = "fuzz_targets/text_chat_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "text_chat_nbt"
+path = "fuzz_targets/text_chat_nbt.rs"
 test = false
 doc = false
 bench = false

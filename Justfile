@@ -498,3 +498,31 @@ run-pgo *args:
 install-hooks:
     git config core.hooksPath .githooks
     @echo "core.hooksPath -> $(git config core.hooksPath)"
+
+# --- Fuzzing (issue #549, docs/fuzzing.md) ----------------------------------
+#
+# `fuzz/` is its own cargo-fuzz workspace (own Cargo.lock, own empty
+# `[workspace]` table), the same reason `web/` and the wasm guests under
+# `crates/lodestone-wasm-host` are — libFuzzer/ASan instrumentation flags must
+# not leak into a plain `cargo build --workspace`. Both recipes below `cd` into
+# it rather than using `--manifest-path`, because `cargo fuzz` resolves its
+# corpus/artifact directories relative to the current directory, not the
+# manifest. Two recipes, not one with a `--check`-only flag, for the same
+# reason `run-wasm`/`run-pgo` are their own names: this file's header forbids
+# a recipe that parses an argument and branches on it. Needs the nightly
+# toolchain `rust-toolchain.toml` already pins (no separate `+channel` needed:
+# a fuzz/ invocation picks it up the same way any other cargo command here
+# does) and the `cargo-fuzz` binary (`cargo install cargo-fuzz`).
+
+# cargo fuzz build -- compiles every fuzz/fuzz_targets/*.rs under ASan, no run
+[doc("cargo-fuzz ASan build of every fuzz/fuzz_targets/*.rs -- no run")]
+fuzz-build:
+    cd fuzz && cargo fuzz build
+
+# cargo fuzz run <target> -- bounded run of one target; pass libFuzzer flags after the name,
+# e.g. `just fuzz-run nbt_decode -max_total_time=60 -rss_limit_mb=1024`. ALWAYS pass
+# -max_total_time on a shared machine -- an unbounded run never terminates on its own,
+# and CLAUDE.md's disk/memory hazards apply to a fuzz corpus exactly as they do to target/.
+[doc("cargo fuzz run <target> [libfuzzer-flags...] -- ALWAYS pass -max_total_time=N")]
+fuzz-run target *args:
+    cd fuzz && cargo fuzz run {{target}} -- {{args}}
