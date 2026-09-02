@@ -1362,7 +1362,7 @@ pub fn mesh_snapshot_models_layers(
 ///
 /// Reads the **centre** section only, through the same
 /// `BlockModels::occludes` predicate `SnapshotModelView::occludes_at` uses for
-/// face culling — vanilla's `isSolidRender` family, which is what feeds its own
+/// face culling — vanilla's own solid-render-shape family, which is what feeds its own
 /// visibility-graph opaque-flag setter. A block this answers "not opaque" for only ever
 /// *connects* more faces, i.e. draws more, which is the safe direction.
 #[must_use]
@@ -1492,23 +1492,24 @@ impl FluidSectionView for SnapshotFluidView<'_> {
         lodestone_assets::fluid::full_footprint_y_range(boxes)
     }
 
-    /// The live half of `shouldRenderFace`'s *self* test — the block sharing the
+    /// The live half of vanilla's own face-render self test — the block sharing the
     /// fluid's own cell, which for a waterlogged stair is the stair. Same
     /// trait-default-plus-override shape as `overlay_at` and
     /// `partial_occluder_y_range_at` above, and the same failure mode if it is
     /// missing: the rule sits in `lodestone-render` and never reaches terrain.
     ///
-    /// # The `RenderLayer::Solid` gate is vanilla's `canOcclude`
+    /// # The `RenderLayer::Solid` gate is vanilla's own occlusion-eligibility flag
     ///
-    /// Vanilla builds the shape this test reads as
-    /// `canOcclude ? getOcclusionShape(state) : Shapes.empty()`, and `canOcclude`
-    /// is a `Properties` flag with no getter, absent from `blocks.json` and from
+    /// Vanilla builds the shape this test reads from a block's real occlusion
+    /// shape only when that block is eligible to occlude at all, and falls
+    /// back to an empty shape otherwise. Eligibility is a block-properties
+    /// flag with no getter, absent from `blocks.json` and from
     /// every table in `lodestone-data`. `BlockModels::layer` stands in for it: a
-    /// state whose sprites are fully opaque renders `Solid`, and a
-    /// `noOcclusion()` block is (in 26.2, across every waterloggable block) one
+    /// state whose sprites are fully opaque renders `Solid`, and an
+    /// ineligible block is (in 26.2, across every waterloggable block) one
     /// whose textures are not. Without the gate, **waterlogged leaves** — a
-    /// full-cube outline shape, `noOcclusion()` in vanilla — would report all five
-    /// faces occluded and cull their water away entirely.
+    /// full-cube outline shape that vanilla marks ineligible to occlude — would
+    /// report all five faces occluded and cull their water away entirely.
     ///
     /// The gate is not a scoping compromise on the *geometry* side:
     /// `face_fully_covered` is exact for any axis-aligned union, so a stair's

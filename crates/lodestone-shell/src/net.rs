@@ -637,8 +637,7 @@ pub type SharedSkyDefault = Arc<SkyDefaultCell>;
 /// answer — `ClientboundResourcePackPushPacket`'s fields, plus the message
 /// this dialog draws.
 ///
-/// `message` is vanilla's `preparePackPrompt` header (`multiplayer
-/// .{requiredT,t}exturePrompt.line2`), with the server's own optional prompt
+/// `message` is vanilla's own pack-prompt header text, with the server's own optional prompt
 /// component appended — pre-flattened to plain text and folded onto one
 /// line, the same "one clipped line, not a wrapped `MultiLineTextWidget`"
 /// simplification [`crate::menu::confirm`]'s module doc already makes and
@@ -6285,15 +6284,15 @@ mod tests {
 
     /// `BiomeClimateCell` carrying real vanilla biome data (frozen_peaks and
     /// desert, `temperature`/`has_precipitation`/`downfall` copied verbatim
-    /// from `.cache/mc/26.2/src/data/minecraft/worldgen/biome/{frozen_peaks,
-    /// desert}.json`) must, once vanilla's own `getPrecipitationAt` predicate
-    /// is applied, land on the correct side of the rain/snow line:
-    /// `Biome.java`, `return this.getTemperature(pos, seaLevel) >= 0.15F;`
-    /// (called from `getPrecipitationAt` at `:108`, gated on `hasPrecipitation()`
-    /// at `:105-106`).
+    /// from the decompiled biome worldgen data for those two biomes) must,
+    /// once vanilla's own precipitation predicate is applied, land on the
+    /// correct side of the rain/snow line: that predicate first checks
+    /// whether the biome has precipitation at all, then answers snow rather
+    /// than rain when the biome's temperature at the given position and sea
+    /// level is below `0.15`.
     ///
-    /// This is the exact-threshold assertion the #25 report's gate asks for,
-    /// kept hermetic (no live server needed) by testing `BiomeClimateCell`
+    /// This is the exact-threshold assertion an earlier bug report's gate
+    /// asks for, kept hermetic (no live server needed) by testing `BiomeClimateCell`
     /// directly rather than the full `ClientHandle`-dependent hop — that hop
     /// is covered by `app::tests::
     /// live_precipitation_matches_vanillas_own_threshold_for_real_biomes`

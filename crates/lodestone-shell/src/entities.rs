@@ -1455,8 +1455,8 @@ impl CapeLag {
 /// to gate by type, and it must run at tick rate: both are per-tick eases in
 /// vanilla, not per-frame ones, exactly like [`tick_swim_ramp`].
 ///
-/// **Approximation, stated rather than hidden:** vanilla's `tBob` also gates
-/// on `!isDeadOrDying()`, which would need [`DeathTime`] bridged through
+/// **Approximation, stated rather than hidden:** vanilla's own cape-bob timer
+/// also gates on the entity being alive, which would need [`DeathTime`] bridged through
 /// [`EntityIndex`] the way [`OnGround`]/[`Pose`] are below; a dying entity's
 /// cape bob not freezing on the killing blow is the one behaviour this port
 /// does not chase, in exchange for not widening this query further.
@@ -2819,7 +2819,7 @@ pub fn extract_entity_draws(
                     0.0
                 }
             });
-        // `hurtTime > 0 || deathTime > 0`, vanilla's `hasRedOverlay` gate in full.
+        // hurt-time or death-time positive: vanilla's own red-overlay gate in full.
         // `false` for an entity that has never been hit (`HurtTime` absent, like
         // `AttackSwing`) — and also for one whose countdown has aged out, since
         // `tick_hurt_time` leaves the component in place at zero rather than
@@ -3301,10 +3301,10 @@ fn new_projectile_physics(snap: &EntityFacts) -> ProjectilePhysics {
 /// way it reads those.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub struct BodyYawState {
-    /// Vanilla's `yBodyRot`.
+    /// Vanilla's own body-yaw field.
     yaw: f32,
-    /// This entity's `Position` as of last tick — vanilla's `xo`/`zo`, the
-    /// reference [`crate::sim::step::body_yaw_target`]'s `(dx, dz)` is
+    /// This entity's `Position` as of last tick — vanilla's own previous-position
+    /// pair, the reference [`crate::sim::step::body_yaw_target`]'s `(dx, dz)` is
     /// measured against.
     last_feet: lodestone_model::Vec3,
 }

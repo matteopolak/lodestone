@@ -1316,10 +1316,10 @@ pub const SUGGESTION_LINE_START_OFFSET: usize = 1;
 ///   Up/Down and then pressing Tab commits what you are looking at rather than
 ///   the one after it.
 ///
-/// `original` is vanilla's `originalContents` — the line as it was when the list
+/// `original` is vanilla's own captured original line — the line as it was when the list
 /// was built. Every commit is computed from *that*, not from the current line,
 /// which is what lets Tab cycle: the second Tab replaces the first Tab's text
-/// rather than appending to it. Brigadier's `Suggestion.apply` splices over the
+/// rather than appending to it. The command-parsing library's own suggestion-apply splices over the
 /// suggestion's own range, and in the chat box that range always ends at the
 /// caret — [`Self::end`] — so the splice is
 /// `original[..start] + text + original[end..]`. That tail is a no-op whenever
@@ -3044,8 +3044,8 @@ mod tests {
         }
 
         /// Once a token fails to parse, nothing further is offered — matching
-        /// vanilla's own `updateUsageInfo`, which only fills usage/suggestions
-        /// from `findSuggestionContext`, never past a hard parse failure.
+        /// vanilla's own usage-info update, which only fills usage/suggestions
+        /// from the parser's own suggestion-context resolution, never past a hard parse failure.
         #[test]
         fn no_completions_past_a_failed_token() {
             let nodes = vec![

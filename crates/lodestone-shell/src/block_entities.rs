@@ -4571,7 +4571,7 @@ mod bell_tests {
         assert_eq!(shakes.shake(pos, 0.0), None);
     }
 
-    /// The four horizontal faces map to vanilla's own `from3DDataValue` order, and
+    /// The four horizontal faces map to vanilla's own direction-from-data order, and
     /// the two vertical ones are dropped rather than stored as a direction the
     /// model has no rotation for.
     #[test]
@@ -5550,8 +5550,8 @@ mod piston_tests {
             "an int `facing` must be declined, not silently defaulted"
         );
 
-        // Absent `extending`/`source`/`progress` are vanilla's `getBooleanOr`/
-        // `getFloatOr` defaults, which are real states rather than decode failures.
+        // Absent `extending`/`source`/`progress` are vanilla's own
+        // boolean-or-default/float-or-default results, which are real states rather than decode failures.
         let sparse = Nbt::Compound(vec![
             ("blockState".into(), block_state),
             ("facing".into(), Nbt::Byte(0)),
@@ -5789,9 +5789,9 @@ fn is_beacon_base_block(state_id: u32) -> bool {
     })
 }
 
-/// `BeaconBlockEntity.updateBase` — the number of complete concentric square
+/// Vanilla's own beacon-base update — the number of complete concentric square
 /// rings of base blocks below the beacon, `0..=4`. Stops at the first
-/// incomplete or unloaded ring, exactly as vanilla's own `break` does.
+/// incomplete or unloaded ring, exactly as vanilla's own early exit does.
 fn beacon_levels(world: &World, pos: [i32; 3]) -> i32 {
     let [x, y, z] = pos;
     let mut levels = 0;

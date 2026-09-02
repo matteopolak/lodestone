@@ -1021,10 +1021,10 @@ impl UiState {
     /// Whether the settings screen was opened **from inside a world**, i.e. from
     /// the pause menu rather than the title.
     ///
-    /// This is vanilla's `inWorld` flag on `OptionsScreen`
-    ///, and it picks between two mutually exclusive
-    /// buttons in the root screen's header: `options.worldOptions.button` when a
-    /// level is loaded, `options.online` when not (`:56-66`). It reads
+    /// This is vanilla's own in-world flag on its options screen,
+    /// and it picks between two mutually exclusive
+    /// buttons in the root screen's header: the world-options label when a
+    /// level is loaded, the online-options label when not. It reads
     /// [`Self::settings_return`], which is already the exact fact — see
     /// [`open_settings_from_pause`](Self::open_settings_from_pause) — so this is
     /// an accessor and not a second piece of state to keep in step.
