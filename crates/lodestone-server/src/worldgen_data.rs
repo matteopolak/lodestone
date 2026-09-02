@@ -7,13 +7,37 @@
 //! [`overworld_generator`] the shell's local world can call directly — no async
 //! runtime, no files, no network.
 //!
-//! # Where this belongs long-term
+//! # Where this belongs long-term, and why it does not move to a version crate
 //!
-//! Per plan §3 version-specific worldgen data eventually lives in the version
-//! crate, dropped when the version is dropped. This bundled copy is the
-//! singleplayer *default* the direct-call path consumes today; when the
-//! integrated-server-over-loopback path lands, it calls the same
-//! [`OverworldGenerator`] — only the data's home moves, not the generator.
+//! An earlier version of this doc said the data "eventually lives in the
+//! version crate" (issue #407's original scope: move `assets/worldgen/` into
+//! `crates/protocol/v770`). That was checked against the tree and does not
+//! fit — not as a style preference, as a hard `cargo` cycle:
+//! `crates/protocol/v770/Cargo.toml` already depends on `lodestone-server`
+//! (`V770ServerProtocol` implements [`crate::protocol::ServerProtocol`]), so
+//! `lodestone-server` depending back on `lodestone-v770` for its worldgen
+//! data would be the reverse edge of an existing dependency — cargo refuses
+//! a cycle outright, regardless of feature-gating it as optional. This data
+//! is the same category of thing `lodestone-data`'s own extraction already
+//! settled for the *other* 26.2 censuses (block collision, entity
+//! hitboxes, …): 26.2-specific, but not a *protocol* question, so it stays
+//! here rather than moving into the one crate a version-family split would
+//! put it in.
+//!
+//! What genuinely was missing, and is now real: a Cargo-level
+//! acknowledgement that this bundle is version-specific
+//! (`bundled-worldgen-v26_2` in this crate's own `[features]`, default on —
+//! see that feature's own doc comment for the honest limit of what it buys
+//! today), and a *checked* construction entry point,
+//! [`overworld_chunk_source_checked`], that actually consults
+//! [`bundled_worldgen_serves`] instead of leaving it "pinned by tests" with
+//! no caller. Both are real. What neither reaches on its own is the one
+//! production call site that would make the check *matter*:
+//! `crates/lodestone-shell/src/net.rs`'s `Origin::Integrated` handling still
+//! calls [`overworld_chunk_source`] directly and unconditionally — that file
+//! is out of this session's ownership, so [`overworld_chunk_source_checked`]
+//! is built, tested, and ready for whoever next owns that call site to
+//! adopt in one line.
 //!
 //! # Honest scope
 //!
@@ -115,6 +139,57 @@ pub const BUNDLED_WORLDGEN_SCOPE: WorldgenScope = WorldgenScope::V26_2;
 #[must_use]
 pub fn bundled_worldgen_serves(scope: WorldgenScope) -> bool {
     scope == BUNDLED_WORLDGEN_SCOPE
+}
+
+/// Why [`overworld_chunk_source_checked`] refused — the hosting protocol's
+/// own reported [`WorldgenScope`] does not match what this crate embeds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorldgenScopeMismatch {
+    /// What the hosting protocol actually reported.
+    pub requested: WorldgenScope,
+}
+
+impl std::fmt::Display for WorldgenScopeMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the embedded worldgen bundle serves only {BUNDLED_WORLDGEN_SCOPE:?}, but the hosting \
+             protocol reports {:?}",
+            self.requested
+        )
+    }
+}
+
+impl std::error::Error for WorldgenScopeMismatch {}
+
+/// [`overworld_chunk_source`], gated by [`bundled_worldgen_serves`] — the
+/// checked construction entry point issue #407 asks for: a hosting family
+/// whose [`crate::protocol::ServerProtocol::worldgen_scope`] does not match
+/// [`BUNDLED_WORLDGEN_SCOPE`] is refused here rather than silently handed
+/// 26.2 terrain it never declared it could serve.
+///
+/// See this module's own doc for why nothing in *production* calls this
+/// yet: the one real construction site is a single unconditional call to
+/// [`overworld_chunk_source`] in `crates/lodestone-shell/src/net.rs`, a
+/// file this crate cannot reach into. `v770` — today's only
+/// [`crate::protocol::ServerProtocol`] implementor — reports
+/// [`WorldgenScope::V26_2`] unconditionally, so even once wired the refusal
+/// branch stays unreachable in production until a second hosting family
+/// exists; that is the same "not urgent, but no longer merely declared"
+/// status [`bundled_worldgen_serves`]'s own doc already states.
+///
+/// # Errors
+///
+/// [`WorldgenScopeMismatch`] when `scope` is not [`BUNDLED_WORLDGEN_SCOPE`].
+pub fn overworld_chunk_source_checked(
+    scope: WorldgenScope,
+    seed: i64,
+) -> Result<crate::chunk::OverworldChunkSource, WorldgenScopeMismatch> {
+    if bundled_worldgen_serves(scope) {
+        Ok(overworld_chunk_source(seed))
+    } else {
+        Err(WorldgenScopeMismatch { requested: scope })
+    }
 }
 
 /// A [`Resolver`] backed by the embedded worldgen table.
@@ -1585,6 +1660,28 @@ mod tests {
              bundle — the version gate exists to make that a refusal, not a silent \
              default to 26.2 terrain"
         );
+    }
+
+    /// [`overworld_chunk_source_checked`] is the real consumer
+    /// [`bundled_worldgen_serves`]'s own doc says does not exist yet — this
+    /// drives it both ways: a matching scope actually returns a working
+    /// chunk source (not just `true`), and a mismatched one refuses with
+    /// [`WorldgenScopeMismatch`] naming what was requested, rather than
+    /// silently constructing the bundle anyway.
+    #[test]
+    fn overworld_chunk_source_checked_serves_v26_2_and_refuses_everything_else() {
+        use crate::chunk::ChunkSource;
+
+        let source = overworld_chunk_source_checked(WorldgenScope::V26_2, 42)
+            .expect("the matching scope must be served");
+        // Not just "did not error" — the returned source is the real thing,
+        // proven by asking it to do the one thing a `ChunkSource` exists
+        // for: produce a column.
+        let _ = source.column(0, 0);
+
+        let err = overworld_chunk_source_checked(WorldgenScope::None, 42)
+            .expect_err("a mismatched scope must refuse rather than silently serving 26.2 terrain");
+        assert_eq!(err, WorldgenScopeMismatch { requested: WorldgenScope::None });
     }
 
     /// The exact, named vegetal-decoration gap surface for every biome
