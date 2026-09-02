@@ -427,8 +427,10 @@ mod tests {
              `lodestone:item_id` -- update this test and the doc's gap list"
         );
         // What *does* survive is everything vanilla-shaped, including the
-        // selector a resource pack keys on.
-        assert_eq!(lifted.custom_model_data(), None, "also model-unmodelled");
+        // selector a resource pack keys on — `ItemComponents::custom_model_data`
+        // is a real modelled field (unlike the identity tag above) and round
+        // trips through the conversion cleanly.
+        assert_eq!(lifted.custom_model_data(), Some(7), "a real vanilla component, must survive");
         assert_eq!(
             lifted.custom_name().map(Text::to_legacy_string),
             Some("Flamebrand".to_owned()),

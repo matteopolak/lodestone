@@ -1805,6 +1805,45 @@ mod tests {
         );
     }
 
+    /// The regression this issue exists to prevent: a custom item name
+    /// carrying a hex colour (`TextColor::Rgb`, added in 1.16) must reach
+    /// whatever a tooltip/held-item draw site actually consumes —
+    /// `styled_hover_name_spans` — even though `styled_hover_name`'s
+    /// `to_legacy_string()` flattening has no legacy code for an RGB colour
+    /// and drops it. The control asserts the loss really lives where this
+    /// says it does; without it, the spans assertion could be passing for
+    /// any reason.
+    #[test]
+    fn styled_hover_name_spans_carries_a_hex_colour_the_legacy_string_drops() {
+        let mut stack = ItemStack::new(id("minecraft:diamond_sword"), 1);
+        let mut name = Text::literal("Flamebrand");
+        name.style.color = Some(lodestone_model::TextColor::Rgb(0x1a_2b3c));
+        stack.set_custom_name(Some(name));
+
+        // Control: the legacy string this replaced at every draw site has no
+        // representation for an RGB colour, so it must show the loss — the
+        // only code present is the forced-italic `§o`, no colour code at all.
+        let legacy = styled_hover_name(&stack, &no_translation);
+        assert_eq!(
+            legacy, "\u{a7}oFlamebrand",
+            "control failed: the legacy string was expected to lose the hex colour \
+             and keep only the forced-italic code, got {legacy:?}"
+        );
+
+        // Fix: the span-carrying sibling a real draw site prefers keeps the
+        // colour on the run that carries the custom name.
+        let spans = styled_hover_name_spans(&stack, &no_translation);
+        let hex = spans.iter().find_map(|s| match s.style.color {
+            Some(lodestone_model::TextColor::Rgb(rgb)) => Some(rgb),
+            _ => None,
+        });
+        assert_eq!(
+            hex,
+            Some(0x1a_2b3c),
+            "the hex colour must survive to the spans a real draw site consumes: {spans:?}"
+        );
+    }
+
     // -- Issue #143: the component read/write seam ---------------------
 
     /// The bug the `dyed_color` branch fixes, pinned. Before it, a dyed model

@@ -932,3 +932,50 @@ fn tab_complete_reply_reads_id_range_and_tooltips_straight_off_the_wire() {
         other => panic!("unexpected directives: {other:?}"),
     }
 }
+
+/// **Known, tracked bug (issue #656), pinned rather than silently left.**
+///
+/// Protocol 754 is Minecraft 1.16.5, which postdates 1.16's introduction of
+/// hex (`#rrggbb`) text colours
+/// (`lodestone_model::text::TextColor::rgb`'s own doc: "a hex colour has no
+/// legacy code"). A tooltip here is a real JSON text component and can
+/// legitimately carry one, but `CommandSuggestionEntry::tooltip` is a plain
+/// `String`, so this decode arm has nowhere to put a colour except
+/// `Text::to_legacy_string()`, which drops any `TextColor::Rgb` outright.
+///
+/// This is real production behaviour today, not a hypothetical: it is
+/// asserted here so it cannot be "fixed" by an unrelated refactor without
+/// this test being noticed and updated. The actual fix needs
+/// `CommandSuggestionEntry::tooltip`'s type widened (to carry spans, or the
+/// raw `Text`) in `lodestone-model`, plus every protocol crate's
+/// construction site and every shell consumer updated to match — out of
+/// this crate's reach alone.
+#[test]
+fn tab_complete_reply_tooltip_hex_colour_is_lost_to_the_legacy_string_flatten() {
+    let mut w = Writer::default();
+    w.var_i32(1); // transaction id
+    w.var_i32(0); // start
+    w.var_i32(0); // length
+    w.var_i32(1); // count
+    w.string("op");
+    w.bool(true);
+    w.string(r#"{"text":"admin","color":"#1a2b3c"}"#);
+
+    let directives = dispatch(play::clientbound::TAB_COMPLETE, &w.into_vec()).expect("handle");
+    match directives.as_slice() {
+        [Directive::Emit(ClientEvent::CommandSuggestionsReceived { suggestions, .. })] => {
+            assert_eq!(suggestions.len(), 1);
+            assert_eq!(suggestions[0].text, "op");
+            let tooltip = suggestions[0].tooltip.as_deref().expect("tooltip present");
+            assert_eq!(
+                tooltip, "admin",
+                "pinned known-bug value: the hex colour must be lost here today. If \
+                 this now differs (e.g. carries a `§` code or the assertion fails \
+                 because the field is no longer a `String`), the loss has been \
+                 fixed — update this test and `Text::to_legacy_string`'s doc, which \
+                 names this call site as the one open illegitimate caller."
+            );
+        }
+        other => panic!("unexpected directives: {other:?}"),
+    }
+}

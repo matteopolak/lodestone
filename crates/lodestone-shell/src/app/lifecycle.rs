@@ -290,7 +290,10 @@ impl ApplicationHandler for WindowApp {
                     // The same 100-entry cap the per-frame sync/window fetch
                     // uses (`app/redraw.rs`) — `ChatFeed`'s own capacity, so
                     // this is the true total, not a windowed subset of it.
-                    let total = self.sim.recent_chat(100).len();
+                    // `recent_chat_spans`, not `recent_chat`: only the count is
+                    // read here (issue #656), but the legacy `to_legacy_string`
+                    // path has no remaining production reason to run at all.
+                    let total = self.sim.recent_chat_spans(100).len();
                     self.chat_input.scroll_mut().scroll(notch as i32, total, rows_per_page);
                 }
             }
