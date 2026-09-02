@@ -155,7 +155,7 @@ pub fn hud_icons(fx: &ActiveEffects) -> Vec<HudEffectIcon> {
 ///
 /// The cosine is the **table**, not `f32::cos`; see `lodestone_physics::mth`.
 /// Ours takes an `f64`, so the index can round one step differently from
-/// vanilla's `float` overload at the boundary between two of the 65,536
+/// vanilla's own single-precision table lookup at the boundary between two of the 65,536
 /// entries. That is a sub-frame difference in a decorative fade, recorded
 /// rather than papered over.
 #[must_use]

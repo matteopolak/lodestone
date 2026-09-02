@@ -358,18 +358,19 @@ pub const DEFAULT_FRAMERATE_LIMIT: u32 = 120;
 /// them ([`Options::render_distance`], [`Options::cloud_status`],
 /// [`Options::cutout_leaves`]), so [`crate::menu::nav::MenuNav::apply_graphics_preset`]
 /// writes those three and no others — see that function's doc for the numbers
-/// and for why `Custom` writes nothing (vanilla's own `switch` has no `CUSTOM`
-/// arm).
+/// and for why `Custom` writes nothing (vanilla's own preset selector has no
+/// arm for it — it is a client-local marker meaning "none of the presets
+/// match anymore", not a preset vanilla itself ever switches to).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GraphicsPreset {
-    /// `GraphicsPreset.FAST`.
+    /// The fastest preset.
     Fast,
-    /// `GraphicsPreset.FANCY` — vanilla's shipped default.
+    /// The middle preset — vanilla's shipped default.
     Fancy,
-    /// `GraphicsPreset.FABULOUS`.
+    /// The most detailed preset.
     Fabulous,
-    /// `GraphicsPreset.CUSTOM` — the state every individually-changed quality
-    /// option should settle into (vanilla's `setGraphicsPresetToCustom`).
+    /// The state every individually-changed quality
+    /// option should settle into (vanilla's own preset-to-custom transition).
     /// Nothing in this client writes it automatically yet; see
     /// [`Options::graphics_preset`]'s doc for the gap.
     Custom,
@@ -382,7 +383,7 @@ impl Default for GraphicsPreset {
 }
 
 impl GraphicsPreset {
-    /// The four variants in `GraphicsPreset.values()`'s declaration order —
+    /// The four variants in vanilla's own declaration order —
     /// the order both the slider and [`graphics_preset_name`]/
     /// [`graphics_preset_from_name`] key off.
     pub const ORDER: [GraphicsPreset; 4] = [
@@ -461,8 +462,8 @@ pub const MOUSE_WHEEL_SENSITIVITY_STEP: f32 = 0.25;
 /// granularity: `UnitDouble` is a *drag*, continuous over `[0, 1]`, and this
 /// client's settings rows activate as a click rather than a drag (see
 /// `menu::options::SettingsOutcome::Cycle`). `0.1` is chosen to match the
-/// granularity vanilla's own `percentValueLabel` displays — it prints
-/// `(int)(value * 100)`, so a tenth is a visible 10-percentage-point move and
+/// granularity vanilla's own percent-value label displays — it prints
+/// the value scaled to whole percent, so a tenth is a visible 10-percentage-point move and
 /// the whole range is ten clicks.
 pub const UNIT_DOUBLE_STEP: f32 = 0.1;
 
@@ -763,9 +764,9 @@ pub struct Options {
     ///
     /// Pushed to the mixer every frame by `Sim::set_sound_volumes`; the final
     /// gain a sound is played at is **not** this number — it is
-    /// `CategoryVolumes::gain`, which is `sourceVolume * masterVolume` for every
-    /// bus except `Master` itself (vanilla's `getFinalSoundSourceVolume`
-    /// asymmetry: master is not squared).
+    /// `CategoryVolumes::gain`, which is source volume times master volume for every
+    /// bus except `Master` itself (vanilla's own final-volume asymmetry: master
+    /// is not squared).
     pub sound_volumes: [f32; 11],
     /// Vanilla's **FOV** option, the vertical field of
     /// view in **degrees** — an `IntRange(30, 110)` defaulting to `70`, not a
