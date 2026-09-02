@@ -95,7 +95,7 @@
 //! - The 26.2 jar's `assets/minecraft/lang/en_us.json` for the surviving
 //!   captions verbatim (`telemetry_info.screen.title`,
 //!   `.button.give_feedback`, `.button.show_data`) and
-//!   `.cache/mc/26.2/client-src/net/minecraft/util/CommonLinks.java` for the
+//!   vanilla's own common-links table for the
 //!   feedback URL. The description body is Lodestone's own text, not a
 //!   transcription — see below.
 

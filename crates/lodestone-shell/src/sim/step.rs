@@ -275,9 +275,8 @@ impl Sim {
         // write guard into it would deadlock the moment one of those was reached.
         let actions = self.write(|w| {
             let mut actions = std::mem::take(&mut w.resource_mut::<ActionQueue>().0);
-            // Vanilla's tick tail. `Minecraft.tick` ends with
-            // `connection.send(ServerboundClientTickEndPacket.INSTANCE)`
-            // (`client-src/net/minecraft/client/Minecraft.java`) — every
+            // Vanilla's tick tail. Its own client tick routine ends with
+            // sending the client-tick-end packet — every
             // tick, after everything else the tick queued, whenever a connection
             // exists and the game is not paused.
             //

@@ -22,7 +22,7 @@
 //! # What is and is not vanilla-exact
 //!
 //! Every constant here is transcribed from
-//! `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/CreativeModeInventoryScreen.java`.
+//! the decompiled 26.2 client's own creative-mode-inventory-screen class.
 //! The click semantics are a transcription of `slotClicked` — see
 //! [`CreativeEffect`] and [`creative_item_list_click`], which is where the screen's
 //! real behaviour lives and why it is not "a chest with a copy flag". Three deliberate

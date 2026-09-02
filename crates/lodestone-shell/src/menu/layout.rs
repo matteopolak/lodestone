@@ -1,4 +1,4 @@
-//! Vanilla's **layout containers** — `net/minecraft/client/gui/layouts/` — ported
+//! Vanilla's **layout containers** — its own `gui/layouts/` package — ported
 //! as arithmetic: [`GridLayout`], [`LinearLayout`], [`FrameLayout`],
 //! [`HeaderAndFooterLayout`], [`SpacerElement`] and the [`LayoutSettings`] cell
 //! model they all arrange against.

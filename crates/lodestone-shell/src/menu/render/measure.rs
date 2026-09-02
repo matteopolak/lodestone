@@ -231,7 +231,7 @@ pub const EDIT_BOX_H: f32 = 20.0;
 
 // -- vanilla's `ManageServerScreen` metrics ----------------------------------
 //
-// `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/ManageServerScreen.java`
+// Vanilla's own manage-server-screen class
 // — the add/edit-server form `JoinMultiplayerScreen`'s Add/Edit buttons open.
 // Every number is transcribed from there, not measured off this pipeline's
 // own output.

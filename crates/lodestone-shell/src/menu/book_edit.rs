@@ -1,6 +1,5 @@
-//! The book-and-quill editing screen: vanilla's `BookEditScreen`/
-//! `BookSignScreen` (`.cache/mc/26.2/client-src/net/minecraft/client/gui/
-//! screens/inventory/{BookEditScreen,BookSignScreen}.java`) — issue #613's
+//! The book-and-quill editing screen: vanilla's own book-edit screen and
+//! book-sign screen — the
 //! `EditBook` remainder. See `docs/book-editing.md` for the server-side half
 //! (`ServerboundEditBookPacket`'s slot addressing) that already existed
 //! before this module; this is the client-side producer that packet had none

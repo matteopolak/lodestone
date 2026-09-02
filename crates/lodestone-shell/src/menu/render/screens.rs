@@ -96,7 +96,7 @@ const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 /// `DeathScreen` — the title, the server's death message, the score line, and
 /// two buttons (Respawn / Title Screen) at vanilla's rects (see
 /// [`death_slot`] and [`super::nav::DeathButton`]) — reproduced from
-/// `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/DeathScreen.java`.
+/// vanilla's own death-screen class.
 ///
 /// Like [`pause_frame`], not gated by [`owns_frame`]: the world (and, on a
 /// live server, the session) keeps rendering and ticking behind it — a dead
@@ -1110,7 +1110,7 @@ const ERROR_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
 /// its row and no wrapped-text bound on its reason, until now):
 /// title, the disconnect reason wrapped and bounded exactly like
 /// [`accounts_failed_frame`]'s failure message, and one real button
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/DisconnectedScreen.java`).
+/// (vanilla's own disconnected-screen class).
 ///
 /// **Two vanilla widgets are never built here.** The `gui.report_to_server`
 /// and `gui.open_report_dir` buttons only appear when a `DisconnectionDetails`

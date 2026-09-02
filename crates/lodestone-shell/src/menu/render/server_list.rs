@@ -8,8 +8,8 @@ use super::*;
 
 // -- vanilla's `JoinMultiplayerScreen` / `ServerSelectionList` metrics --------
 //
-// Every number below is from `.cache/mc/26.2/client-src/net/minecraft/client/gui/
-// screens/multiplayer/`, with the line named. Deliberately its own set of
+// Every number below is from the decompiled 26.2 client's own multiplayer
+// screen classes. Deliberately its own set of
 // constants rather than shared with the world-select block above: the two
 // screens agree on several values *by coincidence* (both list `itemHeight`s are
 // 36, both content paddings are 2 because they inherit the same base class), and

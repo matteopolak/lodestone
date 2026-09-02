@@ -1,6 +1,5 @@
-//! The sign-editing screen: vanilla's `AbstractSignEditScreen`/`SignEditScreen`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/
-//! {AbstractSignEditScreen,SignEditScreen}.java`).
+//! The sign-editing screen: vanilla's own abstract sign-edit screen and its
+//! concrete sign-edit screen subclass.
 //!
 //! ## What it is
 //!

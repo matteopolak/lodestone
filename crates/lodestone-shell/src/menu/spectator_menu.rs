@@ -1,11 +1,8 @@
-//! The Spectator Menu — vanilla's `SpectatorMenu`/`SpectatorGui`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/gui/spectator/**`),
-//! opened by a hotbar-number key while in spectator mode. This is issue
-//! [#613]'s `TeleportToEntity` remainder: `ClientAction::SpectatorAction`
+//! The Spectator Menu — vanilla's own spectator menu/GUI classes,
+//! opened by a hotbar-number key while in spectator mode. This is the
+//! `TeleportToEntity` remainder: `ClientAction::SpectatorAction`
 //! already had a real producer (`Sim::begin_attack_live`'s
 //! left-click-while-spectating arm); this module is `TeleportToEntity`'s.
-//!
-//! [#613]: https://github.com/matteopolak/lodestone/issues/613
 //!
 //! ## The real trigger, corrected once already
 //!
