@@ -1,5 +1,5 @@
-//! **Jigsaw assembly** — `JigsawPlacement.addPieces` and its `Placer` (issue
-//! #514's S4).
+//! **Jigsaw assembly** — `JigsawPlacement.addPieces` and its `Placer`
+//! (structure placement's S4).
 //!
 //! # What it is
 //!

@@ -57,7 +57,7 @@ use crate::rng::{RandomSource, WorldgenRandom};
 
 use self::region_view::RegionView;
 
-/// Grass/flower/tree placement (issue #406) — a separate engine from the
+/// Grass/flower/tree placement — a separate engine from the
 /// rest of this module (ores), sharing only [`BlockPos`]/[`IntProvider`]/
 /// [`canon_state`] and the [`STEP_VEGETAL_DECORATION`] constant below. See
 /// its own module doc for scope and named gaps.
@@ -71,7 +71,7 @@ pub mod vegetation;
 /// the coordinate-space trap it inherits.
 pub mod region_view;
 
-/// `TOP_LAYER_MODIFICATION` — snow layers and surface ice (issue #404's U2),
+/// `TOP_LAYER_MODIFICATION` — snow layers and surface ice,
 /// vanilla's `freeze_top_layer`. A third engine again: it consumes no RNG, never
 /// writes outside its own chunk, and reads per-block-state facts (collision
 /// UP-face fullness, fluid presence) that neither the ore nor the vegetation
@@ -87,16 +87,16 @@ pub mod ore_probe;
 pub const STEP_UNDERGROUND_ORES: i32 = 6;
 
 /// `GenerationStep.Decoration.VEGETAL_DECORATION.ordinal()` — grass, flowers
-/// and trees (issue #406). One past `UNDERGROUND_DECORATION`/`FLUID_SPRINGS`
+/// and trees. One past `UNDERGROUND_DECORATION`/`FLUID_SPRINGS`
 /// (7, 8), which this engine does not compose; see
-/// `net.minecraft.world.level.levelgen.GenerationStep.Decoration`'s own
+/// vanilla's own decoration-step enum's
 /// declaration order (`RAW_GENERATION, LAKES, LOCAL_MODIFICATIONS,
 /// UNDERGROUND_STRUCTURES, SURFACE_STRUCTURES, STRONGHOLDS, UNDERGROUND_ORES,
 /// UNDERGROUND_DECORATION, FLUID_SPRINGS, VEGETAL_DECORATION,
 /// TOP_LAYER_MODIFICATION`).
 pub const STEP_VEGETAL_DECORATION: i32 = 9;
 
-/// A block position with `i32` components (`net.minecraft.core.BlockPos`).
+/// A block position with `i32` components (vanilla's own block-position record).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct BlockPos {
     pub x: i32,
@@ -104,7 +104,7 @@ pub struct BlockPos {
     pub z: i32,
 }
 
-/// `net.minecraft.world.level.levelgen.VerticalAnchor`.
+/// Vanilla's own vertical-anchor type.
 #[derive(Clone, Copy, Debug)]
 pub enum VerticalAnchor {
     Absolute(i32),
@@ -149,25 +149,25 @@ impl VerticalAnchor {
     }
 }
 
-/// `net.minecraft.util.valueproviders.IntProvider` (the subset features use).
+/// Vanilla's own int-provider type (the subset features use).
 ///
-/// [`IntProvider::WeightedList`] (issue #406's `trees_plains`/`trees_birch`/
+/// [`IntProvider::WeightedList`] (this change's `trees_plains`/`trees_birch`/
 /// `trees_taiga` outer `count` — e.g. `{data: 0, weight: 19}, {data: 1,
-/// weight: 1}`) is additive: nothing in the ore engine (issue #295)
+/// weight: 1}`) is additive: nothing in the ore engine
 /// constructs it, so this is a strict superset, not a behaviour change to
 /// any existing caller.
 #[derive(Clone, Debug)]
 pub enum IntProvider {
     Constant(i32),
     Uniform { min: i32, max: i32 },
-    /// `net.minecraft.util.valueproviders.WeightedListInt` — a `WeightedList<Integer>`.
+    /// Vanilla's own weighted-list int provider — a `WeightedList<Integer>`.
     /// `(value, weight)` pairs, in JSON declaration order (order doesn't
     /// affect the *distribution*, but does affect [`WeightedList::sample`]'s
     /// draw semantics, which walks the list in order — see that fn's doc).
     WeightedList(Vec<(i32, i32)>),
-    /// `net.minecraft.util.valueproviders.BiasedToBottomInt` — used by
-    /// `cactus`/`sugar_cane`'s `BlockColumnFeature` layer heights (issue
-    /// #406's cacti/sugar-cane increment). Additive: nothing before that
+    /// Vanilla's own biased-to-bottom int provider — used by
+    /// `cactus`/`sugar_cane`'s block-column-feature layer heights (the
+    /// cacti/sugar-cane increment). Additive: nothing before that
     /// increment constructs this variant.
     BiasedToBottom { min: i32, max: i32 },
     /// `net.minecraft.util.valueproviders.TrapezoidInt`, the REAL
@@ -179,7 +179,7 @@ pub enum IntProvider {
     /// crate's vegetation engine actually uses) draws `nextInt` TWICE and
     /// subtracts, while `Uniform` draws once — every RNG call after the
     /// first desyncs completely from vanilla's own stream. Found via
-    /// `tests/vegetation_parity.rs` (issue #406's real-oracle evidence
+    /// `tests/vegetation_parity.rs` (this change's real-oracle evidence
     /// gap): `patch_grass_plain`'s placed positions were disjoint,
     /// bit-for-bit, from the real JVM's — not "close but off by a block",
     /// a full stream desync — because `random_offset`'s `xz_spread`/
@@ -288,7 +288,7 @@ pub enum HeightProvider {
         plateau: i32,
     },
     /// `VeryBiasedToBottomHeight` — three chained `Mth.nextInt` draws, not one.
-    /// Added by issue #513 because two bundled placed features use it in a
+    /// Added by this change because two bundled placed features use it in a
     /// *decoration* step (nothing in the ore step does, which is why
     /// [`HeightProvider::parse`]'s `panic!` never fired on it).
     VeryBiasedToBottom {
@@ -623,7 +623,7 @@ pub fn parse_placements(placed: &Value) -> Vec<Placement> {
 /// `(local_x, y, local_z)` centre-relative with `y` absolute — **the parity
 /// fixtures' shape, no longer production's.**
 ///
-/// Issue #106 made this a [`crate::dense_grid::DenseBlockGrid`] instead of a
+/// An earlier change made this a [`crate::dense_grid::DenseBlockGrid`] instead of a
 /// `HashMap<(i32,i32,i32), String>`, and Unit 3 gave that grid interned ids. What
 /// neither could remove is that materialising the region at all means **copying
 /// all nine already-computed source chunks into it** — 884,736 cells per
@@ -937,7 +937,7 @@ pub fn apply_ore_step<R: RandomSource>(
 /// `ores` is the SAME list for all 9 passes — correct whenever biome does not
 /// vary across the neighbourhood (true for a fixed single-biome fixture).
 /// A thin wrapper over [`apply_ore_step_3x3_per_source`] for that fixed-list
-/// case; composing against real per-quart biome variety (issue #295) uses
+/// case; composing against real per-quart biome variety uses
 /// that function directly with a per-source ore-list closure instead.
 ///
 /// Returns the CENTRE pass's own decoration seed. All 9 passes' writes are in
@@ -982,7 +982,7 @@ pub fn apply_ore_step_3x3<R: RandomSource>(
 }
 
 /// The real vanilla 3×3 neighbourhood driver, generalised to a **per-source**
-/// ore list (issue #295's ore-composition increment): `ores_for_source(x, z)`
+/// ore list (this change's ore-composition increment): `ores_for_source(x, z)`
 /// is called once per of the 9 source chunks (their own chunk coordinates,
 /// not centre-relative) and must return that source's own biome's
 /// `UNDERGROUND_ORES` list — vanilla's `ChunkGenerator.applyBiomeDecoration`

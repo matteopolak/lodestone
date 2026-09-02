@@ -347,7 +347,7 @@ pub(super) fn place_tree<R: RandomSource>(
     }
     // `TreeFeature.doPlace`'s own accept gate: `clippedTreeHeight >=
     // treeHeight` (no obstruction at all — every species this module shipped
-    // before issue #428's fancy-oak increment) OR (a `min_clipped_height` is
+    // before this change's fancy-oak increment) OR (a `min_clipped_height` is
     // configured AND the clip didn't cut below it) — `fancy_oak`'s own `4`
     // is the only shipped config that sets this, so this second arm is new
     // territory: every earlier species can still ONLY pass via the first.
@@ -388,12 +388,12 @@ pub(super) fn place_tree<R: RandomSource>(
 
     // Dispatch trunk placement by placer kind — `Straight`'s own
     // `placeBelowTrunkBlock` + single-column loop stayed inline here (this
-    // module's original #406 shape, unchanged); `Forking` (issue #428)
+    // module's original shape, unchanged); `Forking`
     // delegates to `place_forking_trunk`, which does its own
     // `placeBelowTrunkBlock` call internally, matching `ForkingTrunkPlacer
     // .placeTrunk`'s own real structure. Both branches produce the same
     // `(Vec<Attachment>, Vec<BlockPos>, placed_log)` shape — the third being
-    // every position `trunkSetter` actually fired at (issue #428's
+    // every position `trunkSetter` actually fired at (this change's
     // `update_leaf_distances` BFS seed, see that function's doc comment) —
     // so the foliage loop below is written once, not once per trunk kind.
     // Unit 8: both buffers are reused thread-local scratch rather than a fresh
@@ -552,7 +552,8 @@ pub(super) fn place_tree<R: RandomSource>(
     // for EACH attachment (not once overall), so the fresh
     // `sample_offset` call must live INSIDE this loop. For `Straight`
     // (always exactly one attachment) this is behaviourally identical to
-    // the pre-#428 single call it replaces — no draw-count change for
+    // the single call it replaces from before the savanna/acacia increment
+    // — no draw-count change for
     // oak/birch/spruce/pine.
     // `foliage_positions` is this module's stand-in for real vanilla's
     // `FoliageSetter.isSet` — see [`FOLIAGE_POS`]'s own doc. Scoped to the
@@ -610,7 +611,7 @@ pub(super) fn place_tree<R: RandomSource>(
         }
     }
 
-    // `TreeFeature.place`'s own final step, AFTER decorators — issue #428's
+    // `TreeFeature.place`'s own final step, AFTER decorators — this change's
     // fix for the `distance=7`-forever gap named in
     // `update_leaf_distances`'s own doc comment. Draws no RNG (a pure grid
     // post-process), so it is safe to run unconditionally here regardless
@@ -708,7 +709,7 @@ pub(super) fn place_beehive_decorator<R: RandomSource>(
     // used to build was pure waste. Unit 8.
     let state = grid.interner().id_of("minecraft:bee_nest[facing=south,honey_level=0]");
     grid.set_id_if_in_bounds(hx, hy, hz, state);
-    // Issue #520: the bees. This draw was already here and its result was
+    // The bees. This draw was already here and its result was
     // discarded — the nest reached the client empty — and the fix was never to add
     // a draw but to start using one.
     let bee_count = 2 + random.next_int_bounded(2);

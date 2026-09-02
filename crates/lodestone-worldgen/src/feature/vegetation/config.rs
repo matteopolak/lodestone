@@ -76,7 +76,7 @@ pub enum BlockPredicate {
     AllOf(Vec<BlockPredicate>),
     AnyOf(Vec<BlockPredicate>),
     MatchingBlockTag(String),
-    /// `MatchingBlocksPredicate` — issue #513. `blocks` is the JSON's `blocks`
+    /// `MatchingBlocksPredicate` — this change. `blocks` is the JSON's `blocks`
     /// field, which is either one id or a list; `offset` is added to the tested
     /// position. Matched by **base** id, so `minecraft:water[level=0]` counts as
     /// `minecraft:water` — the same collapse [`BlockPredicate::MatchingFluid`]
@@ -630,8 +630,8 @@ pub struct VegTags {
 }
 
 /// Resolves [`VegTags`] from a [`Resolver`]. Empty sets (never a panic) if
-/// the resolver has no data for a given tag id — matches every other #295/
-/// #406 resolver method's "no data supplied" convention.
+/// the resolver has no data for a given tag id — matches every other
+/// resolver method's "no data supplied" convention.
 #[must_use]
 pub fn build_veg_tags(resolver: &dyn Resolver) -> VegTags {
     let resolve = |id: &str| {
@@ -683,7 +683,7 @@ pub enum VegPlacement {
         y: IntProvider,
     },
     BlockPredicateFilter(BlockPredicate),
-    // --- issue #513: the five modifiers neither engine had, plus `height_range`,
+    // --- this change: the five modifiers neither engine had, plus `height_range`,
     // which existed only in the ore engine. 86 of the bundled placed features use
     // `height_range`, so before this every one of them reached a decoration step
     // and was silently dropped.
@@ -1100,7 +1100,7 @@ pub enum Positions {
     /// `vec![pos; n]`. `n <= 0` means none.
     Repeat(BlockPos, i32),
     /// `n` **different** positions — the fan-out shape the doc above says must
-    /// not be smuggled in as a `Repeat`. Issue #513 added the two modifiers that
+    /// not be smuggled in as a `Repeat`. A later change added the two modifiers that
     /// need it (`count_on_every_layer`, `fixed_placement`); `Positions` stopped
     /// being `Copy` at the same time, which is why this variant is the only one
     /// that allocates and why nothing else was converted to use it.
@@ -1127,14 +1127,14 @@ impl Positions {
 pub enum Decorator {
     Beehive { probability: f32 },
     /// `TrunkVineDecorator` — a hanging vine on each of a log's four
-    /// horizontal neighbours, one independent coin flip per side (issue
-    /// #428: reached from `mega_jungle_tree`/`jungle_tree`'s own
+    /// horizontal neighbours, one independent coin flip per side (the
+    /// savanna/acacia increment: reached from `mega_jungle_tree`/`jungle_tree`'s own
     /// `decorators` list, and from every `fallen_*_tree`'s
     /// `stump_decorators`). See [`super::place::place_trunk_vine_decorator`].
     TrunkVine,
     /// `AttachedToLogsDecorator` — one block (a mushroom, for every shipped
     /// instance) on a random direction off a random log, gated by
-    /// `probability` (issue #428: every `fallen_*_tree`'s `log_decorators`).
+    /// `probability` (this change: every `fallen_*_tree`'s `log_decorators`).
     /// See [`super::place::place_attached_to_logs_decorator`].
     AttachedToLogs {
         probability: f32,
@@ -1192,7 +1192,7 @@ impl Decorator {
 /// subclasses vanilla ships, each reachable from tree configs this module
 /// implements: `TwoLayersFeatureSize` (oak, birch, spruce, pine, acacia) and
 /// `ThreeLayersFeatureSize` (dark oak, pale oak — the 2×2-trunk species,
-/// issue #428). The two share the `getSizeAtHeight(treeHeight, yo)` shape but
+/// this change). The two share the `getSizeAtHeight(treeHeight, yo)` shape but
 /// answer it differently: `TwoLayers` splits at `limit`; `ThreeLayers` splits
 /// into lower/middle/upper bands using `upper_limit` measured down from the
 /// tree's own height, which is why the caller must pass `tree_height`.
@@ -1202,8 +1202,8 @@ pub enum FeatureSizeCfg {
         limit: i32,
         lower_size: i32,
         upper_size: i32,
-        /// `FeatureSize.minClippedHeight` — `fancy_oak`'s own `4` (issue
-        /// #428). `None` for every other species' `two_layers_feature_size`
+        /// `FeatureSize.minClippedHeight` — `fancy_oak`'s own `4` (added
+        /// with the savanna/acacia increment). `None` for every other species' `two_layers_feature_size`
         /// (oak's straight branch, birch, spruce, pine, acacia), which is
         /// exactly vanilla's own `OptionalInt.empty()` default. See
         /// [`place_tree`]'s own doc on the one place this is read: a tree
@@ -1347,7 +1347,7 @@ impl TreeConfig {
 }
 
 /// `net.minecraft.world.level.levelgen.feature.configurations.BlockColumnConfiguration`
-/// + `BlockColumnFeature` — issue #406's cacti/sugar-cane increment. Used by
+/// + `BlockColumnFeature` — this change's cacti/sugar-cane increment. Used by
 /// `cactus` (desert) and `sugar_cane` (desert/swamp/badlands/beach), both
 /// previously a silent no-op under [`ConfiguredFeature::Unsupported`].
 /// `direction` is `(dx, dy, dz)`; only `up`/`down` parse (every configured
@@ -1403,7 +1403,7 @@ pub enum ConfiguredFeature {
     SimpleBlock(BlockStateProvider),
     Tree(Box<TreeConfig>),
     BlockColumn(Box<BlockColumnConfig>),
-    /// `FallenTreeFeature` (issue #428) — a real, distinct feature type, NOT
+    /// `FallenTreeFeature` — a real, distinct feature type, NOT
     /// a [`Self::Tree`] variant: a vertical stump plus a horizontal fallen
     /// log, no trunk/foliage placer involved at all. Reachable from many
     /// biomes' `fallen_*_tree` `RandomSelector` branches at a small
@@ -1414,7 +1414,7 @@ pub enum ConfiguredFeature {
         options: Vec<(f32, PlacedRef)>,
     },
     SimpleRandomSelector(Vec<PlacedRef>),
-    // --- issue #513: the types beyond the original seven. Bodies live in
+    // --- this change: the types beyond the original seven. Bodies live in
     // [`super::features`]; each arm's parse is immediately below in
     // `parse_configured_feature_doc`.
     Spring(Box<super::features::SpringCfg>),
@@ -1609,7 +1609,7 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
             ConfiguredFeature::SimpleRandomSelector(list)
         }
         // ------------------------------------------------------------------
-        // Issue #513. Every arm here is `Option`-shaped or defaulted: a field
+        // Every arm here is `Option`-shaped or defaulted: a field
         // this engine cannot read degrades the *feature* to `Unsupported`, never
         // panics, and never silently places the wrong block. See [`super`]'s
         // module doc for why that rule is absolute in this file.
@@ -1705,7 +1705,7 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
         }
         "weeping_vines" => ConfiguredFeature::WeepingVines,
         // `multiface_growth` (glow lichen, sculk vein) is **deliberately still
-        // unsupported**, and this arm is the record of why. Issue #513 ported it
+        // unsupported**, and this arm is the record of why. A later change ported it
         // (body and config both still live in [`super::features`], reachable and
         // compiled, just not selected here): the port reproduces vanilla's search
         // loop and every draw, and `tests/vegetation_parity.rs` then matched the
@@ -1858,7 +1858,7 @@ pub(super) fn parse_configured_feature_doc(resolver: &dyn Resolver, doc: &Value)
 /// [`ConfiguredFeature::Unsupported`] reason string actually reachable from
 /// `placed`. This is the read side of this module's "unsupported degrades to
 /// a silent no-op" rule: a caller that wants that silence to be **loud**
-/// (issue #406's "does this biome's declared vegetation include a placer we
+/// (this change's "does this biome's declared vegetation include a placer we
 /// don't implement" gate, in `lodestone_server::worldgen_data`) diffs this
 /// against a maintained allow-list instead of trusting the resolved tree to
 /// run and simply place fewer blocks than vanilla. Reasons are **not**

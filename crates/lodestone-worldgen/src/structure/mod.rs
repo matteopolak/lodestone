@@ -1,4 +1,4 @@
-//! Structure **placement and starts** — issue #514's S1, the engine that decides
+//! Structure **placement and starts** — this change's S1, the engine that decides
 //! *which chunk gets which structure* for a seed.
 //!
 //! # What it is
@@ -900,11 +900,11 @@ pub enum StructureKind {
         /// The resolved `required_ocean_monument_surrounding` biome set.
         surrounding: HashSet<String>,
     },
-    /// `minecraft:jigsaw` — the five villages and `pillager_outpost` (issue
-    /// #514's S4). See [`jigsaw`] for the assembly and for what a
+    /// `minecraft:jigsaw` — the five villages and `pillager_outpost`
+    /// (structure placement's S4). See [`jigsaw`] for the assembly and for what a
     /// [`JigsawConfig`] refuses to model.
     Jigsaw(Box<JigsawConfig>),
-    /// `minecraft:swamp_hut` — one coded 7x7x9 piece (issue #514's S5). Its only
+    /// `minecraft:swamp_hut` — one coded 7x7x9 piece. Its only
     /// RNG draw is the piece's orientation.
     SwampHut,
     /// `minecraft:desert_pyramid` — one coded 21x15x21 piece plus a cellar and the
@@ -2715,7 +2715,7 @@ impl StructureRegistry {
             // **These two rows overstated the gap for five phases and were corrected
             // in S6 by measurement.** Both said "needs block entities and loot tables
             // in worldgen"; both machineries already exist. `lodestone-worldgen` has a
-            // block-entity layer (`overworld::block_entities`, #520) and
+            // block-entity layer (`overworld::block_entities`) and
             // `lodestone-server` has a loot roller plus `structure_loot`, which
             // re-reads a template piece's raw bytes, finds its DATA markers, rolls and
             // attaches a filled container. So the *marker* path is closed and the real
@@ -2927,7 +2927,7 @@ impl StructureRegistry {
                  fortress cell to a bastion. (2) Nothing *serves* the dimension: \
                  `lodestone-server`'s `EmbeddedResolver` hardcodes the Overworld \
                  documents and `OverworldChunkSource` is the only chunk source, so a \
-                 portal trip still does not land in this terrain (issue #330)"
+                 portal trip still does not land in this terrain"
                     .into(),
             );
         }

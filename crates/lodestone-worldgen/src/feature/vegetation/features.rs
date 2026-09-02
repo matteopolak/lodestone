@@ -1,4 +1,4 @@
-//! Issue #513: the decoration feature types beyond the original seven.
+//! The decoration feature types beyond the original seven.
 //!
 //! ## What it is
 //!
@@ -23,7 +23,7 @@
 //! | `canSurvive` | the target's own family rule, or "support below is not air" | see [`super::config::BlockPredicate`]'s own doc for the same narrowing |
 //! | `level.getSeaLevel()` | [`SEA_LEVEL`] | the overworld constant; a preset that moves it would need this parameterised |
 //! | `scheduleTick` | dropped | there is no tick queue at generation time; the *block* still lands |
-//! | block entities | dropped | see #520 — the generator has no block-entity layer yet |
+//! | block entities | dropped | the generator has no block-entity layer yet |
 //!
 //! The narrowings make some features place slightly more than vanilla would (a
 //! non-full block reads as sturdy). That direction is deliberate: the alternative
@@ -221,7 +221,7 @@ pub struct SculkPatchCfg {
     pub catalyst_chance: f32,
 }
 
-/// `FallenTreeConfiguration` (issue #428) — `FallenTreeFeature`'s own
+/// `FallenTreeConfiguration` — `FallenTreeFeature`'s own
 /// config. Distinct from [`super::config::TreeConfig`]: no trunk/foliage
 /// placer, no `minimum_size`. `stump_decorators`/`log_decorators` reuse
 /// [`super::config::Decorator`] — the same `TreeDecorator` hierarchy
@@ -593,8 +593,9 @@ pub(super) fn place_basalt_pillar<R: RandomSource>(
     }
 }
 
-/// `DesertWellFeature.place`. The suspicious-sand block entity's loot table is
-/// dropped (#520) — the blocks themselves are placed, and the two
+/// Vanilla's own desert-well feature. The suspicious-sand block entity's
+/// loot table is
+/// dropped — the blocks themselves are placed, and the two
 /// `Util.getRandom` draws stay so the stream matches.
 pub(super) fn place_desert_well<R: RandomSource>(
     random: &mut R,
@@ -1475,7 +1476,7 @@ fn apply_fallen_tree_decorators<R: RandomSource>(
     }
 }
 
-/// `FallenTreeFeature.placeFallenTree` (issue #428) — a vertical stump plus
+/// `FallenTreeFeature.placeFallenTree` — a vertical stump plus
 /// a horizontal fallen log, reachable from many biomes' `fallen_*_tree`
 /// `RandomSelector` branches at a small (~1-1.25%) chance each. A real,
 /// distinct feature type: `placeLogBlock` places UNCONDITIONALLY (no
