@@ -11,6 +11,8 @@ mod no_production_source_names_testsupport;
 mod no_test_touches_the_real_saves_dir;
 #[path = "session/offline_identity_is_stable.rs"]
 mod offline_identity_is_stable;
+#[path = "session/ownership_gate.rs"]
+mod ownership_gate;
 #[path = "session/paperdoll_skin_resolver.rs"]
 mod paperdoll_skin_resolver;
 #[path = "session/resource_pack_stack.rs"]

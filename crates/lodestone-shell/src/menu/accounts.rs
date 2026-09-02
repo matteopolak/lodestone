@@ -22,6 +22,16 @@
 //! reference (`RefCell` inside), so it can run from that existing call site
 //! with **no `app.rs` change at all**.
 //!
+//! ## This screen is the ownership gate's only exit
+//!
+//! Nothing else in the client is reachable until [`AccountsNav::entitlement`]
+//! answers `Some` — see `docs/accounts-and-join.md`. That makes this screen
+//! load-bearing in a way it was not before: it is deliberately **exempt** from
+//! the gate (blocking it would make the gate unopenable), so it is also the one
+//! screen a player can be sitting on at the moment they become *un*entitled, by
+//! removing their last account. [`super::nav::MenuNav::leave_accounts`] is what
+//! handles that edge; both exits from this screen go through it.
+//!
 //! ## The offline entry
 //!
 //! [`lodestone_auth::metadata::AccountsMetadata::selected`] is `Option<Uuid>`
@@ -418,6 +428,23 @@ impl AccountsNav {
         let mut rows: Vec<AccountRow> = self.ordered().into_iter().map(AccountRow::Account).collect();
         rows.push(AccountRow::Offline);
         rows
+    }
+
+    /// The ownership proof this screen's roster supports, or `None` when no
+    /// account has been added yet.
+    ///
+    /// This screen owns the loaded roster, so it is the one place that can
+    /// answer, and every consumer of the answer goes through here rather than
+    /// re-reading `profiles.json`: two readers of the same file are two answers
+    /// that can disagree while an account is being added or removed.
+    ///
+    /// Note the value is **not** cached. Adding an account (through
+    /// [`Self::pump`]) and removing one both mutate the roster in place, and a
+    /// cached token would keep the gate open past the removal of the last
+    /// account — which is precisely the state the gate exists to catch.
+    #[must_use]
+    pub fn entitlement(&self) -> Option<lodestone_auth::Entitlement> {
+        lodestone_auth::Entitlement::from_metadata(&self.state.borrow().metadata)
     }
 
     /// Whether `selected` (the metadata's own field) points at nothing, i.e.
@@ -2177,6 +2204,151 @@ mod tests {
         assert!(nav.is_selected(steve.profile_id));
         assert_eq!(AccountsMetadata::load_from(&path).selected, Some(steve.profile_id));
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    // -- the ownership gate ------------------------------------------------
+    //
+    // The half `tests/session/ownership_gate.rs` structurally cannot reach: it
+    // drives the menu from outside the crate and so cannot inject a sign-in
+    // worker, while `handle_key_with` — the seam that makes the real state
+    // machine drivable without a network — is private to this module.
+
+    /// Plants a world directory under `root`, so **Play Selected World** is live
+    /// at all: with an empty `saves/` the button is greyed and a walk to it
+    /// would stop for a reason that has nothing to do with the ownership gate.
+    fn plant_world(root: &Path, dir_name: &str) {
+        let dir = root.join(dir_name);
+        std::fs::create_dir_all(&dir).expect("create world dir");
+        let level = lodestone_anvil::level_dat::LevelDat::for_new_world(
+            dir_name,
+            &lodestone_anvil::level_dat::Spawn::default(),
+            0,
+        );
+        lodestone_anvil::level_dat::write_to_file(
+            &level,
+            &lodestone_anvil::level_dat::path_in(&dir),
+        )
+        .expect("write level.dat");
+    }
+
+    /// Walks a freshly-loaded `MenuNav` on `dir` from the title screen to a
+    /// singleplayer launch, and reports whether it got there.
+    ///
+    /// A **fresh** nav is the point: it re-reads `profiles.json` from disk, so
+    /// this answers "would the next launch let this player play", which is the
+    /// question the gate is actually about.
+    fn a_fresh_launch_can_start_a_world(dir: &Path) -> bool {
+        use crate::menu::nav::{MenuAction, MenuNav};
+        use crate::menu::world_select::WorldSelectButton;
+        let mut nav = MenuNav::with_path(dir.join("servers.json"));
+        plant_world(nav.saves_root(), "planted");
+        let mut ui = crate::menu::UiState::new();
+        // Re-open the world list after planting, exactly as a player pressing
+        // Singleplayer does — the list is read when the screen opens.
+        let opened = nav.key(&mut ui, MenuKey::Enter);
+        assert_eq!(opened, MenuAction::None, "Singleplayer never launches directly");
+        matches!(
+            nav.click(&mut ui, WorldSelectButton::Play.row()),
+            MenuAction::Singleplayer(..)
+        )
+    }
+
+    /// **An account that authenticates but does not own the game leaves the gate
+    /// closed.**
+    ///
+    /// The failure is the one the real chain produces for exactly that case —
+    /// `AuthError::NoMinecraftProfile`, rendered through the same
+    /// `describe_finish_interactive_failure` the worker calls — rather than a
+    /// hand-written string, so the message this screen shows and the message
+    /// production shows cannot drift apart.
+    ///
+    /// Note there is deliberately no "not entitled" flag on the stored account:
+    /// such an account never produces an `AccountProfile` at all, because the
+    /// roster is keyed on a Minecraft profile UUID it does not have. "A row
+    /// exists" and "that account owned the game" are the same statement, and
+    /// this test is what holds that equivalence up.
+    #[test]
+    fn an_account_that_does_not_own_the_game_never_reaches_the_roster_or_opens_the_gate() {
+        let path = temp_path("not-entitled");
+        let dir = path.parent().expect("the temp path has a parent").to_owned();
+        let nav = AccountsNav::with_path(path.clone());
+        let (tx, rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        nav.hover(1 + BUTTON_ADD);
+        nav.handle_key_with(MenuKey::Enter, spawn_stub(rx, cancel));
+
+        let refusal =
+            describe_finish_interactive_failure(&lodestone_auth::AuthError::NoMinecraftProfile);
+        tx.send(WorkerMsg::Failed(refusal.clone())).unwrap();
+        nav.pump();
+
+        assert_eq!(
+            nav.sign_in_view(),
+            SignInView::Failed { message: refusal },
+            "the screen must say the account has no Minecraft profile, not show a \
+             generic error"
+        );
+        assert_eq!(
+            nav.rows(),
+            vec![AccountRow::Offline],
+            "no account row may be added for an account that does not own the game"
+        );
+        assert!(
+            nav.entitlement().is_none(),
+            "a refused sign-in must not produce an ownership proof"
+        );
+        assert!(
+            AccountsMetadata::load_from(&path).profiles.is_empty(),
+            "nothing may be written to profiles.json"
+        );
+        assert!(
+            !a_fresh_launch_can_start_a_world(&dir),
+            "the next launch must still be gated after a sign-in that authenticated \
+             but did not own the game"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// **The other arm of the same comparison**: the identical flow, ending in
+    /// the success message instead, adds the account to the switcher *and* lets
+    /// the next launch start a world.
+    ///
+    /// The two tests differ in one thing — which `WorkerMsg` the worker sends —
+    /// so together they say the outcome tracks ownership rather than tracking
+    /// "a sign-in was attempted".
+    #[test]
+    fn a_sign_in_that_owns_the_game_lands_in_the_switcher_and_opens_the_gate() {
+        let path = temp_path("entitled");
+        let dir = path.parent().expect("the temp path has a parent").to_owned();
+        let nav = AccountsNav::with_path(path.clone());
+        let (tx, rx) = channel();
+        let cancel = Arc::new(AtomicBool::new(false));
+        nav.hover(1 + BUTTON_ADD);
+        nav.handle_key_with(MenuKey::Enter, spawn_stub(rx, cancel));
+
+        let steve = profile("Steve", 42);
+        tx.send(WorkerMsg::SignedIn(steve.clone())).unwrap();
+        nav.pump();
+
+        // In the switcher, selected, and on disk — the same store the title
+        // screen's Accounts row reads, not a parallel one.
+        assert!(
+            nav.rows().contains(&AccountRow::Account(steve.clone())),
+            "the added account must appear in the account switcher's own list"
+        );
+        assert!(nav.is_selected(steve.profile_id));
+
+        let entitlement = nav
+            .entitlement()
+            .expect("a completed sign-in must produce an ownership proof");
+        assert_eq!(entitlement.profile_id(), steve.profile_id);
+        assert_eq!(entitlement.username(), "Steve");
+
+        assert!(
+            a_fresh_launch_can_start_a_world(&dir),
+            "the next launch must be able to start a singleplayer world"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

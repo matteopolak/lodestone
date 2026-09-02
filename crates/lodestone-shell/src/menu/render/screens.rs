@@ -1206,6 +1206,113 @@ pub(super) fn error_frame(end: Option<&SessionEnd>) -> MenuFrame<'static> {
     }
 }
 
+// -- the ownership gate ------------------------------------------------
+
+/// The gate's button width. [`ERROR_BUTTON_W`]'s 200 px, for the same reason
+/// that one is 200: a lone centred button at vanilla's own widest widget size,
+/// on a screen with nothing else competing for the width.
+const OWNERSHIP_BUTTON_W: f32 = 200.0;
+
+/// Gap between the gate's two stacked buttons — vanilla's own 4 px widget
+/// spacing, which is what every stacked-button layout in this menu uses.
+const OWNERSHIP_BUTTON_GAP: f32 = 4.0;
+
+/// Distance from the canvas bottom to the *top* of the lower button.
+/// [`ERROR_BUTTON_BOTTOM_MARGIN`]'s value, so the gate's last row sits exactly
+/// where the disconnect screen's single row does.
+const OWNERSHIP_BUTTON_BOTTOM_MARGIN: f32 = WIDGET_H + 20.0;
+
+/// The gate title's baseline offset from the canvas top. [`ERROR_TITLE_Y`]'s
+/// 40 px, for the same reason: both are single-message screens with a title, a
+/// paragraph and buttons, and putting them at different heights would make a
+/// disconnect look like a different kind of screen from this one.
+const OWNERSHIP_TITLE_Y: f32 = 40.0;
+
+/// Wrap width for the explanatory paragraph. [`ERROR_NOTICE_W`]'s derivation —
+/// `MIN_SCALED_WIDTH` less a 25 px margin each side — so the text is correct at
+/// the smallest canvas `calculate_gui_scale` can produce.
+const OWNERSHIP_NOTICE_W: f32 = crate::config::MIN_SCALED_WIDTH as f32 - 50.0;
+
+/// The gate's heading.
+const OWNERSHIP_TITLE: &str = "Sign in to play";
+
+/// The gate's explanatory paragraph.
+///
+/// It has to answer three questions at once, because a player who has just
+/// launched the game and cannot reach *anything* will otherwise assume the
+/// build is broken: what is being asked, why singleplayer is included, and
+/// what happens to the account afterwards.
+const OWNERSHIP_BODY: &str = "Lodestone needs at least one Microsoft account                               that owns Minecraft before you can play — including                               singleplayer and offline play. Add one and it joins                               your account list, where you can switch between                               accounts or set the name you play offline under.";
+
+/// Builds the ownership gate ([`super::Screen::Ownership`]): a title, the
+/// paragraph above, and [`super::nav::OWNERSHIP_BUTTONS`] stacked at the
+/// bottom.
+///
+/// **Not vanilla geometry**, and there is nothing to be faithful to: real
+/// Minecraft resolves an account in a separate launcher before the game process
+/// starts, so it has no in-game equivalent of this screen. The metrics are
+/// therefore borrowed from [`error_frame`], which is the closest thing this menu
+/// already has — one message, one decision, no list.
+///
+/// The buttons are laid out **upwards from the bottom**, so the last row lands
+/// on the same baseline the disconnect screen's single row does regardless of
+/// how many rows there are.
+#[must_use]
+pub(super) fn ownership_frame(nav: &super::nav::MenuNav) -> MenuFrame<'static> {
+    use super::nav::OWNERSHIP_BUTTONS;
+    let count = OWNERSHIP_BUTTONS.len();
+    MenuFrame {
+        rows: OWNERSHIP_BUTTONS
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                // `count - 1 - i` rows sit below this one, each costing a
+                // button plus a gap. Derived from the row's own index rather
+                // than written as two literal offsets, so adding a third button
+                // cannot leave one of them behind.
+                let below = (count - 1 - i) as f32;
+                MenuRow {
+                    label: b.label().to_string(),
+                    enabled: true,
+                    slot: Some(Slot {
+                        origin: Origin::ScreenBottom,
+                        dx: -(OWNERSHIP_BUTTON_W * 0.5),
+                        dy: -(OWNERSHIP_BUTTON_BOTTOM_MARGIN
+                            + below * (WIDGET_H + OWNERSHIP_BUTTON_GAP)),
+                        w: OWNERSHIP_BUTTON_W,
+                        h: WIDGET_H,
+                    }),
+                    ..Default::default()
+                }
+            })
+            .collect(),
+        selected: nav.ownership_index(),
+        vanilla: true,
+        labels: vec![MenuLabel {
+            text: OWNERSHIP_TITLE.to_string(),
+            origin: Origin::ScreenTop,
+            dx: 0.0,
+            dy: OWNERSHIP_TITLE_Y,
+            align: Align::Centre,
+            colour: LABEL,
+            scale: 1.0,
+        }],
+        notice: Some(MenuNotice {
+            text: OWNERSHIP_BODY.to_string(),
+            spans: Vec::new(),
+            origin: Origin::ScreenTop,
+            dx: -(OWNERSHIP_NOTICE_W * 0.5),
+            dy: OWNERSHIP_TITLE_Y + LINE_H * 3.0,
+            w: OWNERSHIP_NOTICE_W,
+            bottom: OWNERSHIP_BUTTON_BOTTOM_MARGIN
+                + WIDGET_H
+                + (count - 1) as f32 * (WIDGET_H + OWNERSHIP_BUTTON_GAP),
+            colour: LABEL,
+        }),
+        ..Default::default()
+    }
+}
+
 // -- the credits/end-poem screen ---------------------------------
 //
 // **Not vanilla geometry.** `WinScreen.java` draws no widgets at all: it is a

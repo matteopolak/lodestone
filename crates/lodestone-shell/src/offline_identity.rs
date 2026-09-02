@@ -5,7 +5,17 @@
 //! ## What it is
 //!
 //! This is the identity a join presents when no Microsoft account is signed in
-//! and selected. It is the **fallback rung** of [`crate::join_identity`], which
+//! and selected.
+//!
+//! **It is a name choice, not an entry path.** Since the ownership gate landed
+//! ([`crate::menu::Screen::Ownership`]), nothing in the client — this identity
+//! included — is reachable until the account roster holds an account that owns
+//! the game. Choosing the account switcher's offline row still means "join
+//! without a Microsoft session", which is what a `selected` of `None` means; it
+//! no longer lets anyone into the game who has not added an owning account
+//! first, because the switcher itself sits behind the gate. Nothing in this
+//! module enforces that and nothing here should: the gate is expressed as a
+//! value the play verbs require (`lodestone_auth::Entitlement`), one layer up. It is the **fallback rung** of [`crate::join_identity`], which
 //! is the one producer every production join consults — a selected account wins
 //! over this module for singleplayer exactly as it does for a remote join. What
 //! remains this module's own are the nobody-signed-in case and `connect_as`

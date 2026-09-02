@@ -37,11 +37,41 @@ fn a_server_list_tooltip_snaps_its_box_to_the_same_origin_as_its_text() {
 /// A nav with a temporary (never-loaded) list path, so no test reads the
 /// developer's real `servers.json`.
 fn test_nav(tag: &str) -> MenuNav {
+    test_nav_path(tag, true)
+}
+
+/// [`test_nav`] with **no** account in the roster: the ownership gate is closed,
+/// so `frame_for` draws the gate whatever screen `UiState` is on.
+fn unowned_test_nav(tag: &str) -> MenuNav {
+    test_nav_path(tag, false)
+}
+
+/// The shared body. `owned` seeds a one-account `profiles.json` beside the
+/// server list **before** construction, because `AccountsNav` reads the roster
+/// once in its constructor.
+///
+/// Seeded by default: every frame test in this file is about what a player who
+/// can play sees, and an empty roster would make `frame_for` return the
+/// ownership gate for all of them.
+fn test_nav_path(tag: &str, owned: bool) -> MenuNav {
     let path = std::env::temp_dir().join(format!(
         "lodestone-render-{}-{tag}/servers.json",
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    if owned {
+        let mut meta = lodestone_auth::AccountsMetadata::default();
+        let id = uuid::Uuid::new_v4();
+        meta.upsert(lodestone_auth::AccountProfile {
+            profile_id: id,
+            username: "OwnerAccount".to_owned(),
+            skin_url: None,
+            last_used: 1,
+        });
+        meta.selected = Some(id);
+        meta.save_to(&path.parent().unwrap().join("profiles.json"))
+            .expect("the temp roster must be writable");
+    }
     MenuNav::with_path(path)
 }
 
@@ -224,6 +254,10 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
     for screen in Screen::ALL {
         let mut ui = UiState::new();
         match screen {
+            // The gate needs no setup at all: with an account in the roster
+            // (`test_nav` seeds one) it is an ordinary screen, and `UiState`
+            // has no session, so `open_ownership_gate` always lands.
+            Screen::Ownership => ui.open_ownership_gate(),
             Screen::MainMenu => {}
             Screen::ServerList => ui.open_server_list(),
             Screen::ServerEdit => {

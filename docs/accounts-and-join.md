@@ -54,7 +54,58 @@ the client to Microsoft. **None of this repo's tests may reach `sessionserver.mo
 real OAuth endpoint** — the successful premium join is verified interactively by the owner,
 not by any test here.
 
+### The ownership gate
+
+Nothing in the client is reachable until the local account roster holds at least one account
+that owns the game — singleplayer, world creation, the multiplayer list and the offline
+identity included. `Screen::Ownership` is what the player sees instead: a title, one paragraph
+saying what is being asked, and two buttons (Add Account, Quit). Add Account opens the ordinary
+account switcher, so an account added through the gate lands in the same `profiles.json` the
+switcher reads — there is no second store and no second sign-in path.
+
+**The enforcement is a type, not a check, and that distinction is the whole design.**
+`lodestone_auth::Entitlement` has private fields and exactly one constructor,
+`Entitlement::from_metadata`, which answers `Some` only for a roster holding an account. Both
+play verbs — `nav::MenuAction::Singleplayer` and `nav::MenuAction::Connect` — carry one, so a
+future entry path that forgets the gate does not compile. A `bool` consulted at one call site
+would have been forgotten by exactly that path, silently.
+
+Two consequences worth knowing:
+
+- **The check is presence-based, not a fresh network call.** A row can only exist in
+  `profiles.json` because a completed sign-in produced a Minecraft profile for it, and an
+  account with no profile fails the chain with `AuthError::NoMinecraftProfile` before there is
+  anything to store — the roster is keyed on the Minecraft profile UUID such an account does
+  not have. So "a row exists" and "that account owned the game when it was added" are the same
+  statement. Re-verification happens the next time the player signs in or joins an online-mode
+  server; requiring it at launch would break offline play, which is not what the gate is for.
+- **It is not a security boundary.** `profiles.json` is a plain file in the user's own data
+  directory and a determined user can forge one. Nothing stored on a machine its owner controls
+  can prevent that; only a server-side check can, which is what online-mode join already does.
+  What the gate enforces is that the client will not knowingly let anyone play without having
+  added an account that owns the game.
+
+`MenuNav::ownership_gate_blocks` is the screen-level half — one expression consulted by
+`MenuNav::key`, `MenuNav::click`, `MenuNav::hover` and `render::frame_for`, so what is drawn and
+what a keystroke does cannot disagree. `frame_for` is what draws the gate on the very *first*
+frame, before any input has arrived to move `UiState`. Two screens are exempt: `Screen::Accounts`
+(the only exit — blocking it would make the gate unopenable) and `Screen::Error` (a real
+diagnosis the gate must not paint over), plus every screen `Screen::in_session` reports as
+sitting over a live world.
+
+**The browser build cannot currently pass the gate**, because it has no Microsoft sign-in: the
+flow needs an OS keychain for the refresh token and a blocking HTTP client, neither of which
+exists on `wasm32`. The Add Account button there reports that in a sentence rather than doing
+nothing. Implementing a browser sign-in is what unblocks the web build.
+
 ### The offline fallback identity
+
+The offline identity is a **display-name choice available once the ownership gate is open**, not
+an entry path of its own. Selecting the account switcher's offline row still means "join
+without a Microsoft session" — that is what `AccountsMetadata::selected == None` means — but it
+no longer lets anyone into the game who has not added an owning account first, because the
+switcher itself is behind the gate.
+
 
 `offline.json` (beside `profiles.json`/`servers.json`) stores exactly one field, the username;
 the UUID is never stored, only derived, reproducing Java's
@@ -205,6 +256,16 @@ already are — unbuilt, but not blocked on anything new.
   `join_identity`, `NetClient::connect`) fork explicitly on `#[cfg(test)]` rather than an
   early `cfg!(test)` return, specifically so the interception is itself assertable; preserve
   that shape rather than adding an early return.
+- **`Entitlement::from_metadata` must stay the only constructor.** Adding a second way to
+  produce one — a `new`, a `From`, a test-only shortcut reachable from production — is adding a
+  bypass to the ownership gate, and it will not look like one. If a per-account ownership flag
+  is ever wanted, put it on `AccountProfile` and filter inside that constructor.
+- **A test that presses menu keys needs an account in its roster.** With an empty one, the gate
+  intercepts every keystroke, and the symptom is a screen assertion failing on
+  `Screen::Ownership` rather than anything that names ownership. Both nav test helpers
+  (`menu::nav`'s `nav`, `menu::render`'s `test_nav`) seed one; their `unowned_*` twins do not.
+  That seeding means the whole existing corpus is blind to the gate by construction, which is
+  why the gate has its own tests instead of relying on theirs.
 - **`AccountSecrets::open()` decides keychain-vs-memory once per process and never re-probes.**
   A caller wanting live re-detection needs a fresh instance (in practice, a restart).
 - **The offline UUID derivation must stay the unnamespaced Java form** — do not simplify it to
