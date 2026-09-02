@@ -6,7 +6,7 @@ The executable unit sequence for unit group **NE** of
 [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its U13 row): Nether and End terrain —
 legacy RNG wiring, the bespoke noise instantiations, the `nether_cave` carver, the
 disabled-aquifer fluid picker, the Nether multi-noise biome source, the `end_islands`
-density type, `TheEndBiomeSource`, End cell geometry, and the serve seam that keeps any of
+density type, the End's own biome source, End cell geometry, and the serve seam that keeps any of
 it from being an island. Written 2026-08-08 against `HEAD` `5f37fb83`. Engine work only:
 **the data phase is complete** (verified below), and portals/dimension travel are
 gameplay, out of scope — a Nether generator is oracle-testable with no portal existing.
@@ -117,12 +117,13 @@ digit** pre/post (the harness's 905,459-exact precedent is the standard).
 
 ### NE2 — the two bespoke Nether noises + `NormalNoise`/`BlendedNoise` legacy init (M)
 
-Record definitions: `RandomState.NoiseWiringHelper.visitNoise` (`nether/temperature` and
-`nether/vegetation` instantiate via `NormalNoise.createLegacyNetherBiome(new
-LegacyRandomSource(seed + 0))` and `(seed + 1)` — **raw world seed, not a positional
+Record definitions: vanilla's own per-noise wiring visitor (`nether/temperature` and
+`nether/vegetation` instantiate via a legacy-nether-biome `NormalNoise` constructor seeded from
+a legacy random source at `seed + 0` and `seed + 1` — **raw world seed, not a positional
 fork**, which is exactly why these two were once the only missing noises);
-`NormalNoise.createLegacyNetherBiome` (`useNewInitialization = false`); `RandomState.NoiseWiringHelper.wrapNew`
-(`BlendedNoise` legacy arm: `newLegacyInstance(0L)` vs `fromHashOf("terrain")`).
+that same legacy-nether-biome constructor uses the older initialization path; vanilla's own
+noise-wiring "wrap new" step
+(`BlendedNoise` legacy arm: a legacy-instance constructor vs a hash-of-name constructor).
 `PerlinNoise::new_legacy` exists but is private and blended-noise-only — this unit opens
 the `NormalNoise` legacy path.
 
@@ -137,9 +138,9 @@ observe the assert fail (detector-works, run once). **Strengthening**: extend
 
 ### NE3 — disabled aquifer, lava sea, and the `nether_cave` carver (M)
 
-(a) `aquifers_enabled: false` → `Aquifer.createDisabled` semantics: solid where
+(a) `aquifers_enabled: false` → vanilla's own disabled-aquifer semantics: solid where
 `density > 0`, else the global fluid picker — for the Nether every position resolves to
-`FluidStatus(32, LAVA)` (`NoiseBasedChunkGenerator.createFluidPicker`; **not** the overworld
+lava at y=32 (from vanilla's own per-generator fluid-picker construction; **not** the overworld
 aquifer with lava as second fluid — the worldgen-data-census issue's audit correction stands: `min(-54, 32)` is
 unreachable at min_y 0). The flag is currently unread; the overworld path must be
 bit-identical after the branch lands (parity suite). (b) `nether_cave` carver replacing
@@ -245,11 +246,11 @@ generation in the oracle world (one `container` session) upgrade this to outside
 until then the unit's record is "transcription + arithmetic, no vanilla-origin values",
 stated in the landing message.
 
-### NE8 — `TheEndBiomeSource`, End cell geometry, and the End generator (M)
+### NE8 — the End's own biome source, End cell geometry, and the End generator (M)
 
-(a) `TheEndBiomeSource` — not multi-noise; four thresholds over the erosion router slot
-(which holds `cache2d(end_islands)`), record `TheEndBiomeSource.getNoiseBiome`, ~a page.
-(b) Cell geometry: End cells are 8×4 (`size 2/1` × 4, `NoiseSettings.getCellHeight`/`getCellWidth`) against
+(a) the End's own biome source — not multi-noise; four thresholds over the erosion router slot
+(which holds `cache2d(end_islands)`), record vanilla's own biome-lookup routine for it, ~a page.
+(b) Cell geometry: End cells are 8×4 (`size 2/1` × 4, vanilla's own cell-height/cell-width accessors) against
 the engine's 4×8 constants; `NoiseChunkSampler::new` already takes the dims as parameters
 — thread them from the settings. Gate by counter: cells-per-chunk and corner-evaluation
 counts must land on the 8×4 prediction, with the 4×8 hypothesis's counts precomputed as
