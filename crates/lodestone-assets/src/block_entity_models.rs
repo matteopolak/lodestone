@@ -438,13 +438,14 @@ pub fn chest_double_right_model() -> EntityModelDef {
     }
 }
 
-/// A skull/head's single box — `SkullModel.createHeadModel()`:
-/// `addBox(-4, -8, -4, 8, 8, 8)` at `PartPose.ZERO`, texel offset `(0, 0)`.
+/// A skull/head's single box — vanilla's own skull-model head-mesh construction:
+/// a box of `(-4, -8, -4)` origin, `(8, 8, 8)` size at the identity pose, texel offset `(0, 0)`.
 ///
 /// Unlike the chest models, this is authored in the **same Y-down convention
 /// as a mob's own head part** — vanilla never re-authored it block-space-up
-/// the way `ChestModel` was. `SkullBlockRenderer`'s own placement transforms
-/// (`createGroundTransformation`/`createWallTransformation`, ported as
+/// the way its own chest model was. Vanilla's own skull-block-renderer own
+/// placement transforms
+/// (its own ground/wall transformation construction, ported as
 /// `lodestone_render::block_entity::{skull_ground_placement_matrix,
 /// skull_wall_placement_matrix}`) apply vanilla's `scale(-1, -1, 1)` flip to
 /// compensate, exactly the sign [`crate::entity::entity_model_matrix`] uses.
@@ -455,7 +456,8 @@ fn skull_head_part() -> PartDef {
         .with_cube(CubeDef::new([-4.0, -8.0, -4.0], [8.0, 8.0, 8.0], [0.0, 0.0]))
 }
 
-/// The 64×32-canvas skull head — `SkullModel.createMobHeadLayer()`. Used by
+/// The 64×32-canvas skull head — vanilla's own skull-model mob-head-layer
+/// construction. Used by
 /// skeleton, wither skeleton and creeper, whose skin PNGs really are 64×32.
 ///
 /// **Two models exist for one box, not one.** The head's `texOffs(0, 0)`
@@ -477,14 +479,15 @@ pub fn skull_mob_model() -> EntityModelDef {
     }
 }
 
-/// The 64×64-canvas skull head — `SkullModel.createHumanoidHeadLayer()`.
+/// The 64×64-canvas skull head — vanilla's own skull-model humanoid-head-layer
+/// construction.
 /// Used by zombie (whose skin moved to 64×64) and player (always 64×64). See
 /// [`skull_mob_model`] for why the canvas size is a second model rather than
 /// a parameter.
 ///
 /// # The `"hat"` overlay, and the comment that used to say it was pointless
 ///
-/// `createHumanoidHeadLayer` adds a `"hat"` child *of* `head` — the same
+/// Vanilla's own humanoid-head-layer construction adds a `"hat"` child *of* `head` — the same
 /// `-4, -8, -4` box, at `texOffs(32, 0)`, inflated `0.25` — and it is what
 /// draws a skin's second layer: the hair, the helmet, the pumpkin. It is the
 /// **only** part of this model whose texels come from the right-hand half of
@@ -503,7 +506,8 @@ pub fn skull_mob_model() -> EntityModelDef {
 /// puts the overlay strictly outside the base head on every face. Dropping it
 /// while keeping the part is worse than not having the part at all.
 ///
-/// `skull_mob_model` correctly has no hat — `createMobHeadLayer` adds none,
+/// `skull_mob_model` correctly has no hat — vanilla's own mob-head-layer
+/// construction adds none,
 /// and a skeleton sheet has nothing at `(32, 0)` to draw.
 #[must_use]
 pub fn skull_humanoid_model() -> EntityModelDef {
@@ -523,15 +527,15 @@ pub fn skull_humanoid_model() -> EntityModelDef {
 }
 
 /// The ender dragon's own sheet, 256×256 — the canvas
-/// `DragonHeadModel.createHeadLayer()` declares, and the same
+/// vanilla's own dragon-head-model head-layer construction declares, and the same
 /// `entity/enderdragon/dragon` PNG the mob renderer samples.
 const DRAGON_HEAD_SHEET: (u32, u32) = (256, 256);
 
-/// The piglin's own sheet, 64×64 — `LayerDefinitions`' `piglinHeadLayer` is
-/// `LayerDefinition.create(PiglinHeadModel.createHeadModel(), 64, 64)`.
+/// The piglin's own sheet, 64×64 — vanilla's own layer-definitions table
+/// declares its piglin head layer at a 64×64 mesh definition.
 const PIGLIN_HEAD_SHEET: (u32, u32) = (64, 64);
 
-/// The dragon head — `DragonHeadModel.createHeadLayer()`:
+/// The dragon head — vanilla's own dragon-head-model head-layer construction:
 ///
 /// ```text
 /// head  offset(0, -7.986666, 0).scaled(0.75)
@@ -556,7 +560,7 @@ const PIGLIN_HEAD_SHEET: (u32, u32) = (64, 64);
 /// The jaw is a **child** of the head, so the head's `0.75` scale carries it;
 /// its own resting angle is not the authored zero but
 /// `lodestone_render::block_entity::dragon_head_jaw_x_rot`'s value, applied by
-/// the renderer the way `DragonHeadModel.setupAnim` applies it.
+/// the renderer the way vanilla's own dragon-head-model per-frame pose step applies it.
 #[must_use]
 pub fn dragon_head_model() -> EntityModelDef {
     let head = PartDef::new(PartPose::offset(0.0, -7.986_666, 0.0).scaled(0.75))
@@ -589,8 +593,9 @@ pub fn dragon_head_model() -> EntityModelDef {
     }
 }
 
-/// The piglin head — `PiglinHeadModel.createHeadModel()`, which is
-/// `AbstractPiglinModel.addHead(CubeDeformation.NONE, mesh)` verbatim:
+/// The piglin head — vanilla's own piglin-head-model head-mesh construction,
+/// which is
+/// vanilla's own shared abstract-piglin add-head helper, with no deformation, verbatim:
 ///
 /// ```text
 /// head  PartPose.ZERO
@@ -660,7 +665,7 @@ pub fn piglin_head_model() -> EntityModelDef {
 pub const SKULL_HAT_INFLATION: f32 = 0.25;
 
 /// A bell's swinging body and its flared bottom rim —
-/// `BellModel.createBodyLayer()`:
+/// vanilla's own bell-model body-layer construction:
 ///
 /// ```text
 /// bell_body  texOffs(0,  0)  box(-3, -6, -3,  6, 7, 6)  pose offset(8, 12, 8)
@@ -684,8 +689,8 @@ pub const SKULL_HAT_INFLATION: f32 = 0.25;
 /// vanilla itself nests them.
 ///
 /// Authored **block-space-up**, the same convention [`chest_single_model`]
-/// uses and unlike [`skull_head_part`]: `BellRenderer.submit` applies no
-/// `scale(-1, -1, 1)` flip (unlike `SkullBlockRenderer`), so `CubeDef::origin`
+/// uses and unlike [`skull_head_part`]: vanilla's own bell-renderer submit step applies no
+/// `scale(-1, -1, 1)` flip (unlike its own skull-block renderer), so `CubeDef::origin`
 /// and `PartPose` add directly with no sign flip.
 #[must_use]
 pub fn bell_model() -> EntityModelDef {
@@ -702,7 +707,8 @@ pub fn bell_model() -> EntityModelDef {
     }
 }
 
-/// A standing banner's pole and cross-bar — `BannerModel.createBodyLayer(true)`:
+/// A standing banner's pole and cross-bar — vanilla's own banner-model
+/// body-layer construction, standing variant:
 ///
 /// ```text
 /// pole  texOffs(44, 0)  addBox(-1, -42, -1,  2, 42, 2)  pose ZERO
@@ -744,7 +750,8 @@ pub fn banner_body_model() -> EntityModelDef {
     }
 }
 
-/// A standing banner's cloth — `BannerFlagModel.createFlagLayer(true)`:
+/// A standing banner's cloth — vanilla's own banner-flag-model flag-layer
+/// construction, standing variant:
 ///
 /// ```text
 /// flag  texOffs(0, 0)  addBox(-10, 0, -2,  20, 40, 1)  pose offset(0, -44, 0)
@@ -779,13 +786,14 @@ pub fn banner_flag_model() -> EntityModelDef {
     }
 }
 
-/// A **wall** banner's cross-bar — `BannerModel.createBodyLayer(false)`:
+/// A **wall** banner's cross-bar — vanilla's own banner-model body-layer
+/// construction, wall variant:
 ///
 /// ```text
 /// bar  texOffs(0, 42)  addBox(-10, -20.5, 9.5,  20, 2, 2)  pose ZERO
 /// ```
 ///
-/// **No `pole`.** `createBodyLayer` adds the pole only under `if (standing)`, and
+/// **No `pole`.** Vanilla's own body-layer construction adds the pole only under `if (standing)`, and
 /// this is the branch that skips it — a wall banner hangs off a block face, so a
 /// standing banner's 42-texel post would be a pole floating in mid-air. That is
 /// exactly what happens if the two are conflated, and it is why the gather
@@ -793,7 +801,7 @@ pub fn banner_flag_model() -> EntityModelDef {
 ///
 /// The `bar` box is not the standing one moved: **both of its `y` and `z` origins
 /// differ** (`-20.5, 9.5` against `-44, -1`), from the same ternary pair in
-/// `createBodyLayer`. Only the texel offsets and extents are shared, so this is a
+/// vanilla's own body-layer construction. Only the texel offsets and extents are shared, so this is a
 /// second entry rather than a placement variant.
 #[must_use]
 pub fn banner_wall_body_model() -> EntityModelDef {
@@ -812,7 +820,8 @@ pub fn banner_wall_body_model() -> EntityModelDef {
     }
 }
 
-/// A **wall** banner's cloth — `BannerFlagModel.createFlagLayer(false)`:
+/// A **wall** banner's cloth — vanilla's own banner-flag-model flag-layer
+/// construction, wall variant:
 ///
 /// ```text
 /// flag  texOffs(0, 0)  addBox(-10, 0, -2,  20, 40, 1)  pose offset(0, -20.5, 10.5)
@@ -844,7 +853,7 @@ pub fn banner_wall_flag_model() -> EntityModelDef {
     }
 }
 
-/// A shield — `ShieldModel.createLayer()`:
+/// A shield — vanilla's own shield-model layer construction:
 ///
 /// ```text
 /// plate   texOffs(0,  0)  addBox(-6, -11, -2,  12, 22, 1)  pose ZERO
@@ -853,11 +862,11 @@ pub fn banner_wall_flag_model() -> EntityModelDef {
 ///
 /// Two parts, both `PartPose::ZERO` — unlike a banner's body+flag, vanilla
 /// draws the whole shield (plate and handle together) as **one**
-/// `submitModel` call, opaque, then re-submits this exact same mesh once per
+/// submit-model call, opaque, then re-submits this exact same mesh once per
 /// pattern layer through the translucent pattern pipeline
-/// (`BannerRenderer.submitPatterns(..., this.model, Unit.INSTANCE, banner =
-/// false, ...)` in `ShieldSpecialRenderer.submit` — the `model` argument is
-/// the whole `ShieldModel`, not a `flag`-only sub-part the way a banner's
+/// (vanilla's own banner-renderer submit-patterns step, called from its own
+/// shield-special-renderer submit step — the model argument is
+/// the whole shield model, not a `flag`-only sub-part the way a banner's
 /// masks are). So this crate's shield has no analogue of a banner's
 /// `"banner_flag"`: a caller drawing a pattern layer reuses this same
 /// `"shield"` mesh, at the
@@ -890,22 +899,24 @@ pub fn shield_model() -> EntityModelDef {
     }
 }
 
-/// A shulker box's shell — `ShulkerModel.createBoxLayer()`, via the shared
-/// `ShulkerModel.createShellMesh()`:
+/// A shulker box's shell — vanilla's own shulker-model box-layer construction,
+/// via the shared
+/// shell-mesh construction step:
 ///
 /// ```text
 /// lid   texOffs(0,  0)  addBox(-8, -16, -8,  16, 12, 16)  pose offset(0, 24, 0)
 /// base  texOffs(0, 28)  addBox(-8,  -8, -8,  16,  8, 16)  pose offset(0, 24, 0)
 /// ```
 ///
-/// **`createBoxLayer`, not `createBodyLayer`** — the two share `createShellMesh`
+/// **The box-layer construction, not the body-layer one** — the two share the
+/// shell-mesh construction
 /// and the body layer adds a third `head` part for the *mob*. A block-entity
 /// shulker box has no head, and baking the body layer here would draw a shulker's
 /// face floating inside every box in the world.
 ///
 /// `lid` and `base` are siblings with the **same** pivot `(0, 24, 0)`, which is
 /// the sole reason this type "fits the existing `(model, texture)` batch key as
-/// is": `ShulkerBoxRenderer.ShulkerBoxModel.setupAnim` only ever moves `lid`, and
+/// is": vanilla's own shulker-box-renderer per-frame pose step only ever moves `lid`, and
 /// a closed box (`progress == 0`) needs no pose override at all — so a shulker
 /// box is one static mesh per dye colour and nothing per instance. The open
 /// animation is `lid.y = 24 - progress * 8` and `lid.yRot = 270° * progress`, and
@@ -913,7 +924,7 @@ pub fn shield_model() -> EntityModelDef {
 /// `docs/block-entity-renderers.md`.
 ///
 /// Authored **block-space-up** like [`chest_single_model`] and [`bell_model`]:
-/// `ShulkerBoxRenderer.createModelTransform` folds its own
+/// vanilla's own shulker-box-renderer model-transform construction folds its own
 /// `scale(1, -1, -1) · translate(0, -1, 0)` flip into the *placement* matrix, so
 /// the box origins here add to `PartPose` with no sign change.
 #[must_use]
@@ -937,8 +948,8 @@ pub fn shulker_box_model() -> EntityModelDef {
     }
 }
 
-/// An open book — `BookModel.createBodyLayer()`
-/// (`net/minecraft/client/model/object/book/BookModel.java`), sheet 64×32:
+/// An open book — vanilla's own book-model body-layer construction
+/// (in the decompiled 26.2 client source), sheet 64×32:
 ///
 /// ```text
 /// left_lid    texOffs( 0,  0)  addBox(-6, -5, -0.005,  6, 10, 0.005)  pose offset(0, 0, -1)
@@ -969,13 +980,13 @@ pub fn shulker_box_model() -> EntityModelDef {
 /// Shared by two registrations, and the *work* is not shared: a lectern's
 /// `BookModel.State` is a compile-time constant (see
 /// `lodestone_render::block_entity`'s `LECTERN_BOOK_OPENNESS`), while
-/// `EnchantTableRenderer`'s is a client-simulated animation state machine with
+/// vanilla's own enchant-table renderer's is a client-simulated animation state machine with
 /// its own per-frame `open`/`flip`/`rot` counters. One mesh, two very different
 /// consumers.
 ///
 /// Authored **block-space-up** like [`chest_single_model`] and [`bell_model`]:
-/// `LecternRenderer.submit` applies no `scale(-1, -1, 1)` (unlike
-/// `SkullBlockRenderer`), so origins and poses add with no sign flip.
+/// vanilla's own lectern-renderer submit step applies no `scale(-1, -1, 1)` (unlike
+/// its own skull-block renderer), so origins and poses add with no sign flip.
 #[must_use]
 pub fn book_model() -> EntityModelDef {
     // Vanilla builds both flip pages from one `CubeListBuilder`; one `CubeDef`
@@ -1051,7 +1062,7 @@ fn hide_face(index: usize) -> [bool; 6] {
 
 /// `[false; 6]` with one `entity::FACE_ORDER` index set — the inverse of
 /// [`hide_face`], for a box only one face of which is ever visible (the
-/// decorated pot's side quads, `EnumSet.of(Direction.NORTH)` in the jar).
+/// decorated pot's side quads, restricted to just the north face in the jar).
 fn only_face(index: usize) -> [bool; 6] {
     let mut faces = [false; 6];
     faces[index] = true;
@@ -1063,22 +1074,24 @@ fn only_face(index: usize) -> [bool; 6] {
 const FACE_NORTH: usize = 3;
 
 /// The decorated pot's base sheet, 32×32 —
-/// `DecoratedPotRenderer.createBaseLayer()`'s `LayerDefinition.create(mesh, 32, 32)`.
+/// vanilla's own decorated-pot-renderer base-layer construction declares a
+/// 32×32 mesh definition.
 const DECORATED_POT_BASE_SHEET: (u32, u32) = (32, 32);
 
 /// The decorated pot's side sheet, 16×16 —
-/// `DecoratedPotRenderer.createSidesLayer()`'s `LayerDefinition.create(mesh, 16, 16)`.
+/// vanilla's own decorated-pot-renderer sides-layer construction declares a
+/// 16×16 mesh definition.
 /// One quad per model, not a full box — see [`decorated_pot_side_part`].
 const DECORATED_POT_SIDE_SHEET: (u32, u32) = (16, 16);
 
-/// The decorated pot's base — `DecoratedPotRenderer.createBaseLayer()`: the
+/// The decorated pot's base — vanilla's own decorated-pot-renderer base-layer construction: the
 /// neck (two nested boxes, deflated then inflated) plus flat top/bottom
 /// planes sharing one cube. All three parts draw with the single
 /// `decorated_pot_base` sheet regardless of which sherds (if any) are
 /// stored, which is why this is one model rather than four.
 ///
-/// `top`/`bottom` share `topBottomPlane`'s cube unchanged (`texOffs(-14, 13)`,
-/// `addBox(0, 0, 0, 14, 0, 14)`, no `EnumSet` restriction — a real, if
+/// `top`/`bottom` share vanilla's own top-bottom-plane cube unchanged (`texOffs(-14, 13)`,
+/// `addBox(0, 0, 0, 14, 0, 14)`, no face restriction — a real, if
 /// degenerate, six-face box, exactly as the jar authors it) and differ only
 /// in the pivot's `y`.
 #[must_use]
@@ -1113,9 +1126,10 @@ pub fn decorated_pot_base_model() -> EntityModelDef {
     }
 }
 
-/// One decorated-pot side quad — `DecoratedPotRenderer.createSidesLayer()`'s
-/// shared `sidePlane`: `texOffs(1, 0).addBox(0, 0, 0, 14, 16, 0,
-/// EnumSet.of(Direction.NORTH))`. Only the `North` face is emitted (the box
+/// One decorated-pot side quad — vanilla's own decorated-pot-renderer
+/// sides-layer construction's
+/// shared side-plane: `texOffs(1, 0).addBox(0, 0, 0, 14, 16, 0,
+/// restricted to just the north face)`. Only the `North` face is emitted (the box
 /// has zero depth, so the other five are degenerate or coincident) — see
 /// [`only_face`].
 ///
@@ -1201,7 +1215,7 @@ pub fn decorated_pot_side_right_model() -> EntityModelDef {
     ))
 }
 
-/// The conduit's eye — `ConduitRenderer.createEyeLayer()`:
+/// The conduit's eye — vanilla's own conduit-renderer eye-layer construction:
 ///
 /// ```text
 /// eye  texOffs(0, 0)  addBox(-4, -4, 0,  8, 8, 0, CubeDeformation(0.01F))  pose ZERO
@@ -1209,7 +1223,8 @@ pub fn decorated_pot_side_right_model() -> EntityModelDef {
 ///
 /// A near-planar box: zero depth grown by `0.01` texels on every axis by the
 /// deformation, matching vanilla's own `CubeDeformation` rather than a hand
-/// wave at "basically a quad". This is the part `ConduitRenderer.submit`
+/// wave at "basically a quad". This is the part vanilla's own conduit-renderer
+/// submit step
 /// billboards toward the camera and re-skins between `open_eye`/`closed_eye`
 /// per frame — see `lodestone_render::block_entity::resolve_conduit`'s doc for
 /// the billboard and the hunting-state sprite swap, neither of which belongs
@@ -1228,7 +1243,7 @@ pub fn conduit_eye_model() -> EntityModelDef {
     }
 }
 
-/// The conduit's "wind" plume — `ConduitRenderer.createWindLayer()`:
+/// The conduit's "wind" plume — vanilla's own conduit-renderer wind-layer construction:
 ///
 /// ```text
 /// wind  texOffs(0, 0)  addBox(-8, -8, -8,  16, 16, 16)  pose ZERO
@@ -1236,8 +1251,8 @@ pub fn conduit_eye_model() -> EntityModelDef {
 ///
 /// One full 16-texel cube, drawn **twice** per active frame at two different
 /// poses sharing this one mesh (`resolve_conduit`'s two `CONDUIT_WIND`
-/// instances) — vanilla reuses the same `ModelPart` for both
-/// `submitModelPart` calls in `ConduitRenderer.submit`'s active branch.
+/// instances) — vanilla reuses the same model part for both
+/// submit-model-part calls in its own conduit-renderer submit step's active branch.
 #[must_use]
 pub fn conduit_wind_model() -> EntityModelDef {
     let root = PartDef::new(PartPose::ZERO).with_child(
@@ -1255,14 +1270,15 @@ pub fn conduit_wind_model() -> EntityModelDef {
     }
 }
 
-/// The conduit's **inactive** shell — `ConduitRenderer.createShellLayer()`:
+/// The conduit's **inactive** shell — vanilla's own conduit-renderer shell-layer construction:
 ///
 /// ```text
 /// shell  texOffs(0, 0)  addBox(-3, -3, -3,  6, 6, 6)  pose ZERO
 /// ```
 ///
 /// Drawn slowly spinning (`entity/conduit/base`) whenever the frame is not
-/// complete — the `!state.isActive` branch of `ConduitRenderer.submit`. A
+/// complete — the `!state.isActive` branch of vanilla's own conduit-renderer
+/// submit step. A
 /// smaller cube than [`conduit_cage_model`]'s (6×6×6 against 8×8×8): the
 /// conduit visibly grows when it activates, not just changes texture.
 #[must_use]
@@ -1282,17 +1298,18 @@ pub fn conduit_shell_model() -> EntityModelDef {
     }
 }
 
-/// The conduit's **active** shell ("cage") — `ConduitRenderer.createCageLayer()`:
+/// The conduit's **active** shell ("cage") — vanilla's own conduit-renderer cage-layer construction:
 ///
 /// ```text
 /// shell  texOffs(0, 0)  addBox(-4, -4, -4,  8, 8, 8)  pose ZERO
 /// ```
 ///
-/// Named `"shell"` in the jar too (`createCageLayer` also calls
+/// Named `"shell"` in the jar too (vanilla's own cage-layer construction also calls
 /// `addOrReplaceChild("shell", …)`) — the two are still separate *models*
 /// here (`conduit_shell` vs `conduit_cage`), each its own
 /// [`BlockEntityModelEntry`] with its own sheet, since a real client never
-/// draws both in the same frame (`ConduitRenderer.submit` branches on
+/// draws both in the same frame (vanilla's own conduit-renderer submit step
+/// branches on
 /// `state.isActive` and picks exactly one).
 #[must_use]
 pub fn conduit_cage_model() -> EntityModelDef {
@@ -1311,14 +1328,15 @@ pub fn conduit_cage_model() -> EntityModelDef {
     }
 }
 
-/// The copper golem statue's sheet is 64×64 (every one of `CopperGolemModel`'s
-/// four `LayerDefinition.create(mesh, 64, 64)` layers — standing, running,
+/// The copper golem statue's sheet is 64×64 (every one of vanilla's own
+/// copper-golem-model's
+/// four per-pose layer constructions — standing, running,
 /// sitting, star — shares this canvas size).
 const COPPER_GOLEM_SHEET: (u32, u32) = (64, 64);
 
 /// The statue's head — identical geometry in all four poses
-/// (`CopperGolemModel.createBodyLayer`/`createRunningPoseBodyLayer`/
-/// `createSittingPoseBodyLayer`/`createStarPoseBodyLayer`, `"head"` child):
+/// (vanilla's own copper-golem-model per-pose layer constructions (standing/
+/// running/sitting/star), `"head"` child):
 /// four boxes (a wide skull-ish base, a snout nub, an "antenna" stalk, and
 /// its tip), all sharing one deform-inflate pattern.
 fn copper_golem_head_cubes() -> Vec<CubeDef> {
@@ -1330,7 +1348,7 @@ fn copper_golem_head_cubes() -> Vec<CubeDef> {
     ]
 }
 
-/// `CopperGolemModel.createBodyLayer()` — the statue's `STANDING` pose
+/// vanilla's own copper-golem-model body-layer construction — the statue's `STANDING` pose
 /// (`CopperGolemStatueBlock.Pose.STANDING`), and the plainest of the four:
 /// every part is a bare `PartPose.offset` with no rotation, the ordinary
 /// humanoid-ish rig every other block in this corpus that reuses a mob rig
@@ -1385,7 +1403,7 @@ pub fn copper_golem_statue_standing_model() -> EntityModelDef {
     }
 }
 
-/// `CopperGolemModel.createRunningPoseBodyLayer()` — the `RUNNING` pose.
+/// vanilla's own copper-golem-model running-pose body-layer construction — the `RUNNING` pose.
 /// Every limb is a *nested* `PartDefinition`: a bare pivot part (no cube of
 /// its own) holding one `_r1` child that carries the real box at a further
 /// `offsetAndRotation` — a 3D-pose-tool export shape distinct from every
@@ -1470,7 +1488,7 @@ pub fn copper_golem_statue_running_model() -> EntityModelDef {
     }
 }
 
-/// `CopperGolemModel.createSittingPoseBodyLayer()` — the `SITTING` pose.
+/// vanilla's own copper-golem-model sitting-pose body-layer construction — the `SITTING` pose.
 /// The body itself carries **two** cubes plus a nested `body_r1` (the seat
 /// cushion, rotated a full `180°` about `Z`) — the only pose whose top-level
 /// part is not a bare pivot.
@@ -1564,9 +1582,9 @@ pub fn copper_golem_statue_sitting_model() -> EntityModelDef {
     }
 }
 
-/// `CopperGolemModel.createStarPoseBodyLayer()` — the `STAR` pose (arms and
+/// vanilla's own copper-golem-model star-pose body-layer construction — the `STAR` pose (arms and
 /// legs both flung outward). The arms additionally carry an empty
-/// `"rightItem"` pivot child (`CopperGolemModel`'s held-item anchor for a
+/// `"rightItem"` pivot child (vanilla's own copper-golem model's held-item anchor for a
 /// *live* golem) with no cube — not baked here, since a placed statue's
 /// renderer submits only the model, never a held item.
 #[must_use]
@@ -2089,7 +2107,8 @@ mod tests {
     }
 
     /// The flag is one part, offset by `(0, -44, 0)` texels —
-    /// `BannerFlagModel.createFlagLayer(true)`'s `PartPose.offset`. This is
+    /// vanilla's own banner-flag-model standing flag-layer construction's own
+    /// offset pose. This is
     /// the pivot [`crate::entity::PartPose`]'s own `x_rot` overrides to swing
     /// the sway; a wrong offset here would put the sway pivot at the wrong
     /// height even with the angle formula exactly right.
@@ -2169,7 +2188,8 @@ mod tests {
     }
 
     /// The four side models' rest poses, transcribed straight from
-    /// `DecoratedPotRenderer.createSidesLayer()`'s four `offsetAndRotation`
+    /// vanilla's own decorated-pot-renderer sides-layer construction's four
+    /// offset-and-rotation
     /// calls. Checked pairwise-distinct too — a transposition between any two
     /// (say, swapping `left` and `right`) would still leave every individual
     /// pose "a real `PartPose`", which is why the pairwise check is separate
