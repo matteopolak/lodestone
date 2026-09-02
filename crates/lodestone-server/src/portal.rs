@@ -4,14 +4,14 @@
 //! # What it is
 //!
 //! The server half of "portals work". Four independent pieces, each a port of one
-//! vanilla type:
+//! vanilla concept:
 //!
 //! | here | vanilla |
 //! |---|---|
-//! | [`find_empty_portal_shape`] / [`PortalShape`] | `PortalShape` |
-//! | [`ignite`] | `BaseFireBlock.onPlace`'s portal branch |
-//! | [`find_exit_portal`] / [`create_portal`] | `PortalForcer` |
-//! | [`PortalTracker`] | `Entity.portalProcess` + `PortalProcessor` |
+//! | [`find_empty_portal_shape`] / [`PortalShape`] | the real portal-frame-shape model |
+//! | [`ignite`] | the real fire-block-place rule's portal branch |
+//! | [`find_exit_portal`] / [`create_portal`] | the real portal-forcer logic |
+//! | [`PortalTracker`] | the real per-entity portal-process/cooldown state |
 //!
 //! Everything here is a pure function of a [`ChunkSource`] plus coordinates, so it
 //! is drivable from a test with no connection, no protocol and no runtime — which
@@ -21,22 +21,23 @@
 //!
 //! **Ignition.** A fire source used on a block calls [`ignite`], which runs
 //! vanilla's frame search from the clicked cell on the **X axis first** (vanilla's
-//! own preferred axis in `BaseFireBlock.onPlace`), falls back to Z, and requires
-//! the shape be *valid* (2–21 wide, 3–21 tall) **and hold zero portal blocks**
-//! already. On success it returns the `nether_portal` states to write, so the
-//! caller owns both the `set_block` fan-out and the block updates the client needs.
+//! own preferred axis in the real fire-block-place rule), falls back to Z, and
+//! requires the shape be *valid* (2–21 wide, 3–21 tall) **and hold zero portal
+//! blocks** already. On success it returns the `nether_portal` states to write, so
+//! the caller owns both the `set_block` fan-out and the block updates the client
+//! needs.
 //!
 //! **Travel.** [`PortalTracker::tick`] is fed "am I standing in a portal this
 //! tick" once per server tick. It counts up while inside and *decays by four* per
-//! tick while outside — vanilla's `PortalProcessor.decayTick`, not a reset — and
+//! tick while outside — the real portal-processor decay rule, not a reset — and
 //! fires once the count reaches the transition time the game rules supply. After a
-//! trip it holds a 10-tick cooldown (`Player.getDimensionChangingDelay`) so the
+//! trip it holds a 10-tick cooldown (the real player dimension-change delay) so the
 //! destination portal the player materialises inside does not immediately send
 //! them back.
 //!
 //! **Destination.** [`find_exit_portal`] looks for an existing portal near the
 //! scaled arrival point; [`create_portal`] builds a fresh 2×3 one when there is
-//! none, in a spot chosen the way `PortalForcer.createPortal` chooses it.
+//! none, in a spot chosen the way the real portal-forcer create rule chooses it.
 //!
 //! # How to change it
 //!
@@ -45,13 +46,13 @@
 //!   21 blocks from the clicked cell. A "2×3 only" implementation lights a normal
 //!   portal correctly and refuses every larger one, which reads as a client bug.
 //! * **[`is_empty`] includes `nether_portal` itself.** That is what makes a portal
-//!   re-lightable and what makes `numPortalBlocks` meaningful: the interior scan
-//!   walks *through* existing portal blocks counting them, rather than stopping at
-//!   the first one.
-//! * **[`PortalIndex`] is this crate's stand-in for vanilla's POI manager**, and it
-//!   is the reason the destination search is affordable. Anything that creates a
-//!   portal must publish it here; a portal missing from the index is a portal the
-//!   return trip will build a duplicate beside.
+//!   re-lightable and what makes the portal-block count meaningful: the interior
+//!   scan walks *through* existing portal blocks counting them, rather than
+//!   stopping at the first one.
+//! * **[`PortalIndex`] is this crate's stand-in for vanilla's point-of-interest
+//!   manager**, and it is the reason the destination search is affordable. Anything
+//!   that creates a portal must publish it here; a portal missing from the index is
+//!   a portal the return trip will build a duplicate beside.
 //!
 //! ## Gotchas
 //!
@@ -59,7 +60,7 @@
 //!   per tick outside, so brushing past a portal repeatedly still accumulates. A
 //!   reset-to-zero implementation makes the creative-mode 0-tick delay behave
 //!   identically and the survival 80-tick delay subtly wrong.
-//! * **`portalTime++ >= transitionTime` is a post-increment comparison**, so a
+//! * **The transition check is a post-increment comparison**, so a
 //!   transition time of 80 fires on the **81st** consecutive tick inside, and a
 //!   transition time of 0 fires on the first. Reading it as a pre-increment makes
 //!   creative mode take one tick too long — invisible — and survival one tick
@@ -84,21 +85,20 @@ use crate::dimension::Dimension;
 use crate::neighbor_update::Direction;
 use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property};
 
-/// The narrowest a portal frame's interior may be (`PortalShape.MIN_WIDTH`).
+/// The narrowest a portal frame's interior may be.
 pub const MIN_WIDTH: i32 = 2;
-/// The widest (`PortalShape.MAX_WIDTH`).
+/// The widest.
 pub const MAX_WIDTH: i32 = 21;
-/// The shortest (`PortalShape.MIN_HEIGHT`).
+/// The shortest.
 pub const MIN_HEIGHT: i32 = 3;
-/// The tallest (`PortalShape.MAX_HEIGHT`).
+/// The tallest.
 pub const MAX_HEIGHT: i32 = 21;
 
-/// The block a portal frame is made of (`PortalShape.FRAME`).
+/// The block a portal frame is made of.
 pub const FRAME_BLOCK: &str = "minecraft:obsidian";
 
-/// Ticks a player is immune to portals for after a trip —
-/// `Player.getDimensionChangingDelay`, which is 10 and **not** the 300 every other
-/// entity gets.
+/// Ticks a player is immune to portals for after a trip — the real player
+/// dimension-change delay, which is 10 and **not** the 300 every other entity gets.
 pub const PLAYER_PORTAL_COOLDOWN: i32 = 10;
 
 /// The horizontal axis a portal's plane lies in.
@@ -140,7 +140,7 @@ impl Axis {
         }
     }
 
-    /// `PortalShape.findAnyShape`'s `rightDir`: **WEST** for the X axis and
+    /// The real frame-search rule's "right" direction: **WEST** for the X axis and
     /// **SOUTH** for Z. The asymmetry is vanilla's and is load-bearing — swapping
     /// it mirrors the frame search, so an off-centre frame is found on one axis and
     /// missed on the other.
@@ -152,8 +152,8 @@ impl Axis {
         }
     }
 
-    /// The positive direction *along* the axis — `Direction.get(POSITIVE, axis)`,
-    /// which `PortalForcer.createPortal` uses to lay the frame out.
+    /// The positive direction *along* the axis, which the real portal-forcer
+    /// create rule uses to lay the frame out.
     #[must_use]
     fn positive(self) -> (i32, i32) {
         match self {
@@ -162,14 +162,14 @@ impl Axis {
         }
     }
 
-    /// `direction.getClockWise()` for [`positive`](Self::positive) — the axis the
+    /// The clockwise rotation of [`positive`](Self::positive) — the axis the
     /// created portal's *thickness* box is measured along.
     #[must_use]
     fn positive_clockwise(self) -> (i32, i32) {
         match self {
-            // EAST.getClockWise() == SOUTH
+            // EAST rotated clockwise is SOUTH
             Self::X => (0, 1),
-            // SOUTH.getClockWise() == WEST
+            // SOUTH rotated clockwise is WEST
             Self::Z => (-1, 0),
         }
     }
@@ -193,13 +193,14 @@ pub fn is_frame(state: &str) -> bool {
     state == FRAME_BLOCK || state.starts_with("minecraft:obsidian[")
 }
 
-/// `PortalShape.isEmpty`: air, anything in `#minecraft:fire`, or an existing
-/// portal block.
+/// The real frame-interior "is empty" rule: air, anything in `#minecraft:fire`, or
+/// an existing portal block.
 ///
 /// **The portal arm is not a convenience.** Without it the interior scan stops at
-/// the first portal block, `numPortalBlocks` never exceeds zero, and
-/// [`PortalShape::is_complete`] — which `updateShape` uses to decide whether a
-/// portal should survive a neighbour change — is false for every real portal.
+/// the first portal block, the portal-block count never exceeds zero, and
+/// [`PortalShape::is_complete`] — which the real neighbour-update rule uses to
+/// decide whether a portal should survive a neighbour change — is false for every
+/// real portal.
 #[must_use]
 pub fn is_empty(state: &str) -> bool {
     state == "minecraft:air"
@@ -252,20 +253,20 @@ impl PortalShape {
         self.portal_blocks
     }
 
-    /// `PortalShape.isValid` — the size bounds, and nothing else.
+    /// The real is-valid rule — the size bounds, and nothing else.
     #[must_use]
     pub fn is_valid(&self) -> bool {
         (MIN_WIDTH..=MAX_WIDTH).contains(&self.width)
             && (MIN_HEIGHT..=MAX_HEIGHT).contains(&self.height)
     }
 
-    /// `PortalShape.isComplete` — valid *and* every interior cell already lit.
+    /// The real is-complete rule — valid *and* every interior cell already lit.
     #[must_use]
     pub fn is_complete(&self) -> bool {
         self.is_valid() && self.portal_blocks == self.width * self.height
     }
 
-    /// The `(position, state)` pairs `createPortalBlocks` would write.
+    /// The `(position, state)` pairs the real create-portal-blocks rule would write.
     ///
     /// Returned rather than written so the caller can drive both the chunk source
     /// and the per-cell `block_update` packets from one list — an ignition that
@@ -299,7 +300,7 @@ impl PortalShape {
     }
 }
 
-/// `PortalShape.findAnyShape` — the frame around `pos` on `axis`, valid or not.
+/// The real frame-search rule — the frame around `pos` on `axis`, valid or not.
 ///
 /// Always returns a shape; an invalid one carries `width == 0` or `height == 0`.
 /// That is vanilla's shape too, and it matters because the *predicate* is applied
@@ -347,36 +348,34 @@ pub fn find_any_shape<S: ChunkSource + ?Sized>(
     }
 }
 
-/// Vanilla's `NetherPortalBlock.updateShape` — whether the portal cell at
+/// The real portal-block neighbour-update rule — whether the portal cell at
 /// `pos` (on `axis`) must be extinguished (replaced with air) because its
 /// neighbour in `direction_to_neighbour` just changed to `neighbour_state`.
 ///
-/// ```java
-/// Direction.Axis updateAxis = directionToNeighbour.getAxis();
-/// Direction.Axis axis = state.getValue(AXIS);
-/// boolean wrongAxis = axis != updateAxis && updateAxis.isHorizontal();
-/// return !wrongAxis && !neighbourState.is(this) && !PortalShape.findAnyShape(level, pos, axis).isComplete()
-///    ? Blocks.AIR.defaultBlockState()
-///    : super.updateShape(...);
-/// ```
+/// The real rule, restated: given the axis of the direction to the changed
+/// neighbour, and the portal block's own stored axis, the change is on the
+/// "wrong axis" when the two disagree and the neighbour's axis is horizontal.
+/// The cell extinguishes exactly when it is *not* the wrong axis, the neighbour
+/// state is not itself a portal block, and a fresh frame search on `axis` at
+/// `pos` is *not* complete.
 ///
 /// Three clauses, all required (this crate's own evidence standard: a
 /// conjunction ported as "the interesting clause" silently drops the other
 /// two the day an input needs them):
 ///
-/// 1. **`!wrongAxis`** — vanilla's `Direction.Axis` has three values (X, Y,
+/// 1. **The "wrong axis" clause** — vanilla's axis type has three values (X, Y,
 ///    Z) where this crate's [`Axis`] only models the horizontal two, so it is
 ///    expressed here as "vertical, or horizontal along the portal's own
 ///    axis". A neighbour change *perpendicular* to the portal's plane (in
 ///    front of or behind it) cannot have touched the frame and is skipped
 ///    outright — this is what stops a torch placed against the portal's
 ///    face from re-triggering a frame scan on every flicker.
-/// 2. **`!neighbourState.is(this)`** — [`is_portal`]: a notification from
-///    another portal cell (not a frame block) needs no re-validation: an
-///    interior cell changing does not mean the frame broke.
-/// 3. **`!findAnyShape(...).isComplete()`** — [`find_any_shape`] rebuilt on
-///    `axis`, `pos`'s own frame is still intact. `isComplete`, not
-///    `isValid`: a frame whose obsidian is intact but has lost a *portal*
+/// 2. **The "not itself a portal block" clause** — [`is_portal`]: a
+///    notification from another portal cell (not a frame block) needs no
+///    re-validation: an interior cell changing does not mean the frame broke.
+/// 3. **The "frame no longer complete" clause** — [`find_any_shape`] rebuilt on
+///    `axis`, `pos`'s own frame is still intact. Complete, not merely
+///    valid: a frame whose obsidian is intact but has lost a *portal*
 ///    block (through some other cell already having been cleared) must also
 ///    extinguish this one, matching vanilla exactly — see
 ///    [`PortalShape::is_complete`]'s own doc comment.
@@ -396,7 +395,7 @@ pub fn should_extinguish<S: ChunkSource + ?Sized>(
     direction_to_neighbour: Direction,
     neighbour_state: &str,
 ) -> bool {
-    // `updateAxis.isHorizontal()`: only North/South (Z) and East/West (X)
+    // The "is horizontal" check: only North/South (Z) and East/West (X)
     // qualify: Up/Down is vertical, so `wrong_axis` is unconditionally
     // `false` for them regardless of the match below — a broken block above
     // or below a portal cell must always be re-validated.
@@ -416,7 +415,7 @@ pub fn should_extinguish<S: ChunkSource + ?Sized>(
     !find_any_shape(world, dimension, pos, axis).is_complete()
 }
 
-/// Vanilla's `maxChainedNeighborUpdates` for this cascade specifically —
+/// Vanilla's own chained-neighbour-update cap, for this cascade specifically —
 /// mirrors [`crate::server::collapse_unsupported`]'s own `MAX_SUPPORT_COLLAPSE`
 /// for the identical reason: a runaway guard rather than a behavioural limit.
 /// The tallest/widest real portal is 21×21 = 441 interior cells, so this bound
@@ -435,17 +434,17 @@ const MAX_PORTAL_EXTINGUISH_CASCADE: usize = 1024;
 ///
 /// The cascade is what makes mining *one* frame block clear an entire
 /// multi-cell portal rather than only the one interior cell nearest the
-/// break: vanilla's `setBlock` always re-runs `updateNeighbourShapes` on the
-/// cell it just changed, so extinguishing portal cell A (adjacent to the
-/// broken frame block) asks portal cell B (adjacent to A, part of the same
-/// portal) the same question — B's own [`find_any_shape`] rescan now finds
-/// one fewer `portal_blocks` than its rectangle needs, so
+/// break: vanilla's real set-block rule always re-runs the neighbour-update
+/// pass on the cell it just changed, so extinguishing portal cell A (adjacent
+/// to the broken frame block) asks portal cell B (adjacent to A, part of the
+/// same portal) the same question — B's own [`find_any_shape`] rescan now finds
+/// one fewer portal blocks than its rectangle needs, so
 /// [`PortalShape::is_complete`] is false for B too, and so on until the
 /// whole rectangle has cleared.
 ///
 /// This is the caller [`should_extinguish`] itself cannot be: vanilla's
-/// `updateNeighbourShapes` runs `updateShape` on **every** direct neighbour of
-/// a changed cell, not just ones a support table names (unlike
+/// neighbour-update pass runs its update-shape rule on **every** direct
+/// neighbour of a changed cell, not just ones a support table names (unlike
 /// [`crate::server::collapse_unsupported`], which is scoped to
 /// [`crate::block_support`]'s survives table and does not know about
 /// `nether_portal` at all — a portal frame is not "supported by one specific
@@ -512,8 +511,8 @@ pub fn extinguish_broken_frames<S: ChunkSource + ?Sized>(
     removed
 }
 
-/// `PortalShape.findPortalShape` with `findEmptyPortalShape`'s predicate: valid,
-/// and holding **no** portal blocks yet.
+/// The real find-empty-portal-shape rule: valid, and holding **no** portal blocks
+/// yet.
 ///
 /// Tries `preferred` first, then the other axis — the order vanilla uses, and the
 /// reason a frame that would be valid on both axes lights along X.
@@ -536,21 +535,20 @@ pub fn find_empty_portal_shape<S: ChunkSource + ?Sized>(
 /// A fire source used at `pos`: the portal cells to write, or `None` if there is no
 /// valid unlit frame there.
 ///
-/// Vanilla's `BaseFireBlock.onPlace` portal branch, including its **X-first** axis
-/// preference. `dimension` is the `inPortalDimension` guard — the overworld and the
-/// Nether only — which is why an End portal frame cannot be lit with flint.
+/// Vanilla's real fire-block-place rule's portal branch, including its **X-first**
+/// axis preference. `dimension` is the "is a portal-capable dimension" guard — the
+/// overworld and the Nether only — which is why an End portal frame cannot be lit
+/// with flint.
 #[must_use]
 pub fn ignite<S: ChunkSource + ?Sized>(
     world: &S,
     dimension: Dimension,
     pos: BlockPos,
 ) -> Option<Vec<(BlockPos, String)>> {
-    // `inPortalDimension`: only the overworld and the Nether qualify — vanilla's
-    // `BaseFireBlock.onPlace` guard, `Level.getRespawnData().dimension() ==
-    // Level.OVERWORLD || level.dimension() == Level.NETHER`. An End portal is a
-    // different mechanism entirely (`EndPortalFrameBlock`'s eye-of-ender ring, not
-    // fire), so this declines rather than searching for a frame that fire cannot
-    // light.
+    // The "is a portal-capable dimension" guard: only the overworld and the
+    // Nether qualify. An End portal is a different mechanism entirely (an
+    // eye-of-ender ring, not fire), so this declines rather than searching for a
+    // frame that fire cannot light.
     match dimension {
         Dimension::Overworld | Dimension::Nether => {}
         Dimension::End => return None,
@@ -559,7 +557,7 @@ pub fn ignite<S: ChunkSource + ?Sized>(
     Some(shape.fill())
 }
 
-/// `PortalShape.calculateBottomLeft`.
+/// The real calculate-bottom-left rule.
 fn calculate_bottom_left<S: ChunkSource + ?Sized>(
     world: &S,
     dimension: Dimension,
@@ -576,7 +574,7 @@ fn calculate_bottom_left<S: ChunkSource + ?Sized>(
     (edge >= 0).then(|| BlockPos::new(pos.x + left.0 * edge, pos.y, pos.z + left.1 * edge))
 }
 
-/// `PortalShape.getDistanceUntilEdgeAboveFrame`.
+/// The real distance-until-edge-above-frame rule.
 ///
 /// Walks along `direction` while the cell is empty **and the cell below it is
 /// frame**, and returns the distance at which it hits a frame block. The
@@ -604,7 +602,7 @@ fn distance_until_edge_above_frame<S: ChunkSource + ?Sized>(
     0
 }
 
-/// `PortalShape.calculateWidth`.
+/// The real calculate-width rule.
 fn calculate_width<S: ChunkSource + ?Sized>(
     world: &S,
     bottom_left: BlockPos,
@@ -618,7 +616,7 @@ fn calculate_width<S: ChunkSource + ?Sized>(
     }
 }
 
-/// `PortalShape.calculateHeight`, returning `(height, portal_block_count)`.
+/// The real calculate-height rule, returning `(height, portal_block_count)`.
 fn calculate_height<S: ChunkSource + ?Sized>(
     world: &S,
     bottom_left: BlockPos,
@@ -635,7 +633,7 @@ fn calculate_height<S: ChunkSource + ?Sized>(
     }
 }
 
-/// `PortalShape.hasTopFrame`.
+/// The real has-top-frame rule.
 fn has_top_frame<S: ChunkSource + ?Sized>(
     world: &S,
     bottom_left: BlockPos,
@@ -652,11 +650,11 @@ fn has_top_frame<S: ChunkSource + ?Sized>(
     })
 }
 
-/// `PortalShape.getDistanceUntilTop`, returning `(height, portal_block_count)`.
+/// The real distance-until-top rule, returning `(height, portal_block_count)`.
 ///
 /// The count accumulates across every row it *did* walk, including on the row that
-/// terminated the loop — vanilla's `MutableInt` output parameter is not rolled back
-/// either.
+/// terminated the loop — vanilla's own mutable output-count parameter is not rolled
+/// back either.
 fn distance_until_top<S: ChunkSource + ?Sized>(
     world: &S,
     bottom_left: BlockPos,
@@ -690,8 +688,8 @@ fn distance_until_top<S: ChunkSource + ?Sized>(
 }
 
 /// The largest contiguous rectangle of the *same* portal state around `pos`, as
-/// `(min_corner, along_axis_size, height)` — vanilla's
-/// `BlockUtil.getLargestRectangleAround(pos, axis, 21, Y, 21, …)`.
+/// `(min_corner, along_axis_size, height)` — the real largest-rectangle-around rule,
+/// bounded to 21 in each direction.
 ///
 /// Used to place an arriving entity inside a portal it did not create: the relative
 /// position within the source portal's rectangle is carried to the destination's,
@@ -741,11 +739,11 @@ pub fn largest_rectangle_around<S: ChunkSource + ?Sized>(
 }
 
 /// Every lit portal this world knows about, per dimension — this crate's stand-in
-/// for vanilla's `PoiManager` index of `PoiTypes.NETHER_PORTAL`.
+/// for vanilla's own point-of-interest index of the nether-portal POI type.
 ///
 /// # Why an index rather than a scan
 ///
-/// `PortalForcer.findClosestPortalPosition` searches a **128-block radius** in the
+/// The real closest-portal-search rule searches a **128-block radius** in the
 /// overworld. Without an index that is 257 × 257 × 384 block reads across 289 chunk
 /// columns — most of them not generated yet — per return trip. Vanilla does not pay
 /// that because its POI manager is a persisted per-section index built as blocks
@@ -823,7 +821,7 @@ impl PortalIndex {
     }
 }
 
-/// `PoiTypes.NETHER_PORTAL`'s resource key — the type every cell in
+/// The real nether-portal POI type's resource key — the type every cell in
 /// [`PortalIndex`] persists as.
 pub const NETHER_PORTAL_POI_TYPE: &str = "minecraft:nether_portal";
 
@@ -831,9 +829,9 @@ pub const NETHER_PORTAL_POI_TYPE: &str = "minecraft:nether_portal";
 /// [`crate::poi_storage::PoiStorage::save`].
 ///
 /// A fresh [`crate::poi_storage::PoiRecord`] for this type starts at
-/// `free_tickets: 0` (`PoiTypes.bootstrap` registers `NETHER_PORTAL` with
-/// `maxTickets 0`), matching vanilla exactly: a portal is indexed for lookup, never
-/// claimed the way a workstation is.
+/// `free_tickets: 0` (the real POI-type bootstrap registers the nether-portal type
+/// with zero max tickets), matching vanilla exactly: a portal is indexed for
+/// lookup, never claimed the way a workstation is.
 ///
 /// Native only — see [`PortalIndex`]'s own doc for why.
 #[cfg(not(target_arch = "wasm32"))]
@@ -917,10 +915,10 @@ pub fn poi_chunks_for_index(
     out
 }
 
-/// `PortalForcer.NETHER_PORTAL_RADIUS` — the search radius when arriving *in* the
+/// The real nether-portal search radius — the search radius when arriving *in* the
 /// Nether.
 pub const NETHER_SEARCH_RADIUS: i32 = 16;
-/// `PortalForcer.OVERWORLD_PORTAL_RADIUS` — the (much larger) radius when arriving
+/// The real overworld-portal search radius — the (much larger) radius when arriving
 /// in the overworld, because the same Nether portal serves a 128-block overworld
 /// area under the 8:1 scale.
 pub const OVERWORLD_SEARCH_RADIUS: i32 = 128;
@@ -948,8 +946,8 @@ pub fn search_radius(dimension: Dimension) -> i32 {
     }
 }
 
-/// The closest existing portal to `origin` in `dimension` — vanilla's
-/// `PortalForcer.findClosestPortalPosition`.
+/// The closest existing portal to `origin` in `dimension` — the real
+/// closest-portal-search rule.
 ///
 /// Two sources, in this order, because neither alone is enough:
 ///
@@ -1047,7 +1045,8 @@ fn consider_portal_cell<S: ChunkSource + ?Sized>(
 /// the caller must write and broadcast.
 #[derive(Debug, Clone)]
 pub struct CreatedPortal {
-    /// The lower-left interior cell — `BlockUtil.FoundRectangle`'s `minCorner`.
+    /// The lower-left interior cell — vanilla's own found-rectangle's min-corner
+    /// field.
     pub origin: BlockPos,
     /// The axis the frame was laid out on.
     pub axis: Axis,
@@ -1057,26 +1056,27 @@ pub struct CreatedPortal {
     pub portal_cells: Vec<BlockPos>,
 }
 
-/// `PortalForcer.createPortal` — sites and builds a 2×3 portal near `origin`.
+/// The real portal-forcer create rule — sites and builds a 2×3 portal near
+/// `origin`.
 ///
 /// # What is ported exactly, and what is not
 ///
 /// Exact: the two-pass site search (a spot that can host the frame *and* both
 /// neighbouring thickness slices scores as "full", one that can host only the
-/// middle slice as "partial", and a full hit always wins), the `y + 4 <=
-/// maxPlaceableY` headroom check, the `deltaY <= 0 || deltaY >= 3` air-pocket rule,
-/// the `-1..3 × -1..4` frame ring, and the fallback that clamps `origin.y` into the
-/// placeable band and carves its own 2×2×4 pocket.
+/// middle slice as "partial", and a full hit always wins), the headroom check
+/// against the dimension's max placeable height, the air-pocket rule (the height
+/// delta is `<= 0` or `>= 3`), the `-1..3 × -1..4` frame ring, and the fallback
+/// that clamps `origin.y` into the placeable band and carves its own 2×2×4 pocket.
 ///
-/// **Not exact: the scan order.** Vanilla walks `BlockPos.spiralAround(origin, 16,
-/// EAST, SOUTH)`; this walks the same 33 × 33 square sorted by squared distance
-/// then `(dx, dz)`. Both visit the same set of columns, and the winner is chosen by
-/// a strict `>` on distance either way, so the two can only disagree between
-/// candidates at *identical* distance — which changes which of two equally good
-/// spots is used, not whether a spot is found.
+/// **Not exact: the scan order.** Vanilla walks an EAST/SOUTH-biased spiral out
+/// from `origin` bounded to radius 16; this walks the same 33 × 33 square sorted by
+/// squared distance then `(dx, dz)`. Both visit the same set of columns, and the
+/// winner is chosen by a strict `>` on distance either way, so the two can only
+/// disagree between candidates at *identical* distance — which changes which of two
+/// equally good spots is used, not whether a spot is found.
 ///
 /// Returns `None` only when the destination dimension has no placeable band at all,
-/// vanilla's `Optional.empty()` "unable to create a portal".
+/// vanilla's own "unable to create a portal" empty result.
 #[must_use]
 #[cfg(not(target_arch = "wasm32"))]
 fn columns_touched_by_the_site_search(origin: BlockPos) -> Vec<(i32, i32)> {
@@ -1120,7 +1120,7 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
     // before walking them one `block_state` read at a time.
     //
     // The loop below visits every one of the 33 x 33 offsets unconditionally —
-    // vanilla's own `PortalForcer.createPortal` does too (see this function's
+    // vanilla's own create-portal rule does too (see this function's
     // doc comment: "both visit the same set of columns"), so there is no early
     // exit to lose by prefetching everything up front. For a *destination*
     // dimension nothing has looked at yet (the common case: a player's first
@@ -1161,10 +1161,10 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
     for (dx, dz) in offsets {
         let column_x = origin.x + dx;
         let column_z = origin.z + dz;
-        // `columnPos.move(direction, 1)` then back: a world-border check we have no
-        // per-dimension border for, so the column is always in bounds. The moves
-        // themselves are what leaves `columnPos` where the scan expects it, and
-        // since they cancel there is nothing to reproduce here.
+        // Vanilla moves the column position out and back for a world-border check
+        // we have no per-dimension border for, so the column is always in bounds. The
+        // moves themselves are what leaves the column position where the scan
+        // expects it, and since they cancel there is nothing to reproduce here.
         let top = max_placeable_y.min(motion_blocking_height(world, dimension, column_x, column_z));
         let mut y = top;
         while y >= dimension.min_y() {
@@ -1283,13 +1283,12 @@ fn blocks_motion(state: &str) -> bool {
         .unwrap_or(true)
 }
 
-/// `BlockState.canBeReplaced() && getFluidState().isEmpty()` —
-/// `PortalForcer.canPortalReplaceBlock`.
+/// The real can-portal-replace-block rule: not-solid and no fluid state.
 ///
 /// **Two clauses, and the fluid one is not redundant.** Water and lava are
 /// non-motion-blocking, so the census clause alone calls them replaceable — and
 /// vanilla explicitly does not, because a portal carved into a lava lake fills
-/// straight back in. `canBeReplaced` itself has no census in this crate;
+/// straight back in. The real can-be-replaced check itself has no census in this crate;
 /// "does not block motion" is the standing proxy for it (air, plants, snow layers,
 /// fire all qualify), and it errs toward *refusing* a column, which only costs the
 /// search one more candidate.
@@ -1301,7 +1300,7 @@ fn can_portal_replace<S: ChunkSource + ?Sized>(world: &S, x: i32, y: i32, z: i32
     is_empty(&state) || !blocks_motion(&state)
 }
 
-/// `PortalForcer.canHostFrame`: the `-1..3 × -1..4` box offset sideways by
+/// The real can-host-frame rule: the `-1..3 × -1..4` box offset sideways by
 /// `offset` must be **solid below the origin row** and **replaceable at and above
 /// it**.
 fn can_host_frame<S: ChunkSource + ?Sized>(
@@ -1317,7 +1316,7 @@ fn can_host_frame<S: ChunkSource + ?Sized>(
             let y = origin.y + up;
             let z = origin.z + forward.1 * across + clockwise.1 * offset;
             if up < 0 {
-                // `BlockState.isSolid`, proxied by the motion census — the frame
+                // The real is-solid rule, proxied by the motion census — the frame
                 // needs something to stand on.
                 if !blocks_motion(&world.block_state(x, y, z)) {
                     return false;
@@ -1331,7 +1330,7 @@ fn can_host_frame<S: ChunkSource + ?Sized>(
 }
 
 /// The highest non-replaceable `y` in a column, plus one — a stand-in for
-/// `Heightmap.Types.MOTION_BLOCKING`, which this crate does not maintain per
+/// vanilla's own motion-blocking heightmap, which this crate does not maintain per
 /// dimension.
 ///
 /// Scans down from the dimension's ceiling. This is where the Nether's `height` vs
@@ -1368,7 +1367,7 @@ pub struct PortalDestination {
 }
 
 /// Resolves where a player standing in a portal at `player_pos` in `from` arrives in
-/// `to` — vanilla's `NetherPortalBlock.getPortalDestination` plus `getExitPortal`.
+/// `to` — vanilla's real get-portal-destination rule plus its exit-portal search.
 ///
 /// `destination` is the *target* dimension's terrain; `source_axis` is the axis of
 /// the portal block the player is standing in, which is what a newly built exit
@@ -1424,13 +1423,13 @@ pub fn resolve_destination<S: ChunkSource + ?Sized>(
 
 /// `minecraft:end_portal` — the block a completed end-portal-frame ring fills its
 /// 3×3 interior with, and the block stepping into which triggers a trip to the
-/// End (`EndPortalBlock.entityInside`).
+/// End (the real end-portal entity-inside rule).
 pub const END_PORTAL_BLOCK: &str = "minecraft:end_portal";
 
 /// `minecraft:end_portal_frame` — the block the stronghold portal room's 5×5 ring
-/// is built from (`EndPortalFrameBlock`). Its `eye` property is what
-/// `EnderEyeItem.useOn` flips true; this crate has no code that flips it (see
-/// this module's doc for exactly what is and is not implemented here).
+/// is built from. Its `eye` property is what
+/// the real eye-of-ender use-on rule flips true; this crate has no code that flips
+/// it (see this module's doc for exactly what is and is not implemented here).
 pub const END_PORTAL_FRAME_BLOCK: &str = "minecraft:end_portal_frame";
 
 /// Whether `state` is an `end_portal` block. Unlike [`is_portal`], the End's
@@ -1441,14 +1440,14 @@ pub fn is_end_portal(state: &str) -> bool {
 }
 
 /// The blocks [`ensure_end_platform`] writes for the fixed 5×5×4 obsidian
-/// platform every End arrival stands on — `EndPlatformFeature.createEndPlatform`,
+/// platform every End arrival stands on — the real end-platform-create rule,
 /// ported field for field rather than reasoned about, since a transposed loop
 /// bound here either strands the player over the void or buries them in
 /// obsidian.
 ///
 /// `origin` is the platform's **obsidian layer**, not the spawn point itself:
-/// `EndPortalBlock.getPortalDestination` calls this with
-/// `BlockPos.containing(Vec3.atBottomCenterOf(END_SPAWN_POINT)).below()`, which
+/// the real get-portal-destination rule computes this as the block containing
+/// the bottom-center of the fixed End spawn point, one block below — which
 /// for the integer constant `(100, 50, 0)` is `(100, 49, 0)` — one block *below*
 /// [`crate::dimension::Dimension::end_spawn_point`], not the point itself.
 ///
@@ -1472,8 +1471,8 @@ pub fn end_platform_writes(origin: BlockPos) -> Vec<(BlockPos, &'static str)> {
 
 /// Builds (or repairs) the End's fixed arrival platform through `world`,
 /// skipping any cell that already holds the target block — vanilla's own
-/// `!newLevel.getBlockState(blockPos).is(block)` guard on
-/// `EndPlatformFeature.createEndPlatform`, kept so a second arrival does not
+/// block-state-already-matches guard on the real end-platform-create rule,
+/// kept so a second arrival does not
 /// rewrite 100 already-correct cells (and, more importantly, does not
 /// re-destroy a floor a player has built on top of the platform since their
 /// first visit — vanilla's guard is precisely what makes that survive).
@@ -1489,15 +1488,15 @@ pub fn ensure_end_platform<S: ChunkSource + ?Sized>(world: &S, origin: BlockPos)
     }
 }
 
-/// Where a trip **into** the End lands — `EndPortalBlock.getPortalDestination`'s
-/// `fromEnd == false` arm, restricted to the `ServerPlayer` branch (the only
-/// entity kind this crate teleports through a portal).
+/// Where a trip **into** the End lands — the real get-portal-destination rule's
+/// "arriving from a non-End dimension" arm, restricted to the real player branch
+/// (the only entity kind this crate teleports through a portal).
 ///
 /// Returns `(platform_origin, arrival)`:
 /// * `platform_origin` is [`ensure_end_platform`]'s own parameter — the
 ///   obsidian layer's `y`, which is `end_spawn_point().1 - 1`
-///   (`BlockPos.containing(Vec3.atBottomCenterOf(spawnBlockPos)).below()` for
-///   the integer constant `(100, 50, 0)`).
+///   (one block below the block containing the bottom-center of the fixed spawn
+///   point, for the integer constant `(100, 50, 0)`).
 /// * `arrival` is where the *player* materialises: **one block below**
 ///   `end_spawn_point()` itself, standing on the obsidian floor rather than
 ///   floating over it. Vanilla applies this only for `entity instanceof
@@ -1521,7 +1520,7 @@ pub fn end_portal_arrival() -> (BlockPos, lodestone_model::Vec3) {
 }
 
 /// The result of successfully placing an eye of ender into an
-/// `end_portal_frame` — `EnderEyeItem.useOn`.
+/// `end_portal_frame` — the real eye-of-ender use-on rule.
 #[derive(Debug, Clone)]
 pub struct EndPortalIgnition {
     /// The frame cell's own new state (`eye=true`) — always present, whether
@@ -1547,25 +1546,25 @@ pub fn end_portal_frame_state(facing: Direction, eye: bool) -> String {
     )
 }
 
-/// An eye of ender used on `pos` — `EnderEyeItem.useOn`. `None` when `pos` is
-/// not an *unfired* `end_portal_frame` (not a frame at all, or one that
-/// already carries an eye), vanilla's `InteractionResult.PASS` guard.
+/// An eye of ender used on `pos` — the real eye-of-ender use-on rule. `None` when
+/// `pos` is not an *unfired* `end_portal_frame` (not a frame at all, or one that
+/// already carries an eye), vanilla's own "no interaction" guard.
 ///
 /// Otherwise always returns the frame's own `eye=true` write, plus — when
 /// this eye completes a full ring — the 3×3 interior `end_portal` cells. The
 /// caller (`crate::server`'s `apply_use_item_on`) owns every write and the
 /// item's consumption, the same division `ignite` uses for the Nether.
 ///
-/// # Why this is not vanilla's generic `BlockPattern` search
+/// # Why this is not vanilla's generic multi-block-pattern search
 ///
-/// `EndPortalFrameBlock.getOrCreatePortalShape` builds a reusable
-/// `BlockPattern` — Mojang's general multi-block matcher, also used for the
-/// iron golem and the wither — and `find` searches a translated, rotated
+/// The real get-or-create-portal-shape rule builds a reusable
+/// generic multi-block pattern matcher — also used for the
+/// iron golem and the wither — and searches a translated, rotated
 /// window for it. Porting that generic engine for one fixed 5×5 pattern would
 /// be porting infrastructure this crate has no other user for. What matters
 /// is the *result* of applying it to this one pattern, and that result is a
 /// single geometric rule, derived (not assumed) from
-/// `BlockPattern.translateAndRotate`'s cross-product construction applied to
+/// vanilla's own translate-and-rotate cross-product construction applied to
 /// this pattern's aisle string
 /// (`"?vvv?" / ">???<" ×3 / "?^^^?"`, `'v'`→`FACING NORTH`, `'^'`→`SOUTH`,
 /// `'>'`→`WEST`, `'<'`→`EAST`): **every one of the 12 rim frames must be eyed
@@ -1580,8 +1579,8 @@ pub fn end_portal_frame_state(facing: Direction, eye: bool) -> String {
 ///
 /// `pos`'s own facing pins which edge it can be on (a frame facing south can
 /// only be a north-edge cell), so the search below only has to try the three
-/// lateral offsets along that one edge — not the full 24-orientation sweep
-/// `BlockPattern.find` performs.
+/// lateral offsets along that one edge — not the full 24-orientation sweep the
+/// real generic pattern search performs.
 #[must_use]
 pub fn ignite_end_portal_frame<S: ChunkSource + ?Sized>(
     world: &S,
@@ -1660,9 +1659,10 @@ fn ring_is_complete<S: ChunkSource + ?Sized>(
 
 /// The 3×3 interior of the ring anchored at `(min_x, min_z, y)` — the cells
 /// [`ignite_end_portal_frame`] fills with [`END_PORTAL_BLOCK`] once the ring
-/// is complete. `EnderEyeItem.useOn`'s `match.getFrontTopLeft().offset(-3, 0,
-/// -3)` plus its `0..3 × 0..3` loop, re-derived from the ring's own bounding
-/// box rather than from `frontTopLeft` (which this module never constructs).
+/// is complete. The real eye-of-ender use-on rule's front-top-left offset by
+/// `(-3, 0, -3)` plus its `0..3 × 0..3` loop, re-derived from the ring's own
+/// bounding box rather than from a constructed front-top-left corner (which this
+/// module never constructs).
 fn interior_fill(min_x: i32, min_z: i32, y: i32) -> Vec<(BlockPos, String)> {
     let mut cells = Vec::with_capacity(9);
     for x in (min_x + 1)..=(min_x + 3) {
@@ -1691,8 +1691,8 @@ fn find_completed_ring<S: ChunkSource + ?Sized>(
     None
 }
 
-/// The per-player portal transition counter — vanilla's `Entity.portalProcess`
-/// (`PortalProcessor`) plus `Entity.portalCooldown`, in one small value.
+/// The per-player portal transition counter — vanilla's own per-entity
+/// portal-process state plus its portal-cooldown counter, in one small value.
 ///
 /// Lives as a `serve_play` local, next to `take_xp_delay`, because that is where
 /// every other per-player tick counter in this crate lives.
@@ -1701,9 +1701,9 @@ pub struct PortalTracker {
     /// The cell the player entered the portal at, carried so the destination search
     /// can read the *source* portal's axis and rectangle.
     entry: Option<BlockPos>,
-    /// `PortalProcessor.portalTime`.
+    /// Vanilla's own portal-process tick counter.
     ticks: i32,
-    /// `Entity.portalCooldown`.
+    /// Vanilla's own portal-cooldown counter.
     cooldown: i32,
 }
 
@@ -1714,7 +1714,7 @@ impl PortalTracker {
         Self::default()
     }
 
-    /// Whether a trip is currently forbidden — `Entity.isOnPortalCooldown`.
+    /// Whether a trip is currently forbidden — the real is-on-portal-cooldown rule.
     #[must_use]
     pub fn on_cooldown(&self) -> bool {
         self.cooldown > 0
@@ -1727,7 +1727,7 @@ impl PortalTracker {
     }
 
     /// Starts the cooldown after a completed trip —
-    /// `Entity.setPortalCooldown()`, which for a player is 10 ticks.
+    /// the real set-portal-cooldown rule, which for a player is 10 ticks.
     pub fn begin_cooldown(&mut self) {
         self.cooldown = PLAYER_PORTAL_COOLDOWN;
         self.ticks = 0;
@@ -1742,8 +1742,9 @@ impl PortalTracker {
     /// Faithful in three places that each look like a detail:
     ///
     /// * the cooldown is decremented first and, while non-zero, standing in a
-    ///   portal *re-arms* it (`setAsInsidePortal`'s `isOnPortalCooldown` branch
-    ///   calls `setPortalCooldown()` again) — which is what stops a player who
+    ///   portal *re-arms* it (vanilla's own is-on-portal-cooldown branch, when
+    ///   already inside a portal, resets the cooldown again) — which is what
+    ///   stops a player who
     ///   materialises inside the destination portal bouncing back and forth;
     /// * the counter **decays by 4** rather than resetting when outside;
     /// * the comparison is post-increment, so `transition_ticks == 0` fires on the
@@ -1894,14 +1895,14 @@ mod tests {
         }
         assert!(
             ignite(&world, Dimension::Overworld, BlockPos::new(0, 70, 0)).is_none(),
-            "a lit frame holds portal blocks, so findEmptyPortalShape must reject it"
+            "a lit frame holds portal blocks, so find_empty_portal_shape must reject it"
         );
         let shape = find_any_shape(&world, Dimension::Overworld, BlockPos::new(0, 70, 0), Axis::X);
         assert!(shape.is_complete(), "every interior cell is lit");
         assert_eq!(shape.portal_blocks(), 6);
     }
 
-    /// Directly exercises [`should_extinguish`]'s `wrongAxis`
+    /// Directly exercises [`should_extinguish`]'s "wrong axis"
     /// clause against a fixture that is **genuinely** broken (a frame block
     /// removed by hand, independent of [`extinguish_broken_frames`] entirely)
     /// — so the same-axis and perpendicular answers on the *identical* input
@@ -1935,7 +1936,7 @@ mod tests {
         );
         assert!(
             should_extinguish(&world, Dimension::Overworld, interior, Axis::X, Direction::Down, "minecraft:air"),
-            "vertical is never wrongAxis and must also reach the real frame"
+            "vertical is never the wrong axis and must also reach the real frame"
         );
     }
 
@@ -1971,8 +1972,9 @@ mod tests {
 
     /// The end-to-end shape: mining a single frame block clears
     /// every interior cell of the portal it supported, not just the one cell
-    /// touching the break -- vanilla's `setBlock` re-triggers `updateShape`
-    /// on the cell it just changed, cascading through the whole rectangle.
+    /// touching the break -- vanilla's real set-block rule re-triggers its
+    /// update-shape rule on the cell it just changed, cascading through the whole
+    /// rectangle.
     ///
     /// Predicts the exact count (6, the full 2x3 interior) rather than merely
     /// "at least one", which is what a single-hop (non-cascading) mistake
@@ -2238,7 +2240,7 @@ mod tests {
     }
 
     /// `end_platform_writes`'s shape against the geometry read directly out of
-    /// `EndPlatformFeature.createEndPlatform` (`dz`/`dx` in `-2..=2`, `dy` in
+    /// the real end-platform-create rule (`dz`/`dx` in `-2..=2`, `dy` in
     /// `-1..3`): 100 cells, exactly 25 obsidian (the `dy == -1` layer) and 75 air
     /// (three layers of 25), and the two corner cells that a transposed `dx`/`dz`
     /// loop bound would put in the wrong place.
