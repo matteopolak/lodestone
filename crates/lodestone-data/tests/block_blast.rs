@@ -11,9 +11,10 @@
 //! `tests/support/blast_fire_jvm.txt` is an authoritative dump produced by
 //! booting the real 26.2 server (`oracle-java/BlastFireOracle.java`) and reading
 //! four quantities per registered block:
-//! `Block::getExplosionResistance`, `FireBlock`'s private
-//! `igniteOdds`/`burnOdds` maps (populated by `FireBlock::bootStrap`, which
-//! `Bootstrap::bootStrap` calls), and `BlockStateBase::ignitedByLava`.
+//! vanilla's own "get explosion resistance" accessor, its own fire-block
+//! class's own private
+//! ignite-odds/burn-odds maps (populated by its own bootstrap step, which
+//! vanilla's own bootstrap step calls), and its own "ignited by lava" field.
 //!
 //! `blocks.json` has none of these fields; the fire odds are not even a block
 //! *property* (they are a side table keyed by `Block`), and

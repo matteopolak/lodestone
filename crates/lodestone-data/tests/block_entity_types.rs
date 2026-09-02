@@ -8,10 +8,10 @@
 //!
 //! `tests/support/block_entity_types_jvm.txt` is an authoritative dump produced
 //! by booting the real 26.2 server and, for each of the 32,366 states in
-//! `Block.BLOCK_STATE_REGISTRY`, finding the registered `BlockEntityType` whose
-//! `validBlocks` set claims it (`BlockEntityTypeOracle.java`). Neither of
+//! vanilla's own block-state registry, finding the registered block-entity type whose
+//! own valid-blocks set claims it (`BlockEntityTypeOracle.java`). Neither of
 //! Mojang's reports carries this pairing: `blocks.json` is block *properties*
-//! only (no `hasBlockEntity`, no type), and while `registries.json` does carry
+//! only (no has-block-entity flag, no type), and while `registries.json` does carry
 //! the `minecraft:block_entity_type` registry's 49 ids it says nothing about
 //! which blocks each type covers. So "boot the jar and ask it" is the only
 //! authoritative source, exactly as for hardness and collision shapes.
@@ -367,7 +367,7 @@ fn the_chest_family_maps_the_way_the_renderer_assumes() {
 
 /// Every state of a block that owns a block entity owns the *same* one.
 ///
-/// `BlockEntityType.isValid` is `validBlocks.contains(state.getBlock())` — a
+/// Vanilla's own block-entity-type "is valid" check is `validBlocks.contains(state.getBlock())` — a
 /// block-level test — so this must hold, and if a future version makes it
 /// per-state this test is what says so out loud instead of the table quietly
 /// depending on it.

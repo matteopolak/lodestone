@@ -62,8 +62,8 @@ fn committed_path() -> PathBuf {
 /// The committed jar dump — the external anchor, not gitignored.
 const DUMP: &str = include_str!("support/damage_types_jar.txt");
 
-/// `bypasses_cooldown` is declared at `DamageTypeTags.BYPASSES_COOLDOWN` and gates the
-/// i-frame window in `LivingEntity.hurtServer`, but ships **no data file**. It is
+/// `bypasses_cooldown` is declared at vanilla's own damage-type-tags constant and gates the
+/// i-frame window in its own "hurt server" step, but ships **no data file**. It is
 /// carried as a real, empty tag; see `assert`s in
 /// [`bypasses_cooldown_is_a_real_tag_with_no_members`].
 const CODE_ONLY_TAGS: [&str; 1] = ["bypasses_cooldown"];
@@ -237,7 +237,7 @@ fn scaling_index(name: &str) -> u8 {
 }
 
 fn effects_index(name: Option<&str>) -> u8 {
-    // `DamageType.DIRECT_CODEC`: optionalFieldOf("effects", DamageEffects.HURT).
+    // Vanilla's own damage-type direct codec: optionalFieldOf("effects", DamageEffects.HURT).
     match name.unwrap_or("hurt") {
         "hurt" => 0,
         "thorns" => 1,
@@ -250,7 +250,7 @@ fn effects_index(name: Option<&str>) -> u8 {
 }
 
 fn death_message_index(name: Option<&str>) -> u8 {
-    // `DamageType.DIRECT_CODEC`: optionalFieldOf("death_message_type", DEFAULT).
+    // Vanilla's own damage-type direct codec: optionalFieldOf("death_message_type", DEFAULT).
     match name.unwrap_or("default") {
         "default" => 0,
         "fall_variants" => 1,

@@ -7,8 +7,8 @@
 //! # Data provenance
 //!
 //! `tests/support/entity_dimensions_jvm.txt` is an authoritative dump produced
-//! by booting the real 26.2 server and reading `EntityType.getWidth()/
-//! getHeight()` (base `EntityDimensions`, scale 1) for every registered type —
+//! by booting the real 26.2 server and reading vanilla's own entity-type
+//! width/height accessors (base entity-dimensions record, scale 1) for every registered type —
 //! `width`/`height` as raw f32 bits, keyed by network registry id. It is
 //! committed as the external anchor (§ "an expected value must originate outside
 //! the code under test"): the table is derived from it, so a misread f32 or a
