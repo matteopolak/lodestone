@@ -13,7 +13,7 @@ pub struct Vec3d {
     pub z: f64,
 }
 
-/// A coordinate axis, mirroring `Direction.Axis`.
+/// A coordinate axis, mirroring vanilla's own axis enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Axis {
     /// The X axis.
@@ -25,7 +25,7 @@ pub enum Axis {
 }
 
 impl Vec3d {
-    /// `Vec3.ZERO`.
+    /// Vanilla's own zero vector.
     pub const ZERO: Self = Self {
         x: 0.0,
         y: 0.0,
@@ -38,59 +38,59 @@ impl Vec3d {
         Self { x, y, z }
     }
 
-    /// `Vec3.add`.
+    /// Vanilla's own vector add.
     #[must_use]
     #[allow(
         clippy::should_implement_trait,
-        reason = "named to mirror vanilla `Vec3.add`; expression order is deliberately preserved"
+        reason = "named to mirror vanilla's own vector add; expression order is deliberately preserved"
     )]
     pub fn add(self, o: Vec3d) -> Self {
         Self::new(self.x + o.x, self.y + o.y, self.z + o.z)
     }
 
-    /// `Vec3.subtract`.
+    /// Vanilla's own vector subtract.
     #[must_use]
     pub fn subtract(self, o: Vec3d) -> Self {
         Self::new(self.x - o.x, self.y - o.y, self.z - o.z)
     }
 
-    /// `Vec3.scale`.
+    /// Vanilla's own vector scale.
     #[must_use]
     pub fn scale(self, f: f64) -> Self {
         self.multiply_each(f, f, f)
     }
 
-    /// `Vec3.multiply(double, double, double)`.
+    /// Vanilla's own per-component vector multiply.
     #[must_use]
     pub fn multiply_each(self, fx: f64, fy: f64, fz: f64) -> Self {
         Self::new(self.x * fx, self.y * fy, self.z * fz)
     }
 
-    /// `Vec3.lengthSqr`.
+    /// Vanilla's own squared length.
     #[must_use]
     pub fn length_sqr(self) -> f64 {
         self.x * self.x + self.y * self.y + self.z * self.z
     }
 
-    /// `Vec3.length`.
+    /// Vanilla's own length.
     #[must_use]
     pub fn length(self) -> f64 {
         self.length_sqr().sqrt()
     }
 
-    /// `Vec3.horizontalDistanceSqr`.
+    /// Vanilla's own squared horizontal distance.
     #[must_use]
     pub fn horizontal_distance_sqr(self) -> f64 {
         self.x * self.x + self.z * self.z
     }
 
-    /// `Vec3.horizontalDistance`.
+    /// Vanilla's own horizontal distance.
     #[must_use]
     pub fn horizontal_distance(self) -> f64 {
         (self.x * self.x + self.z * self.z).sqrt()
     }
 
-    /// `Vec3.normalize`.
+    /// Vanilla's own normalize.
     ///
     /// Returns `ZERO` when the length is below `1.0E-5F` (a `float` literal in
     /// vanilla, widened to `double` for the comparison), exactly as vanilla.
@@ -104,7 +104,7 @@ impl Vec3d {
         }
     }
 
-    /// `Vec3.get(Axis)`.
+    /// Vanilla's own per-axis component get.
     #[must_use]
     pub fn get(self, axis: Axis) -> f64 {
         match axis {
@@ -114,7 +114,7 @@ impl Vec3d {
         }
     }
 
-    /// `Vec3.with(Axis, double)`.
+    /// Vanilla's own per-axis component with-replace.
     #[must_use]
     pub fn with(self, axis: Axis, value: f64) -> Self {
         match axis {
@@ -125,7 +125,8 @@ impl Vec3d {
     }
 }
 
-/// An axis-aligned bounding box, mirroring `net.minecraft.world.phys.AABB`.
+/// An axis-aligned bounding box, mirroring vanilla's own axis-aligned
+/// bounding box type.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aabb {
     /// Minimum X.
@@ -163,7 +164,7 @@ impl Aabb {
         }
     }
 
-    /// `AABB.min(Axis)`.
+    /// Vanilla's own per-axis min.
     #[must_use]
     pub fn min(&self, axis: Axis) -> f64 {
         match axis {
@@ -173,7 +174,7 @@ impl Aabb {
         }
     }
 
-    /// `AABB.max(Axis)`.
+    /// Vanilla's own per-axis max.
     #[must_use]
     pub fn max(&self, axis: Axis) -> f64 {
         match axis {
@@ -183,7 +184,7 @@ impl Aabb {
         }
     }
 
-    /// `AABB.move(double, double, double)`.
+    /// Vanilla's own box translate.
     #[must_use]
     pub fn moved(&self, xa: f64, ya: f64, za: f64) -> Self {
         Self::new(
@@ -196,13 +197,13 @@ impl Aabb {
         )
     }
 
-    /// `AABB.move(Vec3)`.
+    /// Vanilla's own box translate, vector form.
     #[must_use]
     pub fn move_vec(&self, v: Vec3d) -> Self {
         self.moved(v.x, v.y, v.z)
     }
 
-    /// `AABB.expandTowards(double, double, double)` — the broadphase sweep box.
+    /// Vanilla's own box expand-towards — the broadphase sweep box.
     #[must_use]
     pub fn expand_towards(&self, xa: f64, ya: f64, za: f64) -> Self {
         let mut min_x = self.min_x;
@@ -229,7 +230,7 @@ impl Aabb {
         Self::new(min_x, min_y, min_z, max_x, max_y, max_z)
     }
 
-    /// `AABB.inflate(double)` — grow by `d` on all six faces (`deflate` is
+    /// Vanilla's own box inflate — grow by `d` on all six faces (`deflate` is
     /// `inflate(-d)`, which vanilla spells that way and so do we).
     ///
     /// Note vanilla does **not** clamp a deflation that inverts the box; it
@@ -247,7 +248,7 @@ impl Aabb {
         )
     }
 
-    /// `AABB.intersects(AABB)` (`AABB.java:245-247`) — strict `min < max` on all
+    /// Vanilla's own box-intersection check — strict `min < max` on all
     /// three axes, so a **flush** contact is *not* an intersection.
     #[must_use]
     pub fn intersects(&self, o: &Self) -> bool {
@@ -259,10 +260,10 @@ impl Aabb {
             && self.max_z > o.min_z
     }
 
-    /// `AABB.getSize()` (`AABB.java:267-272`) — the **mean** of the three edge
-    /// lengths, `(xs + ys + zs) / 3.0`. Not a volume and not a diagonal; it is the
-    /// quantity `EntityGetter.getEntityCollisions` compares against `1.0E-7` to
-    /// reject a degenerate query box.
+    /// Vanilla's own box "get size" — the **mean** of the three edge
+    /// lengths, `(xs + ys + zs) / 3.0`. Not a volume and not a diagonal; it
+    /// is the quantity vanilla's own entity-collisions query compares
+    /// against `1.0E-7` to reject a degenerate query box.
     #[must_use]
     pub fn size(&self) -> f64 {
         let xs = self.max_x - self.min_x;
