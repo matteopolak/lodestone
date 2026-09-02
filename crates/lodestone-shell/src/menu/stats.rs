@@ -59,9 +59,9 @@
 //!   (Escape/Done), the General tab's real vanilla structure (77 stats,
 //!   vanilla's own captions, vanilla's own three format rules — `DEFAULT`,
 //!   `DIVIDE_BY_TEN`, `DISTANCE`, `TIME`, transcribed from
-//!   `StatFormatter.java` and tested against known non-zero inputs, not only
+//!   vanilla's own stat-formatter declarations and tested against known non-zero inputs, not only
 //!   the trivial zero case), and the census (`GENERAL_STATS.len() == 77`,
-//!   matching `Stats.java`'s own count of `makeCustomStat` calls).
+//!   matching vanilla's own stats declarations' own count of `makeCustomStat` calls).
 //! - **Decorative**: every value shown, because nothing decodes the packet
 //!   that would populate one — see above. Enabling the pause button
 //!   ([`super::nav::PauseButton::Statistics`]) reflects that this screen now
@@ -115,8 +115,8 @@ pub fn tab_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
 /// in [`StatsNav::focused`] read as harmless.
 pub const DONE_ROW: usize = 0;
 
-/// `StatFormatter.java`'s four formatters, transcribed. `DEFAULT` is vanilla's
-/// `NumberFormat.getIntegerInstance(Locale.US)` — thousands-grouped, no
+/// Vanilla's own stat-formatter declarations' four formatters, transcribed. `DEFAULT` is
+/// the JDK's own integer number format for the US locale — thousands-grouped, no
 /// decimals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatFormat {
@@ -141,7 +141,7 @@ impl StatFormat {
         format!("{value:.2}")
     }
 
-    /// `NumberFormat.getIntegerInstance(Locale.US)`: thousands-grouped,
+    /// The JDK's own integer number format for the US locale: thousands-grouped,
     /// integral. `value` is `i64` because [`Self::format`]'s caller widens
     /// before dividing (see its own doc on why `i32::MIN` cannot be negated
     /// in place).
@@ -223,10 +223,10 @@ fn java_double_to_string(v: f64) -> String {
     }
 }
 
-/// `Stats.java`'s 77 `makeCustomStat` calls, in declaration order — id, the
+/// Vanilla's own stats declarations' 77 `makeCustomStat` calls, in declaration order — id, the
 /// verbatim `en_us.json` caption at `stat.minecraft.<id>`, and its
 /// [`StatFormat`]. Declaration order does not matter for display (vanilla
-/// sorts by *translated* caption, `StatsScreen.java`,
+/// sorts by *translated* caption, vanilla's own stats-screen rendering,
 /// `Comparator.comparing(k -> I18n.get(...))`) — see [`general_rows`], which
 /// sorts at call time instead of requiring this table pre-sorted, so adding a
 /// stat here never has to also get its alphabetical position right.
@@ -402,7 +402,7 @@ pub fn general_rows(snapshot: &StatsSnapshot) -> Vec<(&'static str, String)> {
 
 // -- geometry: a flat list, same departure key_binds.rs/social.rs make ------
 
-/// `GeneralStatisticsList`'s own `itemHeight` (`StatsScreen.java`:
+/// `GeneralStatisticsList`'s own `itemHeight` (vanilla's own stats-screen rendering:
 /// `super(minecraft, StatsScreen.this.width, StatsScreen.this.layout.
 /// getContentHeight(), 33, 14)` — the last constructor argument). **Not**
 /// [`options::WIDGET_H`] (20 px) — that was this constant's previous value,
@@ -416,10 +416,10 @@ pub fn general_rows(snapshot: &StatsSnapshot) -> Vec<(&'static str, String)> {
 /// conversion has the right constant already sitting here rather than a
 /// second archaeology pass through the jar.
 pub const ROW_H: f32 = 14.0;
-/// `ItemStatisticsList`'s own `itemHeight` (`StatsScreen.java`: `super(…,
+/// `ItemStatisticsList`'s own `itemHeight` (vanilla's own stats-screen rendering: `super(…,
 /// 33, 22)`). Not yet consumed — see [`ROW_H`]'s own doc.
 pub const ITEMS_ROW_H: f32 = 22.0;
-/// `MobsStatisticsList`'s own `itemHeight` (`StatsScreen.java`: `super(…,
+/// `MobsStatisticsList`'s own `itemHeight` (vanilla's own stats-screen rendering: `super(…,
 /// 33, 9 * 4)` — four lines of the 9 px font, ported as the expression rather
 /// than the literal `36` so a font-size change would not silently desync it).
 /// Not yet consumed — see [`ROW_H`]'s own doc.
@@ -1024,7 +1024,7 @@ mod tests {
     #[test]
     fn general_row_colour_alternates_and_the_two_shades_are_vanillas_own_argb() {
         // Expected values originate outside this function: `-1`/`-4539718` are
-        // `StatsScreen.java`'s own literals, unpacked by the shared
+        // vanilla's own stats-screen rendering's own literals, unpacked by the shared
         // `argb_to_rgba` rather than restated as a second pair of floats.
         assert_eq!(general_row_colour(0), widget::argb_to_rgba(-1));
         assert_eq!(general_row_colour(1), widget::argb_to_rgba(-4_539_718));
