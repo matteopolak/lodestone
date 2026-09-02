@@ -837,7 +837,7 @@ mod tests {
         assert!(untouched.enabled_features().is_empty());
     }
 
-    /// **The real path a toggled Experiments flag takes to disk** (issue #693):
+    /// **The real path a toggled Experiments flag takes to disk**:
     /// `with_enabled_features`, a real gzip round trip, and read back with
     /// [`LevelDat::enabled_features`] — a decoder sharing its parsing with
     /// every other accessor in this file but not with the encoder under test,
@@ -845,8 +845,8 @@ mod tests {
     /// evidence rules warn against on its own; the real safeguard is
     /// [`re_encoding_a_real_vanilla_file_reproduces_mojangs_own_bytes`]
     /// pinning this crate's writer against Mojang's own bytes elsewhere in
-    /// this schema, and vanilla's `FeatureFlagRegistry::codec` (this method's
-    /// doc) fixing the `minecraft:`-namespaced list shape being asserted here.
+    /// this schema, and vanilla's own feature-flag registry codec fixing the
+    /// `minecraft:`-namespaced list shape being asserted here.
     #[test]
     fn with_enabled_features_round_trips_the_chosen_flags_plus_vanilla() {
         let level = LevelDat::for_new_world("New World", &Spawn::default(), 0)
