@@ -42,7 +42,7 @@
 //! small vanilla censuses per-module rather than share them across a crate
 //! boundary it cannot reach (e.g. `fire.rs`/`growth_tick.rs`'s own private
 //! `base_name` copies). If the two ever disagree, the server's copy is
-//! authoritative; re-derive this one from `BeaconBlockEntity.java` again.
+//! authoritative; re-derive this one from vanilla's own beacon block entity again.
 //!
 //! `container::geometry`'s draw side blits the real vanilla art for these:
 //! a `22x22` `container/beacon/button*` state sprite per button, then the

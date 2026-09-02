@@ -722,7 +722,7 @@ mod tests {
     #[test]
     fn the_rect_is_vanillas_recess_relative_to_the_panel() {
         let a = PlayerAvatar::new(PANEL.0, PANEL.1, None);
-        // `InventoryScreen.java`: `xo + 26, yo + 8` to `xo + 75, yo + 78`.
+        // Vanilla's own inventory-screen layout: `xo + 26, yo + 8` to `xo + 75, yo + 78`.
         assert_eq!(a.rect.x, PANEL.0 + 26.0);
         assert_eq!(a.rect.y, PANEL.1 + 8.0);
         assert_eq!(a.rect.x + a.rect.w, PANEL.0 + 75.0);

@@ -8,20 +8,21 @@
 //! `ClientAction::SetFlying`/`SetBeaconEffects` were caught in before their
 //! own fixes. This module is the producer for the one screen 26.2 actually
 //! uses it for that this tree already renders: the enchanting table's three
-//! offer rows (`EnchantmentScreen.mouseClicked`/`clickMenuButton`,
-//! `EnchantmentScreen.java`/`EnchantmentMenu.java`). Vanilla's other two
+//! offer rows (vanilla's own enchantment-screen click handling and its own
+//! enchantment-menu button-click handling). Vanilla's other two
 //! `ContainerButtonClick` screens, the stonecutter and the loom, pick a
 //! *recipe*/*pattern* from a server-populated list this tree has no registry
-//! sync for yet (`StonecutterMenu`/`LoomMenu`'s `selectableRecipes` mechanism)
+//! sync for yet (vanilla's own stonecutter/loom menus' selectable-recipes mechanism)
 //! — out of scope here, see `docs/container-cost-screens.md`.
 //!
 //! ## How it works
 //!
-//! [`offer_rect`] is `EnchantmentScreen.mouseClicked`'s own click rect
+//! [`offer_rect`] is vanilla's own enchantment-screen click handling's own click rect
 //! (`xo + 60, yo + 14 + 19*i, 108, 19`) — the exact same local-widget-pixel
 //! geometry `container::geometry::draw_enchanting_costs` already draws the
 //! cost numbers at, so the clickable area and the drawn button always agree.
-//! [`offer_clickable`] is `EnchantmentMenu.clickMenuButton`'s own gate: it
+//! [`offer_clickable`] is vanilla's own enchantment-menu button-click
+//! handling's own gate: it
 //! runs **client-side too** (the client's own `EnchantmentMenu` mirror calls
 //! it before sending anything), but its `access.execute` is a no-op there —
 //! so on the client it only ever answers "is this click worth sending",
