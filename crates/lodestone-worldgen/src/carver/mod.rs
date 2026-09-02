@@ -3,7 +3,8 @@
 //! After the noise field is filled and surface rules run, vanilla scans a
 //! 17×17 neighbourhood of *source* chunks around the target chunk and, for each
 //! carver configured on the source chunk's biome, seeds a positional RNG
-//! (`setLargeFeatureSeed`), rolls a probability gate (`isStartChunk`), and — on
+//! (vanilla's own large-feature-seed derivation), rolls a probability gate
+//! (vanilla's own "is start chunk" check), and — on
 //! success — carves tunnels/ravines that write air/water/lava into the *centre*
 //! chunk only. The algorithm is hand-written machinery (this crate); the
 //! per-version parameters (probabilities, radii, y-ranges) arrive as JSON data
@@ -31,12 +32,13 @@ use crate::rng::RandomSource;
 const AIR: &str = "minecraft:air";
 const WATER: &str = "minecraft:water[level=0]";
 const LAVA: &str = "minecraft:lava[level=0]";
-/// `WorldCarver.CAVE_AIR`. Only `NetherWorldCarver.carveBlock` writes it — the
-/// Overworld's `getCarveState` goes through the aquifer, whose air is plain
+/// Vanilla's own cave-air constant. Only vanilla's own nether-carver
+/// block-carve writes it — the
+/// Overworld's own carve-state query goes through the aquifer, whose air is plain
 /// `Blocks.AIR`.
 const CAVE_AIR: &str = "minecraft:cave_air";
 
-/// The carver neighbourhood radius (`applyCarvers`: `dx,dz ∈ [-8, 8]`).
+/// The carver neighbourhood radius (vanilla's own apply-carvers routine: `dx,dz ∈ [-8, 8]`).
 ///
 /// `pub` since Unit 9, and the visibility is load-bearing rather than cosmetic:
 /// [`crate::biome::memo`]'s slot map is sized so that one carve stage's
@@ -46,13 +48,13 @@ const CAVE_AIR: &str = "minecraft:cave_air";
 /// neighbourhood would have silently degraded the memo to a thrashing cache with
 /// every test still green.
 pub const NEIGHBOURHOOD_RANGE: i32 = 8;
-/// Each carver's own `getRange()` (== 4), giving a max tunnel length of
+/// Each carver's own range query (== 4), giving a max tunnel length of
 /// `(4*2-1)*16 = 112` blocks.
 const CARVER_RANGE: i32 = 4;
 const MAX_DISTANCE: i32 = (CARVER_RANGE * 2 - 1) * 16;
 
 /// A vertical position that resolves against the world's height accessor
-/// (`net.minecraft.world.level.levelgen.VerticalAnchor`).
+/// (vanilla's own vertical-anchor type).
 #[derive(Clone, Copy, Debug)]
 pub enum VerticalAnchor {
     Absolute(i32),
@@ -83,7 +85,7 @@ impl VerticalAnchor {
     }
 }
 
-/// `net.minecraft.util.valueproviders.FloatProvider`. Only the variants used by
+/// Vanilla's own float-provider type. Only the variants used by
 /// the overworld carvers are modelled; each `sample` consumes exactly the same
 /// number of RNG draws as vanilla (constant: 0, uniform: 1, trapezoid: 2).
 #[derive(Clone, Copy, Debug)]
@@ -163,8 +165,9 @@ impl HeightProvider {
 /// Cave carver configuration (`CaveCarverConfiguration`).
 ///
 /// One struct for `minecraft:cave` **and** `minecraft:nether_cave`: they share the
-/// codec exactly (`WorldCarver.java:32-34` registers both against
-/// `CaveCarverConfiguration`), and `NetherWorldCarver extends CaveWorldCarver`
+/// codec exactly (vanilla's own carver base registers both against the same
+/// cave-carver-configuration type), and vanilla's own nether-carver extends
+/// its own cave-carver
 /// overriding only the four things [`CaveConfig::nether`] selects.
 #[derive(Clone, Debug)]
 pub struct CaveConfig {
@@ -178,12 +181,12 @@ pub struct CaveConfig {
     /// `minecraft:nether_cave` rather than `minecraft:cave`.
     ///
     /// **Three of the four differences are RNG draws, so this is not cosmetic.**
-    /// `getCaveBound()` is 10 instead of 15 (same three draws, different bound),
-    /// and `getThickness` is `(nextFloat()*2 + nextFloat()) * 2.0` — **two**
+    /// Vanilla's own cave-bound query is 10 instead of 15 (same three draws, different bound),
+    /// and vanilla's own thickness query is `(nextFloat()*2 + nextFloat()) * 2.0` — **two**
     /// draws, where the Overworld's is 2 plus a `nextInt(10)` plus a conditional
     /// 2 more. Routing a nether carver through the Overworld formula desyncs the
     /// stream on the first tunnel and every later cave in the chunk is wrong.
-    /// The fourth, `getYScale() = 5.0`, consumes nothing but stretches every
+    /// The fourth, vanilla's own Y-scale query returning `5.0`, consumes nothing but stretches every
     /// trunk tunnel vertically; the recursive splits still pass `1.0`.
     pub nether: bool,
 }
@@ -276,7 +279,7 @@ impl CarverConfig {
 /// Carvers read the current block (to test replaceability) and overwrite it
 /// with air/water/lava.
 ///
-/// Backed by [`crate::dense_grid::DenseBlockGrid`] (issue #295's Job 2) — a
+/// Backed by [`crate::dense_grid::DenseBlockGrid`] (this change's Job 2) — a
 /// flat, palette-indexed array instead of a `HashMap<(i32,i32,i32), String>`.
 /// The measured regression this replaces: composing carvers over the old
 /// `HashMap`-keyed shape (designed for parity-harness fixtures, not a
@@ -301,7 +304,7 @@ impl std::fmt::Debug for CarveGrid {
 impl CarveGrid {
     /// Test-adapter constructor (see struct doc): the bounding box is
     /// derived from the map's own key range, so this remains a drop-in
-    /// replacement for the pre-#295-Job-2 `HashMap`-keyed constructor —
+    /// replacement for an earlier `HashMap`-keyed constructor —
     /// every existing fixture-driven caller is unchanged.
     #[must_use]
     pub fn new(blocks: HashMap<(i32, i32, i32), String>) -> Self {
@@ -384,7 +387,7 @@ struct CarveEnv<'a> {
     center_z: i32,
     lava_level_y: i32,
     /// Whether the carver currently running is `minecraft:nether_cave`, which
-    /// overrides `carveBlock` wholesale. Set per carver in [`apply_carvers`]
+    /// overrides vanilla's own block-carve wholesale. Set per carver in [`apply_carvers`]
     /// rather than per env, because a biome's list can in principle mix types.
     nether: bool,
 }
@@ -408,10 +411,10 @@ impl CarveEnv<'_> {
         }
     }
 
-    /// `WorldCarver.carveBlock`. `has_grass` tracks whether a grass/mycelium
+    /// Vanilla's own carver block-carve. `has_grass` tracks whether a grass/mycelium
     /// block has been seen higher in this column; when set, a dirt block exposed
     /// directly beneath a carved block is re-capped with the biome's
-    /// `topMaterial`.
+    /// own top-material field.
     fn carve_block(&mut self, x: i32, y: i32, z: i32, has_grass: &mut bool) -> bool {
         if self.nether {
             return self.carve_block_nether(x, y, z);
@@ -456,7 +459,7 @@ impl CarveEnv<'_> {
     ///
     /// No aquifer consultation, no `lava_level` from the config (the `+ 31` is
     /// hardcoded and, at `min_y 0`, means y ≤ 31 — one below the Nether's
-    /// `sea_level` of 32), no grass tracking and no `topMaterial` re-cap. So none
+    /// `sea_level` of 32), no grass tracking and no top-material re-cap. So none
     /// of [`CarveEnv::carve_state`]'s inputs are read on this path, which is what
     /// makes a *disabled* aquifer harmless here.
     fn carve_block_nether(&mut self, x: i32, y: i32, z: i32) -> bool {
@@ -533,24 +536,24 @@ fn cave_should_skip(xd: f64, yd: f64, zd: f64, floor_level: f64) -> bool {
 
 const CAVE_BOUND: i32 = 15;
 const CAVE_Y_SCALE: f64 = 1.0;
-/// `NetherWorldCarver.getCaveBound()`.
+/// Vanilla's own nether-carver cave-bound query.
 const NETHER_CAVE_BOUND: i32 = 10;
-/// `NetherWorldCarver.getYScale()`. Applied to the **trunk** tunnel only; the
+/// Vanilla's own nether-carver Y-scale query. Applied to the **trunk** tunnel only; the
 /// two recursive splits pass a literal `1.0` in both carvers.
 const NETHER_CAVE_Y_SCALE: f64 = 5.0;
 
 impl CaveConfig {
-    /// `getCaveBound()`.
+    /// Vanilla's own cave-bound query.
     fn cave_bound(&self) -> i32 {
         if self.nether { NETHER_CAVE_BOUND } else { CAVE_BOUND }
     }
 
-    /// `getYScale()`.
+    /// Vanilla's own Y-scale query.
     fn trunk_y_scale(&self) -> f64 {
         if self.nether { NETHER_CAVE_Y_SCALE } else { CAVE_Y_SCALE }
     }
 
-    /// `getThickness(random)` — **different draw counts per family**, see
+    /// Vanilla's own thickness query — **different draw counts per family**, see
     /// [`CaveConfig::nether`].
     fn thickness<R: RandomSource>(&self, random: &mut R) -> f32 {
         if self.nether {
@@ -947,12 +950,14 @@ impl CarveObserver for NoObserver {
 /// source chunk × carver and writing carved blocks into `grid`.
 ///
 /// `carvers_for_source(source_x, source_z)` resolves the carver list to run
-/// for one source chunk. Vanilla's own `carverBiome` resolution
-/// (`NoiseBasedChunkGenerator.applyCarvers`) samples that source chunk's
+/// for one source chunk. Vanilla's own carver-biome resolution
+/// (its own noise-based-chunk-generator apply-carvers routine) samples that
+/// source chunk's
 /// biome (at its own quart corner, `y = 0` — **not** the biome's surface
 /// height; carver selection is a different question from surface material)
 /// and reads *that* biome's `carvers` list, so the list — and its order,
-/// which the `index` used for `setLargeFeatureSeed` depends on — can differ
+/// which the index used for vanilla's own large-feature-seed derivation
+/// depends on — can differ
 /// per source chunk. A caller with a single fixed biome for the whole
 /// neighbourhood (every isolated fixture test in this crate) can ignore the
 /// arguments and return the same list every time.
