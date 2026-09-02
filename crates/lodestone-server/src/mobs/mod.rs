@@ -11061,7 +11061,7 @@ mod follow_range_tests {
         world
     }
 
-    /// Issue #230's axolotl play-dead (`Axolotl.hurtServer`'s own
+    /// Issue #230's axolotl play-dead (vanilla's own axolotl hurt-handler's own
     /// `PLAY_DEAD_TICKS` gate), gated through the real production path
     /// (`MobSim::attack` → `SimMob::apply_damage`). The trigger is
     /// probabilistic (`axolotl_play_dead_roll`'s own two `nextInt(3)`-shaped
@@ -11135,11 +11135,11 @@ mod follow_range_tests {
         );
     }
 
-    /// Issue #230's camel `RandomSitting`, gated through the real production
+    /// Issue #230's random-sitting camel behaviour, gated through the real production
     /// tick path (`MobSim::tick`, the loop `camel_random_sitting` is called
     /// from) rather than by calling the function on a bare `SimMob`. A camel
     /// left alone long enough must eventually sit down — proving both the
-    /// state flip and that it reaches the wire as the real `Pose.SITTING`
+    /// state flip and that it reaches the wire as the real sitting-pose
     /// ordinal (`10`) `MetadataField::Pose` already carries for the warden,
     /// not merely a private bookkeeping bool nothing reads.
     ///
@@ -11185,7 +11185,7 @@ mod follow_range_tests {
                 .snapshot()
                 .metadata
                 .contains(&MetadataField::Pose(CAMEL_POSE_SITTING)),
-            "a sitting camel must report the real Pose.SITTING ordinal to the client"
+            "a sitting camel must report the real sitting-pose ordinal to the client"
         );
     }
 
@@ -11209,13 +11209,13 @@ mod follow_range_tests {
                     .snapshot()
                     .metadata
                     .contains(&MetadataField::Pose(CAMEL_POSE_SITTING)),
-                "a cow must never report Pose.SITTING, however long it stands around"
+                "a cow must never report the sitting pose, however long it stands around"
             );
         }
     }
 
-    /// Issue #230's remaining camel gap: `Camel.onPlayerJump`/
-    /// `executeRidersJump` end to end through the real production path —
+    /// Issue #230's remaining camel gap: vanilla's own rider-jump handler and
+    /// rider-jump executor end to end through the real production path —
     /// `MobSim::interact` (mounting) then `MobSim::trigger_camel_dash` (the
     /// `ServerBound::PlayerInput` jump-bit consumer's own call), not a
     /// hand-built double. Checks the whole real chain a rider drives: mount
@@ -11250,7 +11250,7 @@ mod follow_range_tests {
                 .snapshot()
                 .metadata
                 .contains(&MetadataField::Dash(true)),
-            "a dashing camel must report Camel.DASH: true to the wire"
+            "a dashing camel must report the dash metadata flag as true to the wire"
         );
 
         for _ in 0..CAMEL_DASH_MINIMUM_DURATION_TICKS {
@@ -11267,7 +11267,7 @@ mod follow_range_tests {
         );
     }
 
-    /// `Camel.onPlayerJump`'s `dashCooldown <= 0` gate: a second jump press
+    /// Vanilla's own rider-jump handler's cooldown-at-or-below-zero gate: a second jump press
     /// while still cooling down must not restart the dash window, and the
     /// full 55-tick cooldown (`CAMEL_DASH_COOLDOWN_TICKS`) must actually
     /// elapse — not merely the 5-tick minimum duration — before a third
@@ -11303,7 +11303,7 @@ mod follow_range_tests {
     }
 
     /// **Controls**: a baby camel refuses to mount at all
-    /// (`Camel.mobInteract`'s `!this.isBaby()` gate), and a species that
+    /// (vanilla's own camel interaction override's own "is not a baby" gate), and a species that
     /// bypasses `MobSim::interact` entirely — mounted directly through the
     /// low-level, species-blind `mount_mob` — still never dashes, proving
     /// `trigger_camel_dash`'s own species check is real and not merely
@@ -11337,7 +11337,7 @@ mod follow_range_tests {
     }
 
     /// Issue #241's ominous-bottle producer: a pillager patrol leader
-    /// (`RaiderPredicate.CAPTAIN_WITHOUT_RAID`'s `isCaptain`) killed while
+    /// (vanilla's own "captain without raid" raider predicate's own "is captain" check) killed while
     /// **not** a member of any active raid must drop `minecraft:ominous_bottle`.
     /// Three controls on the same death path, each isolating one clause of
     /// the predicate the real one needs both halves of:
