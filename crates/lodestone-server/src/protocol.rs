@@ -987,7 +987,7 @@ pub enum ServerBound {
     /// The client selected a new hotbar slot
     /// (`ServerboundSetCarriedItemPacket`). Mirrors vanilla's own
     /// set-carried-item handler, which writes
-    /// straight into `ServerPlayer.getInventory().setSelectedSlot(...)` with
+    /// straight into vanilla's own per-player inventory's selected-slot setter, with
     /// **no confirmation packet** — see `crate::inventory::PlayerInventory
     /// ::set_selected_hotbar_slot`'s consumer in `crate::server` for why
     /// nothing is sent back here either.
@@ -2034,7 +2034,7 @@ pub trait ServerProtocol: Send + Sync {
     ///
     /// This is *only* the mode; the abilities it implies travel in
     /// [`encode_player_abilities`](Self::encode_player_abilities), exactly as
-    /// vanilla sends two packets from `ServerPlayer.setGameMode`. The default
+    /// vanilla sends two packets from its own set-game-mode routine. The default
     /// emits nothing.
     fn encode_game_mode(&self, mode: GameMode) -> ServerDirective {
         let _ = mode;
@@ -2192,11 +2192,11 @@ pub trait ServerProtocol: Send + Sync {
     /// The inventory write and the entity's removal are separate and already
     /// happen. This packet exists only so the client can *show* the take, and the
     /// client deliberately keeps the item entity alive to interpolate it, removing
-    /// it when the animation finishes (`ClientPacketListener.handleTakeItemEntity`;
+    /// it when the animation finishes (vanilla's own client-side take-item-entity handler;
     /// our own `lodestone-shell`'s `entities.rs` carries the matching lerp).
     ///
     /// **So the ordering is load-bearing and it is easy to get wrong in a way that
-    /// looks fixed.** Vanilla's `ItemEntity.playerTouch` calls `player.take(this,
+    /// looks fixed.** Vanilla's own item-entity player-touch routine calls `player.take(this,
     /// orgCount)` and only *then* `this.discard()`. A server that removes the entity
     /// first — or emits `REMOVE_ENTITIES` in the same pass, before this — leaves the
     /// client with nothing to interpolate and produces no animation at all, with the
@@ -2242,13 +2242,13 @@ pub trait ServerProtocol: Send + Sync {
     ///
     /// # Where vanilla sends it
     ///
-    /// `LivingEntity.dealDefaultKnockback` calls `indicateDamage(xd, zd)` with the
+    /// vanilla's own deal-default-knockback routine calls `indicateDamage(xd, zd)` with the
     /// horizontal offset from the damage source to the victim, and only
-    /// `ServerPlayer` overrides it — `LivingEntity.indicateDamage` is empty, and
-    /// `LivingEntity.getHurtDir` is a constant `0.0F`. So in vanilla this packet
+    /// `ServerPlayer` overrides it — the base entity's own indicate-damage routine is empty, and
+    /// its own get-hurt-dir routine is a constant `0.0F`. So in vanilla this packet
     /// goes to **one** connection, the hurt player's own, and never for a mob.
     ///
-    /// `yaw` is `ServerPlayer.indicateDamage`'s own expression,
+    /// `yaw` is vanilla's own per-player indicate-damage routine's own expression,
     /// `atan2(zd, xd) * 180 / PI - yRot` — degrees, in the victim's frame, so a hit
     /// from straight ahead is `0`. See [`crate::vitals::hurt_dir_degrees`], which
     /// is that formula and the one place it should be computed.
