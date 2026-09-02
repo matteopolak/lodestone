@@ -679,23 +679,16 @@ impl Sim {
         })
     }
 
-    /// The most recent chat/system lines (oldest-first) for the HUD to draw,
-    /// each paired with its **age in seconds** (now − arrival) so the HUD can
-    /// apply the vanilla fade-out. Lines carry legacy `§` colour codes.
-    #[must_use]
-    pub fn recent_chat(&self, n: usize) -> Vec<(String, f32)> {
-        let now = self.clock().secs;
-        self.read(|w| {
-            w.get::<SessionChat>(self.local)
-                .expect("the local player always carries SessionChat")
-                .0
-                .recent_ages(n, now)
-        })
-    }
-
-    /// The span-carrying sibling of `recent_chat`: same recent-lines-with-age
-    /// projection, `recent_ages_spans` in place of `recent_ages`, so a hex
-    /// colour survives past this accessor.
+    /// The span-carrying projection of the most recent chat/system lines
+    /// (oldest-first), each paired with its **age in seconds** (now − arrival)
+    /// so the HUD can apply the vanilla fade-out.
+    ///
+    /// This used to have a legacy, plain-`String` sibling (`recent_chat`,
+    /// built on `ChatLog::recent_ages`) that every production call site has
+    /// since moved off of — `app/redraw.rs` fills `HudFrame::chat_spans`
+    /// exclusively (see `app_rs_fills_hud_frame_chat_spans_not_the_legacy_chat_field`
+    /// in `sim/tests.rs`) — so it was deleted rather than kept alive purely by
+    /// its own tests.
     #[must_use]
     pub fn recent_chat_spans(&self, n: usize) -> Vec<(Vec<lodestone_model::TextSpan>, f32)> {
         let now = self.clock().secs;
