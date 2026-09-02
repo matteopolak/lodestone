@@ -406,7 +406,7 @@ impl Sim {
     }
 
     /// How far through an arm swing the local player is **this frame**, in
-    /// `0.0..=1.0` — vanilla's `Player.getAttackAnim(partialTick)`.
+    /// `0.0..=1.0` — vanilla's own attack-anim calculation at a given partial tick.
     ///
     /// This is the value `RenderState::set_hand_swing_source`'s closure returns and
     /// the value `third_person_body_state` puts on [`AnimInput::attack_anim`]; both
@@ -421,15 +421,15 @@ impl Sim {
         self.body_pose.attack_anim_lerp(self.clock().interp_alpha)
     }
 
-    /// Vanilla's `Player.isBlocking()`:
-    /// `isUsingItem() && getUseItem().getUseAnimation() == UseAnim.BLOCK`.
+    /// Vanilla's own is-blocking check: using an item whose own use-animation
+    /// is the block animation.
     /// Approximated by item id, the same simplification `spyglass_scoping`
-    /// (`sim/camera.rs`) makes for `isScoping()`: a shield is the only item
+    /// (`sim/camera.rs`) makes for its own is-scoping check: a shield is the only item
     /// this client raises a block pose for, so an id check stands in for
     /// resolving `use_animation` off the item's data components. Feeds
     /// [`Sim::step`]'s body-yaw clamp — vanilla narrows
-    /// `getMaxHeadRotationRelativeToBody()` from `50°` to `15°` while
-    /// blocking (`Player`'s override of `LivingEntity`'s default).
+    /// its own max-head-rotation-relative-to-body from `50°` to `15°` while
+    /// blocking (the player's own override of the living-entity default).
     #[must_use]
     fn is_blocking(&self) -> bool {
         self.using_item()
@@ -678,7 +678,7 @@ impl Sim {
             // about where the tick left them, not where it started.
             self.tick_portal_effect();
             // Chest lids, on the same fixed 20 Hz as everything else
-            // here: `ChestLidController.tickLid()` ramps by ±0.1 per tick, so a
+            // here: vanilla's own chest-lid tick ramps by ±0.1 per tick, so a
             // lid takes exactly 10 ticks to swing. Advancing it per *frame*
             // instead would open a chest in a third of a second at 60 fps and
             // make the animation speed a function of the frame rate.
@@ -853,11 +853,11 @@ impl Sim {
 
     /// Recompute [`EntityRayTarget`] from the same ray [`Self::update_target`]
     /// just cast against blocks — vanilla's entity half of
-    /// `GameRenderer.pick`, which [`Self::begin_attack`] reads to decide
+    /// its own per-frame crosshair pick, which [`Self::begin_attack`] reads to decide
     /// between `case ENTITY` and `case BLOCK`.
     ///
-    /// The search radius is [`ENTITY_REACH`] (`3.0`, vanilla's
-    /// `DEFAULT_ENTITY_INTERACTION_RANGE`, `Player.java`), shortened to
+    /// The search radius is [`ENTITY_REACH`] (`3.0`, vanilla's own
+    /// default entity-interaction range), shortened to
     /// `block_hit`'s own entry distance when a block sits closer than that —
     /// matching vanilla's `blockDistance` clamp, so a wall between the eye and
     /// an entity is never picked through.

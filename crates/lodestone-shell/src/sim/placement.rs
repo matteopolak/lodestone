@@ -242,14 +242,15 @@ pub(crate) fn is_interactable_state(state: u32) -> bool {
 }
 
 /// Blocks whose `facing` is `getHorizontalDirection().getOpposite()` — vanilla's
-/// `HorizontalDirectionalBlock` family, i.e. "faces the player".
+/// own horizontal-directional block family, i.e. "faces the player".
 ///
 /// A hand-written list, and the reason it is a list rather than a derivation:
 /// nothing in the block-state census distinguishes a 4-way `facing` that points
-/// *toward* the player (`StairBlock`, `LadderBlock`, `BedBlock`, `DoorBlock`,
-/// `FaceAttachedHorizontalDirectionalBlock`) from one that points *away*
-/// (`ChestBlock`, `AbstractFurnaceBlock`, `CarvedPumpkinBlock`, …) — the two
-/// have identical property signatures and differ only in Java. There are 293
+/// *toward* the player (stairs, ladders, beds, doors,
+/// and the face-attached horizontal-directional family) from one that points *away*
+/// (chests, furnaces, the carved pumpkin, …) — the two
+/// have identical property signatures and differ only in vanilla's own
+/// per-block placement logic. There are 293
 /// blocks with a 4-value `facing` in 26.2; a block that is not named here (and is
 /// not a stair) simply does not predict.
 ///
@@ -259,7 +260,7 @@ pub(crate) fn is_interactable_state(state: u32) -> bool {
 /// single-cell blocks whose remaining properties [`state_for_placement`] can also
 /// resolve. Namespace-stripped paths.
 const FACING_HORIZONTAL_OPPOSITE: &[&str] = &[
-    // `ChestBlock.java`, `EnderChestBlock.java`.
+    // The chest family (regular and ender chests).
     "chest",
     "trapped_chest",
     "ender_chest",
@@ -271,25 +272,25 @@ const FACING_HORIZONTAL_OPPOSITE: &[&str] = &[
     "waxed_exposed_copper_chest",
     "waxed_weathered_copper_chest",
     "waxed_oxidized_copper_chest",
-    // `AbstractFurnaceBlock.java`.
+    // The furnace family.
     "furnace",
     "blast_furnace",
     "smoker",
-    // `CarvedPumpkinBlock.java`.
+    // The carved-pumpkin family.
     "carved_pumpkin",
     "jack_o_lantern",
-    // `BeehiveBlock.java`.
+    // The beehive family.
     "beehive",
     "bee_nest",
-    // One-off `HorizontalDirectionalBlock`s.
-    "end_portal_frame",   // `EndPortalFrameBlock.java`
-    "chiseled_bookshelf", // `ChiseledBookShelfBlock.java`
-    "lectern",            // `LecternBlock.java`
-    "loom",               // `LoomBlock.java`
-    "stonecutter",        // `StonecutterBlock.java`
-    "vault",              // `VaultBlock.java`
-    "repeater",           // `DiodeBlock.java`
-    // `GlazedTerracottaBlock.java`.
+    // One-off horizontal-directional blocks.
+    "end_portal_frame",
+    "chiseled_bookshelf",
+    "lectern",
+    "loom",
+    "stonecutter",
+    "vault",
+    "repeater",
+    // The glazed-terracotta family.
     "white_glazed_terracotta",
     "orange_glazed_terracotta",
     "magenta_glazed_terracotta",
