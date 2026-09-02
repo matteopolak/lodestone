@@ -1,27 +1,26 @@
-//! `/team`, from `TeamCommand.java` (issue #48's remainder — explicitly
-//! *not* unlocked by `/scoreboard` landing: vanilla keeps teams and the
-//! scoreboard as two separate `Scoreboard`-owned tables, and this crate now
-//! does too, behind `crate::commands::team_store`).
+//! `/team` (explicitly *not* unlocked by `/scoreboard` landing: the real
+//! rule keeps teams and the scoreboard as two separate tables, and this
+//! crate now does too, behind `crate::commands::team_store`).
 //!
 //! # What is built
 //!
 //! `list [<team>]`, `add <team> [<displayName>]`, `remove <team>`, `empty
 //! <team>`, `join <team> [<members>]`, `leave <members>`, and `modify <team>
-//! <option> <value>` for every option vanilla's own `TeamCommand.java`
-//! registers: `displayName`, `color`, `friendlyfire`,
+//! <option> <value>` for every option the real command registers:
+//! `displayName`, `color`, `friendlyfire`,
 //! `seeFriendlyInvisibles`, `nametagVisibility`, `deathMessageVisibility`,
 //! `collisionRule`, `prefix`, `suffix`.
 //!
 //! `<members>` reuses [`ScoreHolderArg`]/[`super::scoreboard::resolve_many`]
 //! rather than [`EntityArg`] — the identical grammar `/scoreboard players`
-//! uses, and vanilla's own `TeamCommand` registers it the same way
-//! (`ScoreHolderArgument.greedyScoreHolder()`), so a selector, `*`, or a bare
-//! "fake player" name all mean the same thing there and here.
+//! uses, and the real `/team` command registers it the same way, so a
+//! selector, `*`, or a bare "fake player" name all mean the same thing there
+//! and here.
 //!
 //! # What is not built, and why
 //!
 //! `displayName`/`prefix`/`suffix` accept plain text
-//! ([`lodestone_command::StringArgument::greedy`]), not vanilla's JSON text
+//! ([`lodestone_command::StringArgument::greedy`]), not the real JSON text
 //! component — this crate has no textual component parser anywhere (the same
 //! honest omission `crate::commands::scoreboard`'s module doc names for
 //! `/scoreboard objectives add`'s `displayName`). Nothing in this crate
@@ -38,7 +37,7 @@ use super::scoreboard::resolve_many;
 use super::team_store::{CollisionRule, TeamError, Visibility};
 use super::CommandResult;
 
-/// `Commands.LEVEL_GAMEMASTERS`, same as `/scoreboard`.
+/// The game-masters permission level, same as `/scoreboard`.
 const TEAM_LEVEL: u8 = 2;
 
 pub(super) fn register(registrar: &mut Registrar) {
@@ -286,10 +285,10 @@ fn register_bool_option(
     });
 }
 
-/// `nametagVisibility`/`deathMessageVisibility` — vanilla registers the four
-/// [`Visibility`] tokens as literal children rather than a generic argument
-/// type (`TeamCommand.addTeamOptions`'s own shape for these two), so this
-/// does the same instead of inventing a wire type nothing else needs.
+/// `nametagVisibility`/`deathMessageVisibility` — the real command registers
+/// the four [`Visibility`] tokens as literal children rather than a generic
+/// argument type, so this does the same instead of inventing a wire type
+/// nothing else needs.
 fn register_visibility_option(
     registrar: &mut Registrar,
     team_node: lodestone_command::NodeId,
