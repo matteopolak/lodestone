@@ -3235,28 +3235,29 @@ fn travel_and_check_inside_blocks(
         state.fall_distance = 0.0;
     }
 
-    // `Player.aiStep`: `if (abilities.flying && !isPassenger()) resetFallDistance();`
-    // (`Player.java:449-451`) — **before** `super.aiStep()`, so before the travel
-    // dispatch below, alongside the Slow Falling reset rather than after the move.
+    // Vanilla's own per-tick player update: `if (abilities.flying &&
+    // !isPassenger()) resetFallDistance();` — **before** the rest of its
+    // per-tick update, so before the travel dispatch below, alongside the
+    // Slow Falling reset rather than after the move.
     if state.flying {
         state.fall_distance = 0.0;
     }
 
-    // `Player.travel` (`Player.java:1416-1424`) captures `getDeltaMovement().y`
-    // *before* delegating to `super.travel(input)` and then **overwrites** the
+    // Vanilla's own player travel step captures `getDeltaMovement().y`
+    // *before* delegating to its base travel and then **overwrites** the
     // post-travel Y with `originalMovementY * 0.6`.
     //
     // # Why the capture reads through `snap_small_velocity`
     //
-    // Vanilla's read happens inside `travel()`, which `LivingEntity.aiStep` calls
-    // *after* its own velocity snap-to-zero prologue — and that prologue lives
-    // inside our per-path `tick_air`/`tick_elytra`, not out here. Applying the
-    // snap non-destructively to derive the capture is **exactly** vanilla's value,
-    // because the only other thing aiStep writes to velocity between the snap and
-    // `travel()` is `jumpFromGround()`, and that whole block is gated on
-    // `isAffectedByFluids()` (`LivingEntity.java:3089`) — `!flying` for a player.
-    // So while flying nothing else can intervene, and `flying` is the only case
-    // this value is read in.
+    // Vanilla's read happens inside its own travel step, which its per-tick
+    // update calls *after* its own velocity snap-to-zero prologue — and that
+    // prologue lives inside our per-path `tick_air`/`tick_elytra`, not out
+    // here. Applying the snap non-destructively to derive the capture is
+    // **exactly** vanilla's value, because the only other thing the per-tick
+    // update writes to velocity between the snap and travel is the ground
+    // jump, and that whole block is gated on vanilla's own fluid-affected
+    // check — `!flying` for a player. So while flying nothing else can
+    // intervene, and `flying` is the only case this value is read in.
     //
     // Getting it wrong here is quiet rather than loud: capturing *before* the snap
     // leaves a flying player at rest with a residual Y of `1.8e-3 * 0.6^n` that
@@ -3266,19 +3267,17 @@ fn travel_and_check_inside_blocks(
     // `flight_y_overwrite_reads_the_post_snap_velocity` pins it.
     let original_movement_y = state.flying.then(|| snap_small_velocity(state.velocity).y);
 
-    // `LivingEntity.travel`'s dispatch (`LivingEntity.java:2432-2444`), with
-    // `shouldTravelInFluid`'s `isAffectedByFluids()` conjunct
-    // (`LivingEntity.java:2436-2438`) — which `Player` overrides to `!flying`
-    // (`Player.java:875-878`).
+    // Vanilla's own travel dispatch, with its own fluid-travel gate's
+    // fluid-affected conjunct — which the player overrides to `!flying`.
     //
     // **This suppressor is what makes flight a wrapper rather than a fourth
     // travel mode**, and it is the single strongest discriminator between the two
     // shapes: a player flying through water takes `travelInAir`, so they keep
     // moving at flight speed with no `0.8` water slow-down, no buoyancy and no
     // sneak-to-sink. Note it does **not** gate the elytra arm: `canGlide()` is
-    // `!flying && super.canGlide()` (`Player.java:1429`), which stops a flying
-    // player *starting* a glide, but `isFallFlying()` is a server-owned entity-data
-    // bit and vanilla's dispatch still honours it if both are somehow set.
+    // `!flying && super.canGlide()`, which stops a flying player *starting* a
+    // glide, but `isFallFlying()` is a server-owned entity-data bit and
+    // vanilla's dispatch still honours it if both are somehow set.
     let affected_by_fluids = !state.flying;
     if affected_by_fluids && fluid.in_water() {
         tick_water_among_entities(state, input, &fluid, view, profile, nearby);
@@ -3295,10 +3294,10 @@ fn travel_and_check_inside_blocks(
     if let Some(y) = original_movement_y {
         state.velocity.y = y * 0.6;
     }
-    // `LivingEntity.aiStep`'s `applyEffectsFromBlocks()` (`LivingEntity.java:3134`),
-    // immediately after the `travel()` dispatch above (`:3130`) and before
-    // `pushEntities()` (`:3163`). Both calls below are `Block.entityInside` effects
-    // reached from that one sweep, which is why they sit together here.
+    // Vanilla's own per-tick "apply effects from blocks" pass, immediately
+    // after the `travel()` dispatch above and before the crowd-push pass.
+    // Both calls below are per-block "entity inside" effects reached from
+    // that one sweep, which is why they sit together here.
     //
     // Their order is unobservable: vanilla visits each cell once and a cell is
     // either a bubble column or a stuck-in-block, never both, so the two never see
@@ -3307,40 +3306,42 @@ fn travel_and_check_inside_blocks(
     // `stuck_speed_multiplier`, neither reads what the other writes, and the only
     // field they share is `fall_distance`, which both only ever set to `0.0`.
     //
-    // Both are `!flying` for a player: `Player.onAboveBubbleColumn` /
-    // `onInsideBubbleColumn` skip `super` entirely (`Player.java:309-321`), and
-    // `Player.makeStuckInBlock` likewise (`Player.java:1514-1518`). So a flying
-    // player is neither lifted by a soul-sand column nor grabbed by a cobweb.
+    // Both are `!flying` for a player: vanilla's own player overrides for
+    // both the above/inside bubble-column handlers and its own
+    // "make stuck in block" override skip the base behaviour entirely while
+    // flying. So a flying player is neither lifted by a soul-sand column nor
+    // grabbed by a cobweb.
     if !state.flying {
         apply_bubble_column(state, view, profile);
         update_stuck_multiplier(state, view, profile, pre_move_position);
     }
-    // `LivingEntity.aiStep`'s freezing block (`LivingEntity.java:3139-3151`), run
-    // unconditionally — **not** inside the `!flying` gate above. Vanilla's
-    // `Player.makeStuckInBlock` override is what suppresses the two calls above
-    // while flying; nothing overrides `InsideBlockEffectType.FREEZE`
-    // (`InsideBlockEffectType.java:6-11`), which `PowderSnowBlock.entityInside`
-    // applies to every `LivingEntity` standing in the block regardless of
-    // `abilities.flying`. A creative-flying player drifting through powder snow
-    // still accumulates `frozen_ticks`, even with no stuck-multiplier drag.
+    // Vanilla's own per-tick freezing block, run unconditionally — **not**
+    // inside the `!flying` gate above. Vanilla's own "make stuck in block"
+    // player override is what suppresses the two calls above while flying;
+    // nothing overrides the powder-snow freeze effect, which applies to
+    // every living entity standing in the block regardless of
+    // `abilities.flying`. A creative-flying player drifting through powder
+    // snow still accumulates `frozen_ticks`, even with no stuck-multiplier
+    // drag.
     update_freezing(state, view, profile, pre_move_position);
 
-    // `LivingEntity.aiStep`'s "push" block: `if (autoSpinAttackTicks > 0)
-    // autoSpinAttackTicks--;` (`LivingEntity.java:3158-3159`), unconditional —
-    // no `!flying` gate in vanilla either, so a riptide launch that carries a
-    // player into creative flight still counts down normally. The
-    // entity-hit sweep (`checkAutoSpinAttack`) that runs alongside it is not
-    // modelled — see [`PlayerState::auto_spin_attack_ticks`]'s scope note.
+    // Vanilla's own per-tick "push" block: `if (autoSpinAttackTicks > 0)
+    // autoSpinAttackTicks--;`, unconditional — no `!flying` gate in vanilla
+    // either, so a riptide launch that carries a player into creative
+    // flight still counts down normally. The entity-hit sweep that runs
+    // alongside it is not modelled — see
+    // [`PlayerState::auto_spin_attack_ticks`]'s scope note.
     if state.auto_spin_attack_ticks > 0 {
         state.auto_spin_attack_ticks -= 1;
     }
 }
 
-/// [`tick`] followed by one pass of `LivingEntity.pushEntities` against `nearby`.
+/// [`tick`] followed by one pass of vanilla's own crowd-push pass against
+/// `nearby`.
 ///
-/// This is the whole of `LivingEntity.aiStep`'s ordering for entity interaction:
-/// `travel` first (`LivingEntity.java:3130`), the crowd push last (`:3163`). So the
-/// impulse a neighbour delivers this tick is integrated on the **next** one, and
+/// This is the whole of vanilla's own per-tick ordering for entity
+/// interaction: travel first, the crowd push last. So the impulse a
+/// neighbour delivers this tick is integrated on the **next** one, and
 /// this tick's collision sweep never sees it.
 ///
 /// Passing an empty `nearby` is bit-for-bit [`tick`]: movement takes the ordinary
