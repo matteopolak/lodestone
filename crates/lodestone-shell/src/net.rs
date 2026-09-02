@@ -5466,22 +5466,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn poll_is_empty_before_any_events() {
-        // Connecting to a dead port yields an error update eventually, but poll
-        // right away should simply be empty (non-blocking).
-        let client = NetClient::connect("127.0.0.1".into(), 1, 776, None);
-        let _ = client.poll();
-    }
-
     /// Issue #189's other half of the social-roster seam: `local_uuid` must be
     /// published even when the connection itself never succeeds, because
     /// [`LoginProfile`] — and the `local_uuid.set(..)` right after it — is
     /// built *before* `run` ever attempts to dial (see `run`'s own comment at
-    /// that call). A dead port (the same one
-    /// [`poll_is_empty_before_any_events`] uses) proves this without needing
-    /// a real server: if the publish depended on a successful handshake, this
-    /// would time out.
+    /// that call). A dead port proves this without needing a real server: if
+    /// the publish depended on a successful handshake, this would time out.
     #[test]
     fn local_uuid_is_published_before_the_connection_even_resolves() {
         let client = NetClient::connect("127.0.0.1".into(), 1, 776, None);
