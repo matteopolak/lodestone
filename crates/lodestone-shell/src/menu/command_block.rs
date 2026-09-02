@@ -11,8 +11,8 @@
 //! ## Geometry
 //!
 //! Every rect below is transcribed from the two `init` methods, not
-//! invented — `AbstractCommandBlockEditScreen.java` for the shared
-//! widgets and `CommandBlockEditScreen.java` for the block-specific row.
+//! invented — vanilla's own abstract command-block edit-screen base for the shared
+//! widgets and vanilla's own command-block edit-screen rendering for the block-specific row.
 //! All of it is anchored on `this.width / 2` (`render::Origin::ScreenTop`)
 //! except the Done/Cancel row, which is `this.height / 4 + 120 + 12`
 //! (`render::Origin::CommandBlockFooter`).
@@ -32,7 +32,7 @@
 //!   `crate::chat`'s walker only recognises a line that starts with `/`
 //!   (`chat.rs`'s `parse_line`), which every real command-block command does
 //!   **not** (`commandsOnly = true` in vanilla's own
-//!   `CommandSuggestions` constructor, `AbstractCommandBlockEditScreen.java`,
+//!   `CommandSuggestions` constructor, vanilla's own abstract command-block edit-screen base,
 //!   means the whole line is a command with no leading slash). The adapter
 //!   prepends a synthetic `/`, calls the chat walker, then shifts every byte
 //!   offset back by one and drops the synthetic slash's own span — see
@@ -81,7 +81,7 @@ pub const COMMAND_LABEL_DX: f32 = COMMAND_DX + 1.0;
 /// See [`COMMAND_LABEL_DX`].
 pub const COMMAND_LABEL_Y: f32 = 40.0;
 
-/// `CommandBlockEditScreen.getPreviousY()` (`:28-30`): fixed `135` for the
+/// Vanilla's own command-block edit-screen's get-previous-y accessor (`:28-30`): fixed `135` for the
 /// block screen (the minecart variant's is `150` — not modelled here, see the
 /// module doc).
 pub const PREVIOUS_Y: f32 = 135.0;
@@ -147,7 +147,7 @@ pub const MODE_SEQUENCE_TEXT: &str = "Chain";
 pub const MODE_AUTO_TEXT: &str = "Repeat";
 /// `advMode.mode.redstone` — `CommandBlockMode::Redstone`'s label (the
 /// default, matching vanilla's `Mode mode = CommandBlockEntity.Mode.REDSTONE`
-/// field initialiser, `CommandBlockEditScreen.java`).
+/// field initialiser, vanilla's own command-block edit-screen rendering).
 pub const MODE_REDSTONE_TEXT: &str = "Impulse";
 
 /// The mode label for `mode`, matching `CommandBlockEditScreen.addExtraControls`'s
@@ -161,8 +161,8 @@ pub fn mode_label(mode: CommandBlockMode) -> &'static str {
     }
 }
 
-/// `CommandBlockEntity.Mode.values()`'s declared order
-/// (`CommandBlockEntity.java`: `SEQUENCE, AUTO, REDSTONE`), which is
+/// Vanilla's own command-block-entity mode enum's declared order
+/// (vanilla's own command-block-entity declarations: `SEQUENCE, AUTO, REDSTONE`), which is
 /// the order `CycleButton` cycles through.
 #[must_use]
 pub fn next_mode(mode: CommandBlockMode) -> CommandBlockMode {
@@ -173,25 +173,25 @@ pub fn next_mode(mode: CommandBlockMode) -> CommandBlockMode {
     }
 }
 
-/// `outputButton`'s label: `CycleButton.booleanBuilder(Component.literal("O"),
-/// Component.literal("X"), trackOutput).displayOnlyValue()`
+/// `outputButton`'s label: vanilla's own cycle-button widget's boolean-builder
+/// applied to literal "O", literal "X", and `trackOutput`, with display-only value
 /// — `true` shows the *first*
-/// argument (`CycleButton.booleanBuilder`'s own `b == TRUE ? trueText :
-/// falseText`, `CycleButton.java`).
+/// argument (its own boolean-builder's own `b == TRUE ? trueText :
+/// falseText`, vanilla's own cycle-button widget).
 #[must_use]
 pub fn track_output_label(track_output: bool) -> &'static str {
     if track_output { "O" } else { "X" }
 }
 
 /// `conditionalButton`'s label (`advMode.mode.conditional`/`advMode.mode.unconditional`,
-/// `CommandBlockEditScreen.java`).
+/// vanilla's own command-block edit-screen rendering).
 #[must_use]
 pub fn conditional_label(conditional: bool) -> &'static str {
     if conditional { "Conditional" } else { "Unconditional" }
 }
 
 /// `autoexecButton`'s label (`advMode.mode.autoexec.bat`/`advMode.mode.redstoneTriggered`,
-/// `CommandBlockEditScreen.java`). `true` is vanilla's `automatic` flag —
+/// vanilla's own command-block edit-screen rendering). `true` is vanilla's `automatic` flag —
 /// "Always Active", no redstone required; `false` is "Needs Redstone".
 #[must_use]
 pub fn automatic_label(automatic: bool) -> &'static str {
@@ -265,7 +265,7 @@ pub struct CommandBlockOpen {
 
 impl Default for CommandBlockOpen {
     /// A freshly placed command block: vanilla's own field initialisers
-    /// (`CommandBlockEditScreen.java`, `BaseCommandBlock`'s defaults).
+    /// (vanilla's own command-block edit-screen rendering, `BaseCommandBlock`'s defaults).
     fn default() -> Self {
         Self {
             pos: BlockPos::new(0, 0, 0),
@@ -366,7 +366,7 @@ impl CommandBlockState {
     #[must_use]
     pub fn new(open: CommandBlockOpen) -> Self {
         let mut command = EditBox::new(0.0, 0.0, COMMAND_W, COMMAND_H, "Console Command");
-        // `EditBox.setMaxLength(32500)`.
+        // Matches vanilla's own edit-box's max-length setter, called with 32500.
         command.set_max_length(32_500);
         command.set_value(&open.command);
         command.widget.focused = true;
@@ -401,7 +401,7 @@ impl CommandBlockState {
     }
 
     /// `modeButton`'s click handler (`(button, value) -> this.mode = value`,
-    /// `CommandBlockEditScreen.java`).
+    /// vanilla's own command-block edit-screen rendering).
     pub fn cycle_mode(&mut self) {
         self.mode = next_mode(self.mode);
     }
@@ -549,7 +549,7 @@ impl CommandBlockSubmit {
 
 /// Applies a chosen [`Candidate`] at `start`, the way vanilla's
 /// `Suggestion::apply` splices a replacement into `originalContents`
-/// (`CommandSuggestions.java`, transcribed rather than called — this
+/// (vanilla's own command-suggestions type, transcribed rather than called — this
 /// module has no Brigadier `Suggestion` object, only the byte range and text
 /// [`complete`] already computed).
 #[must_use]
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn mode_cycles_in_command_block_entitys_declared_order() {
-        // `Mode.values()`: SEQUENCE, AUTO, REDSTONE, wrapping — and the
+        // Vanilla's own mode enum's declared order: SEQUENCE, AUTO, REDSTONE, wrapping — and the
         // screen's own default field initialiser is REDSTONE.
         let mut state = CommandBlockState::new(open());
         assert_eq!(state.mode, CommandBlockMode::Redstone, "premise: default");
