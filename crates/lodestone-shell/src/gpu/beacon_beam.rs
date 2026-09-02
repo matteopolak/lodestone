@@ -17,7 +17,7 @@
 //! |---|---|---|
 //! | blend | `ColorTargetState.DEFAULT` — `Optional.empty()`, i.e. **no blending at all** (an opaque overwrite; the texture's own alpha never reaches the framebuffer) | `BlendFunction.TRANSLUCENT` |
 //! | depth write | `true` (`DepthStencilState.DEFAULT`) | `false` |
-//! | depth compare | `GREATER_THAN_OR_EQUAL` (vanilla reversed-Z) → this engine's [`wgpu::CompareFunction::LessEqual`], per `CLAUDE.md`'s depth-convention rule | same, flipped the same way |
+//! | depth compare | `GREATER_THAN_OR_EQUAL`, which this reversed-Z engine spells [`lodestone_render::DEPTH_COMPARE_NEARER_OR_EQUAL`] with no sign flip | same |
 //!
 //! So the solid core is drawn like ordinary opaque geometry (it still writes
 //! depth and occludes what is behind it — the reason it is submitted with the
@@ -46,7 +46,9 @@
 //!   `gpu/block_entities.rs`'s module doc for why that ceiling matters at
 //!   all on this backend.
 
-use lodestone_render::{BeaconSpawn, DEPTH_FORMAT, beacon_beam_vertices};
+use lodestone_render::{
+    BeaconSpawn, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT, beacon_beam_vertices,
+};
 
 /// Mirrors [`lodestone_render::BeamVertex`] field-for-field as a GPU-layout
 /// type, the same "own vertex type per pass" idiom
@@ -265,7 +267,7 @@ impl BeaconBeamRenderer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: DEPTH_FORMAT,
                     depth_write_enabled: Some(depth_write),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),

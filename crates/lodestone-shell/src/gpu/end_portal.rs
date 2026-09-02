@@ -24,8 +24,9 @@
 //! `DepthStencilState.DEFAULT` (`GREATER_THAN_OR_EQUAL`, write **true**) and
 //! no `ColorTargetState` blend override at all — this is fully opaque
 //! geometry, matching every other opaque block-entity pass in this crate.
-//! Per `CLAUDE.md`'s depth-convention rule, vanilla's reversed-Z
-//! `GREATER_THAN_OR_EQUAL` is this engine's `LessEqual`.
+//! This renderer is reversed-Z like vanilla, so vanilla's
+//! `GREATER_THAN_OR_EQUAL` is this engine's `DEPTH_COMPARE_NEARER_OR_EQUAL`,
+//! transcribed with no sign flip.
 //!
 //! # `cull_mode: None`, deliberately
 //!
@@ -50,7 +51,7 @@
 //! function's doc for why a partial load has no sensible degraded path.
 
 use lodestone_render::{
-    DEPTH_FORMAT, EndGatewaySpawn, EndPortalSpawn, EndPortalVertex, end_gateway_vertices,
+    DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT, EndGatewaySpawn, EndPortalSpawn, EndPortalVertex, end_gateway_vertices,
     end_portal_vertices,
 };
 
@@ -233,7 +234,7 @@ impl EndPortalRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

@@ -352,8 +352,8 @@ Vanilla's entity depth state is
 (`DepthStencilState.java:6`), inherited by every entity render type from
 `ENTITY_SNIPPET` (`RenderPipelines.java:49-56`) with no override anywhere —
 `ENTITY_SOLID` (`:232`), `ENTITY_CUTOUT` (`:245`), `ENTITY_CUTOUT_CULL` (`:238`),
-`ENTITY_TRANSLUCENT` (`:274`). Under this engine's `[0,1]` DirectX-style depth —
-vanilla is reversed-Z — that is **`LessEqual`**.
+`ENTITY_TRANSLUCENT` (`:274`). This engine is reversed-Z like vanilla, so that
+is **`DEPTH_COMPARE_NEARER_OR_EQUAL`**, transcribed with no sign flip.
 
 This section used to say the base pipeline's `Less` "is the one that departs from
 vanilla. It is left alone rather than 'fixed': changing it alters how every mob's

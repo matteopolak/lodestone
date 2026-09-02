@@ -541,7 +541,7 @@ impl PlayerPreview {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: depth,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Clear(lodestone_render::DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -1127,6 +1127,19 @@ mod tests {
             yaw: 180.0,
             ..lodestone_render::Camera::default()
         };
+        // Which end of `[0, 1]` is nearer is a property of
+        // `Camera::projection_matrix` — reversed-Z, so nearer is *greater* — and
+        // it is derived here rather than written into the assertion. Both arms
+        // share it: the GUI arm draws through the same pipeline and the same
+        // depth comparison as the world one, which is the whole reason
+        // `gui_ortho` carries the world projection's depth direction.
+        let nearer_is_greater_depth = {
+            let vp = camera.view_projection();
+            let depth = |z: f32| vp.project_point3(Vec3::new(0.0, 1.4, z)).z;
+            let (close, distant) = (depth(2.0), depth(0.0));
+            assert_ne!(close, distant, "premise: the projection is degenerate in z");
+            close > distant
+        };
         for model in ["player_wide", "player_slim"] {
             let mesh = models.get(model).expect("a baked player rig");
             let gui = avatar_part_matrices(mesh, model, &avatar, 854, 480);
@@ -1160,12 +1173,18 @@ mod tests {
                     if nf == 0 || nb == 0 {
                         continue;
                     }
+                    let ordered = if nearer_is_greater_depth {
+                        front > back
+                    } else {
+                        front < back
+                    };
                     assert!(
-                        front < back,
+                        ordered,
                         "{model} part {i} through the {arm}: front faces at depth \
                          {front}, back faces at {back}. Depth is [0,1] with \
-                         smaller nearer, so this draws the inside of the far \
-                         side of the box."
+                         {} nearer, so this draws the inside of the far side of \
+                         the box.",
+                        if nearer_is_greater_depth { "larger" } else { "smaller" }
                     );
                     checked += 1;
                 }

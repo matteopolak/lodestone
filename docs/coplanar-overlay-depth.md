@@ -18,9 +18,12 @@ An overlay's separation from the surface behind it has two independent parts, an
 completely differently:
 
 1. **Geometric.** The world-space clearance, converted to depth by `Camera::view_projection`. This
-   renderer's depth is forward `[0, 1]` `Depth32Float`, which spends almost the whole float32
-   mantissa near the near plane, so a fixed world clearance buys a number of representable depth
-   values that **collapses with distance**.
+   renderer's depth is **reversed** `[0, 1]` `Depth32Float` — near maps to `1`, far to `0`, the same
+   arrangement vanilla uses — so a fixed world clearance buys a count of representable depth values
+   that degrades as `1 / d`. It used to be *forward* `[0, 1]`, which spends almost the whole float32
+   mantissa near the near plane and made the same clearance **collapse as `d^2`**; that collapse is
+   what this document was originally written to measure, and the two tables below are the before and
+   after.
 2. **The polygon offset**, a `wgpu::DepthBiasState` on the pipeline. Its `constant` term and its
    `slope_scale` term are measured separately below, because they scale with completely different
    things.
@@ -34,7 +37,20 @@ of the survey got it wrong: comparing same-`x`/`y` points measures `clearance * 
 two disagree by a factor of 130 at 85 degrees off the normal.
 
 Worst float32 ULP separation over a one-block patch, for a map's `1.01 / 128` clearance, through the
-real projection at render distance 12:
+real projection at render distance 12. **This is the shipped, reversed-Z table:**
+
+| distance | 0° | 30° | 45° | 60° | 75° | 85° |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2 | 53166 | 54603 | 63998 | 68127 | 136962 | 423740 |
+| 4 | 26531 | 28841 | 34502 | 47974 | 91984 | 276417 |
+| 8 | 13252 | 14840 | 17954 | 25170 | 48425 | 144636 |
+| 12 | 5888 | 6660 | 8092 | 11373 | 21911 | 65313 |
+| 16 | 6623 | 7530 | 9166 | 12902 | 24875 | 74077 |
+| 24 | 2943 | 3363 | 4103 | 5783 | 11158 | 33195 |
+| 32 | 3311 | 3792 | 4631 | 6535 | 12611 | 37501 |
+| 64 | 1655 | 1903 | 2326 | 3289 | 6349 | 18868 |
+
+And the **forward `[0, 1]` projection this replaced**, same clearance, same rays:
 
 | distance | 0° | 30° | 45° | 60° | 75° | 85° |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -52,10 +68,25 @@ outline and the ordinary ink share **one** world plane, so their geometric separ
 other* is exactly zero at every distance and angle, and the whole ordering between them is their
 polygon offset.
 
-Two things to take from the table. **Separation improves with angle**, monotonically, by more than an
-order of magnitude from head-on to 85 degrees — so an artefact that is worse at oblique views is not
-explained by geometric depth precision. And **it collapses with distance**: head-on, a map has 1 ULP
-at 64 blocks, which is the regime `fluid_coplanar_depth_gate` already documents as a tie.
+Three things to take from the pair.
+
+**Separation improves with angle**, monotonically, in both tables — the depth test compares two
+points on one *ray*, so the quantity is `clearance / cos(theta)`, which grows. An artefact that is
+worse at oblique views is therefore never explained by geometric depth precision. That observation
+was once read as evidence *against* a precision diagnosis; it is not, because the thing that varies
+with angle is the polygon offset's **slope** term, which is zero head-on and unbounded at grazing —
+i.e. the *rescue* varies with angle, not the deficit.
+
+**The forward column collapses and the reversed one does not.** Head-on, a map had 1 ULP at 64
+blocks — the regime `fluid_coplanar_depth_gate` documents as a tie — and now has 1,655. The two
+sawtooth against the binade (12 reads lower than 16, 24 lower than 32) because a float's ULP count
+is quantized to powers of two while depth varies continuously; that factor of two is the width of
+the prediction bracket, not noise.
+
+**The polygon offset is a tiebreak again.** Under the forward projection a live board of framed
+maps was being held up entirely by `MAP_SURFACE_DEPTH_BIAS` — measured, `LODESTONE_MAP_DISABLE_DEPTH_BIAS=1`
+removed the whole board — which is a load-bearing role a 20-ULP constant was never meant to have
+against a clearance that had gone to 1. It is not that role now.
 
 ### What a polygon offset actually contributes
 
@@ -64,26 +95,26 @@ the identical quad without one and differencing the read-back `Depth32Float`. On
 
 | question | measured |
 | --- | --- |
-| is `constant` a raw float add or a ULP count? | **a ULP count** — `constant * 2^(exp(primitive max depth) - 23)`, so `-10` moves a fragment ten representable values at its own binade, independent of distance |
-| is the ported sign right? | **yes** — a negative `constant` reduces the written depth, i.e. moves toward the eye, which is what a forward `[0,1]` buffer needs |
-| does `constant` scale linearly? | **yes** — `-20` gives exactly twice `-10`'s offset, which is the property `MAP_SURFACE_DEPTH_BIAS` relies on to sit one step ahead of `CAMERA_DEPTH_BIAS` |
+| is `constant` a raw float add or a ULP count? | **a ULP count** — `constant * 2^(exp(primitive max depth) - 23)`, so `10` moves a fragment ten representable values at its own binade, independent of distance. Under reversed-Z the primitive's binade falls with distance, which is what makes ten ULPs a roughly constant *relative* separation rather than a fixed absolute one |
+| is the ported sign right? | **yes, and it is now vanilla's own sign** — a `constant` of the same sign as the depth of the near plane moves a fragment toward the eye, so under reversed-Z the transcription is `(+1.0, +10)` with no flip. The calibration below was taken with the forward projection's negative pair and is a statement about the *device*, which the projection cannot change |
+| does `constant` scale linearly? | **yes** — `20` gives exactly twice `10`'s offset, which is the property `MAP_SURFACE_DEPTH_BIAS` relies on to sit one step ahead of `CAMERA_DEPTH_BIAS` |
 | how big is the `slope_scale` term? | **very large, and unbounded** — at a window-space depth slope of `1.56e-5` (about 75 degrees off the normal at 16 blocks) `slope_scale: -1.0` is worth **394 ULP**, against the constant term's 10–20; it grows linearly with the slope |
-| what happens when the bias saturates? | **it clamps, it does not discard** — a fragment biased past `0.0` is written at `0.0` and still shades |
+| what happens when the bias saturates? | **it clamps, it does not discard** — a fragment biased past the end of the range is written at the limit and still shades |
 
 That last row retires a plausible-sounding hypothesis: an unbounded slope-scaled offset at a grazing
 angle does **not** make a primitive vanish. It only ever wins harder.
 
-The consequence for reading any of this code is that a bias pair like `(constant: -10,
-slope_scale: -1.0)` is not two comparable numbers. At head-on the slope term is zero and the constant
+The consequence for reading any of this code is that a bias pair like `(constant: 10,
+slope_scale: 1.0)` is not two comparable numbers. At head-on the slope term is zero and the constant
 is everything; a few degrees off the normal and the slope term is one to three orders of magnitude
 larger. **A surface whose competitor has `slope_scale: 0.0` gains enormously at oblique angles**, and
 two surfaces with equal `slope_scale` cancel that term entirely and are ordered by the constant alone.
 
 ### The ported constants
 
-`lodestone_render::model_pipeline::CAMERA_DEPTH_BIAS` is `(constant: -10, slope_scale: -1.0)`. That is
-vanilla's `TEXT_POLYGON_OFFSET` depth-stencil state sign-flipped for forward depth. Read the record
-definition, not the call site: the record's fields are `(depthTest, writeDepth, depthBiasScaleFactor,
+`lodestone_render::model_pipeline::CAMERA_DEPTH_BIAS` is `(constant: 10, slope_scale: 1.0)`. That is
+vanilla's `TEXT_POLYGON_OFFSET` depth-stencil state transcribed verbatim — reversed-Z on both sides,
+so there is no sign to flip. Read the record definition, not the call site: the record's fields are `(depthTest, writeDepth, depthBiasScaleFactor,
 depthBiasConstant)`, so the literal pair `1.0F, 10.0F` is **scale 1, constant 10**, not the other way
 round. `MAP_SURFACE_DEPTH_BIAS` doubles only the constant, deliberately leaving the slope term equal to
 the frame body's so the two cancel and the relative ordering does not vary with projected slope.
@@ -96,6 +127,11 @@ anyway.
 
 ## How to change it
 
+* **The clearances are not the problem any more, and adding more is not the fix.** A live
+  `LODESTONE_MAP_LIFT_PROBE` run under the forward projection found that `0.0079` failed at ordinary
+  range, `0.02` failed only further away, and `0.2` never failed — added clearance moved the onset
+  distance rather than removing the defect, which is the signature of `d^2` depth resolution and not
+  of a geometric deficit. Reversed-Z is the fix for that shape; a larger constant is not.
 * **Re-run the survey before reasoning about any of these constants.**
   `cargo test -p lodestone-render --test coplanar_overlay_depth_survey -- --nocapture` prints the
   geometric table; adding `--ignored` runs the device calibration, which needs a GPU adapter and is
@@ -116,7 +152,7 @@ changes the default renderer and none exists on wasm.
 | switch | removes |
 | --- | --- |
 | `LODESTONE_MAP_DISABLE_DEPTH=1` | the map pipeline's depth comparison, its depth write **and** its polygon offset — all three at once |
-| `LODESTONE_MAP_DISABLE_DEPTH_TEST=1` | only the comparison (`Always` instead of `LessEqual`) |
+| `LODESTONE_MAP_DISABLE_DEPTH_TEST=1` | only the comparison (`Always` instead of `DEPTH_COMPARE_NEARER_OR_EQUAL`) |
 | `LODESTONE_MAP_DISABLE_DEPTH_WRITE=1` | only the depth write |
 | `LODESTONE_MAP_DISABLE_DEPTH_BIAS=1` | only `MAP_SURFACE_DEPTH_BIAS` |
 | `LODESTONE_SIGN_OUTLINE_MATCH_GLYPH_DEPTH=1` | the glowing outline's own bias, giving it the ink's instead |
@@ -145,9 +181,13 @@ rather than the symptom localises it without a run:
 
 So the difference between the arm that works and the arm that is reported broken is **exactly half the
 polygon offset, on the same plane, against the same board** — and half of a slope term that is already zero
-head-on, which is the shape the framed-map board turned out to have. At 4.9 mm the clearance is worth
-`4096 / d^2` representable depth values, so past about 20 blocks the outline is carried by its `-10`
-constant alone.
+head-on, which is the shape the framed-map board turned out to have.
+
+That reading was taken under the **forward** projection, where 4.9 mm was worth `4096 / d^2`
+representable depth values and the outline was therefore carried by its `10` constant alone past
+about 20 blocks. Under reversed-Z the same plane is worth 4,097 ULP at 16 blocks and 1,025 at 64
+(the survey's third table), so the constant is no longer what orders it and this section's diagnosis
+needs re-taking against a live run before it is quoted again.
 
 Because outline and ink are disjoint, **both existing switches vary a relationship no artefact can be
 about.** `LODESTONE_SIGN_TEXT_LIFT_PROBE` is the one that does not: it moves outline and ink together, so it

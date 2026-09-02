@@ -195,7 +195,7 @@ that is already in the depth buffer — and can only be depth-rejected in front 
 one. Moving the draw without the write would tint particles in front of the surface too.
 
 `depth_compare` is `Less`, not vanilla's `GREATER_THAN_OR_EQUAL`: depth here is `[0,1]`
-DirectX-style rather than reversed-Z, so every ported comparison flips.
+reversed-Z like vanilla's, so a ported comparison transcribes unflipped.
 
 **Neither draw may sit inside `gpu/frame.rs`'s `if let Some(model)` gate, and the row in
 the table above says so because getting it wrong is what shipped.** That gate exists for

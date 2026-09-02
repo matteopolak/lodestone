@@ -34,7 +34,8 @@
 //!   `depthFar = max(renderDistance_chunks * 16 * 4, cloudRange_chunks * 16)`,
 //!   i.e. **four times the render distance in blocks**, not a fixed 512. At
 //!   RD 32 that is `2048`. Use [`Camera::far_for_render_distance`]. The `[0,1]`
-//!   depth choice matches vanilla's `isZZeroToOne()` device path on Metal.
+//!   depth choice matches vanilla's `isZZeroToOne()` device path on Metal, and
+//!   like vanilla the range is **reversed** — near maps to `1`, far to `0`.
 //! * **Eye height / camera offset:** the camera position is the *eye*, which sits
 //!   `entity.y + eyeHeight` above the feet, with standing
 //!   `DEFAULT_EYE_HEIGHT = 1.62` (`Avatar.java`). This offset is load-bearing for
@@ -43,8 +44,14 @@
 //!   for the caller to remember.
 //!
 //! Projection targets `wgpu`'s `[0, 1]` clip-space depth (the DirectX/Metal
-//! convention), via glam's `camera::rh::proj::directx::perspective` — *not* the
-//! OpenGL `[-1, 1]` variant, which would place everything at the wrong depth.
+//! convention) — *not* the OpenGL `[-1, 1]` variant, which would place
+//! everything at the wrong depth — with the range **reversed**, near to `1` and
+//! far to `0`, exactly as vanilla does. [`Camera::projection_matrix`] carries
+//! the measurement of why and the list of what it makes true elsewhere; the
+//! short form is that a forward `[0,1]` buffer's coplanar separation collapses
+//! as the *square* of the viewing distance and a reversed one's as the distance,
+//! and every ported depth comparison and polygon offset in the tree is written
+//! against the reversed sense.
 
 use glam::{Mat4, Vec3, Vec4};
 
@@ -223,14 +230,58 @@ impl Camera {
         )
     }
 
-    /// The perspective projection matrix, targeting `wgpu`'s `[0,1]` depth.
+    /// The perspective projection matrix, targeting `wgpu`'s `[0,1]` depth with
+    /// a **reversed** range: the near plane maps to `1.0` and the far plane to
+    /// `0.0`.
+    ///
+    /// # Why reversed rather than glam's `directx::perspective`
+    ///
+    /// This is elementwise glam's `camera::rh::proj::directx::perspective` with
+    /// `near` and `far` exchanged in the `z` row, and it is written out rather
+    /// than called with swapped arguments so the exchange is visible.
+    ///
+    /// A forward `[0,1]` projection puts every window depth just under `1.0`,
+    /// where `f32` spacing is a flat `2^-24` — so a fixed world-space clearance
+    /// `c` at distance `d` buys `2^23 · near · c / d^2` representable values and
+    /// **collapses as `d^2`**. Reversed, depth is `near · (far - d) / ((far -
+    /// near) · d)`, which shrinks with distance and therefore rides down through
+    /// the exponent: relative separation is `c · far / (d · (far - d))`, and a
+    /// float carries a constant `2^23`-to-`2^24` window of ULPs per binade, so
+    /// the separation degrades only as `1 / d` and is 100x-plus larger over
+    /// everything terrain is drawn at. That is the whole reason vanilla's own
+    /// depth constants are the size they are.
+    ///
+    /// # Consequences, all of which the tree spends
+    ///
+    /// * Nearer is **greater**, so vanilla's `GREATER_THAN_OR_EQUAL` is our
+    ///   [`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
+    ///   with no sign flip at all, and a depth attachment clears to
+    ///   [`DEPTH_CLEAR`](crate::DEPTH_CLEAR) = `0.0`.
+    /// * A polygon offset that pulls toward the eye is **positive**.
+    /// * The matrix determinant is positive, where the forward one's was
+    ///   negative — mirroring the clip `z` axis flips the sign of a 4x4
+    ///   determinant. Nothing about *screen* winding changes, because the
+    ///   rasterizer decides facing from projected `x`/`y` alone; a gate that
+    ///   asserts the 4x4 sign is asserting a polarity rather than measuring
+    ///   winding.
+    ///
+    /// The far plane stays **finite**. An infinite-far reversed projection
+    /// (`z_clip = near`, depth `near / d`) is the usual companion and would make
+    /// the separation exactly `c / d` with no far term, but it also deletes the
+    /// far clip plane, which [`Frustum`] extracts and section culling relies on.
+    /// The finite form already carries 700-5900 ULP where the forward one
+    /// carried 0-47, so the extra precision is not worth changing what gets
+    /// culled.
     #[must_use]
     pub fn projection_matrix(&self) -> Mat4 {
-        glam::camera::rh::proj::directx::perspective(
-            self.fov_y_degrees.to_radians(),
-            self.aspect,
-            self.near,
-            self.far,
+        let (sin_fov, cos_fov) = (0.5 * self.fov_y_degrees.to_radians()).sin_cos();
+        let h = cos_fov / sin_fov;
+        let z_range_inv = 1.0 / (self.far - self.near);
+        Mat4::from_cols(
+            Vec4::new(h / self.aspect, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, h, 0.0, 0.0),
+            Vec4::new(0.0, 0.0, self.near * z_range_inv, -1.0),
+            Vec4::new(0.0, 0.0, self.near * self.far * z_range_inv, 0.0),
         )
     }
 
@@ -483,6 +534,15 @@ pub struct Frustum {
 impl Frustum {
     /// Extract the six frustum planes from a `[0,1]`-depth view-projection matrix
     /// (Gribb–Hartmann, DirectX/Metal depth convention).
+    ///
+    /// The clip-space region is `0 <= z <= w` under **either** depth direction,
+    /// so the two half-space rows below are the same expressions a forward
+    /// projection needs; what reversed-Z changes is which physical plane each
+    /// one *is*. `z >= 0` is the plane depth `0.0` sits on, and under reversed-Z
+    /// that is the **far** plane; `z <= w` is depth `1.0`, the **near** plane.
+    /// The set of six planes is therefore identical and no culling decision
+    /// moves — only the labels swap, and they are swapped here so the field's
+    /// documented `[left, right, bottom, top, near, far]` order stays true.
     #[must_use]
     pub fn from_view_projection(m: Mat4) -> Self {
         // Rows of the column-major matrix.
@@ -496,8 +556,8 @@ impl Frustum {
                 Plane::from_vec4(r3 - r0), // right
                 Plane::from_vec4(r3 + r1), // bottom
                 Plane::from_vec4(r3 - r1), // top
-                Plane::from_vec4(r2),      // near (z >= 0 for [0,1] depth)
-                Plane::from_vec4(r3 - r2), // far  (z <= w)
+                Plane::from_vec4(r3 - r2), // near (z <= w, i.e. depth <= 1)
+                Plane::from_vec4(r2),      // far  (z >= 0, i.e. depth >= 0)
             ],
         }
     }
@@ -588,20 +648,85 @@ mod tests {
         assert!((c.forward() - Vec3::new(0.0, -1.0, 0.0)).length() < 1e-6);
     }
 
+    /// Reversed-Z: the near plane is depth `1`, the far plane depth `0`, and
+    /// depth **decreases** monotonically with distance in between.
+    ///
+    /// The monotonicity arm is not decoration. Near maps to 1 and far to 0 under
+    /// any projection that merely negates the forward one's `z` row, including
+    /// several that are not a valid perspective transform at all, so the two
+    /// endpoint checks alone do not distinguish reversed-Z from a sign slip.
     #[test]
-    fn projection_maps_near_and_far_to_zero_and_one() {
+    fn projection_maps_near_to_one_and_far_to_zero() {
         let c = cam_looking_south();
         let vp = c.view_projection();
-        // A point on the near plane straight ahead.
-        let near_pt = c.position + c.forward() * c.near;
-        let clip = vp * near_pt.extend(1.0);
-        let ndc_z = clip.z / clip.w;
-        assert!(ndc_z.abs() < 1e-3, "near maps to ~0, got {ndc_z}");
-        // A point on the far plane straight ahead.
-        let far_pt = c.position + c.forward() * c.far;
-        let clip = vp * far_pt.extend(1.0);
-        let ndc_z = clip.z / clip.w;
-        assert!((ndc_z - 1.0).abs() < 1e-3, "far maps to ~1, got {ndc_z}");
+        let depth_at = |distance: f32| {
+            let clip = vp * (c.position + c.forward() * distance).extend(1.0);
+            clip.z / clip.w
+        };
+        let near_z = depth_at(c.near);
+        assert!((near_z - 1.0).abs() < 1e-3, "near maps to ~1, got {near_z}");
+        let far_z = depth_at(c.far);
+        assert!(far_z.abs() < 1e-3, "far maps to ~0, got {far_z}");
+        // Strictly decreasing across the whole range, and inside `[0, 1]`.
+        let mut previous = f32::INFINITY;
+        for step in 0..64 {
+            let d = c.near + (c.far - c.near) * (step as f32 / 63.0);
+            let z = depth_at(d);
+            assert!(
+                (0.0..=1.0).contains(&z),
+                "depth at {d} left [0, 1]: {z}"
+            );
+            assert!(
+                z < previous,
+                "depth must decrease with distance: {z} at {d} is not below {previous}"
+            );
+            previous = z;
+        }
+    }
+
+    /// The projection is glam's forward DirectX RH perspective with `near` and
+    /// `far` exchanged in the `z` row, and nothing else.
+    ///
+    /// Sourced outside [`Camera::projection_matrix`]: glam builds the reference,
+    /// so a slip in the hand-written `x`/`y` terms (the aspect divide, the
+    /// half-angle cotangent) fails here rather than showing up as a subtly wrong
+    /// field of view nobody measures.
+    #[test]
+    fn the_projection_is_glams_forward_one_with_near_and_far_exchanged() {
+        let c = Camera {
+            fov_y_degrees: 70.0,
+            aspect: 16.0 / 9.0,
+            near: 0.05,
+            far: 768.0,
+            ..Camera::default()
+        };
+        let reference = glam::camera::rh::proj::directx::perspective(
+            c.fov_y_degrees.to_radians(),
+            c.aspect,
+            c.far,
+            c.near,
+        );
+        let ours = c.projection_matrix();
+        for (i, (a, b)) in ours
+            .to_cols_array()
+            .iter()
+            .zip(reference.to_cols_array().iter())
+            .enumerate()
+        {
+            assert!(
+                (a - b).abs() <= 1e-6 * b.abs().max(1.0),
+                "element {i}: ours {a}, glam-with-exchanged-planes {b}"
+            );
+        }
+        // And it is genuinely *not* the un-exchanged one, so the comparison
+        // above is not satisfied by both orders at once.
+        let forward = glam::camera::rh::proj::directx::perspective(
+            c.fov_y_degrees.to_radians(),
+            c.aspect,
+            c.near,
+            c.far,
+        );
+        assert_ne!(ours.to_cols_array(), forward.to_cols_array());
     }
 
     #[test]

@@ -265,12 +265,31 @@ pub fn compose_special_item_transform(
 ///
 /// * `x`: `0..width` → `-1..1`.
 /// * `y`: `0..height` → `1..-1` (top-left origin; NDC `y` is up).
-/// * `z`: [`GUI_DEPTH_HALF_RANGE`]`..-`[`GUI_DEPTH_HALF_RANGE`] → `0..1`, so a
+/// * `z`: `-`[`GUI_DEPTH_HALF_RANGE`]`..`[`GUI_DEPTH_HALF_RANGE`] → `0..1`, so a
 ///   **larger** GUI `z` is **nearer** — vanilla's convention, and the one
 ///   [`gui_item_pose`]'s positive `z` scale needs for the faces that survive
-///   back-face culling to also be the faces nearest under the entity pipeline's
-///   depth compare (`CompareFunction::LessEqual` since issue #21 — nearest still
-///   wins; only exactly-coincident faces distinguish it from `Less`).
+///   back-face culling to also be the faces nearest under the pipeline's depth
+///   compare ([`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
+///   — nearest still wins; only exactly-coincident faces distinguish it from
+///   the strict form).
+///
+/// # The `z` direction is the world projection's, not a free choice
+///
+/// A GUI item is drawn through the same [`ModelPipeline`](crate::ModelPipeline)
+/// and the same [`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
+/// as world geometry, into a depth attachment cleared to
+/// [`DEPTH_CLEAR`](crate::DEPTH_CLEAR). So "larger GUI `z` is nearer" only holds
+/// if this matrix agrees with [`Camera::projection_matrix`](crate::Camera::projection_matrix)
+/// about which end of `0..1` the near plane is — which since that projection
+/// became **reversed-Z** is `1`. The `z` scale is therefore `+0.5 / half-range`
+/// where a forward projection needed `-0.5 / half-range`.
+///
+/// That sign also carries the winding invariant: flipping it flips this
+/// matrix's determinant, which is the same flip reversing the world projection
+/// makes, so `sign(det(gui_ortho * gui_item_pose))` still equals
+/// `sign(det(Camera::view_projection()))`. Reversing one and not the other
+/// breaks that silently — the icons keep rasterising, they just draw their far
+/// faces.
 ///
 /// The `y` flip here is the counterpart to [`gui_item_pose`]'s: the two cancel,
 /// so triangle winding is preserved. See the module docs.
@@ -279,7 +298,7 @@ pub fn gui_ortho(width_px: u32, height_px: u32) -> Mat4 {
     let w = width_px.max(1) as f32;
     let h = height_px.max(1) as f32;
     Mat4::from_translation(Vec3::new(-1.0, 1.0, 0.5))
-        * Mat4::from_scale(Vec3::new(2.0 / w, -2.0 / h, -0.5 / GUI_DEPTH_HALF_RANGE))
+        * Mat4::from_scale(Vec3::new(2.0 / w, -2.0 / h, 0.5 / GUI_DEPTH_HALF_RANGE))
 }
 
 // ---------------------------------------------------------------------------
@@ -763,14 +782,44 @@ mod tests {
         assert!((br - Vec3::new(1.0, -1.0, 0.5)).length() < 1e-6, "{br}");
     }
 
+    /// Which clip depth belongs to the surface nearer the eye, asked of the
+    /// real world projection.
+    ///
+    /// `Camera::projection_matrix` is reversed-Z, so nearer is *greater* — but
+    /// the point of deriving it is that a GUI item is drawn through the same
+    /// pipeline and the same depth comparison as world geometry, so "larger GUI
+    /// z is nearer" is a claim about agreeing with that projection and not a
+    /// free choice. Written as a literal `<`, this test certified a `gui_ortho`
+    /// pointing the opposite way to the world it shares a pipeline with.
+    fn world_nearer_is_greater_depth() -> bool {
+        let camera = Camera {
+            position: Vec3::new(0.0, 0.0, 4.0),
+            yaw: 180.0,
+            ..Camera::default()
+        };
+        let vp = camera.view_projection();
+        let depth = |z: f32| {
+            let c = vp * Vec3::new(0.0, 0.0, z).extend(1.0);
+            c.z / c.w
+        };
+        let (close, distant) = (depth(1.0), depth(0.0));
+        assert_ne!(close, distant, "premise: the projection is degenerate in z");
+        close > distant
+    }
+
     #[test]
     fn larger_gui_z_is_nearer() {
-        // The depth convention `gui_item_pose`'s positive z scale depends on:
-        // wgpu depth 0 is nearest and the pipeline compares with `Less`.
+        // The depth convention `gui_item_pose`'s positive z scale depends on,
+        // and it has to be the *world* projection's, because a GUI item draws
+        // through the same pipeline into a depth buffer cleared the same way.
         let m = gui_ortho(320, 240);
         let near = m.transform_point3(Vec3::new(0.0, 0.0, 100.0)).z;
         let far = m.transform_point3(Vec3::new(0.0, 0.0, -100.0)).z;
-        assert!(near < far, "larger GUI z must be nearer: {near} vs {far}");
+        if world_nearer_is_greater_depth() {
+            assert!(near > far, "larger GUI z must be nearer: {near} vs {far}");
+        } else {
+            assert!(near < far, "larger GUI z must be nearer: {near} vs {far}");
+        }
         assert!((0.0..=1.0).contains(&near) && (0.0..=1.0).contains(&far));
     }
 
@@ -897,14 +946,26 @@ mod tests {
         // ...and the surviving faces must also be the *nearest* ones, or the
         // depth test would hide exactly what culling kept. This is the half of
         // the inside-out bug that a still screenshot cannot show.
-        let nearest_hidden = hidden
-            .iter()
-            .map(|d| mean_depth(gui, outward_face(*d)))
-            .fold(f32::MAX, f32::min);
+        let nearest_hidden = if world_nearer_is_greater_depth() {
+            hidden
+                .iter()
+                .map(|d| mean_depth(gui, outward_face(*d)))
+                .fold(f32::MIN, f32::max)
+        } else {
+            hidden
+                .iter()
+                .map(|d| mean_depth(gui, outward_face(*d)))
+                .fold(f32::MAX, f32::min)
+        };
         for dir in visible {
             let d = mean_depth(gui, outward_face(dir));
+            let in_front = if world_nearer_is_greater_depth() {
+                d > nearest_hidden
+            } else {
+                d < nearest_hidden
+            };
             assert!(
-                d < nearest_hidden,
+                in_front,
                 "{dir:?} (depth {d}) must be in front of every culled face ({nearest_hidden})"
             );
         }
@@ -912,10 +973,11 @@ mod tests {
 
     #[test]
     fn the_two_y_flips_cancel_against_the_world_convention() {
-        // The determinant restates the winding result compactly. Note the sign
-        // is *negative*, matching `Camera::view_projection` — the invariant is
-        // "same sign as the world path", not "positive": glam's
-        // `rh::proj::directx::perspective` itself has a negative determinant.
+        // The determinant restates the winding result compactly. The invariant
+        // is "**same sign** as the world path", never a fixed polarity: the
+        // projection's own 4x4 sign follows which end of `[0, 1]` the near plane
+        // is at (negative under a forward projection, positive under
+        // reversed-Z), and neither is the one the rasterizer reads.
         let camera = Camera::default();
         let world = camera.view_projection().determinant();
         let gui = (gui_ortho(256, 256)
@@ -927,12 +989,36 @@ mod tests {
             "GUI and world matrices must agree on handedness (world {world}, gui {gui})"
         );
 
-        // And the flips are genuinely two: each half is orientation-reversing on
-        // its own, so dropping either one would invert the composition.
-        assert!(gui_ortho(256, 256).determinant() > 0.0);
+        // And the flips are genuinely two, stated as the axis reversals they
+        // are rather than as determinant polarities — a determinant folds the
+        // `y` flip together with `gui_ortho`'s `z` direction, so its sign moves
+        // when the depth convention does and says nothing about `y`.
+        let ortho = gui_ortho(256, 256);
         assert!(
-            gui_item_pose([0.0, 0.0, 16.0, 16.0], &vanilla_block_gui()).determinant() < 0.0,
+            ortho.transform_vector3(Vec3::Y).y < 0.0,
+            "gui_ortho must send +y (down the screen) to -y in NDC"
+        );
+        let pose = gui_item_pose([0.0, 0.0, 16.0, 16.0], &vanilla_block_gui());
+        assert!(
+            pose.transform_vector3(Vec3::Y).y < 0.0,
+            "the pose's scale(w, -h, d) must send model +y (up) to -y in pixels"
+        );
+        assert!(
+            pose.determinant() < 0.0,
             "the pose's scale(w, -h, d) is orientation-reversing"
+        );
+        // And the cancellation is load-bearing rather than incidental: undo just
+        // one of the two flips and the composition stops agreeing with the world
+        // path. This is the control, and it is what "genuinely two" means — an
+        // assertion on either half's own 4x4 determinant is not, because
+        // `gui_ortho` folds its y flip together with its depth direction and so
+        // changes sign whenever the depth convention does.
+        let unflipped = ortho * Mat4::from_scale(Vec3::new(1.0, -1.0, 1.0)) * pose;
+        assert_eq!(
+            unflipped.determinant().signum(),
+            -world.signum(),
+            "control failed: removing one y flip must invert the composition's \
+             handedness, or this test cannot see a missing flip"
         );
     }
 

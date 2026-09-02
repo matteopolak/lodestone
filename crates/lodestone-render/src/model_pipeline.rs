@@ -36,7 +36,9 @@
 use wgpu::util::DeviceExt;
 
 use crate::anim::AnimSlotUniform;
-use crate::block::{CameraUniform, DEPTH_FORMAT};
+use crate::block::{
+    CameraUniform, DEPTH_COMPARE_NEARER, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT,
+};
 use crate::models::{ModelMesh, ModelVertex};
 use crate::texture::GpuAtlas;
 use crate::translucency::RenderLayer;
@@ -180,18 +182,29 @@ impl TextureFiltering {
 }
 
 /// Polygon offset that moves a coincident world-space primitive toward the
-/// camera in this renderer's ordinary `[0, 1]` depth convention.
+/// camera.
 ///
-/// Vanilla's depth convention is reversed, so its `(+1.0, +10)` polygon
-/// offset becomes this sign-flipped `(slope, constant)` pair.  Keep the
-/// magnitude in depth-buffer units rather than replacing it with a
+/// This renderer's depth is reversed-Z like vanilla's, so nearer is *greater*
+/// and vanilla's `(scale 1.0, constant 10)` polygon offset is transcribed with
+/// **no sign flip**. Read the record definition rather than the call site: the
+/// fields are `(depthTest, writeDepth, depthBiasScaleFactor, depthBiasConstant)`,
+/// so the literal pair `1.0F, 10.0F` is scale 1, constant 10, not the reverse.
+///
+/// Keep the magnitude in depth-buffer units rather than replacing it with a
 /// world-space epsilon: the latter stops working at grazing angles and changes
-/// meaning with camera distance.  Opaque overlays and geometry that shares a
+/// meaning with camera distance. Opaque overlays and geometry that shares a
 /// physical contact plane (text, item-frame bodies, entity feet, selection
 /// lines) use this same policy; translucent terrain deliberately does not.
+///
+/// Under reversed-Z the `constant` term also finally means what it is supposed
+/// to. A device scales it by the ULP at the primitive's own binade, and a
+/// reversed-Z depth rides down through the exponent with distance, so `10`
+/// buys a *relative* separation of roughly `10 * 2^-23` at every distance —
+/// a genuine tiebreak, rather than the load-bearing rescue it had become when
+/// a forward buffer's geometric clearance collapsed out from under it.
 pub const CAMERA_DEPTH_BIAS: wgpu::DepthBiasState = wgpu::DepthBiasState {
-    constant: -10,
-    slope_scale: -1.0,
+    constant: 10,
+    slope_scale: 1.0,
     clamp: 0.0,
 };
 
@@ -628,30 +641,32 @@ impl ModelPipeline {
                 // `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, true)`
                 // (26.2 `RenderPipelines.TERRAIN_SNIPPET` →
                 // `GENERIC_BLOCKS_SNIPPET.withDepthStencilState(DEFAULT)`), and
-                // under reversed-Z that comparison *includes* equality. Our depth
-                // is `[0, 1]` DirectX-style, so the faithful port is `LessEqual`,
-                // not `Less`.
+                // that comparison *includes* equality. Our depth is reversed-Z
+                // like vanilla's, so the faithful port is
+                // `DEPTH_COMPARE_NEARER_OR_EQUAL` and no sign is flipped.
                 //
-                // This is not cosmetic. A model may place two elements at exactly
-                // the same coordinates and rely on the later one winning:
-                // `grass_block.json` puts `#overlay` on top of `#side` at the same
-                // `[0,0,0]..[16,16,16]` box, so a strict `Less` rejects every
-                // overlay quad and a grass block's sides lose their tinted fringe.
-                // Measured: `grass_block` bakes 10 quads, 4 of which are tinted
-                // overlays coplanar with the base cube's sides.
+                // The equality half is not cosmetic. A model may place two
+                // elements at exactly the same coordinates and rely on the later
+                // one winning: `grass_block.json` puts `#overlay` on top of
+                // `#side` at the same `[0,0,0]..[16,16,16]` box, so a strict
+                // `DEPTH_COMPARE_NEARER` rejects every overlay quad and a grass
+                // block's sides lose their tinted fringe. Measured:
+                // `grass_block` bakes 10 quads, 4 of which are tinted overlays
+                // coplanar with the base cube's sides.
                 //
-                // The translucent variant keeps `Less` deliberately, because we
-                // diverge from vanilla on the *other* field: vanilla's
-                // `TRANSLUCENT_TERRAIN` writes depth and we do not
-                // (`depth_write_enabled: !translucent`). `LessEqual` without a
-                // depth write lets two coplanar translucent quads both blend,
-                // double-darkening a water surface — an artefact vanilla's depth
-                // write suppresses. Restore `LessEqual` here if translucent depth
-                // writes are ever restored too.
+                // The translucent variant keeps the strict comparison
+                // deliberately, because we diverge from vanilla on the *other*
+                // field: vanilla's `TRANSLUCENT_TERRAIN` writes depth and we do
+                // not (`depth_write_enabled: !translucent`). Admitting ties
+                // without a depth write lets two coplanar translucent quads both
+                // blend, double-darkening a water surface — an artefact
+                // vanilla's depth write suppresses. Restore the tie-admitting
+                // comparison here if translucent depth writes are ever restored
+                // too.
                 depth_compare: Some(match (depth.compare, translucent) {
                     (false, _) => wgpu::CompareFunction::Always,
-                    (true, true) => wgpu::CompareFunction::Less,
-                    (true, false) => wgpu::CompareFunction::LessEqual,
+                    (true, true) => DEPTH_COMPARE_NEARER,
+                    (true, false) => DEPTH_COMPARE_NEARER_OR_EQUAL,
                 }),
                 stencil: wgpu::StencilState::default(),
                 // The bias is its **own** axis. It used to be dropped whenever
@@ -1091,70 +1106,48 @@ const MODEL_WGSL: &str = include_str!("shaders/model.wgsl");
 // foliage green. Water's greyscale texture becomes blue here.
 const FLUID_WGSL: &str = include_str!("shaders/fluid.wgsl");
 
-/// The fluid pass's anti-z-fight depth nudge, in window-depth (`z / w`) units —
-/// the value `shaders/fluid.wgsl` adds to every fluid fragment's depth.
-///
-/// Restated here so a gate can measure it against the real
-/// [`Camera::view_projection`](crate::Camera::view_projection) without parsing
-/// WGSL; [`FLUID_DEPTH_NUDGE_LITERAL`] and
-/// `fluid_depth_nudge_matches_the_shader` are what stop the two drifting. The
-/// shader's own comment carries the derivation and the measurement — read that,
-/// not this.
-///
-/// `2^-21`, so it is exactly 8 float32 ULPs at any depth in `[0.5, 1)` and more
-/// below it. Positive is away from the camera under this project's `[0,1]`
-/// depth convention.
-pub const FLUID_DEPTH_NUDGE: f32 = 4.768_371_582_031_25e-7;
-
-/// The exact text of [`FLUID_DEPTH_NUDGE`] as it appears in `fluid.wgsl`. Two
-/// copies of a number in two languages is the drift this pairing exists to
-/// catch.
-const FLUID_DEPTH_NUDGE_LITERAL: &str = "4.76837158203125e-7";
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The Rust constant and the WGSL constant must be the same number.
+    /// The fluid pass adjusts no depth of its own: its whole separation from a
+    /// coplanar block face is `bake_fluid`'s 0.001-block geometric inset.
     ///
-    /// `cargo check` never compiles a shader and no pixel gate can tell a
-    /// slightly-too-small nudge from a correct one, so this string match is the
-    /// only thing tying the measured value to the one that actually ships.
+    /// This is the guard on that. Under the forward `[0,1]` projection this
+    /// renderer used to carry, the inset collapsed to 0 ULP at 64 blocks and
+    /// **inverted** at 128, and `fluid.wgsl` compensated with a constant
+    /// window-depth nudge. Reversed-Z restored the inset (6,707 ULP at 2 blocks
+    /// down to 26 at 512 — `fluid_coplanar_depth_gate.rs` has the sweep), and a
+    /// constant window-depth offset is exactly the wrong shape to leave behind
+    /// under it: reversed depth shrinks with distance, so the same offset costs
+    /// ~2.5 blocks of backward push at 512 where it cost 0.001 at arm's length.
+    ///
+    /// A source-text check because `cargo check` never compiles a shader and no
+    /// pixel gate can see a small constant depth offset; it lives in this file
+    /// rather than in `fluid.wgsl` so the string it searches for cannot match
+    /// itself.
     #[test]
-    fn fluid_depth_nudge_matches_the_shader() {
-        let decl = format!("const FLUID_DEPTH_NUDGE: f32 = {FLUID_DEPTH_NUDGE_LITERAL};");
+    fn the_fluid_shader_adjusts_no_depth() {
         assert!(
-            FLUID_WGSL.contains(&decl),
-            "fluid.wgsl does not declare `{decl}` — the shader and \
-             `FLUID_DEPTH_NUDGE` have drifted apart"
+            !FLUID_WGSL.contains("out.clip.z ="),
+            "fluid.wgsl writes to `out.clip.z` after projecting. Under \
+             reversed-Z the geometric inset is worth 26-6708 ULP on its own, and \
+             a constant window-depth offset costs world distance in proportion \
+             to the distance itself"
         );
-        // The literal really is this constant, so the string check above is not
-        // comparing a typo against itself.
-        assert_eq!(
-            FLUID_DEPTH_NUDGE_LITERAL.parse::<f32>().expect("a float literal"),
-            FLUID_DEPTH_NUDGE
+        assert!(
+            !FLUID_WGSL.contains("FLUID_DEPTH_NUDGE"),
+            "fluid.wgsl still declares or uses a depth nudge"
         );
-        // And it is the power of two the ULP guarantee depends on: exactly 8
-        // ULPs at 1.0's exponent. Computed from `f32::EPSILON` (the gap between
-        // 1.0 and its successor, i.e. 2 ULPs at the [0.5, 1) exponent) rather
-        // than restated, so a hand-edited digit cannot pass.
-        assert_eq!(FLUID_DEPTH_NUDGE, f32::EPSILON * 4.0);
-        // Control: the assertion above would reject a value that merely looks
-        // similar, so the nudge cannot be silently halved or doubled.
-        assert_ne!(FLUID_DEPTH_NUDGE, f32::EPSILON * 2.0);
-        assert_ne!(FLUID_DEPTH_NUDGE, f32::EPSILON * 8.0);
-    }
-
-    /// The nudge must push **away** from the camera, which is *positive* under
-    /// this project's `[0,1]` depth. The two pipelines that pull toward the
-    /// camera (crack, sign text) use negative biases; getting this sign
-    /// backwards would make the water win every coplanar contest instead of
-    /// losing it, and a screenshot of a blue film over a stair looks much like a
-    /// z-fight that has stopped moving.
-    #[test]
-    fn fluid_depth_nudge_pushes_away_from_the_camera() {
-        assert!(FLUID_DEPTH_NUDGE > 0.0);
-        assert!(FLUID_WGSL.contains("out.clip.z = out.clip.z + FLUID_DEPTH_NUDGE * out.clip.w;"));
+        // Control: the detector can find the line it is looking for. The
+        // projection assignment it *should* see is still there, so a rename or a
+        // wholesale rewrite of `vs_main` cannot make this test vacuous.
+        assert!(
+            FLUID_WGSL.contains("out.clip = camera.view_proj * vec4<f32>(world, 1.0);"),
+            "control failed: `vs_main` no longer projects the way this test \
+             assumes, so the assertions above are searching a file whose shape \
+             they do not describe"
+        );
     }
 
     /// The Rust constant and both WGSL copies must be the same number, or the
@@ -1441,10 +1434,50 @@ mod tests {
         assert_eq!(TextureFiltering::parse(""), TextureFiltering::None);
     }
 
+    /// The bias must move a fragment **toward the eye**, and which sign does
+    /// that is a property of the projection rather than a constant to restate.
+    ///
+    /// So the direction is derived: ask the real [`Camera`](crate::Camera) which
+    /// way window depth moves when a point comes nearer, and require the bias to
+    /// carry that sign on both terms. Written as an equality against `-10` this
+    /// test passed unchanged through a whole reversed-Z conversion and certified
+    /// a bias pointing into the wall.
+    ///
+    /// The magnitude is vanilla's `1.0F, 10.0F` and is asserted separately, so a
+    /// correctly-signed offset of the wrong size still fails.
     #[test]
     fn camera_depth_bias_pulls_coplanar_world_geometry_toward_the_eye() {
-        assert_eq!(CAMERA_DEPTH_BIAS.constant, -10);
-        assert_eq!(CAMERA_DEPTH_BIAS.slope_scale, -1.0);
+        let camera = crate::Camera {
+            position: glam::Vec3::new(0.5, 0.5, -8.0),
+            yaw: 0.0,
+            pitch: 0.0,
+            ..crate::Camera::default()
+        };
+        let depth_at = |z: f32| {
+            let clip = camera.view_projection() * glam::Vec4::new(0.5, 0.5, z, 1.0);
+            clip.z / clip.w
+        };
+        // `z = 0.4` is one tenth of a block nearer the eye than `z = 0.5`.
+        let nearer_is_greater = depth_at(0.4) > depth_at(0.5);
+        assert!(
+            nearer_is_greater,
+            "premise: this test derives the bias sign from the projection, and \
+             the projection reported that a nearer point is not greater"
+        );
+        let toward_eye = if nearer_is_greater { 1.0_f32 } else { -1.0 };
+        assert_eq!(
+            (CAMERA_DEPTH_BIAS.constant as f32).signum(),
+            toward_eye,
+            "the constant term must move a fragment toward the eye"
+        );
+        assert_eq!(
+            CAMERA_DEPTH_BIAS.slope_scale.signum(),
+            toward_eye,
+            "the slope term must move a fragment toward the eye"
+        );
+        // Vanilla's magnitude, separately from the sign.
+        assert_eq!(CAMERA_DEPTH_BIAS.constant.abs(), 10);
+        assert_eq!(CAMERA_DEPTH_BIAS.slope_scale.abs(), 1.0);
         assert_eq!(CAMERA_DEPTH_BIAS.clamp, 0.0);
     }
 

@@ -391,7 +391,7 @@ fn render_frame(gpu: &Gpu, view: &dyn ModelSectionView) -> Vec<u8> {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &depth_view,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    load: wgpu::LoadOp::Clear(lodestone_render::DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -475,8 +475,9 @@ fn dark_bbox(frame: &[u8], threshold: u8) -> Option<(u32, u32, u32, u32)> {
 /// by which vertex of [`corner_ao_quad`] they correspond to under the
 /// identity camera's NDC -> framebuffer mapping (`x=-1 -> col 0`,
 /// `x=+1 -> col W-1`, `y=+1 -> row 0` (top), `y=-1 -> row H-1` (bottom), the
-/// standard D3D-style viewport transform this renderer uses throughout —
-/// see `CLAUDE.md`'s "Depth is `[0,1]` DirectX-style" note).
+/// standard D3D-style viewport transform this renderer uses throughout — see
+/// `docs/camera.md`. Only the `x`/`y` mapping matters here; the depth range is
+/// reversed-Z and this gate does not read it.
 const INSET: u32 = 3;
 
 fn corner_samples(frame: &[u8]) -> [(&'static str, u8); 4] {

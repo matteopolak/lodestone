@@ -18,10 +18,10 @@
 // glint and it silently draws nothing.
 //
 // Second, `EQUAL` is the one ported depth comparison that does **not** flip sign.
-// Our depth is [0,1] DirectX-style rather than vanilla's reversed-Z, so every
-// ported `GREATER_THAN_OR_EQUAL` becomes `LessEqual` and every positive depth bias
-// becomes negative — but equality is orientation-independent, so `CompareOp.EQUAL`
-// ports across as `CompareFunction::Equal` unchanged.
+// Our depth is reversed-Z [0,1] like vanilla's, so a ported
+// `GREATER_THAN_OR_EQUAL` transcribes unflipped and so does a positive depth
+// bias -- and equality is orientation-independent either way, so
+// `CompareOp.EQUAL` ports across as `CompareFunction::Equal` unchanged.
 //
 // The UV transform arrives already composed as a mat4 (`glint.tex_matrix`) rather
 // than as time + constants, so there is exactly one implementation of the scroll

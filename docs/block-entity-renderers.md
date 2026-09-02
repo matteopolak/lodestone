@@ -1069,8 +1069,9 @@ therefore a claim about the text losing to the board, and **no gate here had eve
 depth buffer underneath its text**. The separation is small enough to be worth measuring rather than
 assuming: `template_sign_rot_0`'s board spans `z ∈ [7.33333, 8.66667]/16` and
 `StandingSignRenderer.TEXT_OFFSET` puts the text plane at `0.5 + 0.046666667`, i.e. **0.005 blocks —
-5 mm** — outside the front face, and this project's depth is forward `[0, 1]` rather than vanilla's
-reversed-Z. So `a_live_signs_text_survives_its_own_board_in_the_depth_buffer` meshes and uploads the
+5 mm** — outside the front face. That was a thin margin when this project's depth was forward
+`[0, 1]` rather than reversed-Z; it is now worth thousands of ULPs at ordinary range
+(`docs/coplanar-overlay-depth.md`). So `a_live_signs_text_survives_its_own_board_in_the_depth_buffer` meshes and uploads the
 live world's own sections around the sign first. Result: 38,528 px of board, and the text survives
 at 221 px.
 
@@ -2102,7 +2103,7 @@ documented gap, not a silent one — see the module doc's own "What is deliberat
 (`RenderPipelines.BEACON_BEAM_OPAQUE`/`BEACON_BEAM_TRANSLUCENT`): the solid core is
 `ColorTargetState.DEFAULT` — `Optional.empty()`, i.e. **no blend function at all**, a real overwrite —
 with depth write on; the glow is `BlendFunction.TRANSLUCENT` with depth write off. Both share
-`DepthStencilState`'s `GREATER_THAN_OR_EQUAL` compare, which this engine's `[0,1]` DirectX-style depth
+`DepthStencilState`'s `GREATER_THAN_OR_EQUAL` compare, which this engine's reversed-Z depth
 flips to `LessEqual` per `CLAUDE.md`'s rendering constraints. One `beacon_beam.wgsl` (texture × vertex
 colour, no lighting term — vanilla submits at `setLight(15728880)`, full-bright, so there is nothing for
 a light channel to attenuate) backs both `wgpu::RenderPipeline`s; only the blend/depth-write fields

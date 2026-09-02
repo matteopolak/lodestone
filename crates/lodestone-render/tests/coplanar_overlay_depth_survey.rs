@@ -18,15 +18,24 @@
 //! the ink differ only in the bias column, and the geometric table below is
 //! identical for both by construction.
 //!
-//! `fluid_coplanar_depth_gate` established the method and the units: this
-//! renderer's depth is forward `[0, 1]` `Depth32Float`, which spends almost the
-//! whole float32 mantissa near the near plane, so a fixed world-space clearance
-//! buys a number of representable depth values that **collapses with distance**.
-//! That file measured the fluid pass's `0.001`-block inset at 210 ULP at 2
-//! blocks and **0 at 64**. This file asks the same question of the four overlays
-//! above, and adds the axis that file did not need: **the angle between the view
-//! direction and the surface normal**, because every one of these defects is
-//! reported at oblique views.
+//! `fluid_coplanar_depth_gate` established the method and the units. This file
+//! asks the same question of the four overlays above, and adds the axis that
+//! file did not need: **the angle between the view direction and the surface
+//! normal**, because every one of these defects was reported at oblique views.
+//!
+//! # This table is now a *before and after*
+//!
+//! Every number below was first taken under a **forward** `[0, 1]`
+//! `Depth32Float` projection, which spends almost the whole float32 mantissa
+//! near the near plane, so a fixed world-space clearance bought a count of
+//! representable depth values that **collapsed as the square of the distance** —
+//! a map's `1.01 / 128` was worth 1661 ULP at 2 blocks and **1 at 64**, and the
+//! fluid pass's `0.001`-block inset went to **0 at 64**. That is the defect this
+//! survey was written to measure and the reason the projection is now
+//! reversed-Z (`Camera::projection_matrix`), under which the same separations
+//! are two to three orders of magnitude larger and degrade only as the distance.
+//! The forward figures are kept in the doc comments below as the before column;
+//! the run prints the current ones.
 //!
 //! It then measures the half that cannot be derived: **what a
 //! `wgpu::DepthBiasState` is worth in depth units on the real device.** The
@@ -223,6 +232,11 @@ const ANGLES: [f32; 6] = [0.0, 30.0, 45.0, 60.0, 75.0, 85.0];
 /// would have sent this whole investigation at the wrong mechanism.
 ///
 /// Returns `None` for a ray parallel to the planes, which projects to nothing.
+///
+/// The **sign convention** is "how far the overlay is in front", and which way
+/// that is in the buffer is asked of the projection ([`nearer_is_greater`])
+/// rather than written down, because that is exactly the fact a reversed-Z
+/// conversion changes. Hardcoded, every cell of this table silently negates.
 fn ray_ulp_gap(camera: &Camera, back_point: glam::Vec3, clearance: f32) -> Option<i64> {
     let eye = camera.position;
     let dir = back_point - eye;
@@ -241,7 +255,29 @@ fn ray_ulp_gap(camera: &Camera, back_point: glam::Vec3, clearance: f32) -> Optio
     if !(back.is_finite() && front.is_finite()) || back < 0.0 || front < 0.0 {
         return None;
     }
-    Some(ulp_gap(front, back))
+    Some(if nearer_is_greater() {
+        ulp_gap(back, front)
+    } else {
+        ulp_gap(front, back)
+    })
+}
+
+/// Does a surface nearer the eye carry a **larger** window depth?
+///
+/// True under this renderer's reversed-Z projection and false under a forward
+/// `[0, 1]` one. Derived from the production [`Camera`] so the survey reports a
+/// positive separation for an overlay that really is in front, whichever
+/// convention the projection carries.
+fn nearer_is_greater() -> bool {
+    let camera = camera_at(8.0, 0.0, Camera::far_for_render_distance(12, 0));
+    let near = window_depth(&camera, glam::Vec3::new(0.0, 0.0, -1.0));
+    let far = window_depth(&camera, glam::Vec3::new(0.0, 0.0, 0.0));
+    assert_ne!(
+        near, far,
+        "premise: two surfaces a block apart projected to the same depth, so \
+         this survey cannot tell which direction is toward the eye"
+    );
+    near > far
 }
 
 /// **The survey.** For each overlay, the worst ULP separation the depth test
@@ -345,11 +381,59 @@ fn the_surveyed_clearances_match_the_shipped_geometry() {
         (SIGN_TEXT_CLEARANCE - (1.0 / 256.0 + 2.0 / 2048.0)).abs() < 1.0e-9,
         "the sign text plane drifted"
     );
-    // And the biases: the outline gets one step, the ink two.
-    assert_eq!(CAMERA_DEPTH_BIAS.constant, -10);
-    assert_eq!(CAMERA_DEPTH_BIAS.slope_scale, -1.0);
-    assert_eq!(MAP_SURFACE_DEPTH_BIAS.constant, -20);
-    assert_eq!(MAP_SURFACE_DEPTH_BIAS.slope_scale, -1.0);
+    // And the biases: vanilla's magnitudes, the outline one step and the map
+    // two. The **sign** is deliberately not restated here — it is a property of
+    // the projection, and `model_pipeline`'s own
+    // `camera_depth_bias_pulls_coplanar_world_geometry_toward_the_eye` derives
+    // it from a real camera. Asserting it in two places is how one of them ends
+    // up certifying a bias pointing into the wall.
+    assert_eq!(CAMERA_DEPTH_BIAS.constant.abs(), 10);
+    assert_eq!(CAMERA_DEPTH_BIAS.slope_scale.abs(), 1.0);
+    assert_eq!(MAP_SURFACE_DEPTH_BIAS.constant, 2 * CAMERA_DEPTH_BIAS.constant);
+    assert_eq!(MAP_SURFACE_DEPTH_BIAS.slope_scale, CAMERA_DEPTH_BIAS.slope_scale);
+}
+
+/// The survey's own headline claim, asserted rather than left in prose: every
+/// one of these overlays now has a separation that **holds** at 64 blocks, where
+/// the forward projection this replaced left the thinnest of them at 1 ULP.
+///
+/// The threshold is `fluid_coplanar_depth_gate`'s `MIN_ULPS` of 4 — the floor
+/// below which a rasterizer interpolating two differently-shaped coplanar quads
+/// can round either way — and the head-on column is the one asserted because it
+/// is the *worst* one: the geometric separation along a ray grows as
+/// `clearance / cos(theta)`, so obliquity only ever helps.
+#[test]
+fn every_surveyed_overlay_clears_the_rounding_floor_head_on_at_range() {
+    const MIN_ULPS: i64 = 4;
+    let far = Camera::far_for_render_distance(12, 0);
+    let mut thin = Vec::new();
+    for overlay in overlays() {
+        for d in DISTANCES {
+            let camera = camera_at(d, 0.0, far);
+            let mut worst = i64::MAX;
+            for i in 0i32..=8 {
+                for j in 0i32..=8 {
+                    let p = glam::Vec3::new(-0.5 + i as f32 / 8.0, -0.5 + j as f32 / 8.0, 0.0);
+                    if let Some(gap) = ray_ulp_gap(&camera, p, overlay.clearance) {
+                        worst = worst.min(gap);
+                    }
+                }
+            }
+            assert_ne!(worst, i64::MAX, "no ray reached the planes at d={d}");
+            if worst < MIN_ULPS {
+                thin.push(format!(
+                    "  {} at {d} blocks head-on: {worst} ULP",
+                    overlay.name
+                ));
+            }
+        }
+    }
+    assert!(
+        thin.is_empty(),
+        "these overlays are within rounding distance of the surface behind them, \
+         so their polygon offset is load-bearing rather than a tiebreak:\n{}",
+        thin.join("\n")
+    );
 }
 
 /// Control for the survey's detector: an overlay with **zero** clearance must
@@ -386,6 +470,40 @@ fn control_a_zero_clearance_overlay_measures_zero_ulps_everywhere() {
 const PROBE_W: u32 = 64;
 const PROBE_H: u32 = 64;
 const PROBE_DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+
+/// The probe's depth clear. Aliased to the production
+/// [`lodestone_render::DEPTH_CLEAR`] because the saturation sweep's whole
+/// detection is "a discarded fragment reads back the clear value", which only
+/// works while the clear sits at the opposite end of the range from the
+/// direction a toward-the-eye bias pushes.
+const PROBE_CLEAR: f32 = lodestone_render::DEPTH_CLEAR;
+
+/// The depth the saturation sweep draws its quad at: near the clear end, so an
+/// over-large toward-the-eye bias has the whole range to travel before it
+/// saturates.
+const PROBE_SATURATION_BASE: f32 = 0.02;
+
+/// The sign a `constant`/`slope_scale` must carry to move a fragment **toward
+/// the eye**, derived from the production projection rather than written down.
+///
+/// The probe below draws in clip space and never touches `Camera`, but the
+/// question it exists to answer — "does the shipped bias pull the way its users
+/// need" — is about the projection those users draw through.
+fn toward_the_eye() -> f32 {
+    let camera = Camera {
+        position: glam::Vec3::new(0.0, 0.0, 4.0),
+        yaw: 180.0,
+        ..Camera::default()
+    };
+    let vp = camera.view_projection();
+    let depth = |z: f32| {
+        let c = vp * glam::Vec4::new(0.0, 0.0, z, 1.0);
+        c.z / c.w
+    };
+    let (close, distant) = (depth(1.0), depth(0.0));
+    assert_ne!(close, distant, "premise: the projection is degenerate in z");
+    if close > distant { 1.0 } else { -1.0 }
+}
 
 /// A pass-through shader: the vertex buffer already holds clip-space positions,
 /// so the probe controls `z/w` exactly and the calibration does not inherit a
@@ -563,7 +681,13 @@ fn probe_depth(gpu: &Gpu, z_left: f32, z_right: f32, bias: wgpu::DepthBiasState)
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &dv,
                 depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
+                    // Deliberately the *far* end of the range from where a
+                    // toward-the-eye bias pushes, so a discarded fragment is
+                    // distinguishable from a clamped one in the saturation
+                    // sweep. `lodestone_render::DEPTH_CLEAR` is that end under
+                    // reversed-Z, and naming it keeps the two in step if the
+                    // convention ever moves again.
+                    load: wgpu::LoadOp::Clear(PROBE_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
@@ -649,26 +773,29 @@ fn polygon_offset_calibration() {
     println!("   backend: {:?}", gpu.backend);
 
     let none = wgpu::DepthBiasState::default();
+    let sign = toward_the_eye();
+    let c10 = (10.0 * sign) as i32;
+    let c20 = (20.0 * sign) as i32;
     println!("\n== constant term, flat quad (slope 0) ==");
-    println!("   {:>12}{:>16}{:>16}{:>16}", "base depth", "unbiased", "const -10", "ULP delta");
+    println!("   {:>12}{:>16}{:>16}{:>16}", "base depth", "unbiased", format!("const {c10}"), "ULP delta");
     for base in [0.02f32, 0.1, 0.25, 0.5, 0.75, 0.9, 0.99] {
         let plain = probe_depth(&gpu, base, base, none);
         let biased = probe_depth(
             &gpu,
             base,
             base,
-            wgpu::DepthBiasState { constant: -10, slope_scale: 0.0, clamp: 0.0 },
+            wgpu::DepthBiasState { constant: c10, slope_scale: 0.0, clamp: 0.0 },
         );
         let d20 = probe_depth(
             &gpu,
             base,
             base,
-            wgpu::DepthBiasState { constant: -20, slope_scale: 0.0, clamp: 0.0 },
+            wgpu::DepthBiasState { constant: c20, slope_scale: 0.0, clamp: 0.0 },
         );
         println!(
-            "   {base:>12.4}{plain:>16.9}{biased:>16.9}{:>16}  (const -20 -> {} ULP)",
-            ulp_gap(biased, plain),
-            ulp_gap(d20, plain)
+            "   {base:>12.4}{plain:>16.9}{biased:>16.9}{:>16}  (const {c20} -> {} ULP)",
+            ulp_gap(plain, biased).abs(),
+            ulp_gap(plain, d20).abs()
         );
     }
 
@@ -677,7 +804,13 @@ fn polygon_offset_calibration() {
         "   a quad running z_left..z_right over {PROBE_W} px has window slope \
          m = |z_right - z_left| / {PROBE_W}"
     );
-    println!("   {:>12}{:>14}{:>18}{:>18}", "m", "unbiased", "slope -1.0 ULP", "slope -2.0 ULP");
+    println!(
+        "   {:>12}{:>14}{:>18}{:>18}",
+        "m",
+        "unbiased",
+        format!("slope {sign:+.0} ULP"),
+        format!("slope {:+.0} ULP", 2.0 * sign)
+    );
     for spread in [0.0f32, 0.001, 0.01, 0.05, 0.2, 0.4] {
         let (l, r) = (0.5 - spread * 0.5, 0.5 + spread * 0.5);
         let m = spread / PROBE_W as f32;
@@ -686,28 +819,29 @@ fn polygon_offset_calibration() {
             &gpu,
             l,
             r,
-            wgpu::DepthBiasState { constant: 0, slope_scale: -1.0, clamp: 0.0 },
+            wgpu::DepthBiasState { constant: 0, slope_scale: sign, clamp: 0.0 },
         );
         let s2 = probe_depth(
             &gpu,
             l,
             r,
-            wgpu::DepthBiasState { constant: 0, slope_scale: -2.0, clamp: 0.0 },
+            wgpu::DepthBiasState { constant: 0, slope_scale: 2.0 * sign, clamp: 0.0 },
         );
         println!(
             "   {m:>12.3e}{plain:>14.9}{:>18}{:>18}",
-            ulp_gap(s1, plain),
-            ulp_gap(s2, plain)
+            ulp_gap(plain, s1).abs(),
+            ulp_gap(plain, s2).abs()
         );
     }
 
     println!("\n== depth-range saturation: does an over-large bias clamp or discard? ==");
     println!(
-        "   a quad at depth 0.02 cleared to 1.0; if the fragment is discarded the \
-         read-back depth stays at the CLEAR value 1.0"
+        "   a quad at depth {PROBE_SATURATION_BASE} cleared to {PROBE_CLEAR}; if \
+         the fragment is discarded the read-back depth stays at the CLEAR value"
     );
     println!("   {:>16}{:>18}", "constant", "written depth");
-    for constant in [-10i32, -1_000, -100_000, -10_000_000, -1_000_000_000] {
+    for magnitude in [10i32, 1_000, 100_000, 10_000_000, 1_000_000_000] {
+        let constant = (magnitude as f32 * sign) as i32;
         let d = probe_saturation(
             &gpu,
             0.02,
@@ -716,11 +850,12 @@ fn polygon_offset_calibration() {
         println!("   {constant:>16}{d:>18.9}");
     }
     println!("   {:>16}{:>18}", "slope_scale", "written depth (m = 6.25e-3)");
-    for slope in [-1.0f32, -10.0, -100.0, -10_000.0] {
+    for magnitude in [1.0f32, 10.0, 100.0, 10_000.0] {
+        let slope = magnitude * sign;
         let d = probe_depth(
             &gpu,
-            0.02 - 0.2,
-            0.02 + 0.2,
+            PROBE_SATURATION_BASE - 0.2,
+            PROBE_SATURATION_BASE + 0.2,
             wgpu::DepthBiasState { constant: 0, slope_scale: slope, clamp: 0.0 },
         );
         println!("   {slope:>16}{d:>18.9}");
@@ -734,22 +869,31 @@ fn polygon_offset_calibration() {
         ("MAP_SURFACE_DEPTH_BIAS", MAP_SURFACE_DEPTH_BIAS),
     ] {
         let b = probe_depth(&gpu, base, base, bias);
-        println!("   {name:<26} -> {:>8} ULP toward the eye", ulp_gap(b, plain));
+        println!(
+            "   {name:<26} -> {:>8} ULP toward the eye",
+            ulp_gap(plain, b).abs()
+        );
     }
 
     // ---- the assertions, each predicting a magnitude against a named wrong
     // ---- hypothesis rather than a direction.
 
-    // 1. Direction. A negative `constant` must move the fragment TOWARD the eye
-    //    (smaller depth in this forward `[0,1]` buffer). The wrong hypothesis is
-    //    that the ported sign is inverted and it pushes primitives away, which
-    //    would make every overlay in the table above lose at grazing angles.
+    // 1. Direction. The shipped `CAMERA_DEPTH_BIAS` must move the fragment
+    //    TOWARD the eye, which is the LARGER depth under this renderer's
+    //    reversed-Z projection and the smaller one under a forward `[0,1]` one.
+    //    Both the expected direction and the bias's own sign come from outside
+    //    this assertion — `toward_the_eye()` asks the real projection — so the
+    //    wrong hypothesis, that the ported sign is inverted and it pushes
+    //    primitives away, fails here rather than at grazing angles in play.
     let flat = probe_depth(&gpu, 0.5, 0.5, none);
     let pulled = probe_depth(&gpu, 0.5, 0.5, CAMERA_DEPTH_BIAS);
+    let moved_toward_eye = if sign > 0.0 { pulled > flat } else { pulled < flat };
     assert!(
-        pulled < flat,
-        "a negative depth bias must reduce the written depth in a forward [0,1] \
-         buffer; measured unbiased {flat} vs biased {pulled}"
+        moved_toward_eye,
+        "the shipped depth bias must move a fragment toward the eye, which for \
+         this projection is the {} depth; measured unbiased {flat} vs biased \
+         {pulled}",
+        if sign > 0.0 { "larger" } else { "smaller" }
     );
 
     // 2. Magnitude, against the two hypotheses that differ by ~7 orders of
@@ -758,45 +902,49 @@ fn polygon_offset_calibration() {
     //    representable step (`r = 2^(exp - 23)` for a float depth attachment),
     //    it is a small ULP count. Predict both and require the measurement to
     //    land on one.
-    let raw_float_hypothesis = 0.0f32;
+    let raw_float_hypothesis = if sign > 0.0 { 1.0f32 } else { 0.0 };
     let ulp_hypothesis_max = 64i64;
     assert!(
-        pulled > 0.4,
-        "a `constant` of -10 landed at {pulled}, which is the raw-float \
-         hypothesis ({raw_float_hypothesis}) rather than a ULP-scaled offset"
+        (pulled - 0.5).abs() < 0.1,
+        "a `constant` of {} landed at {pulled}, which is the raw-float \
+         hypothesis ({raw_float_hypothesis}) rather than a ULP-scaled offset",
+        CAMERA_DEPTH_BIAS.constant
     );
-    let constant_ulps = ulp_gap(pulled, flat);
+    let constant_ulps = ulp_gap(flat, pulled).abs();
     assert!(
         (1..=ulp_hypothesis_max).contains(&constant_ulps),
-        "a `constant` of -10 moved the depth {constant_ulps} ULP; the ULP-scaled \
-         hypothesis predicts a small multiple of 10 and this is outside 1..={ulp_hypothesis_max}"
+        "a `constant` of {} moved the depth {constant_ulps} ULP; the ULP-scaled \
+         hypothesis predicts a small multiple of 10 and this is outside 1..={ulp_hypothesis_max}",
+        CAMERA_DEPTH_BIAS.constant
     );
 
     // 3. The constant term scales with the magnitude of `constant`, so doubling
     //    it doubles the offset — the property `MAP_SURFACE_DEPTH_BIAS` relies on
     //    to sit one step ahead of `CAMERA_DEPTH_BIAS`.
-    let doubled = ulp_gap(probe_depth(&gpu, 0.5, 0.5, MAP_SURFACE_DEPTH_BIAS), flat);
+    let doubled = ulp_gap(flat, probe_depth(&gpu, 0.5, 0.5, MAP_SURFACE_DEPTH_BIAS)).abs();
     assert_eq!(
         doubled,
         constant_ulps * 2,
-        "doubling `constant` must double the offset: -10 gave {constant_ulps} ULP \
-         and -20 gave {doubled}"
+        "doubling `constant` must double the offset: {} gave {constant_ulps} ULP \
+         and {} gave {doubled}",
+        CAMERA_DEPTH_BIAS.constant,
+        MAP_SURFACE_DEPTH_BIAS.constant
     );
 
     // 4. The slope term is real, grows with the primitive's window-space depth
     //    slope, and is **large** compared with the constant term at the slopes a
     //    grazing view produces. The wrong hypothesis — that the slope term is
-    //    negligible, which is what a reader would assume from `slope_scale: -1.0`
-    //    sitting next to `constant: -10` — predicts the two are comparable.
+    //    negligible, which is what a reader would assume from `slope_scale: 1.0`
+    //    sitting next to `constant: 10` — predicts the two are comparable.
     let spread = 0.001f32;
     let sloped_plain = probe_depth(&gpu, 0.5 - spread * 0.5, 0.5 + spread * 0.5, none);
     let sloped_biased = probe_depth(
         &gpu,
         0.5 - spread * 0.5,
         0.5 + spread * 0.5,
-        wgpu::DepthBiasState { constant: 0, slope_scale: -1.0, clamp: 0.0 },
+        wgpu::DepthBiasState { constant: 0, slope_scale: sign, clamp: 0.0 },
     );
-    let slope_ulps = ulp_gap(sloped_biased, sloped_plain);
+    let slope_ulps = ulp_gap(sloped_plain, sloped_biased).abs();
     assert!(
         slope_ulps > constant_ulps * 10,
         "at a window depth slope of {:.3e} the slope term contributed \
@@ -809,17 +957,24 @@ fn polygon_offset_calibration() {
     // 5. Saturation clamps; it does not discard. This is the measurement that
     //    retires the hypothesis that an unbounded slope-scaled offset at a
     //    grazing angle makes an overlay *vanish*: the depth attachment is
-    //    cleared to 1.0, so a discarded fragment would read back as 1.0.
+    //    cleared to `PROBE_CLEAR`, the far end of the range, so a discarded
+    //    fragment would read back at the clear and a clamped one at the
+    //    opposite limit.
     let saturated = probe_depth(
         &gpu,
-        0.02,
-        0.02,
-        wgpu::DepthBiasState { constant: -1_000_000_000, slope_scale: 0.0, clamp: 0.0 },
+        PROBE_SATURATION_BASE,
+        PROBE_SATURATION_BASE,
+        wgpu::DepthBiasState {
+            constant: (1_000_000_000.0f32 * sign) as i32,
+            slope_scale: 0.0,
+            clamp: 0.0,
+        },
     );
     assert!(
-        saturated < 0.5,
-        "an over-large negative bias read back as {saturated}; a value at the \
-         1.0 clear would mean the fragment was discarded rather than clamped, \
-         which is a completely different failure mode for a grazing overlay"
+        (saturated - PROBE_CLEAR).abs() > 0.5,
+        "an over-large bias read back as {saturated}; a value at the \
+         {PROBE_CLEAR} clear would mean the fragment was discarded rather than \
+         clamped, which is a completely different failure mode for a grazing \
+         overlay"
     );
 }

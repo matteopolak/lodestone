@@ -536,20 +536,30 @@ fn sign_text_survives_the_depth_test_against_its_own_board() {
 ///
 /// The separation between the panel and the ink is a fixed **world**
 /// distance — `-0.01` in local glyph space through the `0.025` text scale, so
-/// `0.00025 · scale` blocks. What it is measured *in* is one ULP of a forward
-/// `[0,1]` `Depth32Float`, and that grows as the **square** of the viewing
+/// `0.00025 · scale` blocks. Under the **forward** `[0,1]` `Depth32Float` this
+/// renderer used to project into, one ULP grew as the **square** of the viewing
 /// distance (`≈6.1e-7 · d²` blocks; the entity-shadow work measured the same
-/// curve at 2.44e-06 / 3.84e-05 / 1.55e-04 blocks at 2 / 8 / 16 blocks).
-/// Headroom in ULP is therefore `410 · scale / d²`, and holding the *angular*
-/// size fixed makes it fall as `1 / d`:
+/// curve at 2.44e-06 / 3.84e-05 / 1.55e-04 blocks at 2 / 8 / 16 blocks), so the
+/// headroom was `410 · scale / d²` and holding the *angular* size fixed made it
+/// fall as `1 / d`:
 ///
-/// | `z` | `scale` | eye distance | geometric headroom |
+/// | `z` | `scale` | eye distance | geometric headroom, forward `[0,1]` |
 /// |---|---|---|---|
 /// | 6 | 1 | 7.8 | 6.7 ULP |
 /// | 12 | 2 | 15.6 | 3.4 ULP |
 /// | 24 | 4 | 31.2 | 1.7 ULP |
 /// | 48 | 8 | 62.5 | 0.84 ULP |
 /// | 72 | 12 | 93.7 | 0.56 ULP |
+///
+/// `Camera::projection_matrix` is reversed-Z now, under which the same
+/// separation is worth two to three orders of magnitude more at every row
+/// (`docs/coplanar-overlay-depth.md`). The sweep is kept in full anyway: it was
+/// built because *one* point could not distinguish a mechanism that scales with
+/// the entity from one that scales with the camera, and that reasoning is
+/// independent of how much precision there is. The glyph pipeline's polygon
+/// offset is also kept, for the reason `gpu/display_text.rs` gives — vanilla's
+/// own geometric shadow offset is one-sided and a `text_display` is visible from
+/// both sides, which is geometry rather than precision.
 ///
 /// The single point this gate used to have was the `z = 24, scale = 4` row.
 /// Its own comment claimed scaling the hologram up "does not paper over the
@@ -711,12 +721,12 @@ fn text_display_glyphs_survive_their_own_background_panel() {
         "adding the background panel ate the glyphs at z={} scale={}: \
          {subject_ink} ink px with the panel against {reference_ink} without. \
          The panel is only 0.00025·scale blocks behind the ink, so the two are \
-         within a few float ULP of each other in this renderer's forward [0,1] \
-         depth buffer and the ink loses wherever the two quads' interpolated \
-         depth diverges. Vanilla submits the glyphs through \
-         `RenderPipelines.TEXT_POLYGON_OFFSET` for exactly this reason, and \
-         can afford to because reversed-Z gives it 53+ ULP of headroom at \
-         every distance where this has under 7",
+         close together in world space, and the ink loses wherever the two \
+         quads' interpolated depth diverges. Vanilla submits the glyphs through \
+         `RenderPipelines.TEXT_POLYGON_OFFSET` and so does this pass. Note the \
+         numbers in this file's header were taken under a forward [0,1] \
+         projection; this renderer is reversed-Z now, so a failure here is more \
+         likely to be the pipeline than the precision",
         case.z, case.scale
     );
 }
@@ -756,10 +766,10 @@ impl ShadowCase {
 /// Obliquity **and** distance, because the two axes fail for different
 /// reasons and neither alone is enough.
 ///
-/// Distance, for the reason [`HOLOGRAM_SWEEP`]'s own doc gives at length: one
-/// ULP of a forward `[0,1]` `Depth32Float` grows as the square of the viewing
-/// distance, so a mechanism that holds at one range says nothing about
-/// another. `scale` moves with `z` so every row subtends the same angle and
+/// Distance, for the reason [`HOLOGRAM_SWEEP`]'s own doc gives at length: what
+/// one ULP of depth is worth in world units changes with the viewing distance
+/// under either convention, so a mechanism that holds at one range says nothing
+/// about another. `scale` moves with `z` so every row subtends the same angle and
 /// contributes comparable ink.
 ///
 /// Obliquity, because **[`HOLOGRAM_SWEEP`] structurally cannot see this

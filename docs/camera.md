@@ -136,12 +136,58 @@ the jar and pinned by tests:
 | default `fov_y_degrees` | `70.0` (vertical) | `options.fov` → JOML `perspective` |
 | default `near` | `0.05` | `Camera.PROJECTION_Z_NEAR` |
 | `far` | `max(rd_chunks · 16 · 4, cloud_chunks · 16)` | `Camera::far_for_render_distance` |
-| depth range | `[0, 1]` DirectX/Metal | **not** vanilla's reversed-Z; every ported depth comparison and bias flips sign |
+| depth range | `[0, 1]` DirectX/Metal, **reversed** (near → `1`, far → `0`) | vanilla's own arrangement; every ported depth comparison and polygon offset transcribes with **no** sign flip |
+
+### The depth range is reversed, and that is load-bearing everywhere
+
+`Camera::projection_matrix` is glam's `camera::rh::proj::directx::perspective`
+with `near` and `far` exchanged in the `z` row — written out elementwise rather
+than called with swapped arguments, so the exchange is visible.
+
+A **forward** `[0, 1]` projection puts every window depth just under `1.0`, where
+`f32` spacing is a flat `2^-24`, so a fixed world clearance `c` at distance `d`
+buys `2^23 · near · c / d^2` representable values and collapses as `d^2`.
+Reversed, depth is `near · (far - d) / ((far - near) · d)`, which shrinks with
+distance and rides down through the float exponent: the relative separation is
+`c · far / (d · (far - d))` and a float carries a `2^23`-to-`2^24` window of ULPs
+per binade, so the separation degrades only as `1 / d`. Measured on a framed
+map's `1.01 / 128` clearance, head-on
+(`crates/lodestone-render/tests/coplanar_overlay_depth_survey.rs`):
+
+| distance | forward `[0,1]` | reversed |
+|---|---|---|
+| 2 | 1,661 ULP | 53,166 ULP |
+| 12 | 47 | 5,888 |
+| 32 | 6 | 3,311 |
+| 64 | 1 | 1,655 |
+
+What follows from it, and what a reader porting a constant needs:
+
+* **Nearer is greater.** Vanilla's `GREATER_THAN_OR_EQUAL` is
+  `lodestone_render::DEPTH_COMPARE_NEARER_OR_EQUAL`, its strict sibling is
+  `DEPTH_COMPARE_NEARER`, and neither flips.
+* **A depth attachment clears to `lodestone_render::DEPTH_CLEAR` = `0.0`.** A
+  clear to `1.0` under a "nearer wins" comparison rejects every fragment and
+  draws nothing, silently.
+* **A polygon offset that pulls toward the eye is positive.**
+* **`gui_ortho` carries the same direction**, because a GUI item draws through
+  the same pipeline into a depth buffer cleared the same way.
+* **The projection matrix's 4x4 determinant is positive**, where the forward
+  one's was negative — mirroring the clip `z` axis flips a 4x4 determinant.
+  Nothing about *screen* winding changes: the rasterizer decides facing from
+  projected `x`/`y` alone. A gate asserting that sign as a polarity is asserting
+  a property of the depth convention, not measuring winding.
+
+The far plane stays **finite**. An infinite-far reversed projection is the usual
+companion and would make the separation exactly `c / d`, but it deletes the far
+clip plane that `Frustum` extracts and section culling uses; the finite form
+already carries the numbers above.
 
 ## Dependencies
 
-`glam` (`Mat4`/`Vec3`/`Vec4`, and `camera::rh::proj::directx::perspective` for
-the projection — the `[0,1]` variant, not the OpenGL `[-1,1]` one). Nothing else.
+`glam` (`Mat4`/`Vec3`/`Vec4`). The projection is assembled directly from
+`Mat4::from_cols` — the `[0,1]` DirectX convention rather than the OpenGL
+`[-1,1]` one, with the range reversed. Nothing else.
 Consumers: `lodestone-render`'s `weather_pipeline`, `entity`, `item_render`,
 `section`; `lodestone-shell`'s `camera_rig`, `sim/camera`, `particles`, `gpu/*`.
 

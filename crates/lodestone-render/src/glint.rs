@@ -32,9 +32,10 @@
 //! Vanilla's glint pipeline is `DepthStencilState(CompareOp.EQUAL, false)` with
 //! **zero** depth bias, which works only because the glint pass rasterises
 //! byte-identical clip positions to the pass beneath it. Our depth is `[0,1]`
-//! DirectX-style rather than vanilla's reversed-Z, so every other ported depth
-//! comparison flips sign — but equality is orientation-independent and
-//! `CompareOp.EQUAL` ports across unchanged. See [`DEPTH_COMPARE`].
+//! reversed-Z like vanilla's, so no ported depth comparison flips sign at all —
+//! and equality would be orientation-independent even if one did, so
+//! `CompareOp.EQUAL` ports across unchanged under any convention. See
+//! [`DEPTH_COMPARE`].
 //!
 //! # Bind groups: 2 of 4, so there is room
 //!
@@ -934,13 +935,14 @@ mod tests {
         assert_ne!(b.color.src_factor, wgpu::BlendFactor::One, "ADDITIVE, not GLINT");
     }
 
-    /// Depth is `EQUAL` with no write, and `EQUAL` does not flip under our
-    /// `[0,1]` depth convention.
+    /// Depth is `EQUAL` with no write. `EQUAL` is its own mirror image, so it
+    /// is the one ported comparison that is unaffected by which end of the
+    /// `[0,1]` range the near plane sits at.
     #[test]
     fn depth_compare_is_equal_unflipped() {
         assert_eq!(DEPTH_COMPARE, wgpu::CompareFunction::Equal);
-        // The flipped forms, which is what a mechanical port of every other
-        // depth comparison in this crate would have produced.
+        // The ordered forms, either of which a mechanical sweep over this
+        // crate's depth comparisons would have produced.
         assert_ne!(DEPTH_COMPARE, wgpu::CompareFunction::LessEqual);
         assert_ne!(DEPTH_COMPARE, wgpu::CompareFunction::GreaterEqual);
     }

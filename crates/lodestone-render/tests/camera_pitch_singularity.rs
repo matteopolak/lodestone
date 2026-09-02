@@ -411,15 +411,18 @@ fn view_matrix_third_row_is_the_negated_forward() {
 /// The sign is **derived** from a real camera (the pitch-0 one, which is
 /// unchanged element-for-element by
 /// [`view_matrix_agrees_with_the_legacy_construction_away_from_the_singularity`])
-/// rather than asserted as a polarity — and separately checked to be negative,
-/// which is the fact the GUI pose was built against.
+/// rather than asserted as a polarity. What that polarity *is* follows from the
+/// projection's depth direction — negative under a forward `[0, 1]` one,
+/// positive under reversed-Z, because mirroring the clip `z` axis flips a 4x4
+/// determinant — and the GUI half tracks it by construction, since `gui_ortho`
+/// carries the same depth direction. Only the agreement is asserted.
 #[test]
 fn view_projection_winding_sign_is_unchanged_at_every_pitch() {
     let reference = cam(0.0, 0.0).view_projection().determinant();
     assert!(
-        reference < 0.0,
-        "premise check: glam's DirectX RH perspective makes det(view_projection) \
-         negative; got {reference}"
+        reference.is_finite() && reference != 0.0,
+        "premise check: the pitch-0 reference camera is degenerate ({reference}), \
+         so there is no sign for the other pitches to agree with"
     );
     for yaw in YAWS {
         for pitch in [-90.0_f32, -89.9, -45.0, 0.0, 45.0, 89.9, 90.0] {

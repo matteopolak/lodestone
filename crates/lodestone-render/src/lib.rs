@@ -118,7 +118,10 @@ pub use beacon::{
     MAX_RENDER_Y, SOLID_BEAM_RADIUS, average_beam_color, beacon_beam_color, beacon_beam_vertices,
     beam_radius_scale, end_gateway_beam_vertices,
 };
-pub use block::{BlockPipeline, CameraUniform, DEPTH_FORMAT, DepthBuffer, GpuMesh};
+pub use block::{
+    BlockPipeline, CameraUniform, DEPTH_CLEAR, DEPTH_COMPARE_NEARER,
+    DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT, DepthBuffer, GpuMesh,
+};
 pub use end_portal::{
     EndGatewaySpawn, EndPortalSpawn, EndPortalVertex, end_gateway_vertices, end_portal_vertices,
 };

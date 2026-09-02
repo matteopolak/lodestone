@@ -50,11 +50,13 @@ those alone.
 
 ### Depth precision is not the mechanism
 
-This renderer's projection is forward `[0, 1]` (`Camera::projection_matrix`,
-`near = 0.05`), whose precision at range is far worse than vanilla's
-reversed-Z — `CLAUDE.md` records that a `0.00025`-block separation is
-unresolvable here past ~14 blocks. A ground plate's separation is much larger.
-Through `Depth32Float`, for the smallest offset in the family (`0.015625`):
+This renderer's projection is reversed-Z `[0, 1]` (`Camera::projection_matrix`,
+`near = 0.05`), vanilla's own arrangement. The table below was taken while it was
+**forward** `[0, 1]`, whose precision at range was far worse, and it already
+cleared the bar then — a ground plate's separation is much larger than the
+sub-millimetre ones that collapsed. Reversed-Z only widens the margin, so the
+conclusion stands a fortiori. Through `Depth32Float`, for the smallest offset in
+the family (`0.015625`):
 
 | view distance | ULPs of depth separation |
 |---|---|
@@ -250,10 +252,10 @@ left of the one that matters.
   filtering is ever wanted: shader first, sampler second.
 * **Do not reach for a depth bias.** The table above says the family's real
   offsets resolve throughout the render distance, so a bias would be tuning
-  against a mechanism that is not firing — and `CLAUDE.md` records that a bias
-  that hides an artefact at one distance fails at another under this
-  projection. If a future report really is depth, the durable fix is
-  reversed-Z, which is its own change with its own sign flips.
+  against a mechanism that is not firing. The durable fix a previous version of
+  this bullet pointed at — reversed-Z — has since landed
+  (`docs/camera.md`), so a fresh report here is even less likely to be depth
+  than when the table was taken.
 * **Geometry comes from the jar.** `crates/lodestone-assets`'s `bake.rs`
   handles a degenerate element correctly (`calculate_facing` derives ±Y from
   the cross product, `recalculate_winding` rebuilds each face in its own

@@ -14,10 +14,10 @@
 //!
 //! # Depth: sidestepped, not fought
 //!
-//! This project's depth is `[0,1]` DirectX-style (`LessEqual`, lower = nearer)
-//! while vanilla is reversed-Z — every ported comparison and bias direction
-//! flips, and the sky is drawn at/behind the far plane, exactly where that
-//! trap bites first. Rather than getting a depth comparison direction backwards
+//! This project's depth is reversed-Z `[0,1]` like vanilla's
+//! (`DEPTH_COMPARE_NEARER_OR_EQUAL`, higher = nearer), so no ported comparison
+//! or bias direction flips — but the sky is drawn at/behind the far plane,
+//! exactly where a depth-direction mistake bites first. Rather than getting a depth comparison direction backwards
 //! here, every pipeline in this module sets `depth_stencil: None`: **the sky
 //! pass takes no depth attachment at all** and must run in its own render pass,
 //! before the terrain/entity passes, writing straight into the colour target.

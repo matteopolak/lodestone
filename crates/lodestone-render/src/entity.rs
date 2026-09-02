@@ -4331,25 +4331,33 @@ pub const HAND_FAR: f32 = 100.0;
 /// undo a camera translation either.
 ///
 /// A view matrix is orthonormal-plus-translation, so `det(view) = +1` and
-/// `sign(det(hand_projection)) == sign(det(Camera::view_projection))`. The arm
-/// pose must therefore have a **positive** determinant, exactly like a world
-/// model matrix and unlike the GUI item pose — see
+/// `sign(det(hand_projection)) == sign(det(Camera::view_projection))` — which
+/// is why this is built from [`Camera`](crate::Camera) rather than assembled
+/// separately. The arm pose must therefore have a **positive** determinant,
+/// exactly like a world model matrix and unlike the GUI item pose — see
 /// `first_person_arm_pose_preserves_winding`.
 #[must_use]
 pub fn hand_projection(aspect: f32) -> Mat4 {
-    // The *same* constructor `Camera::projection_matrix` uses, so the two cannot
-    // disagree about depth range or handedness — `[0,1]` DirectX-style depth, and
-    // a negative determinant, which is where the winding invariant comes from.
-    glam::camera::rh::proj::directx::perspective(
-        HAND_FOV_Y_DEGREES.to_radians(),
-        if aspect.is_finite() && aspect > 0.0 {
+    // Built through `Camera::projection_matrix` itself rather than through an
+    // equivalent constructor, so the two cannot disagree about depth range or
+    // handedness. That is not hypothetical: this function used to call glam's
+    // *forward* `directx::perspective` directly, and when the world projection
+    // became reversed-Z the hand pass was left projecting the other way — near
+    // at 0 against a depth buffer cleared to 0 and compared with "nearer is
+    // greater", which discards the entire arm. Only the position and the two
+    // angles are unused here; every field the projection reads is set below.
+    crate::Camera {
+        fov_y_degrees: HAND_FOV_Y_DEGREES,
+        aspect: if aspect.is_finite() && aspect > 0.0 {
             aspect
         } else {
             1.0
         },
-        HAND_NEAR,
-        HAND_FAR,
-    )
+        near: HAND_NEAR,
+        far: HAND_FAR,
+        ..crate::Camera::default()
+    }
+    .projection_matrix()
 }
 
 /// The camera-space chain `ItemInHandRenderer.renderPlayerArm` builds, driven by
@@ -5253,19 +5261,24 @@ mod tests {
 
     /// The armour a wearer draws with is *its own* posed part matrix, so the
     /// world-pose determinant invariant is inherited rather than re-derived:
-    /// every matrix an armour layer is drawn under has to be positive, because
-    /// `view_projection` left-multiplies and carries the negative sign.
+    /// every matrix an armour layer is drawn under has to be **positive**,
+    /// orientation-preserving like any world model matrix, so that composing it
+    /// with `view_projection` leaves the camera's own sign untouched and the
+    /// same faces survive culling as for un-armoured geometry.
     ///
-    /// The reference sign comes from a real camera, not from an assumed
-    /// polarity — `CLAUDE.md`'s rule, applied to a world pose.
+    /// The camera's own polarity is deliberately not asserted. It follows from
+    /// which end of `[0, 1]` the near plane sits at — negative under a forward
+    /// projection, positive under this renderer's reversed-Z one — and it is not
+    /// what the rasterizer reads. The claim that matters is that the *pose* does
+    /// not reverse orientation, and that is absolute.
     #[test]
     fn armour_is_drawn_under_positive_determinant_wearer_matrices() {
         let camera = crate::camera::Camera::default();
-        let view_proj_sign = camera.view_projection().determinant().signum();
-        assert_eq!(
-            view_proj_sign, -1.0,
-            "the reference camera must carry the negative sign, or this test is \
-             asserting a polarity instead of deriving one"
+        let view_proj = camera.view_projection().determinant();
+        assert!(
+            view_proj.abs() > 1.0e-6,
+            "the reference camera's projection is degenerate ({view_proj}), so \
+             composition through it says nothing"
         );
 
         let set = ArmourModelSet::load();
@@ -5294,7 +5307,10 @@ mod tests {
                 );
                 // And the composed clip transform must then inherit the
                 // camera's sign, which is what actually decides facing.
-                assert_eq!((camera.view_projection() * m).determinant().signum(), view_proj_sign);
+                assert_eq!(
+                    (camera.view_projection() * m).determinant().signum(),
+                    view_proj.signum()
+                );
                 checked += 1;
             }
         }
@@ -7450,10 +7466,18 @@ mod tests {
         // cannot be fooled by a misremembered glam/wgpu convention.
         //
         // The trap this pins: the GUI rule is that `gui_ortho * gui_item_pose`
-        // matches `view_projection`'s determinant SIGN (negative). Applying that
-        // to a *world* pose — which is left-multiplied by that same
+        // matches `view_projection`'s determinant SIGN. Applying that to a
+        // *world* pose — which is left-multiplied by that same
         // `view_projection` — inverts it. A world pose must have a POSITIVE
-        // determinant, and the composition then inherits the camera's negative.
+        // determinant, and the composition then inherits the camera's.
+        //
+        // The camera's own sign is deliberately not written down here. It is a
+        // property of the projection (negative under a forward `[0,1]` one,
+        // positive under reversed-Z, because mirroring the clip `z` axis flips a
+        // 4x4 determinant) and it decides nothing the rasterizer can see, which
+        // reads facing from projected `x`/`y` alone. All that is required is
+        // that it be non-degenerate, so that the relative claims below have a
+        // reference to be relative to.
         let camera = crate::camera::Camera {
             position: Vec3::new(0.5, 0.5, 4.0),
             yaw: 180.0,
@@ -7462,9 +7486,9 @@ mod tests {
         };
         let world = camera.view_projection();
         assert!(
-            world.determinant() < 0.0,
-            "the reference camera's determinant is expected to be negative \
-             (glam's DirectX RH perspective); it is {}",
+            world.determinant().abs() > 1.0e-6,
+            "the reference camera's projection is degenerate ({}), so it cannot \
+             supply a front-facing sign",
             world.determinant()
         );
         let front_sign = screen_area(world, cube_face(Direction::South)).signum();

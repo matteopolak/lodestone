@@ -41,7 +41,7 @@
 //! test could use. This pass deliberately does no culling of its own; the cost
 //! ceiling is [`MAX_BOLT_VERTICES`] rather than a cull.
 
-use lodestone_render::DEPTH_FORMAT;
+use lodestone_render::{DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 use lodestone_render::lightning_bolt::{BOLT_VERTICES, bolt_seed_for_entity, lightning_bolt_vertices};
 
 use crate::entities::EntityDraw;
@@ -175,7 +175,7 @@ impl LightningBoltRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),

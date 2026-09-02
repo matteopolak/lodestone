@@ -12,9 +12,9 @@
 //! constants, corpus-loader resolution, placement-transform identity. A
 //! depth-only, colour-masked draw is exactly the shape that can be
 //! structurally correct and still do nothing — wrong pipeline bound, wrong
-//! pass order, an inverted depth comparison (this backend's `[0,1]`
-//! DirectX-style depth is not vanilla's reversed-Z, so a ported comparison
-//! can silently flip) — so this is the live check: a boat sitting in real
+//! pass order, an inverted depth comparison (a ported comparison can silently
+//! flip, and this renderer's reversed-Z `[0,1]` depth is one more thing to get
+//! backwards) — so this is the live check: a boat sitting in real
 //! water, rendered through the real production path, read back as rasterised
 //! pixels.
 //!

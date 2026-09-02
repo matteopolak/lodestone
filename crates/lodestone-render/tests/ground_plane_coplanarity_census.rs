@@ -31,14 +31,15 @@
 //!   information, because it is vanilla's own geometry and not ours to change.
 //! * **A small non-zero offset** — leaf litter's `0.25/16`, a carpet's
 //!   `1/16`, a snow layer's `2/16`. Resolvable up to some distance and not
-//!   beyond, and this renderer's forward `[0, 1]` depth is much worse at range
-//!   than vanilla's reversed-Z. Measured for `0.015625` blocks through a
-//!   `near = 0.05` forward `[0,1]` projection into `Depth32Float`: **52 ULPs
-//!   at 16 blocks, 13 at 32, 3 at 64**, and a grazing view makes it *better*,
-//!   not worse, because the separation along the ray grows as `1/sin` while
-//!   the distance grows only linearly. So the family's real offsets are
-//!   resolvable throughout the render distance, and depth precision is not the
-//!   mechanism behind the report — see `docs/ground-plate-rendering.md`.
+//!   beyond. Measured for `0.015625` blocks through the **forward** `[0,1]`
+//!   projection this renderer used to carry (`near = 0.05`, `Depth32Float`):
+//!   **52 ULPs at 16 blocks, 13 at 32, 3 at 64**, and a grazing view makes it
+//!   *better*, not worse, because the separation along the ray grows as `1/sin`
+//!   while the distance grows only linearly. So the family's real offsets were
+//!   resolvable throughout the render distance even then, and depth precision
+//!   is not the mechanism behind the report. `Camera::projection_matrix` is
+//!   reversed-Z now, which only widens that margin — see
+//!   `docs/ground-plate-rendering.md`.
 //!
 //! A quad carrying a `cullface` is reported separately: it is only drawn when
 //! the neighbour does not occlude, so it is a much weaker candidate.

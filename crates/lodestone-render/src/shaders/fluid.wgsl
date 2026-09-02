@@ -68,54 +68,32 @@ fn not_gamma_vec3(c: vec3<f32>) -> vec3<f32> {
     return c * (max_scaled / max_component);
 }
 
-// Anti-z-fight depth nudge, in **window-depth units** (`z / w`), applied to
-// every fluid fragment in `vs_main`.
+// There is deliberately no anti-z-fight depth nudge here.
 //
-// `bake_fluid` already insets each fluid side face 0.001 blocks off its block
-// boundary, exactly where vanilla's `FluidRenderer.tesselate` does, so that a
-// waterlogged block's water face on a *partially* covered side -- a stair front,
-// where the stair itself fills only the bottom half -- sits behind the block's
-// own coplanar face and loses the depth test cleanly. Vanilla spends that inset
-// in a reversed-Z depth buffer, where relative precision barely changes with
-// distance. Ours is `[0,1]` DirectX-style `Depth32Float` (see `camera.rs` and
-// `DESIGN.md` §7), which spends nearly the whole float32 mantissa within a few
-// blocks of the near plane. Measured through the real `Camera::view_projection`
-// (`fluid_coplanar_depth_gate.rs`), 0.001 blocks is worth 210 float32 ULPs of
-// depth at 2 blocks, 4 at 16, 1 at 32, **0 at 64 and -1 at 128** -- the
-// separation collapses and then inverts, so beyond roughly 24 blocks the winner
-// at each pixel is decided by whatever rounding the rasterizer's interpolation
-// happens to produce for two differently shaped coplanar quads, and it changes
-// as the camera moves. That is the z-fight.
+// `bake_fluid` insets each fluid side face 0.001 blocks off its block boundary,
+// exactly where vanilla's `FluidRenderer.tesselate` does, so that a waterlogged
+// block's water face on a *partially* covered side -- a stair front, where the
+// stair itself fills only the bottom half -- sits behind the block's own
+// coplanar face and loses the depth test cleanly. Vanilla spends that inset in a
+// reversed-Z depth buffer, where relative precision barely changes with
+// distance, and since this renderer's projection became reversed-Z too the inset
+// is again worth what vanilla assumes it is worth.
 //
-// A *world-space* inset cannot fix this, because the problem is the mapping from
-// world distance to depth. A constant offset in window depth can: `2^-21` is
-// exactly 8 ULPs at any depth in `[0.5, 1)` and more below it, so the separation
-// is bounded from below across the entire depth range, independent of distance.
-// Positive pushes away from the camera under our `[0,1]` convention (the crack
-// and sign-text pipelines use negative biases to pull *toward* it), which is the
-// direction the inset already meant.
+// Measured through the real `Camera::view_projection`
+// (`fluid_coplanar_depth_gate.rs`), 0.001 blocks buys 6,707 float32 ULPs of
+// depth separation at 2 blocks, 838 at 16, 209 at 64, and 26 at 512 -- the
+// furthest a 32-chunk render distance draws -- against that gate's floor of 4.
+// Under the forward `[0,1]` projection this shader used to be written for, the
+// same inset was worth 210 ULP at 2 blocks, 4 at 16, **0 at 64 and -1 at 128**:
+// it collapsed and then inverted, and a `2^-21` constant window-depth nudge was
+// added here to pay that back.
 //
-// 8 rather than 4 because the inset does not merely fade, it inverts, so the
-// nudge has to pay that back before it buys any margin: at 128 blocks the inset
-// contributes -1 ULP, and the residual has to still clear the ULP or two a
-// rasterizer can differ by when it interpolates two coplanar quads of different
-// shapes.
-//
-// The cost is bounded the other way, and the same gate holds it: a constant
-// window-depth offset costs world distance quadratically, so it is measured
-// *relative to* the surface's distance from the camera, where it is linear --
-// 0.05% of the distance at 2 blocks, 0.09% at 128, 0.5% at 512, which is as far
-// as a 32-chunk render distance draws. In absolute terms that is 0.001 blocks at
-// arm's length and 0.12 blocks at 128. The residual worth knowing: at the very
-// edge of a 32-chunk render distance the push reaches ~2.7 blocks, so water
-// within about three blocks of an opaque surface behind it could lose the depth
-// test there. That is a deliberate trade against a z-fight at 30-130 blocks,
-// where players actually are.
-//
-// Keep this a power of two: the ULP guarantee above is exact only because it is.
-// `model_pipeline::FLUID_DEPTH_NUDGE` restates it for the gate, and
-// `fluid_depth_nudge_matches_the_shader` fails if the two drift.
-const FLUID_DEPTH_NUDGE: f32 = 4.76837158203125e-7;
+// That nudge is gone with the projection that needed it, and removing it is not
+// merely tidying. A constant window-depth offset is *relatively* larger the
+// smaller the depth value is, and reversed-Z depth shrinks with distance, so the
+// same 2^-21 that cost 0.001 blocks of backward push at arm's length would cost
+// about 2.5 blocks at 512 -- pushing a distant ocean surface toward its own sea
+// floor to fix a z-fight that no longer exists.
 
 const BRIGHTNESS_FACTOR: f32 = 0.5;
 
@@ -245,11 +223,13 @@ fn vs_main(
     let world = position + origin.section_origin.xyz;
 
     var out: VsOut;
+    // No depth adjustment: the geometry's own 0.001-block inset is the whole
+    // separation, and under reversed-Z it is worth hundreds to thousands of
+    // float32 ULPs at every distance terrain is drawn at. See the note above
+    // `BRIGHTNESS_FACTOR` for the measurement and for why the constant
+    // window-depth nudge that used to sit here had to go with the forward
+    // projection.
     out.clip = camera.view_proj * vec4<f32>(world, 1.0);
-    // Push the fragment away from the camera by a constant amount of *window*
-    // depth. Scaling by `w` is what makes it constant after the perspective
-    // divide: `(z + n*w) / w == z/w + n`. See `FLUID_DEPTH_NUDGE`.
-    out.clip.z = out.clip.z + FLUID_DEPTH_NUDGE * out.clip.w;
     out.uv = uv;
     out.shade = vec3<f32>(ao, ao, ao) * lightmap_color(sky, block);
     out.tinted = select(0.0, 1.0, tint_idx != 255u);

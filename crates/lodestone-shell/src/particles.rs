@@ -1575,11 +1575,13 @@ impl ParticleRenderer {
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: wgpu::TextureFormat::Depth32Float,
                     depth_write_enabled: Some(depth_write),
-                    // `Less`, not vanilla's `GREATER_THAN_OR_EQUAL`: depth here
-                    // is `[0,1]` DirectX-style rather than vanilla's reversed-Z,
-                    // so every ported comparison flips (`CLAUDE.md`,
-                    // "Rendering constraints").
-                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    // Strictly nearer wins. Note this is *not* vanilla's
+                    // `GREATER_THAN_OR_EQUAL`, which admits an exact tie; the
+                    // difference is inert for a billboard, which is never
+                    // coplanar with the surface behind it, and the divergence
+                    // predates the reversed-Z conversion rather than being
+                    // introduced by it.
+                    depth_compare: Some(lodestone_render::DEPTH_COMPARE_NEARER),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),

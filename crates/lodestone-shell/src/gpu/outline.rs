@@ -1,6 +1,6 @@
 //! The mining-crack target descriptor and the block-outline wireframe pass.
 use lodestone_model::math::BlockPos;
-use lodestone_render::{CAMERA_DEPTH_BIAS, DEPTH_FORMAT};
+use lodestone_render::{CAMERA_DEPTH_BIAS, DEPTH_COMPARE_NEARER_OR_EQUAL, DEPTH_FORMAT};
 
 /// The block currently being mined, for the progressive crack overlay: its world
 /// position, vanilla state id (to resolve the block's real model geometry) and
@@ -343,7 +343,7 @@ impl OutlineRenderer {
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: DEPTH_FORMAT,
                 depth_write_enabled: Some(false),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                depth_compare: Some(DEPTH_COMPARE_NEARER_OR_EQUAL),
                 stencil: wgpu::StencilState::default(),
                 bias: CAMERA_DEPTH_BIAS,
             }),

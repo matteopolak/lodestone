@@ -150,7 +150,7 @@ screen.
    constraint applies per pipeline layout — a compute prepass would get its own layout —
    so the honest reason GPU-driven culling is rejected is Metal's emulated multi-draw
    (strategy.rs), not the bind-group floor.
-2. **Depth is `[0,1]` DirectX-style, not reversed-Z.** All culling here is CPU-side and
+2. **Depth is reversed-Z `[0,1]`, the same sense as vanilla.** All culling here is CPU-side and
    depth-agnostic. Reversed-Z and a depth prepass are evaluated (and rejected) below.
 3. **Vanilla parity is the premise.** Every cull must be a set vanilla itself does not draw
    (occlusion graph, circular membership) or provably pixel-identical. Sodium-style

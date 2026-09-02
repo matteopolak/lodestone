@@ -245,9 +245,9 @@ fn render_arm(gpu: &Gpu, mesh: &EntityMesh, attack_anim: f32) -> Vec<u8> {
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                 view: &depth.view,
                 depth_ops: Some(wgpu::Operations {
-                    // `[0,1]` DirectX-style depth, so the far plane is 1.0 — not
-                    // vanilla's reversed-Z 0.0.
-                    load: wgpu::LoadOp::Clear(1.0),
+                    // Reversed-Z `[0,1]` depth, so the far plane — what a
+                    // depth attachment clears to — is 0.0, the same as vanilla.
+                    load: wgpu::LoadOp::Clear(lodestone_render::DEPTH_CLEAR),
                     store: wgpu::StoreOp::Store,
                 }),
                 stencil_ops: None,
