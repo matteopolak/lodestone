@@ -485,3 +485,16 @@ build-pgo:
 # cargo run --release with -Cprofile-use -- play the PGO-optimised build
 run-pgo *args:
     RUSTFLAGS="-Cprofile-use={{pgo_dir}}/merged.profdata -Cllvm-args=-pgo-warn-missing-function" cargo run --release -p lodestone-shell --bin lodestone {{jflag}} --target-dir {{pgo_dir}}/build -- {{args}}
+
+# --- Git hooks --------------------------------------------------------------
+
+# Point git at .githooks/, which carries this repo's pre-commit hook. Hooks are
+# per-clone configuration rather than tracked state, so this has to be run once
+# in each checkout; it is idempotent. The pre-commit hook enforces a token
+# budget on the files that are auto-loaded into an AI agent's context
+# (CLAUDE.md, AGENTS.md) -- see the header of .githooks/pre-commit for the cap
+# and how it was chosen.
+[doc("point git at .githooks/ -- one-off per clone; enforces the CLAUDE.md token budget")]
+install-hooks:
+    git config core.hooksPath .githooks
+    @echo "core.hooksPath -> $(git config core.hooksPath)"
