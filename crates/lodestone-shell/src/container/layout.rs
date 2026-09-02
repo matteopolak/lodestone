@@ -83,36 +83,33 @@ pub fn slot_layout(menu: &Menu) -> SlotLayout {
 
 /// Vanilla's real slot layout for the menus that have a
 /// [`Menu::special_layout`]. Positions are vanilla's slot constructor
-/// arguments, re-read from the decompile rather than taken from a summary:
+/// arguments, re-read individually from the decompile rather than assumed to
+/// match a sibling menu or taken from a summary:
 ///
-/// | [`SpecialLayout`] | slots (menu index @ x,y) | source |
-/// |---|---|---|
-/// | `Anvil` | `0@27,47` `1@76,47` `2@134,47` | `AnvilMenu.java` |
-/// | `Grindstone` | `0@49,19` `1@49,40` `2@129,34` | `GrindstoneMenu.java` |
-/// | `Smithing` | `0@8,48` `1@26,48` `2@44,48` `3@98,48` | `SmithingMenu.java` |
-/// | `Enchanting` | `0@15,47` `1@35,47` | `EnchantmentMenu.java` |
-/// | `Furnace`/`BlastFurnace`/`Smoker` | `0@56,17` `1@56,53` `2@116,35` | `AbstractFurnaceMenu.java` |
-/// | `Brewing` | `0@56,51` `1@79,58` `2@102,51` `3@79,17` `4@17,17` | `BrewingStandMenu.java` |
-/// | `Loom` | `0@13,26` `1@33,26` `2@23,45` `3@143,57` | `LoomMenu.java` |
-/// | `Stonecutter` | `0@20,33` `1@143,33` | `StonecutterMenu.java` |
-/// | `Cartography` | `0@15,15` `1@15,52` `2@145,39` | `CartographyTableMenu.java` |
-/// | `Dispenser` | `0..9` a 3×3 grid from `62,17`, step `18` | `DispenserMenu.java` |
-/// | `Hopper` | `0..5` a row from `44,20`, step `18` | `HopperMenu.java` |
-/// | `Beacon` | `0@136,110` | `BeaconMenu.java` |
+/// | [`SpecialLayout`] | slots (menu index @ x,y) |
+/// |---|---|
+/// | `Anvil` | `0@27,47` `1@76,47` `2@134,47` |
+/// | `Grindstone` | `0@49,19` `1@49,40` `2@129,34` |
+/// | `Smithing` | `0@8,48` `1@26,48` `2@44,48` `3@98,48` |
+/// | `Enchanting` | `0@15,47` `1@35,47` |
+/// | `Furnace`/`BlastFurnace`/`Smoker` | `0@56,17` `1@56,53` `2@116,35` |
+/// | `Brewing` | `0@56,51` `1@79,58` `2@102,51` `3@79,17` `4@17,17` |
+/// | `Loom` | `0@13,26` `1@33,26` `2@23,45` `3@143,57` |
+/// | `Stonecutter` | `0@20,33` `1@143,33` |
+/// | `Cartography` | `0@15,15` `1@15,52` `2@145,39` |
+/// | `Dispenser` | `0..9` a 3×3 grid from `62,17`, step `18` |
+/// | `Hopper` | `0..5` a row from `44,20`, step `18` |
+/// | `Beacon` | `0@136,110` |
 ///
-/// Every one of these calls vanilla's standard `addStandardInventorySlots`
-/// for the player section (`ItemCombinerMenu.java`,
-/// `EnchantmentMenu.java`, and — re-read individually rather than assumed
-/// to match — `AbstractFurnaceMenu.java`, `BrewingStandMenu.java`,
-/// `LoomMenu.java`, `StonecutterMenu.java`,
-/// `CartographyTableMenu.java`, `DispenserMenu.java`) with a **fixed**
+/// Every one of these calls vanilla's standard player-inventory-slots helper
+/// with a **fixed**
 /// `main_y`, not derived from the top section the way
 /// [`generic_layout`]/[`crafting_layout`] compute it from their own row
 /// count, because none of these screens' top sections stack rows the way a
 /// chest or crafting grid does. `main_y` is `84` for every one of them
-/// **except** the hopper, whose own call is `addStandardInventorySlots(inventory,
-/// 8, 51)` (`HopperMenu.java`) — its panel is genuinely shorter
-/// (`imageHeight = 133`, not `166`), so restating `84` here would silently
+/// **except** the hopper, whose own call passes
+/// `(inventory, 8, 51)` — its panel is genuinely shorter
+/// (image height `133`, not `166`), so restating `84` here would silently
 /// overlap the hopper's own five slots with the top of the main inventory.
 ///
 /// `None` for a menu with no [`Menu::special_layout`], or (defensively) if the
@@ -198,7 +195,7 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
                 slots.push(slot(i, 44.0 + i as f32 * SLOT, 20.0));
             }
         }
-        // `MerchantMenu.java` — two payment slots then a take-only
+        // Vanilla's own merchant menu — two payment slots then a take-only
         // result. The trade **list** to their left is not a slot at all; see
         // `super::merchant`.
         (SpecialLayout::Merchant, 3) => {
@@ -206,18 +203,18 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
             slots.push(slot(1, 162.0, 37.0));
             slots.push(slot(2, 220.0, 37.0));
         }
-        // `BeaconMenu.java:50-53` — one payment slot, no result slot at all.
+        // Vanilla's own beacon menu — one payment slot, no result slot at all.
         (SpecialLayout::Beacon, 1) => {
             slots.push(slot(0, 136.0, 110.0));
         }
         _ => return None,
     }
-    // Every one of these calls `addStandardInventorySlots(inventory, x,
-    // main_y)` with a **fixed** `main_y` — `84.0` for every screen except the
-    // hopper, whose real panel is *shorter* (`imageHeight = 133`, not `166`)
-    // and whose own constructor passes `51` (`HopperMenu.java`), not `84`,
-    // and the beacon, whose taller panel (`imageHeight = 219`) passes `137`
-    // (`BeaconMenu.java:53`). Getting this one wrong is exactly the
+    // Every one of these calls vanilla's standard player-inventory-slots
+    // helper with a **fixed** `main_y` — `84.0` for every screen except the
+    // hopper, whose real panel is *shorter* (image height `133`, not `166`)
+    // and whose own constructor passes `51`, not `84`,
+    // and the beacon, whose taller panel (image height `219`) passes `137`.
+    // Getting this one wrong is exactly the
     // "plausible but transposed" failure mode this whole function warns
     // about: `84.0` would still produce a valid-looking layout, just one
     // that overlaps the hopper's or beacon's own slots.
@@ -228,9 +225,8 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
     } else {
         84.0
     };
-    // `x = 8` for every screen but the merchant (`x = 108`,
-    // `MerchantMenu.java`) and the beacon (`x = 36`, `BeaconMenu.java:53`) —
-    // see `append_main_inventory_at`.
+    // `x = 8` for every screen but the merchant (`x = 108`) and the beacon
+    // (`x = 36`) — see `append_main_inventory_at`.
     let main_x = if special == SpecialLayout::Merchant {
         108.0
     } else if special == SpecialLayout::Beacon {
@@ -238,10 +234,9 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
     } else {
         8.0
     };
-    // `176` for every screen but the merchant (`276`,
-    // `MerchantScreen.java`'s `super(menu, inventory, title, 276, 166)`) and
-    // the beacon (`230`, `BeaconScreen.java`'s `super(menu, inventory,
-    // title, 230, 219)`).
+    // `176` for every screen but the merchant (`276`, vanilla's own merchant
+    // screen constructor) and the beacon (`230`, vanilla's own beacon screen
+    // constructor).
     let width = if special == SpecialLayout::Merchant {
         276.0
     } else if special == SpecialLayout::Beacon {
@@ -264,8 +259,8 @@ fn special_layout_positions(menu: &Menu) -> Option<SlotLayout> {
 /// size their panel around it.
 ///
 /// `main_x` is the left edge of the grid — `8.0` for every screen but the
-/// merchant, whose `addStandardInventorySlots(inventory, 108, 84)` starts its
-/// player section at `x = 108` (`MerchantMenu.java`); see
+/// merchant, whose own call starts its
+/// player section at `x = 108`; see
 /// [`append_main_inventory`] for the `x = 8` convenience every other caller
 /// still uses.
 fn append_main_inventory_at(slots: &mut Vec<SlotRect>, base: usize, main_x: f32, main_y: f32) -> f32 {
@@ -314,10 +309,9 @@ fn player_layout() -> SlotLayout {
 /// The `GENERIC_9x1`..`GENERIC_9x6` shape every chest-like container (chest,
 /// barrel, shulker box, ender chest, trapped chest, hopper minecart, …) uses.
 ///
-/// `main_y`'s `+ 13` is `ChestMenu`'s own constructor, verbatim:
-/// `int inventoryTop = 18 + this.containerRows * 18 + 13;`
-/// (`ChestMenu.java`, fed the real `containerRows` every `GENERIC_9x*` size
-/// passes to it). **Not `+ 14`** — that one-off constant sat here as a
+/// `main_y`'s `+ 13` is vanilla's own chest-menu constructor, verbatim: the
+/// player-inventory top is `18 + rows * 18 + 13`, fed the real row count
+/// every `GENERIC_9x*` size passes to it. **Not `+ 14`** — that one-off constant sat here as a
 /// plausible-looking neighbour of the real value and put the player's own
 /// inventory section one pixel too low in every chest-shaped screen,
 /// regardless of row count (the error is a constant added once, not scaled
@@ -341,8 +335,8 @@ fn generic_layout(container_size: usize) -> SlotLayout {
     append_main_inventory(&mut slots, container_size, main_y);
     SlotLayout {
         width: 176.0,
-        // `ContainerScreen`'s own constructor: `super(menu, inventory, title,
-        // 176, 114 + menu.getRowCount() * 18)` (`ContainerScreen.java`) — a
+        // Vanilla's own container-screen constructor sets its image height to
+        // `114 + rows * 18` — a
         // **second**, independent vanilla constant, not a value derived from
         // `main_y` above. The two do not sit a fixed 82 px apart: vanilla's
         // own top/bottom background blits (`containerRows * 18 + 17` then a
@@ -443,9 +437,8 @@ pub fn panel_origin_with_scale(
     )
 }
 
-/// `AbstractRecipeBookScreen.widthTooNarrow`'s threshold —
-/// `this.widthTooNarrow = this.width < 379`
-/// (`AbstractRecipeBookScreen.java`).
+/// Vanilla's own recipe-book "width too narrow" threshold —
+/// `width_too_narrow = width < 379`.
 ///
 /// **379 is not a round number, it is the exact fit**, and reading it that way is
 /// what makes the rest of this arithmetic checkable. At `w == 379` the book's own
@@ -457,13 +450,11 @@ pub fn panel_origin_with_scale(
 /// overlap.
 pub const RECIPE_BOOK_MIN_WIDTH: f32 = 379.0;
 
-/// `RecipeBookComponent.xOffset`'s wide-screen value, `86`
-/// (`RecipeBookComponent.java`) — how far left of screen-centre the book's
-/// own 147-wide page is drawn.
+/// Vanilla's own recipe-book-panel wide-screen offset, `86` — how far left
+/// of screen-centre the book's own 147-wide page is drawn.
 pub const RECIPE_BOOK_X_OFFSET: f32 = 86.0;
 
-/// The `177` and `200` in `RecipeBookComponent.updateScreenPosition`
-/// (`:173-180`).
+/// The `177` and `200` in vanilla's own recipe-book screen-position update.
 const RECIPE_BOOK_SCREEN_LEFT: f32 = 177.0;
 /// See [`RECIPE_BOOK_SCREEN_LEFT`].
 const RECIPE_BOOK_SCREEN_SPAN: f32 = 200.0;
@@ -476,15 +467,10 @@ pub fn recipe_book_width_too_narrow(canvas_w: f32) -> bool {
 }
 
 /// How far **right** the container panel moves when the recipe book is open —
-/// `RecipeBookComponent.updateScreenPosition` (`:173-180`):
-///
-/// ```java
-/// if (this.isVisible() && !this.widthTooNarrow) {
-///    leftPos = 177 + (width - imageWidth - 200) / 2;
-/// } else {
-///    leftPos = (width - imageWidth) / 2;
-/// }
-/// ```
+/// vanilla's own screen-position update: when the book is visible and the
+/// canvas is not too narrow, the left edge becomes `177 + (width - image_width
+/// - 200) / 2`; otherwise it stays the plain centred `(width - image_width) /
+/// 2`.
 ///
 /// Returned as a **delta** from [`panel_origin_with_scale`]'s own centring rather
 /// than as an absolute `leftPos`, so every caller that does not know about the
@@ -534,10 +520,10 @@ pub enum MenuHit {
     Outside,
 }
 
-/// Resolves a viewport pixel to a menu slot, mirroring vanilla
-/// `AbstractContainerScreen.findSlot` / `hasClickedOutside`.
+/// Resolves a viewport pixel to a menu slot, mirroring vanilla's own
+/// slot-lookup and clicked-outside checks.
 ///
-/// The hit rect is vanilla's `isHovering(x, y, 16, 16, …)`: the 16×16 cell grown
+/// The hit rect is vanilla's own hover test: the 16×16 cell grown
 /// by one pixel on every side, which is exactly the 18×18 well this module
 /// draws — so the clickable area and the visible area are the same rectangle by
 /// construction rather than by coincidence.
