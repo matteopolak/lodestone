@@ -1956,15 +1956,16 @@ fn tick_air_among_entities(
         suppress_bounce: input.sneak,
         omnidirectional_air_mover: false,
         discard_friction: false,
-        // `Player.maybeBackOffFromEdge` — a player always has the override; the
-        // shift key and the fall distance are what decide whether it does anything.
+        // Vanilla's own sneak-at-a-ledge back-off — a player always has the
+        // override; the shift key and the fall distance are what decide
+        // whether it does anything.
         //
-        // …except while flying: the override's own first conjunct is
-        // `!this.abilities.flying` (`Player.java:882`), so a flying player gets the
-        // *base* implementation, which is the identity. This is the conjunct
-        // `EdgeBackOff`'s doc records as "satisfied by construction here" because
-        // this crate had no flight — that argument has now expired, so the gate is
-        // real rather than vacuous, and a sneaking player can fly off a ledge.
+        // …except while flying: the override's own first conjunct is not
+        // flying, so a flying player gets the *base* implementation, which
+        // is the identity. This is the conjunct `EdgeBackOff`'s doc records
+        // as "satisfied by construction here" because this crate had no
+        // flight — that argument has now expired, so the gate is real
+        // rather than vacuous, and a sneaking player can fly off a ledge.
         edge_back_off: if state.flying {
             EdgeBackOff::Entity
         } else {
@@ -1973,14 +1974,14 @@ fn tick_air_among_entities(
                 fall_distance: state.fall_distance,
             }
         },
-        // `Player.getFlyingSpeed()` — sprint- and flight-dependent, so it cannot be
-        // a profile constant. This is also what fixes the non-flying sprint-jump
-        // case, which was reading a flat `0.02`.
+        // Vanilla's own flying-speed accessor — sprint- and flight-dependent,
+        // so it cannot be a profile constant. This is also what fixes the
+        // non-flying sprint-jump case, which was reading a flat `0.02`.
         flying_speed: Some(player_flying_speed(state, profile)),
-        // `Player.getBlockSpeedFactor()` (`Player.java:1855`) — suppressed while
-        // flying **or** gliding.
+        // Vanilla's own block-speed-factor — suppressed while flying **or**
+        // gliding.
         suppress_block_speed_factor: state.flying || state.fall_flying,
-        // `Player.onClimbable()` (`Player.java:2025`).
+        // Vanilla's own "on climbable" check.
         suppress_climbable: state.flying,
     };
     travel_in_air_among_entities(
@@ -1999,17 +2000,17 @@ fn tick_air_among_entities(
     state.horizontal_collision = motion.horizontal_collision;
     state.stuck_speed_multiplier = motion.stuck_speed_multiplier;
 
-    // `Entity.move()`'s `checkFallDamage(movement.y, onGround, …)` call
-    // (`Entity.java:783-784`) — not in water on this path (see
-    // `accumulate_fall_distance`'s doc).
+    // Vanilla's own fall-damage bookkeeping call, made from inside its move
+    // step — not in water on this path (see `accumulate_fall_distance`'s
+    // doc).
     accumulate_fall_distance(state, state.position.y - old_y, false);
 
-    // `LocalPlayer.move()` calls `updateAutoJump(deltaX, deltaZ)` after
-    // `super.move()` (`LocalPlayer.java:981-990`) — the detector sees the
-    // *actual* post-collision delta (cast to `float`), not the pre-collision
-    // intent, and arms the one-tick-deferred jump spent at the top of the next
-    // tick. This is a client-only steering effect: the server only ever sees the
-    // resulting jump, whose velocity the crate already reproduces bit-exactly.
+    // Vanilla's own client move step calls its auto-jump detector after the
+    // base move completes — the detector sees the *actual* post-collision
+    // delta (cast to `float`), not the pre-collision intent, and arms the
+    // one-tick-deferred jump spent at the top of the next tick. This is a
+    // client-only steering effect: the server only ever sees the resulting
+    // jump, whose velocity the crate already reproduces bit-exactly.
     update_auto_jump(
         state,
         input,
@@ -2020,15 +2021,14 @@ fn tick_air_among_entities(
     );
 }
 
-/// `LivingEntity.handleOnClimbable(Vec3)` — the pre-move clamp applied while on
-/// a ladder/vine.
+/// Vanilla's own pre-move clamp applied while on a ladder/vine.
 ///
-/// The clamp bounds are the **`float`** literals `-0.15F`/`0.15F`, promoted to
-/// `double` for `Mth.clamp(double, double, double)`. `(double)0.15F` is
-/// `0.15000000596046448`, *not* `0.15`, so the widened bound is observable at
-/// the last ULP — we widen through `f32` exactly like vanilla rather than
-/// writing `0.15_f64`. The sneak-hold (`yd = 0` when descending) applies to
-/// ladders/vines but not scaffolding.
+/// The clamp bounds are the **`float`** literals `-0.15F`/`0.15F`, promoted
+/// to `double` for the clamp. `(double)0.15F` is `0.15000000596046448`,
+/// *not* `0.15`, so the widened bound is observable at the last ULP — we
+/// widen through `f32` exactly like vanilla rather than writing `0.15_f64`.
+/// The sneak-hold (`yd = 0` when descending) applies to ladders/vines but
+/// not scaffolding.
 pub(crate) fn handle_on_climbable(delta: Vec3d, sneaking: bool) -> Vec3d {
     let bound = f64::from(0.15f32);
     let xd = mth::clamp_f64(delta.x, -bound, bound);
