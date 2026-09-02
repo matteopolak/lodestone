@@ -331,7 +331,7 @@ pub fn recipe_book_entries() -> &'static [RecipeBookEntry] {
 }
 
 /// The `minecraft:recipe_book_category` id for a grid recipe —
-/// `RecipeBookCategories.java:7-10` for the crafting book's four tabs.
+/// vanilla's own recipe-book-categories registry lists four tabs for crafting.
 fn book_category(recipe: &lodestone_game::recipe::Recipe) -> &'static str {
     use lodestone_game::recipe::RecipeCategory;
     match recipe.category() {
@@ -402,10 +402,11 @@ fn grid_matches(
 /// This used to clear the grid on **every** click and place exactly one craft, so
 /// clicking a recipe twice produced one craft's worth both times — the second
 /// click quietly returned the first click's items and took them straight back out.
-/// Vanilla accumulates: `ServerPlaceRecipe.placeRecipe` asks
-/// `RecipeBookMenu.recipeMatches` first, and `calculateAmountToCraft` answers
-/// `smallestStackSize + 1` when it does, against `1` for a fresh grid
-/// (`ServerPlaceRecipe.java`). So:
+/// Vanilla accumulates: its own recipe-placement routine asks
+/// whether the grid already matches the recipe first, and its craft-amount
+/// calculation answers
+/// `smallestStackSize + 1` when it does, against `1` for a fresh grid.
+/// So:
 ///
 /// | click | grid already holds | result |
 /// |---|---|---|

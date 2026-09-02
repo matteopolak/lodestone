@@ -1,32 +1,32 @@
 //! Server-authoritative advancement and statistic tracking (issue #338).
 //!
-//! Vanilla tracks these *on the server*: `net/minecraft/server/
-//! PlayerAdvancements.java` holds per-player advancement progress,
-//! `net/minecraft/stats/ServerStatsCounter.java` holds statistics, both persist
-//! to disk, and the server streams them to the client with three packets:
+//! Vanilla tracks these *on the server*: per-player advancement progress and
+//! per-player statistics are each kept in their own server-side table, both
+//! persisted to disk, and the server streams them to the client with three
+//! packets:
 //!
-//! * `ClientboundUpdateAdvancementsPacket` — the advancement tree, per-player
+//! * the advancement-update packet — the advancement tree, per-player
 //!   progress, and visibility. Vanilla sends it on join (the "first packet"
 //!   carries the whole visible tree with `reset` true) and then whenever a
 //!   dirty root or a changed progress needs broadcasting.
 //!   [`ServerProtocol::encode_update_advancements`](crate::ServerProtocol::encode_update_advancements)
 //!   is the seam for exactly that packet; this module builds the version-free
 //!   payload.
-//! * `ClientboundAwardStatsPacket` — a batch of `(stat, count)` pairs, sent in
-//!   reply to the client's `ClientCommand(REQUEST_STATS)`.
-//! * `ClientboundSelectAdvancementsTabPacket` — which tab the client should
+//! * the award-stats packet — a batch of `(stat, count)` pairs, sent in
+//!   reply to the client's stats-request client command.
+//! * the select-advancements-tab packet — which tab the client should
 //!   show (the client asks; vanilla answers with the same value).
 //!
 //! This crate is version-free, so the module owns the *data model and rules*,
-//! never the wire bytes: advancement completion (`AdvancementRequirements`'s
-//! AND-of-ORs test), progress dirtiness and the every-tick flush, the depth-2
+//! never the wire bytes: advancement completion (an AND-of-ORs test over the
+//! requirement groups), progress dirtiness and the every-tick flush, the depth-2
 //! visibility evaluator, and NBT persistence for the #437 hook. The protocol
 //! crates turn the version-free payloads into packets.
 //!
 //! # Model vs vanilla
 //!
 //! * [`Advancement`] is a node in the tree: id, parent, requirement groups,
-//!   and the `sendsTelemetryEvent` bit. Display info (title, icon, frame) is
+//!   and the telemetry-opt-in bit. Display info (title, icon, frame) is
 //!   intentionally **absent** — it is pure presentation and this crate has no
 //!   component model; a version crate's encoder may carry display fields from
 //!   its own registry instead. See [`AdvancementManager::builtin`] for the
@@ -34,19 +34,20 @@
 //!   landing (part of this epic) will grow into a loader.
 //! * [`AdvancementProgress`] is one advancement's per-criterion state: the
 //!   criterion → obtained-epoch-millis map plus the requirement groups (so
-//!   `is_done` is a property of the progress, exactly as vanilla's
-//!   `AdvancementProgress.update(requirements)` keeps both).
-//! * [`PlayerAdvancementState`] is the per-player bookkeeping vanilla's
-//!   `PlayerAdvancements` does: progress keyed by advancement id, a dirty set,
+//!   `is_done` is a property of the progress, exactly as vanilla keeps both
+//!   together when it re-evaluates progress against requirements).
+//! * [`PlayerAdvancementState`] is the per-player bookkeeping vanilla keeps
+//!   the same way: progress keyed by advancement id, a dirty set,
 //!   the visible-set cache, and the "is the first packet still pending" flag.
-//! * [`PlayerStatistics`] is the per-player `Object2IntMap<Stat<?>>`.
+//! * [`PlayerStatistics`] is the per-player id-to-count map for statistics.
 //!
 //! # Lifecycle
 //!
 //! 1. On join the server calls [`AdvancementManager::initial_update`]: it
 //!    resets the client, sends the whole tree as "added", sends every
-//!    advancement's current progress, and pre-computes visibility. Vanilla's
-//!    `isFirstPacket` does the same.
+//!    advancement's current progress, and pre-computes visibility. Vanilla
+//!    tracks the same "still owe the client its first packet" flag to decide
+//!    when to do this.
 //! 2. Gameplay code calls [`AdvancementManager::grant_criterion`] /
 //!    [`AdvancementManager::revoke_criterion`] when a trigger fires. Each
 //!    call returns a [`GrantOutcome`] so the caller can react to a *first*
@@ -73,21 +74,21 @@
 //!    item *banked*, not per entity seen), and the `minecraft:deaths` custom
 //!    counter in `publish_health`, whose own guards already make crossing zero
 //!    happen once per life.
-//! 3. Every tick (vanilla: `ServerPlayer.tick()` calls
-//!    `advancements.flushDirty(player, true)`) the server calls
+//! 3. Every tick vanilla flushes dirty advancement state for every player as
+//!    part of that player's own per-tick update; the server here calls
 //!    [`AdvancementManager::flush_dirty`]. Only when the first packet is still
 //!    pending or a root/progress is dirty does it produce an
 //!    [`AdvancementUpdate`] — this is the every-tick-no-op fast path.
 //! 4. On save, [`AdvancementManager::save_advancements`] /
 //!    [`AdvancementManager::save_statistics`] hand back NBT for the #437
 //!    world-persistence hook; on load, the matching `load_*` restores it.
-//!    The NBT mirrors vanilla's `PlayerAdvancements.asData()` (criteria
+//!    The NBT mirrors vanilla's own per-player advancement table (criteria
 //!    map with obtained timestamps + `done` flag) rather than the JSON files
 //!    on disk, because this crate persists NBT, not JSON.
 //!
 //! # Completion
 //!
-//! Vanilla's `AdvancementRequirements` is a list of groups; the advancement is
+//! Vanilla's requirement shape is a list of groups; the advancement is
 //! done when **every group** has **at least one** done criterion (AND of ORs).
 //! An `allOf` advancement puts each criterion in its own group; an `anyOf` puts
 //! all in one group. The empty group list (an advancement with no criteria)
@@ -95,7 +96,7 @@
 //!
 //! # Visibility
 //!
-//! Vanilla's `AdvancementVisibilityEvaluator` walks the tree in order and only
+//! Vanilla's visibility walk goes over the tree in order and only
 //! *hides* a node when an ancestor at depth 2 is *done*; a node without a
 //! display is hidden (this module's builtin tree has no display info, so
 //! vanilla would hide those — see [`AdvancementManager::builtin`] for the
@@ -112,10 +113,10 @@ use uuid::Uuid;
 /// A single node in the advancement tree — id, parent, and completion shape.
 ///
 /// Requirements are version-free stand-ins for vanilla's
-/// `AdvancementRequirements` (a list of UTF string groups); the display info
-/// (`DisplayInfo`) that determines icon/frame/toast is deliberately absent so
-/// this crate never names a component model. `sendsTelemetryEvent` is carried
-/// because it *is* on the wire (`Advancement.write`).
+/// requirement shape (a list of UTF string groups); the display info
+/// that determines icon/frame/toast is deliberately absent so
+/// this crate never names a component model. The telemetry-opt-in bit is carried
+/// because it *is* on the wire.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Advancement {
     /// The fully-qualified id, e.g. `minecraft:story/mine_stone`.
@@ -123,9 +124,9 @@ pub struct Advancement {
     /// Parent id, if any. A tree has exactly one node with `None` per root.
     pub parent: Option<String>,
     /// AND-of-ORs completion shape: done when every inner list has at least
-    /// one granted criterion. Mirrors vanilla's `AdvancementRequirements`.
+    /// one granted criterion. Mirrors vanilla's requirement shape.
     pub requirements: Vec<Vec<String>>,
-    /// The `sendsTelemetryEvent` bit carried on the wire.
+    /// The telemetry-opt-in bit carried on the wire.
     pub sends_telemetry_event: bool,
 }
 
@@ -192,7 +193,7 @@ impl AdvancementProgress {
 
     /// True when every requirement group has at least one obtained criterion.
     /// An advancement with no requirement groups is never done, matching
-    /// vanilla's `AdvancementRequirements.test` (which returns `false` for an
+    /// vanilla's requirement test (which returns `false` for an
     /// empty list).
     pub fn is_done(&self) -> bool {
         if self.requirements.is_empty() {
@@ -261,7 +262,7 @@ impl AdvancementProgressUpdate {
     }
 }
 
-/// The full payload of `ClientboundUpdateAdvancementsPacket` (26.2):
+/// The full payload of the advancement-update packet (26.2):
 /// a reset flag, the added tree, removed ids, per-advancement progress, and
 /// the show-advancements-screen flag. A version crate's
 /// `encode_update_advancements` lowers exactly this.
@@ -286,9 +287,8 @@ pub struct AdvancementUpdate {
 /// The two booleans answer different questions: `changed` is "did the
 /// criterion flip" (a re-trigger of an already-obtained criterion is not a
 /// change and not a dirty flush); `completion_changed` is "did the
-/// advancement's overall done state flip" (vanilla's
-/// `rootAdvancements.get(predicate)` + toast logic fires only on a *newly*
-/// completed root).
+/// advancement's overall done state flip" (vanilla's own root-lookup
+/// and toast logic fires only on a *newly* completed root).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GrantOutcome {
     pub changed: bool,
@@ -297,8 +297,8 @@ pub struct GrantOutcome {
 }
 
 /// A statistic key: a stat-type (mined/crafted/used/…) plus the value key the
-/// type dispatches on (vanilla's `Stat.STREAM_CODEC` = `registry(STAT_TYPE)`
-/// dispatch — an item/block/entity registry id for the typed kinds, a custom
+/// type dispatches on (vanilla's own wire codec dispatches on the stat-type
+/// registry entry — an item/block/entity registry id for the typed kinds, a custom
 /// stat id for `custom`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StatType {
@@ -316,7 +316,7 @@ pub enum StatType {
 impl StatType {
     /// The real 26.2 stat-type registry key (from
     /// `generated/reports/registries.json`), which is what travels in the
-    /// `ClientboundAwardStatsPacket` varint-encoded as the type's registry id.
+    /// award-stats packet varint-encoded as the type's registry id.
     pub fn resource_key(self) -> &'static str {
         match self {
             Self::Mined => "minecraft:mined",
@@ -373,9 +373,9 @@ pub struct PlayerStatistics {
 }
 
 impl PlayerStatistics {
-    /// Bump a statistic and return the new value. Vanilla's
-    /// `ServerStatsCounter.add` pushes a dirty marker and re-sends on the next
-    /// `AwardStatsPacket`; here the caller owns when a snapshot is broadcast.
+    /// Bump a statistic and return the new value. Vanilla's own
+    /// statistics counter pushes a dirty marker and re-sends on the next
+    /// award-stats packet; here the caller owns when a snapshot is broadcast.
     pub fn increment(&mut self, key: &StatKey, by: i32) -> i32 {
         let entry = self.values.entry(key.clone()).or_insert(0);
         *entry += by;
@@ -452,7 +452,7 @@ impl PlayerStatistics {
     }
 }
 
-/// Per-player advancement bookkeeping — vanilla's `PlayerAdvancements` in
+/// Per-player advancement bookkeeping — vanilla's own per-player state in
 /// miniature: progress keyed by id, the changed set, the visible-set cache,
 /// and the pending-first-packet flag.
 #[derive(Debug, Clone, Default)]
@@ -463,7 +463,7 @@ pub struct PlayerAdvancementState {
     /// Advancement ids whose progress changed since the last flush.
     progress_changed: BTreeSet<String>,
     /// The currently-visible set, cached between flushes so `flush_dirty`
-    /// only emits the *delta* (vanilla's `visibilityChanged` set).
+    /// only emits the *delta* (vanilla keeps the same changed-visibility set).
     visible: BTreeSet<String>,
     /// True until the first `update_advancements` has been sent; the first
     /// flush then sends the whole tree with `reset` true.
@@ -536,7 +536,7 @@ impl PlayerAdvancementState {
 
     /// Persist as NBT: one compound keyed by advancement id, each value a
     /// `{criteria: {name: millis}, done: 1b}` compound — the NBT mirror of
-    /// vanilla's `PlayerAdvancements.asData()` JSON (which skips advancements
+    /// vanilla's own per-player advancement JSON (which skips advancements
     /// with no obtained criteria and stores obtained timestamps as strings;
     /// here timestamps are epoch-millis longs).
     pub fn to_nbt(&self) -> Nbt {
@@ -647,7 +647,7 @@ impl AdvancementManager {
     /// Note that every node here lacks display info, and vanilla's visibility
     /// evaluator *hides* display-less nodes — so of this tree only the roots
     /// and their done descendants would be visible to a real client until the
-    /// data-pack loader (the next landing of this epic) supplies `DisplayInfo`.
+    /// data-pack loader (the next landing of this epic) supplies display info.
     /// Completion logic, dirtiness and the flush protocol are all exercised
     /// regardless.
     ///
@@ -858,7 +858,7 @@ impl AdvancementManager {
     }
 
     /// The `(key, value)` snapshot sent in reply to the client's
-    /// `ClientCommand(REQUEST_STATS)` (vanilla's `ServerStatsCounter.sendStats`).
+    /// stats-request client command (vanilla's own send-stats routine).
     pub fn stats_snapshot(&self, player: Uuid) -> Vec<(StatKey, i32)> {
         self.players
             .get(&player)
@@ -868,7 +868,7 @@ impl AdvancementManager {
 
     /// The first-packet update: `reset` true, the whole tree as `added`, every
     /// advancement's current progress, and visibility pre-computed. Call once
-    /// on join (vanilla's `isFirstPacket` path). Returns a packet to send.
+    /// on join (vanilla's own pending-first-packet path). Returns a packet to send.
     pub fn initial_update(&mut self, player: Uuid, show_advancements: bool) -> AdvancementUpdate {
         let tree_ids: Vec<String> = self.tree.keys().cloned().collect();
         let added: Vec<Advancement> = self.tree.values().cloned().collect();
@@ -897,7 +897,7 @@ impl AdvancementManager {
 
     /// The every-tick flush: produce an `update_advancements` payload only
     /// when the first packet is still pending or something changed. This is
-    /// the no-op fast path vanilla's `PlayerAdvancements.flushDirty` takes
+    /// the no-op fast path vanilla's own per-player dirty-flush takes
     /// every tick that nothing happened.
     pub fn flush_dirty(&mut self, player: Uuid, show_advancements: bool) -> Option<AdvancementUpdate> {
         let state = self.players.get_mut(&player)?;
@@ -908,8 +908,8 @@ impl AdvancementManager {
         state.advancements.first_packet_pending = false;
 
         // Recompute visibility against current completion and emit the
-        // delta against the previous visible set (vanilla's
-        // `visibilityChanged` roots → added/removed).
+        // delta against the previous visible set (vanilla emits the same
+        // changed-visibility roots → added/removed).
         let old_visible = std::mem::take(&mut state.advancements.visible);
         state.advancements.recompute_visible(&self.tree);
         let target = std::mem::take(&mut state.advancements.visible);
@@ -983,8 +983,8 @@ impl AdvancementManager {
     }
 }
 
-/// The depth-2 visibility walk from vanilla's
-/// `AdvancementVisibilityEvaluator`: a node is visible when it or a descendant
+/// The depth-2 visibility walk from vanilla's own evaluator: a node is
+/// visible when it or a descendant
 /// is done, or when its parent or grandparent is done. A done node always
 /// re-shows the chain up to it; a node whose done ancestor is further away than
 /// a grandparent stays hidden.
@@ -1018,10 +1018,10 @@ fn walk(
     let self_done = is_done(id);
     ancestors.push(self_done);
     let len = ancestors.len();
-    // Vanilla's `AdvancementVisibilityEvaluator.VISIBILITY_DEPTH = 2`: the
+    // Vanilla's own visibility depth constant is 2: the
     // depth-2 window is the node's *own* rule plus its parent and grandparent
-    // (the top-3 entries of the rule stack, `evaluateVisiblityForUnfinishedNode`
-    // scanning `peek(0..=2)`). The node's own rule is `SHOW` exactly when it is
+    // (the top-3 entries of the rule stack, vanilla's evaluator for an
+    // unfinished node scanning exactly those three). The node's own rule shows it exactly when it is
     // done — which `subtree_done` already covers below — so the *ancestor*
     // window is the parent and grandparent done-flags, `ancestors[len-2]` and
     // `ancestors[len-3]`. A great-grandparent's done state is out of window,

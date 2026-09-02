@@ -7,14 +7,13 @@
 //! `protocol.rs`'s `UseItemOn`, `vitals.rs`) said so independently. This is
 //! the minimum model that gives a real slot somewhere to write into:
 //! [`PlayerInventory`] is 41 native slots (hotbar + main + armour + off-hand),
-//! mirroring vanilla's `Inventory` class
-//! (`.cache/mc/26.2/src/net/minecraft/world/entity/player/Inventory.java`)
+//! mirroring vanilla's own player-inventory class
 //! exactly:
 //!
 //! * `items` is `NonNullList.withSize(36, ItemStack.EMPTY)` — hotbar `0..=8`,
-//!   main storage `9..=35` (`Inventory.java:56`, `SELECTION_SIZE = 9`,
+//!   main storage `9..=35` (vanilla's own constants: `SELECTION_SIZE = 9`,
 //!   `INVENTORY_SIZE = 36`).
-//! * `EQUIPMENT_SLOT_MAPPING` (`Inventory.java:36-50`) adds feet `36`, legs
+//! * The equipment-slot mapping (vanilla's own field) adds feet `36`, legs
 //!   `37`, chest `38`, head `39`, off-hand `40` (this module does not model
 //!   `41`/body or `42`/saddle — those are mount equipment, not a player's own
 //!   inventory, and have no menu slot on the player inventory screen at all).
@@ -55,12 +54,12 @@ use crate::crafting::CraftingState;
 /// `PLAYER_NATIVE_SIZE` (`crates/lodestone-game/src/menu.rs:113`).
 pub const PLAYER_NATIVE_SIZE: usize = 41;
 
-/// Native index of the off-hand slot (`Inventory.SLOT_OFFHAND`,
-/// `Inventory.java:34`). Mirrors `lodestone-game`'s `OFFHAND_NATIVE`
+/// Native index of the off-hand slot (vanilla's own off-hand slot constant).
+/// Mirrors `lodestone-game`'s `OFFHAND_NATIVE`
 /// (`crates/lodestone-game/src/menu.rs:118`).
 pub const OFFHAND_NATIVE: usize = 40;
 
-/// Number of hotbar slots (`Inventory.SELECTION_SIZE`, `Inventory.java:32`).
+/// Number of hotbar slots (vanilla's own selection-size constant).
 pub const HOTBAR_SIZE: u8 = 9;
 
 /// Native index of the boots slot (`EQUIPMENT_SLOT_MAPPING`, see the module doc).
@@ -73,8 +72,7 @@ pub const CHEST_NATIVE: usize = 38;
 pub const HEAD_NATIVE: usize = 39;
 
 /// A player's server-authoritative inventory: [`PLAYER_NATIVE_SIZE`] native
-/// slots plus the selected hotbar index (vanilla's `Inventory.selected`,
-/// `Inventory.java:59`).
+/// slots plus the selected hotbar index (vanilla's own selected-slot field).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerInventory {
     slots: Vec<Option<ItemStack>>,
@@ -160,8 +158,8 @@ impl Default for PlayerInventory {
 
 impl PlayerInventory {
     /// A fresh, empty inventory with hotbar slot `0` selected — vanilla's
-    /// `Inventory`'s own field defaults (`private int selected;` starts at
-    /// `0`, `Inventory.java:59`).
+    /// own field default (`private int selected;` starts at
+    /// `0`).
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -193,8 +191,8 @@ impl PlayerInventory {
 
     /// Sets the selected hotbar slot from a `SET_CARRIED_ITEM` packet.
     /// Returns `false` (no-op) for anything outside `0..HOTBAR_SIZE`,
-    /// mirroring vanilla's `Inventory.setSelectedSlot` guard
-    /// (`Inventory.java:70-76`: `isHotbarSlot` throws server-side; here it
+    /// mirroring vanilla's own selected-slot setter guard
+    /// (its own hotbar-slot check throws server-side; here it
     /// degrades to a rejected update instead of a panic/disconnect, matching
     /// this crate's "malformed packet drops the effect, not the connection"
     /// convention — e.g. `WorldAdminState`'s difficulty/game-rule decode).
@@ -208,7 +206,7 @@ impl PlayerInventory {
     }
 
     /// The item in the currently selected hotbar slot (vanilla's
-    /// `Inventory.getSelectedItem`, `Inventory.java:78-80`).
+    /// own selected-item getter).
     #[must_use]
     pub fn selected_item(&self) -> Option<&ItemStack> {
         self.native(usize::from(self.selected_hotbar_slot))
@@ -461,10 +459,10 @@ impl PlayerInventory {
             .unwrap_or_default()
     }
 
-    /// Adds `stack` to this inventory, mirroring vanilla's
-    /// `Inventory.add(-1, stack)` → `addResource` loop
-    /// (`Inventory.java`'s `add`/`addResource`/`getSlotWithRemainingSpace`/
-    /// `getFreeSlot`), and returns **every native index this call wrote** plus
+    /// Adds `stack` to this inventory, mirroring vanilla's own
+    /// add-to-inventory → add-resource loop
+    /// (vanilla's own add/add-resource/remaining-space-slot/
+    /// free-slot helpers), and returns **every native index this call wrote** plus
     /// whatever could not be fitted.
     ///
     /// This is what item pickup credits into (issue #337). The returned index
@@ -683,8 +681,8 @@ pub const PLAYER_CRAFT_RESULT_MENU_SLOT: i32 = 0;
 
 /// The 2×2 grid cell a player-inventory menu slot addresses, if any.
 ///
-/// `InventoryMenu` lays the grid out as menu slots `1..=4` in row-major order
-/// immediately after the result (`InventoryMenu.java`'s `CraftingContainer(2, 2)`
+/// Vanilla's own player-inventory menu lays the grid out as menu slots `1..=4` in row-major order
+/// immediately after the result (its own 2x2 crafting-container
 /// loop), so cell index is `menu_slot - 1`.
 #[must_use]
 pub fn player_craft_grid_cell(menu_slot: i32) -> Option<usize> {

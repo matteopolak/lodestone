@@ -3,8 +3,7 @@
 //!
 //! # What it is
 //!
-//! A port of vanilla's `AbstractContainerMenu.doClick`
-//! (`.cache/mc/26.2/src/net/minecraft/world/inventory/AbstractContainerMenu.java:334-540`)
+//! A port of vanilla's own container-menu click dispatch
 //! over a flat, menu-ordered slot vector.
 //!
 //! Before this module `apply_container_clicked` applied the client's own
@@ -51,8 +50,8 @@
 //!   `ResultSlot.mayPlace` is `false` and `ResultSlot.onTake` is what decrements the
 //!   grid: a click *on* the result is how you craft. [`do_click`] always modelled the
 //!   take; what was missing is that the result slot is **live inside one click**.
-//!   Vanilla's `QUICK_MOVE` arm loops `quickMoveStack` *while the clicked slot still
-//!   holds the same item* (`AbstractContainerMenu.java:423-427`), and that loop only
+//!   Vanilla's quick-move arm loops its own quick-move-stack routine *while the clicked slot still
+//!   holds the same item*, and that loop only
 //!   terminates because `slotsChanged` refills slot `0` between iterations — which is
 //!   how shift-clicking a result crafts until the grid empties. So a caller that owns
 //!   a recipe corpus passes it to [`do_click_with`]; [`do_click`] itself keeps the
@@ -82,16 +81,16 @@
 //!   already is.** Vanilla's own use of it is per-slot, not uniform: every
 //!   slot but one defaults to `true` (`Slot.mayPickup`'s own base
 //!   implementation), and the one override that exists tree-wide is
-//!   `ItemCombinerMenu`'s result slot routing through `AnvilMenu.mayPickup`:
+//!   the anvil menu's result-slot pickup gate:
 //!   `(player.hasInfiniteMaterials() || player.experienceLevel >=
-//!   this.cost.get()) && this.cost.get() > 0` (`AnvilMenu.java`). A caller
+//!   this.cost.get()) && this.cost.get() > 0`. A caller
 //!   with nothing to gate passes `None`, matching every slot's default; the
 //!   anvil economy in `crate::server` passes `Some` closing over the
 //!   player's current XP level and the anvil's live `cost`
 //!   (`crate::anvil::compute`'s own `cost` field, re-derived the same way
-//!   the result itself is, never stored). `ArmorSlot.mayPickup` (refuses a
+//!   the result itself is, never stored). The armor slot's own pickup gate (refuses a
 //!   take while the piece carries `minecraft:prevent_armor_change` and the
-//!   wearer is not creative, `ArmorSlot.java`) is a separate, smaller gap
+//!   wearer is not creative) is a separate, smaller gap
 //!   this hook could also close but does not yet.
 //!
 //!   **Where the hook is actually checked, one per vanilla take path** (not
@@ -578,9 +577,9 @@ fn same(a: &ItemStack, b: &ItemStack) -> bool {
     a.item == b.item && a.components == b.components
 }
 
-/// `ItemStack.isSameItem` — item type only, components ignored. **Not** the same
-/// predicate as [`same`]: vanilla's `doClick` uses this narrower check (`a.is(b.getItem())`,
-/// `ItemStack.java`) for both of its "did the slot refill with the same thing"
+/// Vanilla's own is-same-item test — item type only, components ignored. **Not** the same
+/// predicate as [`same`]: vanilla's click dispatch uses this narrower check (`a.is(b.getItem())`)
+/// for both of its "did the slot refill with the same thing"
 /// repeat-loop guards ([`quick_move`]'s `QUICK_MOVE` loop and the `THROW` arm's
 /// ctrl-Q loop in [`do_click_with`]) — using [`same`] there instead would stop a
 /// repeat early whenever a regenerated crafting/take-only result's components

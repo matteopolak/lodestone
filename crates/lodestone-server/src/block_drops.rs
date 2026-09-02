@@ -103,13 +103,13 @@ use lodestone_model::{BlockPos, ItemStack, ResourceKey, Vec3};
 use crate::loot::{LootBlockState, LootContext, LootTableSet, LootTool};
 use crate::mob_spawn::SpawnRng;
 
-/// Half the height of `EntityTypes.ITEM`, which is `.sized(0.25F, 0.25F)`
-/// (`world/entity/EntityTypes.java:558-566`). `Block.popResource` subtracts
+/// Half the height of the dropped-item entity's own hitbox, which vanilla
+/// sizes to a 0.25×0.25 square. Vanilla's own drop-spawning routine subtracts
 /// this from the y it computes so the item's 0.25-tall box is *centred* on the
 /// block centre rather than sitting on it.
 const ITEM_HALF_HEIGHT: f64 = 0.25 / 2.0;
 
-/// The `±0.25` spread `Block.popResource` applies to each of the three axes
+/// The `±0.25` spread vanilla's own drop-spawning routine applies to each of the three axes
 /// (`Mth.nextDouble(random, -0.25, 0.25)`).
 const POP_SPREAD: f64 = 0.25;
 
@@ -120,7 +120,7 @@ const POP_VELOCITY_Y: f64 = 0.2;
 /// Horizontal velocity spread: `random.nextDouble() * 0.2 - 0.1`, i.e. `±0.1`.
 const POP_VELOCITY_SPREAD: f64 = 0.1;
 
-/// `ItemEntity.setDefaultPickUpDelay()` (`ItemEntity.java:400-402`) — ten ticks
+/// Vanilla's own default pickup-delay setter — ten ticks
 /// before a freshly popped drop can be collected, which is what stops the
 /// player who broke the block from re-absorbing it instantly and is why a
 /// pickup gate must advance the tick clock before asserting.
@@ -140,8 +140,8 @@ const ITEM_HALF_WIDTH: f64 = 0.25 / 2.0;
 /// Full height of the item entity's box.
 const ITEM_HEIGHT: f64 = 0.25;
 
-/// `Player.aiStep`'s pickup inflation (`world/entity/player/Player.java:462`:
-/// `this.getBoundingBox().inflate(1.0, 0.5, 1.0)`), as `(horizontal, vertical)`.
+/// The pickup-range inflation applied to the player's own hitbox each tick
+/// (`this.getBoundingBox().inflate(1.0, 0.5, 1.0)`), as `(horizontal, vertical)`.
 const PICKUP_INFLATE_XZ: f64 = 1.0;
 const PICKUP_INFLATE_Y: f64 = 0.5;
 
@@ -199,9 +199,9 @@ pub struct PoppedItem {
     pub velocity: Vec3,
 }
 
-/// The loot-table key for a block state — vanilla's `Block.getLootTable`, whose
+/// The loot-table key for a block state — vanilla's own loot-table lookup, whose
 /// default is `minecraft:blocks/` + the block's registry path
-/// (`Block.java`'s `lootTable` supplier, built from the block id).
+/// (built from the block id as a lazily-supplied default).
 ///
 /// Accepts a state string with or without properties: `"minecraft:oak_log
 /// [axis=y]"` and `"minecraft:oak_log"` resolve alike, because a loot table is
@@ -316,9 +316,9 @@ pub fn pop_resource_placement(pos: BlockPos, rng: &mut SpawnRng) -> (Vec3, Vec3)
     (position, dropped_item_velocity(rng))
 }
 
-/// The `ItemEntity` constructor's own initial velocity — two horizontal draws
-/// and a constant `0.2` upward (`ItemEntity.java`'s
-/// `setDeltaMovement(random.nextDouble() * 0.2 - 0.1, 0.2, random.nextDouble() * 0.2 - 0.1)`).
+/// The dropped-item entity's own initial velocity — two horizontal draws
+/// and a constant `0.2` upward
+/// (`setDeltaMovement(random.nextDouble() * 0.2 - 0.1, 0.2, random.nextDouble() * 0.2 - 0.1)`).
 ///
 /// Shared by [`pop_resource_placement`] (a block's drop) and mob death loot
 /// (`Entity.spawnAtLocation`), which differ only in the *position*: a block's is
@@ -419,7 +419,7 @@ pub fn mob_loot_table_id(entity_type: &ResourceKey) -> Option<ResourceKey> {
     format!("minecraft:entities/{path}").parse().ok()
 }
 
-/// `Mth.nextDouble(random, min, max)` (`util/Mth.java:154-156`):
+/// Vanilla's own ranged-double-draw helper:
 /// `random.nextDouble() * (max - min) + min`.
 fn next_in_range(rng: &mut SpawnRng, min: f64, max: f64) -> f64 {
     if min >= max {
@@ -428,7 +428,7 @@ fn next_in_range(rng: &mut SpawnRng, min: f64, max: f64) -> f64 {
     rng.next_f64() * (max - min) + min
 }
 
-/// `Player.hasCorrectToolForDrops` (`world/entity/player/Player.java:617-619`):
+/// Vanilla's own correct-tool-for-drops test:
 /// `!state.requiresCorrectToolForDrops() || selectedItem.isCorrectToolForDrops(state)`.
 ///
 /// **This is not a loot condition** and deliberately does not live inside
@@ -630,9 +630,9 @@ fn drop_block_loot_in(
 /// Whether a player whose **feet** are at `player_feet` collects an item entity
 /// whose feet are at `item_position`.
 ///
-/// This is `Player.aiStep`'s test, not a radius:
+/// This is vanilla's own per-tick pickup test, not a radius:
 /// `this.getBoundingBox().inflate(1.0, 0.5, 1.0)` intersected against the other
-/// entity's box (`Player.java:457-474`, via `level().getEntities(this, area)`).
+/// entity's box (via a level entity-in-area query).
 /// Two boxes, so **both** sets of half-extents contribute:
 ///
 /// | axis | reach from the player's feet |

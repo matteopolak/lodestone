@@ -1,7 +1,6 @@
-//! The ender dragon's phase state machine — a port of
-//! `EnderDragonPhase`/`EnderDragonPhaseManager` and the eleven
-//! `DragonPhaseInstance` implementors under
-//! `.cache/mc/26.2/src/net/minecraft/world/entity/boss/enderdragon/phases/`.
+//! The ender dragon's phase state machine — a port of vanilla's own
+//! phase enum and phase manager and the eleven per-phase behaviour
+//! implementations behind them.
 //!
 //! # The one deliberate substitution, named up front
 //!

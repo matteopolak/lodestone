@@ -7,8 +7,8 @@
 //! arbitrary NBT blob at a given chunk coordinate" and parses no chunk schema
 //! at all (its own module doc says so, and issue #298 names the separation as a
 //! trap to preserve). This module is the other half: the mapping between that
-//! blob and [`crate::chunk::ChunkColumn`], i.e. `SerializableChunkData.java`'s
-//! territory, which issue #437 is where it "gets decided".
+//! blob and [`crate::chunk::ChunkColumn`], i.e. vanilla's own chunk
+//! serialization territory, which issue #437 is where it "gets decided".
 //!
 //! # How it works
 //!
@@ -41,8 +41,8 @@
 //! # How to change it, and the gotchas
 //!
 //! - **Heightmaps are deliberately not written.** Vanilla re-primes any
-//!   heightmap missing from the file — `SerializableChunkData.java` lines
-//!   291–302, `Heightmap.primeHeightmaps(chunk, toPrime)` — so omitting them
+//!   heightmap missing from the file — its own chunk-load path re-primes
+//!   any type not present in the saved data — so omitting them
 //!   is a supported input, whereas writing a *wrong* one is trusted and
 //!   corrupts terrain silently. Computing `MOTION_BLOCKING` correctly needs a
 //!   per-state "blocks motion" census this crate does not have; `WORLD_SURFACE`
@@ -764,11 +764,11 @@ impl ChunkExtras {
 ///
 /// # The trap, and why it is invisible without an outside oracle
 ///
-/// `TickPriority.CODEC` is `Codec.INT.xmap(TickPriority::byValue,
-/// TickPriority::getValue)` (`TickPriority.java:14`), so the int written is
-/// `getValue()`. Our [`TickPriority`] is declared in vanilla's order *on
-/// purpose*, so that `#[derive(Ord)]` reproduces Java's ordinal-based
-/// `compareTo` for free — which makes `Normal`'s **ordinal 3** and its
+/// Vanilla's own codec for the priority enum maps the wire int through a
+/// by-value lookup one way and a plain accessor the other, so the int written is
+/// that accessor's return, not the ordinal. Our [`TickPriority`] is declared in vanilla's order *on
+/// purpose*, so that `#[derive(Ord)]` reproduces vanilla's own ordinal-based
+/// comparison for free — which makes `Normal`'s **ordinal 3** and its
 /// **value 0**. Writing the ordinal would therefore turn every ordinary tick
 /// in the world into `EXTREMELY_LOW`, and a round-trip gate against our own
 /// writer could never see it because the reader would make the same mistake.
@@ -790,7 +790,7 @@ pub fn tick_priority_value(priority: TickPriority) -> i32 {
 }
 
 /// The inverse of [`tick_priority_value`], clamping out-of-range values
-/// exactly as `TickPriority.byValue` does (`TickPriority.java:21-29`: below
+/// exactly as vanilla's own by-value lookup does (below
 /// `-3` saturates to `EXTREMELY_HIGH`, anything else out of range to
 /// `EXTREMELY_LOW`) rather than erroring — a corrupt `p` should cost a
 /// mis-ordered tick, never a chunk that will not load.
@@ -937,8 +937,8 @@ fn items_from_nbt(nbt: Option<&Nbt>, len: usize) -> Vec<Option<ItemStack>> {
     out
 }
 
-/// Decodes one `SpawnData` compound (`net.minecraft.world.level.SpawnData`'s
-/// own shape: `{entity: {id: "...", ...}, custom_spawn_rules?: {...},
+/// Decodes one spawner spawn-entry compound (vanilla's own spawn-data NBT
+/// shape: `{entity: {id: "...", ...}, custom_spawn_rules?: {...},
 /// equipment?: {...}}`) into the reduced form `crate::mob_spawner` acts on.
 ///
 /// Only `entity.id` is read — see that module's doc for why
@@ -1039,12 +1039,12 @@ const RECIPES_USED_FIELD: &str = "lodestone:recipes_used";
 ///
 /// # Schema provenance
 ///
-/// `BeehiveBlockEntity.saveAdditional` stores one field, `bees`, through
-/// `Occupant.LIST_CODEC` (`BeehiveBlockEntity.java:303-306`), whose records are
-/// `{entity_data, ticks_in_hive, min_ticks_in_hive}` (`:366-374`). `entity_data`
-/// is a `TypedEntityData` whose codec writes the type under the key `"id"` into
-/// the entity tag (`TypedEntityData.java:35`, `TYPE_TAG`), and every generated
-/// occupant's tag is an otherwise-empty compound (`Occupant.create`, `:397`), so
+/// Vanilla's own beehive block entity save routine stores one field, `bees`, through
+/// its occupant list codec, whose records are
+/// `{entity_data, ticks_in_hive, min_ticks_in_hive}`. `entity_data`
+/// is a typed-entity wrapper whose codec writes the type under the key `"id"` into
+/// the entity tag, and every generated
+/// occupant's tag is an otherwise-empty compound, so
 /// `{id: "minecraft:bee"}` is the whole of it — not a guess about what a bee's
 /// NBT looks like.
 ///

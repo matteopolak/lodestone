@@ -3287,8 +3287,8 @@ impl IntegratedServer {
                             // `crate::sleep`'s module doc.
                             // Issue #545: open-to-LAN keeps the configured
                             // `view_radius` as its live-change ceiling, which is
-                            // vanilla's `serverViewDistance`
-                            // (`ChunkMap.java:826`) and the same policy that
+                            // vanilla's own server view-distance field
+                            // and the same policy that
                             // keeps `MAX_CAPACITY` on this path — a host spends
                             // memory and bandwidth on behalf of players who did
                             // not choose the setting.

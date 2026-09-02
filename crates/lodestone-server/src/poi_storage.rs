@@ -5,10 +5,10 @@
 //!
 //! The reader/writer for vanilla's third region-file set. Entities and terrain
 //! each have their own; a point of interest — a bed, a workstation, a bell, a
-//! lit nether portal — is a third, keyed by *section*, not by block or chunk:
-//! `world/level/entity/ai/village/poi/{PoiRecord,PoiSection,PoiManager}.java`.
+//! lit nether portal — is a third, keyed by *section*, not by block or chunk,
+//! mirroring vanilla's own POI record/section/manager trio.
 //! Before this module, `grep`ping the workspace for `PoiRecord`/`PoiSection`/
-//! `PoiManager`/`"poi"`/`/poi/` returned exactly one hit — a doc comment in
+//! the manager name/`"poi"`/`/poi/` returned exactly one hit — a doc comment in
 //! `crate::portal` noting that vanilla indexes nether portals through
 //! `PoiManager`. No `poi/` region set was read or written anywhere.
 //!
@@ -45,8 +45,8 @@
 //! having all 32 tickets free.
 //!
 //! **A POI chunk has no `Position` field of any kind** — unlike both terrain
-//! (`xPos`/`zPos`) and entities (`Position` IntArray[2]). `SectionStorage.java`
-//! never writes one; the chunk's coordinate is carried *only* by which slot in
+//! (`xPos`/`zPos`) and entities (`Position` IntArray[2]). Vanilla's own
+//! generic section storage never writes one; the chunk's coordinate is carried *only* by which slot in
 //! the region container it occupies. Code that goes looking for a `Position`
 //! or `xPos` key to double-check which chunk it decoded will find nothing —
 //! trust the region container's own `(local_x, local_z)`, exactly as
