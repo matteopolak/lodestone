@@ -254,8 +254,8 @@ pub(crate) fn is_interactable_state(state: u32) -> bool {
 /// not a stair) simply does not predict.
 ///
 /// Sourced by grepping `getStateForPlacement` for
-/// `getHorizontalDirection().getOpposite()` across
-/// `.cache/mc/26.2/src/net/minecraft/world/level/block/`, then restricted to the
+/// `getHorizontalDirection().getOpposite()` across the decompiled 26.2
+/// client's own block classes, then restricted to the
 /// single-cell blocks whose remaining properties [`state_for_placement`] can also
 /// resolve. Namespace-stripped paths.
 const FACING_HORIZONTAL_OPPOSITE: &[&str] = &[

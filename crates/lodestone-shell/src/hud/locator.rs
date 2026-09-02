@@ -1,6 +1,6 @@
 //! Vanilla's locator bar — geometry only, ported from
-//! `.cache/mc/26.2/client-src/net/minecraft/client/gui/contextualbar/LocatorBar.java`
-//! and `net/minecraft/world/waypoints/TrackedWaypoint.java`.
+//! its own contextual locator-bar class
+//! and its own tracked-waypoint class.
 //!
 //! `lodestone_game::waypoints::WaypointStore` (bridged onto the ECS as
 //! `lodestone_ecs::session::SessionWaypoints`) already folds

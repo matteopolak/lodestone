@@ -5671,10 +5671,10 @@ fn a_disagreeing_server_set_slot_overwrites_the_predicted_equip() {
 // Throwing a projectile item swings the arm
 // -----------------------------------------------------------------------
 //
-// `SnowballItem.use`/`EggItem.use`/`EnderpearlItem.use`/`ThrowablePotionItem.use`
-// (`.cache/mc/26.2/src/net/minecraft/world/item/`) all return
+// Vanilla's own snowball/egg/ender-pearl/throwable-potion use routines
+// all return
 // `InteractionResult.SUCCESS`, whose `swingSource()` is `CLIENT`
-// — vanilla's `Minecraft.startUseItem` swings on
+// — vanilla's own start-use-item routine swings on
 // exactly that condition. `use_item_generic` is the shell's landing site for
 // all four (none of them is a block or an `EntityRayTarget` hit in the common
 // case). It used to call `swing_hand()` unconditionally whenever the main

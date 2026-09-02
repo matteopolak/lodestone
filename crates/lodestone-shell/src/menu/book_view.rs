@@ -1,6 +1,5 @@
-//! The signed-book reading screen: vanilla's `BookViewScreen`
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/
-//! BookViewScreen.java`) — the read-only sibling of [`super::book_edit`]'s
+//! The signed-book reading screen: vanilla's own book-view screen —
+//! the read-only sibling of [`super::book_edit`]'s
 //! `BookEditScreen`.
 //!
 //! ## What it is

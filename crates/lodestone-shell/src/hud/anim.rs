@@ -1,5 +1,5 @@
-//! Client-side, cosmetic vitals animations, ported from vanilla's `Hud` class
-//! (`.cache/mc/26.2/client-src/net/minecraft/client/gui/Hud.java`) — see
+//! Client-side, cosmetic vitals animations, ported from vanilla's own HUD
+//! class — see
 //! `docs/hud-animations.md` for the full citation-by-citation notes.
 //!
 //! This module carries all three of real vanilla animations: the

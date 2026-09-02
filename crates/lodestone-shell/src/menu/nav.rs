@@ -712,8 +712,7 @@ impl EditForm {
 
 /// The title screen's widgets, in vanilla's own display order.
 ///
-/// This is vanilla `TitleScreen.init`'s widget list
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/TitleScreen.java`),
+/// This is vanilla's own title-screen init's widget list,
 /// reproduced whole rather than trimmed to what this client implements.
 /// [`MainButton::enabled`] is what marks the rest **present but greyed out**,
 /// which is the faithful thing: a button missing from its vanilla position is a
@@ -878,8 +877,7 @@ impl MainButton {
 
 /// The pause screen's widgets, in vanilla's own display order.
 ///
-/// This is vanilla `PauseScreen.createPauseMenu`'s grid
-/// (`.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/PauseScreen.java`)
+/// This is vanilla's own pause-screen "create pause menu" grid
 /// reproduced whole, and it is **not** the three-button stack people remember:
 /// a full-width Back to Game, then a two-column Advancements / Statistics row,
 /// then a centred row of four 20×20 icon buttons, then Options, then

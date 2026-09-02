@@ -1,7 +1,5 @@
-//! The command block edit screen: vanilla's
-//! `AbstractCommandBlockEditScreen`/`CommandBlockEditScreen` —
-//! `.cache/mc/26.2/client-src/net/minecraft/client/gui/screens/inventory/
-//! {AbstractCommandBlockEditScreen,CommandBlockEditScreen}.java`.
+//! The command block edit screen: vanilla's own abstract command-block-edit
+//! screen and its concrete command-block-edit screen subclass.
 //!
 //! ## What it is
 //!

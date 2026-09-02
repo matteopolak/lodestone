@@ -4,7 +4,7 @@
 //! # Why this has to exist
 //!
 //! 26.2's advancement JSON carries **no** `x`/`y`. `DisplayInfo`'s position
-//! fields are computed server-side by `net/minecraft/advancements/TreeNodePosition.java`
+//! fields are computed server-side by vanilla's own tree-node-position layout routine
 //! and only ever appear on the wire, so a client that builds the screen from the
 //! data pack — which is what [`super::advancement_data`] does — has to run the
 //! same algorithm. There is nothing on disk to verify a position against, which
