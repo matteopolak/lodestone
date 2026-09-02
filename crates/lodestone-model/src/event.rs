@@ -426,7 +426,7 @@ pub struct EntityMetadataUpdate {
     ///
     /// It is the *other* claimant of the same metadata index (15) with the same
     /// serializer (`BYTE`) — the armor stand's client-flags field rather than
-    /// the mob's flags field — and `0x04` means `showArms` here where it means
+    /// the mob's flags field — and `0x04` means "show arms" here where it means
     /// `aggressive` in [`mob_flags`](Self::mob_flags). Folding them into one
     /// field would make "is this stand's arm visible" and "is this mob
     /// attacking" read off whichever byte the adapter happened to establish
@@ -437,7 +437,7 @@ pub struct EntityMetadataUpdate {
     /// A server-side "hologram" is an armour stand with
     /// [`flags`](Self::flags)'s invisible bit set, a custom name, and
     /// `custom_name_visible` — but that trio alone still shows the stand's base
-    /// plate and, if it were ever built without this byte, a `showArms` toggle
+    /// plate and, if it were ever built without this byte, a "show arms" toggle
     /// would have no field to read. `marker` (no hitbox, ignores piston pushes)
     /// and `no_base_plate` are what a decorative stand actually turns off; see
     /// `lodestone_entity::metadata::ArmorStandFlags`'s own doc for the full
@@ -472,7 +472,7 @@ pub struct EntityMetadataUpdate {
     /// `super.setupAnim` — walk cycle, idle bob and all — and then **assigns**
     /// all six part rotations from the pose, unconditionally. The swing is
     /// computed and thrown away. A stand that has never reported a pose still
-    /// has one: `ArmorStand`'s own `defineId` defaults, which
+    /// has one: vanilla's own armor-stand metadata-field defaults, which
     /// [`ArmorStandPose::VANILLA_DEFAULT`] carries. Treating "nothing reported"
     /// as "do not overwrite" leaves the walk cycle standing, and a stand carried
     /// along by a moving contraption then swings its arms — with any held item,
@@ -1723,8 +1723,8 @@ pub enum ParticleOptions {
     /// under a status effect, and a splash potion's instant burst.
     Spell {
         /// Tint, unpacked from the wire's packed RGB24 `i32` the same way
-        /// [`Self::Dust`]'s `color` is. `SpellParticleOption`'s own accessors
-        /// read only the low three bytes (`getRed`/`getGreen`/`getBlue`), so
+        /// [`Self::Dust`]'s `color` is. Vanilla's own spell-particle option's own accessors
+        /// read only the low three bytes (its own red/green/blue channel reads), so
         /// the top byte of the wire word is not an alpha here — that is
         /// [`Self::Color`]'s field, on a different option type.
         color: [f32; 3],
@@ -1744,7 +1744,7 @@ pub enum ParticleOptions {
         /// Tint and alpha, unpacked from the wire's packed **ARGB** `i32` —
         /// `[ARGB.red, ARGB.green, ARGB.blue, ARGB.alpha]`, each `/ 255.0`.
         /// The alpha byte is the top one and is genuinely used
-        /// (`SpellParticle.MobEffectProvider` calls `setAlpha` with it), so
+        /// (vanilla's own mob-effect spell-particle provider sets alpha with it), so
         /// dropping it makes every ambient effect mote fully opaque.
         color: [f32; 4],
     },
@@ -1935,7 +1935,8 @@ pub enum ClientEvent {
     ///
     /// `ADD_ENTITY`'s trailing VarInt is vanilla's "Object Data": one field whose
     /// meaning is decided entirely by the entity type, and which each type reads in
-    /// its own `recreateFromPacket` override. `FallingBlockEntity`'s is
+    /// its own recreate-from-packet override. Vanilla's own falling-block
+    /// entity's is
     /// `this.blockState = Block.stateById(packet.getData())`. Lowering it as a
     /// per-type event rather than as an opaque integer on the shared spawn event
     /// keeps the *interpretation* in the adapter that has the version's state table,
@@ -2155,7 +2156,7 @@ pub enum ClientEvent {
         /// `player_motion_x/y/z` on the legacy wire (present unconditionally,
         /// `[0.0; 3]` when this player is outside the blast — map that to
         /// `Some([0.0; 3])` there, since the field genuinely is on the wire);
-        /// `playerKnockback` on 26.2, which is a real `Optional<Vec3>` on the
+        /// vanilla's own player-knockback field on 26.2, which is a real `Optional<Vec3>` on the
         /// wire and should map to `None` one-for-one.
         knockback: Option<Vec3>,
     },
@@ -2166,7 +2167,7 @@ pub enum ClientEvent {
         /// Whether the particles should be visible at long distance.
         long_distance: bool,
         /// Whether the particles survive the **Minimal** particle setting —
-        /// the level particles packet's `alwaysShow`, which
+        /// the level particles packet's own "always show" flag, which
         /// the client's particle-level calculation turns into a one-in-ten
         /// reprieve rather than an exemption.
         ///
@@ -2883,9 +2884,10 @@ pub enum ClientEvent {
         /// `minecraft:dimension_type` registry that could supply it. It rides
         /// this event only because this event is emitted from exactly the two
         /// packets that carry it, and because every consumer that wants one
-        /// wants the other: vanilla keeps both in `ClientLevelData` side by
-        /// side, where `voidDarknessOnsetRange()` reads `isFlat` and
-        /// `getMinY()` reads the dimension type.
+        /// wants the other: vanilla keeps both in its own client-level-data side by
+        /// side, where its own void-darkness-onset-range query reads its own
+        /// "is flat" flag and
+        /// its own min-Y query reads the dimension type.
         ///
         /// It is deliberately **not** a field of [`DimensionTypeInfo`], which
         /// is a decode of one registry entry and must stay so — a struct with
@@ -3099,7 +3101,7 @@ pub enum ClientEvent {
         /// `(advancement id, [(criterion, obtained epoch-millis)])`. A criterion
         /// present with `None` is known but not obtained.
         progress: Vec<(Identifier, Vec<(String, Option<i64>)>)>,
-        /// Vanilla's `showAdvancements` flag — whether completions announce.
+        /// Vanilla's own "show advancements" flag — whether completions announce.
         show_advancements: bool,
     },
 
@@ -3362,7 +3364,7 @@ pub struct RecipeBookEntry {
     /// Item ids the recipe's result slot can display. Usually one; a display can
     /// legitimately offer several (a `composite`, or a tag-driven slot).
     pub result_items: Vec<i32>,
-    /// Item ids the display's trailing `craftingStation`/`furnace` `SlotDisplay`
+    /// Item ids the display's trailing crafting-station/furnace slot-display
     /// can show — the small corner icon a recipe-unlock toast draws (a crafting
     /// table, furnace, etc.). Every `RecipeDisplay` variant carries this as its
     /// final `SlotDisplay`. Usually one entry; empty for a display whose station
@@ -3377,8 +3379,9 @@ pub struct RecipeBookEntry {
 /// One villager trade, from the merchant offers packet.
 ///
 /// Note the arithmetic fields are **big-endian `i32`s on the wire, not VarInts** —
-/// `MerchantOffer`'s codec uses `writeInt` for `uses`, `maxUses`, `xp`,
-/// `specialPriceDiff` and `demand`, which is unusual enough in this protocol that
+/// vanilla's own merchant-offer codec writes a fixed-width int for `uses`, its
+/// own max-uses field, `xp`,
+/// its own special-price-diff field, and `demand`, which is unusual enough in this protocol that
 /// a VarInt-by-default encoder or decoder gets all five wrong at once.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MerchantOffer {
@@ -3598,8 +3601,10 @@ impl AdvancementFrame {
 ///
 /// # Field order is not the datapack's
 ///
-/// `DisplayInfo.serializeToNetwork` writes title, description, icon, frame, an
-/// `int` flag word, the optional background, then x and y. `announceChat` is
+/// Vanilla's own display-info network serializer writes title, description,
+/// icon, frame, an
+/// `int` flag word, the optional background, then x and y. Its own
+/// "announce chat" field is
 /// **not on the wire at all** (vanilla's reader hardcodes `false`), and the flag
 /// word is a raw big-endian `int`, not a byte.
 #[derive(Debug, Clone, PartialEq)]
@@ -3637,7 +3642,7 @@ pub struct AdvancementEntry {
     /// AND-of-ORs completion shape: done when every group has one obtained
     /// criterion.
     pub requirements: Vec<Vec<String>>,
-    /// Vanilla's `sendsTelemetryEvent` bit, carried because it is on the wire.
+    /// Vanilla's own "sends telemetry event" bit, carried because it is on the wire.
     pub sends_telemetry_event: bool,
 }
 

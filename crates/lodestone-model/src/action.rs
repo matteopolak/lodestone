@@ -41,10 +41,11 @@ pub enum ClientAction {
         /// Chat text without a leading command slash.
         text: String,
         /// Client timestamp, epoch **milliseconds** — the wire's own unit
-        /// (`ChatMessage.timestamp`/`writeInstant`). Deliberately not the
+        /// (vanilla's own chat-message timestamp field and instant-write
+        /// call). Deliberately not the
         /// epoch-**seconds** value the signature payload itself is computed
-        /// over (`SignedMessageBody.updateSignature`'s
-        /// `timeStamp.getEpochSecond()`): carrying only the millisecond form
+        /// over (vanilla's own signed-message-body signature update, which
+        /// re-derives the epoch-second value): carrying only the millisecond form
         /// here and deriving seconds from it at the signing call site
         /// removes the chance of the two drifting apart.
         timestamp_millis: i64,
@@ -344,10 +345,11 @@ pub enum ClientAction {
     /// Tell the server this client has finished loading the world and is
     /// ready to have its movement validated.
     ///
-    /// Vanilla's server seeds a ~60-tick (~3 s) `clientLoadedTimeoutTimer`
+    /// Vanilla's server seeds a ~60-tick (~3 s) client-loaded timeout timer
     /// after join/respawn and silently ignores movement packets until it
     /// elapses, *unless* the client sends this to zero it early
-    /// (`ServerGamePacketListenerImpl.hasClientLoaded()`). Sent once per
+    /// (vanilla's own "has client loaded" check on the player packet
+    /// listener). Sent once per
     /// join/respawn, as soon as the client is actually ready to be moved.
     PlayerLoaded,
     /// Report which advancement tab is open, or that the advancements screen
@@ -455,8 +457,9 @@ pub enum ClientAction {
     },
     /// Reply to a [`crate::event::ClientEvent::CookieRequested`].
     ///
-    /// Vanilla's own client (`ClientCommonPacketListenerImpl.handleRequestCookie`)
-    /// answers immediately from its local `serverCookies` map with no UI and no
+    /// Vanilla's own client (its own common-packet-listener's
+    /// request-cookie handler)
+    /// answers immediately from its own local server-cookies map with no UI and no
     /// player input — `payload` is `None` when the client has never received a
     /// [`crate::event::ClientEvent::CookieStored`] for this `key`, which the wire
     /// carries as a nullable byte array rather than an error. Present in the

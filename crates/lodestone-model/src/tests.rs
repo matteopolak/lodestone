@@ -1556,8 +1556,8 @@ fn legacy_codes_decompose_to_four_spans_with_vanilla_reset_semantics() {
 /// the screen as `§7` glyphs.
 ///
 /// The enclosing component carries [`alternating_style`], so the span `§r`
-/// produces reads its five flags back — vanilla's `resetStyle` is seeded with the
-/// component's own style, not `Style.EMPTY`, and reset-to-nothing would fail
+/// produces reads its five flags back — vanilla's own style-reset is seeded with the
+/// component's own style, not the empty style, and reset-to-nothing would fail
 /// here on all five.
 #[test]
 fn legacy_codes_inside_a_component_expand_and_inherit_the_enclosing_style() {
@@ -1629,7 +1629,7 @@ fn the_bungeecord_hex_dialect_resolves_to_its_last_digit_not_to_a_hex_colour() {
 }
 
 /// A dangling `§` is dropped, not drawn. Vanilla `break`s out of
-/// `iterateFormatted` without feeding it to the sink.
+/// its own formatted-string iteration without feeding it to the sink.
 #[test]
 fn a_dangling_section_sign_is_dropped() {
     let spans = Text::from_legacy("tail§").to_spans();

@@ -382,9 +382,8 @@ impl Quat {
         Self { x, y, z, w }
     }
 
-    /// The identity rotation — `Transformation.IDENTITY`'s
-    /// `left`/`rightRotation` and the `DATA_LEFT_ROTATION_ID`/
-    /// `DATA_RIGHT_ROTATION_ID` accessors' own defaults.
+    /// The identity rotation — vanilla's own identity transformation's
+    /// left/right rotation and the corresponding metadata accessors' own defaults.
     pub const IDENTITY: Self = Self::new(0.0, 0.0, 0.0, 1.0);
 }
 
