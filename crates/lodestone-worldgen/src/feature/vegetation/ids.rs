@@ -6,7 +6,7 @@
 //!
 //! Unit 8 of [`docs/plans/worldgen-rewrite.md`](../../../../../docs/plans/worldgen-rewrite.md),
 //! candidate 2 of its "Vegetation: cost per draw" section. Every ground check,
-//! every `validTreePos`, every `isAirOrLeaves` anchor and every heightmap cell
+//! every trunk-position test, every air-or-leaves anchor and every heightmap cell
 //! used to cost:
 //!
 //! 1. [`StateInterner::name_of`] — an `RwLock` **read guard**, on a cache line
@@ -119,14 +119,15 @@ pub(super) enum Tag {
     Water,
     /// Base `minecraft:lava` — `MatchingFluid`'s lava arm.
     Lava,
-    /// Base `minecraft:cactus` — `CactusBlock.canSurvive`'s "below is cactus".
+    /// Base `minecraft:cactus` — the cactus survival rule's "below is cactus" arm.
     Cactus,
-    /// Base `minecraft:sugar_cane` — `SugarCaneBlock.canSurvive`'s own half.
+    /// Base `minecraft:sugar_cane` — the sugar-cane survival rule's own half.
     SugarCane,
-    /// `#minecraft:mangrove_logs_can_grow_through` — issue #428's mangrove
-    /// increment: `UpwardsBranchingTrunkPlacer.validTreePos`'s extra OR-arm
+    /// `#minecraft:mangrove_logs_can_grow_through` — the mangrove
+    /// increment: the upwards-branching trunk placer's extra OR-arm on its
+    /// valid-position test
     /// (a mangrove trunk can grow up through e.g. its own leaves/propagules,
-    /// same shape as [`Tag::Leaves`]'s `isAirOrLeaves` anchor for dark oak).
+    /// same shape as [`Tag::Leaves`]'s air-or-leaves anchor for dark oak).
     MangroveLogsCanGrowThrough,
     /// `#minecraft:mangrove_roots_can_grow_through` — `MangroveRootPlacer
     /// .canPlaceRoot`'s extra OR-arm.
@@ -196,7 +197,7 @@ pub(super) struct IdTags {
     /// such property. Filled by [`VegTags::bind`] alongside the masks, and valid
     /// under the same [`Self::resolved`] watermark.
     ///
-    /// `TreeFeature.updateLeaves`' BFS asks this of all six neighbours of every
+    /// The leaf-distance BFS asks this of all six neighbours of every
     /// cell it visits, so it is as hot as a tag test and gets the same treatment.
     /// 64 KiB, one byte per id — the property's range is `0..=7`.
     distance: Box<[AtomicI8]>,
@@ -241,11 +242,11 @@ pub(super) struct IdTags {
 /// remove.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Rewrite {
-    /// `distance=N`, `TreeFeature.updateLeaves`' output.
+    /// `distance=N`, the leaf-distance BFS's output.
     Distance(u8),
     /// `waterlogged=true|false`, `try_place_leaf`'s fix-up.
     Waterlogged(bool),
-    /// `axis=x|y|z`, `RotatedPillarBlock.AXIS` — `FancyTrunkPlacer.getLogAxis`
+    /// `axis=x|y|z`, the pillar-axis property — the fancy trunk placer's log-axis rule
     /// and `FallenTreeFeature`'s own `getSidewaysStateModifier`, both of which
     /// pick a log's axis from the direction it was placed in rather than the
     /// configured (vertical) default.
@@ -415,10 +416,10 @@ impl VegTags {
         self.id_tags.resolved.fetch_max(len, Ordering::Release);
     }
 
-    /// `LeavesBlock.getOptionalDistanceAt`'s non-tag half, by id — the value of
+    /// The leaf-distance lookup's non-tag half, by id — the value of
     /// `id`'s `distance` property, or `None` if it has none.
     ///
-    /// Hot: `TreeFeature.updateLeaves` asks this of every neighbour of every cell
+    /// Hot: the leaf-distance BFS asks this of every neighbour of every cell
     /// its BFS visits.
     pub(super) fn distance_of(&self, interner: &StateInterner, id: StateId) -> Option<i32> {
         let index = id.index();
