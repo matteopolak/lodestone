@@ -42,17 +42,17 @@ checked exhaustively.
 
 Two independent predicates decide what happens when two entity boxes overlap:
 
-| | predicate | `Entity` default | `LivingEntity` |
+| | predicate | base entity default | living-entity default |
 |---|---|---|---|
-| soft push | `isPushable()` | `false` | alive, not spectator, not on a climbable |
-| hard collide | `canBeCollidedWith(other)` | `false` | not overridden |
+| soft push | is-pushable | `false` | alive, not spectator, not on a climbable |
+| hard collide | can-be-collided-with | `false` | not overridden |
 
-The only `canBeCollidedWith` overrides in 26.2 are boats (always `true`), shulkers (`isAlive()`), and
+The only hard-collide overrides in 26.2 are boats (always `true`), shulkers (alive check), and
 happy ghasts (a state machine) — **players and mobs pass through each other by design**, while a boat is
 both collidable and pushable and a shulker blocks without shoving.
 
-`Entity.push(Entity)` computes one horizontal vector and applies `-v`/`+v` symmetrically, gated per side
-on `!isVehicle() && isPushable()`; Y is never touched, and there's no ordering rule because nothing is
+Vanilla's own entity-push routine computes one horizontal vector and applies `-v`/`+v` symmetrically, gated per side
+on "not a vehicle and is-pushable"; Y is never touched, and there's no ordering rule because nothing is
 read after it's written — the impulse lands on velocity and integrates next tick, so simultaneous pushes
 commute. Writing `m = max(|dx|, |dz|)` (Chebyshev, not Euclidean):
 
@@ -159,7 +159,8 @@ outside the hull against real collision shapes, falling back to the hull's own t
 resolver. Placement's obstruction test doesn't check other entities (a boat can overlap a mob), there's
 no rejection for a bad `MoveVehicle`, and a boat isn't persisted across a restart.
 
-**Leashing.** `Mob.canBeLeashed()`'s real default is "not one of vanilla's `Enemy`-tagged hostiles" —
+**Leashing.** Vanilla's own can-be-leashed check's real default is "not one of vanilla's hostile-tagged
+mobs" —
 every non-hostile species by default, not a curated allowlist. Attaching mirrors vanilla's two branches
 (already leashed here → detach, drop a lead unless creative; else unheld-elsewhere, holding a lead,
 leashable, within 12 blocks → attach), checked before the taming chain. A fence anchor moves every mob

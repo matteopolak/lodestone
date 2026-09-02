@@ -121,7 +121,8 @@ directly; **JVM-walked tables** (`hardness`, `collision_shapes`, `block_solidity
 `entity_census`, `entity_dimensions`, `item_prototypes`, `outline_shapes`, `path_types`,
 `snow_support`, `tools`, `block_entity_types`) need a real headless 26.2 server booted and
 walked, because the fact in question has no getter and is absent from the reports (block
-entity coverage, for instance, is recovered from `BlockEntityType.isValid(state)` rather than
+entity coverage, for instance, is recovered from vanilla's own per-type state-validity check
+rather than
 by constructing a live `BlockEntity`).
 
 `lodestone-v770`'s adapter delegates every data-shaped `VersionAdapter` trait method
