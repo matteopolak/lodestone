@@ -2651,6 +2651,40 @@ impl IntegratedServer {
         self.mobs.as_ref()
     }
 
+    /// Spawns a mob of `entity_type` at `pos` on the live simulation, through
+    /// the same [`MobHandle::with`] lock [`crate::server::apply_attack`]
+    /// already uses from a connection task — the server-side half of a
+    /// native plugin's spawn/despawn/modify surface. Returns the id a
+    /// subsequent [`despawn_mob`](Self::despawn_mob) or any connection's
+    /// attack can target.
+    ///
+    /// `None` for a constructor with no tick loop, matching [`mobs`](Self::mobs)
+    /// — see that accessor's own doc for the reseed race a caller should poll
+    /// [`crate::MobSim::next_id`] against before seeding right after open.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn spawn_mob(
+        &self,
+        entity_type: lodestone_model::ResourceKey,
+        pos: lodestone_model::Vec3,
+    ) -> Option<i32> {
+        self.mobs()
+            .map(|mobs| mobs.with(|sim| sim.spawn_species(entity_type, pos).id()))
+    }
+
+    /// Removes the mob `id` names from the live simulation, returning whether
+    /// one was actually removed. `None` for a constructor with no tick loop,
+    /// matching [`spawn_mob`](Self::spawn_mob).
+    ///
+    /// A connected player's id is never removable through this — see
+    /// [`crate::MobSim::remove_mob`]'s own doc for why, and note it drops no
+    /// loot and grants no experience: this is a plain removal, not a kill.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn despawn_mob(&self, id: i32) -> Option<bool> {
+        self.mobs().map(|mobs| mobs.with(|sim| sim.remove_mob(id)))
+    }
+
     /// Issue #619. The world's real chunk-ticket graph — the same handle every
     /// connection's `PLAYER_LOADING`/`PLAYER_SIMULATION` grant and the world's
     /// own `PLAYER_SPAWN` grant move, not a copy. `None` for a constructor
