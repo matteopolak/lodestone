@@ -1,5 +1,5 @@
-//! The plugin config convention's other half: a minimal typed config-loading helper, mirroring
-//! `JavaPlugin.getConfig()` — load a `T` from the plugin's own data
+//! The plugin config convention's other half: a minimal typed config-loading helper, matching
+//! the familiar plugin-config convention — load a `T` from the plugin's own data
 //! directory, falling back to `T::default()` when the file is absent or
 //! unparseable, and save one back. serde-based, matching every other
 //! data-model shape in this codebase (this crate's own dependency list, and
@@ -21,9 +21,10 @@ use serde::de::DeserializeOwned;
 /// `T::default()` if the file does not exist, cannot be read, or does not
 /// parse as JSON.
 ///
-/// Deliberately forgiving rather than `Result`-returning: `JavaPlugin.getConfig()`
-/// has the same shape — a plugin with no config file yet gets its defaults, not
-/// a load error to handle on every startup. A plugin that needs to distinguish
+/// Deliberately forgiving rather than `Result`-returning: the familiar
+/// plugin-config convention has the same shape — a plugin with no config file
+/// yet gets its defaults, not a load error to handle on every startup. A
+/// plugin that needs to distinguish
 /// "missing" from "corrupt" should read the file itself.
 #[must_use]
 pub fn load_or_default<T: DeserializeOwned + Default>(plugin_name: &str, file_name: &str) -> T {

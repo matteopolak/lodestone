@@ -10,8 +10,8 @@
 //! # Sine table
 //!
 //! Vanilla's own sine function is **not** the standard-library `sin`: it is a
-//! 65,536-entry `float` lookup table built as
-//! `sin[i] = (float)Math.sin(i / 10430.378350470453)`. The table is generated
+//! 65,536-entry `float` lookup table built as the double-precision sine of
+//! `i / 10430.378350470453`, truncated to `f32`. The table is generated
 //! once and checked in as [`sin_table`](crate::sin_table); it is **not** built
 //! at runtime. To regenerate it, evaluate that expression for `i in 0..65536`,
 //! widen each result to `f32`, and emit the raw bit patterns.
@@ -44,7 +44,9 @@ fn sin_table() -> &'static [f32; 65536] {
 
 /// Vanilla's own sine: a quantized table lookup, **not** `f64::sin`.
 ///
-/// Mirrors `SIN[(int)((long)(i * SIN_SCALE) & 65535L)]`.
+/// Scales the input by the table's per-entry angle step, truncates to a
+/// 64-bit int, masks to the table's 65536-entry range, and looks up that
+/// index.
 #[must_use]
 pub fn sin(i: f64) -> f32 {
     let idx = ((i * SIN_SCALE) as i64 & 65535) as usize;
@@ -53,26 +55,27 @@ pub fn sin(i: f64) -> f32 {
 
 /// Vanilla's own cosine: the same quantized table, offset by a quarter turn.
 ///
-/// Mirrors `SIN[(int)((long)(i * SIN_SCALE + 16384.0) & 65535L)]`.
+/// Same lookup as [`sin`], with a quarter-table (16384-entry) offset added
+/// before scaling.
 #[must_use]
 pub fn cos(i: f64) -> f32 {
     let idx = ((i * SIN_SCALE + 16384.0) as i64 & 65535) as usize;
     sin_table()[idx]
 }
 
-/// Vanilla's own `floor`: `(int)Math.floor(v)`.
+/// Vanilla's own floor-to-int: floor, then truncate to `i32`.
 #[must_use]
 pub fn floor(v: f64) -> i32 {
     v.floor() as i32
 }
 
-/// Vanilla's own `lfloor`: `(long)Math.floor(v)`.
+/// Vanilla's own floor-to-long: floor, then truncate to `i64`.
 #[must_use]
 pub fn lfloor(v: f64) -> i64 {
     v.floor() as i64
 }
 
-/// Vanilla's own `ceil`: `(int)Math.ceil(v)`.
+/// Vanilla's own ceil-to-int: ceiling, then truncate to `i32`.
 #[must_use]
 pub fn ceil(v: f64) -> i32 {
     v.ceil() as i32
@@ -110,7 +113,7 @@ pub fn java_max_f64(a: f64, b: f64) -> f64 {
     }
 }
 
-/// Vanilla's own "abs max": `Math.max(Math.abs(a), Math.abs(b))`, i.e. the
+/// Vanilla's own "abs max": the larger of the two absolute values, i.e. the
 /// **larger magnitude of the two components**, not the length of the vector
 /// they form.
 ///
@@ -128,7 +131,8 @@ pub fn abs_max(a: f64, b: f64) -> f64 {
 
 /// Vanilla's own clamp.
 ///
-/// Note vanilla's asymmetric form: `value < min ? min : Math.min(value, max)`.
+/// Note vanilla's asymmetric form: if `value` is less than `min`, return `min`;
+/// otherwise return the NaN-propagating min of `value` and `max`.
 /// This matters at `NaN` and negative-zero edges (Java's own `min` propagates
 /// `NaN`), so we reproduce it exactly rather than using `f64::clamp`.
 #[must_use]
@@ -206,26 +210,17 @@ pub fn compute_modified_friction(friction: f32, modifier: f32) -> f32 {
     clamp_f32(1.0 - (1.0 - friction) * modifier, 0.0, 1.0)
 }
 
-/// `org.joml.Math.invsqrt(float)` — the float inverse square root that
-/// vanilla's own inverse-square-root helper delegates to.
+/// The float inverse square root that vanilla's own inverse-square-root
+/// helper delegates to, via a small vendored math library.
 ///
-/// **Not** the Quake-style magic-constant Newton iterate: JOML 1.10.8 (the
-/// version 26.2 ships in `libraries/org/joml/joml/1.10.8`) compiles
-/// `invsqrt(float)` to exactly
-///
-/// ```text
-/// fconst_1
-/// fload_0
-/// f2d                       // (double)x — IEEE widening, lossless
-/// invokestatic Math.sqrt    // correctly-rounded double sqrt
-/// d2f                       // round back to float
-/// fdiv                      // 1.0f / (float)sqrt(x)
-/// ```
-///
-/// i.e. `1.0F / (float)Math.sqrt((double)x)`. The magic constant `0x5f375a86`
-/// appears in *no* class file in that jar — a fast-inverse-sqrt port would be a
+/// **Not** the Quake-style magic-constant Newton iterate: disassembling the
+/// vendored library's compiled inverse-square-root routine shows it widens
+/// the input to `double`, takes a correctly-rounded double square root,
+/// narrows back to `float`, and divides `1.0` by that — i.e. `1.0F /
+/// (float)sqrt((double)x)`. The magic constant `0x5f375a86` appears nowhere
+/// in that routine — a fast-inverse-sqrt port would be a
 /// divergence of up to ~0.17% from the reference, verified by disassembling
-/// `Math.class` from the 26.2 cache.
+/// the vendored library's compiled form from the 26.2 cache.
 ///
 /// The only consumer is the client's own steering (vanilla's own auto-jump
 /// detector normalises its look-ahead direction through it), so a divergence
@@ -233,8 +228,8 @@ pub fn compute_modified_friction(friction: f32, modifier: f32) -> f32 {
 /// player logic is the reference for client-side movement, and a wrong
 /// look-ahead changes *when* auto-jump fires, so the bits are reproduced
 /// exactly. All three widths (`f64::sqrt` is IEEE-754 correctly rounded, like
-/// `Math.sqrt`; both roundings are round-to-nearest-even, like `f2d`/`d2f`)
-/// match the JVM, so this is exact.
+/// the vendored routine's double sqrt; both narrowing/widening roundings are
+/// round-to-nearest-even, matching the JVM) match, so this is exact.
 #[must_use]
 pub fn inv_sqrt_f32(x: f32) -> f32 {
     1.0_f32 / (f64::from(x).sqrt() as f32)
@@ -246,11 +241,12 @@ pub fn inv_sqrt_f32(x: f32) -> f32 {
 /// *the argument itself* for `±0.0` (so `signum(0.0) == 0.0` and
 /// `signum(-0.0) == -0.0`), whereas Rust's `f64::signum` returns `1.0` for `0.0`
 /// and `-1.0` for `-0.0`. Vanilla's own sneak-at-a-ledge back-off computes
-/// its step as `Math.signum(deltaX) * 0.05`, so on a zero component Rust's
+/// its step as the sign of the x-delta times `0.05`, so on a zero component Rust's
 /// version would manufacture a `±0.05` step out of nothing.
 ///
-/// It happens to be harmless *there* — the step is only read inside a
-/// `while (deltaX != 0.0)` loop, which a zero component never enters — but the
+/// It happens to be harmless *there* — the step is only read inside a loop
+/// that repeats while the x-delta is nonzero, which a zero component never
+/// enters — but the
 /// discrepancy is exactly the kind that survives review and then bites a later
 /// caller. NaN propagates in both.
 #[must_use]
@@ -268,7 +264,7 @@ mod tests {
 
     #[test]
     fn java_signum_returns_the_argument_for_signed_zero() {
-        // Rust's `f64::signum` returns ±1.0 here; Java's `Math.signum` does not.
+        // Rust's `f64::signum` returns ±1.0 here; Java's own `signum` does not.
         assert_eq!(java_signum(0.0).to_bits(), 0.0_f64.to_bits());
         assert_eq!(java_signum(-0.0).to_bits(), (-0.0_f64).to_bits());
         assert_eq!(java_signum(0.2), 1.0);
@@ -279,7 +275,7 @@ mod tests {
     #[test]
     fn sin_table_matches_jvm_reference() {
         // Authoritative regression guard: every one of the 65,536 checked-in
-        // `f32` bit patterns must equal the raw `Float.floatToRawIntBits` values
+        // `f32` bit patterns must equal the raw IEEE-754 bits
         // dumped by the real JVM (`oracle-java/SinOracle.java`, temurin:25-jdk —
         // the runtime vanilla 26.2 runs on). This is strictly stronger than a
         // hash: on failure it names the exact divergent index. Regenerate the
@@ -300,7 +296,7 @@ mod tests {
     fn sin_matches_known_anchors() {
         // sin(0) is exactly 0; the table's quarter-turn index yields exactly 1.
         assert_eq!(sin(0.0), 0.0);
-        // Mth.sin(PI/2) via the table hits the peak entry (== 1.0f).
+        // sin(PI/2) via the table hits the peak entry (== 1.0f).
         assert_eq!(sin(std::f64::consts::FRAC_PI_2), 1.0);
         // cos(0) == sin(quarter turn) == 1.0.
         assert_eq!(cos(0.0), 1.0);
@@ -328,7 +324,7 @@ mod tests {
     fn clamp_matches_vanilla_form() {
         assert_eq!(clamp_f64(5.0, 0.0, 1.0), 1.0);
         assert_eq!(clamp_f64(-5.0, 0.0, 1.0), 0.0);
-        // NaN: vanilla returns Math.min(NaN, max) == NaN when NaN<min is false.
+        // NaN: vanilla's NaN-propagating min of NaN and max is NaN, and NaN<min is false.
         assert!(clamp_f64(f64::NAN, 0.0, 1.0).is_nan());
     }
 
@@ -342,11 +338,11 @@ mod tests {
     #[test]
     fn inv_sqrt_matches_joml_reference_bits() {
         // Authoritative regression guard: vanilla's own inverse-square-root
-        // helper delegates to `org.joml.Math.invsqrt(float)`, which JOML 1.10.8
-        // compiles to `1.0f / (float)Math.sqrt((double)x)` — NOT a magic-constant
-        // Newton iterate. These raw `Float.floatToRawIntBits` values were dumped
-        // by running the actual `joml-1.10.8.jar` from the 26.2 cache
-        // (`org/joml/Math.class` disassembled to confirm the `fdiv`/`sqrt` form).
+        // helper delegates to a small vendored math library, whose compiled
+        // inverse-square-root routine is `1.0f / (float)sqrt((double)x)` — NOT a
+        // magic-constant Newton iterate. These raw IEEE-754 bit values were dumped
+        // by running the actual vendored library's jar from the 26.2 cache
+        // (its disassembled compiled form confirms the divide/sqrt form).
         // Asserting bits, not values, catches a subtly-wrong-but-close port
         // (e.g. fast-inverse-sqrt) that a 1e-7 tolerance would wave through.
         let cases: &[(f32, u32)] = &[
@@ -399,7 +395,7 @@ mod tests {
         let negative = inv_sqrt_f32(-1.0);
         assert!(
             negative.is_nan(),
-            "inv_sqrt_f32(-1.0) must be NaN like Math.sqrt of a negative double, got {negative}"
+            "inv_sqrt_f32(-1.0) must be NaN like the double square root of a negative number, got {negative}"
         );
         assert_eq!(
             negative.to_bits() & 0x7FFF_FFFF,

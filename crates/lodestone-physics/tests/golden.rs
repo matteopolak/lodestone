@@ -1822,7 +1822,7 @@ fn bubble_column_up_matches_golden() {
         last_y > first_y + 25.0,
         "the lift did not lift: y went {first_y} -> {last_y}"
     );
-    // `Math.min(0.7, …)` — the inside-branch push-up clamp, reached and not exceeded.
+    // the inside-branch push-up clamp caps vertical velocity at 0.7, reached and not exceeded.
     let last_vy = f64::from_bits(last.vel[1]);
     assert_eq!(
         last_vy, 0.7,

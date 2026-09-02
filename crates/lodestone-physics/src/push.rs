@@ -885,7 +885,7 @@ mod tests {
         assert!(self_is_pushable(flags, pos, &Empty));
         assert!(
             !self_is_pushable(flags, pos, &Ladders),
-            "LivingEntity.isPushable() vetoes on onClimbable()"
+            "a living entity's pushable check vetoes while it is on a climbable block"
         );
         let dead = PushSelf {
             alive: false,

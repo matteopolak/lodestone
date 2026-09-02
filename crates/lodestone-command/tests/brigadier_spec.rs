@@ -1,9 +1,9 @@
-//! Tree-level behaviour, checked against Brigadier 1.3.10's own algorithms
-//! (`CommandDispatcher::parseNodes`/`getCompletionSuggestions`,
-//! `Suggestions::merge`), never against this crate's own parser or suggester
-//! in isolation. Every expected value below is derived by hand from the
-//! decompiled/upstream source, not from running this code and eyeballing the
-//! result — see each test's comment for the derivation.
+//! Tree-level behaviour, checked against the command-parser library's own
+//! node-parsing, completion-suggestion, and suggestion-merge algorithms,
+//! never against this crate's own parser or suggester in isolation. Every
+//! expected value below is derived by hand from the upstream algorithm, not
+//! from running this code and eyeballing the result — see each test's
+//! comment for the derivation.
 
 use std::sync::Arc;
 
@@ -17,8 +17,8 @@ use lodestone_command::{
 
 #[test]
 fn integer_out_of_range_reports_start_not_end_of_token() {
-    // Oracle: IntegerArgumentType.parse resets `reader`'s cursor to `start`
-    // via `reader.setCursor(start)` *before* throwing integerTooHigh — so the
+    // Oracle: the integer-argument parser resets the reader's cursor back to
+    // `start` before raising the too-high error — so the
     // reported position is where the number began (0), not where it ended
     // (2), even though the number itself parsed successfully as a value.
     // The naive (wrong) hypothesis a first-pass port would reach for is
@@ -35,11 +35,11 @@ fn integer_out_of_range_reports_start_not_end_of_token() {
 
 #[test]
 fn integer_immediately_followed_by_more_text_is_expected_separator_not_leftover() {
-    // "12abc": readInt consumes only "12" (cursor -> 2; 'a' is not
-    // `isAllowedNumber`), succeeding as a value — but the very next character
-    // is neither a space nor end-of-input, so `parseNodes`'s boundary check
-    // (`if (reader.canRead() && reader.peek() != ' ') throw
-    // dispatcherExpectedArgumentSeparator()`) fires *before* anything gets a
+    // "12abc": the integer reader consumes only "12" (cursor -> 2; 'a' is not
+    // an allowed number character), succeeding as a value — but the very next character
+    // is neither a space nor end-of-input, so the node-parsing boundary check
+    // (there is more input, and the next character is not a space: raise
+    // an expected-argument-separator error) fires *before* anything gets a
     // chance to call this "leftover". Position is 2 (right after the
     // successfully-parsed number, where the missing space should have been).
     let mut tree = CommandTree::new();
@@ -56,8 +56,8 @@ fn integer_immediately_followed_by_more_text_is_expected_separator_not_leftover(
 fn integer_leftover_input_after_a_real_separator_is_unknown_argument() {
     // "12 abc": this time the number IS followed by a real space, which gets
     // consumed (cursor -> 3); the `amount` node is a leaf (no children, no
-    // redirect), so nothing exists to take "abc". `CommandDispatcher.execute`
-    // sees leftover input with a non-empty context -> DISPATCHER_UNKNOWN_ARGUMENT
+    // redirect), so nothing exists to take "abc". Top-level execution
+    // sees leftover input with a non-empty context -> an unknown-argument error
     // at the reader's cursor, which is 3 (the start of "abc"), not 0.
     let mut tree = CommandTree::new();
     let root = tree.root();
@@ -71,11 +71,11 @@ fn integer_leftover_input_after_a_real_separator_is_unknown_argument() {
 
 #[test]
 fn integer_invalid_number_reports_start_via_reset_cursor() {
-    // "999999999999abc" overflows i32 during readInt's own number-run (the
+    // "999999999999abc" overflows i32 during the integer reader's own number-run (the
     // whole all-digit prefix is consumed as "allowed number" text before
-    // Integer::parseInt fails), so this is InvalidInt, not a leftover error —
-    // and per StringReader.readInt, the cursor resets to `start` (0) before
-    // the exception is created.
+    // the integer parse fails), so this is InvalidInt, not a leftover error —
+    // and the reader resets its cursor to `start` (0) before
+    // the error is created.
     let mut tree = CommandTree::new();
     let root = tree.root();
     let arg = tree.add_argument(root, "amount", Arc::new(IntegerArgument::new()));
@@ -101,17 +101,17 @@ fn unknown_command_at_root_reports_position_zero() {
 
 #[test]
 fn greedy_vs_single_word_disagree_on_multi_token_input() {
-    // Brigadier oracle for "hello world" against `message: word`:
-    //   StringArgumentType.word() -> reader.readUnquotedString() consumes
-    //   "hello" (space is not in isAllowedInUnquotedString), cursor -> 5.
-    //   parseNodes then requires a separator (peek() == ' ' at 5: yes),
+    // Oracle for "hello world" against `message: word`:
+    //   the word-string reader consumes
+    //   "hello" (space is not an allowed unquoted-string character), cursor -> 5.
+    //   node-parsing then requires a separator (next char is a space at 5: yes),
     //   skips it (cursor -> 6). The "message" node is a leaf with no
     //   children and no redirect, so nothing consumes "world"; the top-level
-    //   parse ends with the reader canRead() at cursor 6, context non-empty
-    //   -> DISPATCHER_UNKNOWN_ARGUMENT at position 6.
+    //   parse ends with input still remaining at cursor 6, context non-empty
+    //   -> an unknown-argument error at position 6.
     //
     // Same oracle for "hello world" against `message: greedy string`:
-    //   StringArgumentType.greedyString() takes reader.getRemaining() ("hello
+    //   the greedy-string reader takes the whole remaining input ("hello
     //   world") unconditionally and sets the cursor to the end (11) — no
     //   leftover, Ok.
     //
@@ -140,9 +140,9 @@ fn greedy_vs_single_word_disagree_on_multi_token_input() {
 #[test]
 fn quotable_phrase_behaves_like_word_on_unquoted_multi_token_input() {
     // A second angle on the same trap: `quotable` and `word` are also
-    // indistinguishable from each other on unquoted input — StringReader's
-    // readString() only takes the quoted branch if the *next* char is a
-    // quote, otherwise it falls through to readUnquotedString(), byte-for-
+    // indistinguishable from each other on unquoted input — the quotable-string
+    // reader only takes the quoted branch if the *next* char is a
+    // quote, otherwise it falls through to the same unquoted-string reading, byte-for-
     // byte identical to the `word` case above. This is the negative half of
     // the trap: proving quotable is NOT secretly greedy either.
     let mut tree = CommandTree::new();
@@ -157,8 +157,9 @@ fn quotable_phrase_behaves_like_word_on_unquoted_multi_token_input() {
 
 #[test]
 fn quotable_phrase_spans_spaces_when_quoted() {
-    // `"hello world"` (with literal quotes in the input): readString sees a
-    // starting `"`, skips it, and readStringUntil('"') accumulates up to the
+    // `"hello world"` (with literal quotes in the input): the quotable-string
+    // reader sees a
+    // starting `"`, skips it, and accumulates characters up to the
     // closing quote, spaces included. Input length is 13
     // (`"`,h,e,l,l,o,' ',w,o,r,l,d,`"`), so a fully successful parse leaves
     // the cursor at 13.
@@ -172,15 +173,15 @@ fn quotable_phrase_spans_spaces_when_quoted() {
 }
 
 // ---------------------------------------------------------------------------
-// Suggestions: exact ordered candidate lists, per Suggestions::merge's
+// Suggestions: exact ordered candidate lists, per the suggestion-merge
 // case-insensitive sort.
 // ---------------------------------------------------------------------------
 
 #[test]
 fn suggestions_are_sorted_case_insensitively_and_filtered_by_prefix() {
-    // Oracle: LiteralCommandNode.listSuggestions matches
-    // `literalLowerCase.startsWith(remainingLowerCase)`; Suggestions.merge
-    // sorts the merged set with `a.compareToIgnoreCase(b)`.
+    // Oracle: a literal node's suggestions match by lowercased-prefix
+    // containment; the merged suggestion set is
+    // sorted case-insensitively.
     // "gamemode" vs "gamerule": equal through "gam", then 'e' < 'r', so
     // "gamemode" sorts first. "give" doesn't start with "gam" at all, and
     // the bare `target` word argument contributes no suggestions (its
@@ -209,7 +210,7 @@ fn suggestions_at_empty_input_list_every_matching_child() {
 
 #[test]
 fn bool_argument_suggests_only_the_matching_literal() {
-    // Oracle: BoolArgumentType offers "true"/"false" unconditionally; the
+    // Oracle: the bool-argument type offers "true"/"false" unconditionally; the
     // generic prefix filter (Suggestions builder) narrows to the ones whose
     // lowercase form starts with the typed prefix's lowercase form. "t"
     // matches only "true".

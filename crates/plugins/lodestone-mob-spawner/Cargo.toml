@@ -2,7 +2,7 @@
 # non-networked entity, plus one custom entity type registered at startup —
 # the real consumer of `lodestone_ecs::entity_spawn`.
 #
-# "Everything a Bukkit `World.spawnEntity`/`Entity.remove()` caller would want
+# "Everything a familiar plugin-API spawn/remove caller would want
 # from a plugin, minus the wire — a real target for a minigame manager that
 # spawns a training dummy, or a disguise plugin that wants a fake mob with no
 # server involved."

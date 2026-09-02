@@ -4,7 +4,7 @@
 //! # What this is
 //!
 //! The real consumer of [`lodestone_ecs::entity_spawn`] —
-//! "everything a Bukkit `World.spawnEntity(loc, type)`/`Entity.remove()` caller
+//! "everything a familiar plugin-API spawn/remove caller
 //! would want, minus the wire": a minigame manager spawning a training dummy,
 //! a mob-farm plugin spawning stock, a disguise plugin wanting a fake mob with
 //! no server involved. Like [`lodestone_worldedit`], this is a *second* plugin
@@ -20,7 +20,7 @@
 //! [`apply_spawn_requests`]/[`apply_despawn_requests`] drain them once per
 //! [`GameTick`], calling straight through to
 //! [`lodestone_ecs::entity_spawn::spawn_entity`]/[`spawn_custom_entity`](lodestone_ecs::entity_spawn::spawn_custom_entity)/[`despawn_entity`](lodestone_ecs::entity_spawn::despawn_entity).
-//! [`SpawnedEntities`] is the "return value" a Bukkit `spawnEntity` caller
+//! [`SpawnedEntities`] is the "return value" a familiar plugin-API spawn caller
 //! gets back — the ids currently live, so a driver never has to reach into
 //! the ECS itself to learn what landed.
 //!
@@ -93,7 +93,7 @@ pub struct SpawnRequests(pub Vec<SpawnRequest>);
 pub struct DespawnRequests(pub Vec<i32>);
 
 /// Every id this plugin has spawned that has not yet been despawned — the
-/// "return value" a Bukkit `spawnEntity` caller gets back, published so a
+/// "return value" a familiar plugin-API spawn caller gets back, published so a
 /// driver can read what actually landed without reaching into the ECS.
 #[derive(Resource, Debug, Default)]
 pub struct SpawnedEntities(pub Vec<i32>);

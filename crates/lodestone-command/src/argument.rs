@@ -1,9 +1,8 @@
 //! Brigadier's primitive argument types, plus registration of custom ones.
 //!
-//! Every built-in type here has a direct counterpart in
-//! `com.mojang.brigadier.arguments` (brigadier 1.3.10): `IntegerArgumentType`,
-//! `LongArgumentType`, `FloatArgumentType`, `DoubleArgumentType`,
-//! `BoolArgumentType`, `StringArgumentType`. Minecraft-flavoured types
+//! Every built-in type here has a direct counterpart in the upstream
+//! command-parser library's own primitive argument types: integer, long,
+//! float, double, bool, and string. Minecraft-flavoured types
 //! (player name, block id, entity selector, ...) are deliberately **not**
 //! here — they depend on this substrate, not part of
 //! it, and building one would mean guessing at a wire format nobody has
@@ -216,7 +215,7 @@ impl ArgumentType for BoolArgument {
     }
 }
 
-/// The three flavours of `StringArgumentType`. **This is the classic
+/// The three flavours of string argument. **This is the classic
 /// Brigadier trap**: `Word` and `Quotable` are indistinguishable from
 /// `Greedy` on a single-token input, and from each other on any unquoted
 /// input — they only diverge once the input contains a space (word vs.
@@ -225,12 +224,12 @@ impl ArgumentType for BoolArgument {
 /// for the input chosen specifically to make them disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StringKind {
-    /// `StringArgumentType.word()`: `reader.readUnquotedString()`.
+    /// Reads a single unquoted token, stopping at the first space.
     Word,
-    /// `StringArgumentType.string()`: `reader.readString()` — quoted if the
-    /// next char is a quote, otherwise identical to `Word`.
+    /// Reads a quoted string if the next char is a quote, otherwise
+    /// identical to `Word`.
     Quotable,
-    /// `StringArgumentType.greedyString()`: everything from the cursor to
+    /// Everything from the cursor to
     /// the end of input, unconditionally, including spaces and quotes.
     Greedy,
 }
