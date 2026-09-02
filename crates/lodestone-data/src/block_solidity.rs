@@ -1,31 +1,30 @@
-//! Per-block-state `legacySolid` / `blocksMotion` flags for protocol 776
+//! Per-block-state "legacy solid" / "blocks motion" flags for protocol 776
 //! (Minecraft 26.2) — the one block fact that decides whether an entity is
 //! stopped by a cell, and the one that **cannot** be derived from the collision
 //! census next door.
 //!
 //! # Why this table has to exist
 //!
-//! `BlockState.blocksMotion()` is
-//! `block != COBWEB && block != BAMBOO_SAPLING && isSolid()`
-//! (`BlockBehaviour.BlockStateBase.blocksMotion`), and `isSolid()` is a plain read of the cached
-//! `legacySolid` field (`BlockBehaviour.BlockStateBase.isSolid`) computed once per state by
-//! `calculateSolid()` (`BlockBehaviour.BlockStateBase.calculateSolid`):
+//! Vanilla's own "blocks motion" accessor is
+//! `block != COBWEB && block != BAMBOO_SAPLING && isSolid()`, and its own
+//! "is solid" accessor is a plain read of a cached "legacy solid" field
+//! computed once per state by a "calculate solid" step:
 //!
 //! ```text
 //! if (properties.forceSolidOn)  return true;
 //! if (properties.forceSolidOff) return false;
-//! if (cache == null)            return false;          // dynamicShape blocks
+//! if (cache == null)            return false;          // dynamic-shape blocks
 //! if (collisionShape.isEmpty()) return false;
 //! return bounds.getSize() >= 0.7291666666666666 || bounds.getYsize() >= 1.0;
 //! ```
 //!
-//! Only the last line is geometry. The first two branches read
-//! `BlockBehaviour.Properties.forceSolidOn` / `forceSolidOff`, which have **no
+//! Only the last line is geometry. The first two branches read vanilla's own
+//! block-properties builder's "force solid on"/"force solid off" flags, which have **no
 //! getter**, are absent from `blocks.json`, and are set on **237** and **8**
-//! blocks respectively in 26.2. The third fires for the 23 `dynamicShape()`
-//! blocks, whose `Cache` is never built (`BlockBehaviour.BlockStateBase.initCache`
-//! skips it when `hasDynamicShape()`) — so
-//! their `legacySolid` ignores the shape they nonetheless report.
+//! blocks respectively in 26.2. The third fires for the 23 blocks vanilla marks
+//! as having a dynamic shape, whose cache is never built (vanilla's own
+//! cache-init step skips it for those) — so
+//! their "legacy solid" flag ignores the shape they nonetheless report.
 //!
 //! Deriving solidity from the shape instead gets **2,742 of 32,366 states across
 //! 222 blocks** wrong: every sign, hanging sign, banner, pressure plate, chain,
@@ -37,14 +36,14 @@
 //!
 //! `0.7291666666666666` is exactly `(1 + 1 + 3/16) / 3` — the mean extent of a
 //! ladder's collision box. The constant exists *because* a ladder lands on it,
-//! and `forceSolidOff()` on `Blocks.LADDER` exists because landing on it gives
-//! the wrong answer.
+//! and the ladder block's own "force solid off" flag exists because landing on
+//! it gives the wrong answer.
 //!
 //! # Data source
 //!
 //! Dumped from the real 26.2 server (`BlockPhysicsOracle.java`, walking
-//! `Block.BLOCK_STATE_REGISTRY` after `SharedConstants::tryDetectVersion` +
-//! `Bootstrap::bootStrap`), same as [`crate::hardness`] and
+//! vanilla's own block-state registry after booting the server headlessly),
+//! same as [`crate::hardness`] and
 //! [`crate::outline_shapes`]. See `tests/block_physics.rs` for the generator, the
 //! drift guard and `LODESTONE_REGEN=1`.
 //!
@@ -66,19 +65,19 @@ fn bit(bits: &[u8], id: u32) -> Option<bool> {
     Some(byte & (1u8 << (id % 8)) != 0)
 }
 
-/// Vanilla `BlockState.isSolid()` — the raw cached `legacySolid` flag — for
+/// Vanilla's own "is solid" accessor — the raw cached "legacy solid" flag — for
 /// block-state `id`, or `None` if `id` is not in `0..`[`STATE_COUNT`].
 ///
-/// Prefer [`blocks_motion`] for physics. This is exposed because `isSolid()` has
+/// Prefer [`blocks_motion`] for physics. This is exposed because "is solid" has
 /// several vanilla consumers that are *not* motion blocking (replaceability
-/// checks, `BlockBehaviour.canBeReplaced(BlockState, Fluid)`), and because it is the value the drift
+/// checks, a can-be-replaced-by-fluid check), and because it is the value the drift
 /// guard compares a shape-derived answer against.
 #[must_use]
 pub fn legacy_solid(id: u32) -> Option<bool> {
     bit(&table::LEGACY_SOLID, id)
 }
 
-/// Vanilla `BlockState.blocksMotion()` for block-state `id`, or `None` if `id`
+/// Vanilla's own "blocks motion" accessor for block-state `id`, or `None` if `id`
 /// is not in `0..`[`STATE_COUNT`].
 ///
 /// This is [`legacy_solid`] with vanilla's two hard-coded exclusions already

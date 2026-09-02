@@ -1,19 +1,19 @@
-//! The four per-block-state facts vanilla's `freeze_top_layer`
-//! (`TOP_LAYER_MODIFICATION`, `SnowAndFreezeFeature`) needs and that no other
+//! The four per-block-state facts vanilla's own "freeze top layer" worldgen
+//! feature (a snow-and-freeze feature) needs and that no other
 //! census in this crate carries, plus the default-state key its consumer needs to
 //! look them up, for protocol 776 (Minecraft 26.2).
 //!
 //! # Why this table has to exist
 //!
-//! `SnowAndFreezeFeature.place` asks four
+//! Vanilla's own snow-and-freeze feature's place step asks four
 //! questions of the block field, none of them answerable from `blocks.json`:
 //!
 //! | fn | vanilla expression | used for |
 //! |---|---|---|
-//! | [`face_full_up`] | `Block.isFaceFull(state.getCollisionShape(…), UP)` | `SnowLayerBlock.canSurvive` |
-//! | [`has_fluid_state`] | `!state.getFluidState().isEmpty()` | the second half of the `MOTION_BLOCKING` heightmap predicate (`Heightmap.Types.MOTION_BLOCKING`) |
-//! | [`is_water_source_liquid_block`] | `getFluidState().is(Fluids.WATER) && block instanceof LiquidBlock` | which blocks turn to ice (`Biome.shouldFreeze`) |
-//! | [`has_snowy_property`] | `state.hasProperty(BlockStateProperties.SNOWY)` | the `snowy` flip under a placed snow layer, also in `SnowAndFreezeFeature.place` |
+//! | [`face_full_up`] | is the collision shape's up-face full | the snow-layer block's own "can survive" check |
+//! | [`has_fluid_state`] | `!state.getFluidState().isEmpty()` | the second half of the motion-blocking heightmap predicate |
+//! | [`is_water_source_liquid_block`] | the fluid state is water **and** the block is a liquid block | which blocks turn to ice (vanilla's own biome "should freeze" check) |
+//! | [`has_snowy_property`] | the state carries the "snowy" property | the `snowy` flip under a placed snow layer, also in the place step above |
 //!
 //! [`crate::block_solidity::blocks_motion`] already carries the *first* half of
 //! the `MOTION_BLOCKING` predicate, and [`crate::collision_shapes`] carries the
@@ -24,22 +24,24 @@
 //!   states have a full UP collision face — a minority, which is itself
 //!   surprising, and it does not coincide with "the collision shape is one
 //!   unit box" either. `tests/snow_support.rs` measures both counts and their
-//!   disagreement rather than restating them here. The predicate is
-//!   `!Shapes.joinIsNotEmpty(Shapes.block(), shape.getFaceShape(UP),
-//!   NOT_SAME)` over the *discretised* `DiscreteVoxelShape` grid, after
-//!   `VoxelShape.calculateFace`'s three-way branch on `isCubeLikeAlong(Y)` /
-//!   empty slice / cube-like slice. Re-deriving that
+//!   disagreement rather than restating them here. The predicate is a
+//!   shape-join emptiness test between a full cube and the shape's own
+//!   up-face slice, over the *discretised* voxel-shape grid, after
+//!   vanilla's own face-calculation step's three-way branch on whether the
+//!   shape is cube-like along Y / an empty slice / a cube-like slice.
+//!   Re-deriving that
 //!   from the AABB list [`crate::collision_shapes`] holds means re-implementing
-//!   `SliceShape`, `CubePointRange` and their `1.0E-7` fuzzy comparisons. That
+//!   vanilla's own slice-shape and cube-point-range helpers and their `1.0E-7`
+//!   fuzzy comparisons. That
 //!   is a hand-rolled geometry pass, and this repo has already shipped a
 //!   hand-rolled lexer that was silently wrong about lifetimes; asking the jar
 //!   costs one column.
 //!
 //! * **`is_water_source_liquid_block` is true for exactly ONE state.** Not
-//!   "every water block" and not "every waterlogged block": `Fluids.WATER` is
-//!   the *source* fluid, so `water[level=1..15]` is `Fluids.FLOWING_WATER` and
-//!   fails `is(Fluids.WATER)`, while a waterlogged stair passes the fluid test
-//!   and fails `instanceof LiquidBlock`. The single state is
+//!   "every water block" and not "every waterlogged block": still water is
+//!   the *source* fluid, so `water[level=1..15]` is the flowing-water fluid and
+//!   fails the source-fluid identity test, while a waterlogged stair passes the fluid test
+//!   and fails the liquid-block instance check. The single state is
 //!   `minecraft:water[level=0]`. Ice therefore forms only on still source
 //!   water, and any hand-written approximation of this predicate ("is it
 //!   water?") freezes flowing water that vanilla leaves alone.
@@ -52,24 +54,24 @@
 //!
 //! # Known scope
 //!
-//! The shape behind [`face_full_up`] is read at `EmptyBlockGetter.INSTANCE` /
-//! `BlockPos.ZERO`, so neighbour-dependent geometry (fences, walls, panes)
+//! The shape behind [`face_full_up`] is read at an empty block-getter
+//! singleton and the origin position, so neighbour-dependent geometry (fences, walls, panes)
 //! reports its no-neighbour shape — the same convention
-//! [`crate::collision_shapes`] uses, and the dump carries the `dynamicShape()`
+//! [`crate::collision_shapes`] uses, and the dump carries the dynamic-shape
 //! candidate set so that scope is checkable rather than asserted.
 //!
 //! # Data source
 //!
 //! Dumped from the real 26.2 server (`oracle-java/SnowSupportOracle.java`,
-//! walking `Block.BLOCK_STATE_REGISTRY` after `SharedConstants::tryDetectVersion`
-//! + `Bootstrap::bootStrap`), same as [`crate::block_solidity`] and
+//! walking vanilla's own block-state registry after booting the server
+//! headlessly), same as [`crate::block_solidity`] and
 //! [`crate::shade_brightness`]. See `tests/snow_support.rs` for the generator,
 //! the drift guard and `LODESTONE_REGEN=1`.
 //!
 //! # Memory design
 //!
 //! Five bitsets, 4,046 bytes each — pure rodata, no heap, O(1) by id. The fifth,
-//! [`is_default_state`], is not a `freeze_top_layer` predicate; see its own doc.
+//! [`is_default_state`], is not a "freeze top layer" predicate; see its own doc.
 
 use crate::generated_snow_support as table;
 
@@ -84,10 +86,10 @@ fn bit(bits: &[u8], id: u32) -> Option<bool> {
     Some(byte & (1u8 << (id % 8)) != 0)
 }
 
-/// Vanilla `Block.isFaceFull(state.getCollisionShape(level, pos), Direction.UP)`
-/// for block-state `id`, or `None` if `id` is not in `0..`[`STATE_COUNT`].
+/// Vanilla's own "is face full" check against the state's collision shape and
+/// the up direction, for block-state `id`, or `None` if `id` is not in `0..`[`STATE_COUNT`].
 ///
-/// This is the geometric half of `SnowLayerBlock.canSurvive`: a snow layer
+/// This is the geometric half of the snow-layer block's own "can survive" check: a snow layer
 /// survives on a block whose collision shape presents a full 1×1 square at its
 /// top face. **Not** the same question as "is the collision shape a full block"
 /// — see the module doc.
@@ -99,8 +101,8 @@ pub fn face_full_up(id: u32) -> Option<bool> {
 /// Vanilla `!state.getFluidState().isEmpty()` for block-state `id`, or `None`
 /// if `id` is not in `0..`[`STATE_COUNT`].
 ///
-/// The second half of the `MOTION_BLOCKING` heightmap predicate
-/// (`Heightmap.Types.MOTION_BLOCKING` — `input.blocksMotion() || !input.getFluidState()
+/// The second half of the motion-blocking heightmap predicate
+/// (`input.blocksMotion() || !input.getFluidState()
 /// .isEmpty()`); combine with [`crate::block_solidity::blocks_motion`] for the
 /// whole thing. True for still and flowing water and lava **and** every
 /// waterlogged state, which is why it is broader than
@@ -110,11 +112,10 @@ pub fn has_fluid_state(id: u32) -> Option<bool> {
     bit(&table::HAS_FLUID_STATE, id)
 }
 
-/// Vanilla `state.getFluidState().is(Fluids.WATER) && state.getBlock()
-/// instanceof LiquidBlock` for block-state `id`, or `None` if `id` is not in
+/// Vanilla's own "is source water and a liquid block" check for block-state `id`, or `None` if `id` is not in
 /// `0..`[`STATE_COUNT`].
 ///
-/// Exactly the condition `Biome.shouldFreeze` puts on a
+/// Exactly the condition vanilla's own biome "should freeze" check puts on a
 /// block before it becomes ice. True for **one** state in 26.2,
 /// `minecraft:water[level=0]` — see the module doc for why that is not a bug in
 /// the dump.
@@ -123,11 +124,11 @@ pub fn is_water_source_liquid_block(id: u32) -> Option<bool> {
     bit(&table::IS_WATER_SOURCE_LIQUID_BLOCK, id)
 }
 
-/// Vanilla `state.hasProperty(BlockStateProperties.SNOWY)` for block-state
+/// Vanilla's own "has snowy property" check for block-state
 /// `id`, or `None` if `id` is not in `0..`[`STATE_COUNT`].
 ///
-/// `SnowAndFreezeFeature` flips this property to `true` on the block it puts a
-/// snow layer on (in `SnowAndFreezeFeature.place`); a port that skips the flip
+/// Vanilla's own snow-and-freeze feature flips this property to `true` on the block it puts a
+/// snow layer on (in its own place step); a port that skips the flip
 /// leaves visibly wrong terrain (a green grass top under snow) even when the
 /// snow itself is placed correctly.
 #[must_use]

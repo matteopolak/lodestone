@@ -4,12 +4,12 @@
 //!
 //! `lodestone-game`'s `mining` module already replays vanilla's break-time math
 //! bit-exactly; what it does not own is the *data*. [`crate::hardness`] supplies
-//! half of it (the block's `destroySpeed` and whether it demands a correct
+//! half of it (the block's "destroy speed" and whether it demands a correct
 //! tool). This module supplies the other half — the two `BreakInputs` fields
 //! that depend on the **item**:
 //!
-//! * `tool_speed` = `ItemStack.getDestroySpeed(state)`
-//! * `correct_tool` = `Player.hasCorrectToolForDrops(state)`
+//! * `tool_speed` = vanilla's own item-stack "get destroy speed" accessor
+//! * `correct_tool` = vanilla's own player "has correct tool for drops" check
 //!
 //! # Why this needs a version-owned census at all
 //!
@@ -17,14 +17,15 @@
 //! — is only half the story, and the half that never fires in normal play:
 //!
 //! 1. **A vanilla pickaxe does not send `minecraft:tool`.** A clientbound stack
-//!    carries a `DataComponentPatch`, which is the *delta* from the item's
+//!    carries a data-component patch, which is the *delta* from the item's
 //!    built-in prototype component map. 26.2 registers a pickaxe's
-//!    `minecraft:tool` in that prototype (`ToolMaterial.applyToolProperties`),
+//!    `minecraft:tool` in that prototype (vanilla's own tool-material
+//!    properties-apply step),
 //!    so `/give …  diamond_pickaxe` arrives as an **empty patch** and the client
 //!    is expected to already know the component. That prototype is version data
 //!    → [`generated::ITEM_TOOLS`].
-//! 2. **A rule names blocks by tag.** `Tool.Rule.blocks` is a
-//!    `HolderSet<Block>`, in practice `#minecraft:mineable/pickaxe` and
+//! 2. **A rule names blocks by tag.** Vanilla's own tool-rule's block set is a
+//!    holder set of blocks, in practice `#minecraft:mineable/pickaxe` and
 //!    `#minecraft:incorrect_for_<material>_tool`. Tag membership is version data
 //!    → [`generated::BLOCK_TAGS`].
 //! 3. **When a rule names blocks directly it uses registry ids**, and matching
@@ -38,7 +39,7 @@
 //! # Datapack-retagged blocks
 //!
 //! Block tags are *synced* to the client (`update_tags`), decoded in
-//! `crates/protocol/v770/src/adapter.rs` (`decode_update_tags`) for both the
+//! `crates/protocol/v770/src/adapter.rs`'s own update-tags decode step for both the
 //! Configuration and Play states — vanilla sends the same wire shape in
 //! either. The decoded `minecraft:block` registry's tag map is installed here
 //! with [`set_block_tag_overrides`] and consulted by [`block_tag_members`],
@@ -58,7 +59,7 @@
 //! packet-handling adapter instead would be correct data with no reader.
 //!
 //! Vanilla resends the *complete* non-empty tag set on every `update_tags`,
-//! never a delta (`TagNetworkSerialization.serializeTagsToNetwork` walks every
+//! never a delta (vanilla's own tag-network-serialization step walks every
 //! registry from scratch), so [`set_block_tag_overrides`] replaces the whole
 //! table rather than merging into it, and a tag absent from a decoded update
 //! is absent for real — see that function's own doc for why lookups do not
@@ -104,11 +105,11 @@ pub struct ToolRuleDef {
 pub struct ToolDef {
     /// Match rules in vanilla's order. First match wins.
     pub rules: &'static [ToolRuleDef],
-    /// `Tool.defaultMiningSpeed`, used when no rule supplies a speed.
+    /// Vanilla's own tool record's default-mining-speed field, used when no rule supplies a speed.
     pub default_mining_speed: f32,
-    /// `Tool.damagePerBlock`.
+    /// Vanilla's own tool record's damage-per-block field.
     pub damage_per_block: u32,
-    /// `Tool.canDestroyBlocksInCreative`.
+    /// Vanilla's own tool record's can-destroy-blocks-in-creative field.
     pub can_destroy_blocks_in_creative: bool,
 }
 
@@ -157,7 +158,7 @@ pub fn set_block_tag_overrides(tags: HashMap<String, Vec<u16>>) {
 /// has no such block tag.
 ///
 /// The name is written without the leading `#`, exactly as the wire and
-/// `TagKey.location()` write it. Once [`set_block_tag_overrides`] has
+/// vanilla's own tag-key location accessor write it. Once [`set_block_tag_overrides`] has
 /// installed a table, it answers *every* lookup — including a `None` for a
 /// tag the vanilla census has but the override does not, since vanilla only
 /// omits a tag from `update_tags` when it is genuinely empty on that server.
@@ -187,22 +188,23 @@ pub fn default_tool(item: &str) -> Option<&'static ToolDef> {
         .map(|index| &generated::ITEM_TOOLS[index].1)
 }
 
-/// Resolves the held item's break-time contribution for a block state: vanilla
-/// `ItemStack.getDestroySpeed` and `Player.hasCorrectToolForDrops`.
+/// Resolves the held item's break-time contribution for a block state: vanilla's
+/// own item-stack "get destroy speed" accessor and player "has correct tool
+/// for drops" check.
 ///
 /// `held` is the main-hand stack; `None` is the bare hand. Returns `None` only
 /// when `state_id` is not a state this version knows.
 ///
 /// The returned `correct_tool` is the **player's** flag, already folded with the
-/// block's own `requiresCorrectToolForDrops` — see [`ToolMining::correct_tool`].
+/// block's own "requires correct tool for drops" flag — see [`ToolMining::correct_tool`].
 #[must_use]
 pub fn mining(held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
     let requires_correct_tool = crate::hardness::hardness(state_id)?.requires_correct_tool;
     let block = block_registry_id(state_id)?;
 
-    // The effective `minecraft:tool`, resolved exactly as
-    // `ItemStack.get(DataComponents.TOOL)` does: the patch wins if it says
-    // anything, otherwise the item's prototype.
+    // The effective `minecraft:tool`, resolved exactly as vanilla's own
+    // component-map accessor for that component does: the patch wins if it
+    // says anything, otherwise the item's prototype.
     let patch = held.map_or(&ToolPatch::Inherited, |stack| &stack.components.tool);
     match patch {
         ToolPatch::Set(tool) => Some(evaluate(
@@ -248,9 +250,9 @@ pub fn mining(held: Option<&ItemStack>, state_id: u32) -> Option<ToolMining> {
 /// The contribution of an item with no `minecraft:tool` at all — a bare hand, a
 /// block, a torch.
 ///
-/// `Item.getDestroySpeed` returns `1.0F` when the component is absent and
-/// `Item.isCorrectToolForDrops` returns `false`, which leaves
-/// `Player.hasCorrectToolForDrops` as the plain negation of the block's own
+/// Vanilla's own item "get destroy speed" accessor returns `1.0F` when the component is absent and
+/// its own "is correct tool for drops" check returns `false`, which leaves
+/// the player's own "has correct tool for drops" check as the plain negation of the block's own
 /// requirement. That negation is the whole reason this seam exists rather than
 /// callers reading `BlockHardness::requires_correct_tool` directly.
 fn bare_handed(requires_correct_tool: bool) -> ToolMining {
@@ -261,7 +263,7 @@ fn bare_handed(requires_correct_tool: bool) -> ToolMining {
     }
 }
 
-/// Vanilla `Tool.getMiningSpeed` + `Tool.isCorrectForDrops`, over any rule
+/// Vanilla's own tool "get mining speed" and "is correct for drops" accessors, over any rule
 /// representation.
 ///
 /// `rule(i)` yields `(matches this block, speed override, correct-for-drops
@@ -295,7 +297,7 @@ fn evaluate(
     }
     ToolMining {
         speed: speed.unwrap_or(default_mining_speed),
-        // `Player.hasCorrectToolForDrops`: a block that does not demand a
+        // Vanilla's own "has correct tool for drops" check: a block that does not demand a
         // correct tool always drops, whatever the item says.
         correct_tool: !requires_correct_tool || correct.unwrap_or(false),
         damage_per_block,
