@@ -2,14 +2,15 @@
 //!
 //! # Vanilla parity (Minecraft 26.2)
 //!
-//! **Range.** `SoundEngine.play` computes
-//! `attenuationDistance = Math.max(instanceVolume, 1.0F) * sound.getAttenuationDistance()`,
-//! where `getAttenuationDistance()` defaults to `16`. So a sound at volume ≤ 1
-//! reaches its raw attenuation distance (16 blocks by default), and a sound at
-//! volume > 1 reaches proportionally further — while its *gain* is still clamped
-//! to 1 (see [`crate::category`]). Both facts are reproduced here.
+//! **Range.** Vanilla computes
+//! `attenuationDistance = max(instanceVolume, 1.0) * soundAttenuationDistance`,
+//! where the per-sound attenuation distance defaults to `16`. So a sound at
+//! volume ≤ 1 reaches its raw attenuation distance (16 blocks by default), and
+//! a sound at volume > 1 reaches proportionally further — while its *gain* is
+//! still clamped to 1 (see [`crate::category`]). Both facts are reproduced
+//! here.
 //!
-//! **Attenuation model.** `Channel.linearAttenuation(maxDistance)` configures the
+//! **Attenuation model.** Vanilla's linear-attenuation setup configures the
 //! OpenAL source with:
 //! ```text
 //! AL_DISTANCE_MODEL  = AL_LINEAR_DISTANCE (0xD003)

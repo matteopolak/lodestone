@@ -435,7 +435,7 @@ mod tests {
 
     #[test]
     fn music_bus_runtime_gain_scales_a_streaming_voice() {
-        // The crossfade primitive `MusicManager.fadePlaying` drives: a runtime
+        // The primitive vanilla's music-fade routine drives: a runtime
         // gain on the Music bus must reach a streaming voice exactly like it
         // reaches an ordinary one.
         let mut m = Mixer::new(48_000);

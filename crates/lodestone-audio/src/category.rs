@@ -5,20 +5,20 @@
 //! The category set and the final-gain formula are transcribed from the
 //! decompiled client:
 //!
-//! * `net.minecraft.sounds.SoundSource` enumerates the buses. In 26.2 there are
+//! * Vanilla's sound-source enum lists the buses. In 26.2 there are
 //!   **eleven**: `MASTER, MUSIC, RECORDS("record"), WEATHER, BLOCKS("block"),
 //!   HOSTILE, NEUTRAL, PLAYERS("player"), AMBIENT, VOICE, UI`.
-//! * `Options.getFinalSoundSourceVolume(source)`:
+//! * The final-source-volume formula:
 //!   ```text
 //!   MASTER            -> masterVolume
 //!   any other source  -> sourceVolume * masterVolume
 //!   ```
-//! * `SoundEngine.calculateVolume(volume, source)`:
+//! * The volume-calculation formula:
 //!   ```text
-//!   clamp(volume, 0, 1) * clamp(getFinalSoundSourceVolume(source), 0, 1)
-//!                       * gainBySource[source]
+//!   clamp(volume, 0, 1) * clamp(final_source_volume(source), 0, 1)
+//!                       * runtime_gain[source]
 //!   ```
-//!   where `gainBySource` is a runtime per-bus gain (defaults to `1.0`, used for
+//!   where the runtime gain is a per-bus value (defaults to `1.0`, used for
 //!   ducking/fades). We model it as [`CategoryVolumes::runtime_gain`].
 //!
 //! Note the asymmetry that a naive implementation gets wrong: `MASTER` is **not**
@@ -26,7 +26,7 @@
 //! once, not squared.
 
 /// A sound-category volume bus. These correspond one-to-one to vanilla's
-/// `SoundSource`, but the enum is a pure mixer-bus identity: mapping a protocol
+/// sound-source enum, but the enum is a pure mixer-bus identity: mapping a protocol
 /// category id (which differs across versions — `UI` did not always exist) onto
 /// a variant is a version-crate concern, not this crate's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -73,7 +73,7 @@ impl SoundCategory {
 
     /// The vanilla wire/config name for this bus (e.g. `Blocks` -> `"block"`).
     ///
-    /// These strings match `SoundSource.getName()` in 26.2. Whether a given
+    /// These strings match vanilla's sound-source name accessor in 26.2. Whether a given
     /// version *uses* all of them is a version concern; the strings themselves
     /// are stable for the buses that exist.
     pub fn vanilla_name(self) -> &'static str {
@@ -112,7 +112,7 @@ impl SoundCategory {
 /// User-facing volume settings for every bus, plus a runtime per-bus gain.
 ///
 /// `user[bus]` is the slider value in `[0, 1]`; `runtime[bus]` is the transient
-/// gain (fades/ducking) that vanilla keeps in `gainBySource`.
+/// gain (fades/ducking) that vanilla keeps as a runtime per-bus value.
 #[derive(Debug, Clone)]
 pub struct CategoryVolumes {
     user: [f32; 11],
@@ -145,7 +145,7 @@ impl CategoryVolumes {
         self.user[category.index()]
     }
 
-    /// Sets the runtime gain for a bus (vanilla's `gainBySource`, for
+    /// Sets the runtime gain for a bus (vanilla's runtime per-bus gain, for
     /// fades/ducking). Not clamped to `[0, 1]`: vanilla clamps it there, but the
     /// value is only ever set to values in range, and the final product is what
     /// matters.
@@ -158,7 +158,7 @@ impl CategoryVolumes {
         self.runtime[category.index()]
     }
 
-    /// `getFinalSoundSourceVolume(source)`: master volume for the master bus,
+    /// The final-source-volume formula: master volume for the master bus,
     /// otherwise `sourceVolume * masterVolume`.
     fn final_source_volume(&self, category: SoundCategory) -> f32 {
         let master = self.user[SoundCategory::Master.index()];
@@ -169,8 +169,8 @@ impl CategoryVolumes {
     }
 
     /// The final linear gain applied to a sound on `category` whose per-instance
-    /// volume is `instance_volume`, matching
-    /// `SoundEngine.calculateVolume(volume, source)`:
+    /// volume is `instance_volume`, matching vanilla's volume-calculation
+    /// formula:
     ///
     /// `clamp(instance_volume,0,1) * clamp(finalSourceVolume,0,1) * runtimeGain`.
     ///
