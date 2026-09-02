@@ -125,7 +125,7 @@ pub struct ItemComponents {
     /// **Effective** `minecraft:potion_contents` colour: the opaque ARGB a potion
     /// item's `minecraft:potion` tint source resolves to (vanilla's own
     /// potion-color resolution), already folded with the potion's own built-in
-    /// effect list and any `customEffects`/`customColor` the patch carried.
+    /// effect list and any custom-effects/custom-color fields the patch carried.
     ///
     /// `None` when the patch carries no `minecraft:potion_contents` at all (a
     /// non-potion item, or a potion stack whose patch is otherwise empty) — the same
