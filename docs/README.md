@@ -775,8 +775,8 @@ of these caught the *brief* being wrong rather than the code.
   device needs of the execution model" table) rather than against an imagined
   redstone, and its first finding is that the issue's own premise needs correcting:
   **there is no per-tick rescan to replace**. The expensive thing is the per-event
-  constant factor, and the missing thing is cross-chunk propagation — not
-  incrementality, which the current model already has.
+  constant factor, and the correctness gap this plan closes is cross-chunk propagation
+  — not incrementality, which the model already has.
 - [Plan: regionised server ticking (issue #342)](./plans/regionised-server-ticking.md) —
   A design document — not an implementation — for splitting the server's
   single-threaded world tick into independently-ticked regions (Folia's model: groups
