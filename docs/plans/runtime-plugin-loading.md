@@ -54,6 +54,13 @@ problem is:
 > 47%, not 10–13%** (gzip 844,527 B against the 1,600,000 B ceiling, measured after repairing the
 > two `web/` breaks; the 1.21–1.24 MiB baseline this plan cites is stale). The rest of the section
 > stands as written and is left as the record of what was reasoned before it was built.
+>
+> **A follow-up gap, also closed:** `Sim::from_app` accepting a plugin did not by itself mean the
+> shipped *binary* could take one — `WindowApp::new` (and therefore `run_windowed`/`run`, i.e.
+> `Mode::Window`, the actual on-screen client) still called `Sim::new` directly with no parameter
+> for a caller's `App`. `WindowApp::new_with_app` and the `run_with_app` wrapper (`app::run_with_app`,
+> `lodestone_shell::run_with_app`) are the rendered-binary entry point this created; see
+> `docs/plugin-api.md`'s "Registration" section for the shape and its gate.
 
 **This refactor is upstream of every other milestone in this plan, and it is not about wasm at
 all.** A runtime-loaded wasm plugin and a compiled-in one must arrive at the same registration

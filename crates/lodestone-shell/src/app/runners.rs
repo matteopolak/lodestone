@@ -5,6 +5,19 @@
 use super::*;
 
 pub(super) fn run_windowed(config: Config) -> anyhow::Result<()> {
+    run_windowed_with_app(Sim::client_app(), config)
+}
+
+/// [`run_windowed`], around a caller-composed [`lodestone_app::App`] instead of
+/// [`Sim::client_app`]'s own — the entry point a downstream crate reaches through
+/// [`crate::run_with_app`] to register a plugin into the real, on-screen client.
+/// Everything past `WindowApp::new_with_app` is identical to `run_windowed`: the
+/// composed `App` only changes what `Sim` the constructed `WindowApp` holds, never
+/// how the winit loop drives it.
+pub(super) fn run_windowed_with_app(
+    plugin_app: lodestone_app::App,
+    config: Config,
+) -> anyhow::Result<()> {
     // `EventLoop::<ShellEvent>::with_user_event().build()` rather than
     // `EventLoop::new()`: the two are identical when `ShellEvent = ()`
     // (`EventLoop::new()`'s own doc says it is an alias of
@@ -15,7 +28,7 @@ pub(super) fn run_windowed(config: Config) -> anyhow::Result<()> {
     // is `AppEvent`.
     let event_loop = EventLoop::<ShellEvent>::with_user_event().build()?;
     event_loop.set_control_flow(ControlFlow::Poll);
-    let app = WindowApp::new(config);
+    let app = WindowApp::new_with_app(plugin_app, config);
 
     // Native: `run_app` takes over this thread and returns when the loop exits.
     #[cfg(not(target_arch = "wasm32"))]
