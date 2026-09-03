@@ -247,15 +247,41 @@ collision downstream keep the un-backed-off value, so releasing shift
 mid-hold launches at full speed. World-border collision is the one
 unmodelled term of the block/entity/border triple this check consults.
 
-The 0.25-block correction check itself is purely horizontal — the vertical
-component is always zeroed before the comparison, so no fall of any speed
-ever trips it on that account alone. `crates/lodestone-shell/tests/live/
-live_edge_back_off_rubber_band.rs` is the live confirmation of both halves
-against the survival oracle: sneaking at a real built ledge produces zero
-adopted `TeleportPlayer`s (`Sim::teleport_count` stays flat), and an ordinary
-fall whose per-tick vertical delta exceeds the threshold produces zero as
-well, contrasted against an RCON `tp`'s own teleport, which the same counter
-does register — the control proving the counter can move at all.
+The server has **two** rules that can teleport a player back, and they are
+easy to conflate. The 0.25-block *disagreement* check is purely horizontal —
+the vertical component is always zeroed before the comparison (the guard that
+would keep it is an always-true disjunction), so no fall of any speed trips it
+on that account alone. The *speed* check is the other one, and it is genuinely
+three-dimensional: it compares a packet's squared claimed travel against a
+budget of `100` per packet per tick, i.e. ten blocks in one packet. Free fall
+cannot reach that at any height, because `v <- (v - 0.08) * 0.98` has a fixed
+point of 3.92 blocks/tick — so a fall is exempt from both rules, not just from
+the first. Anything a falling player does get corrected for is a claim the
+server had already overruled, and the speed check is what names it: measured
+on the survival oracle, a stale claim of the pre-teleport pose reported a
+vertical term of 153 blocks against a target 153 blocks above it.
+
+That stale claim is a real window and it is closed at **both** ends of the
+outbound action channel (`net.rs`: `NetClient::send_action` and the net loop's
+own drain). Staleness is a property of the moment a movement action was
+*built*, not of the moment it is drained, and the two are up to a full net-loop
+iteration apart — so a rewrite that only consults the teleport bookkeeping at
+drain time reads "level with the server" for an action built before the
+simulation adopted the teleport, and waves it through after the confirmation
+for that teleport is already on the wire. Measured margin on the oracle: 1.0 ms
+either way, i.e. a coin flip, with the server answering the losing side with a
+corrective teleport.
+
+`crates/lodestone-shell/tests/live/live_edge_back_off_rubber_band.rs` is the
+live confirmation of all of it against the survival oracle: sneaking at a real
+built ledge produces zero adopted `TeleportPlayer`s (`Sim::teleport_count`
+stays flat), and an ordinary 151-block fall produces zero as well, contrasted
+against an RCON `tp`'s own teleport, which the same counter does register — the
+control proving the counter can move at all. That fall's premise is a predicted
+number rather than a direction: its largest per-tick delta must be
+`3.92 * (1 - 0.98^77) = 3.0926` blocks, which is both past the 0.25-block
+disagreement threshold (so the run is not vacuous) and far inside the ten-block
+speed budget (so zero corrections is a guarantee the server actually made).
 
 ### Component sets
 
