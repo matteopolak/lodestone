@@ -4258,3 +4258,98 @@ fn merchant_screen_opens_and_renders_its_trade_list_through_the_real_path() {
          a real offer folded through TradeOffers::apply"
     );
 }
+
+/// Bounding box of colour-stream triangles inside NDC `rect`, sampled on a
+/// `res × res` grid — [`triangle_hits`] applied repeatedly, so a failure
+/// below can print *where* geometry actually landed (or that it landed
+/// nowhere) rather than only a hit count.
+fn bbox_in_rect(
+    verts: &[f32],
+    (rx0, ry0, rx1, ry1): (f32, f32, f32, f32),
+    res: usize,
+) -> (usize, Option<(f32, f32, f32, f32)>) {
+    let mut covered = 0usize;
+    let mut bbox: Option<(f32, f32, f32, f32)> = None;
+    for gy in 0..res {
+        for gx in 0..res {
+            #[allow(clippy::cast_precision_loss)]
+            let (px, py) = (
+                rx0 + (rx1 - rx0) * (gx as f32 + 0.5) / res as f32,
+                ry0 + (ry1 - ry0) * (gy as f32 + 0.5) / res as f32,
+            );
+            if triangle_hits(verts, (px, py)) > 0 {
+                covered += 1;
+                bbox = Some(match bbox {
+                    None => (px, py, px, py),
+                    Some((x0, y0, x1, y1)) => (x0.min(px), y0.min(py), x1.max(px), y1.max(py)),
+                });
+            }
+        }
+    }
+    (covered, bbox)
+}
+
+/// **`RecipeBookSync::ghost`'s island, closed through the real draw path.**
+/// The store decoded, folded and unit-tested `ghost()` since
+/// `PLACE_GHOST_RECIPE` landed, and nothing under `lodestone-shell` ever read
+/// it — `grep -rn "\.ghost()" crates/lodestone-shell/src/` found only this
+/// module's own test as a production reader. Clicking a recipe the player
+/// cannot yet craft therefore showed nothing at all, forever: `auto_fill_recipe`
+/// silently no-ops when `plan_recipe_auto_fill` fails, and the *local*
+/// grid-match ghost (`ContainerFrame::recipe_book`) has nothing to predict
+/// from an empty grid either. `ContainerFrame::recipe_ghost` closes that gap:
+/// the server's own reply names a result even when the grid holds none of the
+/// ingredients.
+///
+/// The control is the state every real session was in until the read side
+/// wired up here landed — an empty grid, no ghost attached — and it is
+/// **executed**, not described:
+/// it must fail the identical assertion the real gate passes, at the exact
+/// same screen location (`craft.result_slot`'s own rect via [`slot_origin`]),
+/// so a location bug cannot hide behind a control that happened to look
+/// somewhere else.
+#[test]
+fn a_server_ghost_draws_a_dimmed_result_even_with_an_empty_crafting_grid() {
+    let menu = Menu::crafting(3, 3);
+    let craft = menu.craft_layout().expect("a crafting table has a craft layout");
+    assert!(
+        (craft.first_input..craft.first_input + craft.cell_count())
+            .all(|i| menu.slot_item(i).is_none()),
+        "sanity: the grid must be genuinely empty, so the local match_grid \
+         ghost has nothing to predict and cannot be what the gate measures"
+    );
+    let (canvas_w, canvas_h) =
+        crate::menu::render::logical_canvas(crate::config::AUTO_GUI_SCALE, VIEW.0, VIEW.1);
+    let (sx, sy) = slot_origin(&menu, craft.result_slot);
+    let rect = {
+        let (x0, y0) = to_ndc(sx, sy, canvas_w, canvas_h);
+        let (x1, y1) = to_ndc(sx + CELL, sy + CELL, canvas_w, canvas_h);
+        (x0.min(x1), y1.min(y0), x0.max(x1), y1.max(y0))
+    };
+
+    // The jar-less background already covers most of a slot's rect with its
+    // own flat swatch — the same reason the merchant gate above measures a
+    // **count delta**, not bare presence. `triangle_hits` here counts every
+    // colour-stream triangle stacked at a point, so the dim overlay this
+    // change adds shows up as *more* triangles at the same pixels, not as
+    // the first ones.
+    let control = ContainerGeometry::build(&ContainerFrame::new(Some(&menu), "Crafting"), VIEW.0, VIEW.1);
+    let (control_covered, control_bbox) = bbox_in_rect(&control.verts, rect, 16);
+
+    let torch = ItemStack::new("minecraft:torch".parse().expect("valid identifier"), 1);
+    let frame = ContainerFrame::new(Some(&menu), "Crafting").with_recipe_ghost(Some(&torch));
+    let subject = ContainerGeometry::build(&frame, VIEW.0, VIEW.1);
+    let (subject_covered, subject_bbox) = bbox_in_rect(&subject.verts, rect, 16);
+
+    let control_hits_at_centre = triangle_hits(&control.verts, ((rect.0 + rect.2) / 2.0, (rect.1 + rect.3) / 2.0));
+    let subject_hits_at_centre = triangle_hits(&subject.verts, ((rect.0 + rect.2) / 2.0, (rect.1 + rect.3) / 2.0));
+    assert!(
+        subject_hits_at_centre > control_hits_at_centre,
+        "a server ghost for this window must draw an *extra* layer (the icon \
+         plus the dim overlay) over the result slot's own rect {rect:?} even \
+         though the grid is empty — control: {control_hits_at_centre} \
+         triangles at the cell centre (coverage {control_covered}/256, bbox \
+         {control_bbox:?}), subject: {subject_hits_at_centre} (coverage \
+         {subject_covered}/256, bbox {subject_bbox:?})"
+    );
+}

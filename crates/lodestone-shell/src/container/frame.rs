@@ -3,6 +3,7 @@
 //!
 //! Split out of `container.rs` verbatim.
 
+use lodestone_game::item::ItemStack;
 use lodestone_game::menu::{Menu, MenuKind};
 use lodestone_game::recipe::RecipeBook;
 use lodestone_game::trades::TradeOffers;
@@ -221,6 +222,21 @@ pub struct ContainerFrame<'a> {
     /// [`with_bundle_selection`](Self::with_bundle_selection) and
     /// `super::tooltip`'s bundle-image drawing.
     pub bundle_selection: Option<crate::container::bundle::BundleSelection>,
+    /// The server's own ghost preview of a selected-but-not-yet-crafted
+    /// recipe's result — the wire's reply to a recipe-book click, already
+    /// resolved to a drawable stack (see
+    /// `crate::container::recipe_book::ghost_result_stack`) and filtered to
+    /// this exact window by the caller, the same "no window id of its own"
+    /// contract [`Self::bundle_selection`] documents. `None` (the default)
+    /// draws nothing extra, matching every existing caller.
+    ///
+    /// Drawn in the crafting-grid's own **result slot**, dimmed, while that
+    /// slot is empty — the same visual treatment [`Self::recipe_book`]'s own
+    /// local grid-match ghost uses. This one takes priority when present: a
+    /// server-declared ghost holds even while the grid is missing
+    /// ingredients, which a local grid match cannot predict from an
+    /// incomplete or empty grid.
+    pub recipe_ghost: Option<&'a ItemStack>,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -252,6 +268,7 @@ impl<'a> ContainerFrame<'a> {
             beacon_primary: None,
             beacon_secondary: None,
             bundle_selection: None,
+            recipe_ghost: None,
             effects: &[],
         }
     }
@@ -282,6 +299,7 @@ impl<'a> ContainerFrame<'a> {
             beacon_primary: None,
             beacon_secondary: None,
             bundle_selection: None,
+            recipe_ghost: None,
             effects: &[],
         }
     }
@@ -402,6 +420,15 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_recipe_book(mut self, book: Option<&'a RecipeBook>) -> Self {
         self.recipe_book = book;
+        self
+    }
+
+    /// Attach the server's own ghost preview for this exact window — see
+    /// [`Self::recipe_ghost`] for what it draws and why the caller, not this
+    /// struct, is the one that checks the window id.
+    #[must_use]
+    pub fn with_recipe_ghost(mut self, ghost: Option<&'a ItemStack>) -> Self {
+        self.recipe_ghost = ghost;
         self
     }
 

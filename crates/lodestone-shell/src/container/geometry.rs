@@ -834,29 +834,45 @@ impl ContainerGeometry {
         // Ghost preview: when the crafting result slot is still empty, show
         // what the grid would produce, dimmed — a hint before the server's own
         // `container_set_slot` lands, never a claim. This never touches `menu`
-        // itself (the match runs fresh against `menu.crafting_grid()` every
-        // frame), so a server disagreeing simply means next frame's real
+        // itself, so a server disagreeing simply means next frame's real
         // `slot_item` draw takes over and this block stops firing — the same
         // "server truth always wins" contract every other slot already has.
         // See `docs/crafting.md`'s "who computes the result slot".
+        //
+        // Two independent sources feed this, in priority order:
+        //
+        // 1. `frame.recipe_ghost` — the server's own reply to a recipe-book
+        //    click, already filtered to this window by the caller. It holds
+        //    even while the grid is missing ingredients, which source 2
+        //    cannot predict from an incomplete or empty grid — clicking an
+        //    uncraftable recipe used to show nothing at all, and this is the
+        //    fix.
+        // 2. The local recipe corpus matched against the grid's *current*
+        //    contents (`book.match_grid`) — a hint computed fresh every
+        //    frame from what is actually sitting in the cells, independent of
+        //    whether a recipe was ever clicked in the book.
         if let Some(craft) = menu.craft_layout()
             && menu.slot_item(craft.result_slot).is_none()
-            && let Some(book) = frame.recipe_book
-            && let Some(grid) = menu.crafting_grid()
-            && let Some(predicted) = book.match_grid(&grid)
             && let Some(rect) = layout.slots.iter().find(|r| r.menu_index == craft.result_slot)
         {
-            let sx = x + rect.x;
-            let sy = y + rect.y;
-            b.draw_stack(assets, predicted, sx, sy);
-            // Dim the icon just drawn: a translucent dark quad on the colour
-            // stream, appended after the icon so it lands on top of it (see the
-            // module doc on pass structure — everything past `chrome_floats`
-            // draws over the icon passes regardless of append order among
-            // itself). This is the same "same icon, lower apparent opacity"
-            // treatment vanilla's own recipe-book ghosts use, and it is what
-            // keeps a predicted result visually distinct from a confirmed one.
-            b.rect_px(sx, sy, CELL, CELL, [0.05, 0.05, 0.05, 0.55]);
+            let ghost_stack = frame.recipe_ghost.or_else(|| {
+                let book = frame.recipe_book?;
+                let grid = menu.crafting_grid()?;
+                book.match_grid(&grid)
+            });
+            if let Some(ghost_stack) = ghost_stack {
+                let sx = x + rect.x;
+                let sy = y + rect.y;
+                b.draw_stack(assets, ghost_stack, sx, sy);
+                // Dim the icon just drawn: a translucent dark quad on the colour
+                // stream, appended after the icon so it lands on top of it (see the
+                // module doc on pass structure — everything past `chrome_floats`
+                // draws over the icon passes regardless of append order among
+                // itself). This is the same "same icon, lower apparent opacity"
+                // treatment vanilla's own recipe-book ghosts use, and it is what
+                // keeps a predicted result visually distinct from a confirmed one.
+                b.rect_px(sx, sy, CELL, CELL, [0.05, 0.05, 0.05, 0.55]);
+            }
         }
 
         // Everything above is the **slot stratum**; everything below is the

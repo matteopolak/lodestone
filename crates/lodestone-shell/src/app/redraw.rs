@@ -2101,6 +2101,23 @@ impl WindowApp {
             } else {
                 Vec::new()
             };
+            // The server's own ghost preview for whichever window is on
+            // screen right now: resolved to a drawable stack here, where
+            // `lodestone_data`'s item table lives, and filtered to this exact
+            // window — the same "no window id of its own" contract
+            // `bundle_selection` below already established, because
+            // `ContainerFrame` itself has nothing to compare `window_id`
+            // against. `known_recipes()` is a cheap clone of the session's
+            // own recipe-sync store (`Sim::known_recipes`'s own doc), so
+            // reading it unconditionally here costs nothing when no ghost is
+            // showing.
+            let ghost_window_id = open_menu.as_ref().map_or(0, |open| open.window_id);
+            let recipe_ghost_stack = self
+                .sim
+                .known_recipes()
+                .ghost()
+                .filter(|ghost| ghost.window_id == ghost_window_id)
+                .and_then(recipe_panel::ghost_result_stack);
             // The live drag preview (issue #378 part 2). `drag_paint` is the
             // *same* paint set `MenuInput::release` will turn into the
             // QUICK_CRAFT sequence, and the counts drawn from it come out of
@@ -2140,6 +2157,7 @@ impl WindowApp {
                 // a source installed but never set.
                 .with_menu_type(open_menu.as_ref().map(|open| &open.menu_type))
                 .with_recipe_book(self.recipe_book.as_ref())
+                .with_recipe_ghost(recipe_ghost_stack.as_ref())
                 // The inventory avatar's **live pose**. Vanilla poses the real
                 // render state, so a player who opens their inventory during the
                 // tail of a swing sees that swing. Without this line
