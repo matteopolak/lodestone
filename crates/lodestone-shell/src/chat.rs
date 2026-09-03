@@ -180,7 +180,7 @@ use lodestone_command::{
 use lodestone_model::command_tree::{
     ArgumentParser, CommandSuggestionEntry, CommandTree, NodeKind, StringKind,
 };
-use lodestone_model::text::Text;
+use lodestone_model::text::{ResolvedText, Text};
 
 /// Vanilla's cap on the recent-chat store — a 100-entry deque plus the
 /// size-at-least-100-drops-oldest guard in vanilla's own add-recent-chat handling.
@@ -647,7 +647,11 @@ pub struct Candidate {
     /// Carried as a real [`Text`] rather than a flattened `§`-coded string so
     /// a hex-coloured tooltip (`TextColor::Rgb`, added in 1.16) survives to
     /// the draw site — see [`CommandSuggestionEntry::tooltip`]'s own doc.
-    pub tooltip: Option<Text>,
+    ///
+    /// Resolved at [`SuggestionRequests::receive`], the one place a
+    /// server-authored tooltip enters the shell, so the popup's draw has a
+    /// tree with no keys left in it.
+    pub tooltip: Option<ResolvedText>,
 }
 
 /// The result of [`complete`].
@@ -1173,7 +1177,12 @@ impl SuggestionRequests {
     /// candidates when `id` matches the request in flight (and clears the
     /// pending state); `None` for a stale id, which the caller should
     /// silently drop rather than apply.
-    pub fn receive(&mut self, id: i32, entries: Vec<CommandSuggestionEntry>) -> Option<Vec<Candidate>> {
+    pub fn receive(
+        &mut self,
+        id: i32,
+        entries: Vec<CommandSuggestionEntry>,
+        translate: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<Vec<Candidate>> {
         match &self.pending {
             Some(pending) if pending.id == id => {
                 self.pending = None;
@@ -1182,7 +1191,7 @@ impl SuggestionRequests {
                         .into_iter()
                         .map(|entry| Candidate {
                             text: entry.text,
-                            tooltip: entry.tooltip,
+                            tooltip: entry.tooltip.map(|tip| tip.resolve(translate)),
                         })
                         .collect(),
                 )
@@ -1873,12 +1882,13 @@ impl ChatInput {
     pub fn apply_suggestions(
         &mut self,
         response: &lodestone_model::command_tree::CommandSuggestionsResponse,
+        translate: &dyn Fn(&str) -> Option<String>,
     ) -> bool {
-        let Some(candidates) = self
-            .completion
-            .requests
-            .receive(response.id, response.suggestions.clone())
-        else {
+        let Some(candidates) = self.completion.requests.receive(
+            response.id,
+            response.suggestions.clone(),
+            translate,
+        ) else {
             return false;
         };
         let Some(asked) = self.completion.pending_line.take() else {
@@ -3291,7 +3301,8 @@ mod tests {
                     vec![CommandSuggestionEntry {
                         text: "stale".to_string(),
                         tooltip: None,
-                    }]
+                    }],
+                    &|_| None,
                 ),
                 None
             );
@@ -3304,10 +3315,13 @@ mod tests {
                 text: "@a".to_string(),
                 tooltip: Some(Text::literal("all players")),
             }];
-            let received = requests.receive(id, entries).expect("current id honoured");
+            let received = requests.receive(id, entries, &|_| None).expect("current id honoured");
             assert_eq!(received.len(), 1);
             assert_eq!(received[0].text, "@a");
-            assert_eq!(received[0].tooltip, Some(Text::literal("all players")));
+            assert_eq!(
+                received[0].tooltip,
+                Some(ResolvedText::literal("all players"))
+            );
             assert!(!requests.is_pending());
         }
 
@@ -3328,8 +3342,8 @@ mod tests {
             assert_ne!(first_id, second_id);
             // The first id is now stale (a third request never happened, but
             // the second's request superseded it).
-            assert_eq!(requests.receive(first_id, vec![]), None);
-            assert_eq!(requests.receive(second_id, vec![]), Some(vec![]));
+            assert_eq!(requests.receive(first_id, vec![], &|_| None), None);
+            assert_eq!(requests.receive(second_id, vec![], &|_| None), Some(vec![]));
         }
     }
 }

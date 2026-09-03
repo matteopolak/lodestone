@@ -2694,7 +2694,7 @@ fn session_phase_tracks_net_updates() {
 /// (`BlockResources::load(false)`), which never loads a language table —
 /// `sim.language` is deterministically `None` here regardless of the
 /// environment. With no table, `resolve_text` still lowers the
-/// `Translate` node (via `lodestone_game::text::resolve`), but with
+/// `Translate` node (via `Text::resolve`), but with
 /// nothing to translate it and no `fallback` set, it falls back to the
 /// key itself — reproducing byte-for-byte the pre-#68 defect
 /// (`net::forward` used to send `reason.to_plain_string()`, which hits
@@ -5140,8 +5140,8 @@ fn a_signed_book_in_hand_is_reported_with_its_own_metadata_and_pages() {
             author: "Steve".to_owned(),
             generation: 2,
             pages: vec![
-                lodestone_model::Text::literal("First page"),
-                lodestone_model::Text::literal("Second page"),
+                lodestone_model::ResolvedText::literal("First page"),
+                lodestone_model::ResolvedText::literal("Second page"),
             ],
         }
     );
@@ -5276,7 +5276,7 @@ fn lectern_book_view_reads_slot_zero_and_container_page_data() {
     assert_eq!(window_id, 12);
     assert_eq!(page, 1);
     assert_eq!(open.title, "Lectern manual");
-    assert_eq!(open.pages[1], lodestone_model::Text::literal("second"));
+    assert_eq!(open.pages[1], lodestone_model::ResolvedText::literal("second"));
 }
 
 /// Same idiom as [`give_main_hand_item`], carrying a real `minecraft:
@@ -7950,7 +7950,7 @@ fn a_real_text_display_folded_through_ingest_and_extract_reaches_sim_display_dra
         .unwrap_or_else(|| panic!("entity 9 never reached Sim::display_draws: {draws:?}"));
     assert_eq!(draw.type_path, crate::display_entities::TEXT_DISPLAY_TYPE_PATH);
     assert_eq!(
-        draw.text.as_ref().map(lodestone_model::Text::to_plain_string),
+        draw.text.as_ref().map(lodestone_model::ResolvedText::to_plain_string),
         Some("hello".to_string())
     );
 }

@@ -84,7 +84,9 @@ use bevy_ecs::component::Component;
 use bevy_ecs::prelude::{Query, Res, With};
 use bevy_ecs::schedule::{IntoScheduleConfigs, SystemSet};
 use bevy_ecs::world::World;
-use lodestone_model::{ClientEvent, Difficulty, DimensionId, DimensionTypeInfo, GameMode, Text};
+use lodestone_model::{
+    ClientEvent, Difficulty, DimensionId, DimensionTypeInfo, GameMode, ResolvedText, Text,
+};
 
 use crate::ingest::{IngestBatch, IngestQueuePlugin};
 use crate::player::{LocalPlayer, SelectedSlot};
@@ -1303,13 +1305,19 @@ pub struct SessionEnd {
     /// The reason, resolved but still styled. For [`SessionEndKind::Disconnected`]
     /// this is the *server's* own component and belongs on screen verbatim; for
     /// [`SessionEndKind::Failed`] it is ours.
-    pub reason: Text,
+    ///
+    /// [`ResolvedText`] and not [`Text`]: a kick reason is a `translate`
+    /// component (`multiplayer.disconnect.kicked` and friends), and the end
+    /// screen that draws it is the surface that shipped the raw key. Taking the
+    /// resolved form means the language table has provably been consulted before
+    /// the value gets this far.
+    pub reason: ResolvedText,
 }
 
 impl SessionEnd {
     /// A server-sent disconnect carrying the server's own component.
     #[must_use]
-    pub fn disconnected(reason: Text) -> Self {
+    pub fn disconnected(reason: ResolvedText) -> Self {
         Self {
             kind: SessionEndKind::Disconnected,
             reason,
@@ -1318,7 +1326,7 @@ impl SessionEnd {
 
     /// A client-side failure carrying our own error text.
     #[must_use]
-    pub fn failed(reason: Text) -> Self {
+    pub fn failed(reason: ResolvedText) -> Self {
         Self {
             kind: SessionEndKind::Failed,
             reason,
@@ -1327,7 +1335,7 @@ impl SessionEnd {
 
     /// The local player died.
     #[must_use]
-    pub fn died(reason: Text) -> Self {
+    pub fn died(reason: ResolvedText) -> Self {
         Self {
             kind: SessionEndKind::Died,
             reason,

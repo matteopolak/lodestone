@@ -50,7 +50,7 @@
 //! form reports `ContainerButtonClick` and `ContainerClose` through the menu
 //! action boundary.
 
-use lodestone_model::{Text, text::TextSpan};
+use lodestone_model::{ResolvedText, Text, text::TextSpan};
 
 use super::book_edit::{PAGE_LINE_LIMIT, PAGE_WRAP_CHARS};
 use super::text_area::TextArea;
@@ -84,7 +84,7 @@ pub struct BookViewOpen {
     /// `WrittenBookContent.generation`, `0..=3`.
     pub generation: u8,
     /// The pages, in order, with authored style retained for the reader.
-    pub pages: Vec<Text>,
+    pub pages: Vec<ResolvedText>,
 }
 
 impl BookViewOpen {
@@ -93,10 +93,17 @@ impl BookViewOpen {
     /// indicator: a book with no pages still shows "Page 1 of 1" rather than
     /// "Page 1 of 0".
     #[must_use]
-    pub fn from_pages(title: String, author: String, generation: u8, pages: &[Text]) -> Self {
-        let mut pages = pages.to_vec();
+    pub fn from_pages(
+        title: String,
+        author: String,
+        generation: u8,
+        pages: &[Text],
+        translate: &dyn Fn(&str) -> Option<String>,
+    ) -> Self {
+        let mut pages: Vec<ResolvedText> =
+            pages.iter().map(|page| page.resolve(translate)).collect();
         if pages.is_empty() {
-            pages.push(Text::literal(""));
+            pages.push(ResolvedText::literal(""));
         }
         Self {
             title,
@@ -119,7 +126,7 @@ pub struct BookViewState {
     pub generation: u8,
     /// Every authored page, in order. Never empty — see
     /// [`BookViewOpen::from_pages`].
-    pages: Vec<Text>,
+    pages: Vec<ResolvedText>,
     /// `BookViewScreen.currentPage`, always a valid index into
     /// [`Self::pages`].
     current_page: usize,
@@ -143,7 +150,7 @@ impl BookViewState {
     pub fn new(open: BookViewOpen) -> Self {
         let mut pages = open.pages;
         if pages.is_empty() {
-            pages.push(Text::literal(""));
+            pages.push(ResolvedText::literal(""));
         }
         // `with_line_limit` is deliberately **not** set: the limit exists to
         // stop an *editor* growing a page past what the parchment can show,
@@ -311,7 +318,7 @@ mod tests {
             title: "Wandering Notes".to_owned(),
             author: "Steve".to_owned(),
             generation: 2,
-            pages: vec![Text::literal("one"), Text::literal("two"), Text::literal("three")],
+            pages: vec![ResolvedText::literal("one"), ResolvedText::literal("two"), ResolvedText::literal("three")],
         })
     }
 
@@ -366,7 +373,8 @@ mod tests {
             "A".to_owned(),
             0,
             &[page],
-        ));
+                                &|_| None,
+));
 
         let runs = state.visible_styled_lines();
         assert_eq!(runs.len(), 1);
@@ -389,7 +397,7 @@ mod tests {
             title: String::new(),
             author: String::new(),
             generation: 0,
-            pages: vec![Text::literal(long)],
+            pages: vec![ResolvedText::literal(long)],
         });
         assert_eq!(
             state.visible_lines().len(),
@@ -402,7 +410,7 @@ mod tests {
     /// `BookViewScreen`'s own `Math.max(getNumPages(), 1)`.
     #[test]
     fn a_pageless_book_still_reads_as_one_page() {
-        let open = BookViewOpen::from_pages("T".to_owned(), "A".to_owned(), 0, &[]);
+        let open = BookViewOpen::from_pages("T".to_owned(), "A".to_owned(), 0, &[], &|_| None);
         assert_eq!(BookViewState::new(open).page_indicator(), (1, 1));
     }
 
@@ -432,7 +440,7 @@ mod tests {
                 title: "Wandering Notes".to_owned(),
                 author: "Steve".to_owned(),
                 generation: 2,
-                pages: vec![Text::literal("one"), Text::literal("two")],
+                pages: vec![ResolvedText::literal("one"), ResolvedText::literal("two")],
             },
         );
         assert_eq!(ui.screen(), Screen::BookView);
@@ -471,7 +479,7 @@ mod tests {
                 title: "T".to_owned(),
                 author: "A".to_owned(),
                 generation: 0,
-                pages: vec![Text::literal("p")],
+                pages: vec![ResolvedText::literal("p")],
             },
         );
 
@@ -503,7 +511,8 @@ mod tests {
                 "Librarian".to_owned(),
                 0,
                 &[Text::literal("first"), Text::literal("second")],
-            ),
+                                    &|_| None,
+),
             0,
         );
 

@@ -74,7 +74,7 @@ use crate::resources::BlockResources;
 use crate::worldgen;
 
 /// A borrowed translation closure: `key → resolved format string`, the shape
-/// [`lodestone_game::text::resolve`] consumes. Factored out so the projection
+/// [`lodestone_model::Text::resolve`] consumes. Factored out so the projection
 /// helpers and the `Sim` accessors share one name for it.
 pub(crate) type Translator<'a> = Box<dyn Fn(&str) -> Option<String> + 'a>;
 
@@ -1618,7 +1618,7 @@ impl Sim {
     }
 
     /// A translation closure over the loaded language table — the exact shape
-    /// [`lodestone_game::text::resolve`] consumes. On the demo palette (no table)
+    /// [`lodestone_model::Text::resolve`] consumes. On the demo palette (no table)
     /// it resolves nothing, so a component falls back to its own `fallback`/key.
     /// The table itself stays owned centrally by the `Sim`; only this borrowed
     /// closure is handed to the pure projection helpers, matching how vanilla
@@ -1634,8 +1634,11 @@ impl Sim {
     /// against the loaded language table, preserving styling. Used at the read
     /// boundary for the title/action-bar and at ingest for chat, so raw keys
     /// like `entity.minecraft.spider` never reach the HUD.
-    fn resolve_text(&self, text: &lodestone_model::Text) -> lodestone_model::Text {
-        lodestone_game::text::resolve(text, self.translator().as_ref())
+    pub(crate) fn resolve_text(
+        &self,
+        text: &lodestone_model::Text,
+    ) -> lodestone_model::ResolvedText {
+        text.resolve(self.translator().as_ref())
     }
 
     /// The chunk store as a `'static` [`CollisionSource`].

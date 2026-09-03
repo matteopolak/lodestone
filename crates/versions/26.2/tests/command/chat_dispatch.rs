@@ -357,9 +357,9 @@ fn system_chat_preserves_component_colour() {
         [Directive::Emit(ClientEvent::Chat { text, .. })] => {
             assert_eq!(text.to_plain_string(), "hi");
             assert!(
-                text.to_legacy_string().starts_with("§c"),
+                text.resolve(&|_| None).to_legacy_string().starts_with("§c"),
                 "red colour must survive, got {:?}",
-                text.to_legacy_string()
+                text.resolve(&|_| None).to_legacy_string()
             );
         }
         other => panic!("expected one system chat event, got {other:?}"),
@@ -483,9 +483,9 @@ fn disguised_chat_preserves_component_colour() {
         [Directive::Emit(ClientEvent::Chat { text, .. })] => {
             assert_eq!(text.to_plain_string(), "psst");
             assert!(
-                text.to_legacy_string().starts_with("§6"),
+                text.resolve(&|_| None).to_legacy_string().starts_with("§6"),
                 "gold colour must survive, got {:?}",
-                text.to_legacy_string()
+                text.resolve(&|_| None).to_legacy_string()
             );
         }
         other => panic!("expected one disguised chat event, got {other:?}"),

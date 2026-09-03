@@ -18,7 +18,7 @@
 //!   tiny built-in table. This reproduces the exact defect: the entity key is
 //!   left raw. Its output is printed and asserted, so the gate is provably
 //!   discriminating rather than vacuously green.
-//! - **Fixed** — [`lodestone_game::text::resolve`] against the **real** vanilla
+//! - **Fixed** — [`lodestone_model::Text::resolve`] against the **real** vanilla
 //!   `en_us.json`, read out of the downloaded `client.jar` (the same asset the
 //!   renderer loads). The expected words "was slain by" / "Spider" therefore
 //!   originate from a real Mojang asset, not from a table typed into this test.
@@ -35,7 +35,7 @@ use std::time::Duration;
 
 use lodestone_assets::{Language, ZipSource};
 use lodestone_client::{ClientBuilder, ClientEvent, LoginProfile, ServerAddress};
-use lodestone_game::text::resolve_to_string;
+
 use lodestone_model::{ChatKind, Text};
 use lodestone_testsupport::{AsyncRconClient as Rcon, poll_until, unique_username};
 use uuid::Uuid;
@@ -270,7 +270,7 @@ async fn death_message_resolves_against_real_language_pack() {
     checked += 1;
 
     // --- Fixed: resolve the same component against the real en_us.json ---
-    let after = resolve_to_string(&captured, &lang.translator());
+    let after = captured.resolve(&lang.translator()).to_plain_string();
     println!("FIXED (real en_us.json):               {after:?}");
     assert!(
         !after.contains("entity.minecraft.spider"),

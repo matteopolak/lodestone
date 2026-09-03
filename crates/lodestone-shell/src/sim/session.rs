@@ -692,11 +692,12 @@ impl Sim {
     #[must_use]
     pub fn recent_chat_spans(&self, n: usize) -> Vec<(Vec<lodestone_model::TextSpan>, f32)> {
         let now = self.clock().secs;
+        let translate = self.translator();
         self.read(|w| {
             w.get::<SessionChat>(self.local)
                 .expect("the local player always carries SessionChat")
                 .0
-                .recent_ages_spans(n, now)
+                .recent_ages_spans(n, now, translate.as_ref())
         })
     }
 
@@ -1264,6 +1265,7 @@ impl Sim {
                 content.author.clone(),
                 content.generation,
                 &content.pages,
+                self.translator().as_ref(),
             ),
             page,
         ))
@@ -1577,6 +1579,7 @@ impl Sim {
             content.author.clone(),
             content.generation,
             &content.pages,
+            self.translator().as_ref(),
         ))
     }
 

@@ -167,7 +167,7 @@ pub fn spans_lines(spans: &[TextSpan]) -> Vec<Vec<TextSpan>> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct BossBarView {
     /// The title as **styled spans**, for the same reason [`Sidebar`]'s fields
-    /// are. This was a `String` filled by `resolve_to_string`, which flattens
+    /// are. This was a `String` filled by a resolve-then-flatten, which flattens
     /// through [`lodestone_model::Text::to_plain_string`] — so a boss bar whose
     /// title carried a hex colour arrived here uncoloured. A legacy `§` code
     /// survived a `String` (the font layer applies codes at draw time); a
@@ -235,7 +235,7 @@ pub fn boss_bars_from(
             // flatten never consults the model's stub table, and `to_spans`
             // applies `TextStyle::inherit` down the tree so a nested run with no
             // colour of its own arrives carrying its parent's.
-            title: lodestone_game::text::resolve(&b.title, translate).to_spans(),
+            title: b.title.resolve(translate).to_spans(),
             progress: b.progress.clamp(0.0, 1.0),
             color: b.color,
             overlay: b.overlay,

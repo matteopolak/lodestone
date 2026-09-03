@@ -577,7 +577,7 @@ fn a_nested_component_inherits_its_parents_colour() {
         extra: vec![Text::literal("child")],
         ..Text::literal("parent")
     };
-    let spans = tree.to_spans();
+    let spans = tree.resolve(&|_| None).to_spans();
 
     // First, at the model layer: the child span must carry gold.
     let child = spans

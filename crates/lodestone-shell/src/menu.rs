@@ -1817,7 +1817,7 @@ mod tests {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
         ui.session_failed(SessionEnd::disconnected(
-            lodestone_model::Text::literal("connection refused (os error 61)"),
+            lodestone_model::ResolvedText::literal("connection refused (os error 61)"),
         ));
         assert_eq!(ui.screen(), Screen::Error);
         assert_eq!(
@@ -1833,7 +1833,7 @@ mod tests {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Singleplayer);
         ui.session_failed(SessionEnd::disconnected(
-            lodestone_model::Text::literal("integrated server failed to start: bind :25565 in use"),
+            lodestone_model::ResolvedText::literal("integrated server failed to start: bind :25565 in use"),
         ));
         assert_eq!(ui.screen(), Screen::Error);
         assert!(ui.error().unwrap().plain().contains("failed to start"));
@@ -1850,7 +1850,7 @@ mod tests {
                 assert!(ui.is_paused());
             }
             ui.session_failed(SessionEnd::disconnected(
-            lodestone_model::Text::literal("Server closed"),
+            lodestone_model::ResolvedText::literal("Server closed"),
         ));
             assert_eq!(ui.screen(), Screen::Error, "pause_first={pause_first}");
             assert_eq!(
@@ -1877,7 +1877,7 @@ mod tests {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
         ui.session_failed(SessionEnd::disconnected(
-            lodestone_model::Text::literal("boom"),
+            lodestone_model::ResolvedText::literal("boom"),
         ));
         ui.dismiss_error();
         assert_eq!(ui.screen(), Screen::MainMenu);
@@ -1899,7 +1899,7 @@ mod tests {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
         ui.session_failed(SessionEnd::disconnected(
-            lodestone_model::Text::literal("x"),
+            lodestone_model::ResolvedText::literal("x"),
         ));
         ui.on_escape();
         assert_eq!(ui.screen(), Screen::MainMenu);
@@ -1936,7 +1936,7 @@ mod tests {
         let mut ui = UiState::new();
         ui.begin(SessionKind::Multiplayer);
         ui.session_failed(SessionEnd::disconnected(
-            lodestone_model::Text::literal("dropped"),
+            lodestone_model::ResolvedText::literal("dropped"),
         ));
         ui.session_ready();
         assert_eq!(
@@ -2217,7 +2217,7 @@ mod tests {
         ui.pause();
         check(&ui); // Paused
         ui.session_failed(SessionEnd::disconnected(
-            lodestone_model::Text::literal("end"),
+            lodestone_model::ResolvedText::literal("end"),
         ));
         check(&ui); // Error
     }
@@ -2443,7 +2443,7 @@ mod tests {
         assert_eq!(ui.screen(), Screen::Settings);
 
         ui.session_failed(SessionEnd::disconnected(
-            lodestone_model::Text::literal("Server closed"),
+            lodestone_model::ResolvedText::literal("Server closed"),
         ));
         assert_eq!(
             ui.screen(),
@@ -2463,7 +2463,7 @@ mod tests {
         let mut ui = UiState::new();
         ui.open_settings();
         ui.session_failed(SessionEnd::disconnected(
-            lodestone_model::Text::literal("connection refused (os error 61)"),
+            lodestone_model::ResolvedText::literal("connection refused (os error 61)"),
         ));
         assert_eq!(
             ui.screen(),
@@ -2618,7 +2618,7 @@ mod tests {
         assert_eq!(ui.screen(), Screen::Death);
 
         ui.session_failed(SessionEnd::disconnected(
-            lodestone_model::Text::literal("Server closed"),
+            lodestone_model::ResolvedText::literal("Server closed"),
         ));
         assert_eq!(ui.screen(), Screen::Error);
         assert_eq!(

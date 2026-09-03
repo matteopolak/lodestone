@@ -253,7 +253,7 @@ fn lore_preserves_nested_rgb_and_explicit_style_overrides() {
 
     assert_eq!(item.components.lore.len(), 1);
     assert_eq!(item.components.lore[0].to_plain_string(), "Ancient Rune");
-    let spans = item.components.lore[0].to_spans();
+    let spans = item.components.lore[0].resolve(&|_| None).to_spans();
     assert_eq!(spans.len(), 2);
     assert_eq!(spans[1].style.color, Some(TextColor::Rgb(0x12_ab_ef)));
     assert_eq!(spans[1].style.italic, Some(false));

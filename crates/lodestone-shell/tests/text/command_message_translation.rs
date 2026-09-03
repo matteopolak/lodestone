@@ -18,7 +18,7 @@
 //! * `resources.rs` loads `assets/minecraft/lang/en_us.json` out of the same
 //!   `client.jar` every texture comes from (8,123 keys in 26.2),
 //! * `Sim::translator()` hands it out as a `Fn(&str) -> Option<String>`,
-//! * `lodestone_game::text::resolve` walks a `Text` tree replacing every
+//! * `Text::resolve` walks a `Text` tree replacing every
 //!   `translate` node with its literal expansion — `%s`, `%N$s`, `%%`, nested
 //!   arguments, `fallback`, key-as-last-resort, and full style inheritance,
 //! * `hud::vanilla_font` really draws bold/italic/underline/strikethrough.
@@ -85,7 +85,7 @@ const PATTERNS: &[(&str, &str)] = &[
     ("container.inventory", "Inventory"),
 ];
 
-/// [`PATTERNS`] as the closure `lodestone_game::text::resolve` consumes — the
+/// [`PATTERNS`] as the closure `Text::resolve` consumes — the
 /// same shape `Sim::translator()` produces from the real table.
 fn table() -> Language {
     let json: serde_json::Value = PATTERNS
@@ -98,7 +98,7 @@ fn table() -> Language {
 
 fn resolve(text: &Text) -> String {
     let lang = table();
-    lodestone_game::text::resolve_to_string(text, &lang.translator())
+    text.resolve(&lang.translator()).to_plain_string()
 }
 
 /// `/gamemode creative` on yourself — vanilla's gamemode-change feedback: the
@@ -236,7 +236,7 @@ fn the_op_broadcast_is_grey_italic_and_the_nested_message_inherits_it() {
     };
 
     let lang = table();
-    let resolved = lodestone_game::text::resolve(&broadcast, &lang.translator());
+    let resolved = broadcast.resolve(&lang.translator());
     assert_eq!(
         resolved.to_plain_string(),
         "[Server: Set own game mode to Creative Mode]"
@@ -265,7 +265,7 @@ fn the_op_broadcast_is_grey_italic_and_the_nested_message_inherits_it() {
     // The control: the same feedback message *outside* the broadcast wrapper is
     // not italic. Without this, a resolver that italicised everything
     // unconditionally would pass the loop above.
-    let plain = lodestone_game::text::resolve(&feedback, &lang.translator());
+    let plain = feedback.resolve(&lang.translator());
     for span in plain.to_spans() {
         assert_ne!(
             span.style.italic,

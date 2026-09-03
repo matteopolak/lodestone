@@ -870,7 +870,10 @@ impl WindowApp {
         else {
             return;
         };
-        let _ = self.chat_input.apply_suggestions(&response);
+        let translate = self.sim.translator();
+        let _ = self
+            .chat_input
+            .apply_suggestions(&response, translate.as_ref());
     }
 
     /// `key.use` in the world — vanilla's own start-use-item routine, plus the one
