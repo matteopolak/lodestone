@@ -346,6 +346,13 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and the stage of
   [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md)
   that closes the pre-1.17 legacy gap between 1.13 and 1.17.
+- [The 1.17 era crate: one family, two protocols, a world that moved](./protocol-1-17-era.md) —
+  `crates/versions/1.17` (package `lodestone-v1-17`) serves Minecraft 1.17.1 and
+  1.18.2 — protocols **756** and **758** — from a single adapter, two generated
+  packet-id tables, one generated block-state table, one generated entity registry,
+  and nine explicitly-carried shape deltas, rather than two copies of a family. It is
+  the fourth era crate, after [`1.9`](./protocol-1-9-era.md),
+  [`1.14`](./protocol-1-14-era.md) and [`1.13`](./protocol-1-13-era.md).
 - [The 1.9 era crate: one family, four protocols](./protocol-1-9-era.md) —
   `crates/versions/1.9` (package `lodestone-v1-9`) is the first *era* crate in this
   repo: one family serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 — protocols
