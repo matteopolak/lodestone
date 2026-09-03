@@ -275,7 +275,15 @@ mod tests {
         let result = apply_trim(&template, &base, &addition).expect("must trim");
         assert_eq!(
             result.components.trim,
-            Some(lodestone_model::ArmorTrim { material: "emerald".into(), pattern: "dune".into() })
+            Some(lodestone_model::ArmorTrim {
+                material: "emerald".into(),
+                pattern: "dune".into(),
+                // The four inline-definition fields a smithing-table trim never
+                // carries: the table writes a registry reference for both the
+                // material and the pattern, so the description, asset-override and
+                // decal fields are absent by construction.
+                ..Default::default()
+            })
         );
     }
 
