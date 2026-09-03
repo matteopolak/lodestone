@@ -222,14 +222,19 @@ pub struct ItemComponents {
     /// while this is `None` **no item can
     /// be placed in any armour slot by any click type**.
     ///
-    /// Only the slot is carried. Vanilla's equippable component also has an
-    /// allowed-entities set — `minecraft:wolf_armor` is wolves only,
+    /// Only the slot is carried *here*. Vanilla's equippable component also has
+    /// an allowed-entities set — `minecraft:wolf_armor` is wolves only,
     /// `minecraft:saddle` is `#minecraft:can_equip_saddle` — which
-    /// vanilla's own equip-eligibility check additionally requires. Every restricted item
+    /// vanilla's own equip-eligibility check additionally requires; when the
+    /// patch states one it lands in
+    /// [`equippable_allowed_entities`](Self::equippable_allowed_entities).
+    /// That field is patch-shaped rather than effective, so it is `None` for an
+    /// ordinary item whose restriction lives only in its prototype: a consumer
+    /// wanting the effective restriction still has to ask the version seam
+    /// (`VersionAdapter::item_prototype`). Every restricted item
     /// in 26.2 is in a non-humanoid slot ([`EquipmentSlot::Body`] or
     /// [`EquipmentSlot::Saddle`]) and so cannot reach a player armour slot on
-    /// the slot check alone, but a consumer wanting the restriction itself must
-    /// ask the version seam (`VersionAdapter::item_prototype`), not this field.
+    /// the slot check alone.
     ///
     /// **[`EquipmentSlot::Body`] is not chest armour.** Vanilla gates humanoid
     /// armour on a distinct "humanoid armour" slot-type grouping, which covers
@@ -375,6 +380,64 @@ pub struct ItemComponents {
     /// fixed-width floats with no length prefix, so a spear-family item in any
     /// container used to truncate the rest of the packet from that slot onward.
     pub attack_range: Option<AttackRange>,
+    /// `minecraft:repairable`: the items an anvil accepts as repair material
+    /// for this stack, or `None` when the patch carries no repairable component
+    /// (which is every ordinary item — the component lives in a damageable
+    /// item's prototype, not its patch, so only a datapack- or command-authored
+    /// stack mentions it on the wire).
+    ///
+    /// A tag arm ([`RegistrySet::Tag`]) is the common case for a real server:
+    /// vanilla's own repair materials are tags, and their membership is not on
+    /// the wire, so this names the tag rather than expanding it.
+    pub repairable_items: Option<RegistrySet>,
+    /// `minecraft:equippable`'s allowed-entities set: which entity types may
+    /// wear this item at all, independent of [`equippable`](Self::equippable)'s
+    /// slot. `None` when the patch's equippable component carries no
+    /// restriction, and also for every stack whose patch does not mention the
+    /// component — which is almost all of them, since equippable is a prototype
+    /// component.
+    ///
+    /// **Patch-shaped, unlike [`equippable`](Self::equippable).** The slot is an
+    /// *effective* value folded with the item's prototype; this is only what the
+    /// patch itself said. A consumer wanting the effective restriction for an
+    /// ordinary item has to ask the version seam
+    /// (`VersionAdapter::item_prototype`), because a prototype-only restriction
+    /// never appears here.
+    pub equippable_allowed_entities: Option<RegistrySet>,
+    /// `minecraft:damage_resistant`: the damage types this item's holder is
+    /// immune to while it is held or worn, or `None` when the patch carries no
+    /// such component.
+    ///
+    /// Another prototype component in practice — a netherite item's fire
+    /// immunity comes from its prototype, not from a patch — so a wire value
+    /// here means a datapack- or command-authored stack.
+    pub damage_resistant: Option<RegistrySet>,
+    /// `minecraft:blocks_attacks`: what raising this item blocks, and at what
+    /// cost. `None` for every item that does not block (and for a plain shield,
+    /// whose blocking comes from its prototype rather than its patch).
+    pub blocks_attacks: Option<BlocksAttacks>,
+    /// `minecraft:provides_banner_patterns`: the banner patterns this item
+    /// unlocks as a loom input, or `None` when the patch carries no such
+    /// component. Vanilla's own banner-pattern items name a tag here, so the
+    /// [`Tag`](RegistrySet::Tag) arm is the expected shape.
+    pub provides_banner_patterns: Option<RegistrySet>,
+    /// `minecraft:consumable`'s on-consume effect list, in wire order. Empty
+    /// both for a non-consumable item and for a consumable whose patch lists no
+    /// effects; the two are indistinguishable here, the same
+    /// absent-patch-field-and-explicitly-empty convention
+    /// [`enchantments`](Self::enchantments) uses.
+    ///
+    /// Only the effect list is retained from the component. Its other fields —
+    /// how long consuming takes, which animation and sound play, whether
+    /// particles are emitted — are consumed for alignment and not modeled:
+    /// every one of them drives a first-person animation this crate's consumers
+    /// do not run.
+    pub consume_effects: Vec<ConsumeEffect>,
+    /// `minecraft:death_protection`'s effect list, in wire order — what a
+    /// totem-shaped item does to its holder when it prevents their death. Empty
+    /// for every item without the component, with the same empty-versus-absent
+    /// collapse [`consume_effects`](Self::consume_effects) documents.
+    pub death_protection_effects: Vec<ConsumeEffect>,
     /// True when the stack's patch carried at least one component this build
     /// does not model, so decoding stopped early and the modeled fields above
     /// may be incomplete. The modeled fields that were decoded remain valid.
@@ -580,18 +643,45 @@ impl AttackRange {
 ///
 /// Both are carried as bare registry **paths** (`"iron"`, `"sentry"`), the form
 /// `lodestone_assets::trim::{trim_material, trim_pattern}` keys its sprite tables
-/// by, so a renderer can go straight from this to a trim sprite. Neither
-/// registry reference's *value* is kept: a trim material is an asset-suffix
-/// group plus a description component and a trim pattern is an asset id
-/// plus a description and a `decal` flag, all of which the asset layer
-/// already has statically for the eleven materials and eighteen patterns
-/// 26.2 ships.
+/// by, so a renderer can go straight from this to a trim sprite.
+///
+/// # The registry-reference and inline arms carry different amounts
+///
+/// Either reference may arrive as a **registry id** or as a full **inline
+/// definition**; a datapack-defined trim always arrives inline. Only the inline
+/// arm puts a material's per-armour asset overrides, either half's description
+/// component, or a pattern's decal flag on the wire at all — for a registry
+/// reference the client is expected to have that data statically, which for the
+/// eleven materials and eighteen patterns 26.2 ships it does (the asset layer's
+/// own tables). So each of those four fields is `None`/empty *both* when the
+/// reference was a registry id and when an inline definition genuinely carried
+/// nothing, and a consumer that needs the value for a registry reference must
+/// read it from the asset layer rather than from here.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ArmorTrim {
     /// Trim material registry path, e.g. `"netherite"`.
     pub material: String,
     /// Trim pattern registry path, e.g. `"silence"`.
     pub pattern: String,
+    /// The material's tooltip description, when an inline material definition
+    /// carried one — the styled line a trimmed piece of armour shows above its
+    /// pattern line.
+    pub material_description: Option<Text>,
+    /// The material's per-armour-material asset overrides, in wire order, as
+    /// `(armour material registry key, asset suffix)` pairs.
+    ///
+    /// A trim's palette is redrawn per base armour material so a gold trim
+    /// stays legible on gold armour; [`material`](Self::material) is only the
+    /// default suffix. Empty for a registry reference and for an inline
+    /// definition that overrides nothing.
+    pub material_asset_overrides: Vec<(String, String)>,
+    /// The pattern's tooltip description, when an inline pattern definition
+    /// carried one.
+    pub pattern_description: Option<Text>,
+    /// The pattern's decal flag, when an inline pattern definition carried one:
+    /// a decal pattern is tinted by the material's colour instead of drawing
+    /// the pattern's own palette. `None` for a registry reference.
+    pub pattern_decal: Option<bool>,
 }
 
 /// What a stack's component patch said about `minecraft:tool`.
@@ -774,4 +864,270 @@ pub struct AuthoredEnchantment {
     pub path: &'static str,
     /// Enchantment level.
     pub level: u8,
+}
+
+/// A set of registry entries in the shape the wire carries it: either the name
+/// of a server-side tag, or an explicit list of numeric registry ids.
+///
+/// The payload is a single leading VarInt — `0` means a tag name follows, and
+/// `n` means `n - 1` bare registry ids follow. Both arms are represented
+/// because they are not interchangeable: a tag's *membership* is server-side
+/// data that never reaches the client, so an id list cannot be reconstructed
+/// from a tag name, and collapsing the tag arm to an empty id list makes
+/// "matches nothing" indistinguishable from "matches whatever the server put in
+/// that tag".
+///
+/// [`Ids`](Self::Ids) holds **session-scoped network ids**, the same contract
+/// [`ItemEnchantment::id`] documents: the registries they index are data-driven
+/// and synced per connection, so an id is meaningless outside the session that
+/// produced it and must never be persisted or compared across connections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistrySet {
+    /// A tag name, for example `"minecraft:planks"`. Its members are not on the
+    /// wire.
+    Tag(String),
+    /// Explicitly listed registry ids, in wire order. An empty list is legal
+    /// and means the set genuinely matches nothing.
+    Ids(Vec<i32>),
+}
+
+impl RegistrySet {
+    /// The explicitly listed registry ids, or an empty slice for the tag arm.
+    ///
+    /// A caller that must distinguish "no members" from "members this client
+    /// cannot enumerate" has to match on the variant instead — that difference
+    /// is the whole reason the tag arm is kept.
+    #[must_use]
+    pub fn explicit_ids(&self) -> &[i32] {
+        match self {
+            Self::Tag(_) => &[],
+            Self::Ids(ids) => ids,
+        }
+    }
+}
+
+/// One entry of a mob-effect instance list — the shape a potion's custom
+/// effects and an item's on-consume effect application both carry.
+///
+/// The protocol appends an optional nested record holding the weaker effect to
+/// restore when a stronger one of the same kind expires. That record is
+/// consumed for alignment and not carried here: it is holder-side bookkeeping
+/// with no client-visible surface, and its own shape omits the effect id, so it
+/// cannot be represented as another `MobEffectInstance` without inventing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MobEffectInstance {
+    /// Network `minecraft:mob_effect` registry id — session-scoped, the same
+    /// contract [`ItemEnchantment::id`] documents.
+    pub effect_id: i32,
+    /// Amplifier, `0` meaning level I. Clamped into `0..=255` at decode time to
+    /// match the protocol's own clamp, so a wire value outside that range
+    /// saturates rather than wrapping.
+    pub amplifier: u8,
+    /// Remaining duration in ticks, exactly as the wire carried it.
+    pub duration_ticks: i32,
+    /// Whether the effect came from an ambient source such as a beacon.
+    pub ambient: bool,
+    /// Whether the effect emits particles.
+    pub show_particles: bool,
+    /// Whether the effect shows its HUD icon.
+    pub show_icon: bool,
+}
+
+/// One entry of an item's consume-effect list — what consuming the item does
+/// beyond restoring hunger, and what a death-protecting item does when it saves
+/// its holder.
+///
+/// The list is an unframed sequence of `(type id, payload)` pairs, so a type id
+/// a build does not recognise cannot be skipped; a decoder that meets one
+/// reports the stack as carrying an unmodeled component
+/// ([`ItemComponents::has_unmodeled`]) rather than guessing a width.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConsumeEffect {
+    /// Apply mob effects, all-or-nothing at the carried probability.
+    ApplyEffects {
+        /// The effects to apply, in wire order.
+        effects: Vec<MobEffectInstance>,
+        /// Raw IEEE-754 bits of the application probability, read back through
+        /// [`probability`](ConsumeEffect::probability). Stored as bits so this
+        /// equality-bearing model never has to pretend `f32` is `Eq` — the same
+        /// call [`AttackRange`] and [`ItemComponents::custom_model_data`] make.
+        probability_bits: u32,
+    },
+    /// Remove every effect in this set.
+    RemoveEffects(RegistrySet),
+    /// Remove every effect the holder has. Presence alone is the value; the
+    /// payload is empty.
+    ClearAllEffects,
+    /// Teleport the holder randomly within a cube of the carried diameter, in
+    /// blocks.
+    TeleportRandomly {
+        /// Raw IEEE-754 bits of the diameter, read back through
+        /// [`teleport_diameter`](ConsumeEffect::teleport_diameter), for the
+        /// reason [`ApplyEffects`](Self::ApplyEffects) documents.
+        diameter_bits: u32,
+    },
+    /// Play a sound.
+    ///
+    /// The sound reference itself is deliberately not carried: it arrives
+    /// either as an inline definition or as a session-scoped sound-registry id,
+    /// and nothing in this crate's consumers plays a sound sourced from an item
+    /// component, so neither form has anything able to interpret it. A build
+    /// that grows a consumer should widen this variant rather than re-reading
+    /// the bytes at the call site.
+    PlaySound,
+}
+
+impl ConsumeEffect {
+    /// The application probability of an [`ApplyEffects`](Self::ApplyEffects)
+    /// entry, or `None` for every other variant.
+    #[must_use]
+    pub fn probability(&self) -> Option<f32> {
+        match self {
+            Self::ApplyEffects {
+                probability_bits, ..
+            } => Some(f32::from_bits(*probability_bits)),
+            _ => None,
+        }
+    }
+
+    /// The diameter of a [`TeleportRandomly`](Self::TeleportRandomly) entry, in
+    /// blocks, or `None` for every other variant.
+    #[must_use]
+    pub fn teleport_diameter(&self) -> Option<f32> {
+        match self {
+            Self::TeleportRandomly { diameter_bits } => Some(f32::from_bits(*diameter_bits)),
+            _ => None,
+        }
+    }
+}
+
+/// A decoded `minecraft:blocks_attacks` data component — what a shield-shaped
+/// item does when its holder raises it.
+///
+/// Floats are stored as raw IEEE-754 bits behind accessors, the same call
+/// [`AttackRange`] makes and for the same reason: [`ItemComponents`] is
+/// equality-bearing and `f32` is not `Eq`.
+///
+/// The component also carries two optional sound references (one for a
+/// successful block, one for the item being disabled). Those are consumed for
+/// alignment and not represented, for the reason
+/// [`ConsumeEffect::PlaySound`] documents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlocksAttacks {
+    block_delay_seconds_bits: u32,
+    disable_cooldown_scale_bits: u32,
+    /// Per-damage-type reduction rules, in wire order.
+    pub damage_reductions: Vec<DamageReduction>,
+    item_damage_threshold_bits: u32,
+    item_damage_base_bits: u32,
+    item_damage_factor_bits: u32,
+    /// Damage types this item cannot block at all, or `None` when the component
+    /// carries no bypass set (nothing bypasses it).
+    pub bypassed_by: Option<RegistrySet>,
+}
+
+impl BlocksAttacks {
+    /// Builds a blocks-attacks component from its decoded fields, in wire
+    /// order.
+    #[must_use]
+    pub fn new(
+        block_delay_seconds: f32,
+        disable_cooldown_scale: f32,
+        damage_reductions: Vec<DamageReduction>,
+        item_damage_threshold: f32,
+        item_damage_base: f32,
+        item_damage_factor: f32,
+        bypassed_by: Option<RegistrySet>,
+    ) -> Self {
+        Self {
+            block_delay_seconds_bits: block_delay_seconds.to_bits(),
+            disable_cooldown_scale_bits: disable_cooldown_scale.to_bits(),
+            damage_reductions,
+            item_damage_threshold_bits: item_damage_threshold.to_bits(),
+            item_damage_base_bits: item_damage_base.to_bits(),
+            item_damage_factor_bits: item_damage_factor.to_bits(),
+            bypassed_by,
+        }
+    }
+
+    /// How long the item must be held up before it blocks anything, in seconds.
+    #[must_use]
+    pub fn block_delay_seconds(&self) -> f32 {
+        f32::from_bits(self.block_delay_seconds_bits)
+    }
+
+    /// Multiplier applied to the disable cooldown an attack that defeats the
+    /// block imposes.
+    #[must_use]
+    pub fn disable_cooldown_scale(&self) -> f32 {
+        f32::from_bits(self.disable_cooldown_scale_bits)
+    }
+
+    /// Incoming damage below this threshold costs the item no durability.
+    #[must_use]
+    pub fn item_damage_threshold(&self) -> f32 {
+        f32::from_bits(self.item_damage_threshold_bits)
+    }
+
+    /// Flat durability cost of a block that passes the threshold.
+    #[must_use]
+    pub fn item_damage_base(&self) -> f32 {
+        f32::from_bits(self.item_damage_base_bits)
+    }
+
+    /// Per-point-of-damage durability cost of a block that passes the
+    /// threshold.
+    #[must_use]
+    pub fn item_damage_factor(&self) -> f32 {
+        f32::from_bits(self.item_damage_factor_bits)
+    }
+}
+
+/// One rule of [`BlocksAttacks::damage_reductions`]: how much of an incoming
+/// hit a raised item absorbs, and from which directions and damage types.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DamageReduction {
+    horizontal_blocking_angle_bits: u32,
+    /// Damage types this rule applies to, or `None` when the rule carries no
+    /// set and so applies to every type.
+    pub damage_types: Option<RegistrySet>,
+    base_bits: u32,
+    factor_bits: u32,
+}
+
+impl DamageReduction {
+    /// Builds a reduction rule from its decoded fields, in wire order.
+    #[must_use]
+    pub fn new(
+        horizontal_blocking_angle: f32,
+        damage_types: Option<RegistrySet>,
+        base: f32,
+        factor: f32,
+    ) -> Self {
+        Self {
+            horizontal_blocking_angle_bits: horizontal_blocking_angle.to_bits(),
+            damage_types,
+            base_bits: base.to_bits(),
+            factor_bits: factor.to_bits(),
+        }
+    }
+
+    /// Half-width of the arc, in degrees, within which the hit counts as
+    /// blocked.
+    #[must_use]
+    pub fn horizontal_blocking_angle(&self) -> f32 {
+        f32::from_bits(self.horizontal_blocking_angle_bits)
+    }
+
+    /// Flat damage absorbed.
+    #[must_use]
+    pub fn base(&self) -> f32 {
+        f32::from_bits(self.base_bits)
+    }
+
+    /// Fraction of the remaining damage absorbed.
+    #[must_use]
+    pub fn factor(&self) -> f32 {
+        f32::from_bits(self.factor_bits)
+    }
 }

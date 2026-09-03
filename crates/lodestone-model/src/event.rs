@@ -3376,6 +3376,27 @@ pub struct RecipeBookEntry {
     /// final `SlotDisplay`. Usually one entry; empty for a display whose station
     /// slot is itself `empty` or unresolved.
     pub station_items: Vec<i32>,
+    /// The recipe-book group this entry shares a stacked button with, or `None`
+    /// when the entry stands alone.
+    ///
+    /// A group is what makes the four wood-plank recipes collapse into one
+    /// button that cycles. The wire encoding is an optional VarInt where `0`
+    /// means absent and a present value `v` is written `v + 1`; the offset is
+    /// already removed here, so `Some(0)` is group zero.
+    pub group: Option<i32>,
+    /// Which recipe-book tab the entry belongs to — the book category index,
+    /// not the crafting-book *type*.
+    pub category: i32,
+    /// The ingredient sets a player must have already unlocked before this
+    /// entry is shown, in wire order, or `None` when the entry states no
+    /// requirement.
+    ///
+    /// This is the recipe book's own progressive-reveal gate, not the recipe's
+    /// inputs: the display's inputs are what
+    /// [`result_items`](Self::result_items) and the display walk cover. A
+    /// [`RegistrySet::Tag`](crate::RegistrySet::Tag) arm names a tag whose
+    /// membership is not on the wire.
+    pub crafting_requirements: Option<Vec<crate::RegistrySet>>,
     /// Whether this unlock should raise a toast (`flags` bit 0).
     pub notification: bool,
     /// Whether its recipe-book tab should highlight (`flags` bit 1).

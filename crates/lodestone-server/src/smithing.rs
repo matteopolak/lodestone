@@ -149,11 +149,26 @@ pub fn apply_trim(template: &ItemStack, base: &ItemStack, addition: &ItemStack) 
         .find(|(item, _)| *item == addition_item)
         .map(|(_, material)| *material)?;
 
+    // A trim authored here is a pair of registry references and nothing else:
+    // the descriptions, per-armour asset overrides and decal flag `ArmorTrim`
+    // also carries only exist for an inline, datapack-defined trim arriving off
+    // the wire, and a smithing table can only apply one of the built-in
+    // patterns. Hence the default tail rather than an exhaustive literal.
     let new_trim = lodestone_model::ArmorTrim {
         material: material.to_string(),
         pattern: pattern.to_string(),
+        ..Default::default()
     };
-    if base.components.trim.as_ref() == Some(&new_trim) {
+    // The no-op refusal compares the two registry references only. Comparing
+    // whole `ArmorTrim`s would let a base whose trim arrived inline — carrying
+    // a description this table cannot reproduce — pass as a different trim and
+    // re-apply the one it already has.
+    if base
+        .components
+        .trim
+        .as_ref()
+        .is_some_and(|trim| trim.material == new_trim.material && trim.pattern == new_trim.pattern)
+    {
         return None;
     }
     let mut result = base.clone();

@@ -5,7 +5,9 @@ use super::*;
 // Not in `adapter::mod`'s own `lodestone_model` import list — added directly
 // here rather than widening that shared glob for one type this file alone
 // needs.
-use lodestone_model::AttackRange;
+use lodestone_model::{
+    AttackRange, BlocksAttacks, ConsumeEffect, DamageReduction, MobEffectInstance, RegistrySet,
+};
 
 impl V770Adapter {
     /// Clientbound play-state packets in the inventory domain, split out of the
@@ -388,15 +390,23 @@ const TRIM_PATTERN_IDS: &[&str] = &[
 /// helper), and it is also the half `lodestone_assets::trim::trim_sprite_id`
 /// actually needs.
 fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
+    let mut material_asset_overrides = Vec::new();
+    let mut material_description = None;
     let material = match reader.var_i32().map_err(dec_err)? {
         0 => {
             let base = reader.string(32767).map_err(dec_err)?;
             let overrides = reader.var_i32().map_err(dec_err)?;
+            let overrides = usize::try_from(overrides).map_err(|_| {
+                AdapterError::Decode(format!("invalid trim asset override count {overrides}"))
+            })?;
+            material_asset_overrides.reserve(overrides.min(256));
             for _ in 0..overrides {
-                let _key = reader.string(32767).map_err(dec_err)?;
-                let _suffix = reader.string(32767).map_err(dec_err)?;
+                let armor_material = reader.string(32767).map_err(dec_err)?;
+                let suffix = reader.string(32767).map_err(dec_err)?;
+                material_asset_overrides.push((armor_material, suffix));
             }
-            let _description = read_network_nbt(reader).map_err(dec_err)?;
+            material_description =
+                Some(Text::from_nbt(&read_network_nbt(reader).map_err(dec_err)?));
             base
         }
         holder => TRIM_MATERIAL_IDS
@@ -405,11 +415,13 @@ fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
             .unwrap_or_default()
             .to_owned(),
     };
+    let mut pattern_description = None;
+    let mut pattern_decal = None;
     let pattern = match reader.var_i32().map_err(dec_err)? {
         0 => {
             let asset_id = reader.string(32767).map_err(dec_err)?;
-            let _description = read_network_nbt(reader).map_err(dec_err)?;
-            let _decal = reader.bool().map_err(dec_err)?;
+            pattern_description = Some(Text::from_nbt(&read_network_nbt(reader).map_err(dec_err)?));
+            pattern_decal = Some(reader.bool().map_err(dec_err)?);
             // The asset id is a full identifier; the registry path is what the
             // asset layer keys by.
             asset_id
@@ -422,7 +434,14 @@ fn read_armor_trim(reader: &mut Reader<'_>) -> Result<ArmorTrim, AdapterError> {
             .unwrap_or_default()
             .to_owned(),
     };
-    Ok(ArmorTrim { material, pattern })
+    Ok(ArmorTrim {
+        material,
+        pattern,
+        material_description,
+        material_asset_overrides,
+        pattern_description,
+        pattern_decal,
+    })
 }
 
 /// `minecraft:banner_pattern` registry paths in the order a vanilla server
@@ -647,7 +666,12 @@ fn read_potion_contents_color(reader: &mut Reader<'_>) -> Result<u32, AdapterErr
     } else {
         None
     };
-    let custom_effects = read_mob_effect_instances(reader)?;
+    // The colour mix is keyed by effect id and amplifier only; the durations and
+    // flags the same records carry cannot move a colour.
+    let custom_effects: Vec<(i32, u8)> = read_mob_effect_instances(reader)?
+        .into_iter()
+        .map(|effect| (effect.effect_id, effect.amplifier))
+        .collect();
     // `customName`: `vanilla's UTF-8 string codec.apply(vanilla's optional-value codec)`,
     // consumed for alignment only — nothing here reads it back.
     if reader.bool().map_err(dec_err)? {
@@ -835,19 +859,23 @@ fn read_written_book_content(reader: &mut Reader<'_>) -> Result<WrittenBookConte
 }
 
 /// `vanilla's own mob effect instance's own stream codec's own apply(vanilla's list codec())`: a VarInt count then
-/// that many `(MobEffect id, vanilla's own mob effect instance's own details)` pairs. Only the effect id
-/// and amplifier are kept — the colour mix needs nothing else — but every field is
-/// still read off the wire in declaration order, because skipping one would
-/// misalign every byte after it.
-fn read_mob_effect_instances(reader: &mut Reader<'_>) -> Result<Vec<(i32, u8)>, AdapterError> {
+/// that many `(MobEffect id, vanilla's own mob effect instance's own details)` pairs.
+///
+/// Shared by `minecraft:potion_contents`' custom effects and by an on-consume
+/// effect application, which want different halves of the record — the potion
+/// colour mix needs only the effect ids and amplifiers, an effect application
+/// needs the durations and flags too — so the whole record is returned and each
+/// caller takes what it needs.
+fn read_mob_effect_instances(
+    reader: &mut Reader<'_>,
+) -> Result<Vec<MobEffectInstance>, AdapterError> {
     let count = read_count(reader, "potion custom_effects")?;
     let mut out = Vec::with_capacity(count.min(64));
     for _ in 0..count {
         // `vanilla's own mob effect's own stream codec = vanilla's holder-registry codec(vanilla's own registries's own mob effect)`:
         // the same plain 0-based VarInt shape as the potion holder above.
         let effect_id = reader.var_i32().map_err(dec_err)?;
-        let amplifier = read_mob_effect_details(reader)?;
-        out.push((effect_id, amplifier));
+        out.push(read_mob_effect_details(reader, effect_id)?);
     }
     Ok(out)
 }
@@ -855,19 +883,38 @@ fn read_mob_effect_instances(reader: &mut Reader<'_>) -> Result<Vec<(i32, u8)>, 
 /// `vanilla's own mob effect instance's own details's own stream codec`: VarInt amplifier, VarInt duration, bool
 /// ambient, bool showParticles, bool showIcon, then `Optional<Details>` recursing
 /// into this same shape — **without** its own leading effect id, since `hiddenEffect`
-/// is a nested `Details`, not a nested `MobEffectInstance`. Returns just the
-/// amplifier, clamped into `u8` the way `MobEffectInstance`'s own constructor
-/// (`vanilla's own mth's own clamp(amplifier, 0, 255)`) does.
-fn read_mob_effect_details(reader: &mut Reader<'_>) -> Result<u8, AdapterError> {
+/// is a nested `Details`, not a nested `MobEffectInstance`. `effect_id` is
+/// therefore passed in by the caller that read it, and the recursive call is
+/// given the same id so the nested read is byte-identical.
+///
+/// The amplifier is clamped into `u8` the way vanilla's own instance
+/// constructor clamps it, so a wire value outside `0..=255` saturates instead
+/// of wrapping.
+///
+/// The nested hidden effect is read and dropped: it is the weaker effect to
+/// restore when a stronger one of the same kind expires, which is holder-side
+/// bookkeeping no client surface shows, and its own record omits the effect id
+/// so [`MobEffectInstance`] cannot represent it without a second type.
+fn read_mob_effect_details(
+    reader: &mut Reader<'_>,
+    effect_id: i32,
+) -> Result<MobEffectInstance, AdapterError> {
     let amplifier = reader.var_i32().map_err(dec_err)?;
-    reader.var_i32().map_err(dec_err)?; // duration
-    reader.bool().map_err(dec_err)?; // ambient
-    reader.bool().map_err(dec_err)?; // showParticles
-    reader.bool().map_err(dec_err)?; // showIcon
+    let duration_ticks = reader.var_i32().map_err(dec_err)?;
+    let ambient = reader.bool().map_err(dec_err)?;
+    let show_particles = reader.bool().map_err(dec_err)?;
+    let show_icon = reader.bool().map_err(dec_err)?;
     if reader.bool().map_err(dec_err)? {
-        read_mob_effect_details(reader)?; // hiddenEffect, discarded
+        read_mob_effect_details(reader, effect_id)?;
     }
-    Ok(amplifier.clamp(0, 255) as u8)
+    Ok(MobEffectInstance {
+        effect_id,
+        amplifier: amplifier.clamp(0, 255) as u8,
+        duration_ticks,
+        ambient,
+        show_particles,
+        show_icon,
+    })
 }
 
 /// Decodes an item stack's `DataComponentPatch` into the modeled component set,
@@ -1003,19 +1050,21 @@ fn read_component_patch(
                     AdapterError::Decode(format!("negative item max_damage {max}"))
                 })?);
             }
-            // `vanilla's own repairable's own stream codec` is one `HolderSet<Item>`. The repair
-            // items themselves have no consumer here, but this component is
-            // unframed like every other patch payload, so consuming it is what
-            // keeps a repaired item from ending the rest of its packet.
+            // `vanilla's own repairable's own stream codec` is one registry set of items — the
+            // material an anvil accepts for this stack. Unframed like every
+            // other patch payload, so consuming it is also what keeps a
+            // repairable item from ending the rest of its packet.
             Some("minecraft:repairable") => {
-                let _repair_items = read_holder_set(reader)?;
+                components.repairable_items = Some(read_registry_set(reader)?);
             }
-            // `vanilla's own equippable's own stream codec` is an eleven-field record. Only its
-            // slot reaches `ItemComponents` today, but every field must be read:
-            // a patched horse armour otherwise drops the remainder of the
-            // container packet at this component.
+            // `vanilla's own equippable's own stream codec` is an eleven-field record. Its slot and
+            // its allowed-entities set reach `ItemComponents`; every remaining
+            // field must still be read, because a patched horse armour otherwise
+            // drops the remainder of the container packet at this component.
             Some("minecraft:equippable") => {
-                components.equippable = Some(read_equippable(reader)?);
+                let (slot, allowed_entities) = read_equippable(reader)?;
+                components.equippable = Some(slot);
+                components.equippable_allowed_entities = allowed_entities;
             }
 
             // ---------------------------------------------------------------
@@ -1288,11 +1337,12 @@ fn read_component_patch(
                 reader.var_i32().map_err(dec_err)?; // ItemUseAnimation
                 read_sound_event_holder(reader)?;
                 reader.bool().map_err(dec_err)?;
-                if !read_consume_effects(reader)? {
+                let Some(effects) = read_consume_effects(reader)? else {
                     components.has_unmodeled = true;
                     let _ = reader.bytes(reader.remaining());
                     return Ok((components, false));
-                }
+                };
+                components.consume_effects = effects;
             }
 
             // `vanilla's own use remainder's own stream codec` is a single `ItemStackTemplate` — the
@@ -1317,10 +1367,10 @@ fn read_component_patch(
             }
 
             // `vanilla's own damage resistant's own stream codec` is a single, non-optional
-            // `HolderSet<DamageType>` — the same wire shape [`read_holder_set`]
-            // already reads for `Repairable`'s item set.
+            // damage-type registry set — the same wire shape
+            // [`read_registry_set`] reads for the repair-material set above.
             Some("minecraft:damage_resistant") => {
-                let _ = read_holder_set(reader)?;
+                components.damage_resistant = Some(read_registry_set(reader)?);
             }
 
             // `vanilla's own weapon's own stream codec`: VarInt itemDamagePerAttack, float
@@ -1336,11 +1386,12 @@ fn read_component_patch(
             // itself an unframed dispatch this decoder cannot see past, so the same
             // truncation applies as for `minecraft:consumable` above.
             Some("minecraft:death_protection") => {
-                if !read_consume_effects(reader)? {
+                let Some(effects) = read_consume_effects(reader)? else {
                     components.has_unmodeled = true;
                     let _ = reader.bytes(reader.remaining());
                     return Ok((components, false));
-                }
+                };
+                components.death_protection_effects = effects;
             }
 
             // Vanilla's own blocks-attacks stream codec: float blockDelaySeconds,
@@ -1351,34 +1402,54 @@ fn read_component_patch(
             // factor — not a list), `Optional<HolderSet<DamageType>>` bypassedBy,
             // then two `Optional<Holder<SoundEvent>>` (blockSound, disableSound).
             Some("minecraft:blocks_attacks") => {
-                reader.f32().map_err(dec_err)?;
-                reader.f32().map_err(dec_err)?;
+                let block_delay_seconds = reader.f32().map_err(dec_err)?;
+                let disable_cooldown_scale = reader.f32().map_err(dec_err)?;
                 let reductions = read_count(reader, "blocks_attacks damage_reductions")?;
                 if reductions > 256 {
                     return Err(AdapterError::Decode(format!(
                         "blocks_attacks declares {reductions} damage reductions, implausibly many"
                     )));
                 }
+                let mut damage_reductions = Vec::with_capacity(reductions);
                 for _ in 0..reductions {
-                    reader.f32().map_err(dec_err)?; // horizontalBlockingAngle
-                    if reader.bool().map_err(dec_err)? {
-                        let _ = read_holder_set(reader)?; // type
-                    }
-                    reader.f32().map_err(dec_err)?; // base
-                    reader.f32().map_err(dec_err)?; // factor
+                    let angle = reader.f32().map_err(dec_err)?; // horizontalBlockingAngle
+                    let damage_types = if reader.bool().map_err(dec_err)? {
+                        Some(read_registry_set(reader)?)
+                    } else {
+                        None
+                    };
+                    let base = reader.f32().map_err(dec_err)?;
+                    let factor = reader.f32().map_err(dec_err)?;
+                    damage_reductions.push(DamageReduction::new(angle, damage_types, base, factor));
                 }
-                reader.f32().map_err(dec_err)?; // item-damage-function threshold
-                reader.f32().map_err(dec_err)?; // item-damage-function base
-                reader.f32().map_err(dec_err)?; // item-damage-function factor
+                let item_damage_threshold = reader.f32().map_err(dec_err)?;
+                let item_damage_base = reader.f32().map_err(dec_err)?;
+                let item_damage_factor = reader.f32().map_err(dec_err)?;
+                let bypassed_by = if reader.bool().map_err(dec_err)? {
+                    Some(read_registry_set(reader)?)
+                } else {
+                    None
+                };
+                // blockSound and disableSound: consumed for alignment. Both are
+                // sound references — an inline definition or a session-scoped
+                // registry id — and no consumer here plays a sound sourced from
+                // an item component, so neither form has an interpreter. See
+                // `ConsumeEffect::PlaySound`, which makes the same call.
                 if reader.bool().map_err(dec_err)? {
-                    let _ = read_holder_set(reader)?; // bypassedBy
+                    read_sound_event_holder(reader)?;
                 }
                 if reader.bool().map_err(dec_err)? {
-                    read_sound_event_holder(reader)?; // blockSound
+                    read_sound_event_holder(reader)?;
                 }
-                if reader.bool().map_err(dec_err)? {
-                    read_sound_event_holder(reader)?; // disableSound
-                }
+                components.blocks_attacks = Some(BlocksAttacks::new(
+                    block_delay_seconds,
+                    disable_cooldown_scale,
+                    damage_reductions,
+                    item_damage_threshold,
+                    item_damage_base,
+                    item_damage_factor,
+                    bypassed_by,
+                ));
             }
 
             // `vanilla's own piercing weapon's own stream codec`: two bools (dealsKnockback, dismounts)
@@ -1519,9 +1590,12 @@ fn read_component_patch(
             }
 
             // `vanilla's holder-set codec(vanilla's own registries's own banner pattern)` — the same
-            // `HolderSet<T>` shape [`read_holder_set`] already reads.
+            // registry-set shape [`read_registry_set`] reads elsewhere. Vanilla's
+            // own banner-pattern items name a tag here, so the tag arm is the
+            // expected one and the tag *name* is the only membership information
+            // the wire carries.
             Some("minecraft:provides_banner_patterns") => {
-                let _ = read_holder_set(reader)?;
+                components.provides_banner_patterns = Some(read_registry_set(reader)?);
             }
 
             // `vanilla's own lodestone tracker's own stream codec`: an `Optional<GlobalPos>` (bool, then
@@ -1776,18 +1850,24 @@ fn read_component_patch(
 /// in registration order) and dispatches to that type's own composite codec.
 /// A sixth, future/datapack-defined type has no generic fallback — the same
 /// unframed-dispatch cliff [`read_component_patch`]'s own `other` arm
-/// documents — so this returns `false` rather than erroring, letting the
-/// caller apply the same has-unmodeled-component treatment.
+/// documents — so this returns `None` rather than erroring, letting the
+/// caller apply the same has-unmodeled-component treatment. The entries
+/// decoded before that point are discarded along with it: the caller stops
+/// reading the packet anyway, and a truncated effect list would be reported as
+/// a complete one.
 ///
 /// Bounded at 1024 entries defensively: the codec itself declares no cap
 /// (`vanilla's list codec()` with no argument).
-fn read_consume_effects(reader: &mut Reader<'_>) -> Result<bool, AdapterError> {
+fn read_consume_effects(
+    reader: &mut Reader<'_>,
+) -> Result<Option<Vec<ConsumeEffect>>, AdapterError> {
     let count = read_count(reader, "consume effect")?;
     if count > 1024 {
         return Err(AdapterError::Decode(format!(
             "consume effect list declares {count} entries, implausibly many"
         )));
     }
+    let mut effects = Vec::with_capacity(count.min(64));
     for _ in 0..count {
         let type_id = reader.var_i32().map_err(dec_err)?;
         match type_id {
@@ -1795,27 +1875,31 @@ fn read_consume_effects(reader: &mut Reader<'_>) -> Result<bool, AdapterError> {
             // [`read_mob_effect_instances`] already reads for potion custom
             // effects) then a float probability.
             0 => {
-                let _ = read_mob_effect_instances(reader)?;
-                reader.f32().map_err(dec_err)?;
+                let instances = read_mob_effect_instances(reader)?;
+                effects.push(ConsumeEffect::ApplyEffects {
+                    effects: instances,
+                    probability_bits: reader.f32().map_err(dec_err)?.to_bits(),
+                });
             }
-            // remove_effects: HolderSet<MobEffect>.
-            1 => {
-                let _ = read_holder_set(reader)?;
-            }
+            // remove_effects: a mob-effect registry set.
+            1 => effects.push(ConsumeEffect::RemoveEffects(read_registry_set(reader)?)),
             // clear_all_effects: no payload — presence alone is the value.
-            2 => {}
+            2 => effects.push(ConsumeEffect::ClearAllEffects),
             // teleport_randomly: a float diameter.
-            3 => {
-                reader.f32().map_err(dec_err)?;
-            }
-            // play_sound: Holder<SoundEvent>.
+            3 => effects.push(ConsumeEffect::TeleportRandomly {
+                diameter_bits: reader.f32().map_err(dec_err)?.to_bits(),
+            }),
+            // play_sound: a sound reference, consumed for alignment — see
+            // `ConsumeEffect::PlaySound` for why the reference itself has no
+            // consumer able to interpret either of its two arms.
             4 => {
                 read_sound_event_holder(reader)?;
+                effects.push(ConsumeEffect::PlaySound);
             }
-            _ => return Ok(false),
+            _ => return Ok(None),
         }
     }
-    Ok(true)
+    Ok(Some(effects))
 }
 
 /// Consumes a `TypedEntityData<T>.STREAM_CODEC` (vanilla's typed-entity-data stream codec):
@@ -2508,18 +2592,24 @@ fn decode_award_stats(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
     })])
 }
 
-/// Consumes a `HolderSet<T>` and returns the direct entries' registry ids, or an
-/// empty list for the tag form.
+/// Consumes vanilla's holder-set codec into a [`RegistrySet`], keeping whichever
+/// of its two arms the wire chose.
 ///
-/// vanilla's holder-set codec uses this same wire shape for `Item` ingredients,
-/// `Repairable`'s items, and `Equippable`'s entity types: a VarInt where `0`
-/// means a tag identifier follows and `n` means `n - 1` explicit bare registry
-/// ids. The caller decides whether those ids are worth retaining.
-fn read_holder_set(reader: &mut Reader<'_>) -> Result<Vec<i32>, AdapterError> {
+/// One wire shape serves every registry-set field in this protocol — item
+/// ingredients, an item's repair materials, an equippable's entity types, a
+/// damage-type set: a VarInt where `0` means a tag identifier follows and `n`
+/// means `n - 1` explicit bare registry ids.
+///
+/// The tag name is part of the value, not framing. A tag's *membership* is
+/// server-side data that never reaches the client, so a tag-form set collapsed
+/// to an empty id list is indistinguishable from a set that genuinely matches
+/// nothing — and vanilla's own repair materials, saddle-equippable entities and
+/// banner-pattern unlocks are all tags, so the tag arm is the common case
+/// rather than the exotic one.
+fn read_registry_set(reader: &mut Reader<'_>) -> Result<RegistrySet, AdapterError> {
     let discriminator = reader.var_i32().map_err(dec_err)?;
     if discriminator == 0 {
-        let _tag = reader.string(32767).map_err(dec_err)?;
-        return Ok(Vec::new());
+        return Ok(RegistrySet::Tag(reader.string(32767).map_err(dec_err)?));
     }
     let count = usize::try_from(discriminator - 1)
         .map_err(|_| AdapterError::Decode(format!("invalid item set size {discriminator}")))?;
@@ -2527,7 +2617,7 @@ fn read_holder_set(reader: &mut Reader<'_>) -> Result<Vec<i32>, AdapterError> {
     for _ in 0..count {
         items.push(reader.var_i32().map_err(dec_err)?);
     }
-    Ok(items)
+    Ok(RegistrySet::Ids(items))
 }
 
 /// Consumes a `Holder<SoundEvent>` (`vanilla's own sound event's own stream codec`).
@@ -2546,15 +2636,23 @@ fn read_sound_event_holder(reader: &mut Reader<'_>) -> Result<(), AdapterError> 
     Ok(())
 }
 
-/// Decodes vanilla's own equippable-component stream codec, retaining only
-/// the slot.
+/// Decodes vanilla's own equippable-component stream codec into its slot and
+/// its allowed-entities set.
 ///
 /// The slot is a plain id-mapper codec, not an enum ordinal. In particular
 /// wire id 5 is `OffHand` while enum ordinal 5 is `Head`; map from vanilla's
 /// own equipment-slot wire ids explicitly. Vanilla's id-mapper uses its ZERO
 /// out-of-bounds strategy, so malformed ids alias `MainHand` just as vanilla
 /// does rather than inventing a second validation policy here.
-fn read_equippable(reader: &mut Reader<'_>) -> Result<EquipmentSlot, AdapterError> {
+///
+/// The remaining nine fields are equip/shear sounds, an equipment asset id, a
+/// camera overlay texture and five behaviour flags. They are consumed for
+/// alignment: the two sounds for the reason `ConsumeEffect::PlaySound`
+/// documents, and the rest because nothing here draws a first-person overlay or
+/// runs a shear/swap interaction to gate.
+fn read_equippable(
+    reader: &mut Reader<'_>,
+) -> Result<(EquipmentSlot, Option<RegistrySet>), AdapterError> {
     let slot = match reader.var_i32().map_err(dec_err)? {
         0 => EquipmentSlot::MainHand,
         1 => EquipmentSlot::Feet,
@@ -2573,14 +2671,16 @@ fn read_equippable(reader: &mut Reader<'_>) -> Result<EquipmentSlot, AdapterErro
     if reader.bool().map_err(dec_err)? {
         reader.string(32767).map_err(dec_err)?; // cameraOverlay Identifier
     }
-    if reader.bool().map_err(dec_err)? {
-        let _allowed_entities = read_holder_set(reader)?;
-    }
+    let allowed_entities = if reader.bool().map_err(dec_err)? {
+        Some(read_registry_set(reader)?)
+    } else {
+        None
+    };
     for _ in 0..5 {
         reader.bool().map_err(dec_err)?;
     }
     read_sound_event_holder(reader)?; // shearingSound
-    Ok(slot)
+    Ok((slot, allowed_entities))
 }
 
 /// Decodes vanilla's clientbound recipe-book-add packet.
@@ -2605,25 +2705,37 @@ fn decode_recipe_book_add(payload: &[u8]) -> Result<Vec<Directive>, AdapterError
         let Some((result_items, station_items)) = read_recipe_display(&mut reader)? else {
             return Ok(Vec::new());
         };
-        // `OPTIONAL_VAR_INT`, not a bool-prefixed optional.
-        let _group = reader.var_i32().map_err(dec_err)?;
-        let _category = reader.var_i32().map_err(dec_err)?;
-        if reader.bool().map_err(dec_err)? {
+        // `OPTIONAL_VAR_INT`, not a bool-prefixed optional: `0` is absent and a
+        // present value is written one higher, so the offset comes back off
+        // here rather than being carried into the model.
+        let group = match reader.var_i32().map_err(dec_err)? {
+            0 => None,
+            raw => Some(raw - 1),
+        };
+        let category = reader.var_i32().map_err(dec_err)?;
+        let crafting_requirements = if reader.bool().map_err(dec_err)? {
             let requirement_count = reader.var_i32().map_err(dec_err)?;
             let requirement_count = usize::try_from(requirement_count).map_err(|_| {
                 AdapterError::Decode(format!(
                     "invalid crafting requirement count {requirement_count}"
                 ))
             })?;
+            let mut requirements = Vec::with_capacity(requirement_count.min(256));
             for _ in 0..requirement_count {
-                let _ingredient = read_holder_set(&mut reader)?;
+                requirements.push(read_registry_set(&mut reader)?);
             }
-        }
+            Some(requirements)
+        } else {
+            None
+        };
         let flags = reader.i8().map_err(dec_err)?;
         entries.push(RecipeBookEntry {
             display_id,
             result_items,
             station_items,
+            group,
+            category,
+            crafting_requirements,
             notification: flags & 0x01 != 0,
             highlight: flags & 0x02 != 0,
         });
@@ -2671,7 +2783,11 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
         // is kept, not discarded: a stonecutter shows only the results reachable
         // from whatever its input slot holds, so a consumer needs the ingredient
         // each result is keyed by, not just the result.
-        let input = read_holder_set(&mut reader)?;
+        // `RecipePropertySetsUpdated` carries explicit item ids, so a tag-form
+        // ingredient reaches it as an empty list — the one place in this module
+        // where a registry set is narrowed rather than kept whole, because
+        // widening the event reaches consumers outside this crate.
+        let input = read_registry_set(&mut reader)?.explicit_ids().to_vec();
         let display = read_slot_display(&mut reader, 0)?;
         if !display.complete {
             // Emit what was decoded before the unmodeled entry rather than the

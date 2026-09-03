@@ -1074,12 +1074,15 @@ fn encode_recipe_book_add_body(entries: &[ServerRecipeBookEntry], replace: bool)
     for entry in entries {
         w.var_i32(entry.id);
         write_recipe_display(&mut w, &entry.display);
+        // The group is an offset VarInt, **not** a bool-prefixed optional: `0`
+        // is absent and a present value is written one higher. A bool-prefixed
+        // encoding happens to agree on the absent case (a `false` byte and a
+        // zero VarInt are both `0x00`) and mis-frames every following field
+        // whenever a group is present, which is why the client-side decoder in
+        // `adapter::inventory`'s `decode_recipe_book_add` reads it this way.
         match entry.group {
-            Some(group) => {
-                w.bool(true);
-                w.var_i32(group);
-            }
-            None => w.bool(false),
+            Some(group) => w.var_i32(group.saturating_add(1)),
+            None => w.var_i32(0),
         }
         let category = RECIPE_BOOK_CATEGORIES
             .iter()

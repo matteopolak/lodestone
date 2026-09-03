@@ -905,3 +905,61 @@ fn a_merchant_offer_with_a_component_predicate_drops_the_packet() {
     .concat();
     assert!(decode(play::clientbound::MERCHANT_OFFERS, &payload).is_empty());
 }
+
+/// The three per-entry fields between the display walk and the flags byte:
+/// `group`, `category`, and the optional list of reveal-gate ingredient sets.
+///
+/// **`group` is an offset VarInt, not a bool-prefixed optional.** The two
+/// encodings coincide only on the absent case (`0x00` either way), which every
+/// other gate in this file happens to use — so the present case here is what
+/// distinguishes them, and a decoder reading a presence bool would take the
+/// group's own value as the category and desync from there.
+///
+/// The two ingredient sets deliberately use *different* arms: an explicit id
+/// list and a tag name. A decoder that kept only ids would report the second as
+/// gating on nothing.
+#[test]
+fn a_recipe_book_entry_keeps_its_group_category_and_reveal_gate() {
+    let payload: Vec<u8> = [
+        &[0x01u8][..],       // entry count
+        &[0x06],             // display_id
+        &[0x00],             // crafting_shapeless
+        &[0x00],             // no ingredients
+        &item_display(12),   // result
+        &EMPTY_DISPLAY,      // craftingStation
+        // group: OPTIONAL_VAR_INT, present. The value is written one higher, so
+        // 0x0C decodes to 11 — a wrong reader lands on 12 or on a presence bool.
+        &[0x0C],
+        &[0x02],             // category registry id
+        &[0x01],             // craftingRequirements: present
+        &[0x02],             // two ingredient sets
+        &[0x02, 0x1F][..],   // set 1: direct, one entry (1 + 1), item id 31
+        &[0x00][..],         // set 2: tag arm
+        &[0x10][..],         // tag name length 16
+        b"minecraft:planks",
+        &[0x00],             // flags: neither bit
+        &[0x00],             // replace = false
+    ]
+    .concat();
+    let ClientEvent::RecipeBookAdded { entries, replace } =
+        one(play::clientbound::RECIPE_BOOK_ADD, &payload)
+    else {
+        panic!("wrong event");
+    };
+    assert!(!replace, "the trailing flag must still be reached");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].display_id, 6);
+    assert_eq!(
+        entries[0].group,
+        Some(11),
+        "the offset comes off at decode, so the wire's 12 is group 11"
+    );
+    assert_eq!(entries[0].category, 2);
+    assert_eq!(
+        entries[0].crafting_requirements,
+        Some(vec![
+            lodestone_model::RegistrySet::Ids(vec![31]),
+            lodestone_model::RegistrySet::Tag("minecraft:planks".to_owned()),
+        ]),
+    );
+}
