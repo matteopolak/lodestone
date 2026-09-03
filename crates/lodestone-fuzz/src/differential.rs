@@ -1,79 +1,85 @@
-//! Track B of issue #549: the tick-aligned differential-fuzzing harness
-//! skeleton.
-//!
-//! ## Scope, stated honestly
-//!
-//! This module is the harness — the tick-alignment mechanism and the
-//! comparison loop — plus one concrete oracle ([`RconOracle`], gated behind
-//! the `rcon-oracle` feature) that drives *any* Source-RCON endpoint,
-//! vanilla or our own [`lodestone_server::IntegratedServer`] alike, since
-//! both speak the same RCON wire format. What this module does **not** do:
-//!
-//! - **No generation or shrinking over the action alphabet.** [`Script`] is a
-//!   fixed, hand-written sequence today. Issue #549's own suggested order
-//!   puts this *after* "prove the harness agrees on a script with no known
-//!   divergence" — step 2 of 5 — and that is as far as this session got.
-//!   `arbitrary`'s derive is the bridge the issue names for step 3; nothing
-//!   here depends on it yet.
-//! - **No validation against a reverted historical fix.** The issue's own
-//!   "Validation" section — revert a committed fix in a scratch worktree and
-//!   require the fuzzer to rediscover it — needs a corpus of actions rich
-//!   enough to reach the reverted code path, which needs step 3 first.
-//! - **No client-state comparison.** Only the two-`WorldOracle`, block-state
-//!   comparison half exists; the issue's "on the client half" section is
-//!   entirely unaddressed.
-//! - **Reading arbitrary block state over vanilla RCON has no general
-//!   primitive.** `/data get block <pos>` only answers for a block **with**
-//!   a block entity ("The target block has no tile data" otherwise), so
-//!   there is no vanilla RCON command that returns "what block state is at
-//!   this position" for an arbitrary block. [`RconOracle::block_state`]
-//!   therefore reads by **probing a caller-supplied candidate list** with
-//!   `execute if block <pos> <candidate>` — exactly the technique
-//!   `crate::redstone_oracle_gate` (in `lodestone-server`, read-only
-//!   reference here, not edited) already established as the correct way to
-//!   get an exact state read rather than a sampled one. This means today's
-//!   harness can only compare positions whose *possible* resulting states
-//!   the caller enumerates up front — a real, narrowing limitation, not an
-//!   implementation gap to paper over. A future version could add a custom
-//!   data-pack function or a block-entity round-trip trick for full
-//!   generality; neither is built here.
-//! - **Tick alignment between two independently-running server processes has
-//!   no shared "step" primitive either.** Neither side implements a
-//!   `/tick step`/`/tick sprint`-equivalent pause/resume today (`lodestone
-//!   -server` has no `/tick` command at all yet, per a grep of
-//!   `crates/lodestone-server/src/commands/` done while writing this), and
-//!   vanilla's own `/tick step` famously does not advance scheduled block
-//!   ticks (`docs/fuzz-harness.md`'s sibling record, and
-//!   `redstone_oracle_gate.rs`'s own module doc, both name this trap).
-//!   [`RconOracle::advance_tick`] instead sleeps one real tick interval
-//!   (`TICK_MILLIS`, matching vanilla's own 50 ms) and lets each side's
-//!   already-running tick loop advance on its own — the same "real time,
-//!   never `tick step`" discipline `redstone_oracle_gate.rs` already uses for
-//!   its own timing measurements. This bounds tick alignment to "close
-//!   enough that both sides have had at least one real tick", not "the exact
-//!   same tick count provably elapsed on both processes" — a real
-//!   imprecision, named rather than hidden.
+//! The tick-aligned differential-fuzzing harness: run one action script
+//! against two worlds and report the **first tick** at which they disagree.
 //!
 //! ## What is real and load-bearing here
 //!
-//! [`run_differential`] is the actual comparison loop the issue's design
-//! insists on: it compares **every tick**, not just the end state, and
+//! [`run_differential`] compares **every tick**, not just the end state, and
 //! returns the **first** diverging tick/position/pair of values rather than
-//! aggregating — "comparing only the final state loses the signal that
-//! localises the bug" (issue #549). `tests/differential_harness_self_check.rs`
-//! proves this against two in-memory fake oracles (no server, no
-//! network, runs in milliseconds): an identical script against two fresh
-//! fakes finds no divergence, and a script that diverges on the fake's
-//! *n*th tick is caught at exactly tick *n*, not merely "eventually" — the
-//! tick-localisation property this whole module exists for.
+//! aggregating — comparing only the final state loses the signal that
+//! localises the bug, and the two most instructive bug classes here (a fluid
+//! spreading at the wrong rate, a piston committing on the wrong tick) are
+//! *timing* bugs that agree on the final state.
+//! `tests/differential_harness_self_check.rs` proves the loop against two
+//! in-memory fake oracles (no server, no network, runs in milliseconds): an
+//! identical script against two fresh fakes finds no divergence, and a script
+//! that diverges on the fake's *n*th tick is caught at exactly tick *n*, not
+//! merely "eventually".
+//!
+//! Two concrete oracles exist:
+//!
+//! * [`rcon::RconOracle`] (behind the `rcon-oracle` feature) drives any
+//!   Source-RCON endpoint, so it works against a real vanilla server and
+//!   against our own [`lodestone_server::IntegratedServer::start_rcon`] with
+//!   the same code.
+//! * [`fluid::FluidModelOracle`] drives this workspace's fluid model
+//!   in-process through the same production entry point the world tick loop
+//!   drains its scheduled block ticks into.
+//!
+//! Pairing those two is what `tests/differential_live_fluid_spread.rs` does,
+//! and it is the comparison that actually measures us against vanilla.
+//!
+//! ## The two reading and timing constraints, measured
+//!
+//! - **Reading arbitrary block state over vanilla RCON has no general
+//!   primitive.** `/data get block <pos>` only answers for a block **with** a
+//!   block entity ("The target block has no tile data" otherwise), so there
+//!   is no vanilla RCON command that returns "what block state is at this
+//!   position" for an arbitrary block. [`rcon::RconOracle::block_state`]
+//!   therefore reads by **probing a caller-supplied candidate list** with the
+//!   terminal `execute if block <pos> <candidate>` form, whose feedback is
+//!   `Test passed`/`Test failed`. So a comparison can only cover positions
+//!   whose possible resulting states the caller enumerates up front — a real,
+//!   narrowing limitation. [`state_matches`] gives the in-process side the
+//!   same subset-matching semantics so both sides answer in one alphabet.
+//! - **Neither side has a usable single-tick step primitive, and vanilla's
+//!   `/tick step` is measurably not one.** Measured on a live 26.2 server
+//!   with `pause-when-empty-seconds=0` (so the world was demonstrably not
+//!   merely paused), with a control on the same rig in the same run: a water
+//!   source in a closed channel advanced its front exactly one cell per 5
+//!   ticks under real time, and advanced **zero** cells across 25 consecutive
+//!   `/tick freeze` + `/tick step 1` pairs. Scheduled block ticks do not run
+//!   under `tick step`, and the world being frozen rather than paused does
+//!   not change that.
+//!
+//!   [`rcon::RconOracle::advance_tick`] therefore sleeps one real tick
+//!   interval ([`TICK_MILLIS`], 50 ms) and lets the server's own loop
+//!   advance. That bounds an RCON-side comparison to about ±1 tick of
+//!   alignment rather than an exact tick count, which is why
+//!   [`fluid::FluidModelOracle`] steps *exactly* — putting the whole error
+//!   budget on one side instead of two. Measured on the same rig, real-time
+//!   alignment was good to well under a tick: cell *N* first read as water at
+//!   249·*N* ms across two independent trials, against a 250·*N* ms
+//!   prediction.
+//!
+//! ## What this module does not do yet
+//!
+//! - **No generation or shrinking over the action alphabet.** [`Script`] is a
+//!   fixed, hand-written sequence. `arbitrary`'s derive is the intended
+//!   bridge; nothing here depends on it.
+//! - **No validation against a reverted historical fix** — revert a committed
+//!   fix in a scratch worktree and require the harness to rediscover it. That
+//!   needs an action corpus rich enough to reach the reverted code path,
+//!   which needs generation first.
+//! - **No client-state comparison.** Only the two-`WorldOracle`, block-state
+//!   half exists.
 
 use std::time::Duration;
 
-/// One action applied to a world. Deliberately small today — issue #549's
-/// suggested biasing ("waterloggable blocks, fluids, redstone, containers,
-/// falling blocks, pistons") all reduce to a `SetBlock` plus letting the
-/// server's own tick loop react, which is why this alphabet starts here
-/// rather than modelling every vanilla command.
+/// One action applied to a world. Deliberately small: the families where
+/// divergence has actually been found here — waterloggable blocks, fluids,
+/// redstone, containers, falling blocks, pistons — all reduce to a
+/// `SetBlock` plus letting the server's own tick loop react, which is why
+/// this alphabet starts here rather than modelling every vanilla command.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// `/setblock x y z <state>` (or the equivalent direct world-sink call
@@ -86,8 +92,8 @@ pub enum Action {
     /// a raw command string, sent verbatim to an oracle that supports one
     /// (RCON does; a hermetic fake may simply refuse it). Kept separate from
     /// `SetBlock` rather than folding everything into "run a command" so a
-    /// non-command-based oracle (a future in-process `ChunkSource` oracle,
-    /// say) can still implement the common case.
+    /// non-command-based oracle ([`fluid::FluidModelOracle`]) can still
+    /// implement the common case.
     RunCommand(String),
 }
 
@@ -133,9 +139,10 @@ impl Script {
 /// module's doc explains: an oracle with no general block-state-read
 /// primitive (real vanilla RCON) can only tell you which of a supplied list
 /// the position currently matches, not enumerate the state itself. An oracle
-/// with a real read primitive (a future in-process `ChunkSource` oracle) is
-/// free to ignore `candidates` and return the true state directly — the
-/// trait does not require probing, only permits it.
+/// with a real read primitive ([`fluid::FluidModelOracle`]) still answers in
+/// the candidate alphabet, via [`state_matches`], so both sides of a
+/// comparison speak the same language — the trait does not require probing,
+/// only permits it.
 pub trait WorldOracle {
     type Error: std::fmt::Display;
 
@@ -151,10 +158,16 @@ pub trait WorldOracle {
 
 /// Where two oracles disagreed: the first tick, position and pair of
 /// observed values `run_differential` found — never an aggregate, per this
-/// module's whole reason for existing (CLAUDE.md: "comparing only the final
-/// state loses the signal that localises the bug").
+/// module's whole reason for existing: comparing only the final state loses
+/// the signal that localises the bug.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Divergence {
+    /// The **0-based index of the tick that had just been run**, so `0` means
+    /// "after exactly one elapsed tick": [`run_differential`] applies the
+    /// steps scheduled for tick *T*, runs tick *T*, then compares. A
+    /// divergence reported at `tick: 0` for a script whose only action is
+    /// scheduled at tick 0 therefore says the two sides already disagreed on
+    /// the very first tick either of them ran, not before any of them did.
     pub tick: u64,
     pub pos: (i32, i32, i32),
     /// `None` means "did not match any candidate", distinct from a specific
@@ -194,14 +207,14 @@ pub enum DifferentialOutcome {
 /// position in `region` (each entry a position plus the candidate states
 /// worth probing there, per [`WorldOracle::block_state`]'s doc) after every
 /// tick, and returning the *first* disagreement rather than collecting all
-/// of them — the tick-localisation property issue #549 asks for by name.
+/// of them — the tick-localisation property this module exists for.
 ///
 /// Runs `script.last_tick() + settle_ticks` ticks total: actions scheduled
 /// for a tick are applied to **both** sides, in script order, before either
 /// side is ticked, then both are advanced one tick, then every `region`
 /// entry is compared. `settle_ticks` exists because a real mechanic can
-/// react on a delay (a redstone torch's `TOGGLE_DELAY = 2`, per
-/// `redstone_oracle_gate.rs`) — comparing only through the last scheduled
+/// react on a delay (a redstone torch inverts two ticks after its input
+/// changes) — comparing only through the last scheduled
 /// action would miss a divergence that only manifests after it.
 pub fn run_differential<L: WorldOracle, R: WorldOracle>(
     script: &Script,
@@ -296,6 +309,7 @@ pub mod rcon {
     use lodestone_testsupport::RconClient;
     use std::net::ToSocketAddrs;
 
+    #[derive(Debug)]
     pub struct RconOracle {
         client: RconClient,
         /// Prefixed to every position this oracle touches, so two oracles
@@ -350,19 +364,273 @@ pub mod rcon {
         fn block_state(&mut self, pos: (i32, i32, i32), candidates: &[String]) -> Result<Option<String>, Self::Error> {
             let (x, y, z) = self.world_pos(pos);
             for candidate in candidates {
-                let response = self
-                    .client
-                    .command(&format!("execute if block {x} {y} {z} {candidate} run say match"))?;
-                // Vanilla's `execute if` prints nothing (empty success
-                // response with no feedback) when the condition is false and
-                // runs the attached `say` (echoing back "match") when it is
-                // true — probing one candidate at a time, first hit wins,
-                // exactly `redstone_oracle_gate.rs`'s own technique.
-                if response.contains("match") {
+                // The TERMINAL `execute if block` form, whose own feedback is
+                // the literal string `Test passed` or `Test failed`.
+                //
+                // The `... run say <marker>` variant is measurably useless
+                // over RCON and fails in the silent direction: `say`
+                // broadcasts to chat and sends the command source no
+                // feedback, so an RCON caller gets an EMPTY response body for
+                // both the matching and the non-matching case. A probe built
+                // that way answers "no candidate matched" for every position
+                // in every world, which makes two oracles agree
+                // unconditionally — an `Agreed` outcome that measures
+                // nothing. Measured against a live 26.2 server, both arms:
+                // `run say` returned `''` for a true and a false condition
+                // alike, while the terminal form returned `Test passed` /
+                // `Test failed` respectively.
+                //
+                // Anything else coming back (a parse error, a permission
+                // refusal, a response from a server that does not implement
+                // this command) is an oracle failure, NOT "did not match":
+                // conflating the two is how a broken rig reports agreement.
+                let response = self.client.command(&format!("execute if block {x} {y} {z} {candidate}"))?;
+                let response = response.trim();
+                if response.starts_with("Test passed") {
                     return Ok(Some(candidate.clone()));
+                }
+                if !response.starts_with("Test failed") {
+                    return Err(std::io::Error::other(format!(
+                        "`execute if block {x} {y} {z} {candidate}` answered {response:?}, \
+                         which is neither `Test passed` nor `Test failed`"
+                    )));
                 }
             }
             Ok(None)
+        }
+    }
+}
+
+/// Does `state` match the state *pattern* `candidate`?
+///
+/// The two sides of a comparison have to answer in the same alphabet, and the
+/// two read primitives are shaped differently: a real vanilla server answers
+/// `execute if block <pos> <pattern>`, which matches on the base block name
+/// plus **only the properties the pattern spells out**, while an in-process
+/// oracle can read the full canonical state string. This function gives the
+/// in-process side the vanilla side's matching semantics, so
+/// `minecraft:water` matches `minecraft:water[level=3]` on both sides and a
+/// pattern naming a property still discriminates on it.
+///
+/// Property order is irrelevant on both sides — a pattern's pairs are looked
+/// up individually rather than compared as a substring.
+#[must_use]
+pub fn state_matches(state: &str, candidate: &str) -> bool {
+    let (state_name, state_props) = split_state(state);
+    let (candidate_name, candidate_props) = split_state(candidate);
+    if state_name != candidate_name {
+        return false;
+    }
+    candidate_props.iter().all(|(key, value)| {
+        state_props
+            .iter()
+            .any(|(state_key, state_value)| state_key == key && state_value == value)
+    })
+}
+
+fn split_state(state: &str) -> (&str, Vec<(&str, &str)>) {
+    match state.split_once('[') {
+        None => (state, Vec::new()),
+        Some((name, rest)) => {
+            let props = rest
+                .strip_suffix(']')
+                .unwrap_or(rest)
+                .split(',')
+                .filter(|pair| !pair.is_empty())
+                .filter_map(|pair| pair.split_once('='))
+                .map(|(k, v)| (k.trim(), v.trim()))
+                .collect();
+            (name, props)
+        }
+    }
+}
+
+pub mod fluid {
+    //! [`FluidModelOracle`]: the *our-side* [`WorldOracle`], driving this
+    //! workspace's fluid model through the same production entry point the
+    //! world tick loop drains its scheduled block ticks into.
+    //!
+    //! This is the half that makes the harness compare **us** against vanilla
+    //! rather than vanilla against itself. Two properties matter:
+    //!
+    //! * **Exact tick stepping.** Nothing here sleeps. `advance_tick`
+    //!   increments a counter, drains every tick due at that number and runs
+    //!   it — so our side's tick numbering is exact, and any imprecision in a
+    //!   comparison comes from the other side's real-time alignment alone.
+    //!   That asymmetry is deliberate: it puts the whole error budget in one
+    //!   place instead of two.
+    //! * **A real read primitive.** `block_state` reads the world directly
+    //!   and reports which of the caller's candidate patterns matches, via
+    //!   [`super::state_matches`] — the same subset-matching semantics a real
+    //!   server's own `execute if block` uses, so both sides answer in one
+    //!   alphabet.
+    //!
+    //! The world behind it is a flat rig: a solid floor at a caller-chosen
+    //! `y`, air above, and whatever the script writes. It is not a worldgen
+    //! world, and that is the point — a differential comparison needs both
+    //! sides to start from a shape the caller can build on either, and a
+    //! `/fill`ed stone channel is buildable on any vanilla world at any
+    //! coordinates.
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use lodestone_model::BlockPos;
+    use lodestone_server::fluid::{FluidEnv, run_scheduled_tick, ticks_after_edit};
+    use lodestone_server::{ChunkColumn, ChunkSource, ScheduledTickQueue};
+
+    use super::{Action, WorldOracle, state_matches};
+
+    /// A sparse block store with a solid floor, sufficient for the fluid
+    /// model's reads (`block_state`) and writes (`set_block`).
+    #[derive(Debug)]
+    struct FlatRig {
+        blocks: Mutex<HashMap<(i32, i32, i32), String>>,
+        floor_y: i32,
+        floor_state: String,
+    }
+
+    impl ChunkSource for FlatRig {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            // Never read by the fluid model, which goes through
+            // `block_state`/`set_block`. A column is still required by the
+            // trait, so answer with an empty one of the right vertical
+            // extent rather than a panic that would be reached only if that
+            // ever changed.
+            ChunkColumn::new(FLUID_MIN_Y, FLUID_HEIGHT / 16)
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            if let Some(state) = self.blocks.lock().expect("rig lock").get(&(x, y, z)) {
+                return state.clone();
+            }
+            if y == self.floor_y {
+                return self.floor_state.clone();
+            }
+            "minecraft:air".to_owned()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            "minecraft:plains".to_owned()
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            self.blocks
+                .lock()
+                .expect("rig lock")
+                .insert((x, y, z), name.to_owned());
+        }
+    }
+
+    /// Vertical extent of the rig, matching an overworld dimension's own
+    /// build limits so the fluid model's below-the-world guard behaves as it
+    /// does in production rather than being exercised at an unusual `y`.
+    const FLUID_MIN_Y: i32 = -64;
+    const FLUID_HEIGHT: i32 = 384;
+
+    /// Our side of a differential comparison, over the fluid model.
+    #[derive(Debug)]
+    pub struct FluidModelOracle {
+        rig: FlatRig,
+        queue: ScheduledTickQueue<String>,
+        tick: u64,
+        origin: (i32, i32, i32),
+        env: FluidEnv,
+    }
+
+    impl FluidModelOracle {
+        /// `origin` is added to every position an [`Action`] or a
+        /// `block_state` query names, mirroring the RCON oracle's own offset
+        /// so one script can be written in relative coordinates and run on
+        /// both sides.
+        ///
+        /// `floor_y` is relative to `origin`: the floor sits at
+        /// `origin.1 + floor_y`, so a script writing a fluid at relative
+        /// `(0, 0, 0)` rests on a floor built with `floor_y = -1`.
+        #[must_use]
+        pub fn new(origin: (i32, i32, i32), floor_y: i32, floor_state: &str) -> Self {
+            Self {
+                rig: FlatRig {
+                    blocks: Mutex::new(HashMap::new()),
+                    floor_y: origin.1 + floor_y,
+                    floor_state: floor_state.to_owned(),
+                },
+                queue: ScheduledTickQueue::new(),
+                tick: 0,
+                origin,
+                env: FluidEnv::OVERWORLD,
+            }
+        }
+
+        /// Writes a block WITHOUT scheduling the edit's follow-up ticks — for
+        /// building the rig before a script runs, where a `/fill`ed wall must
+        /// not be a fluid trigger of its own.
+        pub fn place_static(&mut self, pos: (i32, i32, i32), state: &str) {
+            let (x, y, z) = self.world_pos(pos);
+            self.rig.set_block(x, y, z, state);
+        }
+
+        fn world_pos(&self, pos: (i32, i32, i32)) -> (i32, i32, i32) {
+            (self.origin.0 + pos.0, self.origin.1 + pos.1, self.origin.2 + pos.2)
+        }
+
+        /// The tick number this oracle has advanced to. Exact by
+        /// construction, unlike a real-time-aligned oracle's.
+        #[must_use]
+        pub fn tick(&self) -> u64 {
+            self.tick
+        }
+    }
+
+    impl WorldOracle for FluidModelOracle {
+        type Error = std::convert::Infallible;
+
+        fn apply(&mut self, action: &Action) -> Result<(), Self::Error> {
+            match action {
+                Action::SetBlock { pos, state } => {
+                    let (x, y, z) = self.world_pos(*pos);
+                    self.rig.set_block(x, y, z, state);
+                    // The same follow-up ticks a production block edit
+                    // schedules, so a script's `SetBlock` behaves like the
+                    // set-block path it stands for rather than like a silent
+                    // poke at the store.
+                    for pending in ticks_after_edit(BlockPos::new(x, y, z)) {
+                        self.queue.schedule(
+                            pending.pos,
+                            pending.kind,
+                            self.tick + pending.trigger_tick,
+                            pending.priority,
+                        );
+                    }
+                }
+                Action::RunCommand(_) => {
+                    // No command grammar on this side by design: a command
+                    // string is a vanilla-shaped instruction, and reproducing
+                    // its parse here would make this oracle a second command
+                    // implementation to keep in step. Rig construction goes
+                    // through `place_static` instead.
+                }
+            }
+            Ok(())
+        }
+
+        fn advance_tick(&mut self) -> Result<(), Self::Error> {
+            self.tick += 1;
+            let mut changes = Vec::new();
+            for entry in self.queue.drain_due(self.tick, usize::MAX) {
+                let pos = BlockPos::new(entry.pos.0, entry.pos.1, entry.pos.2);
+                changes.clear();
+                run_scheduled_tick(&self.rig, self.env, pos, &mut self.queue, self.tick, &mut changes);
+            }
+            Ok(())
+        }
+
+        fn block_state(&mut self, pos: (i32, i32, i32), candidates: &[String]) -> Result<Option<String>, Self::Error> {
+            let (x, y, z) = self.world_pos(pos);
+            let state = self.rig.block_state(x, y, z);
+            Ok(candidates
+                .iter()
+                .find(|candidate| state_matches(&state, candidate))
+                .cloned())
         }
     }
 }
