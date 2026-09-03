@@ -596,6 +596,13 @@ Three eras have now landed, and the numbers separate two cases the plan treated 
 | 1.13 | 404 (singleton) | 5,531 | n/a |
 | 1.17 | 756, 758 | 6,229 | 131 lines |
 
+The 1.17 figure is the **strongest** reading the marginal claim has had, not the weakest: 1.9's
+~20 and 1.14's 69 were both on top of chunk framing that did not change across their era, while
+1.18 rewrote it — the chunk buffer gained a trailing zero byte per single-valued-palette section,
+so the exact-length assertion every other protocol here relies on is simply false at 758. A
+framing rewrite still cost 131 lines against a ~500-line threshold.
+| 1.17 | 756, 758 | 6,229 | 131 lines |
+
 **The mechanism works, and the falsifier is passed** — adding a version to an era that already
 exists costs 20-70 hand-written lines against a ~500-line threshold, versus ~5.5k for a
 copy-forward. That is the claim this plan was built on and it holds.
