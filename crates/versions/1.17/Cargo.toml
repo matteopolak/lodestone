@@ -1,0 +1,53 @@
+[package]
+name = "lodestone-v1-17"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-core = { workspace = true }
+lodestone-data = { workspace = true }
+lodestone-macros = { workspace = true }
+lodestone-model = { workspace = true }
+# Packet definitions measured byte-identical (wire shape and codec) to their
+# v1-8/v1-9 counterparts; see that crate's module docs for which packets and
+# their protocol ranges.
+lodestone-protocol-common = { workspace = true }
+lodestone-world = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+# Enables the white-box live chunk-decode test, which drives a real 1.16.5 join
+# at the packet level and decodes `map_chunk` (flattened flat state ids,
+# non-straddling long packing, a 1024-entry 3-D biome array) plus the separate
+# `update_light` (the 1.14 light split) into `lodestone-world` storage. Off by
+# default so the default build stays hermetic. It lives in this crate (not
+# `lodestone-client`) because it names this crate's concrete chunk types,
+# keeping `lodestone-client` free of any version-crate reference.
+live-chunk = []
+
+# Enables the white-box live entity test: drives a real 1.16.5 join, summons
+# passive mobs over RCON and decodes `spawn_entity_living` / `entity_metadata`
+# packets with this crate's codecs (exercising the unified 1.16 entity registry
+# and the 1.16.5 metadata type table on real bytes). Off by default so the
+# default build stays hermetic; lives here to keep `lodestone-client` free of
+# any version-crate reference.
+live-entity = []
+
+# Enables the white-box live interaction test: drives a real 1.16.5 join, sets
+# the player to creative over RCON, then breaks and places blocks through this
+# crate's `encode_action` serverbound path and reads the result back with
+# `execute if block` (a server-computed oracle). Off by default so the default
+# build stays hermetic; lives here to keep `lodestone-client` free of any
+# version-crate reference.
+live-interaction = []
+
+[dev-dependencies]
+lodestone-net = { workspace = true }
+lodestone-testsupport = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
