@@ -3616,6 +3616,50 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
         unclassified.sort_by(|a, b| a.packet.cmp(&b.packet));
         depth_limited.sort_by(|a, b| a.packet.cmp(&b.packet));
 
+        // A family whose adapter plainly dispatches, but from which this
+        // scanner extracted nothing, is a scanner failure and must not be
+        // reported as a score.
+        //
+        // Both of this function's arm scanners recognise dispatch by its
+        // *spelling*: the if-chain scanner by literal `if packet_id ==`, the
+        // table scanner by a literal `Handler::new(` with the resource name
+        // in the preceding 400 bytes. Neither is a property of a correct
+        // adapter, so a family is free to be correct and unreadable at the
+        // same time — and the result of that is `decoded 0/N`, which reads
+        // exactly like a family that decodes nothing. That has now happened
+        // twice, for two different spellings: once when three families moved
+        // to a data-driven table, and once when a family factored its
+        // entries through a `const fn` helper instead of writing the call
+        // literally.
+        //
+        // Zero is therefore only believable when there is nothing to find.
+        // With dispatch evidence present and no arms parsed, fail loudly and
+        // name what to look at, because the failure is otherwise indis-
+        // tinguishable from the very defect the whole subcommand exists to
+        // report.
+        if arms.is_empty() && !play_ids.clientbound.is_empty() {
+            const DISPATCH_MARKERS: [&str; 4] =
+                ["if packet_id ==", "Handler::new(", "dispatch::Table", "Handler<"];
+            if let Some(marker) = DISPATCH_MARKERS
+                .iter()
+                .find(|marker| combined_adapter_source.contains(**marker))
+            {
+                bail!(
+                    "family {family} has {} play clientbound packet ids and its adapter \
+                     contains `{marker}`, but no dispatch arm could be parsed from it. This \
+                     is a failure of this scanner, not a score of zero: the if-chain arm \
+                     reader anchors on the literal text `if packet_id ==`, and the table \
+                     reader on a literal `Handler::new(` whose resource-name string literal \
+                     lies within the preceding 400 bytes. An adapter that builds its entries \
+                     through a helper, a macro, or any other indirection is correct and \
+                     unreadable here. Either spell the entries so one anchor matches, or \
+                     teach `classify_clientbound_dispatch_table` the new shape -- but do not \
+                     leave it reporting zero.",
+                    play_ids.clientbound.len()
+                );
+            }
+        }
+
         families.push(ConnectednessFamily {
             family,
             play_clientbound_total: play_ids.clientbound.len(),
@@ -11620,6 +11664,84 @@ fn handle_play(
         );
         assert!(report.render().contains("SKIPPED"));
         assert!(report.render().contains("v5"));
+        Ok(())
+    }
+
+    /// An adapter that dispatches through an indirection neither arm reader
+    /// recognises must fail loudly, not score zero.
+    ///
+    /// Both readers match on spelling — the if-chain one on the literal
+    /// `if packet_id ==`, the table one on a literal `Handler::new(` with the
+    /// resource-name literal within the preceding 400 bytes — and neither is
+    /// a property of a correct adapter. So an adapter can be entirely correct
+    /// and completely unreadable here, and the output for that is
+    /// `decoded 0/N`: indistinguishable from a family that decodes nothing,
+    /// which is the exact defect this subcommand exists to report. It has
+    /// happened twice in this repo, for two different spellings.
+    ///
+    /// The fixture below is the second of those: entries built through a
+    /// helper rather than by writing the call literally.
+    #[test]
+    fn an_adapter_whose_dispatch_this_scanner_cannot_read_fails_instead_of_scoring_zero()
+    -> Result<()> {
+        let workspace = connectedness_fixture_workspace()?;
+        // Overwrite the flagship family's adapter with a table whose entries
+        // never spell `Handler::new(` — the shape that measured 0/122 while
+        // being correct.
+        std::fs::write(
+            workspace.join("crates/versions/26.2/src/adapter.rs"),
+            r#"
+const fn entry(name: &'static str, id: i32, f: DecodeFn) -> (&'static str, Handler) {
+    (name, Handler::new(id..=id, f))
+}
+
+fn handle_system_chat(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> {
+    Ok(vec![Directive::Emit(ClientEvent::Chat { text: String::new() })])
+}
+
+static CLIENTBOUND: &[(&str, Handler)] = &[
+    entry("minecraft:system_chat", 0, handle_system_chat),
+];
+
+fn table() -> dispatch::Table {
+    dispatch::Table::new(CLIENTBOUND)
+}
+"#,
+        )?;
+
+        let error = connectedness_report(&workspace)
+            .expect_err("a family with dispatch evidence and no readable arms must fail");
+        let rendered = format!("{error:#}");
+        assert!(
+            rendered.contains("no dispatch arm could be parsed"),
+            "the failure must say the scanner could not read the adapter: {rendered}"
+        );
+        assert!(
+            rendered.contains("26.2"),
+            "the failure must name the family so it is actionable: {rendered}"
+        );
+        Ok(())
+    }
+
+    /// The negative half of the control above: an adapter with no dispatch
+    /// evidence at all still reports zero rather than failing.
+    ///
+    /// Without this, the guard could be satisfied by refusing every empty
+    /// family, which would make it fire on a family that genuinely has not
+    /// been written yet — a false alarm in place of a false zero, no better.
+    /// The fixture's own `v9` family is exactly that case: one clientbound id
+    /// and a deliberately empty `adapter.rs`.
+    #[test]
+    fn an_empty_adapter_still_scores_zero_rather_than_failing() -> Result<()> {
+        let workspace = connectedness_fixture_workspace()?;
+        let report = connectedness_report(&workspace)?;
+        let v9 = report
+            .families
+            .iter()
+            .find(|f| f.family == "v9")
+            .expect("v9 is scanned");
+        assert_eq!(v9.examined_clientbound_arms, 0);
+        assert_eq!(v9.play_clientbound_decoded, 0);
         Ok(())
     }
 
