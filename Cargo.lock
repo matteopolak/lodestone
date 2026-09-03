@@ -2757,6 +2757,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lodestone-block-jobs"
+version = "0.1.0"
+dependencies = [
+ "bevy_app",
+ "bevy_ecs",
+ "lodestone-ecs",
+ "lodestone-model",
+ "lodestone-physics",
+]
+
+[[package]]
 name = "lodestone-canonical"
 version = "0.1.0"
 dependencies = [
@@ -3307,6 +3318,24 @@ name = "lodestone-time"
 version = "0.1.0"
 dependencies = [
  "web-time",
+]
+
+[[package]]
+name = "lodestone-v1-13"
+version = "0.1.0"
+dependencies = [
+ "lodestone-core",
+ "lodestone-data",
+ "lodestone-macros",
+ "lodestone-model",
+ "lodestone-net",
+ "lodestone-protocol-common",
+ "lodestone-testsupport",
+ "lodestone-world",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]
