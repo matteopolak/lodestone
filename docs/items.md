@@ -71,6 +71,67 @@ right elsewhere. Test gotcha: never use a component about to be modelled as a
 test's "unmodelled" stand-in, and a single-item fixture cannot see a list
 caller that ignores the decode verdict.
 
+### Item nesting is sender-chosen, so the decoders bound it
+
+Container-shaped components hold item stacks, and a contained stack declares its
+own component patch, so the wire structure is a cycle: patch → contained stack →
+patch. Nothing on the wire closes it. There is no length prefix and no declared
+level count anywhere in the chain, so the nesting depth is whatever the sender
+wrote — which made one crafted stack from any server a player joined enough to
+exhaust the decoding thread's stack and abort the process, on the headless path
+as much as the playable one.
+
+Four routes reach the cycle in the 26.2 decoder, and every one of them passes
+through `read_component_patch`: `minecraft:container` and
+`minecraft:use_remainder` (and `sulfur_cube_content`) via
+`read_item_stack_template_tolerant`, `minecraft:bundle_contents` and
+`minecraft:charged_projectiles` via their own per-entry readers. The bound
+therefore lives in one place — a `Depth` budget entered at the top of
+`read_component_patch`, not incremented at the call sites that descend — so a
+nesting component added to that match inherits it without its author having to
+remember anything. `read_slot_display`, the recipe-display walk, enters the same
+budget and shares it, since a display can contain a stack and a stack's
+component can contain a display. `Depth` has no arithmetic and no constructor
+from a number: `Depth::ROOT` and the checked descent are the only ways to get
+one.
+
+The cap is **19**, and it is the deepest nesting the game itself will construct,
+summed per route:
+
+| term | where it comes from |
+|---|---|
+| 16 | bundle-in-bundle wraps: a nested bundle costs a flat 1/16 of a bundle's weight budget of 1, so the *n*-th in a chain weighs `(n-1)/16` and the 17th insert is refused. The only route that nests repeatedly. |
+| +1 | the one container-item level able to hold such a chain — a container item refuses to hold *another* container item (the fit-inside-a-container-item rule is false for a shulker-box block item), so this level cannot repeat. |
+| +1 | a stack named by a prototype component (a use remainder, a sulfur cube's content) enclosing the whole thing. |
+
+A payload deeper than that is not a large inventory; it is one no server
+following the game's own rules can produce, and refusing it costs a packet.
+
+**The cap has to be reachable, and that constrains how generous it can be.**
+A cap the decoder overflows *before* hitting is a crash behind an accepted input
+rather than a bound, so the `nesting_budget` gates decode at exactly the cap as
+well as one past it. `ItemComponents` is over 1.7 KB and the thread that decodes
+packets gets the platform default stack of 2 MiB, so holding it as a by-value
+local cost a copy per match arm and put the measured survivable depth at
+**19 levels**;
+boxing it inside `read_component_patch` and dropping the `ItemStack` that
+`read_item_stack_template_tolerant` built and every caller discarded moved that
+to **48 levels and not 64**. That is why the borrowed ceiling here is *not* the
+512-level serialized-structure limit the NBT reader enforces: NBT frames are a
+rounding error beside these, and a cap of 512 would have been unreachable in
+every build.
+
+The same cycle exists in the 1.20.6-era slot decoder (`Slot::decode` →
+`read_component_payload` → `skip_component_payload` → `Slot::decode`, reached by
+that era's three list-of-nested-stacks payloads) and is bounded the same way,
+with the check at `decode_nested`'s top. Its frames are small enough that
+reachability was never in question.
+
+Regression coverage lives in `fuzz/seeds/v26_2_clientbound_decode/`: the
+original crash input plus a pair at the cap and one past it, so `fuzz/smoke.sh`
+replays all three on every push. A clean fuzz *run* is evidence about that run's
+mutation path and not about the code — the committed seeds are the durable half.
+
 ### Consuming a component's bytes is not the same as keeping its value
 
 A component arm has two independent jobs: advance the reader by exactly the

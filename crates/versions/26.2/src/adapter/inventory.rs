@@ -9,6 +9,85 @@ use lodestone_model::{
     AttackRange, BlocksAttacks, ConsumeEffect, DamageReduction, MobEffectInstance, RegistrySet,
 };
 
+/// Maximum nesting this module will walk through sender-chosen structure.
+///
+/// Item stacks nest: a container-shaped component (a shulker box's slots, a
+/// bundle's contents, a crossbow's charged projectiles, a consumable's use
+/// remainder) holds item stacks, and each contained stack carries its own
+/// component patch. Nothing on the wire bounds that — no length prefix, no
+/// declared level count anywhere in the chain — so the depth is whatever the
+/// sender wrote. Unbounded, one crafted stack from any server a player joins
+/// exhausts the decoding thread's stack and aborts the process, on the
+/// headless path as much as the playable one.
+///
+/// # Where the number comes from
+///
+/// It is the deepest item nesting the game itself will construct, summed from
+/// the rules that bound each route:
+///
+/// - **16 bundle wraps.** A bundle inside a bundle costs a flat 1/16 of a
+///   bundle's weight budget of 1 on top of the nested bundle's own weight, and
+///   an insert is refused once that budget is spent — so a chain of nested
+///   empty bundles stops at 17 stacks (the *n*-th weighs `(n-1)/16`, and
+///   `17/16 > 1`). This is the only route that nests repeatedly.
+/// - **+1 container level.** A container item's slots can hold that chain but
+///   not another container item: the fit-inside-a-container-item rule is false
+///   for a shulker-box block item specifically, so this level cannot repeat.
+/// - **+1 prototype-carried level.** A stack named by a prototype component —
+///   a use remainder, a sulfur cube's content — can enclose the whole thing.
+///
+/// A payload deeper than this is not a large inventory; it is one no server
+/// following the game's own rules can produce. Refusing it costs a packet.
+///
+/// # Why it is not simply generous
+///
+/// The bound has to be *reachable*: a cap the decoder overflows before
+/// reaching is a crash behind an accepted input rather than a bound, which is
+/// why `nesting_budget` gates decoding at exactly this depth. `ItemComponents`
+/// is over 1.7 KB, so one level of this recursion costs tens of kilobytes of
+/// frame even with that value boxed, and the thread that decodes packets gets
+/// the platform default stack of 2 MiB. Measured on that stack in an
+/// unoptimised build, decoding survives 48 levels and not 64, so this cap sits
+/// inside a factor of two of the measurement and a much larger one could not be
+/// honoured. Vanilla's serialized-structure depth limit
+/// ([`lodestone_core::NBT_MAX_DEPTH`]) is the wrong ceiling to borrow for
+/// exactly that reason: it bounds NBT tags, whose frames are a rounding error
+/// beside these.
+const MAX_ITEM_NESTING: usize = 16 + 1 + 1 + 1;
+
+/// How deeply the read in progress is nested inside sender-chosen structure.
+///
+/// The bound is enforced by [`Depth::enter`], and `enter` is called at the top
+/// of each reader that a recursion cycle passes through
+/// ([`read_component_patch`] for the item-component cycle,
+/// [`read_slot_display`] for the recipe-display one) rather than at the call
+/// sites that descend. A nesting component added to either reader therefore
+/// inherits the bound without its author having to remember anything, which is
+/// the property a `depth + 1` at every call site does not have.
+///
+/// The type carries no arithmetic and no constructor from a number: the only
+/// ways to obtain one are [`Depth::ROOT`], used where a packet's outermost
+/// stack begins, and `enter`'s checked descent.
+#[derive(Debug, Clone, Copy)]
+struct Depth(usize);
+
+impl Depth {
+    /// A packet's outermost stack — nested inside nothing.
+    const ROOT: Self = Self(0);
+
+    /// Descends one level, refusing to go past [`MAX_ITEM_NESTING`].
+    fn enter(self) -> Result<Self, AdapterError> {
+        let next = self.0 + 1;
+        if next > MAX_ITEM_NESTING {
+            return Err(AdapterError::Decode(format!(
+                "item structure nests deeper than {MAX_ITEM_NESTING} levels, past the \
+                 depth at which a serialized structure is refused as too complex"
+            )));
+        }
+        Ok(Self(next))
+    }
+}
+
 impl V770Adapter {
     /// Clientbound play-state packets in the inventory domain, split out of the
     /// former monolithic `handle_play` (see `adapter::mod` for the coordinator).
@@ -273,11 +352,11 @@ pub(crate) fn read_item_stack(reader: &mut Reader<'_>) -> Result<DecodedStack, A
         .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
     let count = u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    let (components, complete) = read_component_patch(reader, name)?;
+    let (components, complete) = read_component_patch(reader, name, Depth::ROOT)?;
     let stack = Some(ItemStack {
         item: parse_key(name, "item")?,
         count,
-        components,
+        components: *components,
     });
     Ok(if complete {
         DecodedStack::Complete(stack)
@@ -895,26 +974,50 @@ fn read_mob_effect_instances(
 /// restore when a stronger one of the same kind expires, which is holder-side
 /// bookkeeping no client surface shows, and its own record omits the effect id
 /// so [`MobEffectInstance`] cannot represent it without a second type.
+///
+/// Because every level past the first is discarded, the chain is drained in a
+/// loop rather than by recursing. The nesting depth is the sender's to choose
+/// and nothing on the wire bounds it, so a recursive drain would spend a stack
+/// frame per level on a value it then throws away; iterating costs the sender
+/// bytes instead and needs no depth budget to be safe.
 fn read_mob_effect_details(
     reader: &mut Reader<'_>,
     effect_id: i32,
 ) -> Result<MobEffectInstance, AdapterError> {
+    let (details, mut hidden) = read_mob_effect_details_fields(reader, effect_id)?;
+    while hidden {
+        (_, hidden) = read_mob_effect_details_fields(reader, effect_id)?;
+    }
+    Ok(details)
+}
+
+/// Reads one `Details` record's own five fields and the flag saying whether a
+/// further `hiddenEffect` follows, without touching that nested record. Split
+/// from [`read_mob_effect_details`] so the chain drain and the outermost read
+/// share one transcription of the field order: the drain must consume exactly
+/// the same bytes, and two copies of a five-field order are two things to get
+/// wrong.
+fn read_mob_effect_details_fields(
+    reader: &mut Reader<'_>,
+    effect_id: i32,
+) -> Result<(MobEffectInstance, bool), AdapterError> {
     let amplifier = reader.var_i32().map_err(dec_err)?;
     let duration_ticks = reader.var_i32().map_err(dec_err)?;
     let ambient = reader.bool().map_err(dec_err)?;
     let show_particles = reader.bool().map_err(dec_err)?;
     let show_icon = reader.bool().map_err(dec_err)?;
-    if reader.bool().map_err(dec_err)? {
-        read_mob_effect_details(reader, effect_id)?;
-    }
-    Ok(MobEffectInstance {
-        effect_id,
-        amplifier: amplifier.clamp(0, 255) as u8,
-        duration_ticks,
-        ambient,
-        show_particles,
-        show_icon,
-    })
+    let hidden = reader.bool().map_err(dec_err)?;
+    Ok((
+        MobEffectInstance {
+            effect_id,
+            amplifier: amplifier.clamp(0, 255) as u8,
+            duration_ticks,
+            ambient,
+            show_particles,
+            show_icon,
+        },
+        hidden,
+    ))
 }
 
 /// Decodes an item stack's `DataComponentPatch` into the modeled component set,
@@ -939,10 +1042,23 @@ fn read_mob_effect_details(
 fn read_component_patch(
     reader: &mut Reader<'_>,
     item: &str,
-) -> Result<(ItemComponents, bool), AdapterError> {
+    depth: Depth,
+) -> Result<(Box<ItemComponents>, bool), AdapterError> {
+    // Every cycle in this module's reader call graph runs through here, so this
+    // one descent bounds all of them: the container-shaped components below
+    // reach item stacks, and an item stack's own patch comes back to this
+    // function.
+    let depth = depth.enter()?;
     let added = reader.var_i32().map_err(dec_err)?;
     let removed = reader.var_i32().map_err(dec_err)?;
-    let mut components = ItemComponents::default();
+    // Heap-allocated, not a frame local. `ItemComponents` is over 1.7 KB, this
+    // function recurses through its own container-shaped components, and a
+    // by-value local costs a copy of it per arm the optimiser cannot coalesce —
+    // which is what put the measured frame at tens of kilobytes and made a
+    // nesting bound of any useful size unreachable. Behind a `Box` every
+    // `components.field = ...` below is a deref-assign into the same
+    // allocation, so the recursion's per-level frame carries a pointer.
+    let mut components = Box::new(ItemComponents::default());
     if let Some(prototype) = lodestone_data::item_prototypes::prototype(item) {
         components.max_stack_size = Some(u32::from(prototype.max_stack_size));
         components.max_damage = prototype.max_damage.map(u32::from);
@@ -1224,7 +1340,7 @@ fn read_component_patch(
             // rest of the packet from that slot onward. See
             // [`read_bundle_contents`].
             Some("minecraft:bundle_contents") => {
-                let (items, complete) = read_bundle_contents(reader)?;
+                let (items, complete) = read_bundle_contents(reader, depth)?;
                 components.bundle_contents = items;
                 if !complete {
                     components.has_unmodeled = true;
@@ -1249,7 +1365,7 @@ fn read_component_patch(
             // packet from that slot onward. See [`read_charged_projectiles`]
             // and `docs/items.md` for the wire citation.
             Some("minecraft:charged_projectiles") => {
-                let (items, complete) = read_charged_projectiles(reader)?;
+                let (items, complete) = read_charged_projectiles(reader, depth)?;
                 components.charged_projectiles = items;
                 if !complete {
                     components.has_unmodeled = true;
@@ -1349,7 +1465,7 @@ fn read_component_patch(
             // stack an eaten/drunk item converts into (an empty bottle, a bowl).
             // Unframed like the rest of this group.
             Some("minecraft:use_remainder") => {
-                let (_, complete) = read_item_stack_template_tolerant(reader)?;
+                let complete = read_item_stack_template_tolerant(reader, depth)?;
                 if !complete {
                     components.has_unmodeled = true;
                     let _ = reader.bytes(reader.remaining());
@@ -1644,7 +1760,7 @@ fn read_component_patch(
                 }
                 for _ in 0..count {
                     if reader.bool().map_err(dec_err)? {
-                        let (_, complete) = read_item_stack_template_tolerant(reader)?;
+                        let complete = read_item_stack_template_tolerant(reader, depth)?;
                         if !complete {
                             components.has_unmodeled = true;
                             let _ = reader.bytes(reader.remaining());
@@ -1693,7 +1809,7 @@ fn read_component_patch(
             // `vanilla's own sulfur cube content's own stream codec` is a single, non-optional
             // `ItemStackTemplate` — the block item a sulfur cube has absorbed.
             Some("minecraft:sulfur_cube_content") => {
-                let (_, complete) = read_item_stack_template_tolerant(reader)?;
+                let complete = read_item_stack_template_tolerant(reader, depth)?;
                 if !complete {
                     components.has_unmodeled = true;
                     let _ = reader.bytes(reader.remaining());
@@ -1915,7 +2031,7 @@ fn read_typed_entity_data(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
     Ok(())
 }
 
-/// Reads one `ItemStackTemplate` (item id, count, then a nested, recursive
+/// Consumes one `ItemStackTemplate` (item id, count, then a nested, recursive
 /// `DataComponentPatch`) and reports whether the nested patch decoded to
 /// completion, instead of [`read_item_stack_template`]'s hard failure on an
 /// unmodeled nested component.
@@ -1927,24 +2043,24 @@ fn read_typed_entity_data(reader: &mut Reader<'_>) -> Result<(), AdapterError> {
 /// has-unmodeled-component treatment rather than failing the whole packet —
 /// a shulker box with an unusual item in one slot is not a case this decoder
 /// can afford to treat as fatal.
+///
+/// The stack itself is consumed and not returned: no caller of these three
+/// components reads one, and assembling it cost an [`ItemStack`] — over 1.7 KB
+/// — in this function's frame at every level of a nesting the sender chooses,
+/// which is stack the recursion's depth budget then has to be small enough to
+/// pay for.
 fn read_item_stack_template_tolerant(
     reader: &mut Reader<'_>,
-) -> Result<(ItemStack, bool), AdapterError> {
+    depth: Depth,
+) -> Result<bool, AdapterError> {
     let item_id = reader.var_i32().map_err(dec_err)?;
     let name = item_name(item_id)
         .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
     let count = reader.var_i32().map_err(dec_err)?;
-    let count = u32::try_from(count)
+    u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    let (components, complete) = read_component_patch(reader, name)?;
-    Ok((
-        ItemStack {
-            item: parse_key(name, "item")?,
-            count,
-            components,
-        },
-        complete,
-    ))
+    let (_components, complete) = read_component_patch(reader, name, depth)?;
+    Ok(complete)
 }
 
 /// Consumes one `vanilla's own firework explosion's own stream codec`: `Shape` (a bare `idMapper`
@@ -2316,16 +2432,23 @@ impl SlotDisplayItems {
 /// of `RecipeDisplay` in this crate had to wait for this function, and why the
 /// five recipe packets landed together.
 ///
-/// `depth` bounds the recursion: a malicious or corrupt payload could otherwise
-/// nest `composite` indefinitely and blow the stack. Vanilla's own nesting is two
-/// or three deep in practice.
-fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayItems, AdapterError> {
-    // 16 is far above vanilla's own two-or-three and well below anything that
-    // threatens the stack. Returning `incomplete` rather than erroring keeps a
-    // hostile payload a dropped packet instead of a disconnect.
-    if depth > 16 {
+/// [`Depth`] bounds the recursion: a malicious or corrupt payload could
+/// otherwise nest `composite` indefinitely and blow the stack. Vanilla's own
+/// nesting is two or three deep in practice, so the shared budget is orders of
+/// magnitude of headroom rather than a constraint on any real display. The
+/// budget is shared with the item-component walk this reader descends into, so
+/// a display nested inside a stack nested inside a display counts once per
+/// level either way.
+fn read_slot_display(
+    reader: &mut Reader<'_>,
+    depth: Depth,
+) -> Result<SlotDisplayItems, AdapterError> {
+    // Returning `incomplete` rather than propagating the budget's error keeps a
+    // hostile payload a dropped packet instead of a disconnect, which is what
+    // every other bail-out in this walk does.
+    let Ok(depth) = depth.enter() else {
         return Ok(SlotDisplayItems::incomplete());
-    }
+    };
     let kind = reader.var_i32().map_err(dec_err)?;
     let mut items = Vec::new();
     match kind {
@@ -2340,7 +2463,7 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
             let item_id = reader.var_i32().map_err(dec_err)?;
             let _count = reader.var_i32().map_err(dec_err)?;
             let name = item_name(item_id).unwrap_or("minecraft:air");
-            let (_components, complete) = read_component_patch(reader, name)?;
+            let (_components, complete) = read_component_patch(reader, name, depth)?;
             if !complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
@@ -2353,14 +2476,14 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
             let _tag = reader.string(32767).map_err(dec_err)?;
         }
         slot_display::WITH_ANY_POTION => {
-            let inner = read_slot_display(reader, depth + 1)?;
+            let inner = read_slot_display(reader, depth)?;
             if !inner.complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
             items.extend(inner.items);
         }
         slot_display::ONLY_WITH_COMPONENT => {
-            let inner = read_slot_display(reader, depth + 1)?;
+            let inner = read_slot_display(reader, depth)?;
             if !inner.complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
@@ -2374,11 +2497,11 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
             // both must be consumed — only the first carries the item a recipe
             // panel wants, but skipping the second is not an option (no length
             // prefix).
-            let first = read_slot_display(reader, depth + 1)?;
+            let first = read_slot_display(reader, depth)?;
             if !first.complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
-            let second = read_slot_display(reader, depth + 1)?;
+            let second = read_slot_display(reader, depth)?;
             if !second.complete {
                 return Ok(SlotDisplayItems::incomplete());
             }
@@ -2386,7 +2509,7 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
         }
         slot_display::SMITHING_TRIM => {
             for _ in 0..3 {
-                let inner = read_slot_display(reader, depth + 1)?;
+                let inner = read_slot_display(reader, depth)?;
                 if !inner.complete {
                     return Ok(SlotDisplayItems::incomplete());
                 }
@@ -2406,7 +2529,7 @@ fn read_slot_display(reader: &mut Reader<'_>, depth: u32) -> Result<SlotDisplayI
                 AdapterError::Decode(format!("invalid composite slot display count {count}"))
             })?;
             for _ in 0..count {
-                let inner = read_slot_display(reader, depth + 1)?;
+                let inner = read_slot_display(reader, depth)?;
                 if !inner.complete {
                     return Ok(SlotDisplayItems::incomplete());
                 }
@@ -2448,7 +2571,7 @@ fn read_recipe_display(reader: &mut Reader<'_>) -> Result<Option<(Vec<i32>, Vec<
     // always the final `SlotDisplay`.
     let mut walked: Vec<Vec<i32>> = Vec::new();
     let walk = |reader: &mut Reader<'_>, walked: &mut Vec<Vec<i32>>| -> Result<bool, AdapterError> {
-        let display = read_slot_display(reader, 0)?;
+        let display = read_slot_display(reader, Depth::ROOT)?;
         if !display.complete {
             return Ok(false);
         }
@@ -2788,7 +2911,7 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
         // where a registry set is narrowed rather than kept whole, because
         // widening the event reaches consumers outside this crate.
         let input = read_registry_set(&mut reader)?.explicit_ids().to_vec();
-        let display = read_slot_display(&mut reader, 0)?;
+        let display = read_slot_display(&mut reader, Depth::ROOT)?;
         if !display.complete {
             // Emit what was decoded before the unmodeled entry rather than the
             // whole packet: the property sets above are complete and independently
@@ -3077,14 +3200,14 @@ fn decode_map_item_data(payload: &[u8]) -> Result<Vec<Directive>, AdapterError> 
 /// with the count and uses `<= 0` as the empty sentinel. A template is never
 /// empty (its constructor rejects air and count 0), so there is no sentinel and
 /// no `Option`.
-fn read_item_stack_template(reader: &mut Reader<'_>) -> Result<ItemStack, AdapterError> {
+fn read_item_stack_template(reader: &mut Reader<'_>, depth: Depth) -> Result<ItemStack, AdapterError> {
     let item_id = reader.var_i32().map_err(dec_err)?;
     let name = item_name(item_id)
         .ok_or_else(|| AdapterError::Decode(format!("unknown item registry id {item_id}")))?;
     let count = reader.var_i32().map_err(dec_err)?;
     let count = u32::try_from(count)
         .map_err(|_| AdapterError::Decode(format!("invalid item count {count}")))?;
-    let (components, complete) = read_component_patch(reader, name)?;
+    let (components, complete) = read_component_patch(reader, name, depth)?;
     if !complete {
         return Err(AdapterError::Decode(format!(
             "advancement icon {name} carries an unmodeled item component, so the rest of the packet is unreadable"
@@ -3093,7 +3216,7 @@ fn read_item_stack_template(reader: &mut Reader<'_>) -> Result<ItemStack, Adapte
     Ok(ItemStack {
         item: parse_key(name, "item")?,
         count,
-        components,
+        components: *components,
     })
 }
 
@@ -3115,7 +3238,10 @@ fn read_item_stack_template(reader: &mut Reader<'_>) -> Result<ItemStack, Adapte
 /// many stacks (every contained item costs at least `1/(64*16)` weight against a
 /// budget of `1`, and `getNumberOfItemsToShow` itself caps the tooltip at 12), so
 /// a declared count above it is a malformed packet, not a large bundle.
-fn read_bundle_contents(reader: &mut Reader<'_>) -> Result<(Vec<ItemStack>, bool), AdapterError> {
+fn read_bundle_contents(
+    reader: &mut Reader<'_>,
+    depth: Depth,
+) -> Result<(Vec<ItemStack>, bool), AdapterError> {
     let count = read_count(reader, "bundle_contents item")?;
     if count > 64 {
         return Err(AdapterError::Decode(format!(
@@ -3130,11 +3256,11 @@ fn read_bundle_contents(reader: &mut Reader<'_>) -> Result<(Vec<ItemStack>, bool
         let item_count = reader.var_i32().map_err(dec_err)?;
         let item_count = u32::try_from(item_count)
             .map_err(|_| AdapterError::Decode(format!("invalid item count {item_count}")))?;
-        let (components, complete) = read_component_patch(reader, name)?;
+        let (components, complete) = read_component_patch(reader, name, depth)?;
         items.push(ItemStack {
             item: parse_key(name, "item")?,
             count: item_count,
-            components,
+            components: *components,
         });
         if !complete {
             return Ok((items, false));
@@ -3159,7 +3285,10 @@ fn read_bundle_contents(reader: &mut Reader<'_>) -> Result<(Vec<ItemStack>, bool
 /// declared count alone: every entry costs at least the two single-byte
 /// VarInts an empty patch needs, so no more than `reader.remaining()` of them
 /// can ever be produced, and the count is attacker-influenced.
-fn read_charged_projectiles(reader: &mut Reader<'_>) -> Result<(Vec<ItemStack>, bool), AdapterError> {
+fn read_charged_projectiles(
+    reader: &mut Reader<'_>,
+    depth: Depth,
+) -> Result<(Vec<ItemStack>, bool), AdapterError> {
     let count = read_count(reader, "charged_projectiles item")?;
     if count > 1024 {
         return Err(AdapterError::Decode(format!(
@@ -3174,11 +3303,11 @@ fn read_charged_projectiles(reader: &mut Reader<'_>) -> Result<(Vec<ItemStack>, 
         let item_count = reader.var_i32().map_err(dec_err)?;
         let item_count = u32::try_from(item_count)
             .map_err(|_| AdapterError::Decode(format!("invalid item count {item_count}")))?;
-        let (components, complete) = read_component_patch(reader, name)?;
+        let (components, complete) = read_component_patch(reader, name, depth)?;
         items.push(ItemStack {
             item: parse_key(name, "item")?,
             count: item_count,
-            components,
+            components: *components,
         });
         if !complete {
             return Ok((items, false));
@@ -3218,7 +3347,7 @@ fn decode_update_advancements(payload: &[u8]) -> Result<Vec<Directive>, AdapterE
         let display = if reader.bool().map_err(dec_err)? {
             let title = Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?);
             let description = Text::from_nbt(&read_network_nbt(&mut reader).map_err(dec_err)?);
-            let icon = read_item_stack_template(&mut reader)?;
+            let icon = read_item_stack_template(&mut reader, Depth::ROOT)?;
             let ordinal = reader.var_i32().map_err(dec_err)?;
             let frame = AdvancementFrame::from_ordinal(ordinal).ok_or_else(|| {
                 AdapterError::Decode(format!("unknown advancement frame ordinal {ordinal}"))
@@ -3383,5 +3512,154 @@ mod dynamic_registry_order {
             "{:?}",
             out_of_order(BANNER_PATTERN_IDS)
         );
+    }
+}
+
+#[cfg(test)]
+mod nesting_budget {
+    //! Item structure nests through container-shaped components, and how deep
+    //! it nests is the sender's choice: there is no length prefix and no
+    //! declared level count anywhere in the chain. These gates pin both halves
+    //! of [`Depth`] — that a payload at the cap still decodes (so the cap is
+    //! reachable, not a stack overflow waiting behind an accepted input), and
+    //! that one level past it is refused by the budget rather than by a short
+    //! read.
+    //!
+    //! Each nesting component is gated separately because each reaches the
+    //! recursion by its own route: `container` and `use_remainder` through the
+    //! tolerant template reader, `bundle_contents` and `charged_projectiles`
+    //! through their own per-entry readers. A single gate would leave three
+    //! unproven.
+
+    use super::{Depth, MAX_ITEM_NESTING, Reader, read_component_patch};
+    use lodestone_data::data_component_types::component_type_name;
+    use lodestone_data::items::item_name;
+
+    fn var_i32(out: &mut Vec<u8>, mut value: i32) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value = ((value as u32) >> 7) as i32;
+            if value == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    /// Resolved from the registry rather than written as a literal: an id
+    /// hand-copied here would be a second transcription of a generated table.
+    fn component_id(name: &str) -> i32 {
+        (0..4096)
+            .find(|&id| component_type_name(id) == Some(name))
+            .unwrap_or_else(|| panic!("no data component type is named {name}"))
+    }
+
+    /// The lowest item id the registry actually resolves, so the nested
+    /// templates name a real item at every level.
+    fn some_item_id() -> i32 {
+        (0..4096)
+            .find(|&id| item_name(id).is_some())
+            .expect("the item registry resolves no id at all")
+    }
+
+    /// How a component's payload frames the item stack it contains, past its
+    /// own type id.
+    #[derive(Clone, Copy)]
+    enum Framing {
+        /// A single, non-optional `ItemStackTemplate`.
+        Bare,
+        /// A one-element list of `Optional<ItemStackTemplate>`.
+        OptionalList,
+        /// A one-element list of `ItemStackTemplate`.
+        PlainList,
+    }
+
+    /// Builds a `DataComponentPatch` payload nested `levels` deep through
+    /// `component`, each level's patch adding exactly that one component and
+    /// the innermost adding none.
+    fn nested_patch(component: &str, framing: Framing, levels: usize) -> Vec<u8> {
+        let type_id = component_id(component);
+        let item_id = some_item_id();
+        let mut out = Vec::new();
+        for _ in 0..levels.saturating_sub(1) {
+            var_i32(&mut out, 1); // one added component
+            var_i32(&mut out, 0); // no removed components
+            var_i32(&mut out, type_id);
+            match framing {
+                Framing::Bare => {}
+                Framing::OptionalList => {
+                    var_i32(&mut out, 1); // one list entry
+                    out.push(1); // present
+                }
+                Framing::PlainList => var_i32(&mut out, 1),
+            }
+            var_i32(&mut out, item_id);
+            var_i32(&mut out, 1); // count
+        }
+        var_i32(&mut out, 0); // innermost patch: nothing added
+        var_i32(&mut out, 0); // innermost patch: nothing removed
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Result<(), String> {
+        let mut reader = Reader::new(bytes);
+        read_component_patch(&mut reader, "minecraft:stone", Depth::ROOT)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
+    /// The four routes into the recursion, each with the framing its own
+    /// payload uses.
+    const NESTERS: [(&str, Framing); 4] = [
+        ("minecraft:container", Framing::OptionalList),
+        ("minecraft:use_remainder", Framing::Bare),
+        ("minecraft:bundle_contents", Framing::PlainList),
+        ("minecraft:charged_projectiles", Framing::PlainList),
+    ];
+
+    #[test]
+    fn a_patch_nested_to_the_cap_still_decodes() {
+        for (component, framing) in NESTERS {
+            let bytes = nested_patch(component, framing, MAX_ITEM_NESTING);
+            assert!(
+                decode(&bytes).is_ok(),
+                "{component} nested to the cap of {MAX_ITEM_NESTING} was refused: {:?} — \
+                 a cap the decoder cannot itself reach is a stack overflow behind an accepted \
+                 input, not a bound",
+                decode(&bytes)
+            );
+        }
+    }
+
+    #[test]
+    fn a_patch_nested_past_the_cap_is_refused_by_the_budget() {
+        for (component, framing) in NESTERS {
+            let bytes = nested_patch(component, framing, MAX_ITEM_NESTING + 1);
+            let error = decode(&bytes)
+                .expect_err(&format!("{component} nested past the cap was accepted"));
+            assert!(
+                error.contains("nests deeper"),
+                "{component} past the cap failed for some other reason than the nesting \
+                 budget, so this input proves nothing about the budget: {error}"
+            );
+        }
+    }
+
+    /// The control for the two gates above: without a *reachable* nesting
+    /// component the generator produces a flat patch, so a passing depth gate
+    /// would say nothing. This pins that one level of the shape the generator
+    /// emits is decoded as a real nested stack.
+    #[test]
+    fn the_generator_actually_nests() {
+        for (component, framing) in NESTERS {
+            let flat = nested_patch(component, framing, 1);
+            assert_eq!(flat, vec![0, 0], "{component}: one level is the empty patch");
+            let two = nested_patch(component, framing, 2);
+            assert!(
+                two.len() > flat.len() && decode(&two).is_ok(),
+                "{component}: two levels must decode as a nested stack, got {two:?}"
+            );
+        }
     }
 }

@@ -142,32 +142,67 @@ impl Encode for Slot {
     }
 }
 
+/// Maximum item nesting this decoder will walk.
+///
+/// Three component payloads at this protocol hold whole nested stacks, and a
+/// nested stack declares its own component list, so the wire structure recurses
+/// once per level with nothing bounding it: there is no length prefix and no
+/// declared level count anywhere in the chain, so the depth is the sender's
+/// choice. Unbounded, one crafted stack from any server a player joins
+/// exhausts the decoding thread's stack and aborts the process.
+///
+/// The number is the deepest nesting the game itself will construct: 16 wraps
+/// of bundle-in-bundle (a nested bundle costs a flat 1/16 of a bundle's weight
+/// budget of 1, so the chain stops at 17 stacks), plus one container-item level
+/// that can hold such a chain but not another container item, plus one level
+/// for a stack named by a prototype component enclosing the whole thing. A
+/// payload deeper than that is one no server following the game's own rules can
+/// produce, and refusing it costs a packet.
+const MAX_ITEM_NESTING: u32 = 16 + 1 + 1 + 1;
+
 impl Decode for Slot {
     fn decode(r: &mut Reader<'_>, ctx: Ctx) -> Result<Self> {
-        let count = r.i8()?;
-        if count == 0 {
-            return Ok(Slot::Empty);
-        }
-        let id = r.var_i32()?;
-        let added = read_count(r)?;
-        let removed_count = read_count(r)?;
-        let mut components = Vec::with_capacity(added.min(64));
-        for _ in 0..added {
-            let type_id = r.var_i32()?;
-            let payload = read_component_payload(r, type_id, ctx)?;
-            components.push(SlotComponent { type_id, payload });
-        }
-        let mut removed = Vec::with_capacity(removed_count.min(64));
-        for _ in 0..removed_count {
-            removed.push(r.var_i32()?);
-        }
-        Ok(Slot::Item {
-            id,
-            count,
-            components,
-            removed,
-        })
+        decode_nested(r, ctx, 0)
     }
+}
+
+/// [`Slot`]'s decode with the nesting level threaded through it.
+///
+/// The bound is checked here, at the one point every cycle through this
+/// module's readers passes: a nested stack is only ever reached by
+/// [`skip_component_payload`] calling back into this function, so a component
+/// payload added to that table inherits the bound without its author having to
+/// remember anything.
+fn decode_nested(r: &mut Reader<'_>, ctx: Ctx, depth: u32) -> Result<Slot> {
+    if depth >= MAX_ITEM_NESTING {
+        return Err(Error::Custom(format!(
+            "item stack nests deeper than {MAX_ITEM_NESTING} levels, \
+             past the depth any stack the game constructs can reach"
+        )));
+    }
+    let count = r.i8()?;
+    if count == 0 {
+        return Ok(Slot::Empty);
+    }
+    let id = r.var_i32()?;
+    let added = read_count(r)?;
+    let removed_count = read_count(r)?;
+    let mut components = Vec::with_capacity(added.min(64));
+    for _ in 0..added {
+        let type_id = r.var_i32()?;
+        let payload = read_component_payload(r, type_id, ctx, depth)?;
+        components.push(SlotComponent { type_id, payload });
+    }
+    let mut removed = Vec::with_capacity(removed_count.min(64));
+    for _ in 0..removed_count {
+        removed.push(r.var_i32()?);
+    }
+    Ok(Slot::Item {
+        id,
+        count,
+        components,
+        removed,
+    })
 }
 
 /// Reads a VarInt count, rejecting a negative one rather than wrapping it.
@@ -182,10 +217,15 @@ fn read_count(r: &mut Reader<'_>) -> Result<usize> {
 /// technique the pre-component eras use for a slot's raw NBT:
 /// `remaining_bytes` is tied to the buffer lifetime rather than the borrow, so
 /// the pre-read slice stays valid while the cursor advances.
-fn read_component_payload(r: &mut Reader<'_>, type_id: i32, ctx: Ctx) -> Result<Vec<u8>> {
+fn read_component_payload(
+    r: &mut Reader<'_>,
+    type_id: i32,
+    ctx: Ctx,
+    depth: u32,
+) -> Result<Vec<u8>> {
     let before = r.remaining_bytes();
     let start_len = before.len();
-    skip_component_payload(r, type_id, ctx)?;
+    skip_component_payload(r, type_id, ctx, depth)?;
     let consumed = start_len - r.remaining_bytes().len();
     Ok(before[..consumed].to_vec())
 }
@@ -194,7 +234,7 @@ fn read_component_payload(r: &mut Reader<'_>, type_id: i32, ctx: Ctx) -> Result<
 ///
 /// A type this function does not know is an error naming the id: see the
 /// module docs for why a skip is impossible without the type.
-fn skip_component_payload(r: &mut Reader<'_>, type_id: i32, ctx: Ctx) -> Result<()> {
+fn skip_component_payload(r: &mut Reader<'_>, type_id: i32, ctx: Ctx, depth: u32) -> Result<()> {
     match type_id {
         // Components with no payload at all.
         14 | 15 | 17 | 21 => {}
@@ -259,7 +299,7 @@ fn skip_component_payload(r: &mut Reader<'_>, type_id: i32, ctx: Ctx) -> Result<
         29 | 30 | 51 => {
             let count = read_count(r)?;
             for _ in 0..count {
-                Slot::decode(r, ctx)?;
+                decode_nested(r, ctx, depth + 1)?;
             }
         }
         // Suspicious stew: `(varint effect, varint duration)` pairs.
@@ -282,4 +322,74 @@ fn skip_component_payload(r: &mut Reader<'_>, type_id: i32, ctx: Ctx) -> Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod nesting_budget {
+    //! Three component payloads at this protocol hold whole nested stacks, and
+    //! the wire says nothing about how deeply they nest — that is the sender's
+    //! choice. These gates pin both halves of [`MAX_ITEM_NESTING`]: that a
+    //! stack nested to the cap still decodes, so the cap is reachable rather
+    //! than a stack overflow behind an accepted input, and that one level past
+    //! it is refused by the bound rather than by a short read.
+
+    use super::{MAX_ITEM_NESTING, Slot};
+    use lodestone_core::{Ctx, Decode, Reader};
+
+    /// `minecraft:bundle_contents` — one of the three payloads whose value is a
+    /// list of nested stacks, per this module's own component table.
+    const BUNDLE_CONTENTS: u8 = 51;
+
+    /// A `Slot` nested `levels` deep through `bundle_contents`, the innermost
+    /// stack carrying no components.
+    fn nested(levels: u32) -> Vec<u8> {
+        let mut out = Vec::new();
+        for _ in 0..levels.saturating_sub(1) {
+            out.push(1); // count, non-zero so a stack follows
+            out.push(0); // item id
+            out.push(1); // one added component
+            out.push(0); // no removed components
+            out.push(BUNDLE_CONTENTS);
+            out.push(1); // one nested stack in the list
+        }
+        out.extend_from_slice(&[1, 0, 0, 0]); // innermost: no components
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> lodestone_core::Result<Slot> {
+        Slot::decode(&mut Reader::new(bytes), Ctx { version: 766 })
+    }
+
+    #[test]
+    fn a_stack_nested_to_the_cap_still_decodes() {
+        let bytes = nested(MAX_ITEM_NESTING);
+        assert!(
+            decode(&bytes).is_ok(),
+            "a stack nested to the cap of {MAX_ITEM_NESTING} was refused: {:?} — a cap the \
+             decoder cannot itself reach is a stack overflow behind an accepted input, not a \
+             bound",
+            decode(&bytes)
+        );
+    }
+
+    #[test]
+    fn a_stack_nested_past_the_cap_is_refused_by_the_bound() {
+        let error = decode(&nested(MAX_ITEM_NESTING + 1))
+            .expect_err("a stack nested past the cap was accepted");
+        assert!(
+            error.to_string().contains("nests deeper"),
+            "past the cap this failed for some other reason than the nesting bound, so the \
+             input proves nothing about the bound: {error}"
+        );
+    }
+
+    /// The control for the two gates above: a generator that did not actually
+    /// nest would satisfy both of them vacuously.
+    #[test]
+    fn the_generator_actually_nests() {
+        let one = nested(1);
+        let two = nested(2);
+        assert_eq!(one, vec![1, 0, 0, 0], "one level is a stack with no components");
+        assert!(two.len() > one.len() && decode(&two).is_ok(), "got {two:?}");
+    }
 }
