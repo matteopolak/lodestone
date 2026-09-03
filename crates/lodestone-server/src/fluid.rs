@@ -544,7 +544,7 @@ fn is_source_of_type(state: &str, kind: FluidKind) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Bucket place/pickup — issue #578's remainder. This crate ticks fluid
+// Bucket place/pickup. This crate ticks fluid
 // already in the world; these two functions are the missing entry point a
 // dispenser (or, eventually, a player's direct use) needs to *start* one.
 // Water and lava only — see `crate::redstone_dispenser`'s own behaviour

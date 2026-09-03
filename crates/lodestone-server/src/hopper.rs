@@ -1,5 +1,4 @@
-//! Hopper block entity: the container-to-container item transfer engine
-//! (issue #250).
+//! Hopper block entity: the container-to-container item transfer engine.
 //!
 //! # Where the truth comes from
 //!

@@ -820,9 +820,8 @@ impl ChatSession {
 /// This is the decode-side primitive only: it does **not** track a per-sender
 /// chain, enforce link ordering/expiry, or feed a "verified" badge into any
 /// UI — those are the remainder of vanilla's own message-chain decoder and
-/// its own remote-chat-session state machine, out of scope here (see this crate's
-/// report: rendering other players' messages as verified is explicitly a
-/// later concern per issue #283's own text).
+/// its own remote-chat-session state machine, out of scope here: rendering
+/// other players' messages as verified is explicitly a later concern.
 ///
 /// # Errors
 /// [`AuthError::ChatSessionKeyMalformed`] if `public_key_der` does not parse

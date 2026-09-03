@@ -1,5 +1,5 @@
-//! The enchanting table's three enchant-offer buttons (issue #613's
-//! `ContainerButtonClick` remainder).
+//! The enchanting table's three enchant-offer buttons
+//! (`ContainerButtonClick`).
 //!
 //! ## What it is
 //!

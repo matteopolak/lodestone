@@ -1,7 +1,7 @@
-//! Issue #331: the RCON listener, driven through its production entry point
+//! The RCON listener, driven through its production entry point
 //! (`IntegratedServer::start_rcon`) with the same `AsyncRconClient` the live
-//! oracle tests use against vanilla — the verification the issue body asks
-//! for. The listener, the auth state machine and the command execution are
+//! oracle tests use against vanilla — an end-to-end verification, not a
+//! parser-only unit test. The listener, the auth state machine and the command execution are
 //! exercised over a real loopback socket; nothing here reaches a live server.
 
 use std::collections::HashMap;

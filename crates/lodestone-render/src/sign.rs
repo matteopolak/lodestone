@@ -1,4 +1,4 @@
-//! Sign text placement and colour (issue #23's sign scope) — the render-crate
+//! Sign text placement and colour — the render-crate
 //! half of the chain whose typed NBT parse lives in
 //! [`lodestone_world::sign_text`] and whose GPU quads live in
 //! `lodestone-shell`'s `gpu/sign_text.rs`.

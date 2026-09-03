@@ -16,7 +16,7 @@
 //!
 //! | arm | expected value produced by | is it outside the code under test? |
 //! |---|---|---|
-//! | `a_real_generated_column_is_cell_identical_to_the_flat_grid` | `lodestone_worldgen`'s own `GeneratedColumn::into_raw()` — the flat `Vec<u16>` + palette, straight out of the generator | **yes**, a different crate, and the exact representation this change replaced |
+//! | `a_real_generated_column_is_cell_identical_to_the_flat_grid` | `lodestone_worldgen`'s own `GeneratedColumn::into_raw()` — the flat `Vec<u16>` + palette, straight out of the generator | **yes**, a different crate, and the exact representation now superseded |
 //! | `a_column_read_back_off_disk_is_cell_identical` | the same flat grid, after a `column_to_nbt`/`column_from_nbt` round trip | **yes**, same source, and it also proves `chunk_nbt`'s per-section slicing survived losing `raw_blocks()` |
 //!
 //! The generator is deterministic per chunk (`OverworldGenerator::column`'s own

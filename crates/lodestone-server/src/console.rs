@@ -13,7 +13,7 @@
 //! does not own, both against the world's real, shared
 //! [`WorldStateHandle`](crate::world_state::WorldStateHandle) and
 //! [`PlayerRegistry`](crate::players::PlayerRegistry) — never a private copy,
-//! which is the exact bug issues #327/#328 were filed for.
+//! which is exactly the kind of state-drift bug a private copy would invite.
 //!
 //! ## How it works
 //!

@@ -1,4 +1,4 @@
-//! Issue #301's island gate: the *production* plugin set must install the
+//! An island gate: the *production* plugin set must install the
 //! `custom_payload` dispatch, and with it the `GameEvent` bus it rides on.
 //!
 //! # Why this test and not a `plugin_channel` unit test

@@ -707,7 +707,7 @@ pub const RECIPE_PANEL_SRC: [f32; 4] = [1.0, 1.0, RECIPE_PANEL_W, RECIPE_PANEL_H
 /// which treats [`RECIPE_PANEL_SRC`] as real sprite pixels rather than
 /// rescaling it against this declared size, so a resource pack whose panel
 /// sheet exceeds 256×256 real pixels currently draws the recipe book panel
-/// magnified — issue #582. The fix is
+/// magnified. The fix is
 /// [`GuiAtlas::subregion_quad_declared`](lodestone_render::GuiAtlas::subregion_quad_declared)`(id, RECIPE_PANEL_DECLARED, src, dst)`
 /// at the draw site in `crate::hud`.
 pub const RECIPE_PANEL_DECLARED: (f32, f32) = (256.0, 256.0);

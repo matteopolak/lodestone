@@ -29,8 +29,8 @@
 //!   real `0.1%` "dangerous" roll — [`crate::wither::should_fire_dangerous_skull`]),
 //!   or, when no player is in range, an occasional **unaimed** shot toward a
 //!   random nearby offset (vanilla's idle-head fallback, always dangerous) —
-//!   giving both the "homing" (aimed) and "non-homing" (unaimed) variants
-//!   issue #278 names, on a simplified single-head cadence rather than
+//!   giving both the "homing" (aimed) and "non-homing" (unaimed) variants,
+//!   on a simplified single-head cadence rather than
 //!   vanilla's per-head 10-30-tick jitter.
 //! * **"Aimed" means "aimed at launch", not steered in flight** —
 //!   [`lodestone_entity::projectile::Projectile::throwable`] does not home;

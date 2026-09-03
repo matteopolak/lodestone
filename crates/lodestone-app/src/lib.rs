@@ -122,7 +122,7 @@ pub fn client_app() -> App {
         lodestone_ecs::session::SessionHudPlugin,
         lodestone_ecs::ingest::IngestPlugin,
         lodestone_ecs::SessionPlugin,
-        // Issue #301. Without this line the whole `custom_payload` dispatch is an
+        // Without this line the whole `custom_payload` dispatch is an
         // island *and so is the `GameEvent` bus underneath it*: `SharedState`
         // caches `game_event_bus_enabled` once at construction and only
         // `PluginChannelPlugin::build` (which `add_plugin_channel` installs)

@@ -1,4 +1,4 @@
-//! Issue #273's online-mode login sequence, driven end to end against the
+//! The online-mode login sequence, driven end to end against the
 //! real [`V770ServerProtocol`] over an in-memory duplex: a hand-written
 //! "client" completes the real RSA/AES handshake (the same
 //! `lodestone_net::rsa_encrypt` the real client driver calls), and

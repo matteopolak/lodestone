@@ -319,8 +319,8 @@ pub struct RenderState {
     /// Fed by `RenderState::fishing_line_vertices`, drawn immediately after the
     /// entity sprite pass so the bobber and its line reach the frame together.
     fishing_line: DebugLineRenderer,
-    /// The render half of `ExtractSet::Debug`'s billboard channel (issue
-    /// #161, `docs/plugin-api.md`) — [`DebugLinesSource`]'s sibling for
+    /// The render half of `ExtractSet::Debug`'s billboard channel
+    /// (`docs/plugin-api.md`) — [`DebugLinesSource`]'s sibling for
     /// textured/billboard-style plugin draws rather than plain lines. See
     /// [`PluginBillboardsSource`] for why it starts empty.
     plugin_billboards: PluginBillboardRenderer,

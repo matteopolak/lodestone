@@ -607,8 +607,8 @@ pub struct ArmorTrim {
 /// somewhere, and that somewhere is version data the protocol crate owns.
 ///
 /// Read this only through a version adapter's mining seam
-/// (`VersionAdapter::tool_mining`), which folds the prototype and this patch
-/// together the way vanilla's own component lookup does. Treating
+/// (`VersionAdapter::tool_mining`), which folds the prototype and this data
+/// patch together the way vanilla's own component lookup does. Treating
 /// `Inherited` as "no tool" is the trap: it makes every real pickaxe mine at
 /// bare-hand speed.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

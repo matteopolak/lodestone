@@ -25,7 +25,7 @@
 //! and `docs/dragon-fight.md` for the full writeup including what a real
 //! integration (spawning a live dragon/crystal pair, driving these functions
 //! from [`crate::mobs::MobSim::tick`], and streaming the result) needs from
-//! `crates/lodestone-server/src/protocol.rs` that this change could not add
+//! `crates/lodestone-server/src/protocol.rs` that this module could not add
 //! itself (that file is held for a concurrent `MetadataField` edit — see
 //! that doc for the exact variants and encode methods needed).
 //!

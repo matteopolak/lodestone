@@ -2292,8 +2292,8 @@ pub fn boat_model() -> EntityModelDef {
 /// hollow interior. Owner report: "placing down a boat still shows water
 /// through the bottom". The hull is five thin planks around an open top, so
 /// looking down (or across, at a grazing angle) into an occupied or empty
-/// boat has a real gap between them; without this patch, the translucent
-/// water surface underneath draws straight through it. Vanilla closes the
+/// boat has a real gap between them; without this water-patch mask, the
+/// translucent water surface underneath draws straight through it. Vanilla closes the
 /// gap not with a visible floor but with **depth only**: this model is
 /// submitted through `EntityPipeline::water_mask_pipeline` (colour writes
 /// disabled, depth writes on, texture bound but never sampled into the

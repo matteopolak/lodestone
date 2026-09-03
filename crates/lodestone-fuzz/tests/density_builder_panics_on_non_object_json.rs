@@ -1,5 +1,5 @@
 //! Bug found by `fuzz/fuzz_targets/density_function_json.rs` (widened Track
-//! A scope, issue #549's "obvious first targets" list naming "the density
+//! A scope, from the "obvious first targets" list naming "the density
 //! compiler"): `lodestone_worldgen_core::density::Builder::build` aborts the
 //! process on the very first fuzz iteration, on the two-byte input `[]`.
 //!

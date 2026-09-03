@@ -871,7 +871,7 @@ mod vehicle_tests {
     }
 
     /// **Paddle input: only the rider may set it, and it reaches the streamed
-    /// snapshot.** Issue #262's `PADDLE_BOAT` remainder — the second half of
+    /// snapshot.** The second half of
     /// `only_the_rider_may_move_the_boat`'s security property, plus the
     /// wiring proof that the boolean pair actually shows up in
     /// `EntitySnapshot::metadata` rather than being stored and never read.

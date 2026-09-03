@@ -1,4 +1,4 @@
-//! Issue #519: `world_type` was a hardcoded `OnceLock`, so `Amplified` and
+//! `world_type` was a hardcoded `OnceLock`, so `Amplified` and
 //! `LargeBiomes` — whose `noise_settings` and density functions are already
 //! bundled and byte-identical to the jar — were unreachable. This gate proves
 //! [`WorldType`] is a real, effective parameter rather than a decoration:

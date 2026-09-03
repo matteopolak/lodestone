@@ -1411,7 +1411,7 @@ async fn signed_chat_is_acknowledged_on_keep_alive_tick() {
     drop(handle);
 }
 
-/// Issue #283's remaining half, end to end: a valid signed message reaches
+/// The signed-message verification half, end to end: a valid signed message reaches
 /// `events` with `ack.verified == true` and untouched text; a tampered one
 /// (same sender, same session, same chain, one signature byte flipped)
 /// reaches it `verified == false` with the not-secure tag prepended. Neither

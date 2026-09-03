@@ -1,4 +1,4 @@
-//! Acceptance gate for issue #260's impact half: **a projectile now damages what
+//! Acceptance gate: **a projectile now damages what
 //! it hits.**
 //!
 //! Before this, `MobSim::spawn_projectile`'s own doc comment said hit detection

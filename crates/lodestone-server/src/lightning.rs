@@ -82,7 +82,7 @@
 //! # What is out of reach from here
 //!
 //! **Nothing in this module can spawn a real entity.** `MobSim` (the only
-//! live-entity tracker, in `crate::mobs`, off limits to this change) has no
+//! live-entity tracker, in `crate::mobs`, off limits here) has no
 //! `LightningBolt`/`SkeletonHorse` sidecar, no conversion primitive
 //! (`grep`ping `crate::mobs`/`crate::lodestone-entity` for "convert" or
 //! "ConversionParams" is empty), and no per-entity "struck by this bolt"

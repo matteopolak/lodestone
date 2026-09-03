@@ -115,7 +115,7 @@
 //! [`ShellAudio::resume_on_gesture`] is a separate, explicit call a real input
 //! handler makes. Wiring `resume_on_gesture` to the shell's actual
 //! click/keydown handling is outside this file's owned paths (`app/**`); see
-//! the brokered hunk this change reports.
+//! the brokered hunk recorded for that hand-off.
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;

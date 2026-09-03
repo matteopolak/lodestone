@@ -1007,7 +1007,7 @@ fn decode_vec(crate_path: &Path, ty: &Type, attrs: &FieldAttr) -> syn::Result<To
     // more than `r.remaining()` elements can ever be produced. Capping the
     // *pre-allocation* at `len.min(r.remaining())` keeps the eager
     // `with_capacity` call bounded by the bytes actually available rather
-    // than by a number the input merely claims — see issue #417. This does
+    // than by a number the input merely claims. This does
     // not change `len` itself: the `#max_check` above and the `0..len` loop
     // below are untouched, so a payload that legitimately has more bytes
     // than currently buffered (e.g. more arrives on the socket) still

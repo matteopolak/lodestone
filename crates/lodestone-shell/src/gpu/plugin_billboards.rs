@@ -330,8 +330,8 @@ impl PluginBillboardRenderer {
 }
 
 /// Polled source for this frame's plugin billboards — the render half of
-/// `ExtractSet::Debug`'s billboard channel (`docs/plugin-api.md`, issue
-/// #161). Same idiom as [`super::debug_lines::DebugLinesSource`]: the
+/// `ExtractSet::Debug`'s billboard channel (`docs/plugin-api.md`).
+/// Same idiom as [`super::debug_lines::DebugLinesSource`]: the
 /// renderer cannot reach the ECS `PluginBillboards` resource directly (this
 /// crate has no dependency edge back to whoever owns the `World`), and
 /// threading it through [`RenderState::render`](super::RenderState::render)'s

@@ -12,7 +12,7 @@
 //! recipe table below (ingredient -> result/count/experience/cooking_time) is
 //! transcribed mechanically from every `minecraft:smelting`/
 //! `minecraft:blasting`/`minecraft:smoking` recipe JSON in Mojang's own
-//! generated data (data source #1 per `CLAUDE.md`), not hand-typed from
+//! generated data (the highest-authority data source per `CLAUDE.md`), not hand-typed from
 //! memory or a wiki. `minecraft:campfire_cooking` recipes are excluded: a
 //! campfire has no fuel/lit state machine at all (no block entity — the real
 //! campfire ticks its cooking directly off the block itself), so it is not

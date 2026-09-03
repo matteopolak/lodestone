@@ -1,6 +1,6 @@
 //! Non-secret account metadata: which Microsoft/Minecraft accounts are known
 //! locally, and which one is selected — everything the account switcher
-//! (issue #63) needs to draw its list **without unlocking the keychain**.
+//! needs to draw its list **without unlocking the keychain**.
 //! See [`crate::store`] for where the actual refresh tokens live, and
 //! `docs/accounts.md` for why the two are deliberately split.
 //!
