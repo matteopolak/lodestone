@@ -1,0 +1,1 @@
+minecraft:acacia_hanging_sign[attached=true,rotation=0,waterlogged=true]

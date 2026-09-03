@@ -1,0 +1,13 @@
+# Targets `scripts/fuzz-smoke.sh` builds but does NOT gate on.
+#
+# The smoke run gates on every target under `fuzz/fuzz_targets/` by default —
+# a new target is covered the moment it exists, without a second list to
+# remember. Excluding one is therefore a deliberate, named decision, and each
+# line below records both the target and why the panic it already finds is not
+# a regression signal.
+#
+# Format: `<target-name>  # reason`. Blank lines and `#` lines are ignored. A
+# name here that has no matching `fuzz_targets/<name>.rs` is a hard error, so
+# a stale exclusion cannot silently keep a live target ungated.
+
+density_function_json  # `density::Builder::build` panics by design on any document that is not a number, string or object (the two-byte input `[]` reaches it). That is a documented "trusted embedded data" assumption pinned by `crates/lodestone-fuzz/tests/density_builder_panics_on_non_object_json.rs`, not something a smoke run should rediscover on every push. Gating here again once that builder returns a `Result`.
