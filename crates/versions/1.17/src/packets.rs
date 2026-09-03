@@ -1,4 +1,4 @@
-//! Wire packet definitions for protocol 754 (Minecraft 1.16.5), grouped by state.
+//! Wire packet definitions for this era (protocols 756 and 758), grouped by state.
 
 pub mod chunk;
 pub mod common;

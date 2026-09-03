@@ -1,4 +1,4 @@
-//! The 1.16.5 (protocol 754) `entityMetadata` wire type — an indexed,
+//! This era's `entityMetadata` wire type — an indexed,
 //! self-terminating list of typed entity data-watcher values.
 //!
 //! # Why this is hand-written and why it is *duplicated* rather than shared
@@ -9,11 +9,17 @@
 //! and every later type up by one relative to 1.12, and later versions appended
 //! `Particle`, `VillagerData`, `OptVarInt` and `Pose`. A shared enum would have
 //! to carry a per-version discriminant map; the project blesses duplicating the
-//! whole codec per version instead, so this table is exactly 1.16.5's.
+//! whole codec per version instead, so this table is exactly this era's.
+//!
+//! Measured against `minecraft-data`, the nineteen serializer types below are
+//! **unchanged** across 754, 756 and 758. `minecraft-data` reports the
+//! `entity_metadata` packet's shape as changing at both boundaries, but the
+//! whole of that difference is the particle-id renumbering inside the
+//! embedded particle payload, which this table does not model at all.
 //!
 //! * **Header.** `key: u8` then a separate `type: varint`; the list ends with a
 //!   `0xFF` key.
-//! * **Type table (1.16.5).** `0 Byte, 1 VarInt, 2 Float, 3 String, 4 Chat,
+//! * **Type table.** `0 Byte, 1 VarInt, 2 Float, 3 String, 4 Chat,
 //!   5 OptChat, 6 Slot, 7 Boolean, 8 Rotation, 9 Position, 10 OptPosition,
 //!   11 Direction, 12 OptUUID, 13 OptBlockID, 14 NBT, 15 Particle,
 //!   16 VillagerData, 17 OptVarInt, 18 Pose`.
@@ -40,9 +46,9 @@ const END: u8 = 0xFF;
 /// Upper bound on a metadata string, matching the vanilla limit.
 const MAX_STRING: usize = 32_767;
 
-/// A single typed value in a 1.16.5 entity-metadata list.
+/// A single typed value in this era's entity-metadata list.
 ///
-/// The variant set matches 1.16.5's serializer table. `Position` is a packed
+/// The variant set matches this era's serializer table. `Position` is a packed
 /// `i64` block position; several variants (`OptChat`, the `Opt*` options,
 /// `VillagerData`, `Pose`) are 1.13+/1.14+ additions.
 #[derive(Debug, Clone, PartialEq)]
@@ -101,7 +107,7 @@ pub enum MetadataValue {
 }
 
 impl MetadataValue {
-    /// The 1.16.5 serializer type id.
+    /// The serializer type id.
     const fn type_id(&self) -> i32 {
         match self {
             MetadataValue::Byte(_) => 0,
@@ -230,7 +236,7 @@ impl MetadataValue {
                 // Type 15 (Particle) and any unknown id fall here: no registry
                 // to model them, so fail loudly rather than misparse.
                 return Err(Error::InvalidEnumVariant {
-                    name: "v1-14 metadata type",
+                    name: "v1-17 metadata type",
                     value: other,
                 });
             }
@@ -263,7 +269,7 @@ pub struct MetadataEntry {
     pub value: MetadataValue,
 }
 
-/// A complete 1.16.5 entity-metadata list, terminated on the wire by `0xFF`.
+/// A complete entity-metadata list, terminated on the wire by `0xFF`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct EntityMetadata(pub Vec<MetadataEntry>);
 

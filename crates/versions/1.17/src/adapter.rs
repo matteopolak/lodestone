@@ -28,7 +28,8 @@ use crate::packets::entity::{
 use crate::packets::game::{
     AttachEntity, BlockDig, BlockPlace, ClientCommand, ClientboundChat, ClientboundPositionLook,
     Collect, DifficultyPacket, EntityAction, EntityEffect, JoinGame, KickDisconnect,
-    OpenSignEntity, PlayerlistHeader, RecipeBook, RemoveEntityEffect, Respawn,
+    EntityEffectVarint, OpenSignEntity, PlayerlistHeader, RecipeBook, RemoveEntityEffect,
+    RemoveEntityEffectVarint, Respawn,
     ServerboundArmAnimation, ServerboundChat, ServerboundFlying, ServerboundLook,
     ServerboundPosition, ServerboundPositionLook, SetPassengers,
     Spectate, SpawnPosition, TeleportConfirm, UpdateHealth, UpdateTime, UseEntity, UseEntityAt,
@@ -239,15 +240,6 @@ fn ids_for(protocol: i32) -> &'static PacketIds {
 /// Requested next-state value in the handshake for a login connection.
 const NEXT_STATE_LOGIN: i32 = 2;
 
-/// Flying speed the pre-1.16 serverbound abilities packet carries. The
-/// server ignores the value; it is the vanilla client's own default, and the
-/// same constant `lodestone-v1-9` sends on the same field.
-const DEFAULT_FLYING_SPEED: f32 = 0.05;
-
-/// Walking speed the pre-1.16 serverbound abilities packet carries; same
-/// provenance and same disregard by the server.
-const DEFAULT_WALKING_SPEED: f32 = 0.1;
-
 /// Relative-teleport flag bits used by the clientbound 1.8 position packet.
 const REL_X: i8 = 0x01;
 const REL_Y: i8 = 0x02;
@@ -255,7 +247,7 @@ const REL_Z: i8 = 0x04;
 const REL_YAW: i8 = 0x08;
 const REL_PITCH: i8 = 0x10;
 
-/// Per-connection state used by 1.16.5's client-side player-position-send tick.
+/// Per-connection state used by this era's client-side player-position-send tick.
 #[derive(Debug, Clone, Copy)]
 struct MovementSendState {
     last_pos: Vec3,
@@ -390,7 +382,7 @@ impl V756Adapter {
         })
     }
 
-    /// Selects the 1.16.5 movement shape. This is deliberately local to the
+    /// Selects this era's movement shape. This is deliberately local to the
     /// family: 1.16 shares the 1.12 rule, but not 1.8's idle cadence or the
     /// modern horizontal-collision status bit.
     fn select_move_packet(
@@ -526,7 +518,7 @@ pub fn adapter_for(protocol: i32) -> V756Adapter {
     V756Adapter::for_protocol(protocol)
 }
 
-/// Maps the model's `RecipeBookType` onto the ordinal 1.16.5's `recipe_book`
+/// Maps the model's `RecipeBookType` onto the ordinal this era's `recipe_book`
 /// packet expects. All four recipe books (crafting/furnace/blast
 /// furnace/smoker) exist by 1.16, unlike 1.12.2 which has only the crafting
 /// one; the ordinal itself has held stable from 1.13 through protocol 776.
@@ -815,11 +807,14 @@ impl V756Adapter {
         })])
     }
 
-    /// `minecraft:map_chunk`. Decodes the paletted 1.16.5 column into
-    /// version-free storage and applies it to the world through the sink,
-    /// emitting only a lightweight notification. Light no longer travels
-    /// here (1.14 split it into `update_light`), so the loaded column
-    /// carries empty light until the matching `update_light` arrives.
+    /// `minecraft:map_chunk`. Decodes the paletted column into version-free
+    /// storage and applies it to the world through the sink, emitting only a
+    /// lightweight notification.
+    ///
+    /// The column shape comes from the adapter's own state, which the most
+    /// recent `login`/`respawn` set from the server's dimension entry — the
+    /// era's one genuinely stateful decode. At 756 the column arrives with no
+    /// light and waits for `update_light`; at 758 the light is in this packet.
     fn handle_play_map_chunk(
         adapter: &V756Adapter,
         world: &mut dyn WorldSink,
@@ -843,11 +838,13 @@ impl V756Adapter {
         Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })])
     }
 
-    /// `minecraft:update_light`. 1.14+ delivers light separately from the
-    /// chunk column. Decodes the per-section nibble arrays into a
-    /// version-free `LightPatch` and merges it onto the already-loaded
-    /// column; a light update for an unloaded column is a harmless no-op in
-    /// the world store.
+    /// `minecraft:update_light`. The light-only update, which exists in both
+    /// protocols — at 758 a full column's light additionally rides along in
+    /// `map_chunk`, but this packet is still what a relight sends.
+    ///
+    /// Decodes the per-section nibble arrays into a version-free `LightPatch`
+    /// and merges it onto the already-loaded column; a light update for an
+    /// unloaded column is a harmless no-op in the world store.
     fn handle_play_update_light(
         adapter: &V756Adapter,
         world: &mut dyn WorldSink,
@@ -863,7 +860,7 @@ impl V756Adapter {
         Ok(Vec::new())
     }
 
-    /// `minecraft:unload_chunk`. 1.16.5 has a dedicated forget packet (two
+    /// `minecraft:unload_chunk`. This era has a dedicated forget packet (two
     /// ints).
     fn handle_play_unload_chunk(
         adapter: &V756Adapter,
@@ -1250,7 +1247,7 @@ impl V756Adapter {
         })])
     }
 
-    /// `minecraft:abilities` (clientbound direction). 1.16.5 reuses one
+    /// `minecraft:abilities` (clientbound direction). This era reuses one
     /// packet *name* for both directions with different flag semantics; the
     /// clientbound shape decoded here is byte-identical to 1.12.2's/1.8's,
     /// so it is hand-decoded rather than routed through the
@@ -1375,23 +1372,45 @@ impl V756Adapter {
         _world: &mut dyn WorldSink,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
-        let body: EntityEffect = adapter.decode_body(payload)?;
-        let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
-            AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
-        })?;
+        // 1.18 retyped the effect id from a signed byte to a VarInt, so the
+        // two protocols decode through different structs -- see
+        // [`EntityEffectVarint`]'s own docs for what reading the narrower
+        // form off the wider one would do instead of erroring.
+        let (entity_id, effect_id, amplifier, duration, flags) =
+            if adapter.protocol >= PROTOCOL_1_18_2 {
+                let body: EntityEffectVarint = adapter.decode_body(payload)?;
+                (
+                    body.entity_id,
+                    body.effect_id,
+                    body.amplifier,
+                    body.duration,
+                    body.flags,
+                )
+            } else {
+                let body: EntityEffect = adapter.decode_body(payload)?;
+                (
+                    body.entity_id,
+                    i32::from(body.effect_id),
+                    body.amplifier,
+                    body.duration,
+                    body.flags,
+                )
+            };
+        let name = mob_effect_name(effect_id - 1)
+            .ok_or_else(|| AdapterError::Decode(format!("unknown legacy effect id {effect_id}")))?;
         let effect: ResourceKey = name
             .parse()
             .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
         Ok(vec![Directive::Emit(ClientEvent::MobEffectApplied {
-            entity_id: body.entity_id,
+            entity_id,
             effect,
-            amplifier: i32::from(body.amplifier),
-            duration_ticks: body.duration,
-            ambient: body.flags & 0x01 != 0,
-            visible: body.flags & 0x02 != 0,
-            // 1.16.5 postdates 1.13, so unlike 1.12.2 the "show icon" bit is
-            // real; "blend" is a 1.19+ addition this protocol predates.
-            show_icon: body.flags & 0x04 != 0,
+            amplifier: i32::from(amplifier),
+            duration_ticks: duration,
+            ambient: flags & 0x01 != 0,
+            visible: flags & 0x02 != 0,
+            // The "show icon" bit is real from 1.13 on; "blend" is a 1.19+
+            // addition this era predates.
+            show_icon: flags & 0x04 != 0,
             blend: false,
         })])
     }
@@ -1402,15 +1421,21 @@ impl V756Adapter {
         _world: &mut dyn WorldSink,
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
-        let body: RemoveEntityEffect = adapter.decode_body(payload)?;
-        let name = mob_effect_name(i32::from(body.effect_id) - 1).ok_or_else(|| {
-            AdapterError::Decode(format!("unknown legacy effect id {}", body.effect_id))
-        })?;
+        // Same 1.18 retype as `entity_effect`, on the same field.
+        let (entity_id, effect_id) = if adapter.protocol >= PROTOCOL_1_18_2 {
+            let body: RemoveEntityEffectVarint = adapter.decode_body(payload)?;
+            (body.entity_id, body.effect_id)
+        } else {
+            let body: RemoveEntityEffect = adapter.decode_body(payload)?;
+            (body.entity_id, i32::from(body.effect_id))
+        };
+        let name = mob_effect_name(effect_id - 1)
+            .ok_or_else(|| AdapterError::Decode(format!("unknown legacy effect id {effect_id}")))?;
         let effect: ResourceKey = name
             .parse()
             .map_err(|_| AdapterError::Decode(format!("effect id {name} is not a key")))?;
         Ok(vec![Directive::Emit(ClientEvent::MobEffectRemoved {
-            entity_id: body.entity_id,
+            entity_id,
             effect,
         })])
     }
@@ -1437,7 +1462,7 @@ impl V756Adapter {
 
     /// `minecraft:block_change`. A packed 1.14+ `position` (x/z/y bit
     /// order, unlike the pre-1.14 x/y/z order), then a varint **flat
-    /// block-state id**. 1.16.5 is post-Flattening, so unlike
+    /// block-state id**. This era is post-Flattening, so unlike
     /// `lodestone-v1-9`'s legacy `(id << 4) | meta` composite there is no
     /// metadata split: the wire value is already a single state id in
     /// *this protocol's own* id space, bridged to a real 26.2 state id via
@@ -1532,7 +1557,7 @@ impl V756Adapter {
         })])
     }
 
-    /// `minecraft:open_sign_entity`. 1.16.5 predates the front/back sign
+    /// `minecraft:open_sign_entity`. This era predates the front/back sign
     /// text split (added 1.20); every editable sign has only the one
     /// (front) text at this protocol revision.
     fn handle_play_open_sign_entity(
@@ -1638,7 +1663,7 @@ impl V756Adapter {
     /// fade-out case (times) is `3`, and the two argument-less actions are
     /// `4`/`5`. Action-bar text always renders as an overlay, so it maps to
     /// the same `Chat` `GameInfo` event the dedicated `SET_ACTION_BAR_TEXT`
-    /// packet uses on 26.2 — 1.16.5 predates that split packet, it rides
+    /// packet uses on 26.2 — this era predates that split packet, it rides
     /// this one instead. `4`/`5` are clear-then-reset, the same pair 26.2's
     /// `CLEAR_TITLES` folds into one `resetTimes` bool.
     /// `minecraft:set_title_text`. 1.17 split the older single title packet —
@@ -1734,8 +1759,8 @@ impl V756Adapter {
         let mut suggestions = Vec::with_capacity(count.min(reader.remaining()));
         for _ in 0..count {
             let text = reader.string(32_767).map_err(dec_err)?;
-            // The tooltip is a real JSON text component, and protocol 754
-            // (1.16.5) postdates 1.16's hex-colour introduction, so it can
+            // The tooltip is a real JSON text component, and this era
+            // postdates 1.16's hex-colour introduction, so it can
             // carry a `TextColor::Rgb` — keep it as a real `Text` rather
             // than flattening through `Text::to_legacy_string`.
             let tooltip = if reader.bool().map_err(dec_err)? {
@@ -1772,13 +1797,13 @@ impl V756Adapter {
                 game_mode: None,
                 latency: None,
                 display_name: None,
-                // 1.16.5 has no separate "listed" bit — every entry the
+                // This era has no separate "listed" bit — every entry the
                 // server sends is, by construction, in the tab list.
                 listed: None,
                 properties: None,
-                // 1.16.5 predates secure chat sessions entirely.
+                // This era predates secure chat sessions entirely.
                 chat_session: None,
-                // 1.16.5 predates both `UPDATE_LIST_ORDER` and `UPDATE_HAT`
+                // This era predates both `UPDATE_LIST_ORDER` and `UPDATE_HAT`
                 // (added in 1.21.4's action-bitmask packet) entirely.
                 list_order: None,
                 hat_visible: None,
@@ -3284,9 +3309,10 @@ impl VersionAdapter for V756Adapter {
                     chat_colors,
                     skin_parts,
                     main_hand,
-                    // 1.16 predates these fields; dropped deliberately.
-                    text_filtering: _,
-                    allow_server_listing: _,
+                    text_filtering,
+                    allow_server_listing,
+                    // 1.20.5 introduced the particle-status field; this era
+                    // predates it.
                     particle_status: _,
                 } = settings;
                 let body = Settings {
@@ -3296,6 +3322,9 @@ impl VersionAdapter for V756Adapter {
                     chat_colors: *chat_colors,
                     skin_parts: skin_parts_bits(*skin_parts),
                     main_hand: main_hand_value(*main_hand),
+                    text_filtering: *text_filtering,
+                    // Written unconditionally; the derive drops it at 756.
+                    allow_server_listing: *allow_server_listing,
                 };
                 Ok(Some((self.ids().settings, self.encode_body(&body)?)))
             }
@@ -3326,11 +3355,6 @@ impl VersionAdapter for V756Adapter {
                 // 1.16 reduced serverbound abilities to a single flags byte.
                 let body = PlayerAbilities {
                     flags: if *flying { ABILITY_FLYING } else { 0 },
-                    // 498/578 only; the derive drops both at 754. These are
-                    // the vanilla client's own default walk/fly speeds, which
-                    // the server ignores on this packet.
-                    flying_speed: DEFAULT_FLYING_SPEED,
-                    walking_speed: DEFAULT_WALKING_SPEED,
                 };
                 Ok(Some((self.ids().abilities, self.encode_body(&body)?)))
             }
@@ -3366,36 +3390,36 @@ impl VersionAdapter for V756Adapter {
                 "this era has no client_tick_end packet".to_owned(),
             )),
             ClientAction::RenameItem { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 rename item encoding is not yet implemented".to_owned(),
+                "this era's rename item encoding is not yet implemented".to_owned(),
             )),
             ClientAction::SelectTrade { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 select trade encoding is not yet implemented".to_owned(),
+                "this era's select trade encoding is not yet implemented".to_owned(),
             )),
             ClientAction::PickItemFromBlock { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 pick item from block encoding is not yet implemented".to_owned(),
+                "this era's pick item from block encoding is not yet implemented".to_owned(),
             )),
             ClientAction::PickItemFromEntity { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 pick item from entity encoding is not yet implemented".to_owned(),
+                "this era's pick item from entity encoding is not yet implemented".to_owned(),
             )),
             ClientAction::SetBeaconEffects { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 set beacon encoding requires a mob-effect registry that is not yet \
+                "this era's set beacon encoding requires a mob-effect registry that is not yet \
                  available"
                     .to_owned(),
             )),
             ClientAction::EditBook { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 edit book encoding is not yet implemented".to_owned(),
+                "this era's edit book encoding is not yet implemented".to_owned(),
             )),
             ClientAction::SignUpdate { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 sign update encoding is not yet implemented".to_owned(),
+                "this era's sign update encoding is not yet implemented".to_owned(),
             )),
             ClientAction::SetCommandBlock { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 set command block encoding is not yet implemented".to_owned(),
+                "this era's set command block encoding is not yet implemented".to_owned(),
             )),
             ClientAction::PlayerLoaded => Err(AdapterError::Unsupported(
-                "protocol 735 predates the player_loaded packet (added in 1.20.2)".to_owned(),
+                "this era's predates the player_loaded packet (added in 1.20.2)".to_owned(),
             )),
             ClientAction::SeenAdvancements { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 advancements encoding is not yet implemented".to_owned(),
+                "this era's advancements encoding is not yet implemented".to_owned(),
             )),
             ClientAction::CommandSuggestion { id, command } => {
                 // `packet_tab_complete` (minecraft-data 1.16.2): `transactionId:
@@ -3408,10 +3432,10 @@ impl VersionAdapter for V756Adapter {
                 Ok(Some((self.ids().tab_complete, writer.into_vec())))
             }
             ClientAction::PaddleBoat { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 paddle boat encoding is not yet implemented".to_owned(),
+                "this era's paddle boat encoding is not yet implemented".to_owned(),
             )),
             ClientAction::MoveVehicle { .. } => Err(AdapterError::Unsupported(
-                "protocol 735 move vehicle encoding is not yet implemented".to_owned(),
+                "this era's move vehicle encoding is not yet implemented".to_owned(),
             )),
 
             // Leaving the death screen. `client_command` action `0` =
@@ -3422,7 +3446,7 @@ impl VersionAdapter for V756Adapter {
                 let body = ClientCommand { action: 0 };
                 Ok(Some((self.ids().client_command, self.encode_body(&body)?)))
             }
-            // Clicking a name in the tab list while spectating. 1.16.5's
+            // Clicking a name in the tab list while spectating. This era's
             // `spectate` packet carries the target's uuid directly, which the
             // model already supplies, so no entity registry is needed.
             ClientAction::TeleportToEntity { target } => {
@@ -3430,7 +3454,7 @@ impl VersionAdapter for V756Adapter {
                 Ok(Some((self.ids().spectate, self.encode_body(&body)?)))
             }
             // The continuous spectator-follow action carries only a network
-            // entity id, but 1.16.5's wire packet is the same uuid-keyed
+            // entity id, but this era's wire packet is the same uuid-keyed
             // `spectate` packet as `TeleportToEntity` above. A stateless
             // adapter has no id->uuid registry to bridge the two.
             ClientAction::SpectatorAction { .. } => Err(AdapterError::Unsupported(
@@ -3448,7 +3472,7 @@ impl VersionAdapter for V756Adapter {
             ClientAction::SetContainerSlotState { .. } => Err(AdapterError::Unsupported(
                 "this era predates the crafter block (added in 1.21)".to_owned(),
             )),
-            // All four recipe books exist by 1.16.5, so this needs no
+            // All four recipe books exist by this era, so this needs no
             // version-specific fallback the way protocol 340's does.
             ClientAction::SetRecipeBookSettings {
                 book_type,
@@ -3464,7 +3488,7 @@ impl VersionAdapter for V756Adapter {
                 Ok(Some((self.ids().recipe_book, payload)))
             }
             // Both packets identify a recipe by a namespaced string id in
-            // 1.16.5 (`craft_recipe_request.recipe` and
+            // this era (`craft_recipe_request.recipe` and
             // `displayed_recipe.recipeId`, both `string` per minecraft-data's
             // 1.16.2 protocol.json) rather than the numeric index the model
             // carries, and this stateless adapter has no recipe registry to

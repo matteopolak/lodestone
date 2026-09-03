@@ -15,7 +15,7 @@
 //! general `#[mc(bits(x = 26, z = 26, y = 12))]`), because the *only* thing
 //! that differs between old and modern positions is the field order of the
 //! packing: 1.8 through 1.13 pack `x, y, z` (y in the middle) whereas 1.14+
-//! (protocol 754 is 1.16.5) packs `x, z, y` (y in the low bits). A subtly wrong
+//! (which is every protocol in this era) packs `x, z, y` (y in the low bits). A subtly wrong
 //! bit layout is invisible to a round-trip test, which is why this module is
 //! covered by byte-level golden tests.
 

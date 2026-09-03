@@ -1,4 +1,4 @@
-//! Clientbound `player_info` packet for protocol 754 -- the tab list.
+//! Clientbound `player_info` packet for this era -- the tab list.
 //!
 //! Byte-identical to v1-8's and v1-9's own hand-written decoder (measured:
 //! only doc comments and a test-only `CTX` constant differed), so this type
