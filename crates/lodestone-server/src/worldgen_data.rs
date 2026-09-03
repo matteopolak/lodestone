@@ -1133,6 +1133,121 @@ pub fn flat_chunk_source(
     FlatChunkSource::new(flat_generator(settings))
 }
 
+/// Builds the flat/fixed-biome [`ChunkSource`](crate::chunk::ChunkSource)
+/// `world_dir`'s own `world_gen_settings.dat` actually specifies — the
+/// launch-time half of reading back a "Customize Type" choice.
+/// `crate::menu::create_world::CustomizeEditor`
+/// (`lodestone-shell`) already writes the player's chosen preset/biome into
+/// that file at world creation, via
+/// [`lodestone_anvil::world_gen_settings::WorldGenSettings::with_overworld_flat_generator`]/
+/// [`with_overworld_fixed_biome_generator`](lodestone_anvil::world_gen_settings::WorldGenSettings::with_overworld_fixed_biome_generator);
+/// nothing before this function ever read that field back, so a freshly
+/// created customized world generated exactly like an uncustomized one the
+/// moment the player pressed Play.
+///
+/// Returns `Ok(None)` when there is nothing to override: no settings file
+/// yet (a throwaway in-memory world, or a world whose first open has not
+/// run [`crate::region_source::resolve_world_seed`] yet), or the stored
+/// generator is [`OverworldGenerator::Other`](lodestone_anvil::world_gen_settings::OverworldGenerator::Other)
+/// — a real `Normal`/`LargeBiomes`/`Amplified` world, whose generator this
+/// crate already reconstructs from `seed` alone and needs no on-disk
+/// override for.
+///
+/// # Where this is not yet called from
+///
+/// `crates/lodestone-shell/src/net.rs`'s `preset_chunk_source` is the sole
+/// place that builds a persistent world's chunk source, and today its
+/// `WorldTypePreset::Flat | WorldTypePreset::FlatAllDimensions` and
+/// `WorldTypePreset::SingleBiomeSurface` arms call
+/// [`world_preset_flat_settings`]/[`world_preset_single_biome_default_biome`]
+/// unconditionally — the bundled default, regardless of what
+/// `world_gen_settings.dat` (already written by the time that function
+/// runs; `world_dir` is in scope there) actually says. That file was out of
+/// this session's ownership (a concurrent movement investigation), the same
+/// reason [`overworld_chunk_source_checked`]'s own doc already names for
+/// the `Origin::Integrated`/`overworld_chunk_source` pair — this function is
+/// built, tested, and ready for whoever next owns that call site to adopt:
+/// call this first with `world_dir`, and only fall back to the bundled
+/// default on `Ok(None)`.
+///
+/// # Errors
+///
+/// [`WorldgenScopeMismatch`] if `world_dir` stores a Flat or fixed-biome
+/// override but the hosting protocol's declared `scope` does not match what
+/// this crate's embedded worldgen bundle serves — the same refusal
+/// [`overworld_chunk_source_checked`] and `preset_chunk_source`'s own
+/// `refuse_unless_served` apply to every other preset.
+///
+/// Native only, like [`crate::region_source`]: reads a real file, and
+/// `lodestone-anvil` is not a dependency of this crate's `wasm32` build (a
+/// browser singleplayer world has no filesystem to have written
+/// `world_gen_settings.dat` to in the first place).
+#[cfg(not(target_arch = "wasm32"))]
+pub fn overworld_chunk_source_override(
+    world_dir: &std::path::Path,
+    scope: WorldgenScope,
+    seed: i64,
+) -> Result<Option<(std::sync::Arc<dyn crate::chunk::ChunkSource>, i32, i32)>, WorldgenScopeMismatch>
+{
+    let path = lodestone_anvil::world_gen_settings::path_in(world_dir);
+    let Ok(settings) = lodestone_anvil::world_gen_settings::read_from_file(&path) else {
+        // No settings file (or an unreadable one) is not this function's
+        // problem to report — `resolve_world_seed` is what makes an
+        // unreadable *existing* file a hard error before this ever runs; a
+        // missing file (this open is the one creating the world, and
+        // creation had not yet written it when this was called) just means
+        // "nothing to override yet".
+        return Ok(None);
+    };
+    match settings.overworld_generator() {
+        Some(lodestone_anvil::world_gen_settings::OverworldGenerator::Flat {
+            layers,
+            biome,
+            features,
+            lakes,
+        }) => {
+            let flat_settings = lodestone_worldgen::flat::FlatLevelGeneratorSettings {
+                biome,
+                features,
+                lakes,
+                layers: layers
+                    .into_iter()
+                    .map(|layer| lodestone_worldgen::flat::FlatLayer {
+                        block: layer.block,
+                        // The NBT field is a signed `Int` (matching
+                        // `with_overworld_flat_generator`'s own writer);
+                        // `FlatLayer::height` is `u32` (row counts are never
+                        // negative). Clamped rather than `as u32` so a
+                        // corrupt negative value on disk becomes `0` (an
+                        // inert, skipped layer) instead of wrapping to a huge
+                        // one.
+                        height: layer.height.max(0) as u32,
+                    })
+                    .collect(),
+                structure_overrides: lodestone_worldgen::flat::StructureOverrides::Default,
+            };
+            let source = flat_chunk_source(flat_settings);
+            // Same "throwaway `OverworldChunkSource` purely to read its
+            // bounds" move `preset_chunk_source`'s own doc already
+            // documents for `Flat`/`FlatAllDimensions`/`DebugAllBlockStates`
+            // — the flat/debug generators read `min_y`/`height` off this
+            // exact overworld noise-settings document, so the two are
+            // guaranteed equal without hardcoding `(-64, 384)` here too.
+            let bounds = overworld_chunk_source_checked(scope, seed)?;
+            Ok(Some((std::sync::Arc::new(source), bounds.min_y(), bounds.height())))
+        }
+        Some(lodestone_anvil::world_gen_settings::OverworldGenerator::FixedBiome { biome }) => {
+            if !bundled_worldgen_serves(scope) {
+                return Err(WorldgenScopeMismatch { requested: scope });
+            }
+            let source = single_biome_chunk_source(seed, &biome);
+            let (min_y, height) = (source.min_y(), source.height());
+            Ok(Some((std::sync::Arc::new(source), min_y, height)))
+        }
+        Some(lodestone_anvil::world_gen_settings::OverworldGenerator::Other) | None => Ok(None),
+    }
+}
+
 /// Every block state's canonical string, id `0..STATE_COUNT`, in the vanilla
 /// global-palette order — [`lodestone_worldgen::debug::DebugLevelSource`]'s
 /// `ALL_BLOCKS`. Built once per process from [`lodestone_data::block_states`]
@@ -3959,6 +4074,187 @@ mod generation_spawn_reaches_a_real_chunk {
 
         // A different column, never edited, still reads the generated stack.
         assert_eq!(flat.block_state(16, -61, 0), "minecraft:grass_block[snowy=false]");
+    }
+
+    fn tempdir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("lodestone-worldgen-data-693-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch world dir");
+        dir
+    }
+
+    /// **The full chain, on disk.** Writes a `world_gen_settings.dat` the way
+    /// `crate::saves::create_world_in` (`lodestone-shell`) does when the
+    /// player picks a *non-default* Flat preset in `CustomizeEditor` — not
+    /// Classic Flat, so a wrong implementation that silently fell back to the
+    /// bundled default would still produce plausible-looking terrain instead
+    /// of visibly failing — then calls
+    /// [`overworld_chunk_source_override`] exactly as `net.rs`'s
+    /// `preset_chunk_source` would, and asserts the **exact block stack**
+    /// the generated column reports: the value is predicted (a specific
+    /// block per row), not merely "some terrain came back" or "differs from
+    /// a baseline".
+    #[test]
+    fn overworld_chunk_source_override_builds_the_customized_flat_world_from_disk() {
+        use crate::chunk::ChunkSource;
+        let dir = tempdir("flat");
+        let path = lodestone_anvil::world_gen_settings::path_in(&dir);
+        let layers = [
+            lodestone_anvil::world_gen_settings::FlatLayer { block: "minecraft:bedrock", height: 1 },
+            lodestone_anvil::world_gen_settings::FlatLayer { block: "minecraft:sandstone", height: 4 },
+            lodestone_anvil::world_gen_settings::FlatLayer { block: "minecraft:sand", height: 2 },
+        ];
+        let settings = lodestone_anvil::world_gen_settings::WorldGenSettings::from_seed(7)
+            .with_overworld_flat_generator(&layers, "minecraft:desert", false, false);
+        lodestone_anvil::world_gen_settings::write_to_file(&settings, &path)
+            .expect("writes the settings file");
+
+        let (source, min_y, _height) =
+            super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_2, 7)
+                .expect("scope matches the bundle")
+                .expect("a Flat generator was stored on disk");
+
+        assert_eq!(min_y, -64, "flat/debug share the bundled overworld's own min_y");
+        let expected: [(i32, &str); 8] = [
+            (-64, "minecraft:bedrock"),
+            (-63, "minecraft:sandstone"),
+            (-62, "minecraft:sandstone"),
+            (-61, "minecraft:sandstone"),
+            (-60, "minecraft:sandstone"),
+            (-59, "minecraft:sand"),
+            (-58, "minecraft:sand"),
+            (-57, "minecraft:air"),
+        ];
+        let mut mismatches = Vec::new();
+        for &(y, want) in &expected {
+            let got = source.block_state(0, y, 0);
+            if got != want {
+                mismatches.push(format!("y={y}: expected {want:?}, got {got:?}"));
+            }
+        }
+        assert!(mismatches.is_empty(), "layer-stack mismatches:\n{mismatches:#?}");
+        // `biome_state` (2-D, surface quarts), not `biome_state_at` (the 3-D
+        // grid): `FlatChunkSource` only populates the surface quarts a flat
+        // world actually has a use for (`flat_world_produces_the_exact_
+        // layer_stack_and_differs_from_default_overworld_at_the_same_column`,
+        // this same module's own pre-existing gate, checks the identical way)
+        // — its 3-D grid is left at `ChunkColumn::new`'s default, so
+        // `biome_state_at` would report that default rather than the chosen
+        // biome, which is not this test's subject.
+        assert_eq!(source.column(0, 0).biome_state(0, 0), "minecraft:desert");
+
+        // The absence control this repo's own standards require: the
+        // *default* Classic Flat stack (what the old, unfixed behaviour
+        // would have produced regardless of this file's contents) must not
+        // appear at the same rows.
+        assert_ne!(
+            source.block_state(0, -63, 0),
+            "minecraft:dirt",
+            "control: the bundled default's own layer must not appear — a \
+             wrong implementation that ignored world_gen_settings.dat and \
+             fell back to the bundled preset would still pass every \
+             assertion above it if this one were missing"
+        );
+    }
+
+    /// The Single Biome half of the same chain — a chosen biome id that is
+    /// not the bundled default, so a wrong implementation that always
+    /// reported the default would still pass a test using the default.
+    #[test]
+    fn overworld_chunk_source_override_builds_the_customized_single_biome_world_from_disk() {
+        use crate::chunk::ChunkSource;
+        let dir = tempdir("single-biome");
+        let path = lodestone_anvil::world_gen_settings::path_in(&dir);
+        let settings = lodestone_anvil::world_gen_settings::WorldGenSettings::from_seed(7)
+            .with_overworld_fixed_biome_generator("minecraft:jungle");
+        lodestone_anvil::world_gen_settings::write_to_file(&settings, &path)
+            .expect("writes the settings file");
+
+        let (source, _min_y, _height) =
+            super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_2, 7)
+                .expect("scope matches the bundle")
+                .expect("a fixed-biome generator was stored on disk");
+
+        // Every column must report the chosen biome — `single_biome_chunk_source`'s
+        // own documented contract (`FixedBiomeSource`), re-checked here through
+        // the disk-driven entry point rather than assumed to carry over.
+        assert_eq!(source.biome_state_at(0, 80, 0), "minecraft:jungle");
+        assert_eq!(source.biome_state_at(512, 80, -512), "minecraft:jungle");
+        assert_ne!(
+            source.biome_state_at(0, 80, 0),
+            super::world_preset_single_biome_default_biome(),
+            "control: the bundled default biome must not appear — a wrong \
+             implementation that ignored the chosen biome and fell back to \
+             the bundled default would still pass a test that only checked \
+             for *a* biome"
+        );
+    }
+
+    /// **The absence control.** A settings file with no `dimensions`
+    /// compound at all — what a settings file looks like the moment
+    /// [`crate::region_source::resolve_world_seed`] creates it, before any
+    /// customization lands — must resolve to `Ok(None)`: nothing to
+    /// override, defer to whatever the caller would otherwise build. Proves
+    /// the detector distinguishes "no override" from "override present"
+    /// rather than treating every settings file as a Flat/FixedBiome one.
+    #[test]
+    fn overworld_chunk_source_override_is_none_for_an_uncustomized_world() {
+        let dir = tempdir("normal");
+        let path = lodestone_anvil::world_gen_settings::path_in(&dir);
+        let settings = lodestone_anvil::world_gen_settings::WorldGenSettings::from_seed(7);
+        lodestone_anvil::world_gen_settings::write_to_file(&settings, &path)
+            .expect("writes the settings file");
+
+        // `Arc<dyn ChunkSource>` is neither `Debug` nor `PartialEq`, so the
+        // `Ok(Some(..))` arm cannot be spelled in an `assert_eq!` — matching
+        // is the only way to assert "definitely `Ok(None)`", not "definitely
+        // not `Err`" (which `is_ok_and` alone would understate).
+        match super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_2, 7) {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("expected Ok(None) for an uncustomized world, got Ok(Some(..))"),
+            Err(e) => panic!("expected Ok(None) for an uncustomized world, got Err({e})"),
+        }
+    }
+
+    /// A world directory with no settings file at all (never opened) is the
+    /// same "nothing to override" case, not an error — `net.rs` calls this
+    /// after `resolve_world_seed` has already run, but a caller checking
+    /// earlier, or a throwaway path, must not panic or error.
+    #[test]
+    fn overworld_chunk_source_override_is_none_with_no_settings_file() {
+        let dir = tempdir("missing");
+        match super::overworld_chunk_source_override(&dir, super::WorldgenScope::V26_2, 7) {
+            Ok(None) => {}
+            Ok(Some(_)) => panic!("expected Ok(None) for a missing settings file, got Ok(Some(..))"),
+            Err(e) => panic!("expected Ok(None) for a missing settings file, got Err({e})"),
+        }
+    }
+
+    /// The same uniform scope refusal every other preset in
+    /// `preset_chunk_source` gets (see [`overworld_chunk_source_override`]'s
+    /// own doc) — a stored Flat override does not bypass it.
+    #[test]
+    fn overworld_chunk_source_override_refuses_a_mismatched_scope() {
+        let dir = tempdir("scope-mismatch");
+        let path = lodestone_anvil::world_gen_settings::path_in(&dir);
+        let settings = lodestone_anvil::world_gen_settings::WorldGenSettings::from_seed(7)
+            .with_overworld_flat_generator(
+                &[lodestone_anvil::world_gen_settings::FlatLayer { block: "minecraft:stone", height: 1 }],
+                "minecraft:plains",
+                false,
+                false,
+            );
+        lodestone_anvil::world_gen_settings::write_to_file(&settings, &path)
+            .expect("writes the settings file");
+
+        // `Result::expect_err` requires the `Ok` side to be `Debug`, which
+        // `Arc<dyn ChunkSource>` is not — matching is the only way to pull
+        // the error out.
+        let err = match super::overworld_chunk_source_override(&dir, super::WorldgenScope::None, 7) {
+            Err(e) => e,
+            Ok(_) => panic!("a bundle-less host must be refused, not silently served"),
+        };
+        assert_eq!(err, super::WorldgenScopeMismatch { requested: super::WorldgenScope::None });
     }
 }
 

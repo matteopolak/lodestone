@@ -637,6 +637,11 @@ pub use worldgen_data::{
     single_biome_chunk_source, single_biome_generator,
     world_preset_flat_settings, world_preset_single_biome_default_biome,
 };
+// The "Customize Type" screen's chosen preset/biome, read back from
+// `world_gen_settings.dat` instead of the bundled default above. Native
+// only — see the function's own doc.
+#[cfg(not(target_arch = "wasm32"))]
+pub use worldgen_data::overworld_chunk_source_override;
 
 // Re-exported so a caller (e.g. the shell's local world) can name the generator
 // and its output without depending on `lodestone-worldgen` directly.

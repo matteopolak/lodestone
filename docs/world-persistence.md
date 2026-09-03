@@ -26,6 +26,29 @@ point-of-interest region files all as one instance each, and so a browser build 
 filesystem can still depend on `lodestone-server` without dragging in the disk-based half of it
 (`lodestone-anvil` is a non-wasm-target dependency for exactly this reason).
 
+### `world_gen_settings.dat`'s generator override
+
+The same file that holds the seed also holds an optional
+`dimensions.minecraft:overworld.generator` compound — vanilla's own way of recording a
+non-default world type (Flat's chosen layer preset, or Single Biome's chosen biome) so that
+reopening a saved world regenerates unexplored chunks the same way rather than reverting to an
+ordinary world. The create-world "Customize Type" screen writes this at creation time
+(`WorldGenSettings::with_overworld_flat_generator`/`with_overworld_fixed_biome_generator`), and
+`WorldGenSettings::overworld_generator()` is the read-back half: it classifies whatever is stored
+as `Flat { layers, biome, features, lakes }`, `FixedBiome { biome }`, or `Other` (a real
+Normal/Large-Biomes/Amplified world, whose generator is reconstructed from the seed alone and
+carries no on-disk override). `lodestone_server::worldgen_data::overworld_chunk_source_override`
+turns that classification into the real `ChunkSource` a world directory's own file specifies,
+returning `Ok(None)` when there is nothing to override.
+
+**As of this writing, nothing on the singleplayer launch path calls
+`overworld_chunk_source_override` yet** — `lodestone-shell`'s own chunk-source construction
+(`net.rs`'s `preset_chunk_source`) still builds Flat/Single-Biome worlds from this crate's bundled
+*default* preset/biome regardless of what a given world's `world_gen_settings.dat` actually
+stores, so a customized world does not yet generate according to the player's choice when played.
+The reader and the chunk-source builder are both real and tested; the one remaining step is a
+shell-side call site adopting them.
+
 `lodestone-server`'s own chunk-NBT schema module owns the mapping between an in-memory
 `ChunkColumn` and the actual chunk NBT tree; the persistence layer sits below the chunk cache and
 above the terrain generator in the chunk-source stack, so that a cache eviction never loses an
