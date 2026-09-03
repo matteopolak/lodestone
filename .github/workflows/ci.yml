@@ -10,14 +10,19 @@
 # 2x the Linux rate, so "which platform catches what" is a real design question
 # here and not a formality; docs/ci.md carries the arithmetic.
 #
-# Five of the six jobs below call the `just` recipes that are exactly
-# CLAUDE.md's "Build and test" health checks, one per job so a failure names
-# itself instead of hiding behind three green jobs and one red one:
+# Four of the six jobs below call the `just` recipes that are four of
+# CLAUDE.md's five "Build and test" health checks, one per job so a failure
+# names itself instead of hiding behind three green jobs and one red one:
 #
 #   just check       # cargo check --workspace --all-targets
 #   just check-all    # cargo check --workspace --all-features --all-targets --exclude lodestone-allocbench
 #   just check-seam   # cargo check -p lodestone-shell --no-default-features
 #   just test         # cargo test --workspace --no-fail-fast
+#
+# The fifth health check, `just check-comment-voice` (cargo xtask
+# check-comment-voice), runs as a step inside `xtask-structural-checks`
+# instead — it is a cheap text scan with no OS/feature axis worth a job of
+# its own, unlike the four above.
 #
 # plus one that is not a "Build and test" health check but is the only
 # automatic runner of the wasm32 tripwire — see the `wasm` job's own comment for
@@ -35,12 +40,13 @@
 # hardcoded `-j`.
 #
 # The sixth (xtask-structural-checks) runs cargo xtask's own dependency-graph
-# checks (check-isolation, check-deletable) — cheap, and CLAUDE.md-adjacent
-# but not one of the four literal commands above. It is left calling `cargo
-# run -p xtask` directly: the Justfile's `xtask *args` passthrough always adds
-# `-q`, which is not byte-identical to this job's existing invocation, so
-# converting it would change what the job actually runs rather than just
-# naming it.
+# checks (check-isolation, check-deletable) plus the fifth health check,
+# check-comment-voice — all cheap, CLAUDE.md-adjacent, and none needing the
+# platform/feature variance that justifies check/check-all/check-seam having
+# their own jobs. It is left calling `cargo run -p xtask` directly: the
+# Justfile's `xtask *args` passthrough always adds `-q`, which is not
+# byte-identical to this job's existing invocation, so converting it would
+# change what the job actually runs rather than just naming it.
 #
 # Do not "simplify" the --exclude on the all-features job away: lodestone-allocbench
 # has a deliberate compile_error!() when more than one allocator feature is on
@@ -266,7 +272,7 @@ jobs:
       - run: just check-seam
 
   xtask-structural-checks:
-    name: "xtask: check-isolation / check-deletable"
+    name: "xtask: check-isolation / check-deletable / check-comment-voice"
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -288,6 +294,12 @@ jobs:
             cargo run -p xtask -- check-deletable "$family"
             echo "::endgroup::"
           done
+      # Fails on a comment/doc-comment written in the voice of the change
+      # that introduced it, or a bare issue reference standing in for the
+      # substance it pointed at -- see xtask/src/comment_voice.rs's module
+      # doc. Exceptions live in xtask/check-comment-voice.toml, each with an
+      # owner and a reason, never silently skipped.
+      - run: cargo run -p xtask -- check-comment-voice
 
   # The wasm32 tripwire. This job is the whole point of `cargo xtask wasm-check`
   # existing: it was written to be a tripwire and NOTHING RAN IT — not `just

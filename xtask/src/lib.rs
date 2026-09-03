@@ -8115,8 +8115,8 @@ pub fn render_version_table_source(entries: &[VersionTableEntry]) -> Result<Stri
          // Regenerate with `cargo run -p xtask -- version-table [--fetch-missing]` (see\n\
          // `crates/lodestone-registry/src/version_table.rs` module docs and\n\
          // `docs/version-table.md` for provenance and how to refresh).\n\
-         //! Generated version table for GitHub epic #343 (multi-version support,\n\
-         //! the latest patch of every major Minecraft release, 1.7.10 through 26.2).\n\
+         //! Generated version table: the latest patch of every major Minecraft\n\
+         //! release this workspace tracks, 1.7.10 through 26.2.\n\
          //! See [`crate::version_table`] for the public API and full provenance notes.\n"
     )?;
     writeln!(

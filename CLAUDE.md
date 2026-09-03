@@ -42,13 +42,14 @@ just check        # cargo check --workspace --all-targets
 just check-all    # ... --all-features --all-targets --exclude lodestone-allocbench
 just check-seam   # cargo check -p lodestone-shell --no-default-features
 just test         # cargo test --workspace --no-fail-fast
-just health       # all four of the above, in order
+just check-comment-voice  # cargo xtask check-comment-voice: no issue refs/change-voice in comments
+just health       # all five of the above, in order
 just wasm-check   # wasm32 compile + confinement guards (CI runs this; `health` does not)
 just run          # launch the game
 just run-wasm     # launch the BROWSER build on :8080
 ```
 
-All four health checks are required, because each catches a class the others cannot:
+All five health checks are required, because each catches a class the others cannot:
 
 - **`cargo build` is not a health check** — it skips test targets. Always `--all-targets`.
 - **`--all-targets` alone misses non-default features**, hence `check-all`. The `--exclude` is not a
@@ -59,6 +60,10 @@ All four health checks are required, because each catches a class the others can
   hiding every alphabetically-later one.
 - **`check-seam` is architectural**: nothing else proves the shell compiles with no version family,
   which is the whole point of the version seam.
+- **`check-comment-voice` is a lint, not a compiler check**: nothing else catches a comment written in
+  the voice of the change that introduced it, or a bare issue reference standing in for the substance
+  it pointed at (`xtask/src/comment_voice.rs`). Exceptions are recorded in
+  `xtask/check-comment-voice.toml`, never silently skipped.
 - **`wasm-check` lives in CI, not in `health`** — the other four can be green while `wasm32` is broken.
   A green wasm compile still does not prove the browser runs: `std::fs` returns `Err(Unsupported)`, but
   `Instant::now`, `SystemTime::now`, `thread::spawn` and `thread::scope` all trap. Run it after any
