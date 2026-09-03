@@ -47,7 +47,7 @@
 use std::collections::BTreeMap;
 
 use lodestone_model::event::{ClientEvent, RecipeBookEntry};
-use lodestone_model::Identifier;
+use lodestone_model::{Identifier, RegistrySet};
 
 /// One recipe the server has unlocked.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +58,15 @@ pub struct KnownRecipe {
     /// furnace, etc.) can display. See
     /// [`lodestone_model::event::RecipeBookEntry::station_items`].
     pub station_items: Vec<i32>,
+    /// The book group this recipe cycles within, or `None` when it stands
+    /// alone. See [`lodestone_model::event::RecipeBookEntry::group`].
+    pub group: Option<i32>,
+    /// The book tab (category index) the recipe belongs to.
+    pub category: i32,
+    /// The ingredient sets that gate this recipe's reveal in the book, or
+    /// `None` when the server states no requirement. See
+    /// [`lodestone_model::event::RecipeBookEntry::crafting_requirements`].
+    pub crafting_requirements: Option<Vec<RegistrySet>>,
     /// Whether the unlock should raise a toast.
     pub notification: bool,
     /// Whether its book tab should highlight.
@@ -167,6 +176,9 @@ impl RecipeBookSync {
                     display_id,
                     result_items,
                     station_items,
+                    group,
+                    category,
+                    crafting_requirements,
                     notification,
                     highlight,
                 } in entries
@@ -176,6 +188,9 @@ impl RecipeBookSync {
                         KnownRecipe {
                             result_items: result_items.clone(),
                             station_items: station_items.clone(),
+                            group: *group,
+                            category: *category,
+                            crafting_requirements: crafting_requirements.clone(),
                             notification: *notification,
                             highlight: *highlight,
                         },
@@ -218,6 +233,7 @@ impl RecipeBookSync {
 #[cfg(test)]
 mod tests {
     use super::RecipeBookSync;
+    use lodestone_model::RegistrySet;
     use lodestone_model::event::{ClientEvent, RecipeBookEntry};
 
     fn entry(display_id: i32, result: i32) -> RecipeBookEntry {
@@ -225,6 +241,9 @@ mod tests {
             display_id,
             result_items: vec![result],
             station_items: Vec::new(),
+            group: None,
+            category: 0,
+            crafting_requirements: None,
             notification: true,
             highlight: false,
         }
@@ -301,6 +320,11 @@ mod tests {
                 display_id: 1,
                 result_items: vec![10],
                 station_items: vec![99],
+                group: Some(5),
+                category: 2,
+                crafting_requirements: Some(vec![RegistrySet::Tag(
+                    "minecraft:planks".to_owned(),
+                )]),
                 notification: true,
                 highlight: false,
             }],
@@ -309,6 +333,14 @@ mod tests {
         let recipe = store.known().get(&1).expect("entry 1 is known");
         assert_eq!(recipe.result_items, vec![10]);
         assert_eq!(recipe.station_items, vec![99]);
+        assert_eq!(recipe.group, Some(5));
+        assert_eq!(recipe.category, 2);
+        assert_eq!(
+            recipe.crafting_requirements,
+            Some(vec![RegistrySet::Tag("minecraft:planks".to_owned())]),
+            "a tag-form reveal gate keeps its tag name; collapsing it to an \
+             empty id list would read as 'gated on nothing'"
+        );
     }
 
     #[test]

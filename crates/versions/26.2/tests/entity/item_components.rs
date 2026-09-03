@@ -22,8 +22,9 @@
 
 use lodestone_core::{Nbt, NbtTag, Writer, write_network_nbt};
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, EquipmentSlot, ItemEnchantment, Text, TextColor,
-    ToolBlocks, ToolPatch, VersionAdapter,
+    ClientEvent, ConnectionState, ConsumeEffect, DamageReduction, Directive, EquipmentSlot,
+    ItemEnchantment, MobEffectInstance, RegistrySet, Text, TextColor, ToolBlocks, ToolPatch,
+    VersionAdapter,
 };
 use lodestone_v26_2::V770Adapter;
 use lodestone_data::data_component_types::component_type_name;
@@ -1103,6 +1104,14 @@ fn repairable_direct_holder_set_keeps_the_following_component_aligned() {
         Some("Mended Apple".to_owned()),
         "the component after repairable proves its direct HolderSet was consumed exactly"
     );
+    assert_eq!(
+        item.components.repairable_items,
+        Some(RegistrySet::Ids(vec![
+            item_id("minecraft:iron_ingot").expect("known repair item"),
+            item_id("minecraft:gold_ingot").expect("known repair item"),
+        ])),
+        "the repair material is the component's whole value, in wire order"
+    );
 }
 
 /// An explicit `minecraft:equippable` patch overrides the horse armour's
@@ -1178,6 +1187,12 @@ fn equippable_patch_overrides_slot_and_consumes_all_wire_fields() {
     let armor = items[0].as_ref().expect("horse armour stack");
     assert!(!armor.components.has_unmodeled);
     assert_eq!(armor.components.equippable, Some(EquipmentSlot::OffHand));
+    assert_eq!(
+        armor.components.equippable_allowed_entities,
+        Some(RegistrySet::Tag("minecraft:can_wear_horse_armor".to_owned())),
+        "the tag arm keeps its tag name: an empty id list would read as \
+         'no entity may wear this', the opposite of the restriction"
+    );
     assert_eq!(
         armor.components.custom_name.as_ref().map(Text::to_plain_string),
         Some("Borrowed Reins".to_owned()),
@@ -1734,9 +1749,14 @@ fn consumable_does_not_truncate_a_component_after_it() {
     patch.var_i32(2); // ItemUseAnimation ordinal
     patch.var_i32(5 + 1); // Holder<SoundEvent> reference form: registry id 5
     patch.bool(true); // hasConsumeParticles
-    patch.var_i32(1); // one ConsumeEffect
+    patch.var_i32(3); // three ConsumeEffect entries
     patch.var_i32(4); // play_sound
     patch.var_i32(9 + 1); // Holder<SoundEvent> reference form: registry id 9
+    patch.var_i32(1); // remove_effects
+    patch.var_i32(0); // registry set, tag arm
+    patch.string("minecraft:beneficial_effects");
+    patch.var_i32(3); // teleport_randomly
+    patch.f32(18.5); // diameter
 
     patch.var_i32(component_id("minecraft:custom_name"));
     write_network_nbt(&mut patch, &Nbt::String("Stew".to_owned())).unwrap();
@@ -1755,6 +1775,25 @@ fn consumable_does_not_truncate_a_component_after_it() {
             .map(Text::to_plain_string),
         Some("Stew".to_owned()),
         "the component after consumable must still decode"
+    );
+    assert_eq!(
+        item.components.consume_effects,
+        vec![
+            ConsumeEffect::PlaySound,
+            ConsumeEffect::RemoveEffects(RegistrySet::Tag(
+                "minecraft:beneficial_effects".to_owned()
+            )),
+            ConsumeEffect::TeleportRandomly {
+                diameter_bits: 18.5_f32.to_bits(),
+            },
+        ],
+        "eating this stew clears a tag's worth of effects and teleports the \
+         eater; the list order is the order the effects apply in"
+    );
+    assert_eq!(
+        item.components.consume_effects[2].teleport_diameter(),
+        Some(18.5),
+        "the diameter reads back through the accessor, not only as bits"
     );
 }
 
@@ -1781,7 +1820,7 @@ fn death_protection_does_not_truncate_a_component_after_it() {
     patch.bool(true); // showParticles
     patch.bool(true); // showIcon
     patch.bool(false); // no hidden effect
-    patch.f32(1.0); // probability
+    patch.f32(0.75); // probability
     patch.var_i32(2); // clear_all_effects
 
     patch.var_i32(component_id("minecraft:custom_name"));
@@ -1801,5 +1840,296 @@ fn death_protection_does_not_truncate_a_component_after_it() {
             .map(Text::to_plain_string),
         Some("Totem".to_owned()),
         "the component after death_protection must still decode"
+    );
+    assert_eq!(
+        item.components.death_protection_effects,
+        vec![
+            ConsumeEffect::ApplyEffects {
+                effects: vec![MobEffectInstance {
+                    effect_id: 10,
+                    amplifier: 1,
+                    duration_ticks: 900,
+                    ambient: false,
+                    show_particles: true,
+                    show_icon: true,
+                }],
+                probability_bits: 0.75_f32.to_bits(),
+            },
+            ConsumeEffect::ClearAllEffects,
+        ],
+        "the effect a totem grants is the component's whole value; the three \
+         flags are pairwise distinct so a transposition cannot pass"
+    );
+    assert_eq!(
+        item.components.death_protection_effects[0].probability(),
+        Some(0.75),
+        "the probability reads back through the accessor, not only as bits"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Registry-set-bearing components
+//
+// Every component below carries at least one registry set, whose wire shape is
+// one VarInt: `0` then a tag identifier, or `n` then `n - 1` bare registry ids.
+// Each gate exercises **both** arms somewhere, because the tag arm is the one a
+// real server sends for vanilla's own items and it is the arm a decoder that
+// only kept ids would silently turn into "matches nothing".
+// ---------------------------------------------------------------------------
+
+/// `minecraft:damage_resistant` is a single, non-optional damage-type set, and
+/// the direct-id arm of it.
+///
+/// The two ids are distinct and the component after it is a pairwise-distinct
+/// custom name, so both a wrong set width and a lost value fail here.
+#[test]
+fn damage_resistant_keeps_the_damage_types_it_read() {
+    let mut patch = Writer::default();
+    patch.var_i32(2);
+    patch.var_i32(0);
+
+    patch.var_i32(component_id("minecraft:damage_resistant"));
+    patch.var_i32(2 + 1); // direct set, two entries
+    patch.var_i32(6); // damage_type registry ids, deliberately non-adjacent
+    patch.var_i32(19);
+
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Fireproof Rod".to_owned())).unwrap();
+
+    let payload = set_slot_with_patch("minecraft:blaze_rod", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(!item.components.has_unmodeled);
+    assert_eq!(
+        item.components.damage_resistant,
+        Some(RegistrySet::Ids(vec![6, 19])),
+    );
+    assert_eq!(
+        item.components
+            .custom_name
+            .as_ref()
+            .map(Text::to_plain_string),
+        Some("Fireproof Rod".to_owned()),
+        "the component after damage_resistant proves the set width was exact"
+    );
+}
+
+/// `minecraft:provides_banner_patterns` is a single banner-pattern set, and the
+/// **tag** arm of it — which is the arm every vanilla banner-pattern item uses,
+/// so a decoder that kept only explicit ids would report the whole component as
+/// unlocking nothing.
+#[test]
+fn provides_banner_patterns_keeps_the_tag_it_read() {
+    let mut patch = Writer::default();
+    patch.var_i32(2);
+    patch.var_i32(0);
+
+    patch.var_i32(component_id("minecraft:provides_banner_patterns"));
+    patch.var_i32(0); // tag arm
+    patch.string("minecraft:pattern_item/globe");
+
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Globe Loom".to_owned())).unwrap();
+
+    let payload = set_slot_with_patch("minecraft:globe_banner_pattern", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(!item.components.has_unmodeled);
+    assert_eq!(
+        item.components.provides_banner_patterns,
+        Some(RegistrySet::Tag("minecraft:pattern_item/globe".to_owned())),
+    );
+    assert_eq!(
+        item.components
+            .custom_name
+            .as_ref()
+            .map(Text::to_plain_string),
+        Some("Globe Loom".to_owned()),
+    );
+}
+
+/// `minecraft:blocks_attacks` in full: two leading floats, two damage-reduction
+/// rules (one with a damage-type set, one without — the `Optional` on that
+/// field is the easiest thing in the component to mis-frame), a three-float
+/// item-damage record, a present bypass set, and both trailing optional sounds
+/// exercised in *different* states.
+///
+/// Every float is a distinct, non-round value: a fixture built from `0.0`/`1.0`
+/// cannot tell a transposition from a correct read, and this component has nine
+/// floats in a row.
+#[test]
+fn blocks_attacks_keeps_its_reductions_bypass_set_and_item_damage() {
+    let mut patch = Writer::default();
+    patch.var_i32(2);
+    patch.var_i32(0);
+
+    patch.var_i32(component_id("minecraft:blocks_attacks"));
+    patch.f32(0.25); // blockDelaySeconds
+    patch.f32(4.75); // disableCooldownScale
+    patch.var_i32(2); // two damage reductions
+    // First rule: an explicit damage-type set.
+    patch.f32(97.5); // horizontalBlockingAngle
+    patch.bool(true);
+    patch.var_i32(1 + 1); // direct set, one entry
+    patch.var_i32(11);
+    patch.f32(2.5); // base
+    patch.f32(0.125); // factor
+    // Second rule: no set at all, so it applies to every damage type.
+    patch.f32(45.5);
+    patch.bool(false);
+    patch.f32(6.75);
+    patch.f32(0.375);
+    // itemDamage: threshold, base, factor.
+    patch.f32(3.5);
+    patch.f32(1.25);
+    patch.f32(0.625);
+    // bypassedBy: present, tag arm.
+    patch.bool(true);
+    patch.var_i32(0);
+    patch.string("minecraft:bypasses_shield");
+    // blockSound: present, reference arm.
+    patch.bool(true);
+    patch.var_i32(31 + 1);
+    // disableSound: absent — the two sounds are in different states on purpose.
+    patch.bool(false);
+
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Bulwark".to_owned())).unwrap();
+
+    let payload = set_slot_with_patch("minecraft:shield", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(!item.components.has_unmodeled);
+    let blocks = item
+        .components
+        .blocks_attacks
+        .as_ref()
+        .expect("blocks_attacks decoded");
+    assert_eq!(blocks.block_delay_seconds(), 0.25);
+    assert_eq!(blocks.disable_cooldown_scale(), 4.75);
+    assert_eq!(blocks.item_damage_threshold(), 3.5);
+    assert_eq!(blocks.item_damage_base(), 1.25);
+    assert_eq!(blocks.item_damage_factor(), 0.625);
+    assert_eq!(
+        blocks.bypassed_by,
+        Some(RegistrySet::Tag("minecraft:bypasses_shield".to_owned())),
+    );
+    assert_eq!(
+        blocks.damage_reductions,
+        vec![
+            DamageReduction::new(97.5, Some(RegistrySet::Ids(vec![11])), 2.5, 0.125),
+            DamageReduction::new(45.5, None, 6.75, 0.375),
+        ],
+        "the absent-set rule and the present-set rule must not swap: both carry \
+         distinct angles, bases and factors so a transposition cannot pass"
+    );
+    assert_eq!(
+        item.components
+            .custom_name
+            .as_ref()
+            .map(Text::to_plain_string),
+        Some("Bulwark".to_owned()),
+        "the component after blocks_attacks proves both trailing sound \
+         optionals were consumed in the states they were written in"
+    );
+}
+
+/// An **inline** `minecraft:trim` — the form a datapack-defined trim arrives as
+/// — keeps its two descriptions, the material's per-armour asset overrides and
+/// the pattern's decal flag, none of which the asset layer can supply for a
+/// trim it has never heard of.
+///
+/// The two descriptions carry different text, and the decal flag is `true`
+/// (its non-default state), so neither can be satisfied by a decoder that
+/// returned a default.
+#[test]
+fn an_inline_trim_keeps_both_descriptions_its_overrides_and_its_decal() {
+    let mut patch = Writer::default();
+    patch.var_i32(2);
+    patch.var_i32(0);
+
+    patch.var_i32(component_id("minecraft:trim"));
+    // Material: inline (discriminator 0).
+    patch.var_i32(0);
+    patch.string("obsidian"); // asset-group suffix
+    patch.var_i32(2); // two per-armour overrides
+    patch.string("minecraft:iron");
+    patch.string("obsidian_darker");
+    patch.string("minecraft:gold");
+    patch.string("obsidian_warm");
+    write_network_nbt(&mut patch, &Nbt::String("Obsidian Material".to_owned())).unwrap();
+    // Pattern: inline (discriminator 0).
+    patch.var_i32(0);
+    patch.string("lodestone:eclipse");
+    write_network_nbt(&mut patch, &Nbt::String("Eclipse Armor Trim".to_owned())).unwrap();
+    patch.bool(true); // decal
+
+    patch.var_i32(component_id("minecraft:custom_name"));
+    write_network_nbt(&mut patch, &Nbt::String("Eclipsed Helm".to_owned())).unwrap();
+
+    let payload = set_slot_with_patch("minecraft:iron_helmet", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(!item.components.has_unmodeled);
+    let trim = item.components.trim.as_ref().expect("trim decoded");
+    assert_eq!(trim.material, "obsidian");
+    assert_eq!(trim.pattern, "eclipse", "the registry path, not the full id");
+    assert_eq!(
+        trim.material_description.as_ref().map(Text::to_plain_string),
+        Some("Obsidian Material".to_owned()),
+    );
+    assert_eq!(
+        trim.pattern_description.as_ref().map(Text::to_plain_string),
+        Some("Eclipse Armor Trim".to_owned()),
+    );
+    assert_eq!(
+        trim.material_asset_overrides,
+        vec![
+            ("minecraft:iron".to_owned(), "obsidian_darker".to_owned()),
+            ("minecraft:gold".to_owned(), "obsidian_warm".to_owned()),
+        ],
+        "the overrides are what make a trim legible on each base armour \
+         material; the default suffix alone cannot reconstruct them"
+    );
+    assert_eq!(trim.pattern_decal, Some(true));
+    assert_eq!(
+        item.components
+            .custom_name
+            .as_ref()
+            .map(Text::to_plain_string),
+        Some("Eclipsed Helm".to_owned()),
+        "the component after an inline trim proves both inline bodies were \
+         consumed exactly"
+    );
+}
+
+/// A **registry-reference** trim leaves all four inline-only fields unset,
+/// rather than inventing a value for them — the control for the gate above,
+/// which would otherwise pass just as well if the decoder always filled them in
+/// from somewhere.
+#[test]
+fn a_registry_reference_trim_carries_no_inline_only_fields() {
+    let mut patch = Writer::default();
+    patch.var_i32(1);
+    patch.var_i32(0);
+
+    patch.var_i32(component_id("minecraft:trim"));
+    patch.var_i32(1 + 1); // material: registry id 1
+    patch.var_i32(3 + 1); // pattern: registry id 3
+
+    let payload = set_slot_with_patch("minecraft:diamond_chestplate", 1, patch.as_slice());
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert!(!item.components.has_unmodeled);
+    let trim = item.components.trim.as_ref().expect("trim decoded");
+    assert!(!trim.material.is_empty(), "the reference resolved to a path");
+    assert!(!trim.pattern.is_empty());
+    assert_eq!(trim.material_description, None);
+    assert_eq!(trim.pattern_description, None);
+    assert!(trim.material_asset_overrides.is_empty());
+    assert_eq!(
+        trim.pattern_decal, None,
+        "a reference carries no decal flag; `Some(false)` here would claim the \
+         wire said something it did not"
     );
 }

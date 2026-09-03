@@ -1367,6 +1367,21 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             // story as `custom_data` above.
             charged_projectiles: Vec::new(),
             attack_range: None,
+            // Seven patch fields with no slot in this crate's component map,
+            // for `charged_projectiles`' reason: no plugin or server path here
+            // authors an item's repair material, equip restriction, damage
+            // immunity, blocking rules, loom unlocks or consume/death effects,
+            // so there is nothing to carry across. They are spelled out rather
+            // than swept up by a `..Default::default()` so a field added to
+            // `lodestone_model::ItemComponents` keeps failing this conversion
+            // until someone decides what it lowers to.
+            repairable_items: None,
+            equippable_allowed_entities: None,
+            damage_resistant: None,
+            blocks_attacks: None,
+            provides_banner_patterns: None,
+            consume_effects: Vec::new(),
+            death_protection_effects: Vec::new(),
             // See the doc above: not lossy, out of scope.
             has_unmodeled: false,
         };
@@ -1914,9 +1929,14 @@ mod tests {
                 potion_color: Some(0xFF_38_5D_C6),
                 potion: Some(14),
                 authored_enchantment: Some(lodestone_model::AuthoredEnchantment { path: "sharpness", level: 5 }),
+                // Only the two registry paths round-trip: this crate's
+                // component map has no slot for an inline trim's descriptions,
+                // asset overrides or decal flag, so they collapse to their zero
+                // value in both directions the way `custom_data` below does.
                 trim: Some(ArmorTrim {
                     material: "netherite".to_string(),
                     pattern: "silence".to_string(),
+                    ..Default::default()
                 }),
                 map_id: Some(1701),
                 // Both now round-trip through this crate's component map, so this
@@ -2000,6 +2020,18 @@ mod tests {
                 // both collapse to their zero value either way.
                 charged_projectiles: Vec::new(),
                 attack_range: None,
+                // The seven patch fields with no `ComponentValue` slot in this
+                // crate, listed for the reason the forward conversion lists
+                // them: they collapse to their zero value in both directions,
+                // and spelling them out keeps a newly added component from
+                // being swept silently into a default here.
+                repairable_items: None,
+                equippable_allowed_entities: None,
+                damage_resistant: None,
+                blocks_attacks: None,
+                provides_banner_patterns: None,
+                consume_effects: Vec::new(),
+                death_protection_effects: Vec::new(),
                 has_unmodeled: false,
             },
         };

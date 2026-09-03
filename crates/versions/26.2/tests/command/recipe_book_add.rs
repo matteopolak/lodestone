@@ -115,9 +115,10 @@ fn shaped_entry_matches_the_stream_codecs_byte_for_byte() {
     // craftingStation: item(crafting_table), hardcoded by every crafting display.
     want.extend(varint(4));
     want.extend(varint(item("minecraft:crafting_table")));
-    // group: OptionalInt, present.
-    want.push(1);
-    want.extend(varint(11));
+    // group: an offset VarInt, present — the value written one higher, never a
+    // bool-prefixed optional. Derived from the shipped codec's own mapping
+    // (`0` empty, `value + 1` present), not from this crate's encoder.
+    want.extend(varint(12));
     // recipe_book_category: crafting_redstone is registration index 1.
     want.extend(varint(1));
     // craftingRequirements: present, two ingredients, each a direct HolderSet.
@@ -167,7 +168,10 @@ fn shapeless_entry_and_absent_optionals() {
     want.extend(varint(0));
     want.extend(varint(4)); // craftingStation: item
     want.extend(varint(item("minecraft:crafting_table")));
-    want.push(0); // group: absent
+    // group: an offset VarInt, absent — a zero VarInt. Note this byte is the
+    // one case a bool-prefixed encoding coincides with the real one, so the
+    // present case above is the load-bearing half of this pair.
+    want.extend(varint(0));
     want.extend(varint(0)); // crafting_building_blocks is index 0
     want.push(0); // craftingRequirements: absent
     want.push(0); // flags

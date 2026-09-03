@@ -38,7 +38,7 @@ use lodestone_model::event::{
     ServerLink, ServerLinkKind, StatAward, TrackedWaypoint, WaypointId, WaypointOperation,
     WaypointPosition,
 };
-use lodestone_model::{BlockPos, ChunkPos};
+use lodestone_model::{BlockPos, ChunkPos, RegistrySet};
 
 fn key(name: &str) -> lodestone_model::Identifier {
     name.parse().expect("test key parses")
@@ -154,6 +154,9 @@ fn every_new_event() -> Vec<ClientEvent> {
                 display_id: 4,
                 result_items: vec![12],
                 station_items: vec![58],
+                group: Some(2),
+                category: 1,
+                crafting_requirements: Some(vec![RegistrySet::Ids(vec![12])]),
                 notification: true,
                 highlight: false,
             }],
@@ -288,6 +291,16 @@ fn every_new_event_reaches_its_session_component() {
     assert_eq!(book.stonecutter_results().len(), 1);
     // The join a panel needs, since a RecipeDisplayId carries no recipe name.
     assert_eq!(book.unlocked_producing(12).count(), 1);
+    // The book's grouping, tab and reveal gate reach the store, not just the
+    // result ids: a fold that pattern-matched only the ids it already used
+    // would drop these three without any packet failing to decode.
+    let unlocked = book.known().get(&4).expect("display id 4 unlocked");
+    assert_eq!(unlocked.group, Some(2));
+    assert_eq!(unlocked.category, 1);
+    assert_eq!(
+        unlocked.crafting_requirements,
+        Some(vec![RegistrySet::Ids(vec![12])])
+    );
 
     let trades = &world
         .get::<SessionTrades>(entity)
@@ -312,6 +325,9 @@ fn a_removed_recipe_leaves_has_data_set() {
                     display_id: 7,
                     result_items: vec![1],
                     station_items: vec![61],
+                    group: None,
+                    category: 0,
+                    crafting_requirements: None,
                     notification: false,
                     highlight: false,
                 }],
