@@ -318,9 +318,11 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                         // over the scrollback beneath it.
                         self.chat_input.suggestion_click(row);
                     } else {
-                        // A click on a scrollback line's own click_event —
-                        // see `dispatch_chat_click_under_cursor`'s doc for
-                        // which actions run immediately and which do not.
+                        // A click on a scrollback line's own click_event, or
+                        // — with shift down — its `insertion` appended to the
+                        // input. See `dispatch_chat_click_under_cursor`'s doc
+                        // for the fork, and for which click actions run
+                        // immediately and which do not.
                         self.dispatch_chat_click_under_cursor();
                     }
                 }

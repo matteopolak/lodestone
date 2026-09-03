@@ -783,11 +783,13 @@ impl WindowApp {
             self.chat_input.scroll().scrolled(),
             self.cursor,
         );
-        hit.filter(|s| s.click.is_some() || s.hover.is_some())
+        hit.filter(|s| s.click.is_some() || s.hover.is_some() || s.insertion.is_some())
     }
 
-    /// Acts on a chat `click_event` under the pointer, if there is one — the
-    /// dispatch half of [`Self::chat_interaction`].
+    /// Acts on the interactive run under the pointer, if there is one — the
+    /// dispatch half of [`Self::chat_interaction`]. A shift-click inserts the
+    /// run's `insertion` instead of running its click; see
+    /// [`Self::dispatch_chat_interaction`] for that fork.
     ///
     /// `run_command`/`suggest_command`/`copy_to_clipboard` act immediately,
     /// the same way vanilla's do: none has an effect outside this process a
@@ -800,7 +802,46 @@ impl WindowApp {
     /// confirmation overlay and opens only after an explicit Yes. `open_file`
     /// remains unsupported and never receives an OS handoff.
     pub(super) fn dispatch_chat_click_under_cursor(&mut self) -> bool {
-        let Some(click) = self.chat_interaction().and_then(|hit| hit.click) else {
+        let Some(hit) = self.chat_interaction() else {
+            return false;
+        };
+        self.dispatch_chat_interaction(hit, self.shift_held)
+    }
+
+    /// The pure half of [`Self::dispatch_chat_click_under_cursor`]: what a hit
+    /// on an interactive run does, given whether a shift modifier is down.
+    ///
+    /// **Shift is a mode, not a modifier of the click.** With shift held the
+    /// run's `insertion` is inserted at the chat caret and the `click_event`
+    /// is deliberately *not* run; without it the reverse. So a run carrying
+    /// both never does both, and a shift-click on a run with no insertion is
+    /// inert rather than falling through to the click — which is what makes
+    /// shift-clicking a player name safe on a message whose sender name is
+    /// also a `run_command` to whisper them.
+    ///
+    /// Insertion goes through [`crate::chat::ChatInput::push_str`], the
+    /// caret-respecting insert, not `set`: the point of the gesture is to
+    /// append a name to a half-typed line, and a replacement would throw that
+    /// line away. The same call also applies the chat text filter and the
+    /// length cap, so a server-authored insertion cannot inject a `§` code or
+    /// overrun the field.
+    ///
+    /// Returns whether anything was consumed, so the caller can fall through
+    /// to the scrollback when nothing was.
+    pub(super) fn dispatch_chat_interaction(
+        &mut self,
+        hit: lodestone_game::text::InteractiveSpan,
+        shift: bool,
+    ) -> bool {
+        if shift {
+            let Some(insertion) = hit.insertion else {
+                return false;
+            };
+            self.chat_input.push_str(&insertion);
+            self.refresh_command_suggestions();
+            return true;
+        }
+        let Some(click) = hit.click else {
             return false;
         };
         self.dispatch_click_action(&click);
