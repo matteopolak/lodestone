@@ -362,6 +362,14 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   spawn and chunk-shape code. It is the fifth era crate, after
   [`1.9`](./protocol-1-9-era.md), [`1.14`](./protocol-1-14-era.md),
   [`1.13`](./protocol-1-13-era.md) and [`1.17`](./protocol-1-17-era.md).
+- [The 1.20.6 era crate: a join with a configuration phase, and items made of components](./protocol-1-20-6-era.md) —
+  `crates/versions/1.20.6` (package `lodestone-v1-20-6`) serves Minecraft 1.20.5 and
+  1.20.6 — both protocol **766** — from a single adapter, one generated packet-id
+  table, one generated block-state table, one generated entity registry, and the era's
+  own configuration-phase, item-component and chunk-shape code. It is the sixth era
+  crate, after [`1.9`](./protocol-1-9-era.md), [`1.14`](./protocol-1-14-era.md),
+  [`1.13`](./protocol-1-13-era.md), [`1.17`](./protocol-1-17-era.md) and
+  [`1.19`](./protocol-1-19-era.md).
 - [The 1.9 era crate: one family, four protocols](./protocol-1-9-era.md) —
   `crates/versions/1.9` (package `lodestone-v1-9`) is the first *era* crate in this
   repo: one family serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 — protocols

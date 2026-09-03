@@ -630,8 +630,8 @@ See [`docs/protocol-1-19-era.md`](../protocol-1-19-era.md) for that era crate's
 own documentation.
 
 `cargo xtask connectedness` currently reports v1-8 59/74, v1-9 62/80, v1-13 51/86,
-v1-14 54/92, v1-17 65/103, v1-19 67/111, v26-2 141/141 clientbound, with zero
-decoded-but-stranded in every family.
+v1-14 54/92, v1-17 65/103, v1-19 67/111, v1-20-6 61/122, v26-2 141/141 clientbound,
+with zero decoded-but-stranded in every family.
 
 **v26-2 has not migrated and that is deliberate** — it is Stage 6, explicitly deferred and not a
 blocker. It still dispatches through the if-arm chain with no `Handler::new` and no `IGNORED` list.
@@ -643,7 +643,7 @@ use either yet". That was true when written and is now stale — the check above
 
 ### Measured cost, and where the estimate was wrong
 
-Three eras have now landed, and the numbers separate two cases the plan treated as one.
+Several eras have now landed, and the numbers separate two cases the plan treated as one.
 
 | era | protocols | era-crate source | marginal cost per added version |
 |---|---|---|---|
@@ -652,14 +652,13 @@ Three eras have now landed, and the numbers separate two cases the plan treated 
 | 1.13 | 404 (singleton) | 5,531 | n/a |
 | 1.17 | 756, 758 | 6,229 | 131 lines |
 | 1.19 | 762 (singleton) | 6,811 | n/a |
-| 1.19 | 762 (singleton) | 6,811 | n/a |
+| 1.20.6 | 766 (singleton as shipped) | 7,437 | n/a |
 
 The 1.17 figure is the **strongest** reading the marginal claim has had, not the weakest: 1.9's
 ~20 and 1.14's 69 were both on top of chunk framing that did not change across their era, while
 1.18 rewrote it — the chunk buffer gained a trailing zero byte per single-valued-palette section,
 so the exact-length assertion every other protocol here relies on is simply false at 758. A
 framing rewrite still cost 131 lines against a ~500-line threshold.
-| 1.17 | 756, 758 | 6,229 | 131 lines |
 
 **The mechanism works, and the falsifier is passed** — adding a version to an era that already
 exists costs 20-70 hand-written lines against a ~500-line threshold, versus ~5.5k for a
@@ -671,6 +670,23 @@ projected ~2-2.5k. `codegen-ratio` puts it beside 1.14's 6,257, i.e. a new era c
 an established multi-protocol one does. So the payoff is entirely in the *second and subsequent*
 version of an era, and a version that neighbours a break on both sides — as 1.13.2 does, at 72%
 and 73% — carries close to full freight however the crate is arranged.
+
+1.20.6 is the fourth reading of that founding cost and the largest yet: **7,437 hand-written
+lines against a projected ~2-3k**, so the projection is out by a factor of roughly 2.5-3.5 here
+as well. The trend across the four singletons and near-singletons is monotone — 5,531, 6,229,
+6,811, 7,437 — and the reason is not accumulated sloppiness: each newer era carries more
+mechanism than the last. 1.20.6 pays for a configuration phase no era below has, an item model
+made of length-implied components that cannot be skipped past, and a dimension registry resolved
+by index rather than carried inline. Founding an era should be budgeted at what an established
+multi-protocol era costs, plus whatever the era's own breaks are, and the estimate in this plan
+should not be used for a fifth one.
+
+1.20.6's era width is worth stating separately, because the crate is a singleton *as shipped* and
+not *as measured*. Its lower boundary is real (54% against 762, 80% against 765, both under the
+85% threshold) but its upper boundary is not: 766 and 767 agree on 204 of 226 shapes, **90%**, so
+Minecraft 1.21 and 1.21.1 belong to this era and are simply not implemented. That is the cheapest
+remaining marginal-cost datapoint in the tree — an era already founded, a neighbour already
+measured as inside it, and 22 differing shapes to write.
 
 Read that as guidance about ordering, not about whether to continue: fold versions into existing
 eras first, and treat each new era as its own decision.
