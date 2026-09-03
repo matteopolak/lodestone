@@ -73,17 +73,15 @@
 //! trailing bytes. **This one cannot**, and the reason is a property of the wire,
 //! not of this decoder.
 //!
-//! Measured against a real 1.18.2 server, three columns from the same flat
-//! world:
-//!
-//! | sections with a single-valued block palette | declared `chunkData` | consumed by the sections | left over |
-//! |---|---|---|---|
-//! | 23 | 2,268 | 2,245 | **23** |
-//! | 21 | 6,369 | 6,348 | **21** |
-//! | 19 | 10,471 | 10,452 | **19** |
+//! The 1.17 era recorded this against a 1.18.2 server. It is **still true at
+//! 762**, re-measured here rather than inherited: the committed capture's
+//! column declares a `chunkData` of 2,268 bytes across a 24-section window and
+//! leaves **23** bytes over — one per section whose block palette is
+//! single-valued, which is every section except the one holding the flat
+//! preset's floor.
 //!
 //! The leftover is always exactly one zero byte per section whose *block*
-//! container is single-valued, and it always sits at the very end: every
+//! container is single-valued, and it sits at the very end: every
 //! section parses contiguously at its predecessor's end with a valid header,
 //! and the light payload that follows the buffer parses to the packet's last
 //! byte. The server is sizing the buffer from an estimate that over-counts a
