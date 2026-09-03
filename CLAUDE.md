@@ -64,7 +64,7 @@ All five health checks are required, because each catches a class the others can
   the voice of the change that introduced it, or a bare issue reference standing in for the substance
   it pointed at (`xtask/src/comment_voice.rs`). Exceptions are recorded in
   `xtask/check-comment-voice.toml`, never silently skipped.
-- **`wasm-check` lives in CI, not in `health`** — the other four can be green while `wasm32` is broken.
+- **`wasm-check` lives in CI, not in `health`** — the other five can be green while `wasm32` is broken.
   A green wasm compile still does not prove the browser runs: `std::fs` returns `Err(Unsupported)`, but
   `Instant::now`, `SystemTime::now`, `thread::spawn` and `thread::scope` all trap. Run it after any
   `cfg` change, dependency edit or module move.
