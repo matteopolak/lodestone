@@ -66,8 +66,38 @@
 //! count, because the family it was written for (1.21.5+) does not write one.
 //! [`decode_container`] therefore peeks the width byte and handles the
 //! zero-width case itself. Getting this wrong leaves one spare byte per
-//! single-valued container — up to 48 per column — which is exactly the class
-//! of error the `chunkData` `ensure_empty` turns into a loud failure.
+//! single-valued container — up to 48 per column.
+//!
+//! # 758's `chunkData` buffer is longer than the sections inside it
+//!
+//! Every other protocol in this repo can be decoded with the buffer's
+//! declared length as an exact assertion: read the sections, then require zero
+//! trailing bytes. **758 cannot**, and the reason is a property of the wire,
+//! not of this decoder.
+//!
+//! Measured against a real 1.18.2 server, three columns from the same flat
+//! world:
+//!
+//! | sections with a single-valued block palette | declared `chunkData` | consumed by the sections | left over |
+//! |---|---|---|---|
+//! | 23 | 2,268 | 2,245 | **23** |
+//! | 21 | 6,369 | 6,348 | **21** |
+//! | 19 | 10,471 | 10,452 | **19** |
+//!
+//! The leftover is always exactly one zero byte per section whose *block*
+//! container is single-valued, and it always sits at the very end: every
+//! section parses contiguously at its predecessor's end with a valid header,
+//! and the light payload that follows the buffer parses to the packet's last
+//! byte. The server is sizing the buffer from an estimate that over-counts a
+//! zero-width container by one byte and sending the whole allocation, padding
+//! and all.
+//!
+//! So the check here is the strongest one that is still true: read exactly
+//! `section_count` sections, then require what remains to be **all zero and
+//! no longer than the section count**. A misparse of any section leaves
+//! either nonzero bytes or too many of them, so the detector survives; only
+//! the exact-length half of it is given up, and only where the wire forces
+//! it.
 
 use lodestone_core::{Nbt, Reader, read_named_nbt};
 use lodestone_macros::Packet;
@@ -355,7 +385,20 @@ impl MapChunk {
             let biome_container = decode_container(shape.biome_kind, &mut blob)?;
             put_section(&mut column, shape, index, blocks, biome_container);
         }
-        blob.ensure_empty()?;
+        // Not `ensure_empty`: see the module docs. The server pads this
+        // buffer with one zero byte per single-valued block container, so the
+        // check is that what remains is all zero and cannot be a section.
+        let padding = blob.remaining_bytes();
+        if padding.len() > shape.section_count || padding.iter().any(|&byte| byte != 0) {
+            return Err(lodestone_core::Error::Custom(format!(
+                "chunkData has {} bytes left after {} sections (at most {} zero \
+                 padding bytes are expected)",
+                padding.len(),
+                shape.section_count,
+                shape.section_count
+            ))
+            .into());
+        }
 
         // Block entities became a positioned record rather than a bare NBT
         // compound: a packed `(x << 4) | z` nibble pair, a whole-world `y`,

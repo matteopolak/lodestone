@@ -14,6 +14,8 @@
 #   1.14.4    v1-14   25586      25587      lodestone-mc1144
 #   1.15.2    v1-14   25588      25589      lodestone-mc1152
 #   1.16.5    v1-14   25573      25574      lodestone-mc1165
+#   1.17.1    v1-17   25592      25593      lodestone-mc1171
+#   1.18.2    v1-17   25594      25595      lodestone-mc1182
 #
 # (1.8.9/1.12.2/1.16.5 container names and ports read directly off
 # crates/versions/<fam>/tests/live_*.rs's own doc comments and #[ignore]
@@ -33,8 +35,14 @@
 # name it directly, and there is no reason to disturb a script that already
 # works.
 #
+# The two 1.17-era rows arrived the same way, when crates/versions/1.17 landed
+# speaking 756 and 758; their ports are the next four free above every port
+# already listed here, and are named by
+# crates/versions/1.17/tests/capture_join.rs.
+#
 # Usage: ./legacy.sh <version>
-#        (1.8.9 | 1.9.4 | 1.10.2 | 1.11.2 | 1.12.2 | 1.13.2 | 1.14.4 | 1.15.2 | 1.16.5)
+#        (1.8.9 | 1.9.4 | 1.10.2 | 1.11.2 | 1.12.2 | 1.13.2 | 1.14.4 | 1.15.2 |
+#         1.16.5 | 1.17.1 | 1.18.2)
 #
 # Runtime: Apple `container`, not Docker -- see docs/oracles-and-benchmarks.md
 # ("Oracle runtimes: Apple container"). That content used to live in
@@ -56,7 +64,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 <version>" >&2
-  echo "  supported versions: 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.13.2 (v1-13); 1.14.4, 1.15.2, 1.16.5 (v1-14)" >&2
+  echo "  supported versions: 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.13.2 (v1-13); 1.14.4, 1.15.2, 1.16.5 (v1-14); 1.17.1, 1.18.2 (v1-17)" >&2
   exit 1
 }
 
@@ -85,6 +93,17 @@ VERSION="${1:-}"
 #   - v1-14 at 1.14.4/1.15.2 (capture_join.rs): a flat world only, so a join
 #     capture is small and its chunk columns are the same shape every run;
 #     nothing there depends on mobs
+#   - v1-17 at 1.17.1/1.18.2 (capture_join.rs): a flat world only, for the same
+#     reason. The 1.13.2 row above records that its spelling had to be
+#     measured rather than assumed, so the same measurement was taken here:
+#     each server was booted with `FLAT` and with `flat`, the generated world
+#     deleted between runs, and the resulting level.dat read back. All four
+#     combinations give an overworld whose generator is `minecraft:flat`, so
+#     matching is case-insensitive from 1.17 on and the two rows share one
+#     spelling. That is worth stating because an unrecognised level-type is
+#     silent, not fatal -- it falls back to the default generator with no
+#     warning -- so the check is always the world, never the log, and the
+#     join capture's own replay asserts a flat floor besides
 #   - v1-14 at 1.16.5 (live_entity.rs / live_interaction.rs): "flat world, RCON enabled";
 #     live_entity.rs additionally: "spawn-monsters=false/spawn-animals=false
 #     ... difficulty=peaceful" (it summons what it needs over RCON instead of
@@ -146,6 +165,18 @@ case "$VERSION" in
     RCON_PORT=25574
     EXTRA_PROPS=(level-type=FLAT spawn-monsters=false spawn-animals=false difficulty=peaceful)
     ;;
+  1.17.1)
+    NAME=lodestone-mc1171
+    GAME_PORT=25592
+    RCON_PORT=25593
+    EXTRA_PROPS=(level-type=FLAT)
+    ;;
+  1.18.2)
+    NAME=lodestone-mc1182
+    GAME_PORT=25594
+    RCON_PORT=25595
+    EXTRA_PROPS=(level-type=FLAT)
+    ;;
   *)
     echo "unsupported version: $VERSION" >&2
     usage
@@ -193,15 +224,22 @@ container system start >/dev/null 2>&1 || true
 
 container rm -f "$NAME" >/dev/null 2>&1 || true
 
-# `eclipse-temurin:8-jdk`, matching legacy-1.12.sh: every one of these
-# server.jars targets Java 8, and there is no reason to rely on a newer JVM's
-# forward-compatibility with old bytecode when the exact intended runtime is
-# one `container run` away.
+# `eclipse-temurin:8-jdk` for every pre-1.17 row, matching legacy-1.12.sh:
+# those server.jars target Java 8, and there is no reason to rely on a newer
+# JVM's forward-compatibility with old bytecode when the exact intended
+# runtime is one `container run` away. 1.17.1 and 1.18.2 declare a
+# `java_version` of 16 and 17 in their own jars' version.json and refuse to
+# start under 8, so they get the 17 image -- which covers both.
+JDK_IMAGE=eclipse-temurin:8-jdk
+case "$VERSION" in
+  1.17.1 | 1.18.2) JDK_IMAGE=eclipse-temurin:17-jdk ;;
+esac
+
 container run -d --rm --name "$NAME" \
   --memory 3g \
   -p "$GAME_PORT:$GAME_PORT" -p "$RCON_PORT:$RCON_PORT" \
   -v "$WORLD":/w -w /w \
-  eclipse-temurin:8-jdk \
+  "$JDK_IMAGE" \
   java -Xmx2G -jar server.jar nogui
 
 echo "waiting for '$NAME' to accept connections..."
