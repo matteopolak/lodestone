@@ -3334,8 +3334,12 @@ pub enum ClientEvent {
     RecipePropertySetsUpdated {
         /// `(property set key, valid item registry ids)`.
         item_sets: Vec<(Identifier, Vec<i32>)>,
-        /// One entry per stonecutter recipe: the item ids its result can display.
-        stonecutter_results: Vec<Vec<i32>>,
+        /// One entry per stonecutter recipe: `(input item registry ids, result
+        /// item registry ids)`. The input is the ingredient a stonecutter's
+        /// input slot must hold for this entry's results to be offered; without
+        /// it a consumer cannot compute the subset of results reachable from
+        /// whatever the slot currently holds.
+        stonecutter_results: Vec<(Vec<i32>, Vec<i32>)>,
     },
     /// A villager or wandering trader opened its trade list
     /// (the merchant offers packet).
