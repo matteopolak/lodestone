@@ -419,6 +419,12 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                         if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
                             self.nav.hover(&self.ui, row);
                         }
+                        // Page text is not a row, so the row hit-test above
+                        // cannot see it: the reading screen hit-tests the
+                        // pointer against its own text geometry. Outside the
+                        // `if let`, because moving off a run has to clear the
+                        // hovered run as surely as moving onto one sets it.
+                        self.track_book_page_cursor();
                     }
                 }
             }
@@ -436,7 +442,16 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                     // activation instead of finishing the rebind.
                     if self.nav.awaiting_key_capture() {
                         self.nav.capture_binding(Binding::Mouse(button.into()));
-                    } else if button == MouseButton::Left {
+                    } else if button == MouseButton::Left
+                        && !self.dispatch_book_page_click()
+                    {
+                        // A book page run gets first refusal, the same
+                        // precedence the reading screen gives its own text
+                        // over the widgets beneath: its `mouseClicked` runs
+                        // the page hit-test before delegating upward. A run
+                        // with no click action consumes nothing, so the page
+                        // arrows and Done keep working.
+
                         // Only a click *on a row* activates: clicking the backdrop
                         // must not confirm whatever happens to be highlighted.
                         //

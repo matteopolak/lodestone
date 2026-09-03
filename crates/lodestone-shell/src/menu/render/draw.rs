@@ -820,6 +820,21 @@ pub fn build(
         pending_tooltip = Some(wrap_measured(&b, text, options::TOOLTIP_MAX_WIDTH, usize::MAX));
     }
 
+    // A screen-level request, for interactive content that is no row — see
+    // `MenuFrame::tooltip`. Last of the three producers, so a row's own hint
+    // wins wherever both resolve. Wrapped in the same font and to the same
+    // width as the two above.
+    if pending_tooltip.is_none()
+        && let Some(lines) = frame.tooltip.as_ref()
+    {
+        pending_tooltip = Some(
+            lines
+                .iter()
+                .flat_map(|line| wrap_measured(&b, line, options::TOOLTIP_MAX_WIDTH, usize::MAX))
+                .collect(),
+        );
+    }
+
     // The tooltip, drawn last so it sits over every row and the footer — vanilla
     // renders tooltips after `renderables` too. Two producers reach here: the
     // multiplayer list's "who's online" hover, whose trigger is geometric (over the

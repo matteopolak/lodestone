@@ -451,6 +451,68 @@ impl WindowApp {
         crate::menu::render::menu_row_under(&frame, (lx, ly), w, h)
     }
 
+    /// Records the pointer on the signed-book reading screen, so a page run's
+    /// click and hover hit-test has something to test against.
+    ///
+    /// The physical-to-logical conversion is [`Self::menu_row_at_in`]'s
+    /// exactly — the same `on_screen_frame`, the same
+    /// `calculate_gui_scale` divide — because a page run's rect is measured
+    /// in the same logical canvas a row's is. Skipping the divide is the
+    /// "clicks land one run off, invisible at `gui_scale == 1`" bug that
+    /// function's own doc warns about.
+    ///
+    /// Inert on every other screen, and inert without a render target: a
+    /// frame that has not been drawn has no canvas to hit-test against.
+    pub(super) fn track_book_page_cursor(&mut self) {
+        if !self.ui.is_book_view_open() {
+            return;
+        }
+        let Some((fb_w, fb_h)) = self.target.as_ref().map(RenderTarget::size) else {
+            return;
+        };
+        let gui_scale = self.nav.gui_scale();
+        let (w, h) = crate::menu::render::logical_canvas(gui_scale, fb_w, fb_h);
+        let scale =
+            crate::config::calculate_gui_scale(gui_scale, fb_w, fb_h).max(1) as f32;
+        let translate = self.sim.translator();
+        if let Some(state) = self.nav.book_view_mut() {
+            state.set_page_cursor(
+                self.cursor.0 / scale,
+                self.cursor.1 / scale,
+                w,
+                h,
+                translate.as_ref(),
+            );
+        }
+    }
+
+    /// Acts on the `click_event` of the book page run under the pointer, if
+    /// there is one. Returns whether anything was consumed, so the caller can
+    /// fall through.
+    ///
+    /// **A `run_command` closes the book first**, which the reading screen
+    /// does deliberately: the command may open a screen of its own, and a
+    /// book left up would sit over it. The other actions leave the book open,
+    /// so a page of links stays readable across several clicks.
+    pub(super) fn dispatch_book_page_click(&mut self) -> bool {
+        let Some(click) = self.nav.book_view().and_then(
+            crate::menu::book_view::BookViewState::click_under_cursor,
+        ) else {
+            return false;
+        };
+        if click.action == lodestone_model::text::ClickAction::RunCommand {
+            let window_id = self.nav.book_view().and_then(
+                crate::menu::book_view::BookViewState::lectern_window_id,
+            );
+            self.nav.close_book_view(&mut self.ui);
+            if let Some(window_id) = window_id {
+                self.apply_menu_action(MenuAction::CloseContainer { window_id });
+            }
+        }
+        self.dispatch_click_action(&click);
+        true
+    }
+
     /// The slider track fraction for `row` at physical cursor `(x, y)`.
     ///
     /// Vanilla's own slider-button "set value from mouse" routine, verbatim:
@@ -878,7 +940,19 @@ impl WindowApp {
                     click.value
                 ));
             }
-            ClickAction::ChangePage | ClickAction::Other(_) => {}
+            ClickAction::ChangePage => {
+                // The argument is 1-based on the wire, and books are this
+                // action's only consumer — the reading screen turns its own
+                // page and a lectern reader reports the turn to the server,
+                // which `MenuNav::book_view_change_page` forks on. Inert with
+                // no book open, which is the right answer rather than an
+                // error: a server may put a `change_page` on an ordinary chat
+                // line, and vanilla's chat screen ignores it too.
+                let page = click.value.parse::<i32>().unwrap_or(0);
+                let action = self.nav.book_view_change_page(page);
+                self.apply_menu_action(action);
+            }
+            ClickAction::Other(_) => {}
         }
     }
 

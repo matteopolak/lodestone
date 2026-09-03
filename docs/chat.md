@@ -93,14 +93,40 @@ concern at all.
 
 ### Interactive text: links, hover tooltips, and click actions
 
-A chat message's click and hover events (open a URL, run or suggest a command, copy text, show an
-item/entity tooltip) decode correctly off the wire and were never the problem — the gap was that the
-one function this HUD flattens every message through for drawing had no field to carry either through,
-so they were silently dropped downstream of a perfectly correct decode. The fix threads them through as
-an additional, inheriting property of each text span (exactly how color and formatting already
-inherit down a text tree, including across a legacy-code split), and hit-testing reuses the exact same
-wrapping and layout functions the draw itself calls, so a resize or an options change can never leave a
-click or hover target aimed at stale geometry.
+A chat message's click and hover events, and its shift-click insertion, are carried as an additional
+inheriting property of each text span — exactly how color and formatting already inherit down a text
+tree, including across a legacy-code split. Hit-testing reuses the exact same wrapping and layout
+functions the draw itself calls, so a resize or an options change can never leave a click or hover
+target aimed at stale geometry.
+
+**Style field names differ by protocol era, and getting this wrong is silent.** Modern protocols spell
+the two event fields in snake case; older ones spell them in camel case, and the argument of a click
+action is named for the action (`url`, `command`, `path`, and a *numeric* `page`) rather than being a
+string under a single `value`. Both spellings and both argument shapes are read, newest first. A
+mismatch here does not produce an error — it produces a message with no interactivity at all, which
+looks identical to a message that never had any.
+
+**Hover payloads are typed, one shape per action.** `show_text`'s payload is a component; `show_item`'s
+is an item stack (an id, a count and a component patch); `show_entity`'s is a type, a UUID and an
+optional name. Modelling all three as a single component field is a lossy decode in disguise: a payload
+compound carries no `text` and no `translate` key, so parsing one as a component yields an *empty* node
+— an item hover then paints nothing at all. The one exception is the oldest `show_item` form, whose
+payload really was a component holding serialised item data; a payload with no readable item id keeps a
+component payload for exactly that case.
+
+An item hover's tooltip body is gathered by the **same function an inventory slot's tooltip uses**, so
+one stack cannot read two different ways on two surfaces, and it honours the player's own
+advanced-tooltips option for the same reason. An entity hover composes its three documented lines —
+name, type (through the entity type's own description key, resolved against the language table), UUID.
+What is not reproduced is the item tooltip's non-text furniture: no bundle grid, no icon, no nine-slice
+sprite frame, because this box paints from the HUD's untextured colour stream.
+
+A **shift-click** is a mode rather than a modifier of the click: with shift held the run's insertion
+text goes in at the chat caret and the click action is deliberately *not* run; without it, the reverse.
+So a sender name carrying both an insertion and a whisper command never does both, and a shift-click on
+a run with no insertion is inert rather than falling through. Insertion goes through the
+caret-respecting insert, so a half-typed line survives the gesture, and the chat text filter and length
+cap still apply to server-authored text.
 
 Every server-supplied "open URL" click goes through an untrusted-link confirmation prompt before ever
 opening a browser; there is no silent-open path. A "run command" click sends exactly as if the player

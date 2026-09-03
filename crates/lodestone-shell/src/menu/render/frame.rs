@@ -823,6 +823,19 @@ pub struct MenuFrame<'a> {
     /// — see [`ChunkGridView`] and
     /// [`loading_frame_with_progress_and_grid`].
     pub chunk_grid: Option<ChunkGridView>,
+    /// A tooltip the *screen* asks for, independent of any row —
+    /// [`MenuRow::tooltip`]'s frame-level sibling, drawn by the same painter
+    /// and last of all.
+    ///
+    /// A row tooltip covers every widget-shaped hint, but a screen can have
+    /// interactive content that is not a row: a hovered run of a book page is
+    /// hit-tested against its own text geometry, not against
+    /// [`MenuRow::slot`]. A row request wins when both are present, since a
+    /// row is the more specific target.
+    ///
+    /// Lines are `§`-coded strings, like every other string this pipeline
+    /// draws.
+    pub tooltip: Option<Vec<String>>,
 }
 
 /// Vanilla's `LevelLoadingScreen` progress bar, as a frame primitive.
