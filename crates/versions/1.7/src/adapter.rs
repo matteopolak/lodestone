@@ -708,17 +708,72 @@ impl V5Adapter {
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
         let body: ClientboundPositionLook = decode_body_exact(payload)?;
-        Ok(vec![Directive::Emit(ClientEvent::TeleportPlayer {
-            pos: Vec3::new(body.x, body.y, body.z),
-            rotation: Rotation {
-                yaw: body.yaw,
-                pitch: body.pitch,
-            },
-            // Every coordinate in this era's teleport is absolute: the
-            // relative-flags byte arrives with protocol 47, and the trailing
-            // byte here is an on-ground boolean instead.
-            flags: TeleportFlags::default(),
-        })])
+        // The wire's middle coordinate is the eye position, so the feet are
+        // one standing eye height below it. See `ClientboundPositionLook`,
+        // which records how the two readings were told apart.
+        let feet_y = body.stance - STANDING_EYE_HEIGHT;
+        let pos = Vec3::new(body.x, feet_y, body.z);
+        let rotation = Rotation {
+            yaw: body.yaw,
+            pitch: body.pitch,
+        };
+
+        // The confirmation echo, and why nothing works without it.
+        //
+        // There is no teleport id and no confirmation packet in this era —
+        // both arrive with protocol 340. Until the client sends a serverbound
+        // `position_look` back, the server holds the player at the pending
+        // teleport and silently ignores every movement packet: measured
+        // against a real server by walking 320 blocks east one tick at a time
+        // and receiving not one further chunk packet, which is what an ignored
+        // move looks like from the client side. With the echo the same walk
+        // streams new columns.
+        //
+        // Unlike protocol 47's version of this packet there is no
+        // relative-coordinate flags byte, so every component is absolute and
+        // the echo is unconditional: this era cannot express the relative
+        // teleport that forces the later era to defer its confirmation to the
+        // next movement tick.
+        // The stance echoed back is the server's own value verbatim rather
+        // than one re-derived from the feet, so a rounding difference cannot
+        // put it outside the range the server range-checks.
+        let confirm = ServerboundPositionLook {
+            x: body.x,
+            stance: body.stance,
+            y: feet_y,
+            z: body.z,
+            yaw: body.yaw,
+            pitch: body.pitch,
+            on_ground: body.on_ground,
+        };
+
+        // Seed the movement state from where the server actually put the
+        // player. Without this the next `Move` is diffed against a stale
+        // origin, so a genuine teleport followed by standing still would send
+        // a position packet claiming the old coordinates and re-trigger the
+        // hold this echo just cleared.
+        {
+            let mut state = match self.movement.lock() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            state.last_pos = pos;
+            state.last_yaw = body.yaw;
+            state.last_pitch = body.pitch;
+            state.position_reminder = 0;
+        }
+
+        Ok(vec![
+            send(play::serverbound::POSITION_LOOK, &confirm)?,
+            Directive::Emit(ClientEvent::TeleportPlayer {
+                pos,
+                rotation,
+                // Every coordinate in this era's teleport is absolute: the
+                // relative-flags byte arrives with protocol 47, and the
+                // trailing byte here is an on-ground boolean instead.
+                flags: TeleportFlags::default(),
+            }),
+        ])
     }
 
     fn handle_play_spawn_position(

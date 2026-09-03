@@ -5,6 +5,7 @@
 # no script here creates:
 #
 #   version   family  game port  RCON port  container name
+#   1.7.10    v1-7    25602      25603      lodestone-mc1710
 #   1.8.9     v1-8    25566      25576      lodestone-mc189
 #   1.9.4     v1-9    25580      25581      lodestone-mc194
 #   1.10.2    v1-9    25582      25583      lodestone-mc1102
@@ -42,6 +43,22 @@
 # already listed here, and are named by
 # crates/versions/1.17/tests/capture_join.rs.
 #
+# The 1.7.10 row is the bottom of the ladder, and the only row whose ports are
+# not simply "the next two free above every port listed above": 25600 and 25601
+# were the next two free by that rule, but lovelier.sh already publishes both,
+# so this row takes 25602/25603 instead. crates/versions/1.7/tests/capture_join.rs
+# names them. A flat world for the same reason every row above uses one, plus
+# the quiet-world properties, because that crate's entity-type table is
+# generated from a wire transcript that correlates one summon with one spawn
+# packet. `FLAT` is verified for this row by its outcome rather than by
+# level.dat: the join capture recorded against this exact property set replays
+# into a flat floor, and crates/versions/1.7/tests/capture_join.rs asserts
+# bedrock, dirt and grass at their flat-world y layers. The lowercase spelling
+# was not tried here, so unlike the 1.13.2 and 1.17-era rows this one makes no
+# claim about case-insensitivity. Note this era has no whole-connection
+# compression, so `network-compression-threshold` is absent from its
+# server.properties and setting it would do nothing.
+#
 # The 1.19.4 row arrived with crates/versions/1.19, a single-version era; its
 # ports are the next two free above every port already listed, and are named
 # by crates/versions/1.19/tests/capture_join.rs. The 1.20.6 row belongs to no
@@ -51,7 +68,7 @@
 # to come from real bytes of a version the crate does not serve.
 #
 # Usage: ./legacy.sh <version>
-#        (1.8.9 | 1.9.4 | 1.10.2 | 1.11.2 | 1.12.2 | 1.13.2 | 1.14.4 | 1.15.2 |
+#        (1.7.10 | 1.8.9 | 1.9.4 | 1.10.2 | 1.11.2 | 1.12.2 | 1.13.2 | 1.14.4 | 1.15.2 |
 #         1.16.5 | 1.17.1 | 1.18.2 | 1.19.4 | 1.20.6)
 #
 # Runtime: Apple `container`, not Docker -- see docs/oracles-and-benchmarks.md
@@ -74,7 +91,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 <version>" >&2
-  echo "  supported versions: 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.13.2 (v1-13); 1.14.4, 1.15.2, 1.16.5 (v1-14); 1.17.1, 1.18.2 (v1-17); 1.19.4 (v1-19); 1.20.6 (no family -- neighbour captures only)" >&2
+  echo "  supported versions: 1.7.10 (v1-7); 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.13.2 (v1-13); 1.14.4, 1.15.2, 1.16.5 (v1-14); 1.17.1, 1.18.2 (v1-17); 1.19.4 (v1-19); 1.20.6 (no family -- neighbour captures only)" >&2
   exit 1
 }
 
@@ -121,6 +138,12 @@ VERSION="${1:-}"
 EXTRA_PROPS=()
 
 case "$VERSION" in
+  1.7.10)
+    NAME=lodestone-mc1710
+    GAME_PORT=25602
+    RCON_PORT=25603
+    EXTRA_PROPS=(level-type=FLAT spawn-monsters=false spawn-animals=false difficulty=peaceful)
+    ;;
   1.8.9)
     NAME=lodestone-mc189
     GAME_PORT=25566

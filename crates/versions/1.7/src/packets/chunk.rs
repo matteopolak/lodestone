@@ -75,12 +75,23 @@
 //! consumed regardless, because leaving it would fail the zero-trailing-bytes
 //! check that is this module's best detector of a wrong layout.
 //!
-//! # Chunk unload
+//! # Chunk unload, and the only thing `map_chunk` is actually used for
 //!
 //! There is no separate unload packet. A `map_chunk` whose primary bitmask is
-//! zero, with `groundUp` set, is the unload signal, and it carries a
-//! two-byte zlib stream of nothing. [`ChunkData::is_unload`] answers for it so
-//! the adapter does not have to re-derive the condition.
+//! zero, with `groundUp` set, is the unload signal. It is **not** an empty
+//! payload: the 12-byte zlib stream a real server sends inflates to 256 bytes
+//! of biome footer, because `groundUp` implies a footer whether or not any
+//! section is present. [`ChunkData::is_unload`] answers for the condition so
+//! the adapter does not have to re-derive it.
+//!
+//! Measured alongside it: a vanilla server on a flat overworld sends
+//! single-column `map_chunk` packets for **nothing else**. Walking 320 blocks
+//! produced 20 unloads and not one data-bearing `map_chunk`; every column that
+//! was loaded, on join and while travelling, arrived in a `map_chunk_bulk`.
+//! The single-column loading path is still decoded — a non-vanilla server may
+//! use it, and a partial update (`groundUp` false) has no other framing — but
+//! no vanilla capture will exercise it, which is why `tests/chunk.rs` builds
+//! that case by hand and pins the unload case against recorded bytes.
 
 use flate2::bufread::ZlibDecoder;
 use lodestone_canonical::canonical::{self, FallbackTally};

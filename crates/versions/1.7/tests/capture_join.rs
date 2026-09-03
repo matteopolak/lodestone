@@ -52,7 +52,7 @@ const MINECRAFT: &str = "1.7.10";
 /// Game port `scripts/live-oracles/legacy.sh` gives this version. That script
 /// is the single place the port is defined and this is the single place it is
 /// read.
-const GAME_PORT: u16 = 25600;
+const GAME_PORT: u16 = 25602;
 
 /// One clientbound packet as recorded off the wire.
 struct CapturedPacket {
