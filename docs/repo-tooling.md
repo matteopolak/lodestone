@@ -120,6 +120,28 @@ constraint this design does not touch at all is test-runtime memory — a single
 been observed using several gigabytes of RSS, which is unrelated to anything caching or profile
 tuning can fix.
 
+**`sccache`'s measured contribution is approximately nothing, and the blind spot above understates
+it.** Sampled during a five-agent day: 5,635 compile requests, **1 cache hit**, 628 misses, and
+4,984 calls classified non-cacheable — a 0.16% hit rate. It also refuses incremental compilation
+outright rather than falling through (`incremental compilation is prohibited`). The intuitive
+remedy does not work: two builds of the same crate with `CARGO_INCREMENTAL=0` into two *empty*
+target directories — identical inputs, so the second must hit if the cache functions — produced
+zero hits and two further misses. Why it misses is **not** established; the untested suspects are
+the nightly `-Z threads=8` in `build.rustflags` and the Cranelift `codegen-backend` in
+`profile.dev`, both the kind of flag sccache declines to cache, and both carrying their own
+measured wins. Treat any claim that a dependency is "served from sccache" as unverified.
+
+**`just reclaim` is the safe disk reclaim**, and disk is a live constraint rather than a
+theoretical one: free space on this volume has fallen to 4.1 GiB, below which every shell call in
+the repo fails. It removes `target/debug/incremental` (pure cache, nothing downstream depends on
+it, and the largest single sink — measured at 22 GB, 8.6 GB and 8.0 GB on three separate days),
+skipping that step while any `rustc` is live; then removes per-crate directories under
+`target/debug/build/*/` untouched for over a day, which cargo never garbage-collects
+(`lodestone-server` alone accumulated 2,112). What it deliberately avoids is `rm -rf
+target/debug`, which reclaims the most and takes every concurrent agent's in-flight compile with
+it. Note the split is not stable and is worth measuring before choosing: on a busy day only 456 of
+6,317 build directories were stale, 5.6 GB against the incremental directory's 8 GB.
+
 ### The `xtask` static scanners
 
 Two general-purpose scanners complement the packet-specific `connectedness` (see

@@ -1588,21 +1588,21 @@ reason = "verbatim reproduction of the exact issue-reference-shaped text a real 
 
 [[allow]]
 file = "docs/repo-tooling.md"
-line = 185
+text = "a bare `#123`-shaped issue"
 owner = "issue-553"
-reason = "self-referential: this line names the literal pattern check-comment-voice detects, as documentation of the scanner itself, not decay"
+reason = "self-referential: names the literal patterns check-comment-voice detects, as documentation of the scanner itself, not decay. Keyed on text, not line: all three were pinned at 185/186/187 and broke together when a paragraph was inserted above them"
 
 [[allow]]
 file = "docs/repo-tooling.md"
-line = 186
+text = "this patch"
 owner = "issue-553"
-reason = "self-referential: this line names the literal pattern check-comment-voice detects, as documentation of the scanner itself, not decay"
+reason = "self-referential: names the literal patterns check-comment-voice detects, as documentation of the scanner itself, not decay. Keyed on text, not line: all three were pinned at 185/186/187 and broke together when a paragraph was inserted above them"
 
 [[allow]]
 file = "docs/repo-tooling.md"
-line = 187
+text = "Both rot the same way"
 owner = "issue-553"
-reason = "self-referential: this line names the literal pattern check-comment-voice detects, as documentation of the scanner itself, not decay"
+reason = "self-referential: names the literal patterns check-comment-voice detects, as documentation of the scanner itself, not decay. Keyed on text, not line: all three were pinned at 185/186/187 and broke together when a paragraph was inserted above them"
 
 
 [[allow]]
