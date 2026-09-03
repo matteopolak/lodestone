@@ -1008,7 +1008,7 @@ mod tests {
     /// string, air everywhere unset — enough to build every fixture below
     /// with no `ChunkColumn` in scope, matching `crate::gravity_tick`'s own
     /// "pure decision, fake world via closure" testing style.
-        fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
         let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
         move |p: BlockPos| {
             entries

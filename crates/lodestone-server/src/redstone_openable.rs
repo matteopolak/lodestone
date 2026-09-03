@@ -203,7 +203,7 @@ mod tests {
     /// A tiny fake world: an explicit map from position to block-state
     /// string, air everywhere unset — the same "pure decision, fake world
     /// via closure" style every redstone module in this crate uses.
-        fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
         let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
         move |p: BlockPos| {
             entries
