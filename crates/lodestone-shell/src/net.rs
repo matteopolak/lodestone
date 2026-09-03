@@ -2969,16 +2969,55 @@ async fn run_async(
                 // today's only production `ServerProtocol` — always declares
                 // the bundle this crate embeds, so this refusal is a real
                 // guard against a *future* hosting family, not a live path.
-                let (source, min_y, height) =
-                    match preset_chunk_source(server_protocol.worldgen_scope(), seed, world_type) {
-                        Ok(built) => built,
+                // A saved world's own generator wins over `world_type`.
+                //
+                // `world_type` is the menu's choice at creation time and says
+                // only which of the seven bundled generators to build. It
+                // carries none of what the Customize screen collected — a flat
+                // world's layer stack, or a single-biome world's biome — so
+                // building from it alone regenerates a customized world as a
+                // stock one. That is the same failure the seed handling above
+                // treats as fatal: a world whose stored settings we ignore is
+                // one we silently regenerate differently.
+                //
+                // `None` means there is nothing to override: no world directory
+                // (an in-memory session), or no settings file yet because this
+                // open is the one creating the world. Both fall through to the
+                // bundled generator, which is what they should do.
+                let stored = match &world_dir {
+                    Some(dir) => match lodestone_server::overworld_chunk_source_override(
+                        dir,
+                        server_protocol.worldgen_scope(),
+                        seed,
+                    ) {
+                        Ok(found) => found,
                         Err(mismatch) => {
                             let _ = tx.try_send(NetUpdate::Error(format!(
                                 "cannot start this world: {mismatch}"
                             )));
                             return;
                         }
-                    };
+                    },
+                    None => None,
+                };
+                let (source, min_y, height) = match stored {
+                    Some(built) => built,
+                    None => {
+                        match preset_chunk_source(
+                            server_protocol.worldgen_scope(),
+                            seed,
+                            world_type,
+                        ) {
+                            Ok(built) => built,
+                            Err(mismatch) => {
+                                let _ = tx.try_send(NetUpdate::Error(format!(
+                                    "cannot start this world: {mismatch}"
+                                )));
+                                return;
+                            }
+                        }
+                    }
+                };
                 // Open to LAN (scope 1). Taken before the
                 // in-memory constructors below because it is a *different
                 // server*: `IntegratedServer::open_to_lan` binds a TCP listener
