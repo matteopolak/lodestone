@@ -3169,7 +3169,7 @@ impl VersionAdapter for V735Adapter {
             ClientAction::SetCreativeModeSlot { slot, item } => {
                 if item.is_some() {
                     return Err(AdapterError::Unsupported(
-                        "protocol 754 SetCreativeModeSlot with an item requires a ResourceKey -> \
+                        "this era's SetCreativeModeSlot with an item requires a ResourceKey -> \
                          numeric item-id registry that is not yet available"
                             .to_owned(),
                     ));
@@ -3199,7 +3199,7 @@ impl VersionAdapter for V735Adapter {
             // decode for it now would be an event with no producer that could
             // trigger it. It becomes real work once `ContainerClick` above is.
             ClientAction::ContainerClick { .. } => Err(AdapterError::Unsupported(
-                "protocol 754 ContainerClick needs a client-tracked transaction id (model carries \
+                "this era's ContainerClick needs a client-tracked transaction id (model carries \
                  only the 1.17+ state_id) and an item registry; refused rather than sending bytes \
                  a live server rejects via a failed transaction"
                     .to_owned(),
@@ -3209,10 +3209,10 @@ impl VersionAdapter for V735Adapter {
             // much later). `Stab` (off-hand attack) has no dedicated 1.16 packet
             // either.
             ClientAction::Stab => Err(AdapterError::Unsupported(
-                "protocol 754 has no dedicated off-hand attack (Stab) packet".to_owned(),
+                "this era has no dedicated off-hand attack (Stab) packet".to_owned(),
             )),
             ClientAction::SetPlayerInput(_) => Err(AdapterError::Unsupported(
-                "protocol 754 has no player-input packet".to_owned(),
+                "this era has no player-input packet".to_owned(),
             )),
 
             // Newly modelled actions that 1.16 genuinely carries. Encoded
@@ -3286,7 +3286,7 @@ impl VersionAdapter for V735Adapter {
                     ResourcePackResponseKind::Accepted => 3,
                     other => {
                         return Err(AdapterError::Unsupported(format!(
-                            "protocol 754 resource_pack_receive has no result code for {other:?}"
+                            "this era's resource_pack_receive has no result code for {other:?}"
                         )));
                     }
                 };
@@ -3301,10 +3301,10 @@ impl VersionAdapter for V735Adapter {
                 )))
             }
             ClientAction::PongResponse { .. } => Err(AdapterError::Unsupported(
-                "protocol 754 predates the play ping/pong packets (added in 1.17)".to_owned(),
+                "this era predates the play ping/pong packets (added in 1.17)".to_owned(),
             )),
             ClientAction::EndClientTick => Err(AdapterError::Unsupported(
-                "protocol 754 has no client_tick_end packet".to_owned(),
+                "this era has no client_tick_end packet".to_owned(),
             )),
             ClientAction::RenameItem { .. } => Err(AdapterError::Unsupported(
                 "protocol 735 rename item encoding is not yet implemented".to_owned(),
@@ -3375,19 +3375,19 @@ impl VersionAdapter for V735Adapter {
             // `spectate` packet as `TeleportToEntity` above. A stateless
             // adapter has no id->uuid registry to bridge the two.
             ClientAction::SpectatorAction { .. } => Err(AdapterError::Unsupported(
-                "protocol 754's spectate packet needs a target uuid; SpectatorAction carries \
+                "this era's spectate packet needs a target uuid; SpectatorAction carries \
                  only a network entity id with no registry to resolve it into one (use \
                  TeleportToEntity instead, which already carries the uuid)"
                     .to_owned(),
             )),
             ClientAction::ChatAck { .. } => Err(AdapterError::Unsupported(
-                "protocol 754 predates signed/acknowledged chat (added in 1.19)".to_owned(),
+                "this era predates signed/acknowledged chat (added in 1.19)".to_owned(),
             )),
             ClientAction::SelectBundleItem { .. } => Err(AdapterError::Unsupported(
-                "protocol 754 predates bundles (added in 1.21.2)".to_owned(),
+                "this era predates bundles (added in 1.21.2)".to_owned(),
             )),
             ClientAction::SetContainerSlotState { .. } => Err(AdapterError::Unsupported(
-                "protocol 754 predates the crafter block (added in 1.21)".to_owned(),
+                "this era predates the crafter block (added in 1.21)".to_owned(),
             )),
             // All four recipe books exist by 1.16.5, so this needs no
             // version-specific fallback the way protocol 340's does.
@@ -3428,16 +3428,16 @@ impl VersionAdapter for V735Adapter {
             // resolve one into the other.
             ClientAction::RecipeBookSeenRecipe { .. } | ClientAction::PlaceRecipe { .. } => {
                 Err(AdapterError::Unsupported(
-                    "protocol 754's recipe-book packets identify a recipe by a namespaced \
+                    "this era's recipe-book packets identify a recipe by a namespaced \
                      string id; the model's display index has no registry to resolve into one"
                         .to_owned(),
                 ))
             }
             ClientAction::PingRequest { .. } => Err(AdapterError::Unsupported(
-                "protocol 754 has no play-state ping request packet".to_owned(),
+                "this era has no play-state ping request packet".to_owned(),
             )),
             ClientAction::ChangeGameMode { .. } => Err(AdapterError::Unsupported(
-                "protocol 754 has no dedicated change_game_mode packet; a debug-menu game-mode \
+                "this era has no dedicated change_game_mode packet; a debug-menu game-mode \
                  switch in this era goes through the /gamemode chat command instead"
                     .to_owned(),
             )),
