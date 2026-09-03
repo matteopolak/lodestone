@@ -671,130 +671,217 @@ impl BlockEntity {
 /// simplification, not a new one).
 #[must_use]
 pub fn block_entity_for_item(item: &str) -> Option<(&'static str, BlockEntity)> {
-    match item {
-        "minecraft:furnace" => Some((
-            "minecraft:furnace",
-            BlockEntity::Furnace(Furnace::new(FurnaceKind::Furnace)),
-        )),
-        "minecraft:smoker" => Some((
-            "minecraft:smoker",
-            BlockEntity::Furnace(Furnace::new(FurnaceKind::Smoker)),
-        )),
-        "minecraft:blast_furnace" => Some((
+    let (block, placed) = placed_block_entity_for_item(item)?;
+    Some((block, placed.instantiate(block)))
+}
+
+/// The stack, in bytes, one [`block_entity_for_item`] call must fit inside —
+/// asserted by `tests::resolving_a_placement_fits_a_modest_stack`, because the
+/// type system has no way to state "this function's frame stays small" and a
+/// frame that outgrows a thread stack is invisible until an unrelated suite
+/// dies at frame zero.
+///
+/// The split resolution below reserves 50,592 bytes across the two frames that
+/// are live at once on that call path — 33,200 for [`block_entity_for_item`]
+/// plus 17,392 for [`PlacedBlockEntity::instantiate`], both read out of the
+/// prologues with `llvm-objdump -d` over this crate's own object files. The
+/// budget is set five times that, so the callee constructors, the caller's own
+/// `(&str, BlockEntity)` binding and the harness's frames all fit, while
+/// staying five times *under* the 1,357,056 bytes a single wide match costs —
+/// the guard fires on a return to that shape.
+#[cfg(test)]
+const PLACEMENT_STACK_BUDGET: usize = 256 * 1024;
+
+/// The block-entity *kind* a placement resolves to, ahead of any
+/// [`BlockEntity`] existing — small enough that the wide item-id match below
+/// can afford one stack slot per arm.
+///
+/// # Why the resolution is split in two
+///
+/// A debug build gives each arm of a `match` its own stack slot for that arm's
+/// temporaries, so such a match's frame is the *sum* over its arms rather than
+/// the largest of them. `size_of::<BlockEntity>()` is 16,504 bytes — its
+/// [`Crafter`](BlockEntity::Crafter) variant carries an inline
+/// `[Option<ItemStack>; 9]`, and `size_of::<ItemStack>()` is 1,832 on its own —
+/// so a forty-arm item-id match that materialises one `BlockEntity` per arm
+/// reserves 1,357,056 bytes in its prologue. That is more than a default thread
+/// stack: merely *calling* such a function overflows, no recursion involved.
+///
+/// Matching an item id down to this descriptor first keeps the wide match's
+/// per-arm slot at tuple-of-pointers scale and leaves exactly one place
+/// ([`instantiate`](Self::instantiate), nine arms) where a `BlockEntity` is
+/// built at all. Boxing the payload is *not* an alternative: `Box::new(expr)`
+/// evaluates `expr` into a stack temporary before moving it to the heap, so
+/// every arm would still reserve its 16,504 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlacedBlockEntity {
+    Composter,
+    Furnace(FurnaceKind),
+    Hopper,
+    BrewingStand,
+    /// A plain item container of `size` slots. Its
+    /// `minecraft:block_entity_type` key is the block name resolved alongside
+    /// the descriptor, so it is not repeated here.
+    Container { size: usize },
+    CommandBlock,
+    Beacon,
+    Crafter,
+    Sign { hanging: bool },
+}
+
+impl PlacedBlockEntity {
+    /// Builds the one fresh [`BlockEntity`] a placement creates. `block` is the
+    /// canonical block name resolved alongside the descriptor, which the
+    /// container variants need as their type key.
+    fn instantiate(self, block: &str) -> BlockEntity {
+        match self {
+            PlacedBlockEntity::Composter => BlockEntity::Composter(Composter::new()),
+            PlacedBlockEntity::Furnace(kind) => BlockEntity::Furnace(Furnace::new(kind)),
+            PlacedBlockEntity::Hopper => BlockEntity::Hopper(Hopper::new()),
+            PlacedBlockEntity::BrewingStand => BlockEntity::BrewingStand(BrewingStand::new()),
+            PlacedBlockEntity::Container { size } => BlockEntity::container_of_size(block, size),
+            PlacedBlockEntity::CommandBlock => {
+                BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new())
+            }
+            PlacedBlockEntity::Beacon => BlockEntity::Beacon(BeaconData::default()),
+            PlacedBlockEntity::Crafter => BlockEntity::crafter(),
+            PlacedBlockEntity::Sign { hanging } => BlockEntity::Sign(SignData {
+                hanging,
+                ..SignData::default()
+            }),
+        }
+    }
+}
+
+/// The canonical block-state string a placement of `item` writes, paired with
+/// the [`PlacedBlockEntity`] describing what to register at that position —
+/// [`block_entity_for_item`]'s item-id half, kept separate from the
+/// construction half for the stack-frame reason [`PlacedBlockEntity`]'s own doc
+/// comment gives.
+///
+/// The block name is the item's own name in every arm; it is spelled out per
+/// arm rather than taken from `item` because the caller is promised a
+/// `&'static str` and a matched string literal is the only `'static` the match
+/// has.
+fn placed_block_entity_for_item(item: &str) -> Option<(&'static str, PlacedBlockEntity)> {
+    let placed = match item {
+        "minecraft:furnace" => ("minecraft:furnace", PlacedBlockEntity::Furnace(FurnaceKind::Furnace)),
+        "minecraft:smoker" => ("minecraft:smoker", PlacedBlockEntity::Furnace(FurnaceKind::Smoker)),
+        "minecraft:blast_furnace" => (
             "minecraft:blast_furnace",
-            BlockEntity::Furnace(Furnace::new(FurnaceKind::BlastFurnace)),
-        )),
-        "minecraft:composter" => Some(("minecraft:composter", BlockEntity::Composter(Composter::new()))),
-        "minecraft:hopper" => Some(("minecraft:hopper", BlockEntity::Hopper(Hopper::new()))),
-        "minecraft:brewing_stand" => Some((
-            "minecraft:brewing_stand",
-            BlockEntity::BrewingStand(BrewingStand::new()),
-        )),
-        "minecraft:chest" => Some(("minecraft:chest", BlockEntity::container("minecraft:chest"))),
-        "minecraft:trapped_chest" => Some((
+            PlacedBlockEntity::Furnace(FurnaceKind::BlastFurnace),
+        ),
+        "minecraft:composter" => ("minecraft:composter", PlacedBlockEntity::Composter),
+        "minecraft:hopper" => ("minecraft:hopper", PlacedBlockEntity::Hopper),
+        "minecraft:brewing_stand" => ("minecraft:brewing_stand", PlacedBlockEntity::BrewingStand),
+        "minecraft:chest" => (
+            "minecraft:chest",
+            PlacedBlockEntity::Container { size: CONTAINER_9X3_SIZE },
+        ),
+        "minecraft:trapped_chest" => (
             "minecraft:trapped_chest",
-            BlockEntity::container("minecraft:trapped_chest"),
-        )),
-        "minecraft:barrel" => Some(("minecraft:barrel", BlockEntity::container("minecraft:barrel"))),
-        "minecraft:dispenser" => Some((
+            PlacedBlockEntity::Container { size: CONTAINER_9X3_SIZE },
+        ),
+        "minecraft:barrel" => (
+            "minecraft:barrel",
+            PlacedBlockEntity::Container { size: CONTAINER_9X3_SIZE },
+        ),
+        "minecraft:dispenser" => (
             "minecraft:dispenser",
-            BlockEntity::container_of_size("minecraft:dispenser", CONTAINER_3X3_SIZE),
-        )),
-        "minecraft:dropper" => Some((
+            PlacedBlockEntity::Container { size: CONTAINER_3X3_SIZE },
+        ),
+        "minecraft:dropper" => (
             "minecraft:dropper",
-            BlockEntity::container_of_size("minecraft:dropper", CONTAINER_3X3_SIZE),
-        )),
-        "minecraft:beacon" => Some(("minecraft:beacon", BlockEntity::Beacon(BeaconData::default()))),
-        "minecraft:crafter" => Some(("minecraft:crafter", BlockEntity::crafter())),
-        "minecraft:command_block" => Some((
-            "minecraft:command_block",
-            BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new()),
-        )),
-        "minecraft:chain_command_block" => Some((
+            PlacedBlockEntity::Container { size: CONTAINER_3X3_SIZE },
+        ),
+        "minecraft:beacon" => ("minecraft:beacon", PlacedBlockEntity::Beacon),
+        "minecraft:crafter" => ("minecraft:crafter", PlacedBlockEntity::Crafter),
+        "minecraft:command_block" => ("minecraft:command_block", PlacedBlockEntity::CommandBlock),
+        "minecraft:chain_command_block" => (
             "minecraft:chain_command_block",
-            BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new()),
-        )),
-        "minecraft:repeating_command_block" => Some((
+            PlacedBlockEntity::CommandBlock,
+        ),
+        "minecraft:repeating_command_block" => (
             "minecraft:repeating_command_block",
-            BlockEntity::CommandBlock(crate::command_block::CommandBlockData::new()),
-        )),
+            PlacedBlockEntity::CommandBlock,
+        ),
         // The twelve standing-sign woods plus their twelve hanging-sign
         // counterparts (`lodestone-data`'s `BLOCK_FOR_ITEM` census, items
         // 1016-1039) — one block-entity type each
         // (`minecraft:sign`/`minecraft:hanging_sign`, see
-        // [`BlockEntity::type_id`]), all twenty-four sharing this arm's
-        // shape. `entity_block` is the item's own name: `block_items
-        // ::block_for_item` reports the *standing* block for every one of
-        // these (wall/hanging-attached orientation is `placed_block_state`'s
-        // job, resolved after this call, exactly as the debug_assert at this
-        // function's call site expects).
+        // [`BlockEntity::type_id`]). The block name is the item's own name:
+        // `block_items::block_for_item` reports the *standing* block for every
+        // one of these (wall/hanging-attached orientation is
+        // `placed_block_state`'s job, resolved after this call, exactly as the
+        // debug_assert at [`block_entity_for_item`]'s call site expects).
         //
-        // `editor` starts `None` here — the placing player is granted it by
+        // `editor` starts `None` — the placing player is granted it by
         // `crate::server`'s placement arm, which is the one call site that
         // actually knows who is placing (see [`SignData::editor`]'s own doc
         // comment for why placement is the only grant site this crate has).
-        "minecraft:oak_sign" => Some(("minecraft:oak_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:spruce_sign" => Some(("minecraft:spruce_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:birch_sign" => Some(("minecraft:birch_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:jungle_sign" => Some(("minecraft:jungle_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:acacia_sign" => Some(("minecraft:acacia_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:cherry_sign" => Some(("minecraft:cherry_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:dark_oak_sign" => Some(("minecraft:dark_oak_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:pale_oak_sign" => Some(("minecraft:pale_oak_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:mangrove_sign" => Some(("minecraft:mangrove_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:bamboo_sign" => Some(("minecraft:bamboo_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:crimson_sign" => Some(("minecraft:crimson_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:warped_sign" => Some(("minecraft:warped_sign", BlockEntity::Sign(SignData::default()))),
-        "minecraft:oak_hanging_sign" => Some((
+        "minecraft:oak_sign" => ("minecraft:oak_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:spruce_sign" => ("minecraft:spruce_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:birch_sign" => ("minecraft:birch_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:jungle_sign" => ("minecraft:jungle_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:acacia_sign" => ("minecraft:acacia_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:cherry_sign" => ("minecraft:cherry_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:dark_oak_sign" => ("minecraft:dark_oak_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:pale_oak_sign" => ("minecraft:pale_oak_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:mangrove_sign" => ("minecraft:mangrove_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:bamboo_sign" => ("minecraft:bamboo_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:crimson_sign" => ("minecraft:crimson_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:warped_sign" => ("minecraft:warped_sign", PlacedBlockEntity::Sign { hanging: false }),
+        "minecraft:oak_hanging_sign" => (
             "minecraft:oak_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:spruce_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:spruce_hanging_sign" => (
             "minecraft:spruce_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:birch_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:birch_hanging_sign" => (
             "minecraft:birch_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:jungle_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:jungle_hanging_sign" => (
             "minecraft:jungle_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:acacia_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:acacia_hanging_sign" => (
             "minecraft:acacia_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:cherry_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:cherry_hanging_sign" => (
             "minecraft:cherry_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:dark_oak_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:dark_oak_hanging_sign" => (
             "minecraft:dark_oak_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:pale_oak_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:pale_oak_hanging_sign" => (
             "minecraft:pale_oak_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:mangrove_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:mangrove_hanging_sign" => (
             "minecraft:mangrove_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:bamboo_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:bamboo_hanging_sign" => (
             "minecraft:bamboo_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:crimson_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:crimson_hanging_sign" => (
             "minecraft:crimson_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        "minecraft:warped_hanging_sign" => Some((
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        "minecraft:warped_hanging_sign" => (
             "minecraft:warped_hanging_sign",
-            BlockEntity::Sign(SignData { hanging: true, ..SignData::default() }),
-        )),
-        _ => None,
-    }
+            PlacedBlockEntity::Sign { hanging: true },
+        ),
+        _ => return None,
+    };
+    Some(placed)
 }
 
 /// A [`BlockPos`]-keyed map of live [`BlockEntity`] values — the world's own
@@ -1091,6 +1178,75 @@ mod tests {
 
     fn stack(item: &str, count: u32) -> ItemStack {
         ItemStack::new(item.parse().expect("valid resource key"), count)
+    }
+
+    /// One item id per [`PlacedBlockEntity`] variant, so the frame the guard
+    /// below measures covers every arm of
+    /// [`PlacedBlockEntity::instantiate`] — including the `Crafter` arm, whose
+    /// inline nine-slot grid is what makes `BlockEntity` 16,504 bytes wide in
+    /// the first place.
+    const ONE_ITEM_PER_PLACED_KIND: &[&str] = &[
+        "minecraft:composter",
+        "minecraft:furnace",
+        "minecraft:hopper",
+        "minecraft:brewing_stand",
+        "minecraft:chest",
+        "minecraft:dispenser",
+        "minecraft:command_block",
+        "minecraft:beacon",
+        "minecraft:crafter",
+        "minecraft:oak_sign",
+        "minecraft:oak_hanging_sign",
+    ];
+
+    /// The stack-frame guard [`PLACEMENT_STACK_BUDGET`] exists for: resolving a
+    /// placement must fit a modest thread stack, because a `match` arm's
+    /// temporaries are per-arm allocas in a debug build and a wide match over a
+    /// 16 KiB return type reserves megabytes (see [`PlacedBlockEntity`]'s doc
+    /// comment for the arithmetic and the frame sizes).
+    ///
+    /// Run in a re-exec of this very test binary rather than on a thread here,
+    /// because an over-budget frame does not return an error — it trips the
+    /// thread's guard page and aborts the process. In a child, that abort is a
+    /// non-zero exit status this assertion can name; in-process it would take
+    /// the whole suite down with a bare `SIGABRT`, which is precisely the
+    /// unattributable failure mode this guard exists to replace.
+    #[test]
+    fn resolving_a_placement_fits_a_modest_stack() {
+        const CHILD_MARKER: &str = "LODESTONE_PLACEMENT_STACK_CHILD";
+        const TEST_PATH: &str = "block_entities::tests::resolving_a_placement_fits_a_modest_stack";
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            std::thread::Builder::new()
+                .name("placement-stack-budget".to_owned())
+                .stack_size(PLACEMENT_STACK_BUDGET)
+                .spawn(|| {
+                    for item in ONE_ITEM_PER_PLACED_KIND {
+                        let (block, entity) = block_entity_for_item(item).expect(item);
+                        assert_eq!(block, *item, "the block name is the item's own name");
+                        // Reading the entity back keeps the value live past the
+                        // call, so the frame under test is a real one.
+                        assert!(!entity.type_id().is_empty());
+                    }
+                })
+                .expect("spawn the budgeted thread")
+                .join()
+                .expect("resolving a placement panicked inside the budgeted thread");
+            return;
+        }
+
+        let exe = std::env::current_exe().expect("this test binary's own path");
+        let status = std::process::Command::new(exe)
+            .args(["--exact", TEST_PATH])
+            .env(CHILD_MARKER, "1")
+            .status()
+            .expect("re-exec this test binary");
+        assert!(
+            status.success(),
+            "resolving a placement did not fit {PLACEMENT_STACK_BUDGET} bytes of stack \
+             (child exited {status}); a wide match materialising one BlockEntity per arm \
+             costs one 16,504-byte alloca per arm — see PlacedBlockEntity's doc comment",
+        );
     }
 
     #[test]
