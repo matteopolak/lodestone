@@ -129,6 +129,15 @@ const FAMILIES: &[Family] = &[
         protocols: lodestone_v1_9::PROTOCOLS,
         make: |protocol| Box::new(lodestone_v1_9::adapter_for(protocol)),
     },
+    #[cfg(feature = "v1-13")]
+    Family {
+        label: "v1-13",
+        // One protocol, deliberately: 1.13.2 is the flattening boundary and
+        // shares under three-quarters of its packet shapes with either
+        // neighbour, so it is its own era rather than a member of one.
+        protocols: lodestone_v1_13::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v1_13::adapter_for(protocol)),
+    },
     #[cfg(feature = "v1-14")]
     Family {
         label: "v1-14",
@@ -198,22 +207,23 @@ struct PhysicsFamily {
 ///   that mattered before this table existed: every production construction
 ///   site hardcoded `mc_1_21()` unconditionally, which happened to be correct
 ///   only because `v26-2` was the only family ever actually joined.
-/// - **`v1-9` (1.12.2) and `v1-14` (protocol 754, 1.16.5) → `mc_1_21`, as an
-///   approximation, not a validated fit.** Neither vanilla era is a clean
-///   match for either profile: both post-date the 1.9 input-pipeline rewrite
-///   ([`InputModel::UnitSquareProjection`], which `mc_1_21` selects and
-///   `mc_1_8` does not), so `mc_1_8` would run the *wrong* structural input
-///   algorithm for either of them, not merely an imprecise one. But 1.12.2
-///   pre-dates Update Aquatic's swimming-pose system entirely and 1.16.5,
-///   while post-Update-Aquatic, has not been checked against
-///   [`FluidModel::Modern`]'s exact constants — so `mc_1_21`'s fluid half is
-///   unvalidated fidelity for both, not a known-correct one. `mc_1_21` is
-///   still the nearer pick: the input model is live on *every* tick a player
-///   takes, while the fluid model only diverges while actually in a fluid, so
-///   getting the input pipeline structurally right dominates. Treat movement
-///   through v1-9/v1-14 as "the modern profile, unvalidated for this era" —
-///   not as bit-exact parity — until a v1-9/v1-14-specific profile is ported
-///   and golden-traced the way `mc_1_8` was.
+/// - **`v1-9` (1.12.2), `v1-13` (1.13.2) and `v1-14` (protocol 754, 1.16.5) →
+///   `mc_1_21`, as an approximation, not a validated fit.** None of the three
+///   vanilla eras is a clean match for either profile: all post-date the 1.9
+///   input-pipeline rewrite ([`InputModel::UnitSquareProjection`], which
+///   `mc_1_21` selects and `mc_1_8` does not), so `mc_1_8` would run the
+///   *wrong* structural input algorithm for any of them, not merely an
+///   imprecise one. But 1.12.2 pre-dates Update Aquatic's swimming-pose
+///   system entirely, and 1.13.2 and 1.16.5, while post-Update-Aquatic, have
+///   not been checked against [`FluidModel::Modern`]'s exact constants — so
+///   `mc_1_21`'s fluid half is unvalidated fidelity for all three, not a
+///   known-correct one. `mc_1_21` is still the nearer pick: the input model
+///   is live on *every* tick a player takes, while the fluid model only
+///   diverges while actually in a fluid, so getting the input pipeline
+///   structurally right dominates. Treat movement through v1-9/v1-13/v1-14 as
+///   "the modern profile, unvalidated for this era" — not as bit-exact
+///   parity — until an era-specific profile is ported and golden-traced the
+///   way `mc_1_8` was.
 const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
     #[cfg(feature = "v1-8")]
     PhysicsFamily {
@@ -228,6 +238,11 @@ const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
     #[cfg(feature = "v1-9")]
     PhysicsFamily {
         protocols: lodestone_v1_9::PROTOCOLS,
+        profile: lodestone_physics::PhysicsProfile::mc_1_21,
+    },
+    #[cfg(feature = "v1-13")]
+    PhysicsFamily {
+        protocols: lodestone_v1_13::PROTOCOLS,
         profile: lodestone_physics::PhysicsProfile::mc_1_21,
     },
     #[cfg(feature = "v1-14")]
@@ -372,6 +387,7 @@ mod tests {
             feature = "v1-8",
             feature = "v26-2",
             feature = "v1-9",
+            feature = "v1-13",
             feature = "v1-14"
         ))) {
             assert!(compiled_families().is_empty());

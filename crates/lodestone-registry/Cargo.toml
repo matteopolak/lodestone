@@ -47,6 +47,7 @@ lodestone-physics = { path = "../lodestone-physics" }
 lodestone-v1-8 = { workspace = true, optional = true }
 lodestone-v26-2 = { workspace = true, optional = true }
 lodestone-v1-9 = { workspace = true, optional = true }
+lodestone-v1-13 = { workspace = true, optional = true }
 lodestone-v1-14 = { workspace = true, optional = true }
 
 [features]
@@ -55,4 +56,5 @@ lodestone-v1-14 = { workspace = true, optional = true }
 v1-8 = ["dep:lodestone-v1-8"]
 v26-2 = ["dep:lodestone-v26-2"]
 v1-9 = ["dep:lodestone-v1-9"]
+v1-13 = ["dep:lodestone-v1-13"]
 v1-14 = ["dep:lodestone-v1-14"]

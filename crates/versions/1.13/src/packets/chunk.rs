@@ -296,11 +296,13 @@ fn decode_column(
         ));
 
         let block_bytes = blob.bytes(LIGHT_BYTES)?;
-        *light.block_mut(index) = LightData::Values(NibbleArray::from_bytes(block_bytes)?);
+        *light.block_mut(light_section(index)) =
+            LightData::Values(NibbleArray::from_bytes(block_bytes)?);
 
         if shape.has_skylight {
             let sky_bytes = blob.bytes(LIGHT_BYTES)?;
-            *light.sky_mut(index) = LightData::Values(NibbleArray::from_bytes(sky_bytes)?);
+            *light.sky_mut(light_section(index)) =
+                LightData::Values(NibbleArray::from_bytes(sky_bytes)?);
         }
     }
 
@@ -333,6 +335,17 @@ fn decode_column(
         light,
         fallback,
     })
+}
+
+/// Maps a world block-section index to its light-section index.
+///
+/// `ColumnLight` spans `section_count + 2` light sections, with light section
+/// `0` sitting *below* the world, so the two indices differ by one. Getting
+/// this wrong stores every section's light one section low, which nothing in
+/// the chunk decode can detect — the arrays are the right size and the buffer
+/// still ends exactly where it should.
+const fn light_section(block_section: usize) -> usize {
+    block_section + 1
 }
 
 /// Reads the 256 big-endian `i32` biome ids of a full column, with no length
