@@ -2068,207 +2068,435 @@ impl V766Adapter {
 
 /// Every clientbound play packet this era decodes, by name.
 static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandler>)] = &[
-    handler("minecraft:login", V766Adapter::handle_play_login),
-    handler("minecraft:respawn", V766Adapter::handle_play_respawn),
-    handler("minecraft:map_chunk", V766Adapter::handle_play_map_chunk),
-    handler(
+    (
+        "minecraft:login",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_login,
+        ),
+    ),
+    (
+        "minecraft:respawn",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_respawn,
+        ),
+    ),
+    (
+        "minecraft:map_chunk",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_map_chunk,
+        ),
+    ),
+    (
         "minecraft:update_light",
-        V766Adapter::handle_play_update_light,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_update_light,
+        ),
     ),
-    handler(
+    (
         "minecraft:unload_chunk",
-        V766Adapter::handle_play_unload_chunk,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_unload_chunk,
+        ),
     ),
-    handler("minecraft:keep_alive", V766Adapter::handle_play_keep_alive),
-    handler("minecraft:ping", V766Adapter::handle_play_ping),
-    handler("minecraft:system_chat", V766Adapter::handle_play_system_chat),
-    handler("minecraft:player_chat", V766Adapter::handle_play_player_chat),
-    handler(
+    (
+        "minecraft:keep_alive",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_keep_alive,
+        ),
+    ),
+    (
+        "minecraft:ping",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_ping,
+        ),
+    ),
+    (
+        "minecraft:system_chat",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_system_chat,
+        ),
+    ),
+    (
+        "minecraft:player_chat",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_player_chat,
+        ),
+    ),
+    (
         "minecraft:profileless_chat",
-        V766Adapter::handle_play_profileless_chat,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_profileless_chat,
+        ),
     ),
-    handler(
+    (
         "minecraft:hide_message",
-        V766Adapter::handle_play_hide_message,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_hide_message,
+        ),
     ),
-    handler("minecraft:position", V766Adapter::handle_play_position),
-    handler(
+    (
+        "minecraft:position",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_position,
+        ),
+    ),
+    (
         "minecraft:chunk_batch_start",
-        V766Adapter::handle_play_chunk_batch_start,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_chunk_batch_start,
+        ),
     ),
-    handler(
+    (
         "minecraft:chunk_batch_finished",
-        V766Adapter::handle_play_chunk_batch_finished,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_chunk_batch_finished,
+        ),
     ),
-    handler(
+    (
         "minecraft:start_configuration",
-        V766Adapter::handle_play_start_configuration,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_start_configuration,
+        ),
     ),
-    handler(
+    (
         "minecraft:spawn_entity",
-        V766Adapter::handle_play_spawn_entity,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_spawn_entity,
+        ),
     ),
-    handler(
+    (
         "minecraft:spawn_entity_experience_orb",
-        V766Adapter::handle_play_spawn_entity_experience_orb,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_spawn_entity_experience_orb,
+        ),
     ),
-    handler(
+    (
         "minecraft:rel_entity_move",
-        V766Adapter::handle_play_rel_entity_move,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_rel_entity_move,
+        ),
     ),
-    handler(
+    (
         "minecraft:entity_move_look",
-        V766Adapter::handle_play_entity_move_look,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_move_look,
+        ),
     ),
-    handler("minecraft:entity_look", V766Adapter::handle_play_entity_look),
-    handler(
+    (
+        "minecraft:entity_look",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_look,
+        ),
+    ),
+    (
         "minecraft:entity_teleport",
-        V766Adapter::handle_play_entity_teleport,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_teleport,
+        ),
     ),
-    handler(
+    (
         "minecraft:entity_velocity",
-        V766Adapter::handle_play_entity_velocity,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_velocity,
+        ),
     ),
-    handler(
+    (
         "minecraft:entity_head_rotation",
-        V766Adapter::handle_play_entity_head_rotation,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_head_rotation,
+        ),
     ),
-    handler(
+    (
         "minecraft:entity_destroy",
-        V766Adapter::handle_play_entity_destroy,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_destroy,
+        ),
     ),
-    handler(
+    (
         "minecraft:entity_status",
-        V766Adapter::handle_play_entity_status,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_status,
+        ),
     ),
-    handler("minecraft:animation", V766Adapter::handle_play_animation),
-    handler(
+    (
+        "minecraft:animation",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_animation,
+        ),
+    ),
+    (
         "minecraft:entity_metadata",
-        V766Adapter::handle_play_entity_metadata,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_metadata,
+        ),
     ),
-    handler(
+    (
         "minecraft:attach_entity",
-        V766Adapter::handle_play_attach_entity,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_attach_entity,
+        ),
     ),
-    handler(
+    (
         "minecraft:set_passengers",
-        V766Adapter::handle_play_set_passengers,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_set_passengers,
+        ),
     ),
-    handler("minecraft:collect", V766Adapter::handle_play_collect),
-    handler(
+    (
+        "minecraft:collect",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_collect,
+        ),
+    ),
+    (
         "minecraft:entity_effect",
-        V766Adapter::handle_play_entity_effect,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_entity_effect,
+        ),
     ),
-    handler(
+    (
         "minecraft:remove_entity_effect",
-        V766Adapter::handle_play_remove_entity_effect,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_remove_entity_effect,
+        ),
     ),
-    handler(
+    (
         "minecraft:block_change",
-        V766Adapter::handle_play_block_change,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_block_change,
+        ),
     ),
-    handler(
+    (
         "minecraft:kick_disconnect",
-        V766Adapter::handle_play_kick_disconnect,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_kick_disconnect,
+        ),
     ),
-    handler(
+    (
         "minecraft:update_health",
-        V766Adapter::handle_play_update_health,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_update_health,
+        ),
     ),
-    handler(
+    (
         "minecraft:spawn_position",
-        V766Adapter::handle_play_spawn_position,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_spawn_position,
+        ),
     ),
-    handler("minecraft:abilities", V766Adapter::handle_play_abilities),
-    handler(
+    (
+        "minecraft:abilities",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_abilities,
+        ),
+    ),
+    (
         "minecraft:game_state_change",
-        V766Adapter::handle_play_game_state_change,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_game_state_change,
+        ),
     ),
-    handler("minecraft:difficulty", V766Adapter::handle_play_difficulty),
-    handler("minecraft:update_time", V766Adapter::handle_play_update_time),
-    handler(
+    (
+        "minecraft:difficulty",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_difficulty,
+        ),
+    ),
+    (
+        "minecraft:update_time",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_update_time,
+        ),
+    ),
+    (
         "minecraft:playerlist_header",
-        V766Adapter::handle_play_playerlist_header,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_playerlist_header,
+        ),
     ),
-    handler("minecraft:player_info", V766Adapter::handle_play_player_info),
-    handler(
+    (
+        "minecraft:player_info",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_player_info,
+        ),
+    ),
+    (
         "minecraft:player_remove",
-        V766Adapter::handle_play_player_remove,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_player_remove,
+        ),
     ),
-    handler(
+    (
         "minecraft:held_item_slot",
-        V766Adapter::handle_play_held_item_slot,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_held_item_slot,
+        ),
     ),
-    handler(
+    (
         "minecraft:close_window",
-        V766Adapter::handle_play_close_window,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_close_window,
+        ),
     ),
-    handler(
+    (
         "minecraft:craft_progress_bar",
-        V766Adapter::handle_play_craft_progress_bar,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_craft_progress_bar,
+        ),
     ),
-    handler("minecraft:experience", V766Adapter::handle_play_experience),
-    handler(
+    (
+        "minecraft:experience",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_experience,
+        ),
+    ),
+    (
         "minecraft:vehicle_move",
-        V766Adapter::handle_play_vehicle_move,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_vehicle_move,
+        ),
     ),
-    handler("minecraft:camera", V766Adapter::handle_play_camera),
-    handler(
+    (
+        "minecraft:camera",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_camera,
+        ),
+    ),
+    (
         "minecraft:update_view_position",
-        V766Adapter::handle_play_update_view_position,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_update_view_position,
+        ),
     ),
-    handler(
+    (
         "minecraft:update_view_distance",
-        V766Adapter::handle_play_update_view_distance,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_update_view_distance,
+        ),
     ),
-    handler(
+    (
         "minecraft:simulation_distance",
-        V766Adapter::handle_play_simulation_distance,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_simulation_distance,
+        ),
     ),
-    handler(
+    (
         "minecraft:open_sign_entity",
-        V766Adapter::handle_play_open_sign_entity,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_open_sign_entity,
+        ),
     ),
-    handler(
+    (
         "minecraft:set_title_text",
-        V766Adapter::handle_play_set_title_text,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_set_title_text,
+        ),
     ),
-    handler(
+    (
         "minecraft:set_title_subtitle",
-        V766Adapter::handle_play_set_title_subtitle,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_set_title_subtitle,
+        ),
     ),
-    handler("minecraft:action_bar", V766Adapter::handle_play_action_bar),
-    handler(
+    (
+        "minecraft:action_bar",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_action_bar,
+        ),
+    ),
+    (
         "minecraft:set_title_time",
-        V766Adapter::handle_play_set_title_time,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_set_title_time,
+        ),
     ),
-    handler(
+    (
         "minecraft:clear_titles",
-        V766Adapter::handle_play_clear_titles,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_clear_titles,
+        ),
     ),
-    handler(
+    (
         "minecraft:set_ticking_state",
-        V766Adapter::handle_play_set_ticking_state,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_set_ticking_state,
+        ),
     ),
-    handler("minecraft:step_tick", V766Adapter::handle_play_step_tick),
-    handler(
+    (
+        "minecraft:step_tick",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_step_tick,
+        ),
+    ),
+    (
         "minecraft:bundle_delimiter",
-        V766Adapter::handle_play_bundle_delimiter,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V766Adapter::handle_play_bundle_delimiter,
+        ),
     ),
 ];
 
-/// Builds one [`CLIENTBOUND`] row. A free function rather than a repeated
-/// literal so the protocol range is stated once: every packet in this crate
-/// is declared for the whole (single-protocol) era.
-const fn handler(
-    name: &'static str,
-    body: PlayHandler,
-) -> (&'static str, lodestone_core::dispatch::Handler<PlayHandler>) {
-    (
-        name,
-        lodestone_core::dispatch::Handler::new(lodestone_core::ProtocolRange::ALL, body),
-    )
-}
 /// Every clientbound play packet this era decodes nothing for, with the
 /// reason. The dispatch table refuses to build unless this list plus
 /// [`CLIENTBOUND`] covers every id in the protocol's own `ENTRIES`, so a
