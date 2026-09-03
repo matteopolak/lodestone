@@ -215,6 +215,30 @@ fn join_and_wait_for_placement(sim: &mut Sim) -> String {
     username
 }
 
+/// Whether an RCON reply should be read as a real command failure.
+///
+/// A **non-empty** reply that names none of `success_markers` is a genuine
+/// failure (a bad username, a malformed command) and should fail fast rather
+/// than waiting out a poll for something that was never going to happen.
+///
+/// An **empty** reply is not evidence of failure at all. Tagging a batch of
+/// commands under concurrent RCON load and checking the oracle's own state
+/// afterward found the command had executed in every case whose reply came
+/// back empty — a well-formed, complete response frame that simply carried no
+/// confirmation text, not a truncated read (a captured exchange showed a
+/// single `recv` filling the declared length exactly, and no further bytes
+/// ever arrived after it) and not a swapped request id (the id on the empty
+/// frame always matched the command that produced it). So an empty reply
+/// falls through to whichever independent, server-state-based confirmation
+/// the caller runs next, which is the actual authority here.
+fn rcon_reply_indicates_failure(reply: &str, success_markers: &[&str]) -> bool {
+    if reply.is_empty() {
+        return false;
+    }
+    let lower = reply.to_lowercase();
+    !success_markers.iter().any(|marker| lower.contains(marker))
+}
+
 /// RCON-teleports the player and drives ticks until the client has adopted a
 /// `TeleportPlayer` landing within `0.5` blocks **horizontally** of the
 /// requested position. Returns the [`Sim::teleport_count`] observed once it
@@ -239,7 +263,7 @@ fn rcon_teleport_and_confirm(sim: &mut Sim, rcon: &mut RconClient, username: &st
     let before = sim.teleport_count;
     let reply = rcon.cmd(&format!("tp {username} {x} {y} {z} {yaw} 0"));
     assert!(
-        reply.to_lowercase().contains("teleported") || reply.to_lowercase().contains("moved"),
+        !rcon_reply_indicates_failure(&reply, &["teleported", "moved"]),
         "RCON tp did not report success: {reply:?}"
     );
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -340,7 +364,7 @@ fn build_platform_and_land_on_it(sim: &mut Sim, rcon: &mut RconClient, username:
         PLATFORM_Z + PLATFORM_HALF,
     ));
     assert!(
-        reply.to_lowercase().contains("chang") || reply.to_lowercase().contains("fill"),
+        !rcon_reply_indicates_failure(&reply, &["chang", "fill"]),
         "RCON fill did not report success: {reply:?}"
     );
 
@@ -653,4 +677,52 @@ fn a_real_fall_never_triggers_a_vertical_correction_despite_exceeding_the_thresh
          teleport, and check the oracle's own log for which rule it named.",
         sim.teleport_count - baseline,
     );
+}
+
+#[cfg(test)]
+mod rcon_reply_tests {
+    use super::rcon_reply_indicates_failure;
+
+    /// The control this predicate exists for: an empty reply used to fail
+    /// `reply.contains("teleported")` outright, which is exactly the false
+    /// failure a real oracle run produced under concurrent RCON load. This
+    /// asserts the replacement predicate no longer reads that case as a
+    /// failure, while still catching a reply that names neither marker.
+    #[test]
+    fn an_empty_reply_is_not_a_failure_but_a_wrong_one_still_is() {
+        assert!(
+            !rcon_reply_indicates_failure("", &["teleported", "moved"]),
+            "an empty reply must fall through to the caller's own confirmation, not fail here"
+        );
+        assert!(
+            !"".contains("teleported"),
+            "sanity: this is the exact substring check the old assertion used to run \
+             directly on the reply, and it is false on empty input -- the bug this predicate \
+             replaces"
+        );
+    }
+
+    #[test]
+    fn a_matching_reply_is_not_a_failure() {
+        assert!(!rcon_reply_indicates_failure(
+            "Teleported ProbeAgent to 1.0, 2.0, 3.0",
+            &["teleported", "moved"]
+        ));
+        assert!(!rcon_reply_indicates_failure(
+            "Successfully changed the block at 1, 2, 3",
+            &["chang", "fill"]
+        ));
+    }
+
+    #[test]
+    fn a_non_matching_non_empty_reply_is_a_real_failure() {
+        assert!(rcon_reply_indicates_failure(
+            "No entity was found",
+            &["teleported", "moved"]
+        ));
+        assert!(rcon_reply_indicates_failure(
+            "Incorrect argument for command",
+            &["chang", "fill"]
+        ));
+    }
 }

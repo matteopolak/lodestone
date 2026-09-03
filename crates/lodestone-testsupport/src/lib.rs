@@ -242,6 +242,33 @@ pub fn fixture_by_name(dir: impl AsRef<Path>, file_name: &str) -> std::io::Resul
 }
 
 /// Blocking Source RCON client for live tests.
+///
+/// ## An empty reply body is not proof the command failed
+///
+/// Both this and [`AsyncRconClient`] read a response with `read_exact` on
+/// the declared length, so a short/truncated body cannot reach a caller as a
+/// successful, silently-wrong result: `read_exact` either fills the buffer or
+/// returns an `io::Error`, never a partial one dressed up as complete. That
+/// was the first thing checked when a real oracle run intermittently got a
+/// matching-id, empty-body reply back for a `tp` -- and it ruled the read
+/// loop out. Tagging a batch of commands under concurrent RCON connections
+/// (several `RconClient`s hammering one server at once, the shape a shared
+/// live-test oracle sees when more than one gate runs against it) and
+/// checking server-side afterward found the command had executed in every
+/// case whose reply came back empty; a captured exchange showed the body
+/// arriving as a single `read` filling the declared length exactly, with no
+/// further bytes ever following it. So the loss is real, but it is server-side
+/// and in the confirmation *text*, not in whether the command ran and not in
+/// how this client reads the wire.
+///
+/// The consequence for a caller: do not gate success on the reply string
+/// alone for a command whose real effect can be confirmed another way (server
+/// state via a follow-up query, or client-observed state for something like a
+/// teleport). Treat an empty reply as inconclusive and fall through to that
+/// confirmation, the way `crates/lodestone-shell/tests/live/
+/// live_edge_back_off_rubber_band.rs`'s `rcon_teleport_and_confirm` does --
+/// and do not retry the command itself to paper over an empty reply, since
+/// nothing here has shown the command needs re-running.
 #[derive(Debug)]
 pub struct RconClient {
     stream: TcpStream,
