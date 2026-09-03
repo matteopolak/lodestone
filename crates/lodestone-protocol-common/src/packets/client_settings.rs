@@ -37,6 +37,14 @@
 //! project's dead-code-removal backlog rather than treating its continued
 //! presence here as an oversight of this move.
 
+//!
+//! The upper bound moved 758 -> 762 when the 1.19 era landed. `minecraft-data`
+//! reports each widened packet's shape identical from 758 to 762 (named types
+//! inlined, primitive aliases kept), and each additionally decodes or encodes
+//! out of the committed real-join capture at
+//! `crates/versions/1.19/tests/captures/join_1_19_4.txt` -- a widening without
+//! one is the inheritance-by-range hazard the dedup plan names.
+
 use lodestone_macros::{Decode, Encode, Packet};
 
 /// Serverbound `custom_payload` carrying the client brand.
@@ -112,7 +120,7 @@ pub struct Settings {
     name = "minecraft:resource_pack_receive",
     state = Play,
     bound = Server,
-    protocols = "110..=758"
+    protocols = "110..=762"
 )]
 pub struct ResourcePackReceive {
     /// Echo of the pushed pack's hash. Protocol 110 only; empty and unsent

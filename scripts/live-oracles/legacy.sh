@@ -16,6 +16,8 @@
 #   1.16.5    v1-14   25573      25574      lodestone-mc1165
 #   1.17.1    v1-17   25592      25593      lodestone-mc1171
 #   1.18.2    v1-17   25594      25595      lodestone-mc1182
+#   1.19.4    v1-19   25596      25597      lodestone-mc1194
+#   1.20.6    --      25598      25599      lodestone-mc1206
 #
 # (1.8.9/1.12.2/1.16.5 container names and ports read directly off
 # crates/versions/<fam>/tests/live_*.rs's own doc comments and #[ignore]
@@ -40,9 +42,17 @@
 # already listed here, and are named by
 # crates/versions/1.17/tests/capture_join.rs.
 #
+# The 1.19.4 row arrived with crates/versions/1.19, a single-version era; its
+# ports are the next two free above every port already listed, and are named
+# by crates/versions/1.19/tests/capture_join.rs. The 1.20.6 row belongs to no
+# family: it is there so that era's *upper* neighbour capture can be recorded,
+# which is the only negative control available to a singleton era -- there is
+# no sibling protocol inside the crate to misroute against, so the control has
+# to come from real bytes of a version the crate does not serve.
+#
 # Usage: ./legacy.sh <version>
 #        (1.8.9 | 1.9.4 | 1.10.2 | 1.11.2 | 1.12.2 | 1.13.2 | 1.14.4 | 1.15.2 |
-#         1.16.5 | 1.17.1 | 1.18.2)
+#         1.16.5 | 1.17.1 | 1.18.2 | 1.19.4 | 1.20.6)
 #
 # Runtime: Apple `container`, not Docker -- see docs/oracles-and-benchmarks.md
 # ("Oracle runtimes: Apple container"). That content used to live in
@@ -64,7 +74,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 <version>" >&2
-  echo "  supported versions: 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.13.2 (v1-13); 1.14.4, 1.15.2, 1.16.5 (v1-14); 1.17.1, 1.18.2 (v1-17)" >&2
+  echo "  supported versions: 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.13.2 (v1-13); 1.14.4, 1.15.2, 1.16.5 (v1-14); 1.17.1, 1.18.2 (v1-17); 1.19.4 (v1-19); 1.20.6 (no family -- neighbour captures only)" >&2
   exit 1
 }
 
@@ -177,6 +187,23 @@ case "$VERSION" in
     RCON_PORT=25595
     EXTRA_PROPS=(level-type=FLAT)
     ;;
+  1.19.4)
+    NAME=lodestone-mc1194
+    GAME_PORT=25596
+    RCON_PORT=25597
+    # A flat world for the same reason every row above uses one, plus
+    # enforce-secure-profile=false: from 1.19 a server may require every chat
+    # message to carry a real signature, and this client has no session key
+    # (online-mode login is not implemented for that era). With enforcement on,
+    # the server rejects the join outright rather than the message.
+    EXTRA_PROPS=(level-type=FLAT enforce-secure-profile=false)
+    ;;
+  1.20.6)
+    NAME=lodestone-mc1206
+    GAME_PORT=25598
+    RCON_PORT=25599
+    EXTRA_PROPS=(level-type=FLAT enforce-secure-profile=false)
+    ;;
   *)
     echo "unsupported version: $VERSION" >&2
     usage
@@ -232,7 +259,10 @@ container rm -f "$NAME" >/dev/null 2>&1 || true
 # start under 8, so they get the 17 image -- which covers both.
 JDK_IMAGE=eclipse-temurin:8-jdk
 case "$VERSION" in
-  1.17.1 | 1.18.2) JDK_IMAGE=eclipse-temurin:17-jdk ;;
+  1.17.1 | 1.18.2 | 1.19.4) JDK_IMAGE=eclipse-temurin:17-jdk ;;
+  # 1.20.6 declares java_version 21 in its own jar and refuses to start under
+  # 17, the same way the 1.17 pair refuse to start under 8.
+  1.20.6) JDK_IMAGE=eclipse-temurin:21-jdk ;;
 esac
 
 container run -d --rm --name "$NAME" \
