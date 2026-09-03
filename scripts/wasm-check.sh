@@ -432,7 +432,7 @@ CONFINEMENT_RULES=(
   # production one, so allowlisting those two files to add a `sleep` rule would buy
   # one hazard and blind two files to it. If you add `thread::sleep` to production
   # code here, nothing will stop you: gate it yourself.
-  "lodestone-shell thread-spawn-confinement|crates/lodestone-shell/src|thread::spawn|mesher.rs,accounts.rs,status.rs"
+  "lodestone-shell thread-spawn-confinement|crates/lodestone-shell/src|thread::spawn|mesher.rs,accounts.rs,status.rs,runners.rs"
   # --- the clock, in every other crate the browser reaches ---
   #
   # **These exist because `lodestone-shell`'s three rules were not enough, and the way
