@@ -327,11 +327,15 @@ mod chat_click_dispatch {
         assert!(crate::overlay::spans_text(&recent[0].0).contains("/etc/passwd"));
     }
 
-    /// `change_page` and an unrecognised action are both inert — the
-    /// negative control proving the match's fallback arm does not
-    /// accidentally fall through to one of the real effects above.
+    /// With **no book open**, `change_page` and an unrecognised action are
+    /// both inert — the negative control proving the match's fallback arm
+    /// does not accidentally fall through to one of the real effects above.
+    ///
+    /// `change_page` is not inert in general (see
+    /// [`change_page_turns_the_open_books_page`] below); a book is its only
+    /// consumer, and a server may still put one on an ordinary chat line.
     #[test]
-    fn change_page_and_unknown_actions_do_nothing_observable() {
+    fn change_page_with_no_book_open_and_unknown_actions_do_nothing_observable() {
         let (mut app, actions) = headless_app_with_loopback();
         let _ = crate::menu::accounts::test_browser_opens::taken();
         let _ = crate::menu::accounts::test_clipboard::taken();
@@ -347,6 +351,59 @@ mod chat_click_dispatch {
         assert!(crate::menu::accounts::test_clipboard::taken().is_empty());
         assert_eq!(app.sim.recent_chat_spans(10).len(), before_chat);
         assert_eq!(app.chat_input.as_str(), before_input);
+    }
+
+    /// `change_page` turns the open reading screen's page — the production
+    /// dispatch, through the same `dispatch_click_action` a page-run click
+    /// and a chat click both go through.
+    ///
+    /// The argument is 1-based (a page number, not an index), so `"3"` on a
+    /// three-page book is the last page and the indicator reads `3 of 3`.
+    /// Predicted from the payload rather than read back: the discriminating
+    /// wrong answers are page 4 (off-by-one the other way) and page 1 (an
+    /// argument that never arrived).
+    #[test]
+    fn change_page_turns_the_open_books_page() {
+        use crate::menu::book_view::BookViewOpen;
+        use lodestone_model::ResolvedText;
+
+        let (mut app, _actions) = headless_app_with_loopback();
+        app.ui.enter_dev_world();
+        app.nav.open_book_view(
+            &mut app.ui,
+            BookViewOpen {
+                title: "Contents".to_owned(),
+                author: "Steve".to_owned(),
+                generation: 0,
+                pages: vec![
+                    ResolvedText::literal("one"),
+                    ResolvedText::literal("two"),
+                    ResolvedText::literal("three"),
+                ],
+            },
+        );
+        assert_eq!(
+            app.nav.book_view().map(crate::menu::book_view::BookViewState::page_indicator),
+            Some((1, 3)),
+            "control: the reader opens on the first page"
+        );
+
+        app.dispatch_click_action(&ClickEvent {
+            action: ClickAction::ChangePage,
+            value: "3".to_string(),
+        });
+
+        assert_eq!(
+            app.nav.book_view().map(crate::menu::book_view::BookViewState::page_indicator),
+            Some((3, 3))
+        );
+        assert_eq!(
+            app.nav
+                .book_view()
+                .map(crate::menu::book_view::BookViewState::visible_lines),
+            Some(vec!["three".to_owned()]),
+            "the page the indicator names must be the page the screen shows"
+        );
     }
 }
 

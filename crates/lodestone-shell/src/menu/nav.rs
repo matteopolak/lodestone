@@ -4297,6 +4297,33 @@ impl MenuNav {
         }
     }
 
+    /// What a `change_page` click event on a book page does — the click-event
+    /// twin of [`Self::activate_book_view_row`]'s two page rows, and the same
+    /// lectern fork: a hand-held book turns its page locally, while a lectern
+    /// reader's page belongs to the server and so reports a button click.
+    ///
+    /// The page number is 1-based; see
+    /// [`book_view::BookViewState::force_page`].
+    pub fn book_view_change_page(&mut self, page: i32) -> MenuAction {
+        let Some(state) = self.book_view.as_mut() else {
+            return MenuAction::None;
+        };
+        if !state.force_page(page) {
+            return MenuAction::None;
+        }
+        state.lectern_page_action().map_or(MenuAction::None, |(window_id, button_id)| {
+            MenuAction::ContainerButtonClick { window_id, button_id }
+        })
+    }
+
+    /// Mutable access to the reading screen's state, for the app's own
+    /// pointer plumbing — the cursor the page hit-test needs is recorded on
+    /// the state, not on this type (see
+    /// [`book_view::BookViewState::set_page_cursor`]).
+    pub fn book_view_mut(&mut self) -> Option<&mut book_view::BookViewState> {
+        self.book_view.as_mut()
+    }
+
     /// What clicking a row on the signed-book reading screen does. Shared by
     /// [`Self::click`]'s `BookView` arm.
     ///

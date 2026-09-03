@@ -25,10 +25,11 @@ copy generation zero, and its content marked resolved. Escape always discards un
 either the draft or the signing layout, matching vanilla — neither of vanilla's own two screens saves on
 close, only on an explicit affirmative action.
 
-Deliberately out of scope, named rather than silently missing: per-pixel mouse caret placement inside a
-page (a click in the page area is a no-op; keyboard focus already has nowhere else to go since neither
-layout has a second focusable field), and opening this same screen for an *already-signed* book — that
-is a distinct, read-only screen (below), not a mode of the editor.
+Deliberately out of scope for the *editor*, named rather than silently missing: per-pixel mouse caret
+placement inside a page (a click in its page area is a no-op; keyboard focus already has nowhere else to
+go since neither layout has a second focusable field), and opening this same screen for an
+*already-signed* book — that is a distinct, read-only screen (below), not a mode of the editor. The
+reader's page text *is* clickable, since its runs are components rather than an editable buffer.
 
 ### Reading a signed book
 
@@ -46,8 +47,26 @@ through one shared frame-builder function precisely because the two are mutually
 stack is either writable or already-written, never both) and because that keeps hit-testing and drawing
 constructed from the same source — a hand-rolled second overlay case is the natural place a future third
 book screen would forget to draw at all despite hit-testing correctly. Page content stays as real styled
-text all the way to the renderer (colors are preserved through word-wrap), though click/hover text
-events on a page are inert — the interaction dispatcher for them doesn't exist yet.
+text all the way to the renderer (colors are preserved through word-wrap), including each run's click,
+hover and insertion.
+
+Page text is interactive. A page is a full chat component, so a run on it can carry a click or a hover
+exactly as a chat line can — `change_page` in particular exists almost solely for books, and books are
+its only consumer. One function on the reader's state says where each authored run draws; the frame
+builder emits its labels from it and the hit-test tests against it, so a click cannot land on a run the
+player sees somewhere else. The rects are the same slot type every menu widget uses, so "where is this
+on *this* canvas" also has one definition. A `run_command` from a page closes the book first (the
+command may open a screen of its own); every other action leaves it open, so a page of links stays
+readable across several clicks. The pointer is recorded on the reader's state rather than passed to the
+frame builder, because the frame builder takes only state and a hovered run's tooltip has to be
+resolvable from that alone — and the tooltip is resolved at that point, not at draw time, since it needs
+the language table: a page is already resolved but a hover payload inside it is not (the resolve step
+carries interactivity through untouched by design).
+
+A hovered run's tooltip paints through the menu overlay's own tooltip painter, which draws `§`-coded
+strings — so a payload's sixteen legacy colours survive and a hex colour does not, and an item or entity
+payload (which has no component to flatten) shows nothing here. The chat HUD's tooltip is the surface
+that carries real spans and composes item and entity payloads.
 
 All three book layouts (reader, editor, signing form) draw from the same real vanilla book texture — a
 loose, non-atlas 256×256 sheet cropped to its top-left 192×192 window, registered as an extra on the
@@ -69,8 +88,8 @@ be free to disagree with the first about exactly where a line breaks.
 
 Each of these is a real, known gap rather than a silent omission:
 
-- **Page click/hover interactivity.** Pages retain their real click/hover text metadata through
-  rendering, but nothing dispatches it yet.
+- **A hex-coloured page hover tooltip, and item/entity hover payloads on a page.** See "Reading a
+  signed book" above for why: this overlay's tooltip painter is a plain-string surface.
 - **Page Up / Page Down as real key bindings.** Arrow keys stand in for the dedicated pair vanilla
   binds.
 - **Taking a book out of a lectern.** Page navigation and closing are implemented; the take-book

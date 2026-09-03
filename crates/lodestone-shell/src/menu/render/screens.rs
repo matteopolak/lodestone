@@ -698,37 +698,34 @@ pub fn book_edit_frame(state: &book_edit::BookEditState) -> MenuFrame<'static> {
 /// Sign button, no caret, and `>` is disabled on the last page rather than
 /// appending one, because a signed book is immutable.
 ///
-/// Row indices match [`book_view::page_row`]. The page text is emitted as
-/// authored styled runs, informational only and outside `rows`' click system,
-/// exactly as [`book_edit_frame`]'s is.
+/// Row indices match [`book_view::page_row`]. The page text is emitted from
+/// [`book_view::BookViewState::page_runs`] — the same function
+/// [`book_view::BookViewState::run_under_cursor`] hit-tests against, so a
+/// click on a page run lands where the run was drawn. It stays outside
+/// `rows`' click system: a run is not a widget, and its geometry is the text
+/// layout's rather than a [`Slot`] stack's.
 pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
-    const PAGE_DX: f32 = -60.0;
-    const PAGE_Y: f32 = 32.0;
-    const PAGE_LINE_H: f32 = 9.0;
     const BOOK_TEXT: [f32; 4] = [0.0, 0.0, 0.0, 1.0];
 
     let (current, total) = state.page_indicator();
 
-    let mut labels = Vec::new();
-    for (i, line) in state.visible_styled_lines().into_iter().enumerate() {
-        let mut dx = PAGE_DX;
-        for span in line {
-            let width = span.text.chars().count() as f32 * 6.0;
-            labels.push(MenuLabel {
-                text: span.text,
-                origin: Origin::ScreenTop,
-                dx,
-                dy: PAGE_Y + i as f32 * PAGE_LINE_H,
-                align: Align::Left,
-                colour: span
-                    .style
-                    .color
-                    .map_or(BOOK_TEXT, |colour| rgb_text_colour(colour.rgb())),
-                scale: 1.0,
-            });
-            dx += width;
-        }
-    }
+    let mut labels: Vec<MenuLabel> = state
+        .page_runs()
+        .into_iter()
+        .map(|run| MenuLabel {
+            text: run.span.text,
+            origin: run.slot.origin,
+            dx: run.slot.dx,
+            dy: run.slot.dy,
+            align: Align::Left,
+            colour: run
+                .span
+                .style
+                .color
+                .map_or(BOOK_TEXT, |colour| rgb_text_colour(colour.rgb())),
+            scale: 1.0,
+        })
+        .collect();
     labels.push(MenuLabel {
         text: format!("Page {current} of {total}"),
         origin: Origin::ScreenTop,
@@ -790,6 +787,11 @@ pub fn book_view_frame(state: &book_view::BookViewState) -> MenuFrame<'static> {
         vanilla: true,
         book_background: true,
         labels,
+        // Both halves of page hover: the cursor so the tooltip painter has an
+        // anchor, and the lines the hovered run asks for. Without the cursor
+        // the tooltip resolves and then draws nowhere.
+        cursor: state.page_cursor(),
+        tooltip: state.hover_tooltip(),
         ..Default::default()
     }
 }

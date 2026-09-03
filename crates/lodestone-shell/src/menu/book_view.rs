@@ -38,10 +38,29 @@
 //!   Consequently the page text is drawn in the menu's ordinary light
 //!   colour rather than `BookViewScreen`'s `PAGE_TEXT_STYLE` black, which is
 //!   only legible against that sprite.
-//! - **No click/hover events on page text.** Vanilla's pages are full chat
-//!   components and a `ClickEvent` can run a command or open a link. The
-//!   screen retains each [`lodestone_model::Text`] page and its styled runs,
-//!   but remains inert because this menu overlay has no text hit-testing.
+//! ## Page text is interactive, and where that lives
+//!
+//! A page is a full chat component, so a run on it can carry a click or a
+//! hover exactly as a chat line can — `change_page` in particular exists
+//! almost solely for books. [`BookViewState::page_runs`] is the one place
+//! that says where each authored run draws: [`super::render::
+//! book_view_frame`] builds its labels from it and
+//! [`BookViewState::run_under_cursor`] hit-tests against it, so a click
+//! cannot land on a run the player sees somewhere else. The rects are
+//! [`Slot`]s rather than bare numbers for the same reason — [`Slot::resolve`]
+//! is then the single definition of where a slot is on a given canvas.
+//!
+//! The cursor reaches the state rather than the frame builder
+//! ([`BookViewState::set_page_cursor`], the shape
+//! [`super::nav::MenuNav::set_menu_cursor`] already uses for the row cursor),
+//! because `book_view_frame` takes only state and the hover tooltip has to be
+//! resolvable from it alone.
+//!
+//! Still absent, and named rather than hidden: the tooltip a hovered run
+//! paints goes through the menu overlay's own tooltip painter, which draws
+//! `§`-coded strings — so a hover payload's sixteen legacy colours survive
+//! and a hex colour does not. The chat HUD's tooltip carries real spans; this
+//! one is a plain-string surface.
 //!
 //! ## Dependencies
 //!
@@ -50,10 +69,28 @@
 //! form reports `ContainerButtonClick` and `ContainerClose` through the menu
 //! action boundary.
 
-use lodestone_model::{ResolvedText, Text, text::TextSpan};
+use lodestone_model::{ResolvedText, Text, text::InteractiveTextSpan, text::TextSpan};
 
 use super::book_edit::{PAGE_LINE_LIMIT, PAGE_WRAP_CHARS};
+use super::render::{Origin, Slot};
 use super::text_area::TextArea;
+
+/// The page text block's left edge, as an offset from [`Origin::ScreenTop`] —
+/// the same anchor and offset [`super::book_edit`]'s non-signing layout uses,
+/// so a draft and the signed book it becomes put their text in the same place.
+pub const PAGE_DX: f32 = -60.0;
+/// The first wrapped line's top edge.
+pub const PAGE_TOP_Y: f32 = 32.0;
+/// The pitch between wrapped lines, and each line's own clickable height —
+/// one font line.
+pub const PAGE_LINE_H: f32 = 9.0;
+/// Per-glyph horizontal advance for page text.
+///
+/// A fixed advance rather than a measured one, matching what the menu overlay
+/// actually draws with: authored page text carries no legacy `§` pairs (the
+/// component model expands those before a span is produced), so the fixed and
+/// the `§`-aware measurement agree run for run.
+pub const PAGE_GLYPH_W: f32 = 6.0;
 
 /// Row indices for [`super::render::book_view_frame`]'s `rows`, in the order
 /// that function builds them. Mirrors [`super::book_edit::page_row`]'s own
@@ -142,6 +179,34 @@ pub struct BookViewState {
     /// same "no keyboard row cursor" shape
     /// [`super::book_edit::BookEditState::hovered`] documents.
     pub hovered: Option<usize>,
+    /// The pointer's last known logical position and the canvas it was
+    /// measured against — `(x, y, canvas_width, canvas_height)`, the same
+    /// tuple [`super::nav::MenuNav::set_menu_cursor`] records for rows.
+    ///
+    /// Held on the state rather than passed to the frame builder because
+    /// [`super::render::book_view_frame`] takes only state, and a hovered
+    /// run's tooltip has to be resolvable from that alone. The canvas rides
+    /// along because a rect is only meaningful against one.
+    page_cursor: Option<(f32, f32, f32, f32)>,
+    /// The tooltip the hovered run asks for, resolved by
+    /// [`Self::set_page_cursor`] — see that method for why it is stored
+    /// rather than derived at draw time.
+    page_tooltip: Option<Vec<String>>,
+}
+
+/// One authored run on the current page: the run itself, and the rect it
+/// draws at.
+///
+/// The draw and the hit-test both come from [`BookViewState::page_runs`], so
+/// the geometry has exactly one definition — see this module's own doc.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PageRun {
+    /// The run's text, fully-inherited style, and whichever click, hover or
+    /// insertion the page's component tree put on it.
+    pub span: InteractiveTextSpan,
+    /// Where it draws, resolvable against any canvas through
+    /// [`Slot::resolve`].
+    pub slot: Slot,
 }
 
 impl BookViewState {
@@ -170,6 +235,8 @@ impl BookViewState {
             page,
             lectern_window_id: None,
             hovered: None,
+            page_cursor: None,
+            page_tooltip: None,
         }
     }
 
@@ -233,6 +300,29 @@ impl BookViewState {
         }
     }
 
+    /// Turns to the page a `change_page` click event names, clamped to the
+    /// book's real range. Returns whether the page actually changed.
+    ///
+    /// **The argument is 1-based**, matching the wire (its codec accepts only
+    /// a positive integer) and the `book.pageIndicator` line a player reads
+    /// off the screen, while [`Self::current_page`] is an index. A book with
+    /// three pages therefore honours `1`..=`3`; anything outside clamps
+    /// rather than being refused, the same as the reading screen's own
+    /// set-page path.
+    ///
+    /// [`Self::current_page`]: Self::page_indicator
+    pub fn force_page(&mut self, one_based: i32) -> bool {
+        let index = usize::try_from(one_based.saturating_sub(1))
+            .unwrap_or(0)
+            .min(self.pages.len() - 1);
+        if index == self.current_page {
+            return false;
+        }
+        self.current_page = index;
+        self.reload_page();
+        true
+    }
+
     /// `pageForward()`.
     pub fn page_forward(&mut self) {
         if self.can_page_forward() {
@@ -264,24 +354,161 @@ impl BookViewState {
     /// [`TextSpan`] style. The `TextArea` owns wrapping; this method only
     /// intersects its character ranges with the model's already-resolved
     /// spans, so presentation cannot silently change line breaks.
+    ///
+    /// A projection of [`Self::visible_interactive_lines`] rather than its own
+    /// intersection pass: two intersections would be free to disagree about
+    /// where a run starts, and a run's *style* boundary and its *click*
+    /// boundary have to be the same boundary.
     #[must_use]
     pub fn visible_styled_lines(&self) -> Vec<Vec<TextSpan>> {
+        self.visible_interactive_lines()
+            .into_iter()
+            .map(|line| {
+                line.into_iter()
+                    .map(|span| TextSpan { text: span.text, style: span.style })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// [`Self::visible_styled_lines`]'s interactive form: the same wrapped
+    /// lines, each run still carrying whichever click, hover or insertion the
+    /// page's component tree put on it.
+    #[must_use]
+    pub fn visible_interactive_lines(&self) -> Vec<Vec<InteractiveTextSpan>> {
         let value = self.page.value();
-        let spans = self.pages[self.current_page].to_spans();
+        let spans = self.pages[self.current_page].to_interactive_spans();
         self.page
             .lines()
             .iter()
             .take(PAGE_LINE_LIMIT)
-            .map(|line| styled_range(&spans, line.begin, line.begin + line.len()))
+            .map(|line| interactive_range(&spans, line.begin, line.begin + line.len()))
             .filter(|line| !line.is_empty() || !value.is_empty())
             .collect()
+    }
+
+    /// Every authored run on the current page with the rect it draws at — the
+    /// one definition of the page's text geometry, read by both the draw and
+    /// [`Self::run_under_cursor`].
+    #[must_use]
+    pub fn page_runs(&self) -> Vec<PageRun> {
+        let mut runs = Vec::new();
+        for (row, line) in self.visible_interactive_lines().into_iter().enumerate() {
+            let mut dx = PAGE_DX;
+            for span in line {
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "a page line is at most PAGE_WRAP_CHARS glyphs, exactly representable"
+                )]
+                let w = span.text.chars().count() as f32 * PAGE_GLYPH_W;
+                runs.push(PageRun {
+                    span,
+                    slot: Slot {
+                        origin: Origin::ScreenTop,
+                        dx,
+                        dy: PAGE_TOP_Y + row as f32 * PAGE_LINE_H,
+                        w,
+                        h: PAGE_LINE_H,
+                    },
+                });
+                dx += w;
+            }
+        }
+        runs
+    }
+
+    /// Records the pointer, in logical canvas pixels, along with the canvas it
+    /// was measured against, and resolves the tooltip whichever run now sits
+    /// under it asks for.
+    ///
+    /// **The tooltip is resolved here, not read at draw time**, because it
+    /// needs the language table and
+    /// [`super::render::book_view_frame`] has no access to one. A page is
+    /// already a [`ResolvedText`], but a hover payload inside it is not: the
+    /// resolve step carries interactivity through *untouched* by design, so a
+    /// payload written as a `translate` still holds its key. Resolving on
+    /// cursor motion costs nothing extra — motion is the only thing that can
+    /// change which run is hovered.
+    pub fn set_page_cursor(
+        &mut self,
+        x: f32,
+        y: f32,
+        canvas_width: f32,
+        canvas_height: f32,
+        translate: &dyn Fn(&str) -> Option<String>,
+    ) {
+        self.page_cursor = Some((x, y, canvas_width, canvas_height));
+        self.page_tooltip = self.hover_tooltip_under_cursor(translate);
+    }
+
+    /// The pointer's last known logical position, for
+    /// [`super::render::MenuFrame::cursor`].
+    #[must_use]
+    pub fn page_cursor(&self) -> Option<(f32, f32)> {
+        self.page_cursor.map(|(x, y, _, _)| (x, y))
+    }
+
+    /// The authored run the pointer is over, or `None` when it is over no page
+    /// text (or no pointer has been seen yet).
+    ///
+    /// A zero canvas is refused rather than divided by: a rect resolved
+    /// against one would put every run at the same place.
+    #[must_use]
+    pub fn run_under_cursor(&self) -> Option<PageRun> {
+        let (x, y, canvas_w, canvas_h) = self.page_cursor?;
+        if canvas_w <= 0.0 || canvas_h <= 0.0 {
+            return None;
+        }
+        self.page_runs().into_iter().find(|run| {
+            let (rx, ry, rw, rh) = run.slot.resolve(canvas_w, canvas_h);
+            x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+        })
+    }
+
+    /// The click action on the run under the pointer, if that run has one.
+    #[must_use]
+    pub fn click_under_cursor(&self) -> Option<lodestone_model::text::ClickEvent> {
+        self.run_under_cursor()?.span.click
+    }
+
+    /// The tooltip lines the run under the pointer asks for, as resolved by
+    /// the last [`Self::set_page_cursor`] — for
+    /// [`super::render::MenuFrame::tooltip`].
+    #[must_use]
+    pub fn hover_tooltip(&self) -> Option<Vec<String>> {
+        self.page_tooltip.clone()
+    }
+
+    /// [`Self::hover_tooltip`]'s producer: the hovered run's hover payload,
+    /// resolved and flattened.
+    ///
+    /// Flattened to `§`-coded strings because that is what the menu overlay's
+    /// tooltip painter draws — the loss this module's own doc names. Split on
+    /// literal newlines the way the chat tooltip's layout does, so a
+    /// multi-line hover payload is multi-line here too. An item or entity
+    /// payload has no component to flatten and so shows nothing here; the
+    /// chat HUD's own tooltip is the surface that composes those.
+    fn hover_tooltip_under_cursor(
+        &self,
+        translate: &dyn Fn(&str) -> Option<String>,
+    ) -> Option<Vec<String>> {
+        let hover = self.run_under_cursor()?.span.hover?;
+        let text = hover.text_payload()?.resolve(translate).to_legacy_string();
+        Some(text.split('\n').map(str::to_owned).collect())
     }
 }
 
 /// Intersects an authored span sequence with a `[begin, end)` character range
 /// from [`TextArea`]. The text model and `TextArea` both index Unicode scalar
 /// values through `.chars()`, so this deliberately does not use byte offsets.
-fn styled_range(spans: &[TextSpan], begin: usize, end: usize) -> Vec<TextSpan> {
+///
+/// Every field but `text` applies uniformly to the run, so a slice of a run
+/// keeps its style and its interaction untouched.
+fn interactive_range(
+    spans: &[InteractiveTextSpan],
+    begin: usize,
+    end: usize,
+) -> Vec<InteractiveTextSpan> {
     let mut offset = 0;
     let mut out = Vec::new();
     for span in spans {
@@ -290,7 +517,7 @@ fn styled_range(spans: &[TextSpan], begin: usize, end: usize) -> Vec<TextSpan> {
         let start = begin.max(offset);
         let stop = end.min(span_end);
         if start < stop {
-            out.push(TextSpan {
+            out.push(InteractiveTextSpan {
                 text: span
                     .text
                     .chars()
@@ -298,6 +525,9 @@ fn styled_range(spans: &[TextSpan], begin: usize, end: usize) -> Vec<TextSpan> {
                     .take(stop - start)
                     .collect(),
                 style: span.style,
+                click: span.click.clone(),
+                hover: span.hover.clone(),
+                insertion: span.insertion.clone(),
             });
         }
         offset = span_end;
@@ -360,6 +590,158 @@ mod tests {
         assert_eq!(state.visible_lines(), vec!["two".to_owned()]);
         state.page_back();
         assert_eq!(state.visible_lines(), vec!["one".to_owned()]);
+    }
+
+    /// A page whose second word carries a `change_page` click and a
+    /// `show_text` hover — the shape a book of contents actually has.
+    fn linked_page() -> BookViewState {
+        use lodestone_model::text::{ClickAction, ClickEvent, HoverEvent};
+
+        let mut link = Text::literal("there");
+        link.click = Some(ClickEvent {
+            action: ClickAction::ChangePage,
+            value: "3".to_owned(),
+        });
+        link.hover = Some(HoverEvent::ShowText(Box::new(Text::literal("go to page 3"))));
+        let page = Text {
+            extra: vec![Text::literal("go "), link],
+            ..Text::literal("")
+        };
+        BookViewState::new(BookViewOpen {
+            title: "Contents".to_owned(),
+            author: "Steve".to_owned(),
+            generation: 0,
+            pages: vec![
+                page.resolve(&|_| None),
+                ResolvedText::literal("two"),
+                ResolvedText::literal("three"),
+            ],
+        })
+    }
+
+    /// The draw and the hit-test read the same geometry: every label
+    /// `render::book_view_frame` emits for page text sits at the `dx`/`dy` of
+    /// a [`PageRun`], with the same text, in the same order.
+    ///
+    /// This is the property that makes a click land where a run was drawn.
+    /// Asserted against the frame builder rather than against restated
+    /// constants — restating them is exactly how the two would drift.
+    #[test]
+    fn the_frames_page_labels_are_the_page_runs() {
+        let state = linked_page();
+        let frame = crate::menu::render::book_view_frame(&state);
+        let runs = state.page_runs();
+        assert!(!runs.is_empty(), "the fixture page has text");
+        for (run, label) in runs.iter().zip(&frame.labels) {
+            assert_eq!(label.text, run.span.text);
+            assert_eq!(label.origin, run.slot.origin);
+            assert!((label.dx - run.slot.dx).abs() < f32::EPSILON, "{label:?} vs {run:?}");
+            assert!((label.dy - run.slot.dy).abs() < f32::EPSILON, "{label:?} vs {run:?}");
+        }
+    }
+
+    /// A click at the centre of the linked run's own rect finds its click
+    /// event; a click on the plain run beside it, and one a line below the
+    /// text, find nothing.
+    ///
+    /// The two negatives are what make the positive mean something: a
+    /// hit-test that returned the first interactive run regardless of
+    /// position would pass the first assertion alone.
+    #[test]
+    fn a_click_on_a_linked_run_resolves_and_its_neighbours_do_not() {
+        let (canvas_w, canvas_h) = (400.0, 240.0);
+        let mut state = linked_page();
+        let runs = state.page_runs();
+        let linked = runs
+            .iter()
+            .find(|r| r.span.text == "there")
+            .expect("the fixture's second run is the link");
+        let plain = runs
+            .iter()
+            .find(|r| r.span.text == "go ")
+            .expect("the fixture's first run is plain");
+
+        let centre = |run: &PageRun| {
+            let (x, y, w, h) = run.slot.resolve(canvas_w, canvas_h);
+            (x + w / 2.0, y + h / 2.0)
+        };
+
+        let (lx, ly) = centre(linked);
+        state.set_page_cursor(lx, ly, canvas_w, canvas_h, &|_| None);
+        assert_eq!(
+            state.click_under_cursor().map(|c| c.value),
+            Some("3".to_owned())
+        );
+
+        let (px, py) = centre(plain);
+        state.set_page_cursor(px, py, canvas_w, canvas_h, &|_| None);
+        assert_eq!(
+            state.click_under_cursor(),
+            None,
+            "the plain run beside the link must carry no click"
+        );
+
+        state.set_page_cursor(lx, ly + PAGE_LINE_H * 2.0, canvas_w, canvas_h, &|_| None);
+        assert_eq!(
+            state.run_under_cursor(),
+            None,
+            "two lines below a one-line page there is no run at all"
+        );
+    }
+
+    /// The hovered run's `show_text` payload becomes the frame's tooltip, and
+    /// moving off it clears it. Without the clear a tooltip would hang over
+    /// the page for the rest of the session.
+    #[test]
+    fn a_hovered_runs_tooltip_reaches_the_frame_and_clears_on_leaving() {
+        let (canvas_w, canvas_h) = (400.0, 240.0);
+        let mut state = linked_page();
+        let linked = state
+            .page_runs()
+            .into_iter()
+            .find(|r| r.span.text == "there")
+            .expect("the fixture's second run is the link");
+        let (x, y, w, h) = linked.slot.resolve(canvas_w, canvas_h);
+
+        state.set_page_cursor(x + w / 2.0, y + h / 2.0, canvas_w, canvas_h, &|_| None);
+        assert_eq!(
+            crate::menu::render::book_view_frame(&state).tooltip,
+            Some(vec!["go to page 3".to_owned()])
+        );
+
+        state.set_page_cursor(x + w / 2.0, y + h + PAGE_LINE_H * 3.0, canvas_w, canvas_h, &|_| None);
+        assert_eq!(
+            crate::menu::render::book_view_frame(&state).tooltip,
+            None,
+            "moving off the run must clear the tooltip"
+        );
+    }
+
+    /// `change_page`'s argument is 1-based and clamps at both ends — the page
+    /// a player reads off the indicator, not an index.
+    #[test]
+    fn force_page_is_one_based_and_clamps() {
+        let mut state = three_pages();
+        assert!(state.force_page(3));
+        assert_eq!(state.page_indicator(), (3, 3));
+        assert_eq!(state.visible_lines(), vec!["three".to_owned()]);
+
+        assert!(!state.force_page(3), "turning to the current page changes nothing");
+        assert!(
+            !state.force_page(99),
+            "past the end clamps to the last page, which is already current"
+        );
+        assert_eq!(state.page_indicator(), (3, 3));
+
+        assert!(state.force_page(1));
+        assert_eq!(state.page_indicator(), (1, 3));
+        assert!(!state.force_page(0), "a zero page clamps to the first, already current");
+        assert_eq!(state.page_indicator(), (1, 3));
+
+        // From the first page, a past-the-end request really does move.
+        assert!(state.force_page(99));
+        assert_eq!(state.page_indicator(), (3, 3));
+        assert_eq!(state.visible_lines(), vec!["three".to_owned()]);
     }
 
     /// The reader must retain the authored component style instead of
