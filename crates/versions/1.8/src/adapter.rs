@@ -2757,10 +2757,29 @@ impl V47Adapter {
         let table = Self::play_dispatch_table();
         match table.get(packet_id) {
             Some(handler) => handler(self, world, payload),
-            None => unreachable!(
-                "Table::build already rejected any play::clientbound id with neither \
-                 a handler nor an IGNORED entry"
-            ),
+            // `table.get` legitimately returns `None` for two different
+            // reasons, and this arm cannot tell them apart:
+            //
+            // 1. `packet_id` names an `IGNORED` entry -- a real, declared
+            //    packet (e.g. `minecraft:update_time`, sent every tick by any
+            //    real server) that `Table::build` verified has a documented
+            //    reason for no handler. `IGNORED` entries are deliberately
+            //    left out of the dispatch map itself, so this is the *normal*
+            //    path for those ids, not an error.
+            // 2. `packet_id` is absent from this protocol's own `ENTRIES`
+            //    table entirely -- outside 1.8's real wire range -- reaching
+            //    here directly from the raw VarInt `handle_packet` decoded
+            //    off the wire, with nothing upstream validating it against
+            //    `ENTRIES` first.
+            //
+            // `Table::build` guarantees every *listed* id resolves to a
+            // handler or an `IGNORED` reason; it says nothing about an id it
+            // was never told about, so this is deliberately not
+            // `unreachable!()`. Folding both cases into a no-op matches the
+            // pre-dispatch-table if-chain's own behaviour for anything it did
+            // not name, and keeps a malformed or non-vanilla server sending an
+            // out-of-table id from being able to panic this client.
+            None => Ok(Vec::new()),
         }
     }
 

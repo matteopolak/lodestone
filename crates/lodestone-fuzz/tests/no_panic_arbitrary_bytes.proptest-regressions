@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc bb221b927e9774d686c417a526c7dee83d817e8031523eec39d7bd86ca64b254 # shrinks to family = V340, state = Play, use_declared_id = true, id_pick = 4206400410222768096, arbitrary_id = 0, payload = [8, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]
+cc 82726382680a628310007349cc05605518433c8fd9a893fa713c0687e19d4530 # shrinks to family = V47, state = Play, use_declared_id = false, id_pick = 0, arbitrary_id = 72, payload = []
