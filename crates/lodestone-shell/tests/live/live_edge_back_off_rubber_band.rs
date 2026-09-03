@@ -158,12 +158,25 @@ fn join_and_wait_for_placement(sim: &mut Sim) -> String {
 }
 
 /// RCON-teleports the player and drives ticks until the client has adopted a
-/// `TeleportPlayer` that actually lands within `0.5` blocks of the requested
-/// position — the "confirmed" threshold every other live gate's own
-/// respawn-landing detection uses, wide enough that ordinary settle jitter
-/// cannot be mistaken for it. Returns the [`Sim::teleport_count`] observed
-/// once the teleport has landed, so a caller has an exact baseline to diff
-/// later corrections against.
+/// `TeleportPlayer` landing within `0.5` blocks **horizontally** of the
+/// requested position. Returns the [`Sim::teleport_count`] observed once it
+/// has landed, so a caller has an exact baseline to diff later corrections
+/// against.
+///
+/// **Horizontal only, and that is the whole point.** Every caller here aims
+/// at a target above the surface — a platform plus two or five blocks, or
+/// the control's y=250 — so the player begins falling the instant the
+/// teleport is adopted and leaves any vertical window almost immediately.
+/// Requiring `|dy| < 0.5` made this helper unsatisfiable: on its first real
+/// run against the oracle the control asked for `(5050, 250, -5000)`, the
+/// client adopted it, x and z landed exactly, and the assertion still failed
+/// thirty seconds later reporting `y = 56` — the ground. The count had
+/// incremented twice, so the teleport was never in doubt; only the criterion
+/// was wrong.
+///
+/// x and z are stable because nothing moves the player horizontally here, so
+/// they identify the teleport unambiguously. Anything vertical belongs to the
+/// physics under test, not to the confirmation that a teleport arrived.
 fn rcon_teleport_and_confirm(sim: &mut Sim, rcon: &mut RconClient, username: &str, x: f64, y: f64, z: f64, yaw: f32) -> u64 {
     let before = sim.teleport_count;
     let reply = rcon.cmd(&format!("tp {username} {x} {y} {z} {yaw} 0"));
@@ -178,16 +191,25 @@ fn rcon_teleport_and_confirm(sim: &mut Sim, rcon: &mut RconClient, username: &st
         let _ = sim.drain_removals();
         let p = sim.player().position;
         let dx = p.x - x;
-        let dy = p.y - y;
         let dz = p.z - z;
-        if sim.teleport_count > before && (dx * dx + dy * dy + dz * dz).sqrt() < 0.5 {
+        // 1.0, not 0.5, and the extra is not slack. A `tp` given integer
+        // coordinates places the player at the BLOCK CENTRE, so each
+        // horizontal axis lands exactly 0.5 off the number asked for and the
+        // diagonal is hypot(0.5, 0.5) = 0.707. Measured, not assumed: with a
+        // 0.5 threshold the control asked for x=5050, z=-5000 and sat at
+        // x=5050.5, z=-4999.5 for the full thirty seconds. 1.0 admits the
+        // centre offset and nothing else — the next block over is 1.414 away
+        // diagonally and 1.0 away on an axis, so a teleport to the wrong
+        // block still cannot satisfy this.
+        if sim.teleport_count > before && dx.hypot(dz) < 1.0 {
             return sim.teleport_count;
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     panic!(
-        "RCON tp to ({x}, {y}, {z}) never landed within 30s (final pos {:?}, teleport_count \
-         {} -> {})",
+        "RCON tp to ({x}, {y}, {z}) never landed horizontally within 30s (final pos {:?}, \
+         teleport_count {} -> {}). A moved count with the wrong x/z means the client adopted \
+         some other teleport; an unchanged count means it adopted none.",
         sim.player().position,
         before,
         sim.teleport_count
