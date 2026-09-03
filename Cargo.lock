@@ -3100,6 +3100,7 @@ dependencies = [
  "lodestone-v1-17",
  "lodestone-v1-19",
  "lodestone-v1-20-6",
+ "lodestone-v1-21-11",
  "lodestone-v1-7",
  "lodestone-v1-8",
  "lodestone-v1-9",
@@ -3399,6 +3400,24 @@ dependencies = [
 
 [[package]]
 name = "lodestone-v1-20-6"
+version = "0.1.0"
+dependencies = [
+ "lodestone-core",
+ "lodestone-data",
+ "lodestone-macros",
+ "lodestone-model",
+ "lodestone-net",
+ "lodestone-protocol-common",
+ "lodestone-testsupport",
+ "lodestone-world",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lodestone-v1-21-11"
 version = "0.1.0"
 dependencies = [
  "lodestone-core",

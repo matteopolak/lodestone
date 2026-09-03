@@ -1,18 +1,26 @@
 //! Entity packets for this era (protocol 774).
 //!
-//! # One spawn packet, and the velocity moved inside it
+//! # One spawn packet, and the velocity that both moved and changed shape
 //!
 //! Every entity a client learns about — object, mob and player alike — arrives
 //! through [`AddEntity`] carrying a varint type id into this era's unified
 //! registry ([`crate::entity_types`]).
 //!
-//! Its field order is **not** the 1.20.6 era's. There, the three velocity
-//! shorts are the packet's tail, after the angle bytes and the type-specific
-//! data varint; here they sit immediately after the position, before the
-//! angles. The two orders consume the same number of bytes for the same
-//! values, so a stale decoder raises no error at all: it reads the yaw byte as
-//! part of a velocity short and spawns entities facing the wrong way, moving
-//! in a direction nothing sent.
+//! Two independent things happened to its velocity relative to the 1.20.6
+//! era, and each is silent on its own:
+//!
+//! * It **moved**. There the three velocity components are the packet's tail,
+//!   after the angle bytes and the type-specific data varint; here they sit
+//!   immediately after the position, before the angles.
+//! * It **changed shape**, from three fixed `i16`s to the packed
+//!   variable-length form in [`LpVec3`](super::velocity::LpVec3) — one byte
+//!   for a stationary entity, six for a moving one.
+//!
+//! Together they mean a decoder inherited from the era below neither errors
+//! nor lands: for a stationary entity it consumes five bytes belonging to the
+//! fields after the velocity, and reports angles and type-specific data that
+//! were never sent. Both are pinned against a real server's bytes in
+//! `tests/capture_join.rs`.
 //!
 //! # And one packet that no longer exists
 //!
@@ -24,6 +32,7 @@ use lodestone_macros::{Decode, Encode, Packet};
 use uuid::Uuid;
 
 use super::metadata::EntityMetadata;
+use super::velocity::LpVec3;
 
 /// Clientbound `minecraft:set_entity_data` — an incremental metadata update.
 ///
@@ -43,9 +52,13 @@ pub struct EntityMetadataPacket {
 /// Clientbound `minecraft:add_entity` — spawns **any** entity, including
 /// players.
 ///
-/// See the module docs for the velocity-before-angles ordering, which is what
+/// See the module docs for the velocity's ordering and shape, which is what
 /// separates this from the era below.
-#[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
+///
+/// Decode-only: the velocity's packed form has a lossy quantisation whose
+/// encode side nothing in this joining-direction family consumes, and an
+/// unused inverse of a lossy codec is a liability rather than symmetry.
+#[derive(Debug, Clone, PartialEq, Decode, Packet)]
 #[mc(name = "minecraft:add_entity", state = Play, bound = Client, protocols = "774..=774")]
 pub struct AddEntity {
     /// Entity id.
@@ -62,12 +75,8 @@ pub struct AddEntity {
     pub y: f64,
     /// Z coordinate.
     pub z: f64,
-    /// Velocity X in `1/8000` block/tick.
-    pub velocity_x: i16,
-    /// Velocity Y in `1/8000` block/tick.
-    pub velocity_y: i16,
-    /// Velocity Z in `1/8000` block/tick.
-    pub velocity_z: i16,
+    /// Velocity in blocks per tick, in this era's packed form.
+    pub velocity: LpVec3,
     /// Pitch as a signed-byte angle.
     pub pitch: i8,
     /// Yaw as a signed-byte angle.
@@ -189,18 +198,16 @@ pub struct EntityPositionSync {
 }
 
 /// Clientbound `minecraft:set_entity_motion`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
+///
+/// Decode-only, for the same reason [`AddEntity`] is.
+#[derive(Debug, Clone, Copy, PartialEq, Decode, Packet)]
 #[mc(name = "minecraft:set_entity_motion", state = Play, bound = Client, protocols = "774..=774")]
 pub struct SetEntityMotion {
     /// Entity id.
     #[mc(varint)]
     pub entity_id: i32,
-    /// Velocity X in `1/8000` block/tick.
-    pub velocity_x: i16,
-    /// Velocity Y in `1/8000` block/tick.
-    pub velocity_y: i16,
-    /// Velocity Z in `1/8000` block/tick.
-    pub velocity_z: i16,
+    /// Velocity in blocks per tick, in this era's packed form.
+    pub velocity: LpVec3,
 }
 
 /// Clientbound `minecraft:rotate_head` — the head yaw, which tracks

@@ -7,18 +7,28 @@
 //! this one assigns eight, adding `update_hat` (bit 6) and `update_list_order`
 //! (bit 7).
 //!
-//! Fields are written in **bit order**, so those two land at the tail of every
-//! entry. A decoder inherited from the era below stops after the display name
-//! and leaves two bytes per entry unread — which the packet-level
+//! The first six fields appear in bit order. **The last two do not**: the
+//! sort priority is written before the hat flag, even though its bit is the
+//! higher of the two. A decoder inherited from the era below stops after the
+//! display name and leaves two bytes per entry unread — which the packet-level
 //! "consumed exactly" check catches, but only because that check exists.
 //!
-//! The tail is where this decoder is most easily wrong in a way nothing else
+//! That tail is where this decoder is most easily wrong in a way nothing else
 //! notices: a bool and a varint are both one byte for the values a server
-//! actually sends, so swapping them costs no length and raises no error. The
-//! recorded-join gate pins the order by asking for a *distinguishable* pair —
-//! a session whose skin flags turn the hat on, so the bool byte is `1` while
-//! the list-order varint is `0`, and the two orders disagree about which is
-//! which.
+//! actually sends, so swapping them costs no length and raises no error, and
+//! `minecraft-data` lists the two fields in the opposite order from its own
+//! bit assignment. The recorded-join gate settles it from real bytes by asking
+//! for a *distinguishable* pair — a session whose skin flags turn the hat on,
+//! so a vanilla server sends priority `0` and hat `true`, and the two readings
+//! disagree about which byte is which. The wire says `[0x00][0x01]`, so the
+//! varint comes first.
+//!
+//! What that capture does **not** settle is which bit gates which field, since
+//! the recorded updates set both at once. That assignment is `minecraft-data`'s
+//! (`update_hat` at bit 6, `update_list_order` at bit 7) and is the weaker of
+//! the two claims — though also the less dangerous one: for the one-byte values
+//! a server sends, a swapped assignment mislabels a value without
+//! desynchronising anything after it.
 //!
 //! The display-name component is **anonymous NBT**, as everywhere else on this
 //! wire.
@@ -209,7 +219,8 @@ impl Decode for PlayerInfoUpdate {
                 show_hat: None,
                 list_order: None,
             };
-            // Fields appear in action ordinal order, for whichever bits are set.
+            // Fields appear in action ordinal order for whichever bits are
+            // set, with the exception noted at the tail below.
             if has(action::ADD_PLAYER) {
                 let (name, properties) = read_add_player(r)?;
                 entry.name = Some(name);
@@ -230,11 +241,13 @@ impl Decode for PlayerInfoUpdate {
             if has(action::UPDATE_DISPLAY_NAME) && r.bool()? {
                 entry.display_name = Some(Text::from_nbt(&read_network_nbt(r)?));
             }
-            if has(action::UPDATE_HAT) {
-                entry.show_hat = Some(r.bool()?);
-            }
+            // Not in bit order: the sort priority precedes the hat flag. See
+            // the module docs for the recorded bytes that establish it.
             if has(action::UPDATE_LIST_ORDER) {
                 entry.list_order = Some(r.var_i32()?);
+            }
+            if has(action::UPDATE_HAT) {
+                entry.show_hat = Some(r.bool()?);
             }
             entries.push(entry);
         }

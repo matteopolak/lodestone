@@ -14,4 +14,5 @@ pub mod position;
 pub mod settings;
 pub mod slot;
 pub mod status;
+pub mod velocity;
 pub mod window;

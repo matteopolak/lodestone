@@ -22,6 +22,22 @@
 //! their length and discarded; reading them is not optional, because
 //! everything after them depends on the cursor.
 //!
+//! # The section containers are framed without a length prefix
+//!
+//! Each section holds two paletted containers, and the eras at and below
+//! 1.21.4 precede a container's packed long array with a `varint` element
+//! count. From 1.21.5 that count is derived from the bits-per-entry and the
+//! container's fixed entry count, and the longs are written bare — which is
+//! [`PaletteKind`]'s own default, so [`ChunkShape`] selects no framing rather
+//! than selecting this one. The same break removes the trailing zero count a
+//! single-valued (zero-width) container carries below 1.21.5, so this era
+//! needs no special case for that either.
+//!
+//! Choosing the wrong framing does not mis-parse quietly: the shared decoder
+//! validates a declared count against the layout, so a prefixed configuration
+//! meeting fixed-size bytes reports the count it expected against the zero it
+//! read from the first long's leading byte.
+//!
 //! # Where the vertical window comes from
 //!
 //! The column is not a fixed sixteen sections tall: the range is **data**, a
@@ -50,7 +66,7 @@ use lodestone_core::{Nbt, Reader};
 use lodestone_data::block_entity_types::block_entity_type;
 use lodestone_macros::Packet;
 use lodestone_world::{
-    BlockEntity, ChunkColumn, ChunkSection, ColumnLight, LightPatch, LongArrayFraming, PaletteKind,
+    BlockEntity, ChunkColumn, ChunkSection, ColumnLight, LightPatch, PaletteKind,
     PalettedContainer, Result,
 };
 
@@ -195,8 +211,8 @@ impl ChunkShape {
             protocol,
             min_y,
             section_count,
-            block_kind: PaletteKind::block_states().with_framing(LongArrayFraming::Prefixed),
-            biome_kind: PaletteKind::biomes().with_framing(LongArrayFraming::Prefixed),
+            block_kind: PaletteKind::block_states(),
+            biome_kind: PaletteKind::biomes(),
             canonical,
             air_id: canonical.air_state_id(),
             biome_id: 0,
@@ -306,7 +322,7 @@ impl LevelChunk {
         for index in 0..shape.section_count {
             let _block_count = blob.i16()?;
             let blocks = read_translated_blocks(&mut blob, shape, &mut fallback)?;
-            let biome_container = decode_container(shape.biome_kind, &mut blob)?;
+            let biome_container = PalettedContainer::decode(shape.biome_kind, &mut blob)?;
             put_section(&mut column, shape, index, blocks, biome_container);
         }
         blob.ensure_empty()?;
@@ -404,7 +420,7 @@ fn read_translated_blocks(
     shape: &ChunkShape,
     fallback: &mut FallbackTally,
 ) -> Result<PalettedContainer> {
-    let raw = decode_container(shape.block_kind, blob)?;
+    let raw = PalettedContainer::decode(shape.block_kind, blob)?;
     let translated: Vec<u32> = (0..BLOCK_ENTRIES)
         .map(|i| shape.canonical.resolve_or_air(raw.get(i), fallback))
         .collect();
@@ -424,32 +440,6 @@ fn put_section(
     if !section.is_empty(shape.biome_id) {
         column.set_section(index, Some(section));
     }
-}
-
-/// Decodes one [`PalettedContainer`], handling the zero-width (single-valued)
-/// palette.
-///
-/// A zero-width container is `[0x00][varint value][varint 0]`, and
-/// `PalettedContainer::decode` stops after the value because the family it was
-/// written for writes no trailing long count. The width byte is peeked off a
-/// copy of the reader — `Reader` is `Copy` — so the non-zero path hands the
-/// untouched reader straight to the shared decoder. Getting this wrong leaves
-/// one spare byte per single-valued container, up to 48 per column.
-fn decode_container(kind: PaletteKind, r: &mut Reader<'_>) -> Result<PalettedContainer> {
-    let mut peek = *r;
-    if peek.u8()? != 0 {
-        return Ok(PalettedContainer::decode(kind, r)?);
-    }
-    let _bits = r.u8()?;
-    let value = u32::try_from(r.var_i32()?).unwrap_or(0);
-    let longs = r.var_i32()?;
-    if longs != 0 {
-        return Err(lodestone_core::Error::Custom(format!(
-            "single-valued palette declares {longs} packed longs, expected 0"
-        ))
-        .into());
-    }
-    Ok(PalettedContainer::new(kind, value))
 }
 
 /// Reads a `varint`-counted `i64[]` bitset (LSB-first, little-endian word
