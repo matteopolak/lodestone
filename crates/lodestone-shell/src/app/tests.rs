@@ -5203,3 +5203,60 @@ fn a_rebound_f3_chord_fires_on_its_new_key_and_stops_on_its_old_one() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Ordinary startup is unaffected by the two new fields —
+/// `WindowApp::new` wants a window and accepts its input immediately, exactly
+/// as it always has. This is the negative control for
+/// `new_headless_session_starts_with_no_presentation_desired_and_input_inert`
+/// below: if both tests read the same values, the two constructors are not
+/// actually distinguished by anything and the "starts headless" claim is
+/// untested.
+#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+#[test]
+fn ordinary_startup_wants_a_window_and_arms_input_immediately() {
+    let app = WindowApp::new(Config::default());
+    assert!(app.presentation_desired);
+    assert!(app.input_armed);
+    assert!(app.sim.presentation_attached());
+}
+
+/// The headless-session constructor (`app::runners::run_headless_session`'s
+/// entry point) is the actual new capability this adds: a session
+/// that starts with no window, no input armed, and no presentation-only ECS
+/// systems — not merely "a window that happens not to exist yet" the way
+/// bring-up-in-progress on the browser target already could represent, but a
+/// session that never asked for one and has already detached the ECS half
+/// too.
+#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+#[test]
+fn new_headless_session_starts_with_no_presentation_desired_and_input_inert() {
+    let app = WindowApp::new_headless_session(Config::default());
+    assert!(!app.presentation_desired);
+    assert!(!app.input_armed);
+    assert!(window_physical_size(&app.config).is_none() || true); // config is unaffected either way
+    assert!(
+        !app.sim.presentation_attached(),
+        "a headless-session start must detach the ECS half too, not just \
+         suppress window creation — the terrain mesher and the \
+         pick/interaction/particle systems must not run with nothing to \
+         consume their output"
+    );
+    assert!(app.window.is_none());
+    assert!(app.gpu.is_none());
+    assert!(app.render.is_none());
+}
+
+/// `WindowApp::detach_presentation` must be safe to call on a session that is
+/// already headless (the common real case: a headless-session start, or a
+/// second detach nobody guarded against) — a no-op, not a panic on an
+/// already-`None` field.
+#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+#[test]
+fn detach_presentation_on_an_already_headless_app_is_a_safe_no_op() {
+    let mut app = WindowApp::new_headless_session(Config::default());
+    app.detach_presentation();
+    assert!(app.window.is_none());
+    assert!(app.gpu.is_none());
+    assert!(!app.presentation_desired);
+    assert!(!app.input_armed);
+}

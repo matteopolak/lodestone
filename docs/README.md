@@ -401,6 +401,12 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   Also covers the general single-winner-vs-merged-stack rule for how *any* pack-loaded
   resource type (vanilla's own jar included, as the lowest-priority layer) composes
   across a pack stack, and the diagnostic env vars for a pack author's font.
+- [Runtime presentation attach/detach](./runtime-presentation.md) — Lets a running
+  session switch between headless and windowed **while it runs**, instead of only at
+  startup. A session can start headless (no window, no GPU, no presentation-only ECS
+  systems) and later have a window attached to it — or a windowed session can drop
+  its window and GPU state and keep ticking headlessly. Behind the
+  `runtime-presentation` Cargo feature on `lodestone-shell` (on by default).
 - [Screen effects](./screen-effects.md) — `lodestone_render::ScreenEffectRenderer`
   draws the client's full-screen and near-full-screen post-hand-pass overlays:
   underwater tint and scroll, fire, a carved-pumpkin vignette, freezing in powder

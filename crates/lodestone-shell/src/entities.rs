@@ -4354,41 +4354,103 @@ impl Plugin for EntityInterpPlugin {
         // `PlayerCollision` — see its docs for the two decisions that differ.
         app.init_resource::<ItemCollision>();
         app.init_resource::<Profile>();
-        app.add_systems(Update, advance_interp_clocks.in_set(FrameSet::Interpolate));
-        app.add_systems(
-            GameTick,
-            tick_item_physics
-                .in_set(TickSet::Physics)
-                .before(tick_walk_animation),
-        );
-        app.add_systems(
-            GameTick,
-            tick_projectile_physics
-                .in_set(TickSet::Physics)
-                .before(tick_walk_animation),
-        );
-        app.add_systems(GameTick, tick_walk_animation.in_set(TickSet::Animate));
-        app.add_systems(GameTick, tick_pickup_animations.in_set(TickSet::Animate));
-        app.add_systems(GameTick, tick_creeper_fuse.in_set(TickSet::Animate));
-        app.add_systems(GameTick, tick_swim_ramp.in_set(TickSet::Animate));
-        app.add_systems(GameTick, tick_cape_lag.in_set(TickSet::Animate));
-        // See `BodyYawState`'s doc: without this, a remote player's reported
-        // body yaw and head yaw are the same wire number forever, and the
-        // entity turns as one rigid block with no head lead.
-        app.add_systems(GameTick, tick_remote_body_yaw.in_set(TickSet::Animate));
-        app.add_systems(Extract, extract_entity_draws.in_set(ExtractSet::Entities));
-        // **`.after` is load-bearing, not tidiness.** `extract_entity_draws`
-        // clears `ExtractedDraws`; without the ordering, bevy is free to run this
-        // first and have every appended pickup draw erased in the same frame it
-        // was written — a system that runs, is unit-testable, and reaches zero
-        // pixels.
-        app.add_systems(
-            Extract,
-            extract_pickup_draws
-                .in_set(ExtractSet::Entities)
-                .after(extract_entity_draws),
-        );
+        add_presentation_systems(app.world_mut());
     }
+}
+
+/// This plugin's own systems — render-side entity interpolation/animation and
+/// the entity-draw extract — tagged into
+/// [`crate::sim::presentation::PresentationSet`] so
+/// [`crate::sim::Sim::detach_presentation`] can remove every one of them and
+/// [`crate::sim::Sim::attach_presentation`] can add them back.
+///
+/// A free `&mut World` function rather than a second call through
+/// [`EntityInterpPlugin::build`]/`App::add_plugins`: by the time a running
+/// session can call this, `Sim` has already taken the `World` out of its `App`
+/// and dropped the `App` (`sim/build.rs`), so there is no `App` left, and
+/// `add_systems` does not deduplicate — re-running `build` on a schedule that
+/// still held the old copies would double every system here. [`Plugin::build`]
+/// itself calls this same function, so there is exactly one place these nine
+/// registrations are spelled out.
+pub(crate) fn add_presentation_systems(world: &mut World) {
+    let mut schedules = world.resource_mut::<bevy_ecs::schedule::Schedules>();
+    schedules.add_systems(
+        Update,
+        advance_interp_clocks
+            .in_set(FrameSet::Interpolate)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    schedules.add_systems(
+        GameTick,
+        tick_item_physics
+            .in_set(TickSet::Physics)
+            .before(tick_walk_animation)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    schedules.add_systems(
+        GameTick,
+        tick_projectile_physics
+            .in_set(TickSet::Physics)
+            .before(tick_walk_animation)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    schedules.add_systems(
+        GameTick,
+        tick_walk_animation
+            .in_set(TickSet::Animate)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    schedules.add_systems(
+        GameTick,
+        tick_pickup_animations
+            .in_set(TickSet::Animate)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    schedules.add_systems(
+        GameTick,
+        tick_creeper_fuse
+            .in_set(TickSet::Animate)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    schedules.add_systems(
+        GameTick,
+        tick_swim_ramp
+            .in_set(TickSet::Animate)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    schedules.add_systems(
+        GameTick,
+        tick_cape_lag
+            .in_set(TickSet::Animate)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    // See `BodyYawState`'s doc: without this, a remote player's reported
+    // body yaw and head yaw are the same wire number forever, and the
+    // entity turns as one rigid block with no head lead.
+    schedules.add_systems(
+        GameTick,
+        tick_remote_body_yaw
+            .in_set(TickSet::Animate)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    schedules.add_systems(
+        Extract,
+        extract_entity_draws
+            .in_set(ExtractSet::Entities)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    // **`.after` is load-bearing, not tidiness.** `extract_entity_draws`
+    // clears `ExtractedDraws`; without the ordering, bevy is free to run this
+    // first and have every appended pickup draw erased in the same frame it
+    // was written — a system that runs, is unit-testable, and reaches zero
+    // pixels.
+    schedules.add_systems(
+        Extract,
+        extract_pickup_draws
+            .in_set(ExtractSet::Entities)
+            .after(extract_entity_draws)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
 }
 
 /// Reset every render-side entity track, for a session teardown.

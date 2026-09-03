@@ -10,6 +10,7 @@ use std::{
     process::{Command, Stdio},
 };
 
+pub mod comment_voice;
 pub mod islands;
 pub mod protocol_dup;
 pub mod ptr_const;
@@ -985,7 +986,7 @@ pub enum CliCommand {
         candidate_sha: Option<String>,
         tolerance: f64,
     },
-    /// wasm32 compile + confinement-guard tripwire (issue #431).
+    /// wasm32 compile + confinement-guard tripwire.
     WasmCheck,
     Islands {
         only_crate: Option<String>,
@@ -994,6 +995,10 @@ pub enum CliCommand {
     WorldCoverage,
     /// Pointer-identity comparison / const-vs-static guard (`ptr_const`).
     CheckPtrConst,
+    /// Comment-voice / issue-reference guard (`comment_voice`).
+    CheckCommentVoice {
+        allowlist: PathBuf,
+    },
     /// The four `docs/plans/multi-version-protocol-dedup.md` duplication
     /// measurements (file, struct, dispatch-arm, function) plus the
     /// minecraft-data adjacency table (`protocol_dup`).
@@ -1006,7 +1011,7 @@ pub enum CliCommand {
 
 #[must_use]
 pub const fn root_help() -> &'static str {
-    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report 26.2 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n    docs-index       Generate docs/README.md from every doc's own H1 + `## What it is` summary\n    bench-compare    Ratio + verdict between two recorded bench-results/*.jsonl runs (issue #82)\n    wasm-check       wasm32 compile + confinement-guard tripwire (tested port of scripts/wasm-check.sh)\n    islands          syn-based scan for dead functions/methods, zero-read fields, and default-only fields\n    world-coverage   Census of registry subjects (entity/block-entity/particle types) that reach no draw path\n    check-ptr-const  syn-based guard: fail any std::ptr::eq/addr_eq or raw-pointer == that targets a const\n    protocol-dup     Report file/struct/dispatch-arm/function duplication across crates/versions/ plus the minecraft-data adjacency table\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/versions/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory (default crates/lodestone-data/src/generated;\n                              crates/versions/*/src/generated also accepted, for a table\n                              that is genuinely per-family translation data)\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses 26.2's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v1-8), folder (1.8), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47 (legacy tokens; still resolve to their new crates/versions/ folder)\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family package/feature suffix to check, e.g. v1-14\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n\nOptions for docs-index:\n    --check               Compare the generated index against docs/README.md and fail on drift without writing\n  Do not hand-edit docs/README.md: add/edit a doc under docs/ (with an H1 and a `## What\n  it is`/`## What this is` summary paragraph) and re-run this command. `cargo test -p xtask`\n  already fails if the committed file drifts from the generator.\n\nOptions for bench-compare:\n    <path>                 A bench-results/<bench>.jsonl file (gitignored local measurement log)\n    --metric <name>        Metric name to compare, e.g. neighbourhood_factor_vs_single\n    --scene <name>          Scene string to compare (must match exactly, including punctuation)\n    --candidate <sha>       Git-sha prefix of the \"after\" run (default: most recent recorded run)\n    --baseline <sha>        Git-sha prefix of the \"before\" run (default: the run immediately\n                            preceding the candidate on the same machine/profile)\n    --tolerance <pct>       Tolerance band as a percentage (default 25, i.e. +/-25%)\n  Never wired into CI by this command -- a manual/local/scheduled check, per\n  docs/roadmap/benchmarks.md's policy. Exits non-zero when the ratio falls outside the\n  tolerance band (useful for a future opt-in script; this alone does not make anything\n  CI-blocking).\n\nOptions for world-coverage:\n    Enumerates all three registries through lodestone-data, resolves each subject against the real\n    rig corpora and dispatch tables (syn), and buckets it as drawn / stranded / absent. \"Stranded\"\n    is the finding class: code that names the subject but emits no geometry for it. Fails hard\n    rather than skipping when a declared draw-surface path or renderer anchor has moved.\n\nOptions for islands:\n    --crate <name>         Only report the named workspace crate (default: every crate)\n  Resolution is name-based (no type checker), so it has few false positives and real false\n  negatives on common names -- see docs/island-detection.md before trusting a finding. Exits\n  non-zero if cargo metadata fails, if any workspace member yields zero .rs files, or if more\n  than 5% of files fail to parse.\n\nOptions for check-ptr-const:\n  syn-parses crates/, xtask/ and web/, indexes every const/static item name, then fails on\n  any std::ptr::eq/addr_eq call or raw-pointer == comparison whose operand directly names a\n  const: a const has no stable address (inlined per use site), so a pointer-identity\n  comparison against one can silently stop matching under a different codegen backend --\n  see CLAUDE.md's const/static rule. Resolution is name-based, like islands; a comparison\n  that goes through a local variable or a function call is out of scope, not asserted safe.\n  Prints the full census (every comparison found, tagged const/static/unresolved) on every\n  run, pass or fail. Exits non-zero if fewer than 500 .rs files are found (a broken walk)\n  or if more than 5% of scanned files fail to parse.\n\nOptions for protocol-dup:\n  No flags. Re-derives docs/plans/multi-version-protocol-dedup.md's \"Duplication, four ways\"\n  tables from the working tree: whole-file line similarity (src/ + tests/, adjacent family\n  pairs), packet struct/enum body identity under src/packets/, handle_play dispatch-arm\n  token similarity (1.8/1.9/1.14 only -- 26.2 is a directory module, not an if-chain),\n  free-function body identity under src/ (excl. generated/, excl. #[cfg(test)]), and the\n  minecraft-data packet-shape adjacency table across the 15 covered target versions. Every\n  number is a fresh measurement, not a citation -- re-run before quoting, and a material\n  disagreement with the plan document is a finding to report, not a mismatch to paper over.\n"
+    "xtask\n\nUsage:\n    cargo run -p xtask -- <command> [options]\n\nCommands:\n    gen-packet-ids   Generate Rust packet ID tables from a Mojang report or minecraft-data\n    fetch-assets     Download and verify vanilla client.jar, the asset index, and the asset-store objects client.jar stubs, into .cache/mc/<version>/\n    fetch-sounds     Download and verify the vanilla .ogg sound corpus (~80 MB) into .cache/mc/<version>/objects/\n    fetch-version    Download and verify vanilla server.jar into .cache/mc/<version>/\n    version-table    Generate/check the epic-343 16-version protocol/data-version table\n    gen-registries   Generate selected registry id->ResourceKey tables from registries.json\n    check-isolation  Enforce protocol version crate dependency isolation\n    check-connected  Enforce workspace crates are reachable from shipped binary/cdylib roots\n    connectedness    Report 26.2 play packet reachability\n    check-deletable  Simulate deleting a version family's folder and report the fallout\n    codegen-ratio    Report generated-vs-hand-written codec metrics per protocol family\n    new-version      Scaffold a protocol family; registry support is withheld until SHAPE_REVIEW.toml is discharged\n    gen-reports      Not implemented yet\n    conformance      Run packet-id, registry, isolation, deletability, test, and clippy checks for a family\n    docs-index       Generate docs/README.md from every doc's own H1 + `## What it is` summary\n    bench-compare    Ratio + verdict between two recorded bench-results/*.jsonl runs (issue #82)\n    wasm-check       wasm32 compile + confinement-guard tripwire (tested port of scripts/wasm-check.sh)\n    islands          syn-based scan for dead functions/methods, zero-read fields, and default-only fields\n    world-coverage   Census of registry subjects (entity/block-entity/particle types) that reach no draw path\n    check-ptr-const  syn-based guard: fail any std::ptr::eq/addr_eq or raw-pointer == that targets a const\n    check-comment-voice  Fail on issue references and change-voice phrases in .rs/.md/.wgsl comments\n    protocol-dup     Report file/struct/dispatch-arm/function duplication across crates/versions/ plus the minecraft-data adjacency table\n\nOptions for gen-packet-ids:\n    --version <version>   Minecraft version, e.g. 26.2 (Mojang) or 1.8 (minecraft-data dir)\n    --protocol <id>       Protocol version, e.g. 776 or 47\n    --source <source>     Report source: mojang (default) or minecraft-data\n    --out <path>          Output path under crates/versions/*/src/generated/\n    --check               Compare generated output against disk and fail on drift without writing\n\nOptions for gen-registries:\n    --version <version>       Minecraft version, e.g. 26.2\n    --protocol <id>           Protocol version, e.g. 776\n    --out-dir <path>          Output directory (default crates/lodestone-data/src/generated;\n                              crates/versions/*/src/generated also accepted, for a table\n                              that is genuinely per-family translation data)\n    --registries <csv>        Registry keys to generate (default: sound_event,particle_type,menu,item)\n    --check                   Compare generated registry tables against disk without writing\n\nOptions for check-connected:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-connected.toml)\n\nOptions for connectedness:\n    Parses 26.2's generated packet_ids.rs for play denominators, then classifies adapter dispatch outlets (ClientEvent, Directive, world/sink writes) with explicit UNCLASSIFIED output.\n\nOptions for check-deletable:\n    <version>             Version family to simulate deleting: package name (lodestone-v1-8), folder (1.8), or path\n\nOptions for codegen-ratio:\n    Reports both the optimistic per-struct derive/manual ratio and the more decision-useful absolute hand-written source lines.\n\nOptions for new-version:\n    --protocol <id>       Protocol number for the new family (required)\n    --minecraft <ver>    Minecraft version key for the packet-id oracle (required)\n    --from <family>       Existing family to copy from, e.g. v770 (default) or v47 (legacy tokens; still resolve to their new crates/versions/ folder)\n    --source <source>     Oracle: mojang or minecraft-data (default inferred from --from)\n    --name <vNNN>         Family folder/label (default v<protocol>)\n    --force               Overwrite the target folder if it already exists\n    SHAPE_REVIEW.toml     Generated when packet shapes differ; every entry must be reviewed before registry support may be added\n\nOptions for conformance:\n    --family <vNNN>       Version family package/feature suffix to check, e.g. v1-14\n    --minecraft <ver>     Minecraft version key for packet-id/registry checks\n    --protocol <id>       Protocol number for the family\n    --source <source>     Packet-id oracle: mojang or minecraft-data (default mojang)\n    --skip-cargo          Only run xtask structural checks; skip cargo test/clippy\n\nOptions for fetch-version:\n    --version <version>   Minecraft version, e.g. 1.16.5\n    --force               Re-download even when cached server.jar already matches its SHA-1\n\nOptions for fetch-assets:\n    --version <version>   Minecraft version, e.g. 26.2\n    --force               Re-download even when cached files already match their SHA-1\n    -h, --help            Print help\n  Also fetches asset-store objects, ~3.2 MB in total:\n    - the 8 whose name is in client.jar at a DIFFERENT size, i.e. the stubs the jar ships to be\n      overridden (the 6 panorama faces, panorama_overlay, unifont.json). Nothing at runtime can\n      tell a stub from the real asset, which is why these must be eager.\n    - minecraft/sounds.json (626 KB), which ShellAudio reads eagerly and cannot start without.\n  The 4871 .ogg samples (375 MB) are NOT fetched: a missing sample is one silent sound, resolved\n  lazily per event. Run `fetch-sounds` for the corpus.\n\nOptions for fetch-sounds:\n    --version <version>   Minecraft version, e.g. 26.2 (fetch-assets must have run first)\n    --all                 Also fetch background music and jukebox discs (+293 MB, 92 objects)\n    --jobs <n>            Concurrent downloads (default 12)\n    --force               Re-download every object even when it already matches its SHA-1\n  Derives the corpus from sounds.json, not a file list: every sample any non-music event can\n  select. Measured on 26.2 -- 4751 objects, 80.14 MB, including all six biome ambience loops.\n  Excluded by default: 70 music tracks + 22 jukebox records = 92 objects, 293.23 MB. The 28 index\n  .ogg objects no event references are fetched in neither mode. Every object's SHA-1 is verified\n  against the index, and a re-run of a complete fetch downloads nothing.\n\nOptions for version-table:\n    --check               Compare the generated table against crates/lodestone-registry/src/generated/version_table.rs and fail on drift without writing\n    --fetch-missing       Also run fetch-version for any of the 16 target versions with no cached .cache/mc/<version>/server.jar (network + disk heavy; off by default)\n\nOptions for docs-index:\n    --check               Compare the generated index against docs/README.md and fail on drift without writing\n  Do not hand-edit docs/README.md: add/edit a doc under docs/ (with an H1 and a `## What\n  it is`/`## What this is` summary paragraph) and re-run this command. `cargo test -p xtask`\n  already fails if the committed file drifts from the generator.\n\nOptions for bench-compare:\n    <path>                 A bench-results/<bench>.jsonl file (gitignored local measurement log)\n    --metric <name>        Metric name to compare, e.g. neighbourhood_factor_vs_single\n    --scene <name>          Scene string to compare (must match exactly, including punctuation)\n    --candidate <sha>       Git-sha prefix of the \"after\" run (default: most recent recorded run)\n    --baseline <sha>        Git-sha prefix of the \"before\" run (default: the run immediately\n                            preceding the candidate on the same machine/profile)\n    --tolerance <pct>       Tolerance band as a percentage (default 25, i.e. +/-25%)\n  Never wired into CI by this command -- a manual/local/scheduled check, per\n  docs/roadmap/benchmarks.md's policy. Exits non-zero when the ratio falls outside the\n  tolerance band (useful for a future opt-in script; this alone does not make anything\n  CI-blocking).\n\nOptions for world-coverage:\n    Enumerates all three registries through lodestone-data, resolves each subject against the real\n    rig corpora and dispatch tables (syn), and buckets it as drawn / stranded / absent. \"Stranded\"\n    is the finding class: code that names the subject but emits no geometry for it. Fails hard\n    rather than skipping when a declared draw-surface path or renderer anchor has moved.\n\nOptions for islands:\n    --crate <name>         Only report the named workspace crate (default: every crate)\n  Resolution is name-based (no type checker), so it has few false positives and real false\n  negatives on common names -- see docs/island-detection.md before trusting a finding. Exits\n  non-zero if cargo metadata fails, if any workspace member yields zero .rs files, or if more\n  than 5% of files fail to parse.\n\nOptions for check-ptr-const:\n  syn-parses crates/, xtask/ and web/, indexes every const/static item name, then fails on\n  any std::ptr::eq/addr_eq call or raw-pointer == comparison whose operand directly names a\n  const: a const has no stable address (inlined per use site), so a pointer-identity\n  comparison against one can silently stop matching under a different codegen backend --\n  see CLAUDE.md's const/static rule. Resolution is name-based, like islands; a comparison\n  that goes through a local variable or a function call is out of scope, not asserted safe.\n  Prints the full census (every comparison found, tagged const/static/unresolved) on every\n  run, pass or fail. Exits non-zero if fewer than 500 .rs files are found (a broken walk)\n  or if more than 5% of scanned files fail to parse.\n\nOptions for check-comment-voice:\n    --allowlist <path>    TOML file of explicit exceptions (default: xtask/check-comment-voice.toml)\n  Scans every .rs/.md/.wgsl comment/doc-comment (.rs) or prose (.md, fenced code excluded) or\n  comment (.wgsl) for #123-shaped issue references and word-bounded, case-insensitive \"this\n  change\"/\"this commit\"/\"this patch\"/\"before this change\"/\"this PR\" phrases. Excludes\n  #[attributes], hex colour literals, and URL fragments from the issue-reference pattern, and\n  requires a trailing word boundary so \"this PR\" never matches \"this process\"/\"this property\".\n  Prints the full census (every hit found, tagged ALLOWED/VIOLATION) on every run, pass or fail.\n  Exits non-zero if fewer than 1500 .rs/.md/.wgsl files are found (a broken walk) or if any hit\n  is not covered by the allowlist.\n\nOptions for protocol-dup:\n  No flags. Re-derives docs/plans/multi-version-protocol-dedup.md's \"Duplication, four ways\"\n  tables from the working tree: whole-file line similarity (src/ + tests/, adjacent family\n  pairs), packet struct/enum body identity under src/packets/, handle_play dispatch-arm\n  token similarity (1.8/1.9/1.14 only -- 26.2 is a directory module, not an if-chain),\n  free-function body identity under src/ (excl. generated/, excl. #[cfg(test)]), and the\n  minecraft-data packet-shape adjacency table across the 15 covered target versions. Every\n  number is a fresh measurement, not a citation -- re-run before quoting, and a material\n  disagreement with the plan document is a finding to report, not a mismatch to paper over.\n"
 }
 
 pub fn parse_cli_args<I, S>(args: I) -> Result<CliCommand>
@@ -1043,6 +1048,7 @@ where
         "islands" => parse_islands_args(&args[1..]),
         "world-coverage" => Ok(CliCommand::WorldCoverage),
         "check-ptr-const" => Ok(CliCommand::CheckPtrConst),
+        "check-comment-voice" => parse_check_comment_voice_args(&args[1..]),
         "protocol-dup" => Ok(CliCommand::ProtocolDup),
         "gen-reports" => Ok(CliCommand::Planned {
             name: planned_command_name(command).expect("matched planned command has a name"),
@@ -1299,6 +1305,11 @@ pub fn run_cli_command(command: CliCommand) -> Result<()> {
             let workspace_root =
                 std::env::current_dir().context("determine current workspace directory")?;
             ptr_const::run_check_ptr_const(&workspace_root)
+        }
+        CliCommand::CheckCommentVoice { allowlist } => {
+            let workspace_root =
+                std::env::current_dir().context("determine current workspace directory")?;
+            comment_voice::run_check_comment_voice(&workspace_root, &allowlist)
         }
         CliCommand::ProtocolDup => {
             let workspace_root =
@@ -1712,6 +1723,26 @@ fn parse_check_connected_args(args: &[String]) -> Result<CliCommand> {
         index += 1;
     }
     Ok(CliCommand::CheckConnected { allowlist })
+}
+
+fn parse_check_comment_voice_args(args: &[String]) -> Result<CliCommand> {
+    let mut allowlist = PathBuf::from(comment_voice::DEFAULT_ALLOWLIST);
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "-h" | "--help" => return Ok(CliCommand::Help),
+            "--allowlist" => {
+                index += 1;
+                allowlist = PathBuf::from(
+                    args.get(index)
+                        .ok_or_else(|| anyhow!("--allowlist requires a value"))?,
+                );
+            }
+            unknown => bail!("unknown check-comment-voice option {unknown:?}"),
+        }
+        index += 1;
+    }
+    Ok(CliCommand::CheckCommentVoice { allowlist })
 }
 
 fn parse_check_deletable_args(args: &[String]) -> Result<CliCommand> {
@@ -3534,8 +3565,8 @@ pub fn connectedness_report(workspace_root: &Path) -> Result<ConnectednessReport
                     depth_limited: limited,
                 } => {
                     // Same allowlist as `DecodedButStranded` above, reached
-                    // from the opposite direction: `UPDATE_TAGS` (issue #296)
-                    // delegates to a helper returning `Result<(), _>` rather
+                    // from the opposite direction: `UPDATE_TAGS` delegates
+                    // to a helper returning `Result<(), _>` rather
                     // than `Result<Vec<Directive>, _>` (it has no directives
                     // to produce, only a side effect on a global table), so
                     // `classify_body`'s delegate-follow never finds a
@@ -7777,8 +7808,8 @@ pub fn fetch_version(
     })
 }
 
-/// The sixteen versions GitHub epic #343 committed to: the latest patch of
-/// every major Minecraft release from 1.7.10 through the current 26.2.
+/// The sixteen versions this workspace tracks: the latest patch of every
+/// major Minecraft release from 1.7.10 through the current 26.2.
 ///
 /// This is the one place that list is spelled out; [`version_table_report`]
 /// walks it in order, so adding or removing a target version is a one-line
@@ -8410,8 +8441,8 @@ pub fn generate_docs_index(workspace_root: &Path) -> Result<String> {
 
     // `docs/plans/` joins the same group, for the same reason `docs/research/`
     // does. It was NOT scanned until 2026-08-04, and the omission was silent in
-    // the worst way: six plan documents for epics #225/#289/#340/#341/#343 and
-    // the server-ECS migration landed invisible to the index, each one having
+    // the worst way: six plan documents, including the server-ECS migration
+    // plan, landed invisible to the index, each one having
     // been written to satisfy the H1 + `## What it is` contract that only
     // matters *because* the generator reads it. Nothing failed -- the drift test
     // compares the generator against `docs/README.md`, and both agreed the
@@ -8527,14 +8558,13 @@ pub fn check_docs_index(workspace_root: &Path) -> Result<DocsIndexCheck> {
 }
 
 // ---------------------------------------------------------------------------
-// bench-compare: issue #82's ratio-against-a-stored-baseline tool
+// bench-compare: ratio-against-a-stored-baseline tool
 // ---------------------------------------------------------------------------
 //
 // `docs/roadmap/benchmarks.md` already states the policy this tool
 // implements (ratio against a same-machine baseline, ±25% tolerance band,
-// never a CI-blocking gate) -- issue #82's own acceptance criteria calls that
-// policy "already written" and asks for the one piece that was still
-// missing: "a small comparison script/tool ... that reads two
+// never a CI-blocking gate); this command is the one piece that policy left
+// still missing: "a small comparison script/tool ... that reads two
 // bench-results/*.jsonl records and reports a ratio + verdict against a
 // stated tolerance." `benches/support.rs`'s `record()` already does this
 // automatically for "this run vs the immediately preceding run" every time a
@@ -8951,7 +8981,7 @@ fn validate_relative_child_path(path: &Path) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
-// wasm-check — wasm32 compile + confinement-guard tripwire (issue #431).
+// wasm-check — wasm32 compile + confinement-guard tripwire.
 //
 // Tested port of scripts/wasm-check.sh. The script is a shell pipeline with no
 // gate (it relies on manual review of its output); this command runs the same
@@ -9033,7 +9063,7 @@ pub fn wasm_crates() -> Vec<WasmCrate> {
             name: "lodestone-sound",
             extra_args: &[],
         },
-        // Canonical 26.2 game-data censuses (issue #361); depends on nothing
+        // Canonical 26.2 game-data censuses; depends on nothing
         // but lodestone-model, listed separately so a regression is
         // unambiguous rather than only surfacing via v770.
         WasmCrate {
@@ -9215,17 +9245,24 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
         //     std::thread::Builder::new().spawn  Err(Unsupported) — degrades
         //     std::thread::available_parallelism Err              — degrades
         //
-        // Allowlist = the three files that confine it behind
+        // Allowlist = the files that confine it behind
         // cfg(not(target_arch = "wasm32")) with a browser arm beside it. SCOPE
         // LIMIT: this does NOT cover `thread::sleep`, whose remaining sites are
         // inside `#[cfg(test)] mod tests` in files whose production halves must stay
         // covered — a scanner cannot tell a test module from a production one, so
         // allowlisting those files would buy one hazard and blind two files to it.
+        //
+        // `app/runners.rs` joined this list for `run_headless_session`:
+        // its stdin control thread is
+        // `cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))`
+        // — the whole function is native-only, like `run_connect`/`run_headless`
+        // right beside it in the same file, and has no browser arm because
+        // `Mode::HeadlessSession` itself is refused on wasm32 (`app.rs`'s `run`).
         ConfinementRule {
             label: "lodestone-shell thread-spawn-confinement",
             src_dir: "crates/lodestone-shell/src",
             banned: "thread::spawn",
-            allowlist: &["mesher.rs", "accounts.rs", "status.rs"],
+            allowlist: &["mesher.rs", "accounts.rs", "status.rs", "runners.rs"],
         },
         // --- the clock, in every other crate the browser reaches ---
         //
@@ -10112,6 +10149,7 @@ mod tests {
         assert!(help.contains("conformance"));
         assert!(help.contains("wasm-check"));
         assert!(help.contains("check-ptr-const"));
+        assert!(help.contains("check-comment-voice"));
     }
 
     #[test]
@@ -10121,6 +10159,33 @@ mod tests {
             CliCommand::CheckPtrConst
         );
         Ok(())
+    }
+
+    #[test]
+    fn cli_parses_check_comment_voice_command_with_default_allowlist() -> Result<()> {
+        assert_eq!(
+            parse_cli_args(["check-comment-voice"])?,
+            CliCommand::CheckCommentVoice {
+                allowlist: PathBuf::from(comment_voice::DEFAULT_ALLOWLIST)
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cli_parses_check_comment_voice_command_with_explicit_allowlist() -> Result<()> {
+        assert_eq!(
+            parse_cli_args(["check-comment-voice", "--allowlist", "custom.toml"])?,
+            CliCommand::CheckCommentVoice {
+                allowlist: PathBuf::from("custom.toml")
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cli_rejects_unknown_check_comment_voice_option() {
+        assert!(parse_cli_args(["check-comment-voice", "--nope"]).is_err());
     }
 
     #[test]
@@ -11048,9 +11113,9 @@ mod tests {
         assert!(compare_bench_records(&records, &opts).is_err());
     }
 
-    /// Demonstration against this repo's own real recorded data (issue #82's
-    /// acceptance criterion: "used by at least one sibling benchmark as a
-    /// demonstration"). `#[ignore]`d because it depends on the *contents* of
+    /// Demonstration against this repo's own real recorded data, satisfying
+    /// the requirement that this tool be "used by at least one sibling
+    /// benchmark as a demonstration". `#[ignore]`d because it depends on the *contents* of
     /// a gitignored, machine-local file that keeps growing every time anyone
     /// runs the bench -- not hermetic, but valuable to run by hand.
     #[test]

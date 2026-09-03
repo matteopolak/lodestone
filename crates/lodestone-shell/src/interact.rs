@@ -1358,7 +1358,25 @@ impl Plugin for InteractPlugin {
         app.init_resource::<PlacementPredictor>();
         app.init_resource::<NetHandle>();
         app.init_resource::<VersionData>();
-        app.add_systems(
+        add_presentation_systems(app.world_mut());
+    }
+}
+
+/// This plugin's one chained system group, tagged into
+/// [`crate::sim::presentation::PresentationSet`] — see
+/// [`crate::entities::add_presentation_systems`]'s doc for why this is a free
+/// `&mut World` function rather than a second call through `Plugin::build`.
+///
+/// `Sim::client_app`'s own doc names this plugin as part of the
+/// presentation-only set alongside the terrain mesher and the render-side
+/// interpolation/extract plugins — the sprint edge, the hold-to-mine loop and
+/// the placement/consume predictors it registers all exist to drive *this
+/// session's own local player* from live keyboard/mouse input, which a
+/// detached (headless) session has none of.
+pub(crate) fn add_presentation_systems(world: &mut lodestone_ecs::ecs::world::World) {
+    world
+        .resource_mut::<lodestone_ecs::ecs::schedule::Schedules>()
+        .add_systems(
             GameTick,
             // `drive_placement` was defined but registered in **no** schedule
             // until that fix's island sweep found it: its only `add_systems` was a
@@ -1392,7 +1410,7 @@ impl Plugin for InteractPlugin {
             )
                 .chain()
                 .after(lodestone_controller::ecs::send_player_input)
-                .in_set(TickSet::Send),
+                .in_set(TickSet::Send)
+                .in_set(crate::sim::presentation::PresentationSet),
         );
-    }
 }

@@ -1816,6 +1816,15 @@ pub enum Mode {
     /// Connect to the server, stream events for a bounded time, print them, and
     /// exit. Proves the live pipeline end to end without a GPU.
     Connect,
+    /// A real, persistent session — ticks, connects, keeps the
+    /// event loop alive — with **no** presentation attached at start: no
+    /// window, no GPU, no `PresentationSet` systems. Unlike [`Mode::Headless`]
+    /// this is not a one-shot evidence path; it stays running until the
+    /// process is told to attach a window (`app::AppEvent::AttachPresentation`,
+    /// driven by `app::runners::run_headless_session`'s stdin control thread)
+    /// or to quit.
+    #[cfg(feature = "runtime-presentation")]
+    HeadlessSession,
 }
 
 /// The live client workload selected by the opt-in frame benchmark driver.
@@ -1968,6 +1977,8 @@ impl Config {
                 "--help" | "-h" => return CliOutcome::Help(Self::usage()),
                 "--headless" => cfg.mode = Mode::Headless,
                 "--connect" => cfg.mode = Mode::Connect,
+                #[cfg(feature = "runtime-presentation")]
+                "--headless-session" => cfg.mode = Mode::HeadlessSession,
                 "--window" => cfg.mode = Mode::Window,
                 "--live" => cfg.connect_in_window = true,
                 "--host" => {
@@ -2149,7 +2160,8 @@ impl Config {
     /// from the parser above.
     #[must_use]
     pub fn usage() -> String {
-        "\
+        #[cfg_attr(not(feature = "runtime-presentation"), allow(unused_mut))]
+        let mut text = "\
 lodestone — a multi-version Minecraft Java client (game shell)
 
 USAGE:
@@ -2186,7 +2198,18 @@ LIVE FRAME BENCHMARK:
 
     -h, --help               Print this help and exit
 "
-        .to_string()
+        .to_string();
+        // A separate `push_str` rather than folded into the
+        // literal above so the flag's presence in `--help` tracks the same
+        // `cfg` that gates parsing it (`Self::from_args`'s `--headless-session`
+        // arm) and `Mode::HeadlessSession` itself — advertising a flag that
+        // does not exist would be worse than the extra `cfg`.
+        #[cfg(feature = "runtime-presentation")]
+        text.push_str(
+            "\nRUNTIME PRESENTATION:\n    \
+             --headless-session       Persistent session, no window until you type `attach`\n",
+        );
+        text
     }
 }
 

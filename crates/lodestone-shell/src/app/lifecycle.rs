@@ -4,9 +4,19 @@
 
 use super::*;
 
-impl ApplicationHandler for WindowApp {
+impl ApplicationHandler<ShellEvent> for WindowApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
+            return;
+        }
+        // A session started through `run_headless_session` wants
+        // no window at all until an `AppEvent::AttachPresentation` arrives —
+        // see `WindowApp::presentation_desired`'s own doc. Every existing
+        // caller (`WindowApp::new`) seeds this `true`, so this guard is a
+        // no-op for them and `resumed` creates a window exactly as it always
+        // has.
+        #[cfg(feature = "runtime-presentation")]
+        if !self.presentation_desired {
             return;
         }
         let mut attrs = window_attributes(&self.config);
@@ -35,6 +45,21 @@ impl ApplicationHandler for WindowApp {
                 attrs = attrs.with_borderless_game(true);
             }
         }
+        // Native: adapter/device selection blocks, so the whole bring-up finishes
+        // inside this one callback exactly as it always did.
+        //
+        // `create_and_attach_window` (`app::session`) is the shared window +
+        // GPU + `RenderState` bring-up factored out so a runtime
+        // attach (`WindowApp::attach_presentation`) is not a second,
+        // slightly-different copy of this. Startup keeps its own failure
+        // handling (`event_loop.exit()`, unlike a runtime attach, which stays
+        // headless) since a window this app cannot draw into is fatal here in
+        // a way it is not for an already-running headless session.
+        #[cfg(not(target_arch = "wasm32"))]
+        if !self.create_and_attach_window(event_loop, attrs) {
+            event_loop.exit();
+        }
+        #[cfg(target_arch = "wasm32")]
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {
@@ -43,21 +68,6 @@ impl ApplicationHandler for WindowApp {
                 return;
             }
         };
-
-        // Native: adapter/device selection blocks, so the whole bring-up finishes
-        // inside this one callback exactly as it always did.
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            let (gpu, target) = match attach_window(window.clone()) {
-                Ok(pair) => pair,
-                Err(e) => {
-                    eprintln!("failed to attach GPU to window: {e}");
-                    event_loop.exit();
-                    return;
-                }
-            };
-            self.finish_bring_up(window, gpu, target);
-        }
 
         // Browser: `resumed` is a *synchronous* winit callback, and adapter/device
         // selection is genuinely asynchronous — `pollster::block_on` on a browser main
@@ -88,6 +98,43 @@ impl ApplicationHandler for WindowApp {
                     ),
                 }
             });
+        }
+    }
+
+    /// The runtime toggle: everything that lets a caller outside
+    /// this event loop attach or detach presentation on a running session —
+    /// the mechanism a runtime switch needs ("attach things with the bevy
+    /// systems at runtime when switching ... as long as we can also remove
+    /// them"). Delivered through winit's own `user_event` callback, which
+    /// (like every `ApplicationHandler` method) carries a live
+    /// `&ActiveEventLoop`, so a window can be created here exactly as
+    /// `resumed` creates one — see `WindowApp::attach_presentation`.
+    ///
+    /// Native-only in practice: `AppEvent` only exists behind
+    /// `runtime-presentation`, and the one producer today
+    /// (`app::runners::run_headless_session`) is itself
+    /// `cfg(not(target_arch = "wasm32"))` — see that function's own doc for
+    /// why. The browser target still compiles this impl (the trait method is
+    /// generic over `ShellEvent`), it simply never receives one.
+    // Native-only, matching `WindowApp::attach_presentation`/
+    // `detach_presentation` (`app::session`), the two methods every non-`Quit`
+    // arm below reaches: a wasm32 build with the feature on still needs to
+    // compile, and those two are themselves target-gated because a browser's
+    // bring-up is the async `attach_window_async` path, not this synchronous
+    // one. Nothing on wasm32 constructs an `AppEvent` either way — the one
+    // producer, `app::runners::run_headless_session`, is itself native-only.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, event: AppEvent) {
+        match event {
+            AppEvent::AttachPresentation { enable_input } => {
+                self.attach_presentation(event_loop, enable_input);
+            }
+            AppEvent::ArmInput(armed) => {
+                self.input_armed = armed;
+                tracing::info!(target: "presentation", armed, "input arm state changed");
+            }
+            AppEvent::DetachPresentation => self.detach_presentation(),
+            AppEvent::Quit => event_loop.exit(),
         }
     }
 
@@ -136,6 +183,32 @@ impl ApplicationHandler for WindowApp {
             )
         {
             self.sim.resume_audio_on_gesture();
+        }
+        // The resolved open question on input while a window is attached at
+        // runtime: input is inert on an attached
+        // window by default, with explicit opt-in. A window
+        // `AppEvent::AttachPresentation` created on a previously headless
+        // session starts with `input_armed: false` (see that field's own
+        // doc), so a script driving the client does not suddenly start
+        // receiving an operator's keystrokes just because someone attached a
+        // window to watch it — only an explicit `AppEvent::ArmInput(true)`
+        // lets these four kinds reach gameplay. Ordinary startup
+        // (`WindowApp::new`) seeds `input_armed: true`, so this is a no-op
+        // there and play is unaffected. Window management (resize, focus,
+        // close, redraw, modifier tracking) is untouched below — an unarmed
+        // window still behaves like a window, it just cannot act on
+        // keyboard/mouse.
+        #[cfg(feature = "runtime-presentation")]
+        if !self.input_armed
+            && matches!(
+                event,
+                WindowEvent::KeyboardInput { .. }
+                    | WindowEvent::MouseInput { .. }
+                    | WindowEvent::MouseWheel { .. }
+                    | WindowEvent::CursorMoved { .. }
+            )
+        {
+            return;
         }
         match event {
             // Winit reports modifier state as its own event rather than
@@ -852,6 +925,12 @@ impl ApplicationHandler for WindowApp {
         // and feeding an un-locked, edge-bounded `movementX`/`Y` through as look-delta
         // is exactly the "stops registering at the edge of the page" report. A no-op
         // change on native, where the two are the same value.
+        #[cfg(feature = "runtime-presentation")]
+        if !self.input_armed {
+            // Same "inert on attach by default" contract as `window_event`'s
+            // guard — raw look-delta is input too.
+            return;
+        }
         if let DeviceEvent::MouseMotion { delta } = event
             && self.ui.is_playing()
             && self.pointer_really_locked()
@@ -903,6 +982,21 @@ impl ApplicationHandler for WindowApp {
         }
         if let Some(window) = &self.window {
             window.request_redraw();
+        }
+        // No window means no `RedrawRequested` will ever fire, so
+        // without this a headless session (never attached, or just detached)
+        // would never tick — the sim would sit frozen instead of continuing
+        // to connect/persist/keep-alive. `redraw()` already ticks the sim and
+        // reconciles menu/session state **before** its GPU-readiness guard
+        // (`app/redraw.rs`'s own comment: "Simulation must never be
+        // conditional on a swapchain image") and returns as soon as it
+        // reaches that guard with nothing to draw into — so calling it here
+        // with no window is exactly the tick-with-no-presentation this mode
+        // needs, reusing the same pacing/catch-up logic a windowed frame
+        // uses rather than a second, divergent tick loop.
+        #[cfg(feature = "runtime-presentation")]
+        if self.window.is_none() {
+            self.redraw();
         }
         // Spin while focused and uncapped (vsync paces the loop); sleep until the
         // next scheduled deadline while `framerateLimit`/`inactivityFpsLimit`
@@ -1507,7 +1601,11 @@ impl WindowApp {
     /// `about_to_wait` once the deferred attach lands. A forked copy would be ~270
     /// lines of render-state construction drifting silently, and the symptom would be a
     /// browser missing one atlas or one uniform rather than a build failure.
-    fn finish_bring_up(
+    // `pub(super)`, not private: `WindowApp::create_and_attach_window`
+    // (`app::session`) — the bring-up shared by ordinary startup and a
+    // runtime attach — calls this too, not only `resumed`/`about_to_wait` in
+    // this file.
+    pub(super) fn finish_bring_up(
         &mut self,
         window: Arc<Window>,
         gpu: GpuContext,
@@ -1975,7 +2073,12 @@ impl WindowApp {
 ///
 /// A free function so both targets build the identical attributes and only the
 /// browser-specific part is forked.
-fn window_attributes(config: &Config) -> winit::window::WindowAttributes {
+///
+/// `pub(super)` rather than private:
+/// `WindowApp::attach_presentation` (`app::session`) needs the identical
+/// attributes for a runtime attach's window, not a second, potentially
+/// drifting copy.
+pub(super) fn window_attributes(config: &Config) -> winit::window::WindowAttributes {
     let attrs = Window::default_attributes().with_title("Lodestone");
 
     // Native only: a concrete starting size for a freestanding OS window, which has no
