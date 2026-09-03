@@ -162,7 +162,7 @@ pub fn tab_list_view(
         .into_iter()
         .take(MAX_TAB_ROWS)
         .map(|entry| TabListRow {
-            name: lodestone_game::text::resolve(&name_for_display(entry, scoreboard), translate)
+            name: name_for_display(entry, scoreboard).resolve(translate)
                 .to_spans(),
             ping_sprite: ping_sprite(entry.latency),
             spectator: entry.game_mode == lodestone_model::GameMode::Spectator,
@@ -224,7 +224,7 @@ pub fn banner_lines(
     let Some(banner) = banner else {
         return Vec::new();
     };
-    let spans = lodestone_game::text::resolve(banner, translate).to_spans();
+    let spans = banner.resolve(translate).to_spans();
     // The whitespace test is on the *wording*: a banner of nothing but spaces and
     // breaks draws nothing however it is coloured.
     if crate::overlay::spans_text(&spans).trim().is_empty() {

@@ -601,7 +601,7 @@ fn text_display_draw(case: HologramCase, background: i32) -> DisplayDraw {
             scale: glam::Vec3::splat(case.scale),
             ..DisplayTransformation::default()
         },
-        text: Some(lodestone_model::text::Text::literal(
+        text: Some(lodestone_model::text::ResolvedText::literal(
             "Main Reveille Hospital\nA Government-run hospital",
         )),
         text_line_width: 200,
@@ -818,7 +818,7 @@ fn shadow_case_draw(case: ShadowCase, style_flags: u8) -> DisplayDraw {
             scale: glam::Vec3::splat(case.scale),
             ..DisplayTransformation::default()
         },
-        text: Some(lodestone_model::text::Text::literal(
+        text: Some(lodestone_model::text::ResolvedText::literal(
             "Main Reveille Hospital\nA Government-run hospital",
         )),
         text_line_width: 200,
@@ -1119,7 +1119,7 @@ fn wall_hologram(background: i32) -> DisplayDraw {
             scale: glam::Vec3::splat(3.0),
             ..DisplayTransformation::default()
         },
-        text: Some(lodestone_model::text::Text::literal("HOLOGRAM\nOVER GLASS")),
+        text: Some(lodestone_model::text::ResolvedText::literal("HOLOGRAM\nOVER GLASS")),
         text_line_width: 200,
         text_background_color: background,
         text_opacity: -1,

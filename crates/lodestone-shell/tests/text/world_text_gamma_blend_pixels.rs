@@ -175,7 +175,7 @@ fn the_nametag_plate_blends_on_gamma_bytes_at_the_surface_format() {
     let feet = glam::Vec3::new(0.0, 0.0, 6.0);
     let subject = EntityDraw {
         name_tag: Some(NameTag {
-            text: lodestone_model::text::Text::literal("Babe"),
+            text: lodestone_model::text::ResolvedText::literal("Babe"),
             // Not discrete, so the plate travels with the see-through
             // submission — see `gpu/nametag.rs`'s module doc.
             see_through: true,

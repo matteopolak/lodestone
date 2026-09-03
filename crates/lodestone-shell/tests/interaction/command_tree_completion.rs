@@ -501,7 +501,7 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
         suggestions: vec![entry("minecraft:creeper")],
     };
     assert!(
-        !input.apply_suggestions(&stale),
+        !input.apply_suggestions(&stale, &|_| None),
         "a reply whose id does not match the request in flight must be dropped"
     );
     assert_eq!(input.as_str(), "/summon ", "and must not touch the line");
@@ -513,7 +513,7 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
         length: 0,
         suggestions: vec![entry("minecraft:creeper")],
     };
-    assert!(!input.apply_suggestions(&out_of_range));
+    assert!(!input.apply_suggestions(&out_of_range, &|_| None));
     assert_eq!(input.as_str(), "/summon ");
 
     // The in-date reply. `start` is read from the response, not re-derived.
@@ -527,7 +527,7 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
         length: 0,
         suggestions: vec![entry("minecraft:creeper"), entry("minecraft:zombie")],
     };
-    assert!(input.apply_suggestions(&good));
+    assert!(input.apply_suggestions(&good, &|_| None));
     assert_eq!(
         input
             .completion_candidates()
@@ -553,7 +553,7 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
     // pump in `app::menus::pump_command_suggestions` does — is stale by
     // construction, because the id match consumed the pending request.
     assert!(
-        !input.apply_suggestions(&good),
+        !input.apply_suggestions(&good, &|_| None),
         "the second poll of one response must be a no-op, or a frame loop would \
          re-raise it forever"
     );
@@ -588,7 +588,7 @@ fn the_replies_own_start_decides_where_the_text_lands() {
         start: 8,
         length: 0,
         suggestions: vec![entry.clone()],
-    }));
+    }, &|_| None));
 
     let mut at_zero = typing("/summon ", Some(&tree));
     let Some(ClientAction::CommandSuggestion { id, .. }) = at_zero.tab(Some(&tree), false) else {
@@ -601,7 +601,7 @@ fn the_replies_own_start_decides_where_the_text_lands() {
         start: 0,
         length: 0,
         suggestions: vec![entry],
-    }));
+    }, &|_| None));
 
     assert!(at_token.tab(Some(&tree), false).is_none());
     assert!(at_zero.tab(Some(&tree), false).is_none());

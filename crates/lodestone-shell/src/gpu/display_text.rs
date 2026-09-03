@@ -935,7 +935,7 @@ fn push_text_display_quads(
     world_font: Option<&crate::hud::vanilla_font::VanillaFont>,
     ink: &super::nametag::StyledInkLayoutCache,
     draw: &DisplayDraw,
-    text: &Text,
+    text: &lodestone_model::ResolvedText,
     camera: &Camera,
     tint: [f32; 3],
     background_out: &mut Vec<DisplayTextVertex>,
@@ -949,7 +949,7 @@ fn push_text_display_quads(
     // `to_legacy_string`/`from_legacy` round trip to lose a hex colour along
     // the way. [`split_spans_into_lines`] then breaks the flattened run list
     // on literal `\n`s while keeping each run's own resolved style.
-    let spans = text.to_spans();
+    let spans = text.resolve(&|_| None).to_spans();
     let lines = split_spans_into_lines(&spans);
     // Per-line layout up front: needed both to size the background panel
     // (vanilla's own `cachedInfo.width()`/`height()`, computed once before
@@ -1168,7 +1168,7 @@ mod tests {
         raster: &RasterFont,
         ink: &super::super::nametag::StyledInkLayoutCache,
         draw: &DisplayDraw,
-        text: &Text,
+        text: &lodestone_model::ResolvedText,
         camera: &Camera,
     ) -> Vec<DisplayTextVertex> {
         let mut out = Vec::new();
@@ -1200,7 +1200,7 @@ mod tests {
             entity_pitch: 0.0,
             billboard: BillboardMode::Fixed,
             transform: DisplayTransformation::default(),
-            text: Some(Text::from_legacy(text)),
+            text: Some(lodestone_model::ResolvedText::from_legacy(text)),
             text_line_width: 200,
             text_background_color: 0,
             text_opacity: -1,
@@ -1225,7 +1225,7 @@ mod tests {
             &raster,
             &ink,
             &draw_with_text(""),
-            &Text::from_legacy(""),
+            &lodestone_model::ResolvedText::from_legacy(""),
             &Camera::default(),
         );
         assert!(out.is_empty());
@@ -1244,7 +1244,7 @@ mod tests {
             &raster,
             &ink,
             &draw,
-            &Text::from_legacy("LODESTONE"),
+            &lodestone_model::ResolvedText::from_legacy("LODESTONE"),
             &Camera::default(),
         );
         assert!(!out.is_empty(), "real text must contribute vertices");
@@ -1266,7 +1266,7 @@ mod tests {
             &raster,
             &ink,
             &without_bg,
-            &Text::from_legacy("A"),
+            &lodestone_model::ResolvedText::from_legacy("A"),
             &Camera::default(),
         );
 
@@ -1276,7 +1276,7 @@ mod tests {
             &raster,
             &ink,
             &with_bg,
-            &Text::from_legacy("A"),
+            &lodestone_model::ResolvedText::from_legacy("A"),
             &Camera::default(),
         );
 
@@ -1412,7 +1412,7 @@ mod tests {
         camera_b.yaw = 200.0;
         camera_b.pitch = -35.0;
 
-        let hello = Text::from_legacy("HELLO");
+        let hello = lodestone_model::ResolvedText::from_legacy("HELLO");
         let fixed_draw = draw_with_text("HELLO");
         let fixed_a = all_quads(&raster, &ink, &fixed_draw, &hello, &camera_a);
         let fixed_b = all_quads(&raster, &ink, &fixed_draw, &hello, &camera_b);
@@ -1460,7 +1460,7 @@ mod tests {
             &raster,
             &ink,
             &coloured,
-            &Text::from_legacy("\u{a7}cRED"),
+            &lodestone_model::ResolvedText::from_legacy("\u{a7}cRED"),
             &Camera::default(),
         );
         assert!(
@@ -1474,7 +1474,7 @@ mod tests {
             &raster,
             &ink,
             &plain,
-            &Text::from_legacy("RED"),
+            &lodestone_model::ResolvedText::from_legacy("RED"),
             &Camera::default(),
         );
         assert!(
@@ -1507,9 +1507,9 @@ mod tests {
         let Some(raster) = super::super::nametag::load_font() else {
             return;
         };
-        let plain_spans = Text::from_legacy("WWWWWW").to_spans();
+        let plain_spans = Text::from_legacy("WWWWWW").resolve(&|_| None).to_spans();
         let (_, plain_width) = super::super::nametag::layout_styled_ink_runs(&raster, &plain_spans);
-        let bold_spans = Text::from_legacy("\u{a7}lWWWWWW").to_spans();
+        let bold_spans = Text::from_legacy("\u{a7}lWWWWWW").resolve(&|_| None).to_spans();
         let (_, bold_width) = super::super::nametag::layout_styled_ink_runs(&raster, &bold_spans);
         assert!(
             bold_width > plain_width,
@@ -1522,7 +1522,7 @@ mod tests {
         // `push_text_display_quads`'s own `(total_width - line_width) / 2.0`
         // formula, evaluated here against the two hypotheses for the width
         // of the *other* line in the block.
-        let short_spans = Text::from_legacy("Hi").to_spans();
+        let short_spans = Text::from_legacy("Hi").resolve(&|_| None).to_spans();
         let (_, short_width) = super::super::nametag::layout_styled_ink_runs(&raster, &short_spans);
         let plain_block_offset = (plain_width - short_width) / 2.0;
         let bold_block_offset = (bold_width - short_width) / 2.0;
@@ -1543,7 +1543,7 @@ mod tests {
             &raster,
             &ink,
             &plain_draw,
-            &Text::from_legacy("Hi\nWWWWWW"),
+            &lodestone_model::ResolvedText::from_legacy("Hi\nWWWWWW"),
             &Camera::default(),
         );
         let bold_draw = draw_with_text("Hi\n\u{a7}lWWWWWW");
@@ -1551,7 +1551,7 @@ mod tests {
             &raster,
             &ink,
             &bold_draw,
-            &Text::from_legacy("Hi\n\u{a7}lWWWWWW"),
+            &lodestone_model::ResolvedText::from_legacy("Hi\n\u{a7}lWWWWWW"),
             &Camera::default(),
         );
         let extent = |verts: &[DisplayTextVertex]| -> f32 {
@@ -1612,7 +1612,7 @@ mod tests {
             is_close(c[0], want[0]) && is_close(c[1], want[1]) && is_close(c[2], want[2])
         };
 
-        let text = Text::from_legacy("\u{a7}cRED");
+        let text = lodestone_model::ResolvedText::from_legacy("\u{a7}cRED");
         let plain = draw_with_text("\u{a7}cRED");
         let mut shadowed = plain.clone();
         shadowed.text_style_flags |= FLAG_SHADOW;
@@ -1703,7 +1703,7 @@ mod tests {
     ///
     /// The control is run first, in this same test, reproducing the exact
     /// lossy path `DisplayDraw::text` used to bridge through
-    /// (`text.to_legacy_string()` then `Text::from_legacy(..).to_spans()`)
+    /// (`text.resolve(&|_| None).to_legacy_string()` then `Text::from_legacy(..).resolve(&|_| None).to_spans()`)
     /// and asserting it drops the hex colour — watched failing, not assumed
     /// — before asserting the real, direct `to_spans()` path
     /// `push_text_display_quads` now takes preserves it end to end, to the
@@ -1722,7 +1722,9 @@ mod tests {
         // Control: the round trip `DisplayDraw::text` used to be bridged
         // through, watched failing on the exact hypothesis it would have
         // produced.
-        let lossy_spans = Text::from_legacy(&hex_text.to_legacy_string()).to_spans();
+        let lossy_spans = Text::from_legacy(&hex_text.resolve(&|_| None).to_legacy_string())
+            .resolve(&|_| None)
+            .to_spans();
         assert!(
             lossy_spans
                 .iter()
@@ -1735,7 +1737,13 @@ mod tests {
         );
 
         let draw = draw_with_text("HEX");
-        let out = all_quads(&raster, &ink, &draw, &hex_text, &Camera::default());
+        let out = all_quads(
+            &raster,
+            &ink,
+            &draw,
+            &hex_text.resolve(&|_| None),
+            &Camera::default(),
+        );
 
         let want_hex = [
             ((hex >> 16) & 0xff) as f32 / 255.0,

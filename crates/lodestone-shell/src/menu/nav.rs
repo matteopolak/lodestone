@@ -10474,7 +10474,7 @@ mod tests {
         // on a roster from a server that is no longer there.
         let (_nav, mut ui) = on_social("social-disconnect");
         ui.session_failed(crate::sim::SessionEnd::disconnected(
-            lodestone_model::Text::literal("connection lost"),
+            lodestone_model::ResolvedText::literal("connection lost"),
         ));
         assert_eq!(ui.screen(), Screen::Error);
     }
@@ -11464,7 +11464,8 @@ mod tests {
                             lodestone_model::text::Text::literal("first"),
                             lodestone_model::text::Text::literal("second"),
                         ],
-                    ),
+                                            &|_| None,
+),
                 );
             }),
             // The sixth overlay screen — the frame is built from
@@ -11530,7 +11531,8 @@ mod tests {
                     lodestone_model::text::Text::literal("first"),
                     lodestone_model::text::Text::literal("second"),
                 ],
-            ),
+                                    &|_| None,
+),
         );
 
         assert!(routes_menu_input(&ui), "the reader owns overlay mouse input");

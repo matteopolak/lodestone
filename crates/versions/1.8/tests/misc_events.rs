@@ -808,7 +808,7 @@ fn title_text_and_subtitle_actions_are_distinguishable() {
     title.var_i32(0);
     title.string("\"Title\"");
     match only_event(dispatch(play::clientbound::TITLE, title.as_slice())) {
-        ClientEvent::TitleText { text } => assert_eq!(text.to_legacy_string(), "Title"),
+        ClientEvent::TitleText { text } => assert_eq!(text.resolve(&|_| None).to_legacy_string(), "Title"),
         other => panic!("unexpected event: {other:?}"),
     }
 
@@ -816,7 +816,7 @@ fn title_text_and_subtitle_actions_are_distinguishable() {
     subtitle.var_i32(1);
     subtitle.string("\"Subtitle\"");
     match only_event(dispatch(play::clientbound::TITLE, subtitle.as_slice())) {
-        ClientEvent::SubtitleText { text } => assert_eq!(text.to_legacy_string(), "Subtitle"),
+        ClientEvent::SubtitleText { text } => assert_eq!(text.resolve(&|_| None).to_legacy_string(), "Subtitle"),
         other => panic!("unexpected event: {other:?}"),
     }
 }

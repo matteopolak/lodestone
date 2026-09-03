@@ -168,11 +168,17 @@ pub struct DisplayDraw {
     ///
     /// The full styled component tree, carried straight through from
     /// [`lodestone_ecs::entity::DisplayText`] — `gpu/display_text.rs` calls
-    /// [`lodestone_model::Text::to_spans`] on it directly, so colour (hex
-    /// included), bold, italic, underline and strikethrough all survive, with
-    /// no `to_legacy_string`/`from_legacy` round trip to lose a hex colour
+    /// [`lodestone_model::ResolvedText::to_spans`] on it directly, so colour
+    /// (hex included), bold, italic, underline and strikethrough all survive,
+    /// with no `to_legacy_string`/`from_legacy` round trip to lose a hex colour
     /// along the way (legacy `§` codes have no hex form).
-    pub text: Option<lodestone_model::Text>,
+    ///
+    /// Resolved against the **empty** table: extraction runs as a scheduled
+    /// system, and the session's language table is not a world resource, so
+    /// there is none to consult here. A `translate` key therefore reads as its
+    /// own name, which is what a text display authored by a command shows
+    /// today. Threading a table into the schedule is the way to change that.
+    pub text: Option<lodestone_model::ResolvedText>,
     /// `text_display`'s wrap width in pixels, defaulted to vanilla's own
     /// `200` when unreported. Meaningless for the other two subtypes.
     pub text_line_width: i32,
@@ -381,10 +387,11 @@ fn extract_display_draws(
             transform,
             // `DisplayText` carries the styled component tree (see its own
             // doc) straight through — `gpu/display_text.rs` reads it with
-            // `Text::to_spans` directly, so colour/bold/italic/underline/
+            // `to_spans` directly, so colour/bold/italic/underline/
             // strikethrough (hex included) survive with no legacy-string
-            // round trip in between.
-            text: text.map(|t| t.0.clone()),
+            // round trip in between. See the field's doc for why the table is
+            // empty here.
+            text: text.map(|t| t.0.resolve(&|_| None)),
             text_line_width: line_width.map_or(DEFAULT_LINE_WIDTH, |w| w.0),
             text_background_color: background_color.map_or(DEFAULT_BACKGROUND_COLOR, |c| c.0),
             text_opacity: opacity.map_or(DEFAULT_TEXT_OPACITY, |o| o.0),

@@ -170,7 +170,7 @@ fn an_invisible_named_armor_stand_draws_no_body_but_still_draws_its_tag() {
 
     let feet = glam::Vec3::new(0.0, 0.0, 6.0);
     let tag = || NameTag {
-        text: lodestone_model::text::Text::literal("Hologram"),
+        text: lodestone_model::text::ResolvedText::literal("Hologram"),
         see_through: true,
     };
 

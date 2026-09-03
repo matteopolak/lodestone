@@ -4952,16 +4952,15 @@ fn draw_command_suggestions(
                 if !layout.contains(mx, my) {
                     continue;
                 }
-                // Via `Text::to_spans`, not `Text::to_legacy_string`: a
-                // server-sent tooltip can carry a hex colour
-                // (`TextColor::Rgb`), which the legacy flatten has no code
-                // for and would silently drop — see
-                // `CommandSuggestionEntry::tooltip`'s own doc.
+                // Via `to_spans`, not `to_legacy_string`: a server-sent
+                // tooltip can carry a hex colour (`TextColor::Rgb`), which
+                // the legacy flatten has no code for and would silently drop
+                // — see `CommandSuggestionEntry::tooltip`'s own doc.
                 let Some(spans) = popup
                     .candidates
                     .get(popup.selected)
                     .and_then(|c| c.tooltip.as_ref())
-                    .map(Text::to_spans)
+                    .map(lodestone_model::ResolvedText::to_spans)
                 else {
                     continue;
                 };
@@ -9818,7 +9817,7 @@ mod tests {
             extra: vec![hex, inline_legacy, named],
             ..Text::default()
         };
-        let spans = root.to_spans();
+        let spans = root.resolve(&|_| None).to_spans();
         assert_eq!(
             spans.len(),
             3,
@@ -9874,7 +9873,7 @@ mod tests {
         // no representation for `TextColor::Rgb`). This must show the loss —
         // if it did not, the assertion above would be proving nothing about
         // which path actually carries the colour.
-        let flattened = root.to_legacy_string();
+        let flattened = root.resolve(&|_| None).to_legacy_string();
         let chat_legacy = [(flattened.as_str(), 0.0_f32)];
         let legacy_geo = HudGeometry::build(
             &HudFrame {
@@ -9939,7 +9938,7 @@ mod tests {
             extra: vec![hex, inline_legacy, named],
             ..Text::default()
         };
-        let spans = root.to_spans();
+        let spans = root.resolve(&|_| None).to_spans();
         assert_eq!(
             spans.len(),
             3,
@@ -9988,7 +9987,7 @@ mod tests {
         // `Text::to_legacy_string`, which has no representation for
         // `TextColor::Rgb`. This must show the loss, or the assertion above
         // proves nothing about which field actually carries the colour.
-        let flattened = root.to_legacy_string();
+        let flattened = root.resolve(&|_| None).to_legacy_string();
         let legacy_geo = HudGeometry::build(
             &HudFrame {
                 crosshair: false,
@@ -12451,7 +12450,7 @@ mod chat_hover_tooltip_gate {
             action: HoverAction::ShowText,
             value: Box::new(lodestone_model::Text::literal("Diamond Sword")),
         };
-        let spans = hover.value.to_spans();
+        let spans = hover.value.resolve(&|_| None).to_spans();
         let text: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(
             text, "Diamond Sword",
@@ -12493,7 +12492,7 @@ mod chat_hover_tooltip_gate {
             extra: vec![hex, inline_legacy, named],
             ..Text::default()
         };
-        let spans = root.to_spans();
+        let spans = root.resolve(&|_| None).to_spans();
         assert_eq!(spans.len(), 3, "sanity: three runs in, three runs out — {spans:?}");
 
         let stats = DebugStats::default();
@@ -12528,7 +12527,7 @@ mod chat_hover_tooltip_gate {
         // `Text::to_legacy_string` has no `TextColor::Rgb` representation for.
         // Must show the loss, or the assertion above proves nothing about
         // which path actually carries the colour.
-        let flattened = root.to_legacy_string();
+        let flattened = root.resolve(&|_| None).to_legacy_string();
         let legacy_spans = vec![TextSpan { text: flattened, style: TextStyle::default() }];
         let legacy_tooltip = ChatHoverTooltip { spans: &legacy_spans, cursor: (10.0, 10.0) };
         let mut legacy_frame = bare_frame(&stats);

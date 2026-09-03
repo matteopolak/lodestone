@@ -16,14 +16,14 @@ const MAX_SIDEBAR_LINES: usize = 15;
 /// the language table itself: the caller supplies the translator closure.
 ///
 /// This was `to_plain_string()`, and that call was the single line where the
-/// sidebar lost every colour a server sent. `lodestone_game::text::resolve`
+/// sidebar lost every colour a server sent. `Text::resolve`
 /// hands back a `Text` with style fully intact (its own test asserts
 /// `style.color == Some(Aqua)` survives); `to_plain_string` then threw all of it
 /// away, one layer above a HUD that had no way to accept it anyway. `to_spans`
 /// resolves the same tree *and* applies `TextStyle::inherit` down it, so a
 /// nested run with no colour of its own arrives carrying its parent's.
 fn spans(text: &Text, translate: &dyn Fn(&str) -> Option<String>) -> Vec<TextSpan> {
-    lodestone_game::text::resolve(text, translate).to_spans()
+    text.resolve(translate).to_spans()
 }
 
 /// Builds the right-edge sidebar view from the folded game scoreboard, resolving

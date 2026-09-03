@@ -254,7 +254,10 @@ fn lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
             TooltipLine {
                 text: line.to_plain_string(),
                 colour: DARK_PURPLE,
-                spans: Some(styled.to_spans()),
+                // `&|_| None` for the same reason [`title_line`] uses it: no
+                // language table reaches this module. Authored lore is
+                // literal text, so there is nothing for a table to change.
+                spans: Some(styled.resolve(&|_| None).to_spans()),
             }
         })
         .collect()

@@ -1817,7 +1817,7 @@ mod tests {
         // no colour of its own and must inherit the root's red, while the
         // second child's own blue overrides it. This is the shape a plain
         // `String` could never have carried.
-        let spans = text.to_spans();
+        let spans = text.resolve(&|_| None).to_spans();
         assert_eq!(spans.len(), 3);
         assert_eq!(spans[0].text, "R");
         assert_eq!(spans[0].style.color, Some(TextColor::Red));

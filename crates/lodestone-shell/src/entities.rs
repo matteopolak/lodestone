@@ -155,7 +155,7 @@ use lodestone_entity::pose::{
     clamp_head_to_body, walk_target_speed,
 };
 use lodestone_model::event::{EntityVariant, EquipmentSlot, Reported};
-use lodestone_model::Text;
+use lodestone_model::{ResolvedText, Text};
 use lodestone_physics::{
     CollisionView, EntityDimensions, EntityMotion, MoveContext, PhysicsProfile, Vec3d, mth,
     move_entity,
@@ -344,14 +344,18 @@ const YAW_EPS: f32 = 1.0e-2;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NameTag {
     /// The styled component tree to draw. `gpu/nametag.rs`'s
-    /// `push_entity_quads` calls [`lodestone_model::Text::to_spans`] on this
-    /// directly — colour (including a hex [`lodestone_model::text::TextColor::Rgb`],
-    /// which a `to_legacy_string`/`from_legacy` round trip could never carry,
-    /// since legacy `§` codes have no hex form), bold, italic, underline and
-    /// strikethrough all survive intact. A translation-key custom name, the
-    /// rare case, draws its raw key rather than resolving through the
-    /// shell's chat language table; see `docs/entity-nametags.md`.
-    pub text: Text,
+    /// `push_entity_quads` calls [`lodestone_model::ResolvedText::to_spans`] on
+    /// this directly — colour (including a hex
+    /// [`lodestone_model::text::TextColor::Rgb`], which a
+    /// `to_legacy_string`/`from_legacy` round trip could never carry, since
+    /// legacy `§` codes have no hex form), bold, italic, underline and
+    /// strikethrough all survive intact.
+    ///
+    /// [`ResolvedText`](lodestone_model::ResolvedText), so a translation-key
+    /// custom name — an armour stand named `block.minecraft.beacon`, say —
+    /// reads as words: [`fold_entities_for_local`] takes the session's language
+    /// table and lowers the tree here, at the one place a nametag is built.
+    pub text: ResolvedText,
     /// Whether the depth-testless, faded pass draws in addition to the normal
     /// depth-tested one — `false` while the entity is sneaking
     /// (vanilla's own is-discrete check), which is when vanilla suppresses it. See
@@ -3467,6 +3471,7 @@ fn resolve_entity_facts(
     tab_list: &lodestone_game::tablist::TabList,
     scoreboard: Option<&lodestone_game::scoreboard::Scoreboard>,
     local_player_name: Option<&str>,
+    translate: &dyn Fn(&str) -> Option<String>,
 ) -> Option<EntityFacts> {
     use lodestone_ecs::entity::{
         Baby, CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, EntityFlags,
@@ -3748,12 +3753,13 @@ fn resolve_entity_facts(
         }
     };
     let name_tag = name_tag.map(|text| NameTag {
-        // Carried through as a real `Text` — `gpu/nametag.rs`'s
-        // `push_entity_quads` reads it with `Text::to_spans` directly, so
+        // Carried through as a real component tree — `gpu/nametag.rs`'s
+        // `push_entity_quads` reads it with `to_spans` directly, so
         // colour/bold/italic/underline/strikethrough (hex included) survive
         // all the way to the drawn vertex, with no legacy-string round trip
-        // to lose a hex colour along the way.
-        text,
+        // to lose a hex colour along the way. Resolved here because this is
+        // the last point that holds the language table.
+        text: text.resolve(translate),
         // Vanilla's own is-discrete check's shift-key bit (`0x02`) — unknown (no
         // metadata yet) defaults open, matching every other not-yet-reported
         // boolean here.
@@ -3936,13 +3942,17 @@ fn default_remote_skin(uuid: uuid::Uuid) -> crate::remote_skins::RemoteSkin {
 /// time someone adds one of those components to the local player for an
 /// unrelated reason).
 pub fn fold_entities(world: &mut World) {
-    fold_entities_for_local(world, None);
+    fold_entities_for_local(world, None, &|_| None);
 }
 
 /// Folds tracked entities for a viewer whose scoreboard holder is
 /// `local_player_name`. The live [`crate::sim::Sim`] supplies that profile
 /// name; harnesses with no session retain the ordinary no-team behaviour.
-pub(crate) fn fold_entities_for_local(world: &mut World, local_player_name: Option<&str>) {
+pub(crate) fn fold_entities_for_local(
+    world: &mut World,
+    local_player_name: Option<&str>,
+    translate: &dyn Fn(&str) -> Option<String>,
+) {
     let tab_list = world
         .query_filtered::<
             (&lodestone_ecs::SessionTabList, &lodestone_ecs::SessionScoreboard),
@@ -3969,6 +3979,7 @@ pub(crate) fn fold_entities_for_local(world: &mut World, local_player_name: Opti
             &tab_list.0,
             Some(&tab_list.1),
             local_player_name,
+            translate,
         ) else {
             continue;
         };
@@ -4923,7 +4934,7 @@ mod tests {
         entity: Entity,
         tab_list: &lodestone_game::tablist::TabList,
     ) -> EntityFacts {
-        resolve_entity_facts(9, world.entity(entity), tab_list, None, None)
+        resolve_entity_facts(9, world.entity(entity), tab_list, None, None, &|_| None)
             .expect("bare_entity always carries the four required components")
     }
 

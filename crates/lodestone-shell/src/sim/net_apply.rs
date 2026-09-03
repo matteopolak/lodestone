@@ -52,8 +52,21 @@ impl Sim {
                 .get(&uuid)
                 .map(|entry| entry.profile.name.clone())
         });
+        // The language table is cloned out of the `Sim` first: `write` takes
+        // `&mut self`, so a borrowed translator cannot survive into the
+        // closure. This is the last point that holds a table at all, and a
+        // nametag built past it can no longer be resolved.
+        let language = self.language.clone();
         self.write(|world| {
-            crate::entities::fold_entities_for_local(world, local_name.as_deref());
+            let translate: Box<dyn Fn(&str) -> Option<String>> = match &language {
+                Some(lang) => Box::new(lang.translator()),
+                None => Box::new(|_: &str| None),
+            };
+            crate::entities::fold_entities_for_local(
+                world,
+                local_name.as_deref(),
+                translate.as_ref(),
+            );
         });
     }
 
@@ -373,16 +386,17 @@ impl Sim {
                     {
                         continue;
                     }
-                    // Resolve translate nodes (death messages, join/leave, …) to
-                    // words once, at arrival, against the language table — so the
-                    // stored scrollback and the log line both read as prose, not
-                    // raw keys like `entity.minecraft.spider`.
-                    let text = self.resolve_text(&text);
+                    // The scrollback stores the server's own component and
+                    // resolves at read (`ChatLog::recent_spans` takes the table),
+                    // so a language pack that arrives later — a pushed resource
+                    // pack — re-reads lines already in the log. Only the log line
+                    // is resolved here, and only because it is written once.
+                    //
                     // `to_plain_string`, not `to_legacy_string`: a terminal does not
                     // render `§` codes, so logging the legacy-flattened string prints
                     // mojibake for any coloured line — the code points survive, just
                     // uninterpreted, into the log file.
-                    tracing::debug!(target: "chat", "{}", text.to_plain_string());
+                    tracing::debug!(target: "chat", "{}", self.resolve_text(&text).to_plain_string());
                     // Stamped with the driver's own clock, which is why the log and
                     // the clock had to move to the ECS together (Stage 3 deferred
                     // both for exactly this reason). `local` is the session entity,
@@ -554,7 +568,7 @@ impl Sim {
                         // stranded the client on the death screen forever.
                         self.status = "server: died".into();
                         self.set_phase(SessionPhase::Ended(Box::new(SessionEnd::died(
-                            Text::literal("player died"),
+                            lodestone_model::ResolvedText::literal("player died"),
                         ))));
                     }
                 }
@@ -769,7 +783,7 @@ impl Sim {
                     self.reset_for_server_transfer();
                     self.status = format!("net error: {e}");
                     self.set_phase(SessionPhase::Ended(Box::new(SessionEnd::failed(
-                        Text::literal(e),
+                        lodestone_model::ResolvedText::literal(e),
                     ))));
                 }
                 NetUpdate::LanPublishError(e) => {

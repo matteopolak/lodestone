@@ -808,7 +808,7 @@ fn push_entity_quads(
     // which no `to_legacy_string`/`from_legacy` round trip could carry, since
     // legacy `§` codes have no hex form — bold, italic, underline and
     // strikethrough straight off it with no bridge in between.
-    let spans = tag.text.to_spans();
+    let spans = tag.text.resolve(&|_| None).to_spans();
 
     // Cached: the walk depends only on `(spans, font)`, and this is called
     // once per visible named entity per frame.
@@ -1353,7 +1353,7 @@ mod tests {
             item_dyed_color: None,
             item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
-                text: Text::literal("Babe"),
+                text: lodestone_model::ResolvedText::literal("Babe"),
                 see_through: true,
             }),
             item_use: None,
@@ -1445,7 +1445,7 @@ mod tests {
             item_dyed_color: None,
             item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
-                text: Text::literal("Babe"),
+                text: lodestone_model::ResolvedText::literal("Babe"),
                 see_through: true,
             }),
             item_use: None,
@@ -1499,7 +1499,7 @@ mod tests {
         let mut see_through2 = Vec::new();
         let sneaking = EntityDraw {
             name_tag: Some(crate::entities::NameTag {
-                text: Text::literal("Babe"),
+                text: lodestone_model::ResolvedText::literal("Babe"),
                 see_through: false,
             }),
             ..draw
@@ -1561,7 +1561,7 @@ mod tests {
             item_dyed_color: None,
             item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
-                text: Text::default(),
+                text: lodestone_model::ResolvedText::default(),
                 see_through: true,
             }),
             item_use: None,
@@ -1750,7 +1750,7 @@ mod tests {
         rgba.extend_from_slice(&opaque_cell);
         let raster = scaled_raster("AB", 32, 20, &rgba);
 
-        let spans = Text::from_legacy("AB").to_spans();
+        let spans = Text::from_legacy("AB").resolve(&|_| None).to_spans();
         let (rects, total_advance) = layout_styled_ink_runs(&raster, &spans);
         assert!(!rects.is_empty(), "the opaque cells must produce ink rects");
         // Same arithmetic as the HUD-path control: advance(A) = (int)(0.5 +
@@ -1799,7 +1799,7 @@ mod tests {
         rgba.extend_from_slice(&opaque_cell);
         let raster = scaled_raster("AB", 32, 20, &rgba);
 
-        let red_spans = Text::from_legacy("\u{a7}cA").to_spans();
+        let red_spans = Text::from_legacy("\u{a7}cA").resolve(&|_| None).to_spans();
         let (red_rects, _) = layout_styled_ink_runs(&raster, &red_spans);
         assert!(!red_rects.is_empty(), "an opaque glyph must still produce ink rects when coloured");
         let hex = TextColor::Red.rgb();
@@ -1815,7 +1815,7 @@ mod tests {
             red_rects.iter().map(|r| r.color).collect::<Vec<_>>()
         );
 
-        let plain_spans = Text::from_legacy("A").to_spans();
+        let plain_spans = Text::from_legacy("A").resolve(&|_| None).to_spans();
         let (plain_rects, _) = layout_styled_ink_runs(&raster, &plain_spans);
         assert!(
             plain_rects.iter().all(|r| r.color == [1.0, 1.0, 1.0, 1.0]),
@@ -1878,10 +1878,10 @@ mod tests {
         rgba.extend_from_slice(&opaque_cell);
         let raster = scaled_raster("AB", 32, 20, &rgba);
 
-        let plain_spans = Text::from_legacy("A").to_spans();
+        let plain_spans = Text::from_legacy("A").resolve(&|_| None).to_spans();
         let (plain_rects, plain_width) = layout_styled_ink_runs(&raster, &plain_spans);
 
-        let bold_spans = Text::from_legacy("\u{a7}lA").to_spans();
+        let bold_spans = Text::from_legacy("\u{a7}lA").resolve(&|_| None).to_spans();
         let (bold_rects, bold_width) = layout_styled_ink_runs(&raster, &bold_spans);
 
         assert_eq!(
@@ -1943,7 +1943,7 @@ mod tests {
             item_dyed_color: None,
             item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
-                text: Text::from_legacy("\u{a7}cA"),
+                text: lodestone_model::ResolvedText::from_legacy("\u{a7}cA"),
                 see_through: false,
             }),
             item_use: None,
@@ -2040,7 +2040,7 @@ mod tests {
     ///
     /// The control is run first, in this same test, reproducing the exact
     /// lossy path `NameTag::text` used to bridge through
-    /// (`text.to_legacy_string()` then `Text::from_legacy(..).to_spans()`)
+    /// (`text.resolve(&|_| None).to_legacy_string()` then `Text::from_legacy(..).resolve(&|_| None).to_spans()`)
     /// and asserting it drops the hex colour — watched failing, not assumed
     /// — before asserting the real, direct `to_spans()` path
     /// `push_entity_quads` now takes preserves it end to end, to the drawn
@@ -2061,7 +2061,9 @@ mod tests {
         // Control: the round trip `NameTag::text` used to be bridged
         // through, watched failing on the exact hypothesis it would have
         // produced.
-        let lossy_spans = Text::from_legacy(&hex_text.to_legacy_string()).to_spans();
+        let lossy_spans = Text::from_legacy(&hex_text.resolve(&|_| None).to_legacy_string())
+            .resolve(&|_| None)
+            .to_spans();
         assert!(
             lossy_spans
                 .iter()
@@ -2099,7 +2101,7 @@ mod tests {
             item_dyed_color: None,
             item_potion_color: None,
             name_tag: Some(crate::entities::NameTag {
-                text: hex_text,
+                text: hex_text.resolve(&|_| None),
                 see_through: false,
             }),
             item_use: None,
@@ -2188,7 +2190,10 @@ mod tests {
             foil: false,
             item_dyed_color: None,
             item_potion_color: None,
-            name_tag: Some(crate::entities::NameTag { text, see_through }),
+            name_tag: Some(crate::entities::NameTag {
+                text: text.resolve(&|_| None),
+                see_through,
+            }),
             item_use: None,
             creeper_swelling: 0.0,
             swim_amount: 0.0,
@@ -2305,7 +2310,7 @@ mod tests {
         let ink = StyledInkLayoutCache::default();
 
         let text = Text::from_legacy("AB");
-        let (_, total_width) = layout_styled_ink_runs(&raster, &text.to_spans());
+        let (_, total_width) = layout_styled_ink_runs(&raster, &text.resolve(&|_| None).to_spans());
         let draw = named_pig(text, true);
         let anchor = draw.feet
             + Vec3::new(

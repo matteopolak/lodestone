@@ -827,7 +827,7 @@ fn title_action_bar_case_maps_to_chat_game_info() {
     let directives = dispatch(play::clientbound::TITLE, &w.into_vec()).expect("handle");
     match directives.as_slice() {
         [Directive::Emit(ClientEvent::Chat { text, kind, sender, ack })] => {
-            assert_eq!(text.to_legacy_string(), "Action bar");
+            assert_eq!(text.resolve(&|_| None).to_legacy_string(), "Action bar");
             assert_eq!(*kind, ChatKind::GameInfo);
             assert!(sender.is_none());
             assert!(ack.is_none());

@@ -2393,7 +2393,7 @@ fn debug_feedback_helpers_match_vanillas_exact_wording_and_legacy_codes() {
 fn debug_feedback_expands_to_a_bold_yellow_prefix_span_and_a_plain_body_span() {
     use lodestone_model::text::{Text, TextColor};
 
-    let spans = Text::literal(debug_shown_feedback("Hitboxes", true)).to_spans();
+    let spans = Text::literal(debug_shown_feedback("Hitboxes", true)).resolve(&|_| None).to_spans();
     assert_eq!(spans.len(), 2, "a coloured prefix run and a plain body run: {spans:?}");
 
     assert_eq!(spans[0].text, "[Debug]:");

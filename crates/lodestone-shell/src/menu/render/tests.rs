@@ -308,7 +308,7 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
             Screen::Error => {
                 ui.begin(SessionKind::Multiplayer);
                 ui.session_failed(crate::sim::SessionEnd::disconnected(
-            lodestone_model::Text::literal("connection refused"),
+            lodestone_model::ResolvedText::literal("connection refused"),
         ));
             }
             Screen::Credits => {
@@ -1494,7 +1494,7 @@ fn the_error_screen_carries_the_disconnect_reason() {
     let mut ui = UiState::new();
     ui.begin(SessionKind::Multiplayer);
     ui.session_failed(crate::sim::SessionEnd::disconnected(
-            lodestone_model::Text::literal("Server closed"),
+            lodestone_model::ResolvedText::literal("Server closed"),
         ));
     let statuses = StatusCache::with_probe(unavailable_probe());
     let mut fav = FaviconCache::new();
@@ -4827,7 +4827,8 @@ fn book_frames_sample_the_vanilla_192_pixel_region_of_the_pack_texture() {
             "Steve".to_string(),
             0,
             &[lodestone_model::text::Text::literal("page")],
-        ),
+                                &|_| None,
+),
     );
     let drawn = build(&book_view_frame(&state), Some(&atlas), None, V_W, V_H);
     let (min, max) = loose_uv_bounds(&atlas, "book/background");
@@ -7913,7 +7914,7 @@ fn a_kick_reason_keeps_the_server_s_colours_through_frame_and_draw() {
     );
     let mut ui = UiState::new();
     ui.begin(crate::menu::SessionKind::Multiplayer);
-    ui.session_failed(crate::sim::SessionEnd::disconnected(reason));
+    ui.session_failed(crate::sim::SessionEnd::disconnected(reason.resolve(&|_| None)));
     assert_eq!(ui.screen(), Screen::Error);
 
     let frame = frame_for(
@@ -7997,7 +7998,7 @@ fn an_uncoloured_kick_reason_still_draws_in_the_error_colour() {
 
     let mut ui = UiState::new();
     ui.begin(crate::menu::SessionKind::Multiplayer);
-    ui.session_failed(crate::sim::SessionEnd::disconnected(Text::literal(
+    ui.session_failed(crate::sim::SessionEnd::disconnected(lodestone_model::ResolvedText::literal(
         "kick reason",
     )));
     let frame = frame_for(
@@ -8073,11 +8074,11 @@ fn the_error_screen_titles_a_failure_differently_from_a_disconnect() {
     };
 
     let mut wrong = Vec::new();
-    let disconnected = title_for(crate::sim::SessionEnd::disconnected(Text::literal("bye")));
+    let disconnected = title_for(crate::sim::SessionEnd::disconnected(lodestone_model::ResolvedText::literal("bye")));
     if disconnected != "Connection Lost" {
         wrong.push(format!("disconnected: {disconnected}"));
     }
-    let failed = title_for(crate::sim::SessionEnd::failed(Text::literal(
+    let failed = title_for(crate::sim::SessionEnd::failed(lodestone_model::ResolvedText::literal(
         "connect: connection refused",
     )));
     if failed != "Failed to connect to the server" {

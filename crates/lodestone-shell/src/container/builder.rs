@@ -500,7 +500,7 @@ mod tests {
             extra: vec![hex, inline_legacy, named],
             ..Text::default()
         };
-        let spans = root.to_spans();
+        let spans = root.resolve(&|_| None).to_spans();
         assert_eq!(spans.len(), 3, "sanity: three runs in, three runs out — {spans:?}");
 
         let mut b = Builder::new(200.0, 100.0, None);
@@ -533,7 +533,7 @@ mod tests {
         // representation for `TextColor::Rgb`. Must show the loss, or the
         // assertion above proves nothing about which call actually carries
         // the colour.
-        let flattened = root.to_legacy_string();
+        let flattened = root.resolve(&|_| None).to_legacy_string();
         let mut legacy_b = Builder::new(200.0, 100.0, None);
         legacy_b.shadowed_label(&flattened, 0.0, 0.0, 1.0, [1.0, 1.0, 1.0, 1.0]);
         assert!(

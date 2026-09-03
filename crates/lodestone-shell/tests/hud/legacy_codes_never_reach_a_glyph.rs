@@ -77,7 +77,7 @@ const RED: (u8, u8, u8) = (0xff, 0x55, 0x55);
 /// component parsed from the legacy string, then `to_spans`, which is the expanding
 /// pass. Building `TextSpan`s by hand here would bypass the expansion under test.
 fn coded_spans(s: &str) -> Vec<TextSpan> {
-    Text::from_legacy(s).to_spans()
+    Text::from_legacy(s).resolve(&|_| None).to_spans()
 }
 
 /// Every vertex's `(x, y)`, quantised to the byte grid the canvas uses. Positions

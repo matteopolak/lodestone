@@ -1329,7 +1329,7 @@ impl WindowApp {
             // better than a world that silently never loads.
             Err(e) => self
                 .ui
-                .session_failed(crate::sim::SessionEnd::failed(lodestone_model::Text::literal(e.to_string()))),
+                .session_failed(crate::sim::SessionEnd::failed(lodestone_model::ResolvedText::literal(e.to_string()))),
         }
         // Remembered for Open to LAN, which republishes this exact
         // launch on a TCP port. Recorded even on the error arm above: a failed

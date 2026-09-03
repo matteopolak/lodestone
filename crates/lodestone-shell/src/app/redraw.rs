@@ -1714,7 +1714,7 @@ impl WindowApp {
             })
             .flatten()
             .and_then(|hit| hit.hover)
-            .map(|hover| hover.value.to_spans());
+            .map(|hover| self.sim.resolve_text(&hover.value).to_spans());
 
         // The top-right status-effect overlay's own list, resolved before the
         // frame is built because the draw borrows it as a slice.

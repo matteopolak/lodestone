@@ -530,7 +530,7 @@ pub fn menu_title(
     title: &lodestone_model::Text,
     translate: &dyn Fn(&str) -> Option<String>,
 ) -> String {
-    lodestone_game::text::resolve_to_string(title, translate)
+    title.resolve(translate).to_plain_string()
 }
 
 /// `en_us.json`'s value for `container.inventory` — the fallback
@@ -556,7 +556,7 @@ const MERCHANT_LEVEL_WORDS: [&str; 5] = ["Novice", "Apprentice", "Journeyman", "
 /// `merchant.title` is `"%s - %s"` (`en_us.json`) — a genuinely nested
 /// translation, the villager's own name as the first argument and a *second*
 /// translated component (the level word) as the second, which is why this
-/// goes through [`lodestone_game::text::resolve_to_string`] rather than a
+/// goes through [`lodestone_model::Text::resolve`] rather than a
 /// local `format!`: a renamed villager's name can itself carry styling or a
 /// further translate node (a custom-named villager from a command block, for
 /// instance), and only the resolver preserves that.
