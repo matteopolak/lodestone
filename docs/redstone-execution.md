@@ -163,8 +163,8 @@ Stated up front rather than discovered later.
 | **Repeater/comparator delay, tick scheduling** | Untouched. Scheduling happens inside the arms; the queue, its `DRAIN_ORDER` and its dedup are not involved. |
 | **Property-sensitive dispatch** | Works. A palette entry is a whole canonical state string, so a predicate reading `powered=true` classifies correctly per entry. |
 | **Neighbour-sensitive dispatch** | **Not supported, by design.** A predicate that reads any *other* cell cannot be a per-entry classification. Such a test must stay inside its arm's body. `redstone_graph`'s module doc states this as the rule for adding a family. |
-| **Chunk boundaries** | **Unchanged, and still the largest real gap.** `react_to_notification` returns an empty cascade outside the 16×16 column it was handed, and `redstone::make_lookup` answers `minecraft:air` there. A circuit crossing a chunk border truncates silently today. That is a correctness gap this work does not close and does not worsen; it is the prerequisite for any contraption-scale benchmark that is larger than one column. |
-| **Unloaded chunks** | Unchanged. The table is derived data: a column unloading drops it, a reload rebuilds it from the palette. Nothing is persisted, so there is no reload staleness. |
+| **Chunk boundaries** | **Closed for the live propagation path (issue #548).** `lodestone_server::random_tick::RedstoneColumns` replaces the single `&ChunkColumn` `react_to_notification`, `propagate_and_react_with_entities` and the placement/tripwire arms read and write through: home stays a plain `&mut` borrow, and any neighbouring column a cascade actually reaches is fetched lazily via `ChunkSource::is_column_resident` (never generated) and cached for the rest of that one cascade. `crate::tick`'s four production call sites — the scheduled-tick drain (including the torch/repeater/comparator reads that precede a re-propagate), target-block hits, and falling-block landings — build it over the real `ChunkStore`; every oracle gate and pre-existing test still gets the old single-column behaviour by construction (`RedstoneColumns` built over a `NoNeighbors` source, which reports every neighbour unloaded). **Two paths still stop at the home column, deliberately, pending their own pass:** the random-tick-triggered notify (`RandomTickScheduler::tick_randomly_ticking_block`'s own call into `propagate_and_react`, for a grass/crop/lava/sapling/leaf mutation's fan-out) and the two entry points `crate::server` calls directly (`react_at_placement_with_entities`, `react_at_removal`) — none of their call sites currently hold a `ChunkSource` to hand in. |
+| **Unloaded chunks** | Unchanged. The table is derived data: a column unloading drops it, a reload rebuilds it from the palette. Nothing is persisted, so there is no reload staleness. `RedstoneColumns`'s own neighbour cache is stricter than a full reload would need: it is scoped to one cascade and dropped at the end of the call, so nothing about cross-chunk reach is retained between notifications either. |
 | **Piston/slime movability** | Out of scope. "Which blocks move when this piston fires" is a connected-component query over a different relation with different edges. It shares the caching *idea* and none of the topology. |
 
 ---
@@ -313,18 +313,24 @@ Gotchas:
 
 ## What to do next, in order of value
 
-1. **Cross-column propagation.** The single largest gap between this model and
-   anything a community contraption needs, and it is a *correctness* gap, not a
-   performance one — a circuit crossing a chunk border truncates with no error.
-   Everything below is less valuable than this.
-2. **`redstone::make_lookup`'s allocation.** It returns
+1. **`redstone::make_lookup`'s allocation.** It returns
    `impl Fn(BlockPos) -> String` and heap-allocates a fresh `String` per read;
    `ChunkColumn::block_state` already returns `&str`, so the allocation is pure
    waste. 5899 of them in one active tick on `raid_farm`, against 837
-   notifications — this is now the largest remaining constant factor by a wide
-   margin. It is a signature change across roughly 60 call sites spanning
-   `redstone*.rs`, `piston.rs`, `fire.rs`, `fluid.rs`, `block_placement.rs` and
-   `server.rs`, which is why it is not folded into this change.
+   notifications — this is the largest remaining constant factor by a wide
+   margin, and #548's cross-chunk landing did not touch it:
+   `RedstoneColumns::state` still returns an owned `String` (it has to, to keep
+   satisfying every `redstone::*`/`redstone_wire::*`/… function's existing
+   `F: Fn(BlockPos) -> String` bound unchanged). It is a signature change
+   across roughly 60 call sites spanning `redstone*.rs`, `piston.rs`, `fire.rs`,
+   `fluid.rs`, `block_placement.rs` and `server.rs`, which is why it is still
+   not folded into any change so far.
+2. **The two remaining single-column call sites named in the table above**
+   (the random-tick notify fan-out, and `crate::server`'s placement/removal
+   entry points) — smaller than #1, but each is a real place a contraption can
+   still truncate at a chunk edge. Both need only a `ChunkSource` threaded one
+   or two calls deeper; neither needs a new abstraction, `RedstoneColumns`
+   already does the work once it is handed one.
 3. **A listener index**, only if 1 and 2 land and counters still show
    notification dispatch dominating. The bar is deliberately high: it is the one
    change here that introduces a defect class this subsystem currently cannot
