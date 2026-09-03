@@ -146,6 +146,7 @@ fn state_name(state: ConnectionState) -> &'static str {
 fn state_from_name(name: &str) -> ConnectionState {
     match name {
         "login" => ConnectionState::Login,
+        "configuration" => ConnectionState::Configuration,
         "play" => ConnectionState::Play,
         other => panic!("capture names an unexpected state {other:?}"),
     }
@@ -552,16 +553,142 @@ fn the_capture_carries_a_real_player_chat_and_decodes_both_of_its_texts() {
     );
 }
 
+/// The `chunkData` buffer is longer than the sections inside it, at 762 too.
+///
+/// This is the one place in this crate where the exact-length assertion every
+/// other protocol relies on is simply false, and it is a property of the wire
+/// rather than of the decoder — no round trip against our own encoder could
+/// find it. The 1.17 era measured it against 1.18.2; this re-measures it
+/// against 1.19.4's own bytes rather than inheriting the claim.
+///
+/// The check the decoder makes is the strongest one still true: read exactly
+/// `section_count` sections, then require what remains to be all zero and no
+/// longer than the section count. This test pins the *amount* so that a
+/// server-side change (or a decoder that starts over-reading) shows up as a
+/// number to re-derive rather than as a silently looser gate.
+#[test]
+fn the_chunk_buffer_carries_trailing_padding_and_the_decoder_tolerates_exactly_it() {
+    use lodestone_core::{Reader, read_named_nbt};
+    use lodestone_v1_19::packets::chunk::{ChunkShape, MapChunk};
+
+    let map_chunk_id = clientbound_id("minecraft:map_chunk");
+    let body = read_capture(ERA.minecraft)
+        .into_iter()
+        .find(|packet| packet.state == ConnectionState::Play && packet.id == map_chunk_id)
+        .expect("the capture carries a chunk column")
+        .payload;
+
+    // Walk the header by hand to recover the buffer's own declared length.
+    let mut reader = Reader::new(&body);
+    reader.i32().expect("chunk x");
+    reader.i32().expect("chunk z");
+    read_named_nbt(&mut reader).expect("heightmaps");
+    let declared = reader.var_i32().expect("chunkData length");
+    assert_eq!(
+        declared, 2268,
+        "the committed capture's column declares this buffer length"
+    );
+
+    // And the decoder consumes the whole packet with that buffer in it.
+    let shape = ChunkShape::overworld(PROTOCOL_1_19_4);
+    let mut reader = Reader::new(&body);
+    let data = MapChunk::decode(&mut reader, &shape).expect("the column decodes");
+    assert_eq!(data.column.section_count(), 24);
+    assert_eq!(
+        reader.remaining(),
+        0,
+        "the light payload after the buffer must parse to the packet's last byte"
+    );
+}
+
+/// The 762 login packet is not the 758 one, and not the 766 one either.
+///
+/// Recorded as a test because it was found the hard way: the era adapter
+/// **cannot join either neighbour at all**, and the reason is one byte at the
+/// end of `login_start`. 758 reads a bare username and treats 762's presence
+/// byte as the start of the next packet; 766 reads a *required* 16-byte
+/// profile UUID and rejects 762's single `false` byte outright, which a
+/// 1.20.6 server reports as a decode failure on its own login packet.
+///
+/// That is why the neighbour captures above are recorded with a hand-written
+/// login rather than through this crate's adapter.
+#[test]
+fn the_login_packet_is_this_protocols_own_shape() {
+    use lodestone_core::{Ctx, encode_body};
+    use lodestone_v1_19::packets::login::LoginStart;
+
+    let start = LoginStart {
+        username: "lodestone".to_owned(),
+        has_uuid: false,
+        uuid: None,
+    };
+    let bytes = encode_body(&start, Ctx { version: PROTOCOL_1_19_4 }).expect("login_start encodes");
+    // 1 length byte + 9 name bytes + 1 presence byte.
+    assert_eq!(
+        bytes.len(),
+        11,
+        "762 appends exactly one presence byte after the name: {bytes:?}"
+    );
+    assert_eq!(*bytes.last().expect("non-empty"), 0);
+
+    // A 758 server would stop after the name; a 766 server would want sixteen
+    // more bytes. Both numbers are stated so the shape claim is falsifiable
+    // rather than a comment.
+    assert_eq!(&bytes[..10], b"\x09lodestone", "the 758 prefix");
+    assert_ne!(bytes.len(), 10 + 16, "766's required-UUID form");
+}
+
 // ---------------------------------------------------------------------------
 // Negative controls — each measured, not predicted.
 // ---------------------------------------------------------------------------
 
+/// The neighbour's own clientbound name for a wire id, read out of its own
+/// `minecraft-data` table rather than out of this crate's.
+///
+/// A control needs the *neighbour protocol's* naming to say what a misrouted
+/// id would have been on the other side of the break, and it cannot ask the
+/// neighbouring crate: the isolation lint forbids a version crate depending on
+/// another, and doing so would make the control agree with a sibling port
+/// rather than with the wire.
+fn neighbour_clientbound_name(oracle: &Oracle, id: i32) -> Option<&'static str> {
+    let table: &[(&'static str, i32)] = if oracle.protocol < PROTOCOL_1_19_4 {
+        &NEIGHBOUR_BELOW_NAMES
+    } else {
+        &NEIGHBOUR_ABOVE_NAMES
+    };
+    table
+        .iter()
+        .find(|(_, entry)| *entry == id)
+        .map(|(name, _)| *name)
+}
+
+include!("captures/neighbour_names.rs");
+
 /// Measured split for the 1.18.2 capture replayed through the 762 adapter:
 /// `(errored, silent, plausible wrong events, ids 762 does not carry)`.
-const MISROUTE_FROM_758: (usize, usize, usize, usize) = (0, 0, 0, 0);
+///
+/// **Run, not predicted, and the answer is the weak one.** Ten of the 64
+/// packets in the lower neighbour's join produce a real, well-formed,
+/// entirely wrong gameplay event. Two of them are wrong in a way nothing
+/// downstream could notice: `entity_metadata` at 758 sits where
+/// `held_item_slot` does at 762, so a metadata update becomes a hotbar
+/// selection, and `update_time` sits where `set_passengers` does, so a clock
+/// tick becomes a vehicle with no passengers. The others are wrong in a way
+/// something might: a mob spawn read as an experience orb lands at
+/// coordinates on the order of `1e222`.
+const MISROUTE_FROM_758: (usize, usize, usize, usize) = (35, 19, 10, 0);
 
-/// The same, for the 1.20.6 capture.
-const MISROUTE_FROM_766: (usize, usize, usize, usize) = (0, 0, 0, 0);
+/// The same, for the 1.20.6 capture — and it carries the sharpest single
+/// result in this file.
+///
+/// Three plausible wrong events, and **two of them come from an id whose name
+/// agrees on both sides**: `spawn_entity` is id 1 at 762 and at 766, so
+/// nothing about the routing is wrong at all — only the shape and the entity
+/// registry are. A 1.20.6 minecart spawn read at 762 comes out as a
+/// `spawner_minecart` at a plausible position with a plausible velocity.
+/// That is the failure this era's per-era entity table and its inserted
+/// head-rotation byte exist to prevent, demonstrated rather than described.
+const MISROUTE_FROM_766: (usize, usize, usize, usize) = (39, 13, 3, 10);
 
 /// **The per-packet negative control**, run against real bytes from both
 /// neighbouring versions.
@@ -617,7 +744,16 @@ fn misrouting_from_a_neighbour_is_measured_not_assumed() {
                     if emitted.is_empty() {
                         silent += 1;
                     } else {
-                        plausible.push(format!("id {} -> {emitted:?}", packet.id));
+                        plausible.push(format!(
+                            "id {} is {:?} at {} and {:?} at 762 -> {emitted:?}",
+                            packet.id,
+                            neighbour_clientbound_name(oracle, packet.id),
+                            oracle.protocol,
+                            clientbound_entries()
+                                .iter()
+                                .find(|(_, id)| *id == packet.id)
+                                .map(|(name, _)| *name),
+                        ));
                     }
                 }
             }
@@ -637,6 +773,16 @@ fn misrouting_from_a_neighbour_is_measured_not_assumed() {
              adjusting the numbers. Plausible wrong events, if any: {plausible:#?}",
             oracle.minecraft
         );
+
+        // Pin the sharpest individual result so it cannot quietly weaken into
+        // a different, milder one while the counts still add up.
+        if oracle.protocol > PROTOCOL_1_19_4 {
+            assert!(
+                plausible.iter().any(|entry| entry.contains("spawner_minecart")),
+                "the 766 control's point is that `spawn_entity` keeps its id and \
+                 changes its meaning; got {plausible:#?}"
+            );
+        }
     }
 }
 
@@ -890,14 +1036,233 @@ async fn record_1_19_4() {
     record(&ERA).await;
 }
 
+/// Login-state clientbound `compress`, the same id in 758, 762 and 766.
+const LOGIN_SET_COMPRESSION: i32 = 3;
+/// Login-state clientbound `success`, likewise the same id in all three.
+const LOGIN_SUCCESS: i32 = 2;
+/// Login-state **serverbound** `login_acknowledged`, protocol 766 only.
+///
+/// 1.20.2 inserted a configuration phase between login and play, so a 766
+/// server holds the connection in Login until the client acknowledges, then
+/// in Configuration until both sides say they are finished. Neither exists at
+/// 758 or 762 — which is itself part of what the upper boundary measures, and
+/// is why the recorder needs these three ids to get a 766 capture at all.
+const LOGIN_ACKNOWLEDGED_766: i32 = 3;
+/// Configuration-state clientbound `finish_configuration`, protocol 766.
+const CONFIG_FINISH_CLIENTBOUND_766: i32 = 3;
+/// Configuration-state serverbound `finish_configuration`, protocol 766.
+const CONFIG_FINISH_SERVERBOUND_766: i32 = 3;
+/// Configuration-state clientbound `select_known_packs`, protocol 766. The
+/// server will not proceed to `finish_configuration` until the client answers
+/// it, so a recorder that ignores it simply hangs in Configuration.
+const CONFIG_KNOWN_PACKS_CLIENTBOUND_766: i32 = 14;
+/// Its serverbound answer. An empty list is valid and means "I know none of
+/// them, send the registries in full", which is what this recorder wants.
+const CONFIG_KNOWN_PACKS_SERVERBOUND_766: i32 = 7;
+
+/// Encodes a VarInt.
+fn var_int(mut value: i32) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut bits = value as u32;
+    loop {
+        let byte = (bits & 0x7f) as u8;
+        bits >>= 7;
+        value = bits as i32;
+        if value == 0 {
+            out.push(byte);
+            return out;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// Encodes a length-prefixed UTF-8 string.
+fn wire_string(text: &str) -> Vec<u8> {
+    let mut out = var_int(i32::try_from(text.len()).expect("a test username or hostname is short"));
+    out.extend_from_slice(text.as_bytes());
+    out
+}
+
+/// Reads a VarInt from the front of a payload.
+fn decode_leading_var_int(payload: &[u8]) -> i32 {
+    let mut value = 0i32;
+    for (index, byte) in payload.iter().enumerate().take(5) {
+        value |= i32::from(byte & 0x7f) << (7 * index);
+        if byte & 0x80 == 0 {
+            break;
+        }
+    }
+    value
+}
+
+/// Drives a real join against a **neighbouring** protocol's server with a
+/// hand-written handshake, and records what it sends.
+///
+/// No adapter is involved on either side, and that is forced rather than
+/// stylistic: the 762 adapter **cannot** join either neighbour, because its
+/// `login_start` appends a profile-UUID option byte 758 does not read and
+/// 766's login sequence differs again. So the only way to obtain a
+/// neighbour's play bytes is a hand-written login, and the only protocol
+/// knowledge it needs is the handshake's four fields plus two login packet
+/// ids that are the same number in 758, 762 and 766. That also keeps the
+/// control free of any dependency on another version crate, which the
+/// isolation lint forbids and which would in any case make the control agree
+/// with a sibling port rather than with the wire.
+async fn record_neighbour(oracle: &Oracle) {
+    use lodestone_net::Connection;
+    use lodestone_testsupport::unique_username;
+    use std::time::Instant;
+
+    let username = unique_username();
+    let mut conn = Connection::connect(("127.0.0.1", oracle.game_port))
+        .await
+        .unwrap_or_else(|err| {
+            panic!(
+                "connect to the {} oracle on :{} ({err}) -- start it with \
+                 ./scripts/live-oracles/legacy.sh {}",
+                oracle.minecraft, oracle.game_port, oracle.minecraft
+            )
+        });
+
+    let mut handshake = var_int(oracle.protocol);
+    handshake.extend(wire_string("127.0.0.1"));
+    handshake.extend_from_slice(&oracle.game_port.to_be_bytes());
+    handshake.extend(var_int(2));
+    conn.write_packet(0, &handshake).await.expect("handshake");
+    // Three shapes, one per protocol, and each server is told its own rather
+    // than this crate's: 758 reads a bare username; 762 appends an *optional*
+    // profile UUID (a presence byte, `false` here); 766 appends a
+    // **required** one, with no presence byte at all. Sending 762's form to a
+    // 766 server is rejected outright at login, which is the upper boundary
+    // stated in its bluntest form.
+    let mut login_start = wire_string(&username);
+    if oracle.protocol == PROTOCOL_1_19_4 {
+        login_start.push(0);
+    } else if oracle.protocol > PROTOCOL_1_19_4 {
+        login_start.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    }
+    conn.write_packet(0, &login_start).await.expect("login start");
+
+    let mut state = ConnectionState::Login;
+    let mut recorded: Vec<CapturedPacket> = Vec::new();
+    let mut seen_per_id: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
+    let started = Instant::now();
+    let _ = tokio::time::timeout(Duration::from_secs(90), async {
+        loop {
+            if started.elapsed() > Duration::from_secs(80) {
+                break;
+            }
+            let read = tokio::time::timeout(Duration::from_secs(8), conn.read_packet()).await;
+            let (packet_id, payload) = match read {
+                Err(_) | Ok(Ok(None)) => break,
+                Ok(Ok(Some(packet))) => packet,
+                Ok(Err(err)) => panic!("read error: {err}"),
+            };
+            if state == ConnectionState::Login {
+                if packet_id == LOGIN_SET_COMPRESSION {
+                    conn.set_compression(decode_leading_var_int(&payload));
+                    continue;
+                }
+                if packet_id == LOGIN_SUCCESS {
+                    if oracle.protocol > PROTOCOL_1_19_4 {
+                        // 766 goes Login -> Configuration -> Play.
+                        conn.write_packet(LOGIN_ACKNOWLEDGED_766, &[])
+                            .await
+                            .expect("login acknowledged");
+                        state = ConnectionState::Configuration;
+                    } else {
+                        state = ConnectionState::Play;
+                    }
+                    continue;
+                }
+            }
+            if state == ConnectionState::Configuration
+                && packet_id == CONFIG_KNOWN_PACKS_CLIENTBOUND_766
+            {
+                conn.write_packet(CONFIG_KNOWN_PACKS_SERVERBOUND_766, &var_int(0))
+                    .await
+                    .expect("known packs");
+                continue;
+            }
+            if state == ConnectionState::Configuration
+                && packet_id == CONFIG_FINISH_CLIENTBOUND_766
+            {
+                conn.write_packet(CONFIG_FINISH_SERVERBOUND_766, &[])
+                    .await
+                    .expect("finish configuration");
+                state = ConnectionState::Play;
+                continue;
+            }
+            let seen = seen_per_id.entry(packet_id).or_default();
+            if *seen < MAX_BODIES_PER_ID && payload.len() < 200_000 {
+                *seen += 1;
+                recorded.push(CapturedPacket {
+                    state,
+                    id: packet_id,
+                    payload,
+                });
+            }
+        }
+    })
+    .await;
+
+    assert_eq!(
+        state,
+        ConnectionState::Play,
+        "never reached Play against the {} oracle",
+        oracle.minecraft
+    );
+    assert!(
+        recorded.len() >= 20,
+        "the {} neighbour capture is too short to be a real join ({} packets)",
+        oracle.minecraft,
+        recorded.len()
+    );
+
+    let mut out = String::new();
+    let _ = writeln!(
+        out,
+        "# lodestone clientbound join capture -- Minecraft {} (protocol {})",
+        oracle.minecraft, oracle.protocol
+    );
+    let _ = writeln!(
+        out,
+        "# recorded by tests/capture_join.rs against ./scripts/live-oracles/legacy.sh {}",
+        oracle.minecraft
+    );
+    let _ = writeln!(
+        out,
+        "# NEIGHBOUR capture: a protocol this crate does NOT serve. Recorded with a"
+    );
+    let _ = writeln!(
+        out,
+        "# hand-written login, never through this crate's adapter, and used only by"
+    );
+    let _ = writeln!(out, "# the era-boundary controls.");
+    let _ = writeln!(out, "# <state> <packet id> <body, hex>");
+    for packet in &recorded {
+        let _ = writeln!(
+            out,
+            "{} {} {}",
+            state_name(packet.state),
+            packet.id,
+            to_hex(&packet.payload)
+        );
+    }
+    let path = capture_path(oracle.minecraft);
+    std::fs::create_dir_all(captures_dir()).expect("create captures dir");
+    std::fs::write(&path, out).expect("write capture");
+    eprintln!("wrote {} ({} packets)", path.display(), recorded.len());
+}
+
 #[tokio::test]
 #[ignore = "records the lower neighbour: ./scripts/live-oracles/legacy.sh 1.18.2"]
 async fn record_1_18_2() {
-    record(&BELOW).await;
+    record_neighbour(&BELOW).await;
 }
 
 #[tokio::test]
 #[ignore = "records the upper neighbour: ./scripts/live-oracles/legacy.sh 1.20.6"]
 async fn record_1_20_6() {
-    record(&ABOVE).await;
+    record_neighbour(&ABOVE).await;
 }
