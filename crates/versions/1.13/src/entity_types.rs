@@ -67,6 +67,8 @@ pub struct EntityTypeTable {
     /// exists for, and `tests/entity_types.rs` checks this pair on every run
     /// without needing the source data.
     declared_len: usize,
+    /// The same guard for [`Self::objects`].
+    declared_object_len: usize,
 }
 
 impl EntityTypeTable {
@@ -127,6 +129,13 @@ impl EntityTypeTable {
     pub const fn object_len(&self) -> usize {
         self.objects.len()
     }
+
+    /// The object-space entry count the generator declared. Always equal to
+    /// [`Self::object_len`]; checked in `tests/entity_types.rs`.
+    #[must_use]
+    pub const fn declared_object_len(&self) -> usize {
+        self.declared_object_len
+    }
 }
 
 /// Minecraft 1.13.2's registry.
@@ -134,6 +143,7 @@ static TABLE_404: EntityTypeTable = EntityTypeTable {
     entries: &generated_entity_types::ENTITY_TYPES,
     objects: &generated_object_types::OBJECT_TYPES,
     declared_len: generated_entity_types::ENTITY_TYPE_COUNT,
+    declared_object_len: generated_object_types::OBJECT_TYPE_COUNT,
 };
 
 /// Resolves a negotiated protocol to its entity-type tables.

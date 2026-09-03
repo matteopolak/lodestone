@@ -424,6 +424,7 @@ this block; the commands are given so you can. Stages 0-3 have landed:
 | 3 dispatch tables | v1-8/v1-9/v1-14 carry 59/62/54 `Handler::new` entries and 20/32/52 `IGNORED` ones |
 | 4 first era crate | `lodestone_v1_9::PROTOCOLS` is `[110, 210, 316, 340]`, with a committed join capture per new protocol under `crates/versions/1.9/tests/captures/` |
 | 7 second era crate | `lodestone_v1_14::PROTOCOLS` is `[498, 578, 754]`, with a committed join capture per new protocol under `crates/versions/1.14/tests/captures/` |
+| 8 (first era) 1.13.2 | `lodestone_v1_13::PROTOCOLS` is `[404]`, with a join capture and **two neighbour captures** under `crates/versions/1.13/tests/captures/` |
 
 **Stage 4's measured cost, which is what this plan asked it to produce.** Diffed against
 `455a87d6`, excluding the three generated id tables (1,971 lines) and the three captured-byte
@@ -480,8 +481,48 @@ version's own jar, so it costs review, not authorship.
 See [`docs/protocol-1-14-era.md`](../protocol-1-14-era.md) for that era crate's own
 documentation.
 
-`cargo xtask connectedness` currently reports v1-8 59/74, v1-9 62/80, v1-14 54/92, v26-2 141/141
-clientbound, with zero decoded-but-stranded in every family.
+**Stage 8's first era, 1.13.2, and the two things it corrects.** Diffed against
+`4fcc999d`, excluding the five generated tables (9,744 lines), the committed jar dump
+(83,529) and the captured bytes (240):
+
+| bucket | lines added |
+|---|---|
+| era-crate source (`crates/versions/1.13/src`, excluding `generated/`) | 5,531 |
+| shared-crate source (four `lodestone-protocol-common` range widenings) plus registry and workspace wiring | 98 |
+| tests (`tests/*.rs`) | 2,270 |
+| oracle script and the two committed oracle transcripts | 226 |
+| **hand-written total** | **8,125** |
+
+A **singleton era has no marginal figure**, so the plan's ~500-line falsifier does
+not apply to it; the comparable number is the whole-family one, and at 5,531
+source lines it is below `codegen-ratio`'s reading for v1-14 (6,257) and roughly
+double the ~2–2.5k this plan projected for 1.13.2. The gap is not the mechanism
+failing: it is that a new era crate pays for a whole adapter, and the projection
+was made before Stage 7 measured what a post-Flattening era actually costs.
+
+Two corrections to the record this stage forces. First, **`minecraft-data` is
+wrong about 1.13.2's entity list four separate ways** — 28 stale pre-1.13 object
+rows mixed into a 95-entry unified registry, and three names that are not
+identifiers at all (`iron_golem}`, `fireworks_rocket`, `commandblock_minecart`),
+each rejected outright by vanilla's own `/summon`. Second, and more expensive:
+**1.13 unified the entity registry but not the two wire id spaces.** At 404
+`spawn_entity` still carries the pre-1.13 *object* numbering and only
+`spawn_entity_living` uses the unified one, so an adapter that resolves an object
+spawn through the unified table names a real, wrong entity for every object on
+the wire. Both were caught by a wire oracle, not by a dataset.
+
+The negative control also came out differently from Stage 7's, and the honest
+answer is the weaker one: measured across two real neighbour captures, a misroute
+across either era boundary **does** produce a plausible wrong event — 7 of 25
+across the lower boundary and 7 of 50 across the upper. The guarantee this crate
+can offer is the whole-stream one, not the per-packet one.
+
+See [`docs/protocol-1-13-era.md`](../protocol-1-13-era.md) for that era crate's
+own documentation.
+
+`cargo xtask connectedness` currently reports v1-8 59/74, v1-9 62/80, v1-13 51/86,
+v1-14 54/92, v26-2 141/141 clientbound, with zero decoded-but-stranded in every
+family.
 
 **v26-2 has not migrated and that is deliberate** — it is Stage 6, explicitly deferred and not a
 blocker. It still dispatches through the if-arm chain with no `Handler::new` and no `IGNORED` list.

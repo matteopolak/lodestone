@@ -391,8 +391,15 @@ fn the_minecart_family_shares_one_object_id() {
 fn the_declared_length_matches_the_table() {
     let table = entity_types::table_for(PROTOCOL);
     assert_eq!(table.len(), table.declared_len());
+    assert_eq!(table.object_len(), table.declared_object_len());
     assert!(!table.is_empty());
     assert_eq!(table.len(), 95, "1.13.2's unified entity registry has 95 entries");
+    assert!(
+        table.object_len() >= 20,
+        "the object table covers only {} ids; it is generated from the wire \
+         transcript, so a shrinking count means a truncated recording",
+        table.object_len()
+    );
 }
 
 /// The unified registry's own bounds.
