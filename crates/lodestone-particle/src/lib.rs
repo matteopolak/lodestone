@@ -227,6 +227,40 @@ pub enum Sheet {
     Flash,
     /// `particle/firefly` — the firefly bush's mote.
     Firefly,
+    /// `particle/noxious_gas_01` … `noxious_gas_08` — `noxious_gas.json`,
+    /// ascending.
+    NoxiousGas,
+    /// `particle/bubble_white` — `sulfur_bubbles.json`'s single frame.
+    ///
+    /// A different physical texture from [`Self::Bubble`]'s `bubble` despite
+    /// both being one-frame water-bubble sheets: the sulfur variant is its
+    /// own asset, not a recolour applied at draw time.
+    BubbleWhite,
+    /// `particle/sulfur_cube_goo` — `sulfur_cube_goo.json`'s single frame.
+    SulfurCubeGoo,
+    /// `particle/geyser_base_01` … `geyser_base_08` — `geyser_base.json`,
+    /// ascending.
+    GeyserBase,
+    /// `particle/geyser_poof_01` … `geyser_poof_08` — `geyser_poof.json`,
+    /// ascending.
+    GeyserPoof,
+    /// `particle/geyser_plume_01` … `geyser_plume_08` — `geyser_plume.json`,
+    /// ascending.
+    GeyserPlume,
+    /// `particle/trial_spawner_detection_0` … `_4` —
+    /// `trial_spawner_detection.json`, ascending.
+    TrialSpawnerDetection,
+    /// `particle/trial_spawner_detection_ominous_0` … `_4` —
+    /// `trial_spawner_detection_ominous.json`, ascending. A separate physical
+    /// sheet from [`Self::TrialSpawnerDetection`]: the ominous variant names
+    /// its own five textures, not a recolour of the plain one.
+    TrialSpawnerDetectionOminous,
+    /// `particle/vault_connection` — `vault_connection.json`'s single frame.
+    VaultConnection,
+    /// `particle/ominous_spawning` — `ominous_spawning.json`'s single frame.
+    OminousSpawning,
+    /// `particle/shriek` — `shriek.json`'s single frame.
+    Shriek,
 }
 
 impl Sheet {
@@ -394,6 +428,47 @@ impl Sheet {
             ],
             Self::Flash => &["flash"],
             Self::Firefly => &["firefly"],
+            // Ascending, per `noxious_gas.json`.
+            Self::NoxiousGas => &[
+                "noxious_gas_01", "noxious_gas_02", "noxious_gas_03", "noxious_gas_04",
+                "noxious_gas_05", "noxious_gas_06", "noxious_gas_07", "noxious_gas_08",
+            ],
+            Self::BubbleWhite => &["bubble_white"],
+            Self::SulfurCubeGoo => &["sulfur_cube_goo"],
+            // Ascending, per `geyser_base.json`.
+            Self::GeyserBase => &[
+                "geyser_base_01", "geyser_base_02", "geyser_base_03", "geyser_base_04",
+                "geyser_base_05", "geyser_base_06", "geyser_base_07", "geyser_base_08",
+            ],
+            // Ascending, per `geyser_poof.json`.
+            Self::GeyserPoof => &[
+                "geyser_poof_01", "geyser_poof_02", "geyser_poof_03", "geyser_poof_04",
+                "geyser_poof_05", "geyser_poof_06", "geyser_poof_07", "geyser_poof_08",
+            ],
+            // Ascending, per `geyser_plume.json`.
+            Self::GeyserPlume => &[
+                "geyser_plume_01", "geyser_plume_02", "geyser_plume_03", "geyser_plume_04",
+                "geyser_plume_05", "geyser_plume_06", "geyser_plume_07", "geyser_plume_08",
+            ],
+            // Ascending, per `trial_spawner_detection.json`.
+            Self::TrialSpawnerDetection => &[
+                "trial_spawner_detection_0",
+                "trial_spawner_detection_1",
+                "trial_spawner_detection_2",
+                "trial_spawner_detection_3",
+                "trial_spawner_detection_4",
+            ],
+            // Ascending, per `trial_spawner_detection_ominous.json`.
+            Self::TrialSpawnerDetectionOminous => &[
+                "trial_spawner_detection_ominous_0",
+                "trial_spawner_detection_ominous_1",
+                "trial_spawner_detection_ominous_2",
+                "trial_spawner_detection_ominous_3",
+                "trial_spawner_detection_ominous_4",
+            ],
+            Self::VaultConnection => &["vault_connection"],
+            Self::OminousSpawning => &["ominous_spawning"],
+            Self::Shriek => &["shriek"],
         }
     }
 
@@ -481,6 +556,17 @@ impl Sheet {
             Self::TintedLeaves,
             Self::Flash,
             Self::Firefly,
+            Self::NoxiousGas,
+            Self::BubbleWhite,
+            Self::SulfurCubeGoo,
+            Self::GeyserBase,
+            Self::GeyserPoof,
+            Self::GeyserPlume,
+            Self::TrialSpawnerDetection,
+            Self::TrialSpawnerDetectionOminous,
+            Self::VaultConnection,
+            Self::OminousSpawning,
+            Self::Shriek,
         ]
     }
 
@@ -899,6 +985,118 @@ pub enum Behaviour {
         /// Signed: half of all motes spin the other way.
         rot_speed: f32,
     },
+    /// The noxious-gas puff — [`Self::AshSmoke`]'s physics, fade-in and sheet
+    /// advance, over a fixed white tint, plus an alpha fade over the back half
+    /// of life that `AshSmoke` itself does not have. See
+    /// [`crate::emit::noxious_gas`].
+    NoxiousGas,
+    /// A non-rendering particle that, every two ticks for its 20-tick life,
+    /// throws one [`Self::NoxiousGas`] puff at a random point within three
+    /// blocks horizontally (and a quarter-block below) its own position.
+    ///
+    /// Vanilla's own version additionally checks the target point has a clear
+    /// line back to the source block before spawning; this port always
+    /// spawns, which can leak a puff through a thin wall a real client would
+    /// have suppressed. See [`crate::emit::noxious_gas_cloud`].
+    NoxiousGasCloudSeed,
+    /// The sulfur-spring bubble — rises through up to four blocks of water,
+    /// growing from `size_start` to `0.15`, and is removed the tick it either
+    /// leaves water, reaches the top of its column, or fails to rise (a stuck
+    /// bubble, `y <= yo`).
+    SulfurBubble {
+        /// Y the bubble was spawned at.
+        y_start: f64,
+        /// Y one block short of `y_start + 4` — the column's top.
+        y_end: f64,
+        /// The starting quad size, randomised once at spawn (`0.02..0.04`).
+        size_start: f32,
+    },
+    /// The trial-spawner/vault detection rune — [`Self::AshSmoke`]'s quad-size
+    /// fade-in and per-frame sheet advance over its own sheet, but **no**
+    /// colour override (it stays the sprite's own white) and its own
+    /// lighter friction/gravity/lifetime constants. Vanilla additionally lays
+    /// this flat (facing up) rather than toward the camera; this crate has no
+    /// non-camera-facing billboard mode, so it draws upright instead — see
+    /// `docs/particle-catalogue.md`.
+    TrialSpawnerDetection,
+    /// The vault's "you are connected" mote — [`Self::FlyTowardsPosition`]'s
+    /// flight curve, an alpha that ramps from `0.0` to `0.6` over the last
+    /// three quarters of life instead of holding at `1.0`, and a `1.5×` quad
+    /// size vanilla applies once at spawn.
+    FlyTowardsPositionFading,
+    /// The ominous-spawning mote — travels in a straight line from its spawn
+    /// offset to the spawn point (unlike
+    /// [`Self::FlyTowardsPosition`]'s quartic dip) while its colour lerps from
+    /// a fixed light blue to white over its life.
+    FlyStraightTowards,
+    /// The sculk shrieker's shockwave — grows from zero over `0..0.75` of its
+    /// life, then fades from full to zero, with a fixed `delay` countdown
+    /// before either starts. Vanilla draws this as two crossed planes at a
+    /// fixed pitch rather than a camera-facing billboard; approximated here as
+    /// one billboard — see `docs/particle-catalogue.md`.
+    Shriek {
+        /// Ticks remaining before growth/fade begins.
+        delay: i32,
+    },
+    /// `pause_mob_growth`/`reset_mob_growth` — a fixed 8-tick billboard with no
+    /// gravity, drifting up or down at a constant `0.03`, over a randomised
+    /// `0.5..1.1` size multiplier fixed at spawn. The sign of the drift is the
+    /// only thing separating the two registry types. See
+    /// [`crate::emit::simple_vertical`].
+    SimpleVertical,
+    /// A non-rendering particle that, every `tick_delay + 1` ticks for its
+    /// life, throws three `gust` puffs at a random point within `scale` blocks
+    /// of its own position — the wind-charge/gust-emitter seed shared by
+    /// `gust_emitter_large`/`gust_emitter_small`. See
+    /// [`crate::emit::gust_emitter`].
+    GustSeed {
+        /// Half-width of the cube the three puffs scatter within.
+        scale: f64,
+        /// `tick_delay_in_between` from the constructor — puffs are thrown
+        /// every `tick_delay + 1` ticks, not every tick.
+        tick_delay: i32,
+    },
+    /// A non-rendering particle that, for its fixed 20-tick life, throws two
+    /// `geyser_base` puffs every two ticks, `water_blocks + 2` `geyser_plume`
+    /// jets every tick, and twenty `geyser_poof` puffs every ten ticks — all
+    /// at its own fixed position and velocity, which is why that velocity is
+    /// carried here rather than in the particle's own (unused) `xd`/`yd`/`zd`.
+    /// See [`crate::emit::geyser`].
+    GeyserEruptionSeed {
+        /// `minecraft:geyser`'s own payload field — how many source blocks of
+        /// water are feeding the eruption.
+        water_blocks: i32,
+        /// The seed's own fixed velocity, forwarded unchanged to every child
+        /// it throws.
+        vel: [f64; 3],
+    },
+    /// The geyser's rising jet — climbs from its spawn height to
+    /// `y_start + 5*max(1, water_blocks) - 1` under an initial upward
+    /// propulsion that itself decays as a cubic function of height, then
+    /// holds briefly once it stops climbing before its shortened lifetime
+    /// runs out. See [`crate::emit::geyser_plume`].
+    GeyserPlume {
+        /// Y at spawn.
+        y_start: f64,
+        /// The column's top — `y_start + plume_height - 1`.
+        y_max: f64,
+        /// `(waterBlocks == 1 ? 1.5 : 1.0) * plumeHeight * 1.45` — also the
+        /// magnitude of the initial `gravity` (negated, since this behaviour
+        /// rises).
+        initial_propulsion: f32,
+        /// Fixed horizontal drift on `x`, randomised once at spawn.
+        horiz_x: f32,
+        /// Fixed horizontal drift on `z`, randomised once at spawn.
+        horiz_z: f32,
+        /// Quad size at the base of the climb.
+        min_size: f32,
+        /// Quad size at the top of the climb.
+        max_size: f32,
+        /// Set the first tick the jet stops climbing (falls, overshoots the
+        /// column top, or gets stuck); once set, the jet's lifetime is capped
+        /// to five more ticks and friction is cut to zero.
+        done: bool,
+    },
 }
 
 /// Which of vanilla's seven drip fluids a [`Behaviour::Drip`] belongs to.
@@ -998,6 +1196,43 @@ pub enum Spawn {
         /// Where.
         pos: [f64; 3],
     },
+    /// One `noxious_gas` puff a [`Behaviour::NoxiousGasCloudSeed`] throws.
+    NoxiousGas {
+        /// Where.
+        pos: [f64; 3],
+    },
+    /// One `gust` puff a [`Behaviour::GustSeed`] throws.
+    Gust {
+        /// Where.
+        pos: [f64; 3],
+    },
+    /// One `geyser_base` puff a [`Behaviour::GeyserEruptionSeed`] throws.
+    GeyserBase {
+        /// Where — the seed's own fixed position.
+        pos: [f64; 3],
+        /// The seed's own fixed velocity, forwarded unchanged.
+        vel: [f64; 3],
+        /// `minecraft:geyser`'s own payload field, forwarded unchanged.
+        water_blocks: i32,
+    },
+    /// One `geyser_plume` jet a [`Behaviour::GeyserEruptionSeed`] throws.
+    GeyserPlume {
+        /// Where.
+        pos: [f64; 3],
+        /// Forwarded unchanged.
+        vel: [f64; 3],
+        /// Forwarded unchanged.
+        water_blocks: i32,
+    },
+    /// One `geyser_poof` puff a [`Behaviour::GeyserEruptionSeed`] throws.
+    GeyserPoof {
+        /// Where.
+        pos: [f64; 3],
+        /// Forwarded unchanged.
+        vel: [f64; 3],
+        /// Forwarded unchanged.
+        water_blocks: i32,
+    },
 }
 
 impl Behaviour {
@@ -1019,7 +1254,10 @@ impl Behaviour {
                 | Self::DragonBreath { .. }
                 | Self::Snowflake
                 | Self::DustPlume
-                | Self::BubblePop,
+                | Self::BubblePop
+                | Self::NoxiousGas
+                | Self::TrialSpawnerDetection
+                | Self::GeyserPlume { .. },
                 SpriteSource::Sheet { sheet, .. },
             ) => Some(sheet),
             _ => None,
@@ -1046,7 +1284,14 @@ impl Behaviour {
             // translucent; both fade by alpha, which an alpha-tested layer
             // cannot express.
             | Self::Firefly
-            | Self::FireworkFlash => Layer::Translucent,
+            | Self::FireworkFlash
+            // The noxious-gas puff fades by alpha over its back half.
+            | Self::NoxiousGas
+            // The vault-connection mote's alpha ramps rather than holding at
+            // full, unlike its opaque enchant/nautilus sibling.
+            | Self::FlyTowardsPositionFading
+            // The shriek shockwave grows and fades by alpha.
+            | Self::Shriek { .. } => Layer::Translucent,
             Self::Animated { layer } => layer,
             Self::Plain
             | Self::Terrain { .. }
@@ -1085,7 +1330,19 @@ impl Behaviour {
             | Self::FallingLeaves { .. }
             // The falling-dust mote is opaque explicitly.
             | Self::FallingDust { .. }
-            | Self::DustColorTransition { .. } => Layer::Opaque,
+            | Self::DustColorTransition { .. }
+            // Two more non-rendering spawners, never actually asked this —
+            // see `Self::HugeExplosionSeed`'s note above, same reasoning.
+            | Self::NoxiousGasCloudSeed
+            | Self::GustSeed { .. }
+            | Self::GeyserEruptionSeed { .. }
+            | Self::SulfurBubble { .. }
+            | Self::TrialSpawnerDetection
+            | Self::FlyStraightTowards
+            | Self::SimpleVertical
+            // The geyser jet is opaque explicitly, like the base/poof puffs
+            // it shares `AshSmoke` with.
+            | Self::GeyserPlume { .. } => Layer::Opaque,
         }
     }
 }
@@ -1371,9 +1628,18 @@ impl Particle {
             | Behaviour::DustPlume
             // The falling-dust mote's is the same expression again.
             | Behaviour::FallingDust { .. }
-            | Behaviour::DustColorTransition { .. } => {
+            | Behaviour::DustColorTransition { .. }
+            // The noxious-gas puff and the trial-spawner/vault detection rune
+            // share this same fade-in.
+            | Behaviour::NoxiousGas
+            | Behaviour::TrialSpawnerDetection => {
                 self.quad_size * (normalised() * 32.0).clamp(0.0, 1.0)
             }
+            // The shriek shockwave: `quadSize * clamp((age + a) / lifetime *
+            // 0.75, 0, 1)` — the same shape as the `* 32` fade-in above but a
+            // far gentler multiplier, so it takes most of its life to reach
+            // full size rather than 1/32 of it.
+            Behaviour::Shriek { .. } => self.quad_size * (normalised() * 0.75).clamp(0.0, 1.0),
             // The firework-flash overlay: `7.1 * sin((age + a - 1.0) * 0.25 *
             // PI)`, which ignores the quad-size field entirely. The `- 1.0` makes the
             // first tick's argument negative and so the size negative; that is
@@ -1458,7 +1724,51 @@ impl Particle {
                 Vec::new()
             }
             Behaviour::FlyTowardsPosition => {
-                self.tick_fly_towards_position();
+                self.tick_fly_towards_position(false);
+                Vec::new()
+            }
+            Behaviour::FlyTowardsPositionFading => {
+                self.tick_fly_towards_position(true);
+                Vec::new()
+            }
+            Behaviour::FlyStraightTowards => {
+                self.tick_fly_straight_towards();
+                Vec::new()
+            }
+            Behaviour::SulfurBubble { y_start, y_end, size_start } => {
+                self.tick_sulfur_bubble(view, y_start, y_end, size_start);
+                Vec::new()
+            }
+            Behaviour::Shriek { delay } => {
+                self.tick_shriek(view, delay);
+                Vec::new()
+            }
+            Behaviour::NoxiousGasCloudSeed => self.tick_noxious_gas_cloud_seed(view),
+            Behaviour::GustSeed { scale, tick_delay } => self.tick_gust_seed(scale, tick_delay),
+            Behaviour::GeyserEruptionSeed { water_blocks, vel } => {
+                self.tick_geyser_eruption_seed(view, water_blocks, vel)
+            }
+            Behaviour::GeyserPlume {
+                y_start,
+                y_max,
+                initial_propulsion,
+                horiz_x,
+                horiz_z,
+                min_size,
+                max_size,
+                done,
+            } => {
+                self.tick_geyser_plume(
+                    view,
+                    y_start,
+                    y_max,
+                    initial_propulsion,
+                    horiz_x,
+                    horiz_z,
+                    min_size,
+                    max_size,
+                    done,
+                );
                 Vec::new()
             }
             Behaviour::CampfireSmoke => {
@@ -1627,8 +1937,34 @@ impl Particle {
             | Behaviour::HugeExplosion
             | Behaviour::Dust
             | Behaviour::Animated { .. }
-            | Behaviour::Cloud => {
+            | Behaviour::Cloud
+            | Behaviour::TrialSpawnerDetection => {
                 self.set_sprite_from_age();
+            }
+            // The noxious-gas puff: the same sheet advance as `AshSmoke`, plus
+            // an alpha fade that starts at `lifetime / 2` and runs out exactly
+            // as `age` reaches `lifetime`.
+            Behaviour::NoxiousGas => {
+                self.set_sprite_from_age();
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "tick counts are small; mirrors Java's int-to-float promotion"
+                )]
+                let fade_out_start = self.lifetime as f32 / 2.0;
+                #[expect(
+                    clippy::cast_precision_loss,
+                    reason = "tick counts are small; mirrors Java's int-to-float promotion"
+                )]
+                let age = self.age as f32;
+                if age > fade_out_start {
+                    let frames_since = age - fade_out_start;
+                    #[expect(
+                        clippy::cast_precision_loss,
+                        reason = "tick counts are small; mirrors Java's int-to-float promotion"
+                    )]
+                    let lifetime = self.lifetime as f32;
+                    self.alpha = (lifetime - frames_since) / lifetime;
+                }
             }
             // The dust-colour-transition particle additionally lerps its
             // colour — vanilla does this every *frame* from `extract`'s
@@ -1828,7 +2164,15 @@ impl Particle {
     /// The removal test is `>=` on the **pre**-increment value, so a particle
     /// with `lifetime` ticks lives through `age == lifetime - 1` and is removed
     /// the tick `age` reaches `lifetime`.
-    fn tick_fly_towards_position(&mut self) {
+    ///
+    /// `fading` is the one difference the vault-connection mote has from its
+    /// enchant/nautilus siblings: instead of holding at full alpha (vanilla's
+    /// own always-opaque lifetime-alpha), its alpha ramps from `0.0` to `0.6`
+    /// over the last three quarters of life. Vanilla recomputes that curve
+    /// every frame from a partial tick; this port advances it once per game
+    /// tick instead, the same granularity [`Self::DustColorTransition`]'s own
+    /// lerp already uses.
+    fn tick_fly_towards_position(&mut self, fading: bool) {
         self.xo = self.x;
         self.yo = self.y;
         self.zo = self.z;
@@ -1846,13 +2190,19 @@ impl Particle {
             pp *= pp;
             pp
         };
-        let pos = f64::from(pos);
+        let pos_f64 = f64::from(pos);
         let [sx, sy, sz] = self.spawn;
         self.set_pos(
-            sx + self.xd * pos,
-            self.yd.mul_add(pos, sy) - f64::from(sag * 1.2),
-            sz + self.zd * pos,
+            sx + self.xd * pos_f64,
+            self.yd.mul_add(pos_f64, sy) - f64::from(sag * 1.2),
+            sz + self.zd * pos_f64,
         );
+        if fading {
+            #[expect(clippy::cast_precision_loss, reason = "Java computes this in f32")]
+            let age_norm = self.age as f32 / self.lifetime as f32;
+            let time_norm = ((age_norm - 0.25) / (1.0 - 0.25)).clamp(0.0, 1.0);
+            self.alpha = 0.6 * time_norm;
+        }
     }
 
     /// The campfire-smoke column's tick — a full override.
@@ -2437,6 +2787,239 @@ impl Particle {
         spawns
     }
 
+    /// A [`Behaviour::NoxiousGasCloudSeed`]'s per-tick step — the base tick
+    /// (vanilla's own version calls it too, so the seed drifts on whatever
+    /// residual velocity its construction scattered) plus, every two ticks,
+    /// one [`Spawn::NoxiousGas`] at a random point within three blocks
+    /// horizontally of the block the seed currently occupies, a quarter-block
+    /// below its centre.
+    ///
+    /// Vanilla additionally checks the target point has a clear line back to
+    /// the source block before spawning; this port always spawns — see
+    /// [`Behaviour::NoxiousGasCloudSeed`]'s own doc.
+    fn tick_noxious_gas_cloud_seed(&mut self, view: &dyn CollisionView) -> Vec<Spawn> {
+        self.tick_base(view);
+        if self.removed || self.age % 2 != 0 {
+            return Vec::new();
+        }
+        let mut rng = self.tick_rng();
+        let dx = f64::from(rng.next_f32() - 0.5);
+        let dz = f64::from(rng.next_f32() - 0.5);
+        let norm = dx.mul_add(dx, dz * dz).sqrt();
+        let (dx, dz) = if norm > 0.0 { (dx / norm, dz / norm) } else { (0.0, 0.0) };
+        let distance = f64::from(rng.next_f32() * 3.0);
+        let (bx, by, bz) = block_containing(self.x, self.y, self.z);
+        let cx = f64::from(bx) + 0.5 + dx * distance;
+        let cy = f64::from(by) + 0.5 - 0.25;
+        let cz = f64::from(bz) + 0.5 + dz * distance;
+        vec![Spawn::NoxiousGas { pos: [cx, cy, cz] }]
+    }
+
+    /// A [`Behaviour::GustSeed`]'s per-tick step — no base tick at all
+    /// (vanilla's own version does not call it either, so the seed never
+    /// moves): every `tick_delay + 1` ticks it throws three [`Spawn::Gust`]
+    /// puffs at a point jittered by up to `scale` blocks on each axis, then
+    /// removes itself the tick its age reaches `lifetime`.
+    fn tick_gust_seed(&mut self, scale: f64, tick_delay: i32) -> Vec<Spawn> {
+        let mut spawns = Vec::new();
+        if self.age % (tick_delay + 1) == 0 {
+            let mut rng = self.tick_rng();
+            let jitter = |r: &mut JavaRandom| r.next_f64() - r.next_f64();
+            for _ in 0..3 {
+                let xx = jitter(&mut rng).mul_add(scale, self.x);
+                let yy = jitter(&mut rng).mul_add(scale, self.y);
+                let zz = jitter(&mut rng).mul_add(scale, self.z);
+                spawns.push(Spawn::Gust { pos: [xx, yy, zz] });
+            }
+        }
+        if self.age == self.lifetime {
+            self.remove();
+        }
+        self.age += 1;
+        spawns
+    }
+
+    /// A [`Behaviour::SulfurBubble`]'s per-tick step: the base tick (its own
+    /// `gravity`/`friction` constructed values do the rise), then removal on
+    /// leaving water, reaching the column top, or failing to rise at all —
+    /// `self.yo` already holds "the position at the start of this tick",
+    /// which is exactly vanilla's own separately-tracked previous-`y` field —
+    /// then an extra horizontal-only wiggle move and the size ramp.
+    fn tick_sulfur_bubble(
+        &mut self,
+        view: &dyn CollisionView,
+        y_start: f64,
+        y_end: f64,
+        size_start: f32,
+    ) {
+        self.tick_base(view);
+        if self.removed {
+            return;
+        }
+        let (bx, by, bz) = block_containing(self.x, self.y, self.z);
+        if !view.is_water(bx, by, bz) || self.y >= y_end || self.y <= self.yo {
+            self.remove();
+            return;
+        }
+        let mut rng = self.tick_rng();
+        let wiggle = |r: &mut JavaRandom| {
+            let mag = f64::from(r.next_f32()) * 0.003;
+            let sign = if r.next_bool() { 1.0 } else { -1.0 };
+            mag * sign * 0.5
+        };
+        self.xd += wiggle(&mut rng);
+        self.zd += wiggle(&mut rng);
+        self.move_by(self.xd, 0.0, self.zd, view);
+        #[expect(clippy::cast_possible_truncation, reason = "travel is clamped into 0..1")]
+        let progress = ((self.y - y_start) / (y_end - y_start)).clamp(0.0, 1.0) as f32;
+        self.quad_size = size_start + progress * (0.15 - size_start);
+    }
+
+    /// A [`Behaviour::Shriek`]'s per-tick step: while `delay` is still
+    /// counting down, nothing else happens at all (no age, no move, no
+    /// alpha) and the particle draws fully transparent — vanilla's own
+    /// version skips its draw call entirely rather than fading it, which
+    /// this crate has no "not drawn this frame" signal for, so zero alpha is
+    /// the equivalent. Once the delay expires, an ordinary base tick runs and
+    /// alpha follows `1 - age/lifetime`, matching vanilla's own extract-time
+    /// computation at this crate's usual "once a tick, not once a frame"
+    /// granularity.
+    fn tick_shriek(&mut self, view: &dyn CollisionView, delay: i32) {
+        if delay > 0 {
+            self.alpha = 0.0;
+            self.behaviour = Behaviour::Shriek { delay: delay - 1 };
+            return;
+        }
+        self.tick_base(view);
+        if self.removed {
+            return;
+        }
+        #[expect(clippy::cast_precision_loss, reason = "tick counts are small")]
+        let age_norm = (self.age as f32 / self.lifetime as f32).clamp(0.0, 1.0);
+        self.alpha = 1.0 - age_norm;
+    }
+
+    /// A [`Behaviour::FlyStraightTowards`]'s per-tick step — the same
+    /// converging-position shape as [`Self::tick_fly_towards_position`] but
+    /// **linear** rather than quartic-dipped (no `sag` term), plus a per-tick
+    /// sRGB-space colour lerp from a fixed start colour to a fixed end colour
+    /// over the particle's life. Vanilla recomputes both every frame from a
+    /// partial tick; this port advances them once per game tick instead, the
+    /// same granularity every other lerp in this crate uses.
+    fn tick_fly_straight_towards(&mut self) {
+        self.xo = self.x;
+        self.yo = self.y;
+        self.zo = self.z;
+        let expired = self.age >= self.lifetime;
+        self.age += 1;
+        if expired {
+            self.remove();
+            return;
+        }
+        #[expect(clippy::cast_precision_loss, reason = "Java computes this in f32")]
+        let age_norm = self.age as f32 / self.lifetime as f32;
+        let pos = f64::from(1.0 - age_norm);
+        let [sx, sy, sz] = self.spawn;
+        self.set_pos(sx + self.xd * pos, sy + self.yd * pos, sz + self.zd * pos);
+        // Vanilla's own ominous-spawning provider's fixed start/end ARGB words
+        // (`-12210434`/`-1`, i.e. `0xFF45AEFE`/`0xFFFFFFFF`) — a sRGB-space
+        // lerp of each channel, matching vanilla's own byte-wise ARGB lerp
+        // rather than a linear-light blend.
+        const START: [f32; 3] = [0x45 as f32 / 255.0, 0xAE as f32 / 255.0, 0xFE as f32 / 255.0];
+        const END: [f32; 3] = [1.0, 1.0, 1.0];
+        for i in 0..3 {
+            self.colour[i] = START[i] + (END[i] - START[i]) * age_norm;
+        }
+        self.alpha = 1.0;
+    }
+
+    /// A [`Behaviour::GeyserEruptionSeed`]'s per-tick step — the base tick
+    /// (vanilla's own version calls it too, and since the seed never has a
+    /// velocity of its own — `vel` is carried as data because vanilla's own
+    /// version never gives it one either — it simply ages in place), then the
+    /// three throw schedules at the seed's own fixed position and velocity.
+    fn tick_geyser_eruption_seed(
+        &mut self,
+        view: &dyn CollisionView,
+        water_blocks: i32,
+        vel: [f64; 3],
+    ) -> Vec<Spawn> {
+        self.tick_base(view);
+        if self.removed {
+            return Vec::new();
+        }
+        let pos = [self.x, self.y, self.z];
+        let mut spawns = Vec::new();
+        if self.age % 2 == 0 {
+            for _ in 0..2 {
+                spawns.push(Spawn::GeyserBase { pos, vel, water_blocks });
+            }
+        }
+        for _ in 0..(water_blocks + 2) {
+            spawns.push(Spawn::GeyserPlume { pos, vel, water_blocks });
+        }
+        if self.age % 10 == 0 {
+            for _ in 0..20 {
+                spawns.push(Spawn::GeyserPoof { pos, vel, water_blocks });
+            }
+        }
+        spawns
+    }
+
+    /// A [`Behaviour::GeyserPlume`]'s per-tick step: the base tick first
+    /// (consuming this tick's already-set `gravity`/`xd`/`zd`), then — once it
+    /// is done, per the same three conditions vanilla's own version checks —
+    /// the propulsion decay, drift and size ramp for the *next* tick's base
+    /// tick to consume. This ordering (recompute after, not before) is the
+    /// one difference from [`Self::tick_falling_dust`]'s decay-then-move
+    /// shape, and reversing it feeds the base tick stale physics for a whole
+    /// extra tick.
+    #[expect(clippy::too_many_arguments, reason = "mirrors the behaviour's own field set")]
+    fn tick_geyser_plume(
+        &mut self,
+        view: &dyn CollisionView,
+        y_start: f64,
+        y_max: f64,
+        initial_propulsion: f32,
+        horiz_x: f32,
+        horiz_z: f32,
+        min_size: f32,
+        max_size: f32,
+        done: bool,
+    ) {
+        self.tick_base(view);
+        if self.removed {
+            return;
+        }
+        let mut done = done;
+        if !done
+            && (self.yd < 0.0 || self.y > y_max || (self.y - self.yo).abs() < f64::EPSILON)
+        {
+            self.lifetime = self.lifetime.min(self.age + 5);
+            self.friction = 0.0;
+            done = true;
+        }
+        let y_progress_linear = ((self.y - y_start) / (y_max - y_start)).clamp(0.0, 1.0);
+        #[expect(clippy::cast_possible_truncation, reason = "clamped into 0.0..=1.0")]
+        let y_progress_linear_f32 = y_progress_linear as f32;
+        let y_progress_exp = y_progress_linear_f32.powi(3);
+        self.gravity = initial_propulsion * y_progress_exp * 0.12;
+        self.xd = y_progress_linear * f64::from(horiz_x);
+        self.zd = y_progress_linear * f64::from(horiz_z);
+        self.set_sprite_from_age();
+        self.quad_size = min_size + y_progress_linear_f32 * (max_size - min_size);
+        self.behaviour = Behaviour::GeyserPlume {
+            y_start,
+            y_max,
+            initial_propulsion,
+            horiz_x,
+            horiz_z,
+            min_size,
+            max_size,
+            done,
+        };
+    }
+
     /// A deterministic per-tick [`JavaRandom`], derived from the particle's
     /// own state rather than a shared engine stream — see [`Self::rng_probe`]
     /// (its sole pre-existing caller) for why that is an acceptable stand-in
@@ -2698,6 +3281,25 @@ impl ParticleEngine {
                 Spawn::Smoke { pos: [x, y, z], vel: [xd, yd, zd] } => {
                     emit::smoke(self, x, y, z, xd, yd, zd, 1.0);
                 }
+                Spawn::NoxiousGas { pos: [x, y, z] } => {
+                    emit::noxious_gas(self, x, y, z, 0.0, 0.0, 0.0);
+                }
+                Spawn::Gust { pos: [x, y, z] } => {
+                    emit::animated_ambient(self, x, y, z, 0.0, 0.0, 0.0, Sheet::Gust, 3.0, 12);
+                }
+                Spawn::GeyserBase { pos: [x, y, z], vel: [xa, ya, za], water_blocks } => {
+                    emit::geyser_base_or_poof(
+                        self, x, y, z, xa, ya, za, water_blocks, 1.5, Sheet::GeyserBase,
+                    );
+                }
+                Spawn::GeyserPlume { pos: [x, y, z], vel: [xa, ya, za], water_blocks } => {
+                    emit::geyser_plume(self, x, y, z, xa, ya, za, water_blocks);
+                }
+                Spawn::GeyserPoof { pos: [x, y, z], vel: [xa, ya, za], water_blocks } => {
+                    emit::geyser_base_or_poof(
+                        self, x, y, z, xa, ya, za, water_blocks, 2.0, Sheet::GeyserPoof,
+                    );
+                }
             }
         }
     }
@@ -2723,7 +3325,13 @@ impl ParticleEngine {
             // "not drawn" value to return, so the exclusion lives here
             // instead, at the one place that turns a live particle into a
             // drawable quad.
-            if matches!(p.behaviour, Behaviour::HugeExplosionSeed) {
+            if matches!(
+                p.behaviour,
+                Behaviour::HugeExplosionSeed
+                    | Behaviour::NoxiousGasCloudSeed
+                    | Behaviour::GustSeed { .. }
+                    | Behaviour::GeyserEruptionSeed { .. }
+            ) {
                 continue;
             }
             let x = p.xo + (p.x - p.xo) * t - camera.x;
