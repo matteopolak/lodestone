@@ -353,6 +353,78 @@ mod chat_click_dispatch {
         assert_eq!(app.chat_input.as_str(), before_input);
     }
 
+    /// A **shift**-click inserts the run's insertion text at the caret and
+    /// does not run its click; an unshifted click on the same run does the
+    /// reverse. The run carries both, which is what makes this
+    /// discriminating: a dispatch that ignored the modifier would satisfy
+    /// either assertion alone.
+    #[test]
+    fn shift_click_inserts_and_leaves_the_click_action_alone() {
+        use lodestone_game::text::InteractiveSpan;
+        use lodestone_model::text::TextStyle;
+
+        let both = InteractiveSpan {
+            text: "<Notch>".to_string(),
+            style: TextStyle::default(),
+            click: Some(ClickEvent {
+                action: ClickAction::SuggestCommand,
+                value: "/msg Notch ".to_string(),
+            }),
+            hover: None,
+            insertion: Some("Notch".to_string()),
+        };
+
+        let (mut app, _actions) = headless_app_with_loopback();
+        app.chat_input.set("hello ");
+        assert!(app.dispatch_chat_interaction(both.clone(), true));
+        assert_eq!(
+            app.chat_input.as_str(),
+            "hello Notch",
+            "the insertion appends at the caret rather than replacing the line"
+        );
+
+        let (mut app, _actions) = headless_app_with_loopback();
+        app.chat_input.set("hello ");
+        assert!(app.dispatch_chat_interaction(both, false));
+        assert_eq!(
+            app.chat_input.as_str(),
+            "/msg Notch ",
+            "unshifted, the suggest_command replaces the line as it always did"
+        );
+    }
+
+    /// A shift-click on a run with **no** insertion is inert — it must not
+    /// fall through to the click action. That fall-through is what would make
+    /// shift-clicking a player name whisper them by accident.
+    #[test]
+    fn shift_click_without_an_insertion_does_not_fall_through_to_the_click() {
+        use lodestone_game::text::InteractiveSpan;
+        use lodestone_model::text::TextStyle;
+
+        let (mut app, actions) = headless_app_with_loopback();
+        let click_only = InteractiveSpan {
+            text: "[Teleport]".to_string(),
+            style: TextStyle::default(),
+            click: Some(ClickEvent {
+                action: ClickAction::RunCommand,
+                value: "/tp @s 0 64 0".to_string(),
+            }),
+            hover: None,
+            insertion: None,
+        };
+
+        assert!(!app.dispatch_chat_interaction(click_only.clone(), true));
+        assert!(
+            actions.try_recv().is_err(),
+            "a shift-click with no insertion must send nothing"
+        );
+
+        // The control: the same run, unshifted, does reach the wire — so the
+        // silence above is the modifier's doing and not a broken fixture.
+        assert!(app.dispatch_chat_interaction(click_only, false));
+        assert!(actions.try_recv().is_ok(), "unshifted, the same run runs its command");
+    }
+
     /// `change_page` turns the open reading screen's page — the production
     /// dispatch, through the same `dispatch_click_action` a page-run click
     /// and a chat click both go through.
