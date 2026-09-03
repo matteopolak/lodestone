@@ -22,7 +22,7 @@
 //!
 //! * every entity packet decodes with **zero trailing bytes** (`ensure_empty`);
 //! * every `spawn_entity_living.kind` resolves through the **unified 1.16 entity
-//!   registry** ([`entity_type_name`]) — this is the table that replaced 1.12's
+//!   registry** (`entity_types::table_for(754)`) — the table that replaced 1.12's
 //!   split mob/object id spaces after flattening, so a mis-migrated id would map
 //!   to the wrong name or `None` here;
 //! * at least one `entity_metadata` packet carries a non-empty list decoded
@@ -44,7 +44,7 @@ use lodestone_model::{
 };
 use lodestone_net::Connection;
 use lodestone_v1_14::V735Adapter;
-use lodestone_v1_14::entity_types::entity_type_name;
+use lodestone_v1_14::entity_types;
 use lodestone_v1_14::packet_ids::play;
 use lodestone_v1_14::packets::entity::{EntityMetadataPacket, SpawnEntityLiving};
 use lodestone_world::World;
@@ -263,12 +263,15 @@ async fn decodes_real_entity_metadata_from_live_1_16_server() {
     // 1.12 two-table lookup would resolve these ids to the wrong names or None.
     let mut resolved: Vec<(&'static str, i32)> = Vec::new();
     for spawn in &spawns {
-        let name = entity_type_name(spawn.kind).unwrap_or_else(|| {
-            panic!(
-                "spawn_entity_living kind {} did not resolve in the unified 1.16 entity registry",
-                spawn.kind
-            )
-        });
+        let name = entity_types::table_for(lodestone_v1_14::PROTOCOL)
+            .entity_type_name(spawn.kind)
+            .unwrap_or_else(|| {
+                panic!(
+                    "spawn_entity_living kind {} did not resolve in the unified 1.16 entity \
+                     registry",
+                    spawn.kind
+                )
+            });
         resolved.push((name, spawn.kind));
     }
 

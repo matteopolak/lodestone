@@ -53,12 +53,28 @@ use lodestone_world::World;
 use tokio::net::TcpStream;
 use uuid::Uuid;
 
-/// Flattened 1.16.5 block-state id of `minecraft:bedrock` (its only state).
-/// This is the world-independent floor of every vanilla overworld column.
-const BEDROCK_STATE: u32 = 33;
-/// Flattened 1.16.5 block-state id of `minecraft:grass_block[snowy=false]`,
-/// the top layer of the default `flat` preset (bedrock, 2×dirt, grass).
-const GRASS_STATE: u32 = 9;
+/// The **canonical 26.2** state id for a block, resolved out of
+/// `lodestone_data::block_states`.
+///
+/// The world store holds canonical ids, not 1.16.5's own flat wire ids: the
+/// chunk decode translates every cell through this protocol's block-state
+/// table on the way in. Resolving the expectation by name rather than
+/// writing a number down keeps it correct across a registry regeneration,
+/// and keeps it anchored outside this crate's own tables.
+fn canonical_state(name: &str, properties: &[(&str, &str)]) -> u32 {
+    (0..lodestone_data::block_states::STATE_COUNT)
+        .find(|&id| {
+            lodestone_data::block_states::block_name(id) == Some(name)
+                && lodestone_data::block_states::properties(id).is_some_and(|props| {
+                    props.len() == properties.len()
+                        && props
+                            .iter()
+                            .zip(properties.iter())
+                            .all(|(a, b)| a.0 == b.0 && a.1 == b.1)
+                })
+        })
+        .unwrap_or_else(|| panic!("26.2 registry has no {name} with {properties:?}"))
+}
 
 /// Applies one login directive against the live connection.
 async fn apply(
@@ -234,22 +250,24 @@ async fn decodes_real_chunks_from_live_1_16_server() {
     // would not land bedrock uniformly on the bottom plane. Checking grass at
     // y=3 additionally catches a section-relative Y offset error that a single
     // bottom-plane check would miss.
+    let bedrock_state = canonical_state("minecraft:bedrock", &[]);
+    let grass_state = canonical_state("minecraft:grass_block", &[("snowy", "false")]);
     let mut checked = 0usize;
     for loaded in world.values() {
         let col = &loaded.column;
         checked += 1;
         let uniform_bedrock =
-            (0..16).all(|x| (0..16).all(|z| col.get_block(x, 0, z) == BEDROCK_STATE));
+            (0..16).all(|x| (0..16).all(|z| col.get_block(x, 0, z) == bedrock_state));
         assert!(
             uniform_bedrock,
-            "y=0 plane is not uniform bedrock (state {BEDROCK_STATE}) — decode is \
+            "y=0 plane is not uniform bedrock (state {bedrock_state}) — decode is \
              likely YZX-transposed, endian-swapped, or using the pre-1.16 \
              straddling long unpack"
         );
-        let uniform_grass = (0..16).all(|x| (0..16).all(|z| col.get_block(x, 3, z) == GRASS_STATE));
+        let uniform_grass = (0..16).all(|x| (0..16).all(|z| col.get_block(x, 3, z) == grass_state));
         assert!(
             uniform_grass,
-            "y=3 plane is not uniform grass_block (state {GRASS_STATE}) — the \
+            "y=3 plane is not uniform grass_block (state {grass_state}) — the \
              section-relative Y offset is likely wrong"
         );
     }
