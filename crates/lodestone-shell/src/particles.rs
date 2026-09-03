@@ -1043,6 +1043,73 @@ impl Particles {
             "item_cobweb" => self.item_burst(pos, "minecraft:cobweb"),
             "item_snowball" => self.item_burst(pos, "minecraft:snowball"),
 
+            // The geyser eruption seed. Its wire payload's own water-blocks
+            // field this client's own decoder does not yet surface (there is
+            // no `ParticleOptions` variant for it), so every geyser draws at
+            // the minimum valid payload value (`1`) rather than dropping the
+            // particle — the same "log and use a harmless default" shape the
+            // `dragon_breath`/`sculk_charge` arms above use for their own
+            // missing payloads. `geyser_base`/`geyser_poof`/`geyser_plume`
+            // are vanilla's own eruption particle's own three children, drawn
+            // through the same emitters here so a direct `/particle` of one
+            // of those three (never how vanilla itself spawns them) still
+            // draws something.
+            "geyser" => {
+                tracing::debug!(
+                    target: "particles",
+                    "geyser particle with no decoded water-blocks payload; drawing at \
+                     water_blocks = 1"
+                );
+                emit::geyser(&mut self.engine, x, y, z, xa, ya, za, 1);
+            }
+            "geyser_base" => {
+                emit::geyser_base_or_poof(&mut self.engine, x, y, z, xa, ya, za, 1, 1.5, Sheet::GeyserBase);
+            }
+            "geyser_poof" => {
+                emit::geyser_base_or_poof(&mut self.engine, x, y, z, xa, ya, za, 1, 2.0, Sheet::GeyserPoof);
+            }
+            "geyser_plume" => emit::geyser_plume(&mut self.engine, x, y, z, xa, ya, za, 1),
+
+            // The potent-sulfur block's noxious-gas family: the puff itself,
+            // fixed scale 3.0, and the non-rendering seed that throws puffs
+            // around itself every two ticks for its own 20-tick life.
+            "noxious_gas" => emit::noxious_gas(&mut self.engine, x, y, z, xa, ya, za),
+            "noxious_gas_cloud" => emit::noxious_gas_cloud(&mut self.engine, x, y, z),
+            // The potent-sulfur spring's rising bubble and the debris a
+            // broken sulfur cube throws. The bubble reads no `ya`: vanilla's
+            // own provider drops it too.
+            "sulfur_bubbles" => emit::sulfur_bubbles(&mut self.engine, x, y, z, xa, za),
+            "sulfur_cube_goo" => emit::sulfur_cube_goo(&mut self.engine, x, y, z),
+            // The trial spawner's and the vault's own detection runes — one
+            // class, two sheets, no wire payload.
+            "trial_spawner_detection" => emit::trial_spawner_detection(
+                &mut self.engine, x, y, z, xa, ya, za, Sheet::TrialSpawnerDetection,
+            ),
+            "trial_spawner_detection_ominous" => emit::trial_spawner_detection(
+                &mut self.engine, x, y, z, xa, ya, za, Sheet::TrialSpawnerDetectionOminous,
+            ),
+            "vault_connection" => {
+                emit::vault_connection(&mut self.engine, x, y, z, xa, ya, za);
+            }
+            "ominous_spawning" => {
+                emit::ominous_spawning(&mut self.engine, x, y, z, xa, ya, za);
+            }
+            // The wind-charge/gust-emitter seeds — vanilla's own two provider
+            // registrations' own constants, never wire-driven.
+            "gust_emitter_large" => emit::gust_emitter(&mut self.engine, x, y, z, 3.0, 7, 0),
+            "gust_emitter_small" => emit::gust_emitter(&mut self.engine, x, y, z, 1.0, 3, 2),
+            "pause_mob_growth" => {
+                emit::simple_vertical(&mut self.engine, x, y, z, xa, ya, za, false);
+            }
+            "reset_mob_growth" => {
+                emit::simple_vertical(&mut self.engine, x, y, z, xa, ya, za, true);
+            }
+            // The sculk shrieker's shockwave. Its wire payload carries a
+            // delay this client's own decoder does not yet surface (there is
+            // no `ParticleOptions` variant for it), so every shriek draws
+            // with delay `0` (immediate) rather than dropping the particle.
+            "shriek" => emit::shriek(&mut self.engine, x, y, z, 0),
+
             other => tracing::debug!(
                 target: "particles",
                 "no emitter wired for particle type {other:?}; dropped"
@@ -4033,6 +4100,147 @@ mod tests {
             particles.engine.particles().is_empty(),
             "26.2 owns the main plume in its own campfire-block-entity particle tick"
         );
+    }
+
+    /// The world-coverage closure: every one of the twenty particle types this
+    /// pass added a wire-dispatch arm for actually reaches live, resolved
+    /// geometry — not just a `match` arm that logs and drops.
+    ///
+    /// `spawn_one`, not `spawn_particles`: unlike the count-loop wrapper,
+    /// `spawn_one` is exactly the site `world-coverage`'s "wire dispatch"
+    /// detector reads its arm literals from, so a type present here is
+    /// present in the same sense the coverage census counts. `count` stays
+    /// out of it entirely.
+    ///
+    /// `vibration` and `trail` are deliberately absent from this table: both
+    /// need a decoded target position this client's `ParticleOptions` does
+    /// not carry yet (an adapter-side change, out of this pass's scope), and
+    /// `elder_guardian` draws a full animated entity mesh rather than a
+    /// billboard, which this particle engine has no facility for at all. All
+    /// three are the tracked remainder in `docs/particle-catalogue.md`.
+    #[test]
+    fn every_family_this_pass_added_resolves_to_live_drawn_geometry() {
+        struct NoCollision;
+        impl CollisionView for NoCollision {
+            fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
+        }
+
+        // Non-rendering spawners draw nothing themselves — see
+        // `Behaviour::HugeExplosionSeed`'s doc and the two new ones this pass
+        // added — so this table ticks each one until a child exists before
+        // asking `extract` for a quad count. Every other type here is a plain
+        // billboard and draws on its very first, untouched frame.
+        const SPAWNERS: &[&str] =
+            &["geyser", "noxious_gas_cloud", "gust_emitter_large", "gust_emitter_small"];
+
+        for kind in [
+            "geyser",
+            "geyser_base",
+            "geyser_poof",
+            "geyser_plume",
+            "noxious_gas",
+            "noxious_gas_cloud",
+            "sulfur_bubbles",
+            "sulfur_cube_goo",
+            "trial_spawner_detection",
+            "trial_spawner_detection_ominous",
+            "vault_connection",
+            "ominous_spawning",
+            "gust_emitter_large",
+            "gust_emitter_small",
+            "pause_mob_growth",
+            "reset_mob_growth",
+            "shriek",
+        ] {
+            let mut p = resolvable();
+            p.spawn_one(
+                kind,
+                [0.5, 65.0, 0.5],
+                [0.02, 0.02, 0.02],
+                ParticleOptions::None,
+            );
+            assert!(
+                !p.engine.particles().is_empty(),
+                "{kind}: spawn_one produced no live particle at all"
+            );
+            if SPAWNERS.contains(&kind) {
+                for _ in 0..4 {
+                    if p.engine.particles().len() > 1 {
+                        break;
+                    }
+                    p.engine.tick(&NoCollision);
+                }
+                assert!(
+                    p.engine.particles().len() > 1,
+                    "{kind}: still only the seed after several ticks — its own schedule \
+                     spawned no children"
+                );
+            }
+            let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+                Some(lodestone_particle::FULL_BRIGHT)
+            });
+            assert_eq!(
+                frame.unresolved, 0,
+                "{kind}: at least one instance did not resolve against the sheet fixture"
+            );
+            assert!(
+                frame.drawn > 0,
+                "{kind}: {} live particle(s) but zero drawn quads",
+                p.engine.particles().len()
+            );
+        }
+    }
+
+    /// The three non-rendering spawners specifically: each must itself draw
+    /// nothing (`Behaviour::*Seed` is excluded from `extract` by design, the
+    /// same way `Behaviour::HugeExplosionSeed` already was), and each must
+    /// still produce its own follow-up geometry once ticked — the two
+    /// symmetric ways a spawner can look "done" while doing nothing: drawing
+    /// itself (wrong; it would double the population once children are
+    /// added), or never spawning a child at all (the actual absence a
+    /// `no-op tick` would produce).
+    #[test]
+    fn the_three_new_spawners_draw_nothing_themselves_but_seed_real_children() {
+        struct NoCollision;
+        impl CollisionView for NoCollision {
+            fn collision_boxes(&self, _x: i32, _y: i32, _z: i32, _out: &mut Vec<lodestone_physics::Aabb>) {}
+        }
+
+        for kind in ["noxious_gas_cloud", "gust_emitter_large", "geyser"] {
+            let mut p = resolvable();
+            p.spawn_one(kind, [0.5, 65.0, 0.5], [0.0, 0.0, 0.0], ParticleOptions::None);
+            assert_eq!(
+                p.engine.particles().len(),
+                1,
+                "{kind}: the seed itself must be the only live particle before its first tick"
+            );
+            let frame = p.extract(&Camera::default(), 0.0, &|_, _, _| {
+                Some(lodestone_particle::FULL_BRIGHT)
+            });
+            assert_eq!(
+                frame.drawn, 0,
+                "{kind}: the seed drew a quad — it must be excluded from extraction like \
+                 every other non-rendering particle"
+            );
+
+            // Tick until a child appears (each schedule fires on its own
+            // cadence — `noxious_gas_cloud`/`geyser` every two ticks,
+            // `gust_emitter_large` every tick — so a handful of ticks covers
+            // all three without depending on the exact schedule).
+            let mut spawned_a_child = false;
+            for _ in 0..4 {
+                p.engine.tick(&NoCollision);
+                if p.engine.particles().len() > 1 {
+                    spawned_a_child = true;
+                    break;
+                }
+            }
+            assert!(
+                spawned_a_child,
+                "{kind}: still only the seed after several ticks — its own schedule spawned \
+                 no children"
+            );
+        }
     }
 }
 
