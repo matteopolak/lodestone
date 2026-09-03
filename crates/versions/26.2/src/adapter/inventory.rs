@@ -1247,7 +1247,7 @@ fn read_component_patch(
             // per-entry shape and carries no length prefix, so a loaded
             // crossbow sitting in any container truncated the rest of the
             // packet from that slot onward. See [`read_charged_projectiles`]
-            // and `docs/item-data-component-decode.md` for the wire citation.
+            // and `docs/items.md` for the wire citation.
             Some("minecraft:charged_projectiles") => {
                 let (items, complete) = read_charged_projectiles(reader)?;
                 components.charged_projectiles = items;
@@ -1263,7 +1263,7 @@ fn read_component_patch(
             // that group: a spear-family item in any container truncated the
             // rest of the packet from that slot onward. Wire order is
             // min reach, max reach, min creative reach, max creative reach,
-            // hitbox margin, mob factor — see `docs/item-data-component-decode.md`
+            // hitbox margin, mob factor — see `docs/items.md`
             // for the wire citation.
             Some("minecraft:attack_range") => {
                 let min_reach = reader.f32().map_err(dec_err)?;
@@ -2191,7 +2191,7 @@ fn read_block_holder_set(reader: &mut Reader<'_>) -> Result<ToolBlocks, AdapterE
 /// holder does elsewhere in this file. It does not: an enchantment reference is
 /// the same bare, unoffset `idMapper` shape `minecraft:rarity`/`minecraft:dye`
 /// already use here, with no inline form at all — see
-/// `docs/item-data-component-decode.md` for the wire citation this was
+/// `docs/items.md` for the wire citation this was
 /// re-verified against.
 ///
 /// The consequence was two-fold, not one: every *non-zero* wire id decoded to

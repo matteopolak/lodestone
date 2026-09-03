@@ -3746,23 +3746,14 @@ impl ServerProtocol for V770ServerProtocol {
             // decoded and applied above. All six below are field-verified
             // against `.cache/mc/26.2/src`'s decompiled packet classes.
             //
-            // `ServerboundInteractPacket`: VarInt target entity id, VarInt
-            // `InteractionHand` ordinal, a low-precision `Vec3` location
-            // (vanilla's own `Vec3` type's own lp-stream-codec accessor — the same codec
-            // [`read_lp_vec3`](crate::packets::entity::read_lp_vec3) already
-            // decodes and unit-tests for entity velocity), then a trailing
-            // boolean for the secondary-action (shift) modifier. 26.2 split
-            // the old combined interact/attack packet in two
-            // (`ServerBound::Attack`'s own doc comment); this is what is left
-            // once attack is removed — right-click entity interaction
-            // (taming/feeding/mounting/etc.), for which this crate has no
-            // interaction model at all yet.
-            // `ServerboundInteractPacket`: VarInt target entity id, VarInt
-            // `InteractionHand` ordinal, a low-precision `Vec3` location
-            // (vanilla's own `Vec3` type's own lp-stream-codec accessor), then a trailing boolean for the
-            // secondary-action (shift) modifier. 26.2 split the old combined
-            // interact/attack packet in two (see `ServerBound::Attack`'s own doc
-            // comment); this is the right-click half, and its consumer is
+            // Vanilla's own interact packet: VarInt target entity id, VarInt
+            // interaction-hand ordinal, a low-precision vector location (the
+            // same codec [`read_lp_vec3`](crate::packets::entity::read_lp_vec3)
+            // already decodes and unit-tests for entity velocity), then a
+            // trailing boolean for the secondary-action (shift) modifier. 26.2
+            // split the old combined interact/attack packet in two (see
+            // `ServerBound::Attack`'s own doc comment); this is the right-click
+            // half, and its consumer is
             // `lodestone_server::mobs::MobSim::interact`.
             //
             // The location is read and dropped rather than skipped: it is the only
