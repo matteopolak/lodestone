@@ -11,8 +11,10 @@
 #
 # One absence is real rather than a trimming artefact: a join in this era
 # streams its terrain entirely through map_chunk_bulk (id 38) and never sends
-# a single-column map_chunk (id 33). That packet's own path is exercised by
-# tests/chunk.rs instead.
+# a single-column map_chunk (id 33). Measured beyond the join too -- walking
+# 320 blocks produced 420 map_chunk packets and every one of them was a chunk
+# unload, with an empty section mask. That packet's own path is exercised by
+# tests/chunk.rs instead, against recorded unload bytes and hand-built bodies.
 login 2 2432366565666261662d326639612d333436392d383635312d616339346262653236643432094c6f646573746f6e65
 play 1 000000160000011404666c6174
 play 63 084d437c4272616e64000776616e696c6c61
