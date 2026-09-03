@@ -157,7 +157,7 @@ const BUNDLE_EMPTY_DESCRIPTION: &str = "Can hold a mixed stack of items";
 
 /// One tooltip line: its text and its colour.
 #[derive(Debug, Clone, PartialEq)]
-pub(super) struct TooltipLine {
+pub(crate) struct TooltipLine {
     /// The text, already resolved to words. Still populated when
     /// [`Self::spans`] is `Some` (as the plain concatenation) so width
     /// measurement and any caller that only wants the words keep working
@@ -186,7 +186,7 @@ pub(super) struct TooltipLine {
 /// the same documented gap `geometry.rs`'s own label code carries: no language
 /// table reaches this module. `item.durability` is `"Durability: %s / %s"` and
 /// `item.components` is `"%s Component(s)"` in `en_us.json`.
-pub(super) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLine> {
+pub(crate) fn tooltip_lines(stack: &ItemStack, advanced: bool) -> Vec<TooltipLine> {
     let mut lines = vec![title_line(stack)];
     lines.extend(lore_lines(stack));
     // `PotionContents.addToTooltip`/`ItemEnchantments.addToTooltip` both run

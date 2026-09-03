@@ -313,10 +313,7 @@ fn to_interactive_spans_inherits_click_hover_and_insertion_down_the_tree() {
         action: ClickAction::RunCommand,
         value: "/help".into(),
     };
-    let tooltip = HoverEvent {
-        action: HoverAction::ShowText,
-        value: Box::new(Text::literal("a tooltip")),
-    };
+    let tooltip = HoverEvent::ShowText(Box::new(Text::literal("a tooltip")));
     // root(click=open_url, hover=tooltip, insertion="root")
     //   -> child A(no events of its own -- must inherit all three)
     //   -> child B(click=run_command -- overrides click, still inherits hover/insertion)
@@ -1387,6 +1384,200 @@ fn client_event_carriers_cover_scoreboard_teams_and_boss_bars() {
             },
         } if *id == boss_id && (*progress - 0.75).abs() < f32::EPSILON
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Interactive-style wire shapes, against a capture from the real 26.2 jar.
+// ---------------------------------------------------------------------------
+
+/// Four components serialised by the 26.2 jar's own component codec, as
+/// `<name>=<json>` lines. Produced by
+/// `crates/lodestone-model/oracle-java/HoverEventOracle.java` (`just
+/// oracle-hover-events`), which documents why each shape is captured rather
+/// than hand-authored.
+const HOVER_EVENTS_JSON: &str = include_str!("../tests/data/hover_events_26_2.json");
+
+/// The same four components from the same run, serialised as network NBT
+/// (a type byte then the payload, no name), each preceded by a big-endian
+/// `i32` length so the four can be walked without parsing them.
+const HOVER_EVENTS_NBT: &[u8] = include_bytes!("../tests/data/hover_events_26_2_nbt.bin");
+
+/// The captured JSON component named `name`.
+fn captured_json(name: &str) -> Text {
+    let prefix = format!("{name}=");
+    let line = HOVER_EVENTS_JSON
+        .lines()
+        .find_map(|l| l.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("the capture has no `{name}` line"));
+    Text::from_json(line)
+}
+
+/// The captured NBT component at `index`, in the order the oracle writes them:
+/// `show_item`, `show_entity`, `change_page`, `run_command`.
+fn captured_nbt(index: usize) -> Text {
+    let mut reader = lodestone_core::Reader::new(HOVER_EVENTS_NBT);
+    for _ in 0..index {
+        let len = reader.i32().expect("a length prefix") as usize;
+        reader.bytes(len).expect("a whole tag");
+    }
+    let len = reader.i32().expect("a length prefix") as usize;
+    let mut tag = reader.take_reader(len).expect("a whole tag");
+    let nbt = lodestone_core::read_network_nbt(&mut tag).expect("a network NBT component");
+    Text::from_nbt(&nbt)
+}
+
+/// The hover event on the run that carries one, wherever in the tree it sits.
+fn only_hover(text: &Text) -> HoverEvent {
+    let spans = text.to_interactive_spans();
+    let mut found = spans.into_iter().filter_map(|s| s.hover);
+    let first = found.next().expect("the capture carries a hover event");
+    assert!(found.all(|h| h == first), "the capture carries exactly one");
+    first
+}
+
+/// **The control for the typed payload.** Before the payload had a type, a
+/// `hoverEvent` held an action tag beside a single component, and an item
+/// payload was run through the component parser to fill it. This is what that
+/// parser makes of a real item payload: nothing at all.
+///
+/// The payload compound carries no `text` and no `translate` key, so a
+/// component parse of it yields an empty node — which is why the old shape's
+/// claim to be "preserving the payload as a literal text node" was false for
+/// every payload a modern server actually sends, and why hovering an item name
+/// showed an empty tooltip rather than a wall of braces.
+#[test]
+fn a_component_parse_of_a_real_item_payload_yields_nothing() {
+    let payload = r#"{"id":"minecraft:diamond_sword","count":1,
+        "components":{"minecraft:custom_name":"Widowmaker"}}"#;
+    let as_component = Text::from_json(payload);
+    assert_eq!(
+        as_component.to_plain_string(),
+        "",
+        "a component parse of an item payload must be empty — that is the \
+         loss the typed payload exists to stop"
+    );
+}
+
+/// The captured `show_item` decodes to the stack the oracle built: a diamond
+/// sword, count 1 (**omitted** on the wire, since the payload's own codec
+/// defaults it), a custom name, two lore lines, and both halves of the
+/// durability pair.
+#[test]
+fn a_captured_show_item_decodes_to_a_typed_stack() {
+    for (front, text) in [("json", captured_json("show_item")), ("nbt", captured_nbt(0))] {
+        let HoverEvent::ShowItem(stack) = only_hover(&text) else {
+            panic!("{front}: a show_item hover must decode to a typed item payload");
+        };
+        assert_eq!(stack.item.to_string(), "minecraft:diamond_sword", "{front}");
+        assert_eq!(stack.count, 1, "{front}: an omitted count is one, never zero");
+        assert_eq!(
+            stack.components.custom_name.as_ref().map(Text::to_plain_string),
+            Some("Widowmaker".to_string()),
+            "{front}"
+        );
+        let lore: Vec<String> = stack.components.lore.iter().map(Text::to_plain_string).collect();
+        assert_eq!(lore, ["Forged in the deep", "Bane of spiders"], "{front}");
+        assert_eq!(stack.components.damage, Some(431), "{front}");
+        assert_eq!(stack.components.max_damage, Some(1561), "{front}");
+        assert!(
+            !stack.components.has_unmodeled,
+            "{front}: all four captured components are decoded, so nothing is unmodeled"
+        );
+    }
+}
+
+/// The captured `show_entity` decodes to the three parts a tooltip shows. The
+/// UUID is the one the oracle passed in, which reaches the wire as four signed
+/// 32-bit words rather than as text — an arm a hand-authored fixture would
+/// have missed.
+#[test]
+fn a_captured_show_entity_decodes_its_type_uuid_and_name() {
+    for (front, text) in [("json", captured_json("show_entity")), ("nbt", captured_nbt(1))] {
+        let HoverEvent::ShowEntity(entity) = only_hover(&text) else {
+            panic!("{front}: a show_entity hover must decode to a typed entity payload");
+        };
+        assert_eq!(
+            entity.kind.as_ref().map(ToString::to_string),
+            Some("minecraft:spider".to_string()),
+            "{front}"
+        );
+        assert_eq!(
+            entity.uuid.map(|u| u.to_string()),
+            Some("6ba7b810-9dad-11d1-80b4-00c04fd430c8".to_string()),
+            "{front}: the four-word UUID form has to be reassembled"
+        );
+        assert_eq!(
+            entity.name.as_deref().map(Text::to_plain_string),
+            Some("Boris".to_string()),
+            "{front}"
+        );
+        assert_eq!(
+            entity.type_translation_key().as_deref(),
+            Some("entity.minecraft.spider"),
+            "{front}: the type line's key is derived from the type, never guessed"
+        );
+    }
+}
+
+/// A `change_page` argument is a **number**, under its own field name. Both
+/// facts are load-bearing: a parse reading a string under `value` finds
+/// neither, which is how a page-turn click reached the dispatch with an empty
+/// argument and did nothing.
+#[test]
+fn a_captured_change_page_click_carries_its_page_number() {
+    for (front, text) in [("json", captured_json("change_page")), ("nbt", captured_nbt(2))] {
+        let click = text.click.as_ref().unwrap_or_else(|| panic!("{front}: a click event"));
+        assert_eq!(click.action, ClickAction::ChangePage, "{front}");
+        assert_eq!(click.value, "3", "{front}");
+    }
+}
+
+/// A `run_command`'s argument is under `command`, and `insertion` rides
+/// alongside it on the same style.
+#[test]
+fn a_captured_run_command_click_carries_its_command_and_insertion() {
+    for (front, text) in [("json", captured_json("run_command")), ("nbt", captured_nbt(3))] {
+        let click = text.click.as_ref().unwrap_or_else(|| panic!("{front}: a click event"));
+        assert_eq!(click.action, ClickAction::RunCommand, "{front}");
+        assert_eq!(click.value, "/tp @s 0 64 0", "{front}");
+        assert_eq!(text.insertion.as_deref(), Some("Notch"), "{front}");
+    }
+}
+
+/// The older camel-case spelling still parses, so a legacy family keeps its
+/// interactivity: same tree, same events, one field name apart.
+#[test]
+fn the_camel_case_style_field_names_still_parse() {
+    let legacy = Text::from_json(
+        r#"{"text":"[here]","clickEvent":{"action":"open_url","value":"https://example.invalid/"},
+            "hoverEvent":{"action":"show_text","value":"a tooltip"}}"#,
+    );
+    assert_eq!(
+        legacy.click.as_ref().map(|c| c.value.as_str()),
+        Some("https://example.invalid/")
+    );
+    assert_eq!(
+        legacy.hover.as_ref().and_then(HoverEvent::text_payload).map(Text::to_plain_string),
+        Some("a tooltip".to_string())
+    );
+}
+
+/// A `show_item` payload with no readable item is the one legacy form that
+/// really was text — a component whose literal held the serialised stack — so
+/// it keeps a component payload rather than becoming a stack this parse
+/// invented.
+#[test]
+fn an_unreadable_show_item_payload_falls_back_to_its_component() {
+    let legacy = Text::from_json(
+        r#"{"text":"[sword]","hoverEvent":{"action":"show_item",
+            "value":"{id:\"minecraft:diamond_sword\",Count:1b}"}}"#,
+    );
+    let hover = legacy.hover.expect("a hover event");
+    assert_eq!(hover.action_name(), "show_item");
+    assert!(
+        hover.text_payload().is_some_and(|t| t.to_plain_string().contains("diamond_sword")),
+        "the payload text must survive when there is no stack to decode: got {hover:?}"
+    );
 }
 
 /// Real "Notch joined the game" broadcast captured live from a 1.8.9 server

@@ -77,7 +77,11 @@ mod renderer;
 /// `ContainerButtonClick` remainder for this screen) — see its own module
 /// doc.
 pub mod stonecutter;
-mod tooltip;
+// `pub(crate)`, not private: `hud`'s chat `show_item` tooltip composes its
+// body from `tooltip::tooltip_lines`, the same line-gathering an inventory
+// slot's tooltip uses, so the two surfaces cannot disagree about what an item
+// stack's tooltip says.
+pub(crate) mod tooltip;
 
 pub use anvil_rename::AnvilRenameState;
 pub use background::ContainerBackground;

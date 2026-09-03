@@ -1,0 +1,4 @@
+show_item={"text":"was slain using ","extra":[{"text":"[Widowmaker]","hover_event":{"id":"minecraft:diamond_sword","components":{"minecraft:custom_name":"Widowmaker","minecraft:lore":["Forged in the deep","Bane of spiders"],"minecraft:damage":431,"minecraft:max_damage":1561},"action":"show_item"}}]}
+show_entity={"text":"Boris","hover_event":{"id":"minecraft:spider","uuid":[1806153744,-1649602095,-2135686976,1339306184],"name":"Boris","action":"show_entity"}}
+change_page={"text":"Turn to page 3","click_event":{"page":3,"action":"change_page"}}
+run_command={"text":"[Teleport]","click_event":{"command":"/tp @s 0 64 0","action":"run_command"},"insertion":"Notch"}
