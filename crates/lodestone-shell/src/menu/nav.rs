@@ -8718,7 +8718,7 @@ mod tests {
 
         // The forwarded raw key, exactly as `app.rs`'s patch is specified to
         // call it.
-        nav.capture_binding(Binding::Key(KeyCode::KeyF));
+        nav.capture_binding(Binding::Key(KeyCode::KeyF.into()));
         assert!(!nav.awaiting_key_capture(), "the capture is consumed");
         assert_eq!(
             nav.settings().page(),
@@ -8728,7 +8728,7 @@ mod tests {
         let persisted = crate::config::Options::load_from(&options_path);
         assert_eq!(
             persisted.keybinds.binding(InputAction::Forward),
-            Binding::Key(KeyCode::KeyF),
+            Binding::Key(KeyCode::KeyF.into()),
             "and it must reach the file immediately, not at exit"
         );
     }
@@ -8744,7 +8744,7 @@ mod tests {
     /// capture_key_for_forwards_a_function_key` proves the physical-key
     /// half (`capture_key_for(F1) == Some(CaptureKey::Bind(F1))`) but reads
     /// no persisted string — this is the missing other half, driven with
-    /// `Binding::Key(KeyCode::F1)`, exactly what `app.rs`'s
+    /// `Binding::Key(KeyCode::F1.into())`, exactly what `app.rs`'s
     /// `Some(CaptureKey::Bind(code)) => self.nav.capture_binding(Binding::
     /// Key(code))` arm forwards verbatim for any `KeyCode`, F1 included.
     ///
@@ -8774,11 +8774,11 @@ mod tests {
         // The exact call `app.rs`'s forwarding arm makes for `PhysicalKey::
         // Code(KeyCode::F1)` — no printable `text`, which is what
         // `menu_key_for` alone would have silently dropped before `a6da3f6`.
-        nav.capture_binding(Binding::Key(KeyCode::F1));
+        nav.capture_binding(Binding::Key(KeyCode::F1.into()));
         assert!(!nav.awaiting_key_capture(), "the capture is consumed");
         assert_eq!(
             nav.options().keybinds.binding(InputAction::Forward),
-            Binding::Key(KeyCode::F1)
+            Binding::Key(KeyCode::F1.into())
         );
 
         let raw = std::fs::read_to_string(&options_path).expect("options.json must exist");
@@ -8799,7 +8799,7 @@ mod tests {
         let reloaded = crate::config::Options::load_from(&options_path);
         assert_eq!(
             reloaded.keybinds.binding(InputAction::Forward),
-            Binding::Key(KeyCode::F1),
+            Binding::Key(KeyCode::F1.into()),
             "the persisted name must parse back to the same binding on load"
         );
     }
@@ -8889,10 +8889,10 @@ mod tests {
             *c == KeyControl::Bind(InputAction::Pause)
         });
         nav.click(&mut ui, bind_row);
-        nav.capture_binding(Binding::Key(winit::keyboard::KeyCode::KeyP));
+        nav.capture_binding(Binding::Key(winit::keyboard::KeyCode::KeyP.into()));
         assert_eq!(
             nav.options().keybinds.binding(InputAction::Pause),
-            Binding::Key(winit::keyboard::KeyCode::KeyP)
+            Binding::Key(winit::keyboard::KeyCode::KeyP.into())
         );
     }
 
@@ -8920,11 +8920,11 @@ mod tests {
         ] {
             let bind_row = key_binds_row(&mut nav, &mut ui, |c| *c == KeyControl::Bind(action));
             nav.click(&mut ui, bind_row);
-            nav.capture_binding(Binding::Key(key));
+            nav.capture_binding(Binding::Key(key.into()));
         }
         assert_eq!(
             nav.options().keybinds.binding(InputAction::Forward),
-            Binding::Key(KeyCode::KeyF)
+            Binding::Key(KeyCode::KeyF.into())
         );
 
         // Resetting Forward alone must not touch Back.
@@ -8934,7 +8934,7 @@ mod tests {
         assert!(nav.options().keybinds.is_default(InputAction::Forward));
         assert_eq!(
             nav.options().keybinds.binding(InputAction::Back),
-            Binding::Key(KeyCode::KeyB),
+            Binding::Key(KeyCode::KeyB.into()),
             "an untouched neighbour must not reset"
         );
         assert!(

@@ -16,6 +16,34 @@
 //! [`blocks`], [`collision`], [`mesher`], [`camera_rig`], [`hud`], [`sim`]); the
 //! winit/wgpu surface in [`app`] is kept as small as possible.
 //!
+//! ## The `window` feature, and what stays winit-free without it
+//!
+//! [`app`] — `WindowApp`'s `ApplicationHandler`, every winit event type, the
+//! whole windowed driver — compiles in only behind the `window` Cargo
+//! feature (on by default, alongside `live`/`runtime-presentation`). With it
+//! off, `winit` is not merely unused, it is **absent from the dependency
+//! graph**: `cargo tree -p lodestone-shell --no-default-features -i winit`
+//! reports nothing, and `xtask`'s `check-no-winit-headless` subcommand
+//! (`just check-seam` calls it) fails loudly if that ever regresses.
+//!
+//! This is a real, checked build configuration, not just a flag that
+//! compiles: [`diagnostics::run_headless`] (one-shot offscreen GPU render)
+//! and [`diagnostics::run_connect`] (the live event-stream diagnostic) live
+//! outside [`app`] specifically so a windowless build keeps both. [`run`] is
+//! the entry point that works either way — it delegates to [`app::run`] when
+//! `window` is on, and to [`diagnostics`] directly when it is off. The one
+//! reach-in a plain `--no-default-features` build cannot resolve is
+//! opening an actual window ([`config::Mode::Window`]), which [`run`]
+//! refuses with a named error rather than silently downgrading to something
+//! else. See `docs/runtime-presentation.md`.
+//!
+//! [`keybinds::Key`]/[`keybinds::MouseButton`] are the seam that makes this
+//! possible: [`keybinds::Binding`] (persisted in `options.json`, read by
+//! [`config`] and [`menu::nav`]) names its own physical-key/mouse-button
+//! types rather than winit's, and the `From<winit::keyboard::KeyCode>`/
+//! `From<winit::event::MouseButton>` conversions exist only behind `window`
+//! — the one place a raw winit key becomes one of these.
+//!
 //! ## Known seam gaps (reported, not worked around)
 //!
 //! Live terrain does not yet reach the shell: [`lodestone_model::ClientEvent`]'s
@@ -23,6 +51,7 @@
 //! [`worldgen`] world through the *same* world → classify → mesh → GPU chain a
 //! real chunk would use. See [`net`] and the accompanying report.
 
+#[cfg(feature = "window")]
 pub mod app;
 pub mod asset_objects;
 pub mod audio;
@@ -35,6 +64,10 @@ pub mod command_block_source;
 pub mod config;
 pub mod consume;
 pub mod container;
+/// `Mode::Headless`/`Mode::Connect` — see this module's own doc for why they
+/// live outside [`app`] and stay in every build regardless of the `window`
+/// feature.
+pub mod diagnostics;
 pub mod display_entities;
 pub mod effects;
 pub mod entities;
@@ -78,3 +111,38 @@ pub mod tablist;
 pub mod worldgen;
 
 pub use config::{CliOutcome, Config, Mode};
+
+/// Entry point: dispatch on the configured mode, whether or not this build
+/// was compiled with the `window` Cargo feature.
+///
+/// `main.rs` calls this rather than `app::run` directly for exactly that
+/// reason — `app` (and therefore `app::run`) does not exist at all without
+/// `window`, while `Mode::Headless`/`Mode::Connect` (via [`diagnostics`])
+/// stay available either way. The browser build (`web/`) keeps calling
+/// `app::run` directly instead: it always builds with `window` on (a browser
+/// session is always [`Mode::Window`]) and has no command line to select a
+/// diagnostic mode from, so there is nothing here for it to gain.
+///
+/// # Errors
+/// Returns an error if GPU bring-up, the event loop, or a diagnostic mode's
+/// own work fails — or, with `window` off, if `config.mode` needs a window
+/// this build was not compiled with one.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run(config: Config) -> anyhow::Result<()> {
+    #[cfg(feature = "window")]
+    {
+        app::run(config)
+    }
+    #[cfg(not(feature = "window"))]
+    {
+        match config.mode {
+            Mode::Headless => diagnostics::run_headless(diagnostics::require_owned_account()?, config),
+            Mode::Connect => diagnostics::run_connect(diagnostics::require_owned_account()?, config),
+            Mode::Window => Err(anyhow::anyhow!(
+                "this build was compiled without the `window` Cargo feature, so it has \
+                 no winit and cannot open a window. Rebuild with `--features window` \
+                 (on by default) to open one, or use --headless/--connect instead."
+            )),
+        }
+    }
+}

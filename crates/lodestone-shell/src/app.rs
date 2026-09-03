@@ -40,7 +40,9 @@ use std::time::Duration;
 // and panics when it runs — see `crate::platform`.
 use crate::platform::Instant;
 
-use lodestone_render::{GpuContext, HeadlessTarget, RenderTarget, TargetError, fog::FogSettings};
+// `HeadlessTarget`/`TargetError` moved to `crate::diagnostics` along with
+// `Mode::Headless`'s own offscreen render — not needed here any more.
+use lodestone_render::{GpuContext, RenderTarget, fog::FogSettings};
 // Native-only: it blocks on adapter/device selection. The browser arm awaits
 // `attach_window_async` from `spawn_local` instead — see `app::lifecycle::resumed`,
 // which is split at exactly that seam.
@@ -130,14 +132,7 @@ use recipe_panel::{
 };
 #[allow(unused_imports)]
 use runners::run_windowed;
-// The two CLI-diagnostic runners are `cfg(not(wasm32))` at their definitions — see
-// `run` below — so the import has to carry the identical `cfg`. A blanket `use` here
-// would name items that do not exist for the browser target, which is precisely the
-// `unresolved import` this crate spent the port learning to avoid.
-#[cfg(not(target_arch = "wasm32"))]
-#[allow(unused_imports)]
-use runners::{run_connect, run_headless};
-// Same carried-`cfg` reasoning as the import just above, but for the
+// Same carried-`cfg` reasoning as the import just below, but for the
 // runtime-presentation runner: `run_headless_session` only exists for
 // `cfg(all(not(wasm32), feature = "runtime-presentation"))`.
 #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
@@ -212,10 +207,14 @@ pub fn run(config: Config) -> anyhow::Result<()> {
         // The proof is a parameter on each runner rather than a check here, so
         // the requirement travels with the function: a third diagnostic mode
         // added later has to obtain one too, or it does not compile.
+        // `require_owned_account`/`run_headless`/`run_connect` live in
+        // `crate::diagnostics` now — unconditional, winit-free, and shared
+        // with `crate::run`'s own `window`-off dispatch, so there is exactly
+        // one copy of each rather than one per caller.
         #[cfg(not(target_arch = "wasm32"))]
-        Mode::Headless => run_headless(require_owned_account()?, config),
+        Mode::Headless => crate::diagnostics::run_headless(crate::diagnostics::require_owned_account()?, config),
         #[cfg(not(target_arch = "wasm32"))]
-        Mode::Connect => run_connect(require_owned_account()?, config),
+        Mode::Connect => crate::diagnostics::run_connect(crate::diagnostics::require_owned_account()?, config),
         #[cfg(target_arch = "wasm32")]
         Mode::Headless | Mode::Connect => Err(anyhow::anyhow!(
             "{:?} is a native CLI diagnostic mode: it needs a filesystem to write a \
@@ -227,7 +226,7 @@ pub fn run(config: Config) -> anyhow::Result<()> {
         // just above: this establishes a real, persistent session outside the
         // menu's own `Entitlement` check, so it needs the identical proof.
         #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
-        Mode::HeadlessSession => run_headless_session(require_owned_account()?, config),
+        Mode::HeadlessSession => run_headless_session(crate::diagnostics::require_owned_account()?, config),
         #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
         Mode::HeadlessSession => Err(anyhow::anyhow!(
             "HeadlessSession is a native CLI diagnostic mode: it needs a real OS \
@@ -238,38 +237,18 @@ pub fn run(config: Config) -> anyhow::Result<()> {
     }
 }
 
-/// The ownership gate for the CLI diagnostic modes: the real account roster, or
-/// a refusal naming what to do about it.
-///
-/// `Mode::Window` does **not** come through here, and that is not an oversight:
-/// the windowed build has a UI, so it shows `crate::menu::Screen::Ownership` and
-/// lets the player add an account, which is a better answer than exiting. These
-/// two modes have no UI to offer, so the only honest answer is to stop.
-///
-/// # Errors
-/// Returns an error when no locally stored account owns the game.
-#[cfg(not(target_arch = "wasm32"))]
-fn require_owned_account() -> anyhow::Result<lodestone_auth::Entitlement> {
-    lodestone_auth::Entitlement::from_metadata(&lodestone_auth::AccountsMetadata::load()).ok_or_else(
-        || {
-            anyhow::anyhow!(
-                "no Microsoft account that owns Minecraft is signed in. Run the game \
-                 without --headless/--connect and add one from the Accounts screen first."
-            )
-        },
-    )
-}
-
 /// Sky distance fog sized to the shell's real render distance, so terrain
 /// dissolves into the sky exactly where chunks stop loading rather than at the
-/// render crate's default 8-chunk fallback. Driven once at render bring-up on
-/// both the windowed and headless paths (render distance is fixed for the
-/// session).
+/// render crate's default 8-chunk fallback. Driven once at render bring-up
+/// (render distance is fixed for the session).
 ///
 /// Delegates to [`crate::sim::fog_for_render_distance`] so the colour and the
 /// fade band have one definition shared with the frame clear — a second copy of
 /// the sky colour here is how the horizon ends up banding in a colour the sky
-/// never is.
+/// never is. `crate::diagnostics::run_headless` (the headless render path,
+/// unconditional and outside this `window`-gated module) calls
+/// `fog_for_render_distance` the same way rather than through this thin
+/// wrapper, so the two never drift.
 fn sky_fog(render_distance: u32) -> FogSettings {
     crate::sim::fog_for_render_distance(render_distance)
 }
@@ -383,7 +362,7 @@ fn menu_button_for(button: MouseButton) -> Option<MenuButton> {
 fn movement_action_for(binds: &Keybinds, code: KeyCode) -> Option<Action> {
     InputAction::ALL
         .into_iter()
-        .filter(|a| binds.is(*a, code))
+        .filter(|a| binds.is(*a, code.into()))
         .find_map(InputAction::movement)
 }
 
@@ -402,7 +381,7 @@ const OFFHAND_SWAP_BUTTON: i32 = 40;
 fn hotbar_slot_for(binds: &Keybinds, code: KeyCode) -> Option<usize> {
     InputAction::ALL
         .into_iter()
-        .filter(|a| binds.is(*a, code))
+        .filter(|a| binds.is(*a, code.into()))
         .find_map(InputAction::hotbar_slot)
 }
 
@@ -415,7 +394,7 @@ fn hotbar_slot_for(binds: &Keybinds, code: KeyCode) -> Option<usize> {
 fn mouse_action_for(binds: &Keybinds, button: MouseButton) -> Option<InputAction> {
     InputAction::ALL
         .into_iter()
-        .find(|a| binds.is_mouse(*a, button))
+        .find(|a| binds.is_mouse(*a, button.into()))
 }
 
 /// Whether the world's own HUD — hotbar, hearts, hunger, the XP bar — draws on

@@ -433,7 +433,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                     // consume its own confirming click as a hover-row
                     // activation instead of finishing the rebind.
                     if self.nav.awaiting_key_capture() {
-                        self.nav.capture_binding(Binding::Mouse(button));
+                        self.nav.capture_binding(Binding::Mouse(button.into()));
                     } else if button == MouseButton::Left {
                         // Only a click *on a row* activates: clicking the backdrop
                         // must not confirm whatever happens to be highlighted.
@@ -1203,7 +1203,7 @@ impl WindowApp {
                             self.handle_menu_key(MenuKey::Escape);
                         }
                         Some(CaptureKey::Bind(code)) => {
-                            self.nav.capture_binding(Binding::Key(code));
+                            self.nav.capture_binding(Binding::Key(code.into()));
                         }
                         None => {}
                     }

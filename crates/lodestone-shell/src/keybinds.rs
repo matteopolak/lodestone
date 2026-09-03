@@ -145,9 +145,6 @@
 
 use std::fmt;
 
-use winit::event::MouseButton;
-use winit::keyboard::KeyCode;
-
 use lodestone_controller::Action;
 
 // ---------------------------------------------------------------------------
@@ -530,13 +527,13 @@ impl InputAction {
     pub fn default_binding(self) -> Binding {
         match self {
             // vanilla's own persisted-options declarations — 87/83/65/68/32/340/341.
-            InputAction::Forward => Binding::Key(KeyCode::KeyW),
-            InputAction::Back => Binding::Key(KeyCode::KeyS),
-            InputAction::Left => Binding::Key(KeyCode::KeyA),
-            InputAction::Right => Binding::Key(KeyCode::KeyD),
-            InputAction::Jump => Binding::Key(KeyCode::Space),
-            InputAction::Sneak => Binding::Key(KeyCode::ShiftLeft),
-            InputAction::Sprint => Binding::Key(KeyCode::ControlLeft),
+            InputAction::Forward => Binding::Key(Key::KeyW),
+            InputAction::Back => Binding::Key(Key::KeyS),
+            InputAction::Left => Binding::Key(Key::KeyA),
+            InputAction::Right => Binding::Key(Key::KeyD),
+            InputAction::Jump => Binding::Key(Key::Space),
+            InputAction::Sneak => Binding::Key(Key::ShiftLeft),
+            InputAction::Sprint => Binding::Key(Key::ControlLeft),
             // vanilla's own persisted-options declarations — mouse-button type, buttons 0 and 1. Note the *order*
             // in the source is `keyUse` (button 1) then `keyAttack` (button 0).
             InputAction::Attack => Binding::Mouse(MouseButton::Left),
@@ -544,39 +541,39 @@ impl InputAction {
             // vanilla's own persisted-options declarations — mouse-button type, button 2.
             InputAction::PickItem => Binding::Mouse(MouseButton::Middle),
             // vanilla's own persisted-options declarations — 69, 70 and 81.
-            InputAction::Inventory => Binding::Key(KeyCode::KeyE),
-            InputAction::SwapOffhand => Binding::Key(KeyCode::KeyF),
-            InputAction::Drop => Binding::Key(KeyCode::KeyQ),
+            InputAction::Inventory => Binding::Key(Key::KeyE),
+            InputAction::SwapOffhand => Binding::Key(Key::KeyF),
+            InputAction::Drop => Binding::Key(Key::KeyQ),
             // vanilla's own persisted-options declarations — 49..57, i.e. the number row, not the keypad.
-            InputAction::Hotbar1 => Binding::Key(KeyCode::Digit1),
-            InputAction::Hotbar2 => Binding::Key(KeyCode::Digit2),
-            InputAction::Hotbar3 => Binding::Key(KeyCode::Digit3),
-            InputAction::Hotbar4 => Binding::Key(KeyCode::Digit4),
-            InputAction::Hotbar5 => Binding::Key(KeyCode::Digit5),
-            InputAction::Hotbar6 => Binding::Key(KeyCode::Digit6),
-            InputAction::Hotbar7 => Binding::Key(KeyCode::Digit7),
-            InputAction::Hotbar8 => Binding::Key(KeyCode::Digit8),
-            InputAction::Hotbar9 => Binding::Key(KeyCode::Digit9),
+            InputAction::Hotbar1 => Binding::Key(Key::Digit1),
+            InputAction::Hotbar2 => Binding::Key(Key::Digit2),
+            InputAction::Hotbar3 => Binding::Key(Key::Digit3),
+            InputAction::Hotbar4 => Binding::Key(Key::Digit4),
+            InputAction::Hotbar5 => Binding::Key(Key::Digit5),
+            InputAction::Hotbar6 => Binding::Key(Key::Digit6),
+            InputAction::Hotbar7 => Binding::Key(Key::Digit7),
+            InputAction::Hotbar8 => Binding::Key(Key::Digit8),
+            InputAction::Hotbar9 => Binding::Key(Key::Digit9),
             // vanilla's own persisted-options declarations — 84/47/258.
-            InputAction::Chat => Binding::Key(KeyCode::KeyT),
-            InputAction::Command => Binding::Key(KeyCode::Slash),
-            InputAction::PlayerList => Binding::Key(KeyCode::Tab),
+            InputAction::Chat => Binding::Key(Key::KeyT),
+            InputAction::Command => Binding::Key(Key::Slash),
+            InputAction::PlayerList => Binding::Key(Key::Tab),
             // vanilla's own persisted-options declarations — 291.
-            InputAction::Screenshot => Binding::Key(KeyCode::F2),
+            InputAction::Screenshot => Binding::Key(Key::F2),
             // vanilla's own persisted-options declarations — 294.
-            InputAction::TogglePerspective => Binding::Key(KeyCode::F5),
+            InputAction::TogglePerspective => Binding::Key(Key::F5),
             // No vanilla counterpart (Escape is not a `KeyMapping`); GLFW 256.
-            InputAction::Pause => Binding::Key(KeyCode::Escape),
+            InputAction::Pause => Binding::Key(Key::Escape),
             // vanilla's own persisted-options declarations — 292.
-            InputAction::DebugOverlay => Binding::Key(KeyCode::F3),
+            InputAction::DebugOverlay => Binding::Key(Key::F3),
             // vanilla's own persisted-options declarations's `debugKeys` — 66/71/72/78/293/80/67.
-            InputAction::DebugShowHitboxes => Binding::Key(KeyCode::KeyB),
-            InputAction::DebugShowChunkBorders => Binding::Key(KeyCode::KeyG),
-            InputAction::DebugShowAdvancedTooltips => Binding::Key(KeyCode::KeyH),
-            InputAction::DebugSpectate => Binding::Key(KeyCode::KeyN),
-            InputAction::DebugSwitchGameMode => Binding::Key(KeyCode::F4),
-            InputAction::DebugFocusPause => Binding::Key(KeyCode::KeyP),
-            InputAction::DebugCopyLocation => Binding::Key(KeyCode::KeyC),
+            InputAction::DebugShowHitboxes => Binding::Key(Key::KeyB),
+            InputAction::DebugShowChunkBorders => Binding::Key(Key::KeyG),
+            InputAction::DebugShowAdvancedTooltips => Binding::Key(Key::KeyH),
+            InputAction::DebugSpectate => Binding::Key(Key::KeyN),
+            InputAction::DebugSwitchGameMode => Binding::Key(Key::F4),
+            InputAction::DebugFocusPause => Binding::Key(Key::KeyP),
+            InputAction::DebugCopyLocation => Binding::Key(Key::KeyC),
         }
     }
 
@@ -623,6 +620,471 @@ impl InputAction {
 // Bindings
 // ---------------------------------------------------------------------------
 
+/// A physical keyboard key position, mirroring winit's own `KeyCode` —
+/// see the module docs on why identity is physical rather than logical.
+///
+/// This crate's own type, not a re-export: [`Binding`] is reachable from
+/// [`crate::config`] and [`crate::menu::nav`], neither of which should have
+/// to pull in `winit` (and, with the `window` Cargo feature off, cannot —
+/// see `docs/runtime-presentation.md` on the winit-free headless build).
+/// [`From<winit::keyboard::KeyCode>`](Key#impl-From<KeyCode>-for-Key) is the
+/// one place a raw winit key becomes one of these, and it exists only when
+/// the `window` feature is on — see the bottom of this file.
+///
+/// Every variant here is winit 0.30's own `KeyCode`, transcribed exactly
+/// (same names, same physical keys) rather than picked by hand, so the
+/// conversion below is a rename, not a redesign. `KeyCode` is
+/// `#[non_exhaustive]` on winit's side (a future release can add a variant);
+/// [`Key::Unknown`] is the sink for that case and is not reachable against
+/// the pinned winit version this crate builds against today.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Key {
+    Backquote,
+    Backslash,
+    BracketLeft,
+    BracketRight,
+    Comma,
+    Digit0,
+    Digit1,
+    Digit2,
+    Digit3,
+    Digit4,
+    Digit5,
+    Digit6,
+    Digit7,
+    Digit8,
+    Digit9,
+    Equal,
+    IntlBackslash,
+    IntlRo,
+    IntlYen,
+    KeyA,
+    KeyB,
+    KeyC,
+    KeyD,
+    KeyE,
+    KeyF,
+    KeyG,
+    KeyH,
+    KeyI,
+    KeyJ,
+    KeyK,
+    KeyL,
+    KeyM,
+    KeyN,
+    KeyO,
+    KeyP,
+    KeyQ,
+    KeyR,
+    KeyS,
+    KeyT,
+    KeyU,
+    KeyV,
+    KeyW,
+    KeyX,
+    KeyY,
+    KeyZ,
+    Minus,
+    Period,
+    Quote,
+    Semicolon,
+    Slash,
+    AltLeft,
+    AltRight,
+    Backspace,
+    CapsLock,
+    ContextMenu,
+    ControlLeft,
+    ControlRight,
+    Enter,
+    SuperLeft,
+    SuperRight,
+    ShiftLeft,
+    ShiftRight,
+    Space,
+    Tab,
+    Convert,
+    KanaMode,
+    Lang1,
+    Lang2,
+    Lang3,
+    Lang4,
+    Lang5,
+    NonConvert,
+    Delete,
+    End,
+    Help,
+    Home,
+    Insert,
+    PageDown,
+    PageUp,
+    ArrowDown,
+    ArrowLeft,
+    ArrowRight,
+    ArrowUp,
+    NumLock,
+    Numpad0,
+    Numpad1,
+    Numpad2,
+    Numpad3,
+    Numpad4,
+    Numpad5,
+    Numpad6,
+    Numpad7,
+    Numpad8,
+    Numpad9,
+    NumpadAdd,
+    NumpadBackspace,
+    NumpadClear,
+    NumpadClearEntry,
+    NumpadComma,
+    NumpadDecimal,
+    NumpadDivide,
+    NumpadEnter,
+    NumpadEqual,
+    NumpadHash,
+    NumpadMemoryAdd,
+    NumpadMemoryClear,
+    NumpadMemoryRecall,
+    NumpadMemoryStore,
+    NumpadMemorySubtract,
+    NumpadMultiply,
+    NumpadParenLeft,
+    NumpadParenRight,
+    NumpadStar,
+    NumpadSubtract,
+    Escape,
+    Fn,
+    FnLock,
+    PrintScreen,
+    ScrollLock,
+    Pause,
+    BrowserBack,
+    BrowserFavorites,
+    BrowserForward,
+    BrowserHome,
+    BrowserRefresh,
+    BrowserSearch,
+    BrowserStop,
+    Eject,
+    LaunchApp1,
+    LaunchApp2,
+    LaunchMail,
+    MediaPlayPause,
+    MediaSelect,
+    MediaStop,
+    MediaTrackNext,
+    MediaTrackPrevious,
+    Power,
+    Sleep,
+    AudioVolumeDown,
+    AudioVolumeMute,
+    AudioVolumeUp,
+    WakeUp,
+    Meta,
+    Hyper,
+    Turbo,
+    Abort,
+    Resume,
+    Suspend,
+    Again,
+    Copy,
+    Cut,
+    Find,
+    Open,
+    Paste,
+    Props,
+    Select,
+    Undo,
+    Hiragana,
+    Katakana,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    F13,
+    F14,
+    F15,
+    F16,
+    F17,
+    F18,
+    F19,
+    F20,
+    F21,
+    F22,
+    F23,
+    F24,
+    F25,
+    F26,
+    F27,
+    F28,
+    F29,
+    F30,
+    F31,
+    F32,
+    F33,
+    F34,
+    F35,
+    /// A physical key winit does not yet name as of the pinned version —
+    /// see this type's own doc. Not constructed anywhere in this crate.
+    Unknown,
+}
+
+/// A mouse button, mirroring winit's own `MouseButton` exactly (that type is
+/// not `#[non_exhaustive]`, so this conversion is total). See [`Key`]'s doc
+/// for why this crate keeps its own copy rather than depending on winit here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+    Back,
+    Forward,
+    /// The raw platform button index, for a button vanilla has no name for.
+    Other(u16),
+}
+
+// ---------------------------------------------------------------------------
+// winit conversions — confined to the windowed path.
+//
+// Everything above this point compiles with `winit` entirely out of the
+// dependency graph (`cargo tree -p lodestone-shell --no-default-features -i
+// winit` reports nothing). These two `From` impls are the one place a raw
+// winit key/button becomes a `Key`/`MouseButton`, and they exist only behind
+// the `window` Cargo feature — the same feature that gates `winit` itself as
+// a dependency and the whole `app` module that is winit's real, unavoidable
+// consumer (`ApplicationHandler`, `WindowEvent`, …). See
+// `docs/runtime-presentation.md`'s "genuinely winit-free headless build"
+// section.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "window")]
+impl From<winit::keyboard::KeyCode> for Key {
+    fn from(code: winit::keyboard::KeyCode) -> Self {
+        match code {
+                winit::keyboard::KeyCode::Backquote => Key::Backquote,
+                winit::keyboard::KeyCode::Backslash => Key::Backslash,
+                winit::keyboard::KeyCode::BracketLeft => Key::BracketLeft,
+                winit::keyboard::KeyCode::BracketRight => Key::BracketRight,
+                winit::keyboard::KeyCode::Comma => Key::Comma,
+                winit::keyboard::KeyCode::Digit0 => Key::Digit0,
+                winit::keyboard::KeyCode::Digit1 => Key::Digit1,
+                winit::keyboard::KeyCode::Digit2 => Key::Digit2,
+                winit::keyboard::KeyCode::Digit3 => Key::Digit3,
+                winit::keyboard::KeyCode::Digit4 => Key::Digit4,
+                winit::keyboard::KeyCode::Digit5 => Key::Digit5,
+                winit::keyboard::KeyCode::Digit6 => Key::Digit6,
+                winit::keyboard::KeyCode::Digit7 => Key::Digit7,
+                winit::keyboard::KeyCode::Digit8 => Key::Digit8,
+                winit::keyboard::KeyCode::Digit9 => Key::Digit9,
+                winit::keyboard::KeyCode::Equal => Key::Equal,
+                winit::keyboard::KeyCode::IntlBackslash => Key::IntlBackslash,
+                winit::keyboard::KeyCode::IntlRo => Key::IntlRo,
+                winit::keyboard::KeyCode::IntlYen => Key::IntlYen,
+                winit::keyboard::KeyCode::KeyA => Key::KeyA,
+                winit::keyboard::KeyCode::KeyB => Key::KeyB,
+                winit::keyboard::KeyCode::KeyC => Key::KeyC,
+                winit::keyboard::KeyCode::KeyD => Key::KeyD,
+                winit::keyboard::KeyCode::KeyE => Key::KeyE,
+                winit::keyboard::KeyCode::KeyF => Key::KeyF,
+                winit::keyboard::KeyCode::KeyG => Key::KeyG,
+                winit::keyboard::KeyCode::KeyH => Key::KeyH,
+                winit::keyboard::KeyCode::KeyI => Key::KeyI,
+                winit::keyboard::KeyCode::KeyJ => Key::KeyJ,
+                winit::keyboard::KeyCode::KeyK => Key::KeyK,
+                winit::keyboard::KeyCode::KeyL => Key::KeyL,
+                winit::keyboard::KeyCode::KeyM => Key::KeyM,
+                winit::keyboard::KeyCode::KeyN => Key::KeyN,
+                winit::keyboard::KeyCode::KeyO => Key::KeyO,
+                winit::keyboard::KeyCode::KeyP => Key::KeyP,
+                winit::keyboard::KeyCode::KeyQ => Key::KeyQ,
+                winit::keyboard::KeyCode::KeyR => Key::KeyR,
+                winit::keyboard::KeyCode::KeyS => Key::KeyS,
+                winit::keyboard::KeyCode::KeyT => Key::KeyT,
+                winit::keyboard::KeyCode::KeyU => Key::KeyU,
+                winit::keyboard::KeyCode::KeyV => Key::KeyV,
+                winit::keyboard::KeyCode::KeyW => Key::KeyW,
+                winit::keyboard::KeyCode::KeyX => Key::KeyX,
+                winit::keyboard::KeyCode::KeyY => Key::KeyY,
+                winit::keyboard::KeyCode::KeyZ => Key::KeyZ,
+                winit::keyboard::KeyCode::Minus => Key::Minus,
+                winit::keyboard::KeyCode::Period => Key::Period,
+                winit::keyboard::KeyCode::Quote => Key::Quote,
+                winit::keyboard::KeyCode::Semicolon => Key::Semicolon,
+                winit::keyboard::KeyCode::Slash => Key::Slash,
+                winit::keyboard::KeyCode::AltLeft => Key::AltLeft,
+                winit::keyboard::KeyCode::AltRight => Key::AltRight,
+                winit::keyboard::KeyCode::Backspace => Key::Backspace,
+                winit::keyboard::KeyCode::CapsLock => Key::CapsLock,
+                winit::keyboard::KeyCode::ContextMenu => Key::ContextMenu,
+                winit::keyboard::KeyCode::ControlLeft => Key::ControlLeft,
+                winit::keyboard::KeyCode::ControlRight => Key::ControlRight,
+                winit::keyboard::KeyCode::Enter => Key::Enter,
+                winit::keyboard::KeyCode::SuperLeft => Key::SuperLeft,
+                winit::keyboard::KeyCode::SuperRight => Key::SuperRight,
+                winit::keyboard::KeyCode::ShiftLeft => Key::ShiftLeft,
+                winit::keyboard::KeyCode::ShiftRight => Key::ShiftRight,
+                winit::keyboard::KeyCode::Space => Key::Space,
+                winit::keyboard::KeyCode::Tab => Key::Tab,
+                winit::keyboard::KeyCode::Convert => Key::Convert,
+                winit::keyboard::KeyCode::KanaMode => Key::KanaMode,
+                winit::keyboard::KeyCode::Lang1 => Key::Lang1,
+                winit::keyboard::KeyCode::Lang2 => Key::Lang2,
+                winit::keyboard::KeyCode::Lang3 => Key::Lang3,
+                winit::keyboard::KeyCode::Lang4 => Key::Lang4,
+                winit::keyboard::KeyCode::Lang5 => Key::Lang5,
+                winit::keyboard::KeyCode::NonConvert => Key::NonConvert,
+                winit::keyboard::KeyCode::Delete => Key::Delete,
+                winit::keyboard::KeyCode::End => Key::End,
+                winit::keyboard::KeyCode::Help => Key::Help,
+                winit::keyboard::KeyCode::Home => Key::Home,
+                winit::keyboard::KeyCode::Insert => Key::Insert,
+                winit::keyboard::KeyCode::PageDown => Key::PageDown,
+                winit::keyboard::KeyCode::PageUp => Key::PageUp,
+                winit::keyboard::KeyCode::ArrowDown => Key::ArrowDown,
+                winit::keyboard::KeyCode::ArrowLeft => Key::ArrowLeft,
+                winit::keyboard::KeyCode::ArrowRight => Key::ArrowRight,
+                winit::keyboard::KeyCode::ArrowUp => Key::ArrowUp,
+                winit::keyboard::KeyCode::NumLock => Key::NumLock,
+                winit::keyboard::KeyCode::Numpad0 => Key::Numpad0,
+                winit::keyboard::KeyCode::Numpad1 => Key::Numpad1,
+                winit::keyboard::KeyCode::Numpad2 => Key::Numpad2,
+                winit::keyboard::KeyCode::Numpad3 => Key::Numpad3,
+                winit::keyboard::KeyCode::Numpad4 => Key::Numpad4,
+                winit::keyboard::KeyCode::Numpad5 => Key::Numpad5,
+                winit::keyboard::KeyCode::Numpad6 => Key::Numpad6,
+                winit::keyboard::KeyCode::Numpad7 => Key::Numpad7,
+                winit::keyboard::KeyCode::Numpad8 => Key::Numpad8,
+                winit::keyboard::KeyCode::Numpad9 => Key::Numpad9,
+                winit::keyboard::KeyCode::NumpadAdd => Key::NumpadAdd,
+                winit::keyboard::KeyCode::NumpadBackspace => Key::NumpadBackspace,
+                winit::keyboard::KeyCode::NumpadClear => Key::NumpadClear,
+                winit::keyboard::KeyCode::NumpadClearEntry => Key::NumpadClearEntry,
+                winit::keyboard::KeyCode::NumpadComma => Key::NumpadComma,
+                winit::keyboard::KeyCode::NumpadDecimal => Key::NumpadDecimal,
+                winit::keyboard::KeyCode::NumpadDivide => Key::NumpadDivide,
+                winit::keyboard::KeyCode::NumpadEnter => Key::NumpadEnter,
+                winit::keyboard::KeyCode::NumpadEqual => Key::NumpadEqual,
+                winit::keyboard::KeyCode::NumpadHash => Key::NumpadHash,
+                winit::keyboard::KeyCode::NumpadMemoryAdd => Key::NumpadMemoryAdd,
+                winit::keyboard::KeyCode::NumpadMemoryClear => Key::NumpadMemoryClear,
+                winit::keyboard::KeyCode::NumpadMemoryRecall => Key::NumpadMemoryRecall,
+                winit::keyboard::KeyCode::NumpadMemoryStore => Key::NumpadMemoryStore,
+                winit::keyboard::KeyCode::NumpadMemorySubtract => Key::NumpadMemorySubtract,
+                winit::keyboard::KeyCode::NumpadMultiply => Key::NumpadMultiply,
+                winit::keyboard::KeyCode::NumpadParenLeft => Key::NumpadParenLeft,
+                winit::keyboard::KeyCode::NumpadParenRight => Key::NumpadParenRight,
+                winit::keyboard::KeyCode::NumpadStar => Key::NumpadStar,
+                winit::keyboard::KeyCode::NumpadSubtract => Key::NumpadSubtract,
+                winit::keyboard::KeyCode::Escape => Key::Escape,
+                winit::keyboard::KeyCode::Fn => Key::Fn,
+                winit::keyboard::KeyCode::FnLock => Key::FnLock,
+                winit::keyboard::KeyCode::PrintScreen => Key::PrintScreen,
+                winit::keyboard::KeyCode::ScrollLock => Key::ScrollLock,
+                winit::keyboard::KeyCode::Pause => Key::Pause,
+                winit::keyboard::KeyCode::BrowserBack => Key::BrowserBack,
+                winit::keyboard::KeyCode::BrowserFavorites => Key::BrowserFavorites,
+                winit::keyboard::KeyCode::BrowserForward => Key::BrowserForward,
+                winit::keyboard::KeyCode::BrowserHome => Key::BrowserHome,
+                winit::keyboard::KeyCode::BrowserRefresh => Key::BrowserRefresh,
+                winit::keyboard::KeyCode::BrowserSearch => Key::BrowserSearch,
+                winit::keyboard::KeyCode::BrowserStop => Key::BrowserStop,
+                winit::keyboard::KeyCode::Eject => Key::Eject,
+                winit::keyboard::KeyCode::LaunchApp1 => Key::LaunchApp1,
+                winit::keyboard::KeyCode::LaunchApp2 => Key::LaunchApp2,
+                winit::keyboard::KeyCode::LaunchMail => Key::LaunchMail,
+                winit::keyboard::KeyCode::MediaPlayPause => Key::MediaPlayPause,
+                winit::keyboard::KeyCode::MediaSelect => Key::MediaSelect,
+                winit::keyboard::KeyCode::MediaStop => Key::MediaStop,
+                winit::keyboard::KeyCode::MediaTrackNext => Key::MediaTrackNext,
+                winit::keyboard::KeyCode::MediaTrackPrevious => Key::MediaTrackPrevious,
+                winit::keyboard::KeyCode::Power => Key::Power,
+                winit::keyboard::KeyCode::Sleep => Key::Sleep,
+                winit::keyboard::KeyCode::AudioVolumeDown => Key::AudioVolumeDown,
+                winit::keyboard::KeyCode::AudioVolumeMute => Key::AudioVolumeMute,
+                winit::keyboard::KeyCode::AudioVolumeUp => Key::AudioVolumeUp,
+                winit::keyboard::KeyCode::WakeUp => Key::WakeUp,
+                winit::keyboard::KeyCode::Meta => Key::Meta,
+                winit::keyboard::KeyCode::Hyper => Key::Hyper,
+                winit::keyboard::KeyCode::Turbo => Key::Turbo,
+                winit::keyboard::KeyCode::Abort => Key::Abort,
+                winit::keyboard::KeyCode::Resume => Key::Resume,
+                winit::keyboard::KeyCode::Suspend => Key::Suspend,
+                winit::keyboard::KeyCode::Again => Key::Again,
+                winit::keyboard::KeyCode::Copy => Key::Copy,
+                winit::keyboard::KeyCode::Cut => Key::Cut,
+                winit::keyboard::KeyCode::Find => Key::Find,
+                winit::keyboard::KeyCode::Open => Key::Open,
+                winit::keyboard::KeyCode::Paste => Key::Paste,
+                winit::keyboard::KeyCode::Props => Key::Props,
+                winit::keyboard::KeyCode::Select => Key::Select,
+                winit::keyboard::KeyCode::Undo => Key::Undo,
+                winit::keyboard::KeyCode::Hiragana => Key::Hiragana,
+                winit::keyboard::KeyCode::Katakana => Key::Katakana,
+                winit::keyboard::KeyCode::F1 => Key::F1,
+                winit::keyboard::KeyCode::F2 => Key::F2,
+                winit::keyboard::KeyCode::F3 => Key::F3,
+                winit::keyboard::KeyCode::F4 => Key::F4,
+                winit::keyboard::KeyCode::F5 => Key::F5,
+                winit::keyboard::KeyCode::F6 => Key::F6,
+                winit::keyboard::KeyCode::F7 => Key::F7,
+                winit::keyboard::KeyCode::F8 => Key::F8,
+                winit::keyboard::KeyCode::F9 => Key::F9,
+                winit::keyboard::KeyCode::F10 => Key::F10,
+                winit::keyboard::KeyCode::F11 => Key::F11,
+                winit::keyboard::KeyCode::F12 => Key::F12,
+                winit::keyboard::KeyCode::F13 => Key::F13,
+                winit::keyboard::KeyCode::F14 => Key::F14,
+                winit::keyboard::KeyCode::F15 => Key::F15,
+                winit::keyboard::KeyCode::F16 => Key::F16,
+                winit::keyboard::KeyCode::F17 => Key::F17,
+                winit::keyboard::KeyCode::F18 => Key::F18,
+                winit::keyboard::KeyCode::F19 => Key::F19,
+                winit::keyboard::KeyCode::F20 => Key::F20,
+                winit::keyboard::KeyCode::F21 => Key::F21,
+                winit::keyboard::KeyCode::F22 => Key::F22,
+                winit::keyboard::KeyCode::F23 => Key::F23,
+                winit::keyboard::KeyCode::F24 => Key::F24,
+                winit::keyboard::KeyCode::F25 => Key::F25,
+                winit::keyboard::KeyCode::F26 => Key::F26,
+                winit::keyboard::KeyCode::F27 => Key::F27,
+                winit::keyboard::KeyCode::F28 => Key::F28,
+                winit::keyboard::KeyCode::F29 => Key::F29,
+                winit::keyboard::KeyCode::F30 => Key::F30,
+                winit::keyboard::KeyCode::F31 => Key::F31,
+                winit::keyboard::KeyCode::F32 => Key::F32,
+                winit::keyboard::KeyCode::F33 => Key::F33,
+                winit::keyboard::KeyCode::F34 => Key::F34,
+                winit::keyboard::KeyCode::F35 => Key::F35,
+                // Non-exhaustive on winit's side only — every variant that
+                // exists in the pinned winit version is matched above.
+                _ => Key::Unknown,
+        }
+    }
+}
+
+#[cfg(feature = "window")]
+impl From<winit::event::MouseButton> for MouseButton {
+    fn from(button: winit::event::MouseButton) -> Self {
+        match button {
+            winit::event::MouseButton::Left => MouseButton::Left,
+            winit::event::MouseButton::Right => MouseButton::Right,
+            winit::event::MouseButton::Middle => MouseButton::Middle,
+            winit::event::MouseButton::Back => MouseButton::Back,
+            winit::event::MouseButton::Forward => MouseButton::Forward,
+            winit::event::MouseButton::Other(n) => MouseButton::Other(n),
+        }
+    }
+}
+
 /// What the player presses to invoke an [`InputAction`].
 ///
 /// Covers a keyboard key **and a mouse button**, because vanilla binds
@@ -652,7 +1114,7 @@ pub enum Binding {
     /// binding never matches any input.
     Unbound,
     /// A **physical** key position — see the module docs on non-QWERTY layouts.
-    Key(KeyCode),
+    Key(Key),
     Mouse(MouseButton),
 }
 
@@ -740,168 +1202,168 @@ impl fmt::Display for Binding {
 /// name and its reverse cannot drift. Scanned linearly, which is fine: it is
 /// touched only on save and load, never per keypress — matching a binding is a
 /// [`Binding`] equality test that never consults this table.
-const KEY_NAMES: &[(KeyCode, &str)] = &[
+const KEY_NAMES: &[(Key, &str)] = &[
     // Number row.
-    (KeyCode::Digit0, "key.keyboard.0"),
-    (KeyCode::Digit1, "key.keyboard.1"),
-    (KeyCode::Digit2, "key.keyboard.2"),
-    (KeyCode::Digit3, "key.keyboard.3"),
-    (KeyCode::Digit4, "key.keyboard.4"),
-    (KeyCode::Digit5, "key.keyboard.5"),
-    (KeyCode::Digit6, "key.keyboard.6"),
-    (KeyCode::Digit7, "key.keyboard.7"),
-    (KeyCode::Digit8, "key.keyboard.8"),
-    (KeyCode::Digit9, "key.keyboard.9"),
+    (Key::Digit0, "key.keyboard.0"),
+    (Key::Digit1, "key.keyboard.1"),
+    (Key::Digit2, "key.keyboard.2"),
+    (Key::Digit3, "key.keyboard.3"),
+    (Key::Digit4, "key.keyboard.4"),
+    (Key::Digit5, "key.keyboard.5"),
+    (Key::Digit6, "key.keyboard.6"),
+    (Key::Digit7, "key.keyboard.7"),
+    (Key::Digit8, "key.keyboard.8"),
+    (Key::Digit9, "key.keyboard.9"),
     // Letters.
-    (KeyCode::KeyA, "key.keyboard.a"),
-    (KeyCode::KeyB, "key.keyboard.b"),
-    (KeyCode::KeyC, "key.keyboard.c"),
-    (KeyCode::KeyD, "key.keyboard.d"),
-    (KeyCode::KeyE, "key.keyboard.e"),
-    (KeyCode::KeyF, "key.keyboard.f"),
-    (KeyCode::KeyG, "key.keyboard.g"),
-    (KeyCode::KeyH, "key.keyboard.h"),
-    (KeyCode::KeyI, "key.keyboard.i"),
-    (KeyCode::KeyJ, "key.keyboard.j"),
-    (KeyCode::KeyK, "key.keyboard.k"),
-    (KeyCode::KeyL, "key.keyboard.l"),
-    (KeyCode::KeyM, "key.keyboard.m"),
-    (KeyCode::KeyN, "key.keyboard.n"),
-    (KeyCode::KeyO, "key.keyboard.o"),
-    (KeyCode::KeyP, "key.keyboard.p"),
-    (KeyCode::KeyQ, "key.keyboard.q"),
-    (KeyCode::KeyR, "key.keyboard.r"),
-    (KeyCode::KeyS, "key.keyboard.s"),
-    (KeyCode::KeyT, "key.keyboard.t"),
-    (KeyCode::KeyU, "key.keyboard.u"),
-    (KeyCode::KeyV, "key.keyboard.v"),
-    (KeyCode::KeyW, "key.keyboard.w"),
-    (KeyCode::KeyX, "key.keyboard.x"),
-    (KeyCode::KeyY, "key.keyboard.y"),
-    (KeyCode::KeyZ, "key.keyboard.z"),
+    (Key::KeyA, "key.keyboard.a"),
+    (Key::KeyB, "key.keyboard.b"),
+    (Key::KeyC, "key.keyboard.c"),
+    (Key::KeyD, "key.keyboard.d"),
+    (Key::KeyE, "key.keyboard.e"),
+    (Key::KeyF, "key.keyboard.f"),
+    (Key::KeyG, "key.keyboard.g"),
+    (Key::KeyH, "key.keyboard.h"),
+    (Key::KeyI, "key.keyboard.i"),
+    (Key::KeyJ, "key.keyboard.j"),
+    (Key::KeyK, "key.keyboard.k"),
+    (Key::KeyL, "key.keyboard.l"),
+    (Key::KeyM, "key.keyboard.m"),
+    (Key::KeyN, "key.keyboard.n"),
+    (Key::KeyO, "key.keyboard.o"),
+    (Key::KeyP, "key.keyboard.p"),
+    (Key::KeyQ, "key.keyboard.q"),
+    (Key::KeyR, "key.keyboard.r"),
+    (Key::KeyS, "key.keyboard.s"),
+    (Key::KeyT, "key.keyboard.t"),
+    (Key::KeyU, "key.keyboard.u"),
+    (Key::KeyV, "key.keyboard.v"),
+    (Key::KeyW, "key.keyboard.w"),
+    (Key::KeyX, "key.keyboard.x"),
+    (Key::KeyY, "key.keyboard.y"),
+    (Key::KeyZ, "key.keyboard.z"),
     // Function row. Vanilla names f1..f25; winit reports up to F35, and the
     // tail is covered by the `winit.*` entries below.
-    (KeyCode::F1, "key.keyboard.f1"),
-    (KeyCode::F2, "key.keyboard.f2"),
-    (KeyCode::F3, "key.keyboard.f3"),
-    (KeyCode::F4, "key.keyboard.f4"),
-    (KeyCode::F5, "key.keyboard.f5"),
-    (KeyCode::F6, "key.keyboard.f6"),
-    (KeyCode::F7, "key.keyboard.f7"),
-    (KeyCode::F8, "key.keyboard.f8"),
-    (KeyCode::F9, "key.keyboard.f9"),
-    (KeyCode::F10, "key.keyboard.f10"),
-    (KeyCode::F11, "key.keyboard.f11"),
-    (KeyCode::F12, "key.keyboard.f12"),
-    (KeyCode::F13, "key.keyboard.f13"),
-    (KeyCode::F14, "key.keyboard.f14"),
-    (KeyCode::F15, "key.keyboard.f15"),
-    (KeyCode::F16, "key.keyboard.f16"),
-    (KeyCode::F17, "key.keyboard.f17"),
-    (KeyCode::F18, "key.keyboard.f18"),
-    (KeyCode::F19, "key.keyboard.f19"),
-    (KeyCode::F20, "key.keyboard.f20"),
-    (KeyCode::F21, "key.keyboard.f21"),
-    (KeyCode::F22, "key.keyboard.f22"),
-    (KeyCode::F23, "key.keyboard.f23"),
-    (KeyCode::F24, "key.keyboard.f24"),
-    (KeyCode::F25, "key.keyboard.f25"),
+    (Key::F1, "key.keyboard.f1"),
+    (Key::F2, "key.keyboard.f2"),
+    (Key::F3, "key.keyboard.f3"),
+    (Key::F4, "key.keyboard.f4"),
+    (Key::F5, "key.keyboard.f5"),
+    (Key::F6, "key.keyboard.f6"),
+    (Key::F7, "key.keyboard.f7"),
+    (Key::F8, "key.keyboard.f8"),
+    (Key::F9, "key.keyboard.f9"),
+    (Key::F10, "key.keyboard.f10"),
+    (Key::F11, "key.keyboard.f11"),
+    (Key::F12, "key.keyboard.f12"),
+    (Key::F13, "key.keyboard.f13"),
+    (Key::F14, "key.keyboard.f14"),
+    (Key::F15, "key.keyboard.f15"),
+    (Key::F16, "key.keyboard.f16"),
+    (Key::F17, "key.keyboard.f17"),
+    (Key::F18, "key.keyboard.f18"),
+    (Key::F19, "key.keyboard.f19"),
+    (Key::F20, "key.keyboard.f20"),
+    (Key::F21, "key.keyboard.f21"),
+    (Key::F22, "key.keyboard.f22"),
+    (Key::F23, "key.keyboard.f23"),
+    (Key::F24, "key.keyboard.f24"),
+    (Key::F25, "key.keyboard.f25"),
     // Keypad.
-    (KeyCode::NumLock, "key.keyboard.num.lock"),
-    (KeyCode::Numpad0, "key.keyboard.keypad.0"),
-    (KeyCode::Numpad1, "key.keyboard.keypad.1"),
-    (KeyCode::Numpad2, "key.keyboard.keypad.2"),
-    (KeyCode::Numpad3, "key.keyboard.keypad.3"),
-    (KeyCode::Numpad4, "key.keyboard.keypad.4"),
-    (KeyCode::Numpad5, "key.keyboard.keypad.5"),
-    (KeyCode::Numpad6, "key.keyboard.keypad.6"),
-    (KeyCode::Numpad7, "key.keyboard.keypad.7"),
-    (KeyCode::Numpad8, "key.keyboard.keypad.8"),
-    (KeyCode::Numpad9, "key.keyboard.keypad.9"),
-    (KeyCode::NumpadAdd, "key.keyboard.keypad.add"),
-    (KeyCode::NumpadDecimal, "key.keyboard.keypad.decimal"),
-    (KeyCode::NumpadEnter, "key.keyboard.keypad.enter"),
-    (KeyCode::NumpadEqual, "key.keyboard.keypad.equal"),
-    (KeyCode::NumpadMultiply, "key.keyboard.keypad.multiply"),
-    (KeyCode::NumpadDivide, "key.keyboard.keypad.divide"),
-    (KeyCode::NumpadSubtract, "key.keyboard.keypad.subtract"),
+    (Key::NumLock, "key.keyboard.num.lock"),
+    (Key::Numpad0, "key.keyboard.keypad.0"),
+    (Key::Numpad1, "key.keyboard.keypad.1"),
+    (Key::Numpad2, "key.keyboard.keypad.2"),
+    (Key::Numpad3, "key.keyboard.keypad.3"),
+    (Key::Numpad4, "key.keyboard.keypad.4"),
+    (Key::Numpad5, "key.keyboard.keypad.5"),
+    (Key::Numpad6, "key.keyboard.keypad.6"),
+    (Key::Numpad7, "key.keyboard.keypad.7"),
+    (Key::Numpad8, "key.keyboard.keypad.8"),
+    (Key::Numpad9, "key.keyboard.keypad.9"),
+    (Key::NumpadAdd, "key.keyboard.keypad.add"),
+    (Key::NumpadDecimal, "key.keyboard.keypad.decimal"),
+    (Key::NumpadEnter, "key.keyboard.keypad.enter"),
+    (Key::NumpadEqual, "key.keyboard.keypad.equal"),
+    (Key::NumpadMultiply, "key.keyboard.keypad.multiply"),
+    (Key::NumpadDivide, "key.keyboard.keypad.divide"),
+    (Key::NumpadSubtract, "key.keyboard.keypad.subtract"),
     // Arrows.
-    (KeyCode::ArrowDown, "key.keyboard.down"),
-    (KeyCode::ArrowLeft, "key.keyboard.left"),
-    (KeyCode::ArrowRight, "key.keyboard.right"),
-    (KeyCode::ArrowUp, "key.keyboard.up"),
+    (Key::ArrowDown, "key.keyboard.down"),
+    (Key::ArrowLeft, "key.keyboard.left"),
+    (Key::ArrowRight, "key.keyboard.right"),
+    (Key::ArrowUp, "key.keyboard.up"),
     // Punctuation. Note winit's `Quote`/`Backquote` are vanilla's
     // `apostrophe`/`grave.accent` — the names do not line up, which is exactly
     // why this is a table and not a `format!`.
-    (KeyCode::Quote, "key.keyboard.apostrophe"),
-    (KeyCode::Backslash, "key.keyboard.backslash"),
-    (KeyCode::Comma, "key.keyboard.comma"),
-    (KeyCode::Equal, "key.keyboard.equal"),
-    (KeyCode::Backquote, "key.keyboard.grave.accent"),
-    (KeyCode::BracketLeft, "key.keyboard.left.bracket"),
-    (KeyCode::Minus, "key.keyboard.minus"),
-    (KeyCode::Period, "key.keyboard.period"),
-    (KeyCode::BracketRight, "key.keyboard.right.bracket"),
-    (KeyCode::Semicolon, "key.keyboard.semicolon"),
-    (KeyCode::Slash, "key.keyboard.slash"),
-    (KeyCode::Space, "key.keyboard.space"),
-    (KeyCode::Tab, "key.keyboard.tab"),
+    (Key::Quote, "key.keyboard.apostrophe"),
+    (Key::Backslash, "key.keyboard.backslash"),
+    (Key::Comma, "key.keyboard.comma"),
+    (Key::Equal, "key.keyboard.equal"),
+    (Key::Backquote, "key.keyboard.grave.accent"),
+    (Key::BracketLeft, "key.keyboard.left.bracket"),
+    (Key::Minus, "key.keyboard.minus"),
+    (Key::Period, "key.keyboard.period"),
+    (Key::BracketRight, "key.keyboard.right.bracket"),
+    (Key::Semicolon, "key.keyboard.semicolon"),
+    (Key::Slash, "key.keyboard.slash"),
+    (Key::Space, "key.keyboard.space"),
+    (Key::Tab, "key.keyboard.tab"),
     // Modifiers. Vanilla says `win` where winit says `Super`.
-    (KeyCode::AltLeft, "key.keyboard.left.alt"),
-    (KeyCode::ControlLeft, "key.keyboard.left.control"),
-    (KeyCode::ShiftLeft, "key.keyboard.left.shift"),
-    (KeyCode::SuperLeft, "key.keyboard.left.win"),
-    (KeyCode::AltRight, "key.keyboard.right.alt"),
-    (KeyCode::ControlRight, "key.keyboard.right.control"),
-    (KeyCode::ShiftRight, "key.keyboard.right.shift"),
-    (KeyCode::SuperRight, "key.keyboard.right.win"),
+    (Key::AltLeft, "key.keyboard.left.alt"),
+    (Key::ControlLeft, "key.keyboard.left.control"),
+    (Key::ShiftLeft, "key.keyboard.left.shift"),
+    (Key::SuperLeft, "key.keyboard.left.win"),
+    (Key::AltRight, "key.keyboard.right.alt"),
+    (Key::ControlRight, "key.keyboard.right.control"),
+    (Key::ShiftRight, "key.keyboard.right.shift"),
+    (Key::SuperRight, "key.keyboard.right.win"),
     // Editing / navigation.
-    (KeyCode::Enter, "key.keyboard.enter"),
-    (KeyCode::Escape, "key.keyboard.escape"),
-    (KeyCode::Backspace, "key.keyboard.backspace"),
-    (KeyCode::Delete, "key.keyboard.delete"),
-    (KeyCode::End, "key.keyboard.end"),
-    (KeyCode::Home, "key.keyboard.home"),
-    (KeyCode::Insert, "key.keyboard.insert"),
-    (KeyCode::PageDown, "key.keyboard.page.down"),
-    (KeyCode::PageUp, "key.keyboard.page.up"),
-    (KeyCode::CapsLock, "key.keyboard.caps.lock"),
-    (KeyCode::Pause, "key.keyboard.pause"),
-    (KeyCode::ScrollLock, "key.keyboard.scroll.lock"),
-    (KeyCode::ContextMenu, "key.keyboard.menu"),
-    (KeyCode::PrintScreen, "key.keyboard.print.screen"),
+    (Key::Enter, "key.keyboard.enter"),
+    (Key::Escape, "key.keyboard.escape"),
+    (Key::Backspace, "key.keyboard.backspace"),
+    (Key::Delete, "key.keyboard.delete"),
+    (Key::End, "key.keyboard.end"),
+    (Key::Home, "key.keyboard.home"),
+    (Key::Insert, "key.keyboard.insert"),
+    (Key::PageDown, "key.keyboard.page.down"),
+    (Key::PageUp, "key.keyboard.page.up"),
+    (Key::CapsLock, "key.keyboard.caps.lock"),
+    (Key::Pause, "key.keyboard.pause"),
+    (Key::ScrollLock, "key.keyboard.scroll.lock"),
+    (Key::ContextMenu, "key.keyboard.menu"),
+    (Key::PrintScreen, "key.keyboard.print.screen"),
     // -- keys vanilla has no name for -------------------------------------
     // Namespaced so a rebind to one survives a save/load cycle. Vanilla's
     // `world.1`/`world.2` (GLFW 161/162) are deliberately *not* claimed for the
     // `Intl*` keys: GLFW's WORLD_1/2 and winit's IntlBackslash/IntlRo/IntlYen
     // are not the same keys, and asserting an equivalence we have not measured
     // is how a binding ends up landing on the wrong physical key.
-    (KeyCode::IntlBackslash, "key.keyboard.winit.intl.backslash"),
-    (KeyCode::IntlRo, "key.keyboard.winit.intl.ro"),
-    (KeyCode::IntlYen, "key.keyboard.winit.intl.yen"),
-    (KeyCode::Fn, "key.keyboard.winit.fn"),
-    (KeyCode::FnLock, "key.keyboard.winit.fn.lock"),
-    (KeyCode::Help, "key.keyboard.winit.help"),
-    (KeyCode::Convert, "key.keyboard.winit.convert"),
-    (KeyCode::NonConvert, "key.keyboard.winit.non.convert"),
-    (KeyCode::KanaMode, "key.keyboard.winit.kana.mode"),
-    (KeyCode::NumpadComma, "key.keyboard.winit.keypad.comma"),
-    (KeyCode::NumpadStar, "key.keyboard.winit.keypad.star"),
-    (KeyCode::NumpadHash, "key.keyboard.winit.keypad.hash"),
-    (KeyCode::NumpadBackspace, "key.keyboard.winit.keypad.backspace"),
-    (KeyCode::NumpadClear, "key.keyboard.winit.keypad.clear"),
-    (KeyCode::NumpadParenLeft, "key.keyboard.winit.keypad.paren.left"),
-    (KeyCode::NumpadParenRight, "key.keyboard.winit.keypad.paren.right"),
-    (KeyCode::F26, "key.keyboard.winit.f26"),
-    (KeyCode::F27, "key.keyboard.winit.f27"),
-    (KeyCode::F28, "key.keyboard.winit.f28"),
-    (KeyCode::F29, "key.keyboard.winit.f29"),
-    (KeyCode::F30, "key.keyboard.winit.f30"),
-    (KeyCode::F31, "key.keyboard.winit.f31"),
-    (KeyCode::F32, "key.keyboard.winit.f32"),
-    (KeyCode::F33, "key.keyboard.winit.f33"),
-    (KeyCode::F34, "key.keyboard.winit.f34"),
-    (KeyCode::F35, "key.keyboard.winit.f35"),
+    (Key::IntlBackslash, "key.keyboard.winit.intl.backslash"),
+    (Key::IntlRo, "key.keyboard.winit.intl.ro"),
+    (Key::IntlYen, "key.keyboard.winit.intl.yen"),
+    (Key::Fn, "key.keyboard.winit.fn"),
+    (Key::FnLock, "key.keyboard.winit.fn.lock"),
+    (Key::Help, "key.keyboard.winit.help"),
+    (Key::Convert, "key.keyboard.winit.convert"),
+    (Key::NonConvert, "key.keyboard.winit.non.convert"),
+    (Key::KanaMode, "key.keyboard.winit.kana.mode"),
+    (Key::NumpadComma, "key.keyboard.winit.keypad.comma"),
+    (Key::NumpadStar, "key.keyboard.winit.keypad.star"),
+    (Key::NumpadHash, "key.keyboard.winit.keypad.hash"),
+    (Key::NumpadBackspace, "key.keyboard.winit.keypad.backspace"),
+    (Key::NumpadClear, "key.keyboard.winit.keypad.clear"),
+    (Key::NumpadParenLeft, "key.keyboard.winit.keypad.paren.left"),
+    (Key::NumpadParenRight, "key.keyboard.winit.keypad.paren.right"),
+    (Key::F26, "key.keyboard.winit.f26"),
+    (Key::F27, "key.keyboard.winit.f27"),
+    (Key::F28, "key.keyboard.winit.f28"),
+    (Key::F29, "key.keyboard.winit.f29"),
+    (Key::F30, "key.keyboard.winit.f30"),
+    (Key::F31, "key.keyboard.winit.f31"),
+    (Key::F32, "key.keyboard.winit.f32"),
+    (Key::F33, "key.keyboard.winit.f33"),
+    (Key::F34, "key.keyboard.winit.f34"),
+    (Key::F35, "key.keyboard.winit.f35"),
 ];
 
 /// The persisted name for a physical key.
@@ -912,7 +1374,7 @@ const KEY_NAMES: &[(KeyCode, &str)] = &[
 /// does not parse back (there is no reverse entry), so it reverts to the default
 /// on load: a lossy round-trip, but a *quiet, non-fatal* one, and adding the key
 /// to the table above fixes it.
-fn key_name(code: KeyCode) -> &'static str {
+fn key_name(code: Key) -> &'static str {
     match KEY_NAMES.iter().find(|(c, _)| *c == code) {
         Some((_, name)) => name,
         None => "key.keyboard.winit.unknown",
@@ -920,7 +1382,7 @@ fn key_name(code: KeyCode) -> &'static str {
 }
 
 /// Reverse of [`key_name`]. `None` for an unrecognised name.
-fn key_from_name(name: &str) -> Option<KeyCode> {
+fn key_from_name(name: &str) -> Option<Key> {
     KEY_NAMES
         .iter()
         .find(|(_, n)| *n == name)
@@ -1034,7 +1496,7 @@ impl Keybinds {
     /// [`Binding::Unbound`] never matches, so unbinding an action really does
     /// disable it rather than making it fire on some arbitrary key.
     #[must_use]
-    pub fn is(&self, action: InputAction, code: KeyCode) -> bool {
+    pub fn is(&self, action: InputAction, code: Key) -> bool {
         self.binding(action) == Binding::Key(code)
     }
 
@@ -1163,6 +1625,10 @@ impl Keybinds {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The raw winit type, distinct from this module's own `Key`: these tests
+    // build a real winit `KeyCode` and run it through `Key::from` so the
+    // conversion table itself is exercised, not just `Key`'s own variants.
+    use winit::keyboard::KeyCode;
 
     // -- defaults, against the decompiled source ---------------------------
     //
@@ -1263,7 +1729,7 @@ mod tests {
         for &(action, keysym, category) in vanilla {
             assert_eq!(
                 action.default_binding(),
-                Binding::Key(winit_code_for_glfw(keysym)),
+                Binding::Key(winit_code_for_glfw(keysym).into()),
                 "{} should default to GLFW keysym {keysym}",
                 action.name()
             );
@@ -1303,17 +1769,17 @@ mod tests {
         // attack and use are mouse-bound out of the box.
         let binds = Keybinds::new();
         assert!(binds.is_mouse(InputAction::Attack, MouseButton::Left));
-        assert!(!binds.is(InputAction::Attack, KeyCode::KeyW));
+        assert!(!binds.is(InputAction::Attack, KeyCode::KeyW.into()));
 
         // …and a mouse button can be rebound to a key, and vice versa.
         let mut binds = binds;
-        binds.set(InputAction::Attack, Binding::Key(KeyCode::KeyR));
-        assert!(binds.is(InputAction::Attack, KeyCode::KeyR));
+        binds.set(InputAction::Attack, Binding::Key(KeyCode::KeyR.into()));
+        assert!(binds.is(InputAction::Attack, KeyCode::KeyR.into()));
         assert!(!binds.is_mouse(InputAction::Attack, MouseButton::Left));
 
         binds.set(InputAction::Jump, Binding::Mouse(MouseButton::Middle));
         assert!(binds.is_mouse(InputAction::Jump, MouseButton::Middle));
-        assert!(!binds.is(InputAction::Jump, KeyCode::Space));
+        assert!(!binds.is(InputAction::Jump, KeyCode::Space.into()));
     }
 
     #[test]
@@ -1344,17 +1810,17 @@ mod tests {
     #[test]
     fn a_rebind_takes_effect_and_the_old_key_stops_working() {
         let mut binds = Keybinds::new();
-        assert!(binds.is(InputAction::Inventory, KeyCode::KeyE));
+        assert!(binds.is(InputAction::Inventory, KeyCode::KeyE.into()));
 
-        binds.set(InputAction::Inventory, Binding::Key(KeyCode::KeyI));
-        assert!(binds.is(InputAction::Inventory, KeyCode::KeyI));
+        binds.set(InputAction::Inventory, Binding::Key(KeyCode::KeyI.into()));
+        assert!(binds.is(InputAction::Inventory, KeyCode::KeyI.into()));
         // The half that a naive implementation gets wrong: the *old* key must
         // stop firing, not merely the new one start.
-        assert!(!binds.is(InputAction::Inventory, KeyCode::KeyE));
+        assert!(!binds.is(InputAction::Inventory, KeyCode::KeyE.into()));
         assert!(!binds.is_default(InputAction::Inventory));
 
         binds.reset(InputAction::Inventory);
-        assert!(binds.is(InputAction::Inventory, KeyCode::KeyE));
+        assert!(binds.is(InputAction::Inventory, KeyCode::KeyE.into()));
         assert!(binds.is_default(InputAction::Inventory));
     }
 
@@ -1362,10 +1828,10 @@ mod tests {
     fn an_unbound_action_never_fires() {
         let mut binds = Keybinds::new();
         binds.set(InputAction::Jump, Binding::Unbound);
-        assert!(!binds.is(InputAction::Jump, KeyCode::Space));
+        assert!(!binds.is(InputAction::Jump, KeyCode::Space.into()));
         // Nor on any other key — an `Unbound` that compared equal to something
         // would fire on whatever that something was.
-        for code in [KeyCode::KeyW, KeyCode::Escape, KeyCode::F3] {
+        for code in [KeyCode::KeyW, KeyCode::Escape, KeyCode::F3].map(Key::from) {
             assert!(!binds.is(InputAction::Jump, code));
         }
         assert!(!binds.is_mouse(InputAction::Jump, MouseButton::Left));
@@ -1386,7 +1852,7 @@ mod tests {
         }
 
         // Put jump on the inventory key.
-        binds.set(InputAction::Jump, Binding::Key(KeyCode::KeyE));
+        binds.set(InputAction::Jump, Binding::Key(KeyCode::KeyE.into()));
         assert_eq!(
             binds.conflicts(InputAction::Jump).collect::<Vec<_>>(),
             vec![InputAction::Inventory]
@@ -1401,7 +1867,7 @@ mod tests {
         assert!(!binds.has_conflict(InputAction::Forward));
         assert_eq!(
             binds
-                .actions_bound_to(Binding::Key(KeyCode::KeyE))
+                .actions_bound_to(Binding::Key(KeyCode::KeyE.into()))
                 .collect::<Vec<_>>(),
             vec![InputAction::Jump, InputAction::Inventory]
         );
@@ -1481,8 +1947,8 @@ mod tests {
         // `key_key.forward:key.keyboard.w` shape of vanilla's own
         // persisted-options declarations and its own key-name table, as JSON.
         let mut binds = Keybinds::new();
-        binds.set(InputAction::Forward, Binding::Key(KeyCode::ArrowUp));
-        binds.set(InputAction::Sneak, Binding::Key(KeyCode::ShiftRight));
+        binds.set(InputAction::Forward, Binding::Key(KeyCode::ArrowUp.into()));
+        binds.set(InputAction::Sneak, Binding::Key(KeyCode::ShiftRight.into()));
         binds.set(InputAction::Attack, Binding::Mouse(MouseButton::Middle));
         binds.set(InputAction::Use, Binding::Unbound);
 
@@ -1520,21 +1986,21 @@ mod tests {
             "key.lodestone.pause": "key.keyboard.grave.accent"
         }"#;
         let binds = Keybinds::from_json_value(&serde_json::from_str(text).unwrap());
-        assert!(binds.is(InputAction::Forward, KeyCode::ArrowUp));
+        assert!(binds.is(InputAction::Forward, KeyCode::ArrowUp.into()));
         assert!(binds.is_mouse(InputAction::Jump, MouseButton::Middle));
-        assert!(binds.is(InputAction::DebugOverlay, KeyCode::F7));
-        assert!(binds.is(InputAction::Hotbar9, KeyCode::Numpad9));
-        assert!(binds.is(InputAction::Pause, KeyCode::Backquote));
+        assert!(binds.is(InputAction::DebugOverlay, KeyCode::F7.into()));
+        assert!(binds.is(InputAction::Hotbar9, KeyCode::Numpad9.into()));
+        assert!(binds.is(InputAction::Pause, KeyCode::Backquote.into()));
         // Untouched actions keep their defaults.
-        assert!(binds.is(InputAction::Back, KeyCode::KeyS));
+        assert!(binds.is(InputAction::Back, KeyCode::KeyS.into()));
         assert!(binds.is_mouse(InputAction::Attack, MouseButton::Left));
     }
 
     #[test]
     fn a_round_trip_is_stable_across_repeated_saves() {
         let mut binds = Keybinds::new();
-        binds.set(InputAction::Forward, Binding::Key(KeyCode::ArrowUp));
-        binds.set(InputAction::Attack, Binding::Key(KeyCode::KeyR));
+        binds.set(InputAction::Forward, Binding::Key(KeyCode::ArrowUp.into()));
+        binds.set(InputAction::Attack, Binding::Key(KeyCode::KeyR.into()));
         binds.set(InputAction::Use, Binding::Mouse(MouseButton::Other(4)));
         binds.set(InputAction::Chat, Binding::Unbound);
 
@@ -1625,10 +2091,10 @@ mod tests {
             binds.is_mouse(InputAction::Attack, MouseButton::Left),
             "an unknown key name must fall back to the default"
         );
-        assert!(binds.is(InputAction::Chat, KeyCode::KeyT), "non-string value");
-        assert!(binds.is(InputAction::Jump, KeyCode::Space), "null value");
+        assert!(binds.is(InputAction::Chat, KeyCode::KeyT.into()), "non-string value");
+        assert!(binds.is(InputAction::Jump, KeyCode::Space.into()), "null value");
         assert!(
-            binds.is(InputAction::Left, KeyCode::KeyA),
+            binds.is(InputAction::Left, KeyCode::KeyA.into()),
             "an unsupported binding *type* must also fall back, not error"
         );
         // …and unknown *action* names were simply ignored. `key.advancements`
@@ -1641,12 +2107,12 @@ mod tests {
 
         // The load kept going: every good entry after a bad one still applied.
         assert!(
-            binds.is(InputAction::Back, KeyCode::ArrowUp),
+            binds.is(InputAction::Back, KeyCode::ArrowUp.into()),
             "the entry after a bad one was dropped — the parse was poisoned"
         );
-        assert!(binds.is(InputAction::Forward, KeyCode::ArrowDown));
+        assert!(binds.is(InputAction::Forward, KeyCode::ArrowDown.into()));
         assert!(
-            binds.is(InputAction::Right, KeyCode::ArrowRight),
+            binds.is(InputAction::Right, KeyCode::ArrowRight.into()),
             "the last entry, after four bad ones, was dropped"
         );
 
@@ -1665,10 +2131,10 @@ mod tests {
             "key.right": "key.keyboard.right"
         }"#;
         let control = Keybinds::from_json_value(&serde_json::from_str(good).unwrap());
-        assert!(control.is(InputAction::Attack, KeyCode::KeyX));
-        assert!(control.is(InputAction::Chat, KeyCode::KeyY));
-        assert!(control.is(InputAction::Jump, KeyCode::KeyZ));
-        assert!(control.is(InputAction::Left, KeyCode::KeyV));
+        assert!(control.is(InputAction::Attack, KeyCode::KeyX.into()));
+        assert!(control.is(InputAction::Chat, KeyCode::KeyY.into()));
+        assert!(control.is(InputAction::Jump, KeyCode::KeyZ.into()));
+        assert!(control.is(InputAction::Left, KeyCode::KeyV.into()));
         assert_ne!(control, binds, "control must differ, or nothing was tested");
     }
 
@@ -1690,10 +2156,10 @@ mod tests {
 
     #[test]
     fn labels_are_readable_for_a_controls_menu() {
-        assert_eq!(Binding::Key(KeyCode::KeyW).label(), "W");
-        assert_eq!(Binding::Key(KeyCode::ShiftLeft).label(), "Left Shift");
-        assert_eq!(Binding::Key(KeyCode::F3).label(), "F3");
-        assert_eq!(Binding::Key(KeyCode::Space).label(), "Space");
+        assert_eq!(Binding::Key(KeyCode::KeyW.into()).label(), "W");
+        assert_eq!(Binding::Key(KeyCode::ShiftLeft.into()).label(), "Left Shift");
+        assert_eq!(Binding::Key(KeyCode::F3.into()).label(), "F3");
+        assert_eq!(Binding::Key(KeyCode::Space.into()).label(), "Space");
         assert_eq!(Binding::Mouse(MouseButton::Left).label(), "Left Button");
         assert_eq!(Binding::Mouse(MouseButton::Other(3)).label(), "Button 4");
         assert_eq!(Binding::Unbound.label(), "Not bound");
