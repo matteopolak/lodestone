@@ -192,9 +192,11 @@ fn player_sample(v: &serde_json::Value) -> Option<PlayerSample> {
 /// array of components, an object with `text`/`extra`/`translate`, nested
 /// arbitrarily deep — by handing the whole value to
 /// [`Text::from_json`](lodestone_model::Text::from_json) rather than walking it
-/// here. `translate` keys are emitted verbatim: resolving them needs a language
-/// table this crate has no business owning, and a raw key on screen is more
-/// honest than an empty MOTD.
+/// here. `translate` keys are emitted verbatim — resolving against the empty
+/// table (`&|_| None`) lowers every key to its own name, which is a genuinely
+/// resolved tree and so is what the styled flatteners accept. A real table is
+/// not available here: it needs a language pack this crate has no business
+/// owning, and a raw key on screen is more honest than an empty MOTD.
 ///
 /// `to_spans`' legacy-code expansion is the load-bearing part. A great many real
 /// MOTDs are legacy `§`-coded strings, including ones wrapped in modern JSON, so
@@ -208,7 +210,9 @@ fn component_spans(v: &serde_json::Value) -> Vec<lodestone_model::text::TextSpan
     // `Value`, so re-serialise. Round-tripping one small JSON value per ping is
     // not a cost worth a second component parser to avoid — a second parser is
     // exactly what this module's doc warns about, and what it had.
-    lodestone_model::Text::from_json(&v.to_string()).to_spans()
+    lodestone_model::Text::from_json(&v.to_string())
+        .resolve(&|_| None)
+        .to_spans()
 }
 
 /// Decodes a `favicon` field into PNG bytes.

@@ -75,7 +75,9 @@ fn a_plugin_opened_menu_satisfies_every_accessor_the_draw_path_requires() {
     assert_eq!(menus.opened_window_id(), Some(LOCAL_MENU_WINDOW_ID));
     assert_eq!(menus.opened_menu_type(), Some(&id("myshop:shop")));
     assert_eq!(
-        menus.opened_title().map(Text::to_legacy_string),
+        menus
+            .opened_title()
+            .map(|title| title.resolve(&|_| None).to_legacy_string()),
         Some("Bob's Emporium".to_owned())
     );
     let opened = menus.opened().expect("a menu is open");

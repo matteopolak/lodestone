@@ -391,7 +391,9 @@ mod tests {
     fn a_definitions_components_land_on_the_stack() {
         let stack = flamebrand().stack(1);
         assert_eq!(
-            stack.custom_name().map(Text::to_legacy_string),
+            stack
+                .custom_name()
+                .map(|name| name.resolve(&|_| None).to_legacy_string()),
             Some("Flamebrand".to_owned())
         );
         assert_eq!(stack.custom_model_data(), Some(7));
@@ -432,7 +434,9 @@ mod tests {
         // trips through the conversion cleanly.
         assert_eq!(lifted.custom_model_data(), Some(7), "a real vanilla component, must survive");
         assert_eq!(
-            lifted.custom_name().map(Text::to_legacy_string),
+            lifted
+                .custom_name()
+                .map(|name| name.resolve(&|_| None).to_legacy_string()),
             Some("Flamebrand".to_owned()),
             "the display name is a real vanilla component and must survive"
         );
