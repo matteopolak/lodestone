@@ -211,6 +211,7 @@ v1-9  clientbound decoded 62/80;  serverbound encoded 24/33;  stranded 0
 v1-14  clientbound decoded 54/92;  serverbound encoded 25/48;  stranded 0
 v26-2  clientbound decoded 141/141; emits 139/141; serverbound encoded 68/69;
       serverbound decoded 66/69, connected 47/69; decodes-to-Ignored-only 19
+1.21.11 clientbound decoded 63/139; emits 62/139; serverbound encoded 34/66; stranded 0
 ```
 
 The legacy gaps (15, 18, 38 undecoded packets) are mostly packets v26-2 *does* implement — the
@@ -726,6 +727,7 @@ Several eras have now landed, and the numbers separate two cases the plan treate
 | 1.19 | 762 (singleton) | 6,811 | n/a |
 | 1.20.6 | 766 (singleton as shipped) | 7,437 | n/a |
 | 1.7 | 5 (singleton) | 5,772 | n/a |
+| 1.21.11 | 774 (of an era measured 771-774) | 8,278 | n/a |
 
 The 1.17 figure is the **strongest** reading the marginal claim has had, not the weakest: 1.9's
 ~20 and 1.14's 69 were both on top of chunk framing that did not change across their era, while
@@ -753,6 +755,34 @@ made of length-implied components that cannot be skipped past, and a dimension r
 by index rather than carried inline. Founding an era should be budgeted at what an established
 multi-protocol era costs, plus whatever the era's own breaks are, and the estimate in this plan
 should not be used for a fifth one.
+
+1.21.11 is the sixth reading and the largest of all: **8,278 hand-written lines**, plus 31,691
+generated and 2,362 of tests. It continues the monotone rise across the modern eras — 5,531,
+6,229, 6,811, 7,437, 8,278 — and 1.7's 5,772 is not a counter-example to it but a confirmation of
+its stated cause: the trend is *newer eras carry more mechanism*, and 1.7 is the oldest era in the
+tree, below the chat signing, the configuration phase, the component items and the dimension
+registry that the four above it each pay for in turn. Ordered by protocol rather than by landing
+date, 1.7's figure is the *floor* of the series and 1.21.11's the ceiling, which is what a
+mechanism-count explanation predicts and an accumulated-sloppiness one does not.
+
+So the projection in this plan has now been wrong in the same direction six times, by a factor
+between 2.5 and 4. The useful reading is not "the estimate is low" but that **founding cost tracks
+the number of era-specific mechanisms, and that number only grows**: 774 pays for everything
+1.20.6 pays for, plus a length-prefix-free chunk container, a typed heightmap array, a packed
+variable-length velocity, an absolute-and-delta teleport with a 32-bit relative word, a
+registry-entry-holder chat format, a movement flags byte on four packets, hashed serverbound
+container stacks, and a serverbound chat checksum. A seventh era should be budgeted from the sixth
+reading, not from this plan's original number.
+
+Two facts about the *width* of this era matter more than its cost, and both are measurements
+rather than readings of the code. First, it is **four protocols wide** — 771 (1.21.6) at 88.5%,
+772 (1.21.7/1.21.8) at 87.4% and 773 (1.21.9/1.21.10) at 94.0% against 774, all above the 85%
+threshold — so three unimplemented versions sit inside a crate that already exists, which is the
+cheapest protocol coverage available anywhere in the tree. Second, the same sweep **confirms the
+1.20.6 finding** (766 against 767 is 204/226, 90.3%, reproducing that doc's own published number
+exactly, so 1.21 and 1.21.1 belong to that era) and adds a new one: 768, 769 and 770 clear 85%
+against *neither* neighbour, so protocols 768-770 belong to no era in this scheme at all and each
+would have to found its own.
 
 1.20.6's era width is worth stating separately, because the crate is a singleton *as shipped* and
 not *as measured*. Its lower boundary is real (54% against 762, 80% against 765, both under the
