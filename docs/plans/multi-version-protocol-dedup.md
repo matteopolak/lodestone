@@ -652,6 +652,7 @@ Three eras have now landed, and the numbers separate two cases the plan treated 
 | 1.13 | 404 (singleton) | 5,531 | n/a |
 | 1.17 | 756, 758 | 6,229 | 131 lines |
 | 1.19 | 762 (singleton) | 6,811 | n/a |
+| 1.19 | 762 (singleton) | 6,811 | n/a |
 
 The 1.17 figure is the **strongest** reading the marginal claim has had, not the weakest: 1.9's
 ~20 and 1.14's 69 were both on top of chunk framing that did not change across their era, while
