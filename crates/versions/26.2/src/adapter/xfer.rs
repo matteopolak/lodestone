@@ -69,9 +69,20 @@
 //!
 //! [`super::V770Adapter::select_move_packet`] therefore reports
 //! `moves_since_teleport` and `dist_from_teleport` on every outbound movement
-//! packet, and escalates to `warn` when the *first* move after a teleport lands
-//! far from that teleport's target. That line is the hypothesis, stated in the
-//! log rather than in a doc: if it appears, the race happened on that run.
+//! packet, and **rewrites** the *first* move after a teleport onto that
+//! teleport's target when the claim lands more than [`STALE_MOVE_BLOCKS`] away,
+//! warning as it does so. This mutex is the last point in the client that can:
+//! the confirmation is recorded under it, and by the time the driver reaches
+//! the queued movement action the shell has no way to touch it any more. The
+//! `warn` line is still the hypothesis stated in the log — if it appears, the
+//! race happened on that run — but it now names a claim that was replaced
+//! rather than one that reached the server.
+//!
+//! The shell keeps its own two rewrites (`net.rs`: `NetClient::send_action` and
+//! the net loop's drain) for the same window one and two queues earlier. They
+//! are not redundant with this one: each closes an ordering the next one down
+//! cannot see, and every one of them is idempotent, because they all write the
+//! same pose.
 //!
 //! # How to change it
 //!
@@ -132,6 +143,10 @@ impl AcceptedTeleport {
 ///
 /// One tick of ordinary movement is well under half a block (sprint-jumping
 /// tops out around `0.4`), so a first post-teleport move beyond a block did not
-/// come from a simulation that had adopted the teleport. Deliberately a
-/// *diagnostic* threshold — nothing branches on it but the log level.
+/// come from a simulation that had adopted the teleport.
+///
+/// This used to be diagnostic only. It now decides whether
+/// [`super::V770Adapter::select_move_packet`] rewrites that first claim onto
+/// the teleport target, so raising it re-opens the window the rewrite closes
+/// and lowering it risks rewriting a claim that was merely a fast tick.
 pub(crate) const STALE_MOVE_BLOCKS: f64 = 1.0;
