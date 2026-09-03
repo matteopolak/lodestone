@@ -1,0 +1,40 @@
+[package]
+name = "lodestone-v1-7"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Pre-Flattening block canonicalisation. This era's wire carries a block id and
+# a 4-bit metadata value in *separate* arrays; the composite `(id << 4) | meta`
+# this crate assembles from them is the same space `lodestone-canonical`
+# already translates for the 1.8/1.9 eras, so the flattening table is shared
+# rather than restated. See `src/packets/chunk.rs`.
+lodestone-canonical = { workspace = true }
+lodestone-core = { workspace = true }
+# Block-entity lookup for a resolved block state: writing a state is what
+# creates or removes a block entity, with no packet involved, so the adapter
+# resolves the type for the state it just wrote.
+lodestone-data = { workspace = true }
+lodestone-macros = { workspace = true }
+lodestone-model = { workspace = true }
+# Packet definitions measured byte-identical to their counterparts in a later
+# era, with the protocol range declared on the shared definition.
+lodestone-protocol-common = { workspace = true }
+lodestone-world = { workspace = true }
+# Chunk payloads in this era are zlib streams inside the packet body. Whole-
+# connection compression does not exist here (the login state has no
+# compression-threshold packet at all), so the inflate is per chunk packet and
+# belongs to the chunk decoder rather than to the framing layer.
+flate2 = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+lodestone-net = { workspace = true }
+lodestone-testsupport = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }

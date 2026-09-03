@@ -90,6 +90,7 @@ lodestone-canonical = { path = "crates/lodestone-canonical" }
 # crate; no family may depend on another family through it.
 lodestone-protocol-common = { path = "crates/lodestone-protocol-common" }
 lodestone-v26-2 = { path = "crates/versions/26.2" }
+lodestone-v1-7  = { path = "crates/versions/1.7" }
 lodestone-v1-8  = { path = "crates/versions/1.8" }
 lodestone-v1-9  = { path = "crates/versions/1.9" }
 lodestone-v1-13 = { path = "crates/versions/1.13" }

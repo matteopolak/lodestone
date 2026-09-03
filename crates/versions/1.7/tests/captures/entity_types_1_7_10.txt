@@ -1,0 +1,95 @@
+# Entity type ids a real Minecraft 1.7.10 server (protocol 5) put on the wire.
+#
+# Recorded by tests/entity_types.rs against
+# ./scripts/live-oracles/legacy.sh 1.7.10. Each name was handed to vanilla's
+# own `/summon` over RCON at a position unique to that name, and the number is
+# the type field of the spawn_entity_living / spawn_entity packet that
+# followed -- accepted only when that packet's own fixed-point position
+# matched the position the summon had asked for.
+#
+# The position match is what makes the transcript trustworthy rather than
+# merely plausible. Entities summoned earlier in a run keep emitting spawns of
+# their own -- a wither fires skulls, a dragon breaks blocks into dropped
+# items -- so a "first spawn after the summon" rule attributes those to
+# whichever name happened to be next. Measured, by recording the same run
+# both ways: 26 of 59 rows picked up at least one foreign spawn inside the
+# window, and for 3 of them the foreign spawn came *first*, so the weaker rule
+# records a wrong id -- giant as an item, entity_horse and minecart as a
+# wither skull.
+#
+# Rows for leash_knot and item_frame come from a separate focused run: both
+# snap to the block grid rather than to the requested position, so the
+# position match cannot select them. Their ids were read from a quiet world
+# with one summon in flight.
+#
+# painting and xp_orb have spawn packets of their own that carry no type field
+# at all, so there is no id to record for them.
+#
+# A `refused` row records the name as it was typed and vanilla's own reply
+# verbatim, so a name this era does not have is evidence rather than a gap.
+#
+# <canonical name> <living|object|untyped> <type id>
+# <name as typed>  refused <vanilla's reply>
+minecraft:arrow object 60
+minecraft:bat living 65
+minecraft:blaze living 61
+minecraft:boat object 1
+minecraft:cave_spider living 59
+minecraft:chicken living 93
+minecraft:cow living 92
+minecraft:creeper living 50
+minecraft:ender_crystal object 51
+minecraft:ender_dragon living 63
+minecraft:enderman living 58
+minecraft:entity_horse living 100
+minecraft:eye_of_ender_signal object 72
+minecraft:falling_sand object 70
+minecraft:fireball object 63
+minecraft:fireworks_rocket_entity object 76
+minecraft:ghast living 56
+minecraft:giant living 53
+minecraft:item object 2
+minecraft:item_frame object 71
+minecraft:lava_slime living 62
+minecraft:leash_knot object 77
+minecraft:minecart object 10
+minecraft:minecart_chest object 10
+minecraft:minecart_command_block object 10
+minecraft:minecart_furnace object 10
+minecraft:minecart_hopper object 10
+minecraft:minecart_rideable object 10
+minecraft:minecart_spawner object 10
+minecraft:minecart_tnt object 10
+minecraft:mushroom_cow living 96
+minecraft:ozelot living 98
+minecraft:painting untyped -
+minecraft:pig living 90
+minecraft:pig_zombie living 57
+minecraft:primed_tnt object 50
+minecraft:sheep living 91
+minecraft:silverfish living 60
+minecraft:skeleton living 51
+minecraft:slime living 55
+minecraft:small_fireball object 64
+minecraft:snow_man living 97
+minecraft:snowball object 61
+minecraft:spider living 52
+minecraft:squid living 94
+minecraft:thrown_enderpearl object 65
+minecraft:thrown_exp_bottle object 75
+minecraft:thrown_potion object 73
+minecraft:villager living 120
+minecraft:villager_golem living 99
+minecraft:witch living 66
+minecraft:wither_boss living 64
+minecraft:wither_skull object 66
+minecraft:wolf living 95
+minecraft:xp_orb untyped -
+minecraft:zombie living 54
+Cat refused Unable to summon object
+Fishing Float refused 'Float' is not a valid number
+FishingHook refused Unable to summon object
+Mob refused Unable to summon object
+Monster refused Unable to summon object
+Ocelot refused Unable to summon object
+minecraft:creeper refused Unable to summon object
