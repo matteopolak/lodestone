@@ -137,8 +137,58 @@ use runners::run_windowed;
 #[cfg(not(target_arch = "wasm32"))]
 #[allow(unused_imports)]
 use runners::{run_connect, run_headless};
+// Same carried-`cfg` reasoning as the import just above, but for the
+// runtime-presentation runner: `run_headless_session` only exists for
+// `cfg(all(not(wasm32), feature = "runtime-presentation"))`.
+#[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+#[allow(unused_imports)]
+use runners::run_headless_session;
 #[allow(unused_imports)]
 use weather::{ContinuousTimeOfDay, ShellWeatherProbe, WeatherTracker, weather_columns_for_frame};
+
+/// The winit user-event type this app's event loop carries.
+///
+/// `()` — winit's own default — with `runtime-presentation` off, so a build
+/// without the feature gets exactly the `EventLoop::new()` shape it had
+/// before this issue, no `AppEvent` machinery compiled in, and `user_event`
+/// falls back to `ApplicationHandler`'s no-op default (nothing ever sends a
+/// `()`). `AppEvent` with the feature on, so a caller outside the event loop
+/// can reach a running session — see [`AppEvent`] and
+/// `app::runners::run_headless_session`.
+#[cfg(feature = "runtime-presentation")]
+pub(crate) type ShellEvent = AppEvent;
+#[cfg(not(feature = "runtime-presentation"))]
+pub(crate) type ShellEvent = ();
+
+/// Custom winit events for driving presentation attach/detach from outside
+/// the event loop — the concrete shape of a runtime attach/detach: attach
+/// the presentation-only ECS systems and the GPU state at runtime, as long as
+/// both can also be removed again. Delivered through
+/// [`ApplicationHandler::user_event`](winit::application::ApplicationHandler::user_event),
+/// which — like every `ApplicationHandler` callback — carries a live
+/// `&ActiveEventLoop`, the thing `docs/runtime-presentation.md` cites as
+/// closing the "can a window be created mid-process" question with no spike
+/// needed.
+#[cfg(feature = "runtime-presentation")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum AppEvent {
+    /// Create a window, GPU surface and `RenderState` for a session that is
+    /// currently headless, and re-attach [`crate::sim::Sim`]'s
+    /// presentation-only ECS systems. `enable_input` seeds
+    /// [`WindowApp::input_armed`] — see that field's own doc for why a
+    /// runtime attach defaults it to `false`.
+    AttachPresentation {
+        enable_input: bool,
+    },
+    /// Arm or disarm live keyboard/mouse input on an already-attached
+    /// window, independent of attach/detach.
+    ArmInput(bool),
+    /// Drop the window, GPU surface and `RenderState`, and detach `Sim`'s
+    /// presentation-only ECS systems.
+    DetachPresentation,
+    /// Exit the event loop cleanly.
+    Quit,
+}
 
 /// Entry point: dispatch on the configured mode.
 ///
@@ -172,6 +222,17 @@ pub fn run(config: Config) -> anyhow::Result<()> {
              PPM to, or a raw TCP socket and a blocking sleep. A browser session is \
              always Mode::Window.",
             config.mode
+        )),
+        // Same ownership-gate reasoning as `Headless`/`Connect`
+        // just above: this establishes a real, persistent session outside the
+        // menu's own `Entitlement` check, so it needs the identical proof.
+        #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+        Mode::HeadlessSession => run_headless_session(require_owned_account()?, config),
+        #[cfg(all(target_arch = "wasm32", feature = "runtime-presentation"))]
+        Mode::HeadlessSession => Err(anyhow::anyhow!(
+            "HeadlessSession is a native CLI diagnostic mode: it needs a real OS \
+             event loop and stdin for its attach/detach control thread, neither of \
+             which a browser session has. A browser session is always Mode::Window."
         )),
         Mode::Window => run_windowed(config),
     }
@@ -963,6 +1024,33 @@ struct WindowApp {
     /// See [`Self::redraw`]'s own call site and
     /// [`crate::sim::Sim::send_ping_request`].
     last_ping_request: Option<Instant>,
+    /// Whether this app wants a window as soon as the event loop
+    /// resumes. `true` for ordinary startup ([`WindowApp::new`]) — unchanged
+    /// from before this field existed, `resumed` always created a window
+    /// unconditionally. `false` for
+    /// [`WindowApp::new_headless_session`]: `resumed` then does nothing, and
+    /// window/GPU/render bring-up only happens once an
+    /// [`AppEvent::AttachPresentation`] arrives (`app::lifecycle`'s
+    /// `resumed`/`user_event`). Also cleared by
+    /// [`WindowApp::detach_presentation`], so a re-resume after a mid-session
+    /// detach does not immediately recreate the window it just dropped.
+    #[cfg(feature = "runtime-presentation")]
+    presentation_desired: bool,
+    /// The resolved open question on input while a window is attached at
+    /// runtime: whether a real window's
+    /// keyboard/mouse input reaches gameplay. `true` for ordinary startup —
+    /// unchanged behaviour, so play is unaffected by this field existing.
+    /// Set to whatever [`AppEvent::AttachPresentation`] asked for
+    /// (`enable_input`) when a window is created on a previously headless
+    /// session, and **defaults to `false` there**: a script driving the
+    /// client headlessly must not start receiving an operator's keystrokes
+    /// just because someone attached a window to watch it. Flipped
+    /// explicitly with [`AppEvent::ArmInput`]. Consulted at the top of
+    /// `window_event`/`device_event` (`app::lifecycle`), which swallow every
+    /// keyboard/mouse/motion event while this is `false` and let window
+    /// management (resize, focus, close, redraw) through unaffected.
+    #[cfg(feature = "runtime-presentation")]
+    input_armed: bool,
 }
 
 #[cfg(test)]

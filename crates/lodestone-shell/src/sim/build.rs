@@ -401,6 +401,11 @@ impl Sim {
             local,
             net: None,
             adopted_live_world: false,
+            // Every construction path composes the four presentation plugins
+            // unconditionally (`Sim::client_app`, above) — see the field's own
+            // doc for why the only way out is `Sim::detach_presentation`.
+            #[cfg(feature = "runtime-presentation")]
+            presentation_attached: true,
             status,
             connect_phase: crate::menu::loading::ConnectPhase::default(),
             expected_view_columns: None,

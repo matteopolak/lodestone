@@ -2721,3 +2721,133 @@ fn hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target() {
          {max_linear_gap:.2}/255 across the sweep (diagnostic only, see row table above)"
     );
 }
+
+/// Dropping the presentation-side GPU state must **measurably**
+/// release real `wgpu` resources — not merely stop submitting draw calls,
+/// which buys nothing for a session left running headless in the background.
+///
+/// # How this is measured
+///
+/// `wgpu::Instance::generate_report()` returns live per-resource-type
+/// allocation counts straight out of `wgpu-core`'s own bookkeeping
+/// (`RegistryReport::num_allocated`) — not a count this crate derives, and
+/// not the absence of a draw call. This builds the same [`RenderState`] and
+/// [`crate::hud::HudRenderer`] `WindowApp::finish_bring_up` builds on a real
+/// attach (offscreen here — no window needed to allocate and drop `wgpu`
+/// handles), takes a report before and after, drops everything, polls the
+/// device so any deferred `wgpu-core` cleanup actually runs, and takes a
+/// third report.
+///
+/// The **control** this test needs (an absence assertion needs a detector
+/// proven to work): the *attach* report is asserted to have **more**
+/// textures, buffers and render pipelines than the baseline first. A
+/// `generate_report()` call that always read zero, or that this test misused
+/// so it never actually counted anything, would make the *detach* assertion
+/// beneath it vacuous — "went from 0 to 0" proves nothing was measured, not
+/// that presentation was released.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn detach_presentation_releases_wgpu_resources() {
+    let ctx = lodestone_render::GpuContext::new_headless_blocking().expect(
+        "headless GPU test opted in via --ignored but no wgpu adapter is available; \
+         run on a host with a GPU (or a software adapter such as \
+         LIBGL_ALWAYS_SOFTWARE=1 / WGPU_BACKEND=gl), don't 'skip' — a silent pass here \
+         would assert nothing",
+    );
+    let device = ctx.device();
+    let queue = ctx.queue();
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+
+    let report = || {
+        ctx.instance()
+            .generate_report()
+            .expect("native wgpu-core backend must support generate_report")
+    };
+
+    let baseline = report();
+
+    // The same construction `WindowApp::finish_bring_up` does on a real
+    // attach: `RenderState` (every terrain/entity/HUD pipeline plus the
+    // block/particle atlases) and `HudRenderer` (its own flat-colour
+    // pipeline). Small offscreen size — the GPU resource *count* this test
+    // reads does not depend on framebuffer dimensions.
+    let render = crate::gpu::RenderState::new(device, queue, format, 64, 64, None);
+    let hud = crate::hud::HudRenderer::new(device, format);
+
+    let attached = report();
+    eprintln!(
+        "baseline: textures={} buffers={} render_pipelines={} bind_groups={}",
+        baseline.hub.textures.num_allocated,
+        baseline.hub.buffers.num_allocated,
+        baseline.hub.render_pipelines.num_allocated,
+        baseline.hub.bind_groups.num_allocated,
+    );
+    eprintln!(
+        "attached: textures={} buffers={} render_pipelines={} bind_groups={}",
+        attached.hub.textures.num_allocated,
+        attached.hub.buffers.num_allocated,
+        attached.hub.render_pipelines.num_allocated,
+        attached.hub.bind_groups.num_allocated,
+    );
+    assert!(
+        attached.hub.textures.num_allocated > baseline.hub.textures.num_allocated,
+        "RenderState/HudRenderer must allocate real textures (atlases, the depth \
+         buffer) — {} -> {} shows none were created, which would make the detach \
+         assertion below meaningless",
+        baseline.hub.textures.num_allocated,
+        attached.hub.textures.num_allocated
+    );
+    assert!(
+        attached.hub.render_pipelines.num_allocated > baseline.hub.render_pipelines.num_allocated,
+        "RenderState/HudRenderer must allocate real render pipelines — {} -> {} shows \
+         none were created",
+        baseline.hub.render_pipelines.num_allocated,
+        attached.hub.render_pipelines.num_allocated
+    );
+    assert!(attached.hub.buffers.num_allocated > baseline.hub.buffers.num_allocated);
+    assert!(attached.hub.bind_groups.num_allocated > baseline.hub.bind_groups.num_allocated);
+
+    // The actual release: `WindowApp::detach_presentation` (`app::session`)
+    // does exactly this — set `self.render`/`self.hud` (and every other
+    // GPU-owning field) to `None`, dropping the last strong reference to
+    // each `wgpu` handle these two objects hold.
+    drop(render);
+    drop(hud);
+    // `wgpu-core` frees some resources lazily on the next device poll rather
+    // than synchronously on drop (deferred destruction); without this a
+    // measurement taken immediately after `drop` can under-report the
+    // release, not because nothing was released but because cleanup had not
+    // run yet.
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+
+    let detached = report();
+    eprintln!(
+        "detached: textures={} buffers={} render_pipelines={} bind_groups={}",
+        detached.hub.textures.num_allocated,
+        detached.hub.buffers.num_allocated,
+        detached.hub.render_pipelines.num_allocated,
+        detached.hub.bind_groups.num_allocated,
+    );
+    assert!(
+        detached.hub.textures.num_allocated < attached.hub.textures.num_allocated,
+        "dropping RenderState/HudRenderer must release textures — {} -> {} shows \
+         nothing was freed (a detach that only stops drawing does not release \
+         anything)",
+        attached.hub.textures.num_allocated,
+        detached.hub.textures.num_allocated
+    );
+    assert!(
+        detached.hub.render_pipelines.num_allocated < attached.hub.render_pipelines.num_allocated,
+        "dropping RenderState/HudRenderer must release render pipelines — {} -> {} \
+         shows nothing was freed",
+        attached.hub.render_pipelines.num_allocated,
+        detached.hub.render_pipelines.num_allocated
+    );
+    assert!(detached.hub.buffers.num_allocated < attached.hub.buffers.num_allocated);
+    assert!(detached.hub.bind_groups.num_allocated < attached.hub.bind_groups.num_allocated);
+    // Back to (at most) the baseline — not merely "some improvement". A real
+    // leak would still show `detached < attached` while leaving `detached`
+    // permanently above `baseline`, so this is the sharper claim.
+    assert!(detached.hub.textures.num_allocated <= baseline.hub.textures.num_allocated);
+    assert!(detached.hub.render_pipelines.num_allocated <= baseline.hub.render_pipelines.num_allocated);
+}

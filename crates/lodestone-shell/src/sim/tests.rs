@@ -8842,3 +8842,64 @@ fn redraw_applies_a_pending_pack_before_it_asks_whether_to_stop_covering_the_wor
          hitch already wears the new pack"
     );
 }
+
+/// `Sim::detach_presentation`/`attach_presentation` actually add
+/// and remove real systems, and a round trip is exact — not "no error was
+/// returned", a measured count.
+///
+/// The control this test needs (per this repo's own rule that an absence
+/// assertion needs a detector proven to work, not merely described): a
+/// **second** consecutive detach, with nothing re-attached in between, must
+/// report `0` removed. If it instead reported the same nonzero number every
+/// time regardless of state, that would mean `detach_presentation`'s count
+/// is not measuring real removal at all — this is the run that would catch
+/// that bug and does not merely assert the direction of a change.
+///
+/// The second control is the round trip itself: `add_systems` does not
+/// deduplicate (`crate::sim::presentation`'s own module doc), so if
+/// `attach_presentation` ever registered a presentation system on top of a
+/// leftover copy, the **second** detach would report *more* systems removed
+/// than the first — this is the discriminating input a naive
+/// "attach re-adds without checking" bug would fail, while a correct
+/// implementation passes.
+#[cfg(feature = "runtime-presentation")]
+#[test]
+fn detach_presentation_removes_systems_and_reattach_is_exact() {
+    let mut sim = Sim::new(test_config());
+    assert!(
+        sim.presentation_attached(),
+        "a freshly constructed Sim composes the four presentation plugins \
+         unconditionally (Sim::client_app) — presentation starts attached"
+    );
+
+    let first_detach = sim.detach_presentation();
+    assert!(
+        first_detach > 0,
+        "detach must actually remove systems from the schedules — the terrain \
+         mesher, render-side interpolation, the Display extract and the \
+         pick/interaction/particle systems all tag into PresentationSet, so \
+         zero removed here means the tagging or the removal call is broken, \
+         not that there was nothing to remove"
+    );
+    assert!(!sim.presentation_attached());
+
+    // Control 1: detaching an already-detached session removes nothing.
+    assert_eq!(
+        sim.detach_presentation(),
+        0,
+        "a second consecutive detach must be a real no-op, proving the first \
+         count above reflected actual work rather than a constant"
+    );
+
+    sim.attach_presentation();
+    assert!(sim.presentation_attached());
+
+    // Control 2: the round trip is exact.
+    let second_detach = sim.detach_presentation();
+    assert_eq!(
+        second_detach, first_detach,
+        "re-attach then detach must remove exactly what the first detach did — \
+         a larger count here means attach_presentation duplicated a system \
+         add_systems never deduplicates on its own"
+    );
+}

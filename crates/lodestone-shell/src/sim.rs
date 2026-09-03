@@ -469,6 +469,24 @@ pub struct Sim {
     /// what lets [`Sim::end_session`] release a server's terrain while leaving the
     /// `with_demo_world` fixture's terrain alone.
     adopted_live_world: bool,
+    /// Whether [`crate::sim::presentation::PresentationSet`]'s systems are
+    /// currently registered on [`Self::ecs`] — the terrain mesher, render-side
+    /// entity interpolation, the `Display`-family extract and the
+    /// pick/interaction/particle systems `Sim::client_app` adds. Starts `true`:
+    /// every existing construction path (`Sim::new`, `Sim::from_app`) composes
+    /// those four plugins unconditionally, exactly as before this field
+    /// existed — a session only ever goes to `false` through
+    /// [`Sim::detach_presentation`].
+    ///
+    /// Guards [`Sim::attach_presentation`]/[`Sim::detach_presentation`] against
+    /// a redundant call: `bevy_ecs`'s `add_systems` does not deduplicate, so
+    /// attaching twice in a row would register every presentation system
+    /// twice, and `Schedule::remove_systems_in_set` errors (tolerated, not a
+    /// panic — see `sim::presentation::detach`) rather than crashing on a
+    /// redundant detach, but would still be a wasted lock + schedule rebuild
+    /// on every frame a caller mistakenly repeats it.
+    #[cfg(feature = "runtime-presentation")]
+    presentation_attached: bool,
     status: String,
     /// The loading screen's current step — set only from
     /// `NetUpdate::ConnectPhase`/`LoggedIn`, i.e. from real boundaries in the
@@ -968,6 +986,62 @@ impl Sim {
     /// only thing keeping that out is review.
     fn write<R>(&mut self, f: impl FnOnce(&mut EcsWorld) -> R) -> R {
         lodestone_ecs::hold_write(&self.ecs, f)
+    }
+
+    /// Whether the presentation-only systems (terrain mesher, render-side
+    /// entity interpolation, the `Display`-family extract, pick/interaction/
+    /// particle) are currently registered on this session's `World` — see
+    /// [`Self::presentation_attached`]'s own field doc.
+    #[cfg(feature = "runtime-presentation")]
+    #[must_use]
+    pub fn presentation_attached(&self) -> bool {
+        self.presentation_attached
+    }
+
+    /// Remove the presentation-only systems from every schedule they were
+    /// registered in. A no-op — logged, not panicked — if
+    /// presentation is already detached.
+    ///
+    /// **This is an ECS-only detach.** It stops the terrain mesher, the
+    /// pick/interaction/particle systems, render-side entity interpolation
+    /// and the `Display`-family extract from running at all — real CPU
+    /// savings for a session with nothing on the other end, not merely "stop
+    /// drawing their output." It does not touch any GPU state: that is
+    /// [`crate::app::WindowApp`]'s job (dropping the window, `GpuContext`,
+    /// `SurfaceTarget` and `RenderState`), because `Sim` itself holds none —
+    /// see this crate's module doc for why that split exists.
+    ///
+    /// Returns the number of systems actually removed, so a caller (and the
+    /// unit test that proves this is not a silent no-op) can assert against a
+    /// real count rather than the absence of an error.
+    #[cfg(feature = "runtime-presentation")]
+    pub fn detach_presentation(&mut self) -> usize {
+        if !self.presentation_attached {
+            tracing::debug!(target: "presentation", "detach_presentation: already detached");
+            return 0;
+        }
+        let removed = self.write(presentation::detach);
+        self.presentation_attached = false;
+        tracing::info!(target: "presentation", removed, "presentation systems detached");
+        removed
+    }
+
+    /// The inverse of [`Self::detach_presentation`]: re-register the
+    /// presentation-only systems, exactly as [`Sim::client_app`] first added
+    /// them. A no-op if presentation is already attached — **load-bearing**,
+    /// not defensive styling: `add_systems` does not deduplicate, so calling
+    /// [`presentation::attach`] twice without an intervening detach would
+    /// register every presentation system twice over, silently doubling
+    /// terrain-mesh and particle work.
+    #[cfg(feature = "runtime-presentation")]
+    pub fn attach_presentation(&mut self) {
+        if self.presentation_attached {
+            tracing::debug!(target: "presentation", "attach_presentation: already attached");
+            return;
+        }
+        self.write(presentation::attach);
+        self.presentation_attached = true;
+        tracing::info!(target: "presentation", "presentation systems attached");
     }
 
     /// The mode a plugin has claimed `key` in, or `None` if
@@ -1582,6 +1656,12 @@ mod net_apply;
 mod audio;
 mod camera;
 mod meshing;
+// Runtime attach/detach of the presentation-only ECS systems.
+// `pub(crate)` (unlike the bare `mod` lines above) because `PresentationSet`
+// itself has to be reachable from `crate::entities`/`crate::display_entities`/
+// `crate::mesher`/`crate::interact` — those four plugins live outside `sim/`
+// and tag their own systems with it.
+pub(crate) mod presentation;
 
 // Seams 9-13, landed together (seam 8 was the `audio` field -> `AudioEngine`
 // resource move, a field dissolution; `docs/sim-dissolution.md` numbers both

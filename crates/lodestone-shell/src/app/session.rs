@@ -101,6 +101,161 @@ impl WindowApp {
             loom_scroll: 0.0,
             pending_game_rules: None,
             last_ping_request: None,
+            // Ordinary startup always wants a window and always accepts
+            // input from it — unchanged from before these fields existed.
+            // Only `WindowApp::new_headless_session` seeds `false`.
+            #[cfg(feature = "runtime-presentation")]
+            presentation_desired: true,
+            #[cfg(feature = "runtime-presentation")]
+            input_armed: true,
+        }
+    }
+
+    /// Start a session with **no** window, no GPU and no
+    /// presentation-only ECS systems — a genuine headless session mode,
+    /// as opposed to `Mode::Headless`'s one-shot PPM capture
+    /// (which has no event loop and no server; see `app::runners::run_headless`'s
+    /// own doc on why the two are not the same thing).
+    ///
+    /// The session still ticks, connects and persists exactly as a windowed
+    /// one does: `Sim::new` is unchanged, so a real login and every
+    /// non-presentation system (physics, net ingest, chat, inventory) runs
+    /// normally. What is missing is only what
+    /// [`Self::detach_presentation`] removes: the four presentation plugins'
+    /// systems ([`crate::sim::presentation::PresentationSet`]) and, once a
+    /// window is later attached, the GPU state.
+    ///
+    /// `Sim::detach_presentation()` runs **after** `Sim::new`, not instead of
+    /// composing the four plugins in the first place: `Sim::client_app`'s
+    /// plugin set is one well-tested construction path with no second
+    /// "windowless" variant to drift from it — see
+    /// `crate::sim::presentation`'s module doc for why detach is the
+    /// mechanism that has to be exact regardless of when it first runs.
+    // Native-only, matching `Mode::HeadlessSession` itself (`app.rs`'s `run`)
+    // and `create_and_attach_window` below: a browser session never calls
+    // this (`spawn_app` hands the loop to the browser and returns
+    // immediately, and bring-up there is the async `attach_window_async`
+    // path `resumed`/`about_to_wait` already split at, not this synchronous
+    // one). Keeping it target-gated rather than merely feature-gated is what
+    // makes a wasm32 build with the feature on still compile.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+    pub(crate) fn new_headless_session(config: Config) -> Self {
+        let mut app = Self::new(config);
+        app.presentation_desired = false;
+        app.input_armed = false;
+        app.sim.detach_presentation();
+        app
+    }
+
+    /// Create a window, attach the GPU and (if it was detached) re-attach
+    /// `Sim`'s presentation-only ECS systems — the runtime-attach half of
+    /// the runtime toggle. Called from `resumed` (ordinary startup) and from
+    /// `user_event`'s `AppEvent::AttachPresentation` (a session that started,
+    /// or was put, headless).
+    ///
+    /// `enable_input` seeds [`Self::input_armed`] — see that field's own doc
+    /// for why a runtime attach should almost always pass `false` here.
+    ///
+    /// A no-op if a window already exists: attach is only ever the
+    /// windowless → windowed transition, never a second window.
+    // Native-only for `create_and_attach_window`'s own reason, just below.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+    pub(crate) fn attach_presentation(&mut self, event_loop: &ActiveEventLoop, enable_input: bool) {
+        if self.window.is_some() {
+            tracing::debug!(target: "presentation", "attach_presentation: already attached");
+            return;
+        }
+        self.presentation_desired = true;
+        self.input_armed = enable_input;
+        self.sim.attach_presentation();
+        if !self.create_and_attach_window(event_loop, super::lifecycle::window_attributes(&self.config)) {
+            // GPU bring-up failed — leave the session headless rather than a
+            // half-attached mess (`self.window` is still `None` here, since
+            // `create_and_attach_window` only sets it on success), and undo
+            // the ECS half so a retry starts from a clean detached state
+            // instead of double-registering the presentation systems next
+            // time (`add_systems` does not deduplicate).
+            self.sim.detach_presentation();
+            self.presentation_desired = false;
+        }
+    }
+
+    /// Drop the window, GPU surface and `RenderState`, and detach `Sim`'s
+    /// presentation-only ECS systems — the other half of the runtime
+    /// toggle, and the half that actually has to release something to be
+    /// worth anything (the AFK case is the whole point of case 1: "leave a
+    /// session running ... and drop to headless so it stops rendering, stops
+    /// holding a swapchain, and stops burning GPU").
+    ///
+    /// # What this releases, and how that is measured
+    ///
+    /// `self.container`/`self.menu`/`self.hud`/`self.render` hold every
+    /// pipeline, bind group and atlas texture this session's GPU bring-up
+    /// created; `self.target` holds the swapchain and depth buffer;
+    /// `self.gpu` holds the wgpu device/queue/adapter/instance this process
+    /// took from the OS. Setting all of them (plus `self.window`) to `None`
+    /// drops the *last* strong reference to each — nothing else in this
+    /// struct clones a `wgpu` handle out of them — so this is a real release,
+    /// not merely "stop drawing". `sim/tests.rs`'s
+    /// `detach_presentation_releases_wgpu_resources` proves this against
+    /// `wgpu::Instance::generate_report()`'s live resource counts, not
+    /// against the absence of a draw call — see `docs/runtime-presentation.md`
+    /// for the measured figures.
+    ///
+    /// Order: the ECS half first (stop the presentation systems from
+    /// producing more mesh/particle/interpolation work), then the GPU half
+    /// (nothing left to consume it). `self.presentation_desired = false` is
+    /// what stops the very next `resumed` (a native event loop keeps running
+    /// with no window — see `app::runners::run_headless_session`'s doc) from
+    /// immediately recreating the window this call just dropped.
+    // Native-only for `Self::attach_presentation`'s own reason: this is the
+    // other half of the same runtime toggle, and keeping both target-gated
+    // identically is simpler than reasoning about which parts of a
+    // browser's (always-windowed) session this would even mean.
+    #[cfg(all(not(target_arch = "wasm32"), feature = "runtime-presentation"))]
+    pub(crate) fn detach_presentation(&mut self) {
+        self.sim.detach_presentation();
+        self.container = None;
+        self.menu = None;
+        self.hud = None;
+        self.render = None;
+        self.target = None;
+        self.gpu = None;
+        self.window = None;
+        self.presentation_desired = false;
+        self.input_armed = false;
+    }
+
+    /// The native window-creation + GPU-attach + render bring-up shared by
+    /// `resumed` (ordinary/benchmark startup) and
+    /// [`Self::attach_presentation`] (a runtime attach) — factored out so
+    /// runtime attach/detach does not grow a second, slightly-different copy of GPU
+    /// bring-up. Returns whether it succeeded; on failure nothing is left
+    /// half-set (`self.window` stays `None`, matching `resumed`'s own
+    /// `event_loop.exit()` failure arms, except a runtime attach chooses to
+    /// stay headless rather than end the process — see the caller).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) fn create_and_attach_window(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        attrs: winit::window::WindowAttributes,
+    ) -> bool {
+        let window = match event_loop.create_window(attrs) {
+            Ok(w) => Arc::new(w),
+            Err(e) => {
+                eprintln!("failed to create window: {e}");
+                return false;
+            }
+        };
+        match attach_window(window.clone()) {
+            Ok((gpu, target)) => {
+                self.finish_bring_up(window, gpu, target);
+                true
+            }
+            Err(e) => {
+                eprintln!("failed to attach GPU to window: {e}");
+                false
+            }
         }
     }
 

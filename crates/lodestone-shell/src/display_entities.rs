@@ -49,6 +49,7 @@
 //! its own note on that method.
 
 use bevy_ecs::prelude::{IntoScheduleConfigs, Query, ResMut, Resource};
+use bevy_ecs::world::World;
 use glam::{Quat, Vec3};
 use lodestone_ecs::app::{App, Plugin};
 use lodestone_ecs::entity::{
@@ -416,8 +417,21 @@ pub struct DisplayEntityPlugin;
 impl Plugin for DisplayEntityPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ExtractedDisplayDraws>();
-        app.add_systems(Extract, extract_display_draws.in_set(ExtractSet::Entities));
+        add_presentation_systems(app.world_mut());
     }
+}
+
+/// This plugin's one system, tagged into
+/// [`crate::sim::presentation::PresentationSet`] — see
+/// [`crate::entities::add_presentation_systems`]'s doc for why this is a free
+/// `&mut World` function rather than a second call through `Plugin::build`.
+pub(crate) fn add_presentation_systems(world: &mut World) {
+    world.resource_mut::<bevy_ecs::schedule::Schedules>().add_systems(
+        Extract,
+        extract_display_draws
+            .in_set(ExtractSet::Entities)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
 }
 
 #[cfg(test)]

@@ -3649,9 +3649,33 @@ impl Plugin for TerrainPlugin {
         // visible. Registered here rather than in the session builder for the same
         // reason `heal_dirty_columns` is: it reads and writes only the terrain
         // resources this plugin owns.
-        app.add_systems(Update, relight_changed_blocks.in_set(FrameSet::Terrain));
-        app.add_systems(Update, heal_dirty_columns.in_set(FrameSet::Terrain));
+        add_presentation_systems(app.world_mut());
     }
+}
+
+/// This plugin's two `Update` systems, tagged into
+/// [`crate::sim::presentation::PresentationSet`] — see
+/// [`crate::entities::add_presentation_systems`]'s doc for why this is a free
+/// `&mut World` function rather than a second call through `Plugin::build`.
+///
+/// Takes `bevy_ecs::world::World` by its full path rather than the bare
+/// `World` this file's own `use` binds to [`lodestone_world::World`] (the
+/// chunk-storage type) — the two are unrelated types that happen to share a
+/// name.
+pub(crate) fn add_presentation_systems(world: &mut bevy_ecs::world::World) {
+    let mut schedules = world.resource_mut::<bevy_ecs::schedule::Schedules>();
+    schedules.add_systems(
+        Update,
+        relight_changed_blocks
+            .in_set(FrameSet::Terrain)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
+    schedules.add_systems(
+        Update,
+        heal_dirty_columns
+            .in_set(FrameSet::Terrain)
+            .in_set(crate::sim::presentation::PresentationSet),
+    );
 }
 
 #[cfg(test)]

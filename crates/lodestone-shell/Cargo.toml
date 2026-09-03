@@ -387,8 +387,25 @@ harness = false
 # explicitly instead — `cargo check -p lodestone-shell --no-default-features` is in
 # `CLAUDE.md`'s health checks. Keep it there; it is the only thing standing between
 # the seam and a hardcoded `v26-2` dependency creeping into shell code.
-default = ["live"]
+default = ["live", "runtime-presentation"]
 live = ["lodestone-registry/v26-2"]
+# Switches a running session between headless and windowed at
+# runtime rather than only at startup. Gates `Sim::attach_presentation`/
+# `detach_presentation` (the ECS-level half: `Schedule::remove_systems_in_set`
+# on `crate::sim::presentation::PresentationSet`, the four presentation
+# plugins' systems), `WindowApp`'s window/GPU attach-detach and the
+# `--headless-session` runner (`app::runners::run_headless_session`) — see
+# `docs/runtime-presentation.md`.
+#
+# On by default, same reasoning as `live`: the shipped binary wants runtime
+# switching, and off is a deliberate opt-out rather than the common case. With
+# it off, `Mode` is fixed at startup exactly as before this issue (a windowed
+# run always has a window from `resumed()` onward, a headless run has none for
+# its whole lifetime) and none of the attach/detach machinery above compiles
+# in. `PresentationSet` itself (the marker every presentation system is
+# tagged with) stays unconditional — it costs nothing unused and keeping the
+# tag off a feature gate means the four plugins need no `cfg` of their own.
+runtime-presentation = []
 # Test-only discriminator for `sim::build`'s physics-profile wiring
 # (`lodestone_registry::physics_profile_for_protocol`). With only `live`
 # (`v26-2`) compiled, every protocol this crate can ever see resolves to
