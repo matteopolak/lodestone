@@ -87,7 +87,7 @@
 use lodestone_model::BlockPos;
 
 use crate::chunk::is_air_or_fluid;
-use crate::redstone::{base_name, direction_from_str, get_str_property};
+use crate::redstone::{base_name, direction_from_str, get_str_property, WorldState};
 
 /// The shape of a block's support rule — which cell it depends on, and how that
 /// cell is read out of the block's own state.
@@ -211,7 +211,7 @@ pub(crate) fn requirement(pos: BlockPos, state: &str) -> Option<Requirement> {
 /// of an arbitrary cell.
 pub(crate) fn survives<F>(pos: BlockPos, state: &str, block_at: F) -> bool
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let Some(requirement) = requirement(pos, state) else {
         return true;
@@ -708,9 +708,9 @@ mod tests {
         let with = |fill: &'static str| {
             move |cell: BlockPos| {
                 if cell == below {
-                    fill.to_string()
+                    WorldState::from(fill)
                 } else {
-                    "minecraft:air".to_string()
+                    WorldState::from("minecraft:air")
                 }
             }
         };
@@ -734,9 +734,9 @@ mod tests {
         let with = |fill: &'static str| {
             move |cell: BlockPos| {
                 if cell == partner {
-                    fill.to_string()
+                    WorldState::from(fill)
                 } else {
-                    "minecraft:air".to_string()
+                    WorldState::from("minecraft:air")
                 }
             }
         };

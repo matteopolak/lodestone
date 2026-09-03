@@ -72,7 +72,7 @@
 //!   wrong the way (for example) a diode's lock/unlock ordering does.
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{base_name, get_bool_property, get_str_property, with_property};
+use crate::redstone::{base_name, get_bool_property, get_str_property, with_property, WorldState};
 use lodestone_model::BlockPos;
 
 pub const POWERED_RAIL: &str = "minecraft:powered_rail";
@@ -185,7 +185,7 @@ fn is_candidate_rail(state: &str, family: &str, dir: RailShape) -> bool {
 #[must_use]
 pub fn find_powered_rail_signal<F, S>(lookup: &F, has_neighbor_signal: &S, family: &str, pos: BlockPos, shape: RailShape, forward: bool, search_depth: i32) -> bool
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
     S: Fn(BlockPos) -> bool,
 {
     if search_depth >= MAX_SEARCH_DEPTH {
@@ -275,7 +275,7 @@ where
 /// further [`find_powered_rail_signal`] recursion one level deeper?
 fn is_same_rail_at<F, S>(lookup: &F, has_neighbor_signal: &S, family: &str, pos: BlockPos, forward: bool, search_depth: i32, dir: RailShape) -> bool
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
     S: Fn(BlockPos) -> bool,
 {
     let state = lookup(pos);
@@ -314,7 +314,7 @@ pub fn extra_notifications(pos: BlockPos, shape: RailShape) -> Vec<crate::neighb
 #[must_use]
 pub fn update_state<F, S>(lookup: &F, has_neighbor_signal: &S, pos: BlockPos, state: &str) -> Option<String>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
     S: Fn(BlockPos) -> bool,
 {
     let family = base_name(state);
@@ -336,14 +336,14 @@ where
 mod tests {
     use super::*;
 
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> String + use<> {
-        let entries: Vec<(BlockPos, String)> = entries.iter().map(|(p, s)| (*p, (*s).to_string())).collect();
+        fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
                 .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| "minecraft:air".to_string())
+                .unwrap_or_else(crate::chunk::air_state_arc)
         }
     }
 

@@ -1372,7 +1372,7 @@ pub(crate) fn react_at_placement_with_entities(
                 if should_be_on != redstone::hopper_enabled(&state) {
                     let new_state = redstone::with_property(&state, "enabled", if should_be_on { "true" } else { "false" });
                     columns.set_block(pos, &new_state);
-                    own.push(RandomTickEvent { pos: (x, y, z), from: state.clone(), to: new_state });
+                    own.push(RandomTickEvent { pos: (x, y, z), from: state.to_string(), to: new_state });
                 }
             }
             let placed_kind = if redstone::is_repeater(&state) {
@@ -1426,7 +1426,7 @@ pub(crate) fn react_at_placement_with_entities(
                 };
                 if let Some(new_state) = new_state {
                     columns.set_block(pos, &new_state);
-                    own.push(RandomTickEvent { pos: (x, y, z), from: state.clone(), to: new_state });
+                    own.push(RandomTickEvent { pos: (x, y, z), from: state.to_string(), to: new_state });
                 }
             }
             // `TripWireHookBlock.setPlacedBy` (`:104-106`) calls `calculateState`
@@ -1505,13 +1505,13 @@ fn apply_tripwire_result(
             continue;
         }
         let from = columns.raw_state(pos);
-        if from == new_state {
+        if from.as_ref() == new_state {
             continue;
         }
         columns.set_block(pos, &new_state);
         own.push(RandomTickEvent {
             pos: (pos.x, pos.y, pos.z),
-            from,
+            from: from.to_string(),
             to: new_state,
         });
     }
@@ -1713,39 +1713,46 @@ impl<'h, 'w> RedstoneColumns<'h, 'w> {
     /// written, say) calls [`Self::raw_state`] instead, uncounted, so the
     /// counters this crate's own harness asserts byte-identical stay
     /// byte-identical for a cascade that never leaves its home column.
-    pub(crate) fn state(&self, pos: BlockPos) -> String {
+    pub(crate) fn state(&self, pos: BlockPos) -> crate::redstone::WorldState {
         self.read(pos, true)
     }
 
     /// [`Self::state`], without bumping the cell-read counter.
-    pub(crate) fn raw_state(&self, pos: BlockPos) -> String {
+    pub(crate) fn raw_state(&self, pos: BlockPos) -> crate::redstone::WorldState {
         self.read(pos, false)
     }
 
-    fn read(&self, pos: BlockPos, counted: bool) -> String {
+    /// [`crate::chunk::ChunkColumn::block_state_arc`] through whichever
+    /// column `pos` falls in: a clone of an already-interned palette entry
+    /// (one atomic increment), never a fresh heap allocation — the
+    /// cross-chunk-aware replacement for the single-column
+    /// [`crate::redstone::make_lookup`]'s own `Arc` read. See
+    /// `palette_arc`'s own doc comment for why this is what makes the
+    /// closure cheap to call on every one of a cascade's reads.
+    fn read(&self, pos: BlockPos, counted: bool) -> crate::redstone::WorldState {
         let key = Self::key_of(pos);
         if self.is_home(key) {
             let home = self.home.borrow();
             if pos.y < home.min_y || pos.y >= home.min_y + home.height {
-                return "minecraft:air".to_string();
+                return crate::chunk::air_state_arc();
             }
             if counted {
                 crate::redstone_counters::bump_cell_read();
             }
-            return home.block_state(pos.x - self.home_cx * 16, pos.y, pos.z - self.home_cz * 16).to_string();
+            return home.block_state_arc(pos.x - self.home_cx * 16, pos.y, pos.z - self.home_cz * 16);
         }
         if !self.ensure(key) {
-            return "minecraft:air".to_string();
+            return crate::chunk::air_state_arc();
         }
         let neighbors = self.neighbors.borrow();
         let col = &neighbors[&key];
         if pos.y < col.min_y || pos.y >= col.min_y + col.height {
-            return "minecraft:air".to_string();
+            return crate::chunk::air_state_arc();
         }
         if counted {
             crate::redstone_counters::bump_cell_read();
         }
-        col.block_state(pos.x - key.0 * 16, pos.y, pos.z - key.1 * 16).to_string()
+        col.block_state_arc(pos.x - key.0 * 16, pos.y, pos.z - key.1 * 16)
     }
 
     /// The palette-derived reaction classification at `pos` (see
@@ -2057,7 +2064,7 @@ fn react_to_notification(
                 columns.set_block(n.pos, want);
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state,
+                    from: state.to_string(),
                     to: want.to_string(),
                 });
             }
@@ -2073,7 +2080,7 @@ fn react_to_notification(
             if new_power != old_power {
                 let new_state = redstone_wire::set_power(new_power);
                 columns.set_block(n.pos, &new_state);
-                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state, to: new_state });
+                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state.to_string(), to: new_state });
                 return wire_update_fan_out(n.pos);
             }
             return Vec::new();
@@ -2106,7 +2113,7 @@ fn react_to_notification(
             let recomputed_lock = redstone_diode::recompute_locked(&redstone::make_columns_lookup(columns), n.pos, &state);
             if let Some(new_state) = recomputed_lock {
                 columns.set_block(n.pos, &new_state);
-                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state, to: new_state });
+                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state.to_string(), to: new_state });
             }
             let state_now = columns.raw_state(n.pos);
             let should_on = redstone_diode::repeater_should_turn_on(&redstone::make_columns_lookup(columns), n.pos, facing);
@@ -2191,11 +2198,11 @@ fn react_to_notification(
                             let write = crate::piston::interrupt(arm_pos, &entity);
                             if columns.reachable(write.pos) {
                                 let from = columns.raw_state(write.pos);
-                                if from != write.to {
+                                if from.as_ref() != write.to {
                                     columns.set_block(write.pos, &write.to);
                                     events.push(RandomTickEvent {
                                         pos: (write.pos.x, write.pos.y, write.pos.z),
-                                        from,
+                                        from: from.to_string(),
                                         to: write.to.clone(),
                                     });
                                     interrupt_fan_out.push(Notification { pos: write.pos, from: Direction::Down });
@@ -2234,11 +2241,11 @@ fn react_to_notification(
                         let write = crate::piston::interrupt(two_pos, &entity);
                         if columns.reachable(write.pos) {
                             let from = columns.raw_state(write.pos);
-                            if from != write.to {
+                            if from.as_ref() != write.to {
                                 columns.set_block(write.pos, &write.to);
                                 events.push(RandomTickEvent {
                                     pos: (write.pos.x, write.pos.y, write.pos.z),
-                                    from,
+                                    from: from.to_string(),
                                     to: write.to.clone(),
                                 });
                                 interrupt_fan_out.push(Notification { pos: write.pos, from: Direction::Down });
@@ -2331,13 +2338,13 @@ fn react_to_notification(
                         );
                     }
                     let from = columns.raw_state(pos);
-                    if from == to {
+                    if from.as_ref() == to {
                         continue;
                     }
                     columns.set_block(pos, &to);
                     events.push(RandomTickEvent {
                         pos: (pos.x, pos.y, pos.z),
-                        from,
+                        from: from.to_string(),
                         to,
                     });
                     fan_out.push(Notification { pos, from: Direction::Down });
@@ -2396,7 +2403,7 @@ fn react_to_notification(
             if should_be_on != redstone::hopper_enabled(&state) {
                 let new_state = redstone::with_property(&state, "enabled", if should_be_on { "true" } else { "false" });
                 columns.set_block(n.pos, &new_state);
-                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state, to: new_state });
+                events.push(RandomTickEvent { pos: (n.pos.x, n.pos.y, n.pos.z), from: state.to_string(), to: new_state });
             }
             return Vec::new();
         }
@@ -2445,7 +2452,7 @@ fn react_to_notification(
                 columns.set_block(n.pos, &new_state);
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state,
+                    from: state.to_string(),
                     to: new_state,
                 });
                 // A door occupies two cells; both halves must flip together.
@@ -2461,7 +2468,7 @@ fn react_to_notification(
                                 columns.set_block(other, &other_new);
                                 events.push(RandomTickEvent {
                                     pos: (other.x, other.y, other.z),
-                                    from: other_state,
+                                    from: other_state.to_string(),
                                     to: other_new,
                                 });
                             }
@@ -2489,7 +2496,7 @@ fn react_to_notification(
                 columns.set_block(n.pos, &reaction.new_state);
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state,
+                    from: state.to_string(),
                     to: reaction.new_state,
                 });
             }
@@ -2512,7 +2519,7 @@ fn react_to_notification(
                 let shape = redstone_rail::shape_of(&new_state);
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state,
+                    from: state.to_string(),
                     to: new_state,
                 });
                 if let Some(shape) = shape {
@@ -2537,7 +2544,7 @@ fn react_to_notification(
                 columns.set_block(n.pos, &reaction.new_state);
                 events.push(RandomTickEvent {
                     pos: (n.pos.x, n.pos.y, n.pos.z),
-                    from: state,
+                    from: state.to_string(),
                     to: reaction.new_state,
                 });
                 if reaction.schedule_fire

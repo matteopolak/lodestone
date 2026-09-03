@@ -107,7 +107,9 @@ use lodestone_model::{BlockPos, Vec3};
 
 use crate::chunk::ChunkSource;
 use crate::neighbor_update::Direction;
-use crate::redstone::{base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property, with_property};
+use crate::redstone::{
+    base_name, direction_from_str, direction_to_str, get_bool_property, get_str_property, with_property, WorldState,
+};
 
 pub const DISPENSER: &str = "minecraft:dispenser";
 pub const DROPPER: &str = "minecraft:dropper";
@@ -412,7 +414,7 @@ fn collision_top(state: &str) -> Option<f64> {
 /// The caller resolves the entity type with
 /// [`crate::spawn_egg::entity_type_for_egg`] first; this only answers *where*.
 #[must_use]
-pub fn spawn_egg_position(origin: BlockPos, face: Direction, block_state: &dyn Fn(BlockPos) -> String) -> Vec3 {
+pub fn spawn_egg_position(origin: BlockPos, face: Direction, block_state: &dyn Fn(BlockPos) -> WorldState) -> Vec3 {
     let target = face.relative(origin);
     let y_off = if matches!(face, Direction::Up) {
         0.0
@@ -468,7 +470,7 @@ pub enum BoatDispense {
 /// and raft shares one width, so the caller does not need to know which of
 /// the twenty it is dispensing to compute this.
 #[must_use]
-pub fn boat_dispense(origin: BlockPos, face: Direction, boat_width: f64, block_state: &dyn Fn(BlockPos) -> String) -> BoatDispense {
+pub fn boat_dispense(origin: BlockPos, face: Direction, boat_width: f64, block_state: &dyn Fn(BlockPos) -> WorldState) -> BoatDispense {
     let (sx, sy, sz) = step(face);
     // `0.5625` here is `AbstractBoat`'s own bounding-box half-thickness
     // constant, numerically identical to `BOAT_HEIGHT` but a *different*
@@ -521,7 +523,7 @@ pub enum MinecartDispense {
 /// falls back to a plain toss, matching vanilla's own
 /// `defaultDispenseItemBehavior.dispense`.
 #[must_use]
-pub fn minecart_dispense(origin: BlockPos, face: Direction, block_state: &dyn Fn(BlockPos) -> String) -> MinecartDispense {
+pub fn minecart_dispense(origin: BlockPos, face: Direction, block_state: &dyn Fn(BlockPos) -> WorldState) -> MinecartDispense {
     let (sx, sy, sz) = step(face);
     let spawn_x = f64::from(origin.x) + 0.5 + sx * 1.125;
     // `Math.floor(center.y) + direction.getStepY()` — `center.y` is
@@ -760,7 +762,7 @@ mod tests {
     /// own floor.
     #[test]
     fn spawn_egg_position_over_air_lands_at_the_target_cells_own_floor() {
-        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::East, &|_| "minecraft:air".to_owned());
+        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::East, &|_| WorldState::from("minecraft:air"));
         assert_eq!(pos, Vec3::new(1.5, 64.0, 0.5));
     }
 
@@ -770,7 +772,7 @@ mod tests {
     /// tell these two apart.
     #[test]
     fn spawn_egg_position_over_solid_stone_stands_on_top_of_it() {
-        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::East, &|_| "minecraft:stone".to_owned());
+        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::East, &|_| WorldState::from("minecraft:stone"));
         assert_eq!(pos, Vec3::new(1.5, 65.0, 0.5));
     }
 
@@ -781,25 +783,25 @@ mod tests {
     /// gate rather than trusting the East case to generalise.
     #[test]
     fn spawn_egg_position_facing_up_never_computes_a_collision_offset() {
-        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::Up, &|_| "minecraft:stone".to_owned());
+        let pos = spawn_egg_position(BlockPos::new(0, 64, 0), Direction::Up, &|_| WorldState::from("minecraft:stone"));
         assert_eq!(pos, Vec3::new(0.5, 65.0, 0.5));
     }
 
     /// A world of water at `y == 63` (source, air above) for `x >= 1`, stone
     /// floor elsewhere, air above `y == 63` everywhere — enough surface
     /// variety to hit every [`boat_dispense`] branch.
-    fn boat_world(overrides: Vec<(BlockPos, String)>) -> impl Fn(BlockPos) -> String {
+    fn boat_world(overrides: Vec<(BlockPos, String)>) -> impl Fn(BlockPos) -> WorldState {
         move |p: BlockPos| {
             if let Some((_, name)) = overrides.iter().find(|(at, _)| *at == p) {
-                return name.clone();
+                return WorldState::from(name.as_str());
             }
             if p.y == 63 && p.x >= 1 {
-                return "minecraft:water[level=0]".to_owned();
+                return WorldState::from("minecraft:water[level=0]");
             }
             if p.y <= 62 {
-                return "minecraft:stone".to_owned();
+                return WorldState::from("minecraft:stone");
             }
-            "minecraft:air".to_owned()
+            WorldState::from("minecraft:air")
         }
     }
 

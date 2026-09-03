@@ -79,7 +79,7 @@
 //! new wood types land.
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{best_neighbor_signal, get_bool_property, get_str_property, with_property};
+use crate::redstone::{best_neighbor_signal, get_bool_property, get_str_property, with_property, WorldState};
 use lodestone_model::BlockPos;
 
 /// `true` for any of the three redstone-openable families — see this module's
@@ -167,7 +167,7 @@ pub fn other_door_half_pos(pos: BlockPos, state: &str) -> Option<BlockPos> {
 #[must_use]
 pub fn has_neighbor_signal<F>(lookup: &F, pos: BlockPos, state: &str) -> bool
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     if best_neighbor_signal(lookup, pos, false) > 0 {
         return true;
@@ -203,14 +203,14 @@ mod tests {
     /// A tiny fake world: an explicit map from position to block-state
     /// string, air everywhere unset — the same "pure decision, fake world
     /// via closure" style every redstone module in this crate uses.
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> String + use<> {
-        let entries: Vec<(BlockPos, String)> = entries.iter().map(|(p, s)| (*p, s.to_string())).collect();
+        fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
                 .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| "minecraft:air".to_string())
+                .unwrap_or_else(crate::chunk::air_state_arc)
         }
     }
 

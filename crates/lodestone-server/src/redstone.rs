@@ -113,6 +113,27 @@
 
 use crate::neighbor_update::{Direction, ALL_DIRECTIONS};
 use lodestone_model::BlockPos;
+use std::sync::Arc;
+
+/// The block-state read a world-lookup closure returns — `F: Fn(BlockPos) ->
+/// WorldState`, the shape every query function in this module (and
+/// `crate::redstone_wire`/`crate::redstone_torch`/`crate::redstone_diode`/
+/// `crate::redstone_observer`/`crate::redstone_rail`/`crate::redstone_tripwire`/
+/// `crate::redstone_openable`/`crate::redstone_dispenser`/`crate::piston`/
+/// `crate::block_support`/`crate::block_placement`/`crate::server`) takes as
+/// `lookup`/`block_at`.
+///
+/// An `Arc<str>` rather than a freshly-allocated `String`: [`make_lookup`] and
+/// [`make_columns_lookup`] both back this with
+/// [`crate::chunk::ChunkColumn::block_state_arc`], which clones an already
+/// -interned palette entry (one atomic increment) instead of allocating and
+/// copying a new string on every call — the fix for the allocation issue #548
+/// named as the largest remaining constant factor on the redstone dispatch
+/// path (5899 lookups measured in one active tick against 837 notifications).
+/// `Arc<str>` derefs to `&str` exactly like `String` does, so every existing
+/// caller that only *reads* through the lookup (`&state`, `.starts_with(..)`,
+/// `base_name(&state)`, …) needed no body change — only the bound itself.
+pub type WorldState = Arc<str>;
 
 pub const WIRE: &str = "minecraft:redstone_wire";
 pub const TORCH: &str = "minecraft:redstone_torch";
@@ -809,7 +830,7 @@ pub fn direct_signal(state: &str, direction: Direction, ignore_wire: bool) -> u8
 #[must_use]
 pub fn direct_signal_to<F>(lookup: &F, pos: BlockPos, ignore_wire: bool) -> u8
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let mut best = 0u8;
     for direction in ALL_DIRECTIONS {
@@ -833,7 +854,7 @@ where
 #[must_use]
 pub fn signal_at<F>(lookup: &F, pos: BlockPos, direction: Direction, ignore_wire: bool) -> u8
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let state = lookup(pos);
     let weak = weak_signal(&state, direction, ignore_wire);
@@ -849,7 +870,7 @@ where
 #[must_use]
 pub fn best_neighbor_signal<F>(lookup: &F, pos: BlockPos, ignore_wire: bool) -> u8
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     crate::redstone_counters::bump_signal_query();
     let mut best = 0u8;
@@ -878,7 +899,7 @@ where
 #[must_use]
 pub fn control_input_signal<F>(lookup: &F, pos: BlockPos, direction: Direction, only_diodes: bool) -> u8
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let state = lookup(pos);
     if only_diodes {
@@ -907,7 +928,7 @@ where
 #[must_use]
 pub fn alternate_signal<F>(lookup: &F, pos: BlockPos, facing: Direction, side_input_diodes_only: bool) -> u8
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let cw = facing.clockwise();
     let ccw = facing.counterclockwise();
@@ -929,7 +950,7 @@ where
 #[must_use]
 pub fn input_signal<F>(lookup: &F, pos: BlockPos, facing: Direction) -> u8
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let target_pos = facing.relative(pos);
     let signal = signal_at(lookup, target_pos, facing, false);
@@ -940,7 +961,7 @@ where
     signal.max(wire_power(&target_state))
 }
 
-/// Builds a `Fn(BlockPos) -> String` reading through `column`, the shared
+/// Builds a `Fn(BlockPos) -> WorldState` reading through `column`, the shared
 /// shape every query function in this module (and `crate::redstone_wire`/
 /// `crate::redstone_torch`/`crate::redstone_diode`/`crate::redstone_observer`)
 /// takes as `lookup`. Positions outside `column`'s own 16×16×height footprint
@@ -953,15 +974,15 @@ where
 /// constructs a fresh one per query rather than reusing one across a
 /// mutation, for exactly this reason.
 #[must_use]
-pub fn make_lookup(column: &crate::chunk::ChunkColumn, min_x: i32, min_z: i32) -> impl Fn(BlockPos) -> String + '_ {
-    move |p: BlockPos| -> String {
+pub fn make_lookup(column: &crate::chunk::ChunkColumn, min_x: i32, min_z: i32) -> impl Fn(BlockPos) -> WorldState + '_ {
+    move |p: BlockPos| -> WorldState {
         let lx = p.x - min_x;
         let lz = p.z - min_z;
         if !(0..16).contains(&lx) || !(0..16).contains(&lz) || p.y < column.min_y || p.y >= column.min_y + column.height {
-            return "minecraft:air".to_string();
+            return crate::chunk::air_state_arc();
         }
         crate::redstone_counters::bump_cell_read();
-        column.block_state(lx, p.y, lz).to_string()
+        column.block_state_arc(lx, p.y, lz)
     }
 }
 
@@ -975,7 +996,7 @@ pub fn make_lookup(column: &crate::chunk::ChunkColumn, min_x: i32, min_z: i32) -
 /// is simulating) — this only extends reach to chunks the server is
 /// already ticking, never generates one to answer a redstone read.
 #[must_use]
-pub fn make_columns_lookup<'a>(columns: &'a crate::random_tick::RedstoneColumns<'_, '_>) -> impl Fn(BlockPos) -> String + 'a {
+pub fn make_columns_lookup<'a>(columns: &'a crate::random_tick::RedstoneColumns<'_, '_>) -> impl Fn(BlockPos) -> WorldState + 'a {
     move |p: BlockPos| columns.state(p)
 }
 
@@ -987,14 +1008,14 @@ mod tests {
     /// string, air everywhere unset — enough to build every fixture below
     /// with no `ChunkColumn` in scope, matching `crate::gravity_tick`'s own
     /// "pure decision, fake world via closure" testing style.
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> String + use<> {
-        let entries: Vec<(BlockPos, String)> = entries.iter().map(|(p, s)| (*p, s.to_string())).collect();
+        fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
                 .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| "minecraft:air".to_string())
+                .unwrap_or_else(crate::chunk::air_state_arc)
         }
     }
 

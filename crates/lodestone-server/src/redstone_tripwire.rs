@@ -68,7 +68,7 @@
 //! described as the point of [`on_wire_removed`].
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{base_name, direction_to_str, get_bool_property, tripwire_hook_facing, with_property};
+use crate::redstone::{base_name, direction_to_str, get_bool_property, tripwire_hook_facing, with_property, WorldState};
 use lodestone_model::BlockPos;
 
 pub const TRIPWIRE: &str = "minecraft:tripwire";
@@ -106,7 +106,7 @@ pub struct WireSource {
     pub distance: i32,
     /// The wire state to use at that distance, overriding whatever `lookup`
     /// would answer.
-    pub state: String,
+    pub state: WorldState,
 }
 
 /// The full write plan one `calculate_state` call produces — see this
@@ -148,7 +148,7 @@ pub struct CalculatedState {
 #[must_use]
 pub fn calculate_state<F>(lookup: &F, pos: BlockPos, state: &str, is_being_destroyed: bool, wire_source: Option<&WireSource>) -> CalculatedState
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let facing = tripwire_hook_facing(state);
     let was_attached = get_bool_property(state, "attached").unwrap_or(false);
@@ -252,7 +252,7 @@ fn hook_state(facing: Direction, attached: bool, powered: bool) -> String {
 #[must_use]
 pub fn find_controlling_hooks<F>(lookup: &F, pos: BlockPos, wire_state: &str) -> Vec<(BlockPos, WireSource)>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let mut found = Vec::new();
     for direction in [Direction::South, Direction::West] {
@@ -265,7 +265,7 @@ where
                         test_pos,
                         WireSource {
                             distance: i,
-                            state: wire_state.to_string(),
+                            state: WorldState::from(wire_state),
                         },
                     ));
                 }
@@ -290,7 +290,7 @@ where
 #[must_use]
 pub fn on_wire_removed<F>(lookup: &F, pos: BlockPos, wire_state_before_removal: &str) -> Vec<(BlockPos, WireSource)>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let forced = with_property(wire_state_before_removal, "powered", "true");
     find_controlling_hooks(lookup, pos, &forced)
@@ -300,14 +300,14 @@ where
 mod tests {
     use super::*;
 
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> String + use<> {
-        let entries: Vec<(BlockPos, String)> = entries.iter().map(|(p, s)| (*p, (*s).to_string())).collect();
+        fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
                 .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| "minecraft:air".to_string())
+                .unwrap_or_else(crate::chunk::air_state_arc)
         }
     }
 

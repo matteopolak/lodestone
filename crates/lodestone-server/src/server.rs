@@ -106,7 +106,7 @@ use crate::protocol::{
     Abilities, BossBarSnapshot, EntitySnapshot, MerchantOfferOut, ResourcePackPush, ServerBound,
     ServerDirective, ServerProtocol,
 };
-use crate::redstone::{COMPARATOR, OBSERVER, REPEATER};
+use crate::redstone::{WorldState, COMPARATOR, OBSERVER, REPEATER};
 use crate::redstone_diode::{set_comparator, set_repeater};
 use crate::redstone_observer::set_observer;
 use crate::scheduled_tick::{ScheduledTick, ScheduledTickQueue};
@@ -5460,7 +5460,7 @@ where
             continue;
         }
         if crate::block_support::survives(cell, &was, |probe| {
-            source.block_state(probe.x, probe.y, probe.z)
+            source.block_state(probe.x, probe.y, probe.z).into()
         }) {
             continue;
         }
@@ -5863,7 +5863,7 @@ fn placed_block_state<F>(
     block_at: F,
 ) -> Option<crate::block_placement::Placement>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     if let Some(yaw) = ctx.yaw {
         let look = horizontal_look_direction(yaw);
@@ -7548,7 +7548,7 @@ where
                 pitch: player_pitch,
             };
             let (state, extra) =
-                match placed_block_state(block_name, &ctx, |p| source.block_state(p.x, p.y, p.z)) {
+                match placed_block_state(block_name, &ctx, |p| source.block_state(p.x, p.y, p.z).into()) {
                     Some(placed) => (placed.state, placed.extra),
                     None => (block_name.to_string(), Vec::new()),
                 };
@@ -19465,7 +19465,7 @@ mod tests {
             yaw,
             pitch: Some(0.0),
         };
-        let air = |_: BlockPos| "minecraft:air".to_string();
+        let air = |_: BlockPos| WorldState::from("minecraft:air");
         let state = |block: &str, yaw: Option<f32>| {
             placed_block_state(block, &looking(yaw), air).map(|placed| placed.state)
         };

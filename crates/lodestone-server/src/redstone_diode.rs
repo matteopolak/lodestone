@@ -101,7 +101,7 @@
 use crate::neighbor_update::Direction;
 use crate::redstone::{
     self, comparator_mode_subtract, comparator_output, diode_facing, diode_powered, direction_to_str, is_diode,
-    repeater_delay_ticks, repeater_locked, COMPARATOR, REPEATER,
+    repeater_delay_ticks, repeater_locked, WorldState, COMPARATOR, REPEATER,
 };
 use crate::scheduled_tick::TickPriority;
 use lodestone_model::BlockPos;
@@ -153,7 +153,7 @@ pub fn repeater_delay(state: &str) -> u32 {
 #[must_use]
 pub fn should_prioritize<F>(lookup: &F, pos: BlockPos, facing: Direction) -> bool
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let direction = facing.opposite();
     let opposite_state = lookup(direction.relative(pos));
@@ -164,7 +164,7 @@ where
 #[must_use]
 pub fn is_locked<F>(lookup: &F, pos: BlockPos, facing: Direction) -> bool
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     redstone::alternate_signal(lookup, pos, facing, true) > 0
 }
@@ -176,7 +176,7 @@ where
 #[must_use]
 pub fn repeater_should_turn_on<F>(lookup: &F, pos: BlockPos, facing: Direction) -> bool
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     redstone::input_signal(lookup, pos, facing) > 0
 }
@@ -195,7 +195,7 @@ pub fn should_schedule_repeater_check(state: &str, should_turn_on: bool) -> bool
 #[must_use]
 pub fn repeater_schedule_priority<F>(lookup: &F, pos: BlockPos, facing: Direction, currently_on: bool) -> TickPriority
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     if should_prioritize(lookup, pos, facing) {
         TickPriority::ExtremelyHigh
@@ -256,7 +256,7 @@ pub fn run_scheduled_tick(state: &str, should_turn_on: bool) -> RepeaterTickOutc
 #[must_use]
 pub fn recompute_locked<F>(lookup: &F, pos: BlockPos, state: &str) -> Option<String>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let facing = diode_facing(state);
     let new_locked = is_locked(lookup, pos, facing);
@@ -312,7 +312,7 @@ pub fn should_schedule_comparator_check(state: &str, input: u8, side: u8) -> boo
 #[must_use]
 pub fn comparator_schedule_priority<F>(lookup: &F, pos: BlockPos, facing: Direction) -> TickPriority
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     if should_prioritize(lookup, pos, facing) {
         TickPriority::High
@@ -343,14 +343,14 @@ pub fn run_scheduled_comparator_tick(state: &str, input: u8, side: u8) -> Option
 mod tests {
     use super::*;
 
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> String + use<> {
-        let entries: Vec<(BlockPos, String)> = entries.iter().map(|(p, s)| (*p, s.to_string())).collect();
+        fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
                 .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| "minecraft:air".to_string())
+                .unwrap_or_else(crate::chunk::air_state_arc)
         }
     }
 
