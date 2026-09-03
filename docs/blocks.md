@@ -281,16 +281,17 @@ breaks unrelated suites in a way that looks nothing like this code.
 
 A debug build gives every arm of a `match` its own stack slot for that arm's
 temporaries, so such a frame is the *sum* over the arms rather than the largest
-of them. `size_of::<BlockEntity>()` is 16,504 bytes — its `Crafter` variant
-holds an inline `[Option<ItemStack>; 9]`, and `size_of::<ItemStack>()` is 1,832
-on its own — so a single forty-arm item-id match materialising one `BlockEntity`
-per arm reserves 1,357,056 bytes in its prologue, more than a default thread
-stack. The symptom is a stack overflow inside a single frame, with no recursion
-anywhere: *calling* the function is enough to abort the process. Split in two, the same
-call path reserves 33,200 + 17,392 = 50,592 bytes across the two frames that are
-live at once. Boxing the payload is not an alternative — `Box::new(expr)`
-evaluates `expr` into a stack temporary before the move, so each arm still
-reserves its 16,504 bytes.
+of them. `size_of::<BlockEntity>()` is 9,168 bytes — `Hopper`'s own five-slot
+flat container, at the same 9,168 bytes, is the widest variant. Still,
+`size_of::<ItemStack>()` is 1,832 on its own, so a single forty-arm item-id
+match materialising one `BlockEntity` per arm reserves 366,720 bytes in its
+prologue, more than a default thread stack. The symptom is a stack overflow
+inside a single frame, with no recursion anywhere: *calling* the function is
+enough to abort the process. Split in two, the same call path reserves
+18,528 + 17,392 = 35,920 bytes across the two frames that are live at once.
+Boxing a whole arm's produced value is not an alternative to the split —
+`Box::new(expr)` evaluates `expr` into a stack temporary before the move, so
+each arm still reserves its full `BlockEntity`.
 
 Read the frame, do not estimate it. It is the `sub sp, sp, …` immediate (or, for
 a frame over a page, the bound of the probe loop that precedes it) in the
@@ -301,16 +302,19 @@ ar x target/debug/liblodestone_server.rlib   # rlib members are the objects
 llvm-objdump -d --disassemble-symbols=<mangled symbol> <member>.o | head -20
 ```
 
-A census over every member of the rlib finds the sibling frames, all downstream
-of that same 16,504-byte enum: `BlockEntityRegistry::tick_hopper` (200,080 — it
-holds three `Option<BlockEntity>` across its remove/tick/reinsert),
-`chunk_nbt::block_entity_from_nbt` (153,584), `structure_loot::chests_for_chunk`
-(101,104), and the `HashMap::insert`/`Vec` collect instantiations over
-`(BlockPos, BlockEntity)` (about 66,000 each). None is overflow-scale alone. The
-one change that shrinks all of them at once is boxing `BlockEntity::Crafter`'s
-slot array, which drops the enum to the `Furnace` variant's ~5.5 KB; it touches
-every `Crafter { .. }` pattern in the crate and is deliberately not part of the
-overflow fix.
+`BlockEntity::Crafter`'s 9-slot grid is a boxed `Box<[Option<ItemStack>; 9]>`
+rather than an inline array for exactly this reason (see that field's own doc
+comment) — an inline grid would make `Crafter` the widest variant by a wide
+margin and inflate every sibling frame downstream of the enum's size, not just
+this one. Three such frames, measured the same way: `BlockEntityRegistry::tick_hopper`
+(119,376 — it holds three `Option<BlockEntity>` across its remove/tick/reinsert),
+`chunk_nbt::block_entity_from_nbt` (131,568 — its crafter-decode arm still
+builds the 9-slot array on the stack ahead of boxing it, so that one arm stays
+wide even though the enum itself did not), and `structure_loot::chests_for_chunk`
+(57,088). None is overflow-scale alone. An `ItemStack`-only frame like
+`item_use::swap_with_equipment_slot` (75,520) is a useful negative control:
+its width comes from `ItemStack` clones, not from `BlockEntity`, so boxing
+`Crafter`'s grid does not move it at all.
 
 `block_entities::tests::resolving_a_placement_fits_a_modest_stack` is the guard,
 since the type system cannot state "this frame stays small" and the regression

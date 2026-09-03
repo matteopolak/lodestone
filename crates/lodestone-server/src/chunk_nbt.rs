@@ -1361,7 +1361,7 @@ pub fn block_entity_to_nbt(pos: BlockPos, entity: &BlockEntity) -> Nbt {
         BlockEntity::Crafter { slots, disabled } => (
             "minecraft:crafter",
             vec![
-                ("Items".to_owned(), items_to_nbt(slots)),
+                ("Items".to_owned(), items_to_nbt(slots.as_slice())),
                 (
                     "disabled_slots".to_owned(),
                     Nbt::IntArray(
@@ -1620,7 +1620,7 @@ fn block_entity_from_nbt(nbt: &Nbt) -> Option<(BlockPos, BlockEntity)> {
                     }
                 }
             }
-            BlockEntity::Crafter { slots, disabled }
+            BlockEntity::Crafter { slots: Box::new(slots), disabled }
         }
         _ => BlockEntity::Opaque {
             id: id.to_owned(),

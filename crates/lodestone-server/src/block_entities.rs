@@ -124,10 +124,17 @@ pub enum BlockEntity {
     /// `CONTAINER_SLOT_STATE_CHANGED`'s own decode/wiring gap, not the
     /// block's mechanism, and `data_properties`'s own doc names `triggered`
     /// (index 9) as the disclosed always-`0` consequence.
+    ///
+    /// `slots` is boxed because it is the one field that sets
+    /// `size_of::<BlockEntity>()`: an inline `[Option<ItemStack>; 9]` puts
+    /// every other variant behind an enum this wide too, and a debug build
+    /// gives a `match` arm one stack slot per arm rather than one for the
+    /// widest arm alone — see [`PlacedBlockEntity`]'s doc comment for the
+    /// arithmetic this costs a wide match specifically.
     Crafter {
         /// The 9-slot 3×3 crafting grid, row-major (`CrafterMenu`'s own
         /// `x + y * 3` addressing).
-        slots: [Option<ItemStack>; 9],
+        slots: Box<[Option<ItemStack>; 9]>,
         /// `true` where that index is disabled — `CONTAINER_SLOT_STATE_CHANGED`'s
         /// own write surface.
         disabled: [bool; 9],
@@ -327,7 +334,7 @@ impl BlockEntity {
     #[must_use]
     pub fn crafter() -> Self {
         BlockEntity::Crafter {
-            slots: [None, None, None, None, None, None, None, None, None],
+            slots: Box::new([None, None, None, None, None, None, None, None, None]),
             disabled: [false; 9],
         }
     }
@@ -387,7 +394,7 @@ impl BlockEntity {
             // A crafter's grid is a flat 9-slot array too, same as a
             // dispenser/dropper's `Container` — hopper adjacency into one
             // works the identical way.
-            BlockEntity::Crafter { slots, .. } => Some(slots),
+            BlockEntity::Crafter { slots, .. } => Some(slots.as_mut_slice()),
             BlockEntity::Composter(_) | BlockEntity::Furnace(_) | BlockEntity::BrewingStand(_)
             | BlockEntity::Opaque { .. } | BlockEntity::CommandBlock(_)
             | BlockEntity::Spawner(_) | BlockEntity::Sign(_) | BlockEntity::Beacon(_) => {
@@ -681,14 +688,14 @@ pub fn block_entity_for_item(item: &str) -> Option<(&'static str, BlockEntity)> 
 /// frame that outgrows a thread stack is invisible until an unrelated suite
 /// dies at frame zero.
 ///
-/// The split resolution below reserves 50,592 bytes across the two frames that
-/// are live at once on that call path — 33,200 for [`block_entity_for_item`]
+/// The split resolution below reserves 35,920 bytes across the two frames that
+/// are live at once on that call path — 18,528 for [`block_entity_for_item`]
 /// plus 17,392 for [`PlacedBlockEntity::instantiate`], both read out of the
 /// prologues with `llvm-objdump -d` over this crate's own object files. The
-/// budget is set five times that, so the callee constructors, the caller's own
-/// `(&str, BlockEntity)` binding and the harness's frames all fit, while
-/// staying five times *under* the 1,357,056 bytes a single wide match costs —
-/// the guard fires on a return to that shape.
+/// budget is set well over seven times that, so the callee constructors, the
+/// caller's own `(&str, BlockEntity)` binding and the harness's frames all
+/// fit, while staying comfortably *under* the 366,720 bytes a single wide
+/// match costs — the guard fires on a return to that shape.
 #[cfg(test)]
 const PLACEMENT_STACK_BUDGET: usize = 256 * 1024;
 
@@ -700,19 +707,23 @@ const PLACEMENT_STACK_BUDGET: usize = 256 * 1024;
 ///
 /// A debug build gives each arm of a `match` its own stack slot for that arm's
 /// temporaries, so such a match's frame is the *sum* over its arms rather than
-/// the largest of them. `size_of::<BlockEntity>()` is 16,504 bytes — its
-/// [`Crafter`](BlockEntity::Crafter) variant carries an inline
-/// `[Option<ItemStack>; 9]`, and `size_of::<ItemStack>()` is 1,832 on its own —
-/// so a forty-arm item-id match that materialises one `BlockEntity` per arm
-/// reserves 1,357,056 bytes in its prologue. That is more than a default thread
-/// stack: merely *calling* such a function overflows, no recursion involved.
+/// the largest of them. `size_of::<BlockEntity>()` is 9,168 bytes — its own
+/// [`Hopper`] variant, at the same 9,168 bytes for its five-slot flat
+/// container, is now the widest; [`Crafter`](BlockEntity::Crafter)'s own grid
+/// is boxed rather than inline for exactly this reason (see that variant's
+/// own doc comment) and no longer sets the enum's size. `size_of::<ItemStack>()`
+/// is 1,832 on its own — so a forty-arm item-id match that materialises one
+/// `BlockEntity` per arm still reserves 366,720 bytes in its prologue, more
+/// than a default thread stack: merely *calling* such a function overflows, no
+/// recursion involved.
 ///
 /// Matching an item id down to this descriptor first keeps the wide match's
 /// per-arm slot at tuple-of-pointers scale and leaves exactly one place
 /// ([`instantiate`](Self::instantiate), nine arms) where a `BlockEntity` is
-/// built at all. Boxing the payload is *not* an alternative: `Box::new(expr)`
-/// evaluates `expr` into a stack temporary before moving it to the heap, so
-/// every arm would still reserve its 16,504 bytes.
+/// built at all. Boxing a whole arm's produced value is *not* an alternative
+/// to that split: `Box::new(expr)` evaluates `expr` into a stack temporary
+/// before moving it to the heap, so every arm would still reserve its full
+/// 9,168 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlacedBlockEntity {
     Composter,
@@ -1182,9 +1193,9 @@ mod tests {
 
     /// One item id per [`PlacedBlockEntity`] variant, so the frame the guard
     /// below measures covers every arm of
-    /// [`PlacedBlockEntity::instantiate`] — including the `Crafter` arm, whose
-    /// inline nine-slot grid is what makes `BlockEntity` 16,504 bytes wide in
-    /// the first place.
+    /// [`PlacedBlockEntity::instantiate`] — including both the `Crafter` arm
+    /// and the `Hopper` arm, the latter now the one that sets
+    /// `BlockEntity`'s width (see [`PlacedBlockEntity`]'s own doc comment).
     const ONE_ITEM_PER_PLACED_KIND: &[&str] = &[
         "minecraft:composter",
         "minecraft:furnace",
@@ -1245,7 +1256,7 @@ mod tests {
             status.success(),
             "resolving a placement did not fit {PLACEMENT_STACK_BUDGET} bytes of stack \
              (child exited {status}); a wide match materialising one BlockEntity per arm \
-             costs one 16,504-byte alloca per arm — see PlacedBlockEntity's doc comment",
+             costs one 9,168-byte alloca per arm — see PlacedBlockEntity's doc comment",
         );
     }
 
