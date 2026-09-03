@@ -425,6 +425,7 @@ this block; the commands are given so you can. Stages 0-3 have landed:
 | 4 first era crate | `lodestone_v1_9::PROTOCOLS` is `[110, 210, 316, 340]`, with a committed join capture per new protocol under `crates/versions/1.9/tests/captures/` |
 | 7 second era crate | `lodestone_v1_14::PROTOCOLS` is `[498, 578, 754]`, with a committed join capture per new protocol under `crates/versions/1.14/tests/captures/` |
 | 8 (first era) 1.13.2 | `lodestone_v1_13::PROTOCOLS` is `[404]`, with a join capture and **two neighbour captures** under `crates/versions/1.13/tests/captures/` |
+| 8 (second era) 1.17.1/1.18.2 | `lodestone_v1_17::PROTOCOLS` is `[756, 758]`, with a committed join capture per protocol under `crates/versions/1.17/tests/captures/` |
 
 **Stage 4's measured cost, which is what this plan asked it to produce.** Diffed against
 `455a87d6`, excluding the three generated id tables (1,971 lines) and the three captured-byte
@@ -520,9 +521,61 @@ can offer is the whole-stream one, not the per-packet one.
 See [`docs/protocol-1-13-era.md`](../protocol-1-13-era.md) for that era crate's
 own documentation.
 
+**Stage 8's second era, 1.17.1 and 1.18.2, and the two things it settles.**
+Diffed against `e90d4391`, excluding the four generated tables (22,310 lines),
+the three committed jar dumps (230,669) and the captured bytes (96):
+
+| bucket | lines added |
+|---|---|
+| era-crate source (`crates/versions/1.17/src`, excluding `generated/`) | 6,229 |
+| shared-crate source (eleven `lodestone-protocol-common` range widenings) plus registry and workspace wiring | 99 |
+| tests (`tests/*.rs`) plus the captures' README | 1,549 |
+| oracle script | 45 |
+| **hand-written total** | **7,922** |
+
+The marginal figure — the one the plan named as its falsifier — is **131
+hand-written lines naming 758 or 1.18.2**, of which 32 are code and the rest
+the documentation that explains them; the function and struct bodies that
+exist only for 758 come to 95 lines. Either reading is well inside the
+~500-line threshold, on an era where the second version changes the chunk
+packet's whole shape. That is the strongest confirmation the mechanism has
+had: 1.9's ~20 and 1.14's 69 were both added on top of an unchanged chunk
+framing.
+
+The whole-era figure repeats Stage 8's first lesson rather than contradicting
+it. At 6,229 source lines this era is *above* 1.13's 5,531 and 1.14's 6,257 is
+its nearest neighbour — founding an era costs roughly a full family however
+the crate is arranged, and the saving is entirely in the second and subsequent
+version. Two era-specific reasons it came in high: the era needed a whole
+second chunk decoder rather than a branch (1.18 removes the section mask and
+the column biome array and folds the light payload in), and 1.17 split three
+action-selected packets into fourteen, so the same events now come from
+fourteen handlers instead of three.
+
+Two corrections to the record this era forces. First, **a per-protocol data
+set is not always per protocol**: the two jars' `--reports` `blocks.json` dumps
+are byte-identical and their entity registries agree id for id, so this era
+needs *one* of each where 1.14 needs three. Both claims are re-derived from the
+committed dumps by tests rather than asserted, and `table_for` still routes
+through the negotiated protocol. Second, and more expensive: **1.18's
+`chunkData` buffer is longer than the sections inside it**, by exactly one zero
+byte per section whose block palette is single-valued (measured at 23, 21 and
+19 bytes of padding across three columns). The exact-length `ensure_empty` every
+other protocol here can assert is therefore false at 758, and no round-trip
+against our own encoder could have found it — only a capture could.
+
+The negative control came out matching the 1.13 era's answer, not the 1.14
+era's: across the 1.17.1 capture, four ids name a different packet at 758 —
+one errors, two land on ignored ids, and one emits a real, well-formed, wrong
+event (`declare_recipes` read as `entity_effect` becomes a levitation
+`MobEffectApplied`). The guarantee this crate offers is the whole-stream one.
+
+See [`docs/protocol-1-17-era.md`](../protocol-1-17-era.md) for that era crate's
+own documentation.
+
 `cargo xtask connectedness` currently reports v1-8 59/74, v1-9 62/80, v1-13 51/86,
-v1-14 54/92, v26-2 141/141 clientbound, with zero decoded-but-stranded in every
-family.
+v1-14 54/92, v1-17 65/103, v26-2 141/141 clientbound, with zero
+decoded-but-stranded in every family.
 
 **v26-2 has not migrated and that is deliberate** — it is Stage 6, explicitly deferred and not a
 blocker. It still dispatches through the if-arm chain with no `Handler::new` and no `IGNORED` list.
@@ -541,6 +594,7 @@ Three eras have now landed, and the numbers separate two cases the plan treated 
 | 1.9 | 110, 210, 316, 340 | ~1,008 | ~20 lines |
 | 1.14 | 498, 578, 754 | 1,524 | 69 lines |
 | 1.13 | 404 (singleton) | 5,531 | n/a |
+| 1.17 | 756, 758 | 6,229 | 131 lines |
 
 **The mechanism works, and the falsifier is passed** — adding a version to an era that already
 exists costs 20-70 hand-written lines against a ~500-line threshold, versus ~5.5k for a
@@ -632,8 +686,8 @@ load-bearing rather than confirmatory. Proof: 1.16.5's canonicalisation gate unc
 captures for 498 and 578 from the jars already on disk, and a replay that lands the flat
 preset's floor in canonical ids.
 
-**Stage 8 — remaining eras, in the order the existing plan's value ranking gives** (1.13.2, then
-1.19.4, 1.20.6, 1.21.11, 1.17.1/1.18.2, 1.7.10 last). Each is stage-5 scaffold + era-specific three
+**Stage 8 — remaining eras, in the order the existing plan's value ranking gives** (1.13.2 and
+1.17.1/1.18.2 landed; then 1.19.4, 1.20.6, 1.21.11, 1.7.10 last). Each is stage-5 scaffold + era-specific three
 modules + captures. 1.7.10 is the outlier: 29% identity with 1.8.9, no minecraft-data, no jar, and
 therefore captures are its *only* shape source — budget it last and alone.
 
