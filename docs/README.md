@@ -370,6 +370,13 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   crate, after [`1.9`](./protocol-1-9-era.md), [`1.14`](./protocol-1-14-era.md),
   [`1.13`](./protocol-1-13-era.md), [`1.17`](./protocol-1-17-era.md) and
   [`1.19`](./protocol-1-19-era.md).
+- [The 1.21.11 era crate: a wire era with four protocols, and a client that must answer its own teleports](./protocol-1-21-11-era.md) —
+  `crates/versions/1.21.11` (package `lodestone-v1-21-11`, feature `v1-21-11`) joins
+  Minecraft **1.21.11** — protocol **774** — with one adapter, one generated
+  packet-id table, one generated block-state table, one generated entity registry, and
+  this era's own chunk, velocity, chat and tab-list codecs. It is the joining
+  direction only: `ServerProtocol` is implemented by the 26.2 family alone, so 774 is
+  a version we can play on and not one we can host.
 - [Protocol 5 era (Minecraft 1.7.6-1.7.10)](./protocol-1-7-era.md) —
   `lodestone-v1-7` is the client protocol crate for **protocol 5**, spoken by
   Minecraft 1.7.6 through 1.7.10 — the bottom of the version ladder and the only era
