@@ -579,3 +579,47 @@ fuzz-smoke seconds="30":
 [doc("regenerate fuzz/seeds/** from .cache/mc vanilla data (needs a populated .cache)")]
 fuzz-seeds-regen:
     python3 fuzz/seeds/generate-seeds.py
+
+# Reclaim disk from `target/` without disturbing a build in progress.
+#
+# Two independently safe reclaims, in increasing order of cost to redo:
+#
+#  1. `target/debug/incremental` -- pure cache, and the single largest sink
+#     here: measured at 22 GB, 8.6 GB and 8.0 GB on three separate days.
+#     sccache refuses to cache an incremental compilation at all ("incremental
+#     compilation is prohibited"), so nothing downstream depends on these
+#     files. Skipped while any `rustc` is live, because that is when deleting
+#     them can fail a compile rather than merely slow the next one.
+#  2. Per-crate build directories under `target/debug/build/*/` untouched for
+#     more than a day. Cargo never garbage-collects these, so they accumulate
+#     one directory per crate per configuration: `lodestone-server` alone held
+#     2,112. A directory nothing has written to in 24h cannot belong to a
+#     running compile; the worst case is that cargo re-runs a build script.
+#
+# What this deliberately does NOT do is `rm -rf target/debug`, which is the
+# reclaim that works but takes every concurrent agent's in-flight compile with
+# it -- its signature is a flood of `E0463 can't find crate` hitting every
+# crate uniformly.
+#
+# Measured expectation on this workspace: reclaim 2 freed 5.6 GB with 456 of
+# 6,317 build directories stale, so on a busy day most of `target/debug/build`
+# is genuinely live and reclaim 1 is where the space is. If both leave you
+# short, the fleet is simply too large for one target directory -- see the
+# sccache/incremental measurements on the infrastructure issue.
+[doc("reclaim target/ disk that no running build depends on")]
+reclaim:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    df -h . | tail -1
+    live=$(ps -Ao command | grep -c "[r]ustc" || true)
+    if [ "$live" -eq 0 ]; then
+        rm -rf target/debug/incremental
+        echo "removed target/debug/incremental"
+    else
+        echo "kept target/debug/incremental ($live rustc live; re-run when idle)"
+    fi
+    stale=$(find target/debug/build -mindepth 2 -maxdepth 2 -type d -mtime +1 2>/dev/null | wc -l | tr -d ' ')
+    find target/debug/build -mindepth 2 -maxdepth 2 -type d -mtime +1 -print0 2>/dev/null \
+        | xargs -0 rm -rf 2>/dev/null || true
+    echo "removed $stale build directories untouched for over a day"
+    df -h . | tail -1
