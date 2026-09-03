@@ -46,7 +46,7 @@ use lodestone_data::block_states;
 use lodestone_model::{BlockFace, BlockPos, Vec3f};
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{base_name, direction_to_str, get_str_property};
+use crate::redstone::{base_name, direction_to_str, get_str_property, WorldState};
 
 /// Everything a placement decision can read: where it landed, how it was
 /// clicked, and where the player was looking.
@@ -90,7 +90,7 @@ impl Placement {
 /// slab's `double`, an end rod's flip).
 pub(crate) fn placement<F>(block: &str, ctx: &PlaceContext, block_at: F) -> Option<Placement>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     // A wall-attached variant is a different *block*, not a different state, so
     // the redirect runs before any family dispatch.
@@ -290,7 +290,7 @@ fn facing_is_clicked_face(block: &str) -> bool {
 /// `DirectionalBlock`-family placement.
 fn six_way_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<String>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let clicked = face_direction(ctx.face);
     let facing = if block == "minecraft:hopper" {
@@ -327,7 +327,7 @@ where
 /// a slab cell as replaceable.
 fn slab_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> String
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let existing = block_at(ctx.target);
     if base_name(&existing) == block && get_str_property(&existing, "type") != Some("double") {
@@ -342,7 +342,7 @@ where
 /// facing axis.
 fn stair_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<String>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let facing = horizontal_look(ctx)?;
     let half = if upper_half(ctx) { "top" } else { "bottom" };
@@ -357,7 +357,7 @@ where
 /// guard that stops a run of parallel stairs from cornering.
 fn stair_shape<F>(pos: BlockPos, facing: Direction, half: &str, block_at: &F) -> &'static str
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let stair_facing = |p: BlockPos| -> Option<Direction> {
         let state = block_at(p);
@@ -426,7 +426,7 @@ fn trapdoor_state(block: &str, ctx: &PlaceContext) -> Option<String> {
 /// which is what puts the upper half in the cell above.
 fn door_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<Placement>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let facing = horizontal_look(ctx)?;
     let hinge = door_hinge(ctx, facing, block_at);
@@ -445,7 +445,7 @@ where
 /// block the cursor landed in.
 fn door_hinge<F>(ctx: &PlaceContext, facing: Direction, block_at: &F) -> &'static str
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let pos = ctx.target;
     let above = Direction::Up.relative(pos);
@@ -489,7 +489,7 @@ where
 /// partner's own re-typing that vanilla performs through `updateShape`.
 fn chest_state<F>(block: &str, ctx: &PlaceContext, block_at: &F) -> Option<Placement>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let facing = horizontal_look(ctx)?.opposite();
     // `candidatePartnerFacing`: a same-block, still-single chest one step over.
@@ -742,8 +742,8 @@ mod tests {
         }
     }
 
-    fn air(_: BlockPos) -> String {
-        "minecraft:air".to_string()
+    fn air(_: BlockPos) -> WorldState {
+        WorldState::from("minecraft:air")
     }
 
     fn state_of(block: &str, face: BlockFace, cursor_y: f32, yaw: f32) -> String {
@@ -805,7 +805,7 @@ mod tests {
     /// A slab clicked onto a matching half-slab doubles.
     #[test]
     fn a_slab_on_a_slab_doubles() {
-        let existing = |_: BlockPos| "minecraft:oak_slab[type=bottom]".to_string();
+        let existing = |_: BlockPos| WorldState::from("minecraft:oak_slab[type=bottom]");
         let placed = placement("minecraft:oak_slab", &ctx(BlockFace::Up, 0.0, 0.0), existing).unwrap();
         assert_eq!(placed.state, "minecraft:oak_slab[type=double]");
     }
@@ -902,9 +902,9 @@ mod tests {
         let west = BlockPos::new(-1, 64, 0);
         let neighbour = move |p: BlockPos| {
             if p == west {
-                "minecraft:chest[facing=south,type=single]".to_string()
+                WorldState::from("minecraft:chest[facing=south,type=single]")
             } else {
-                "minecraft:air".to_string()
+                WorldState::from("minecraft:air")
             }
         };
         let placed = placement("minecraft:chest", &ctx(BlockFace::Up, 0.0, 180.0), neighbour).unwrap();
@@ -942,9 +942,9 @@ mod tests {
     fn a_note_block_placed_on_gold_reads_bell() {
         let below_gold = |pos: BlockPos| {
             if pos.y == 63 {
-                "minecraft:gold_block".to_string()
+                WorldState::from("minecraft:gold_block")
             } else {
-                "minecraft:air".to_string()
+                WorldState::from("minecraft:air")
             }
         };
         let placed = placement("minecraft:note_block", &ctx(BlockFace::Up, 0.0, 0.0), below_gold).unwrap();
@@ -957,11 +957,11 @@ mod tests {
     fn a_note_block_placed_under_a_skull_reads_the_skull_not_the_floor() {
         let skull_above_gold = |pos: BlockPos| {
             if pos.y == 65 {
-                "minecraft:skeleton_skull".to_string()
+                WorldState::from("minecraft:skeleton_skull")
             } else if pos.y == 63 {
-                "minecraft:gold_block".to_string()
+                WorldState::from("minecraft:gold_block")
             } else {
-                "minecraft:air".to_string()
+                WorldState::from("minecraft:air")
             }
         };
         let placed = placement(

@@ -4,7 +4,7 @@
 //! ## What it is
 //!
 //! Vanilla `PistonBaseBlock` + `PistonStructureResolver`, ported as pure decisions
-//! over a `Fn(BlockPos) -> String` world lookup — the same shape every other
+//! over a `Fn(BlockPos) -> WorldState` world lookup — the same shape every other
 //! module in the `redstone*` family takes, so the wiring in
 //! [`crate::random_tick`] reaches it exactly as it reaches a repeater.
 //!
@@ -370,7 +370,7 @@ pub fn resolve<F>(
     extending: bool,
 ) -> Option<Resolution>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> redstone::WorldState,
 {
     let push_direction = if extending { direction } else { direction.opposite() };
     let start_pos = if extending {
@@ -387,11 +387,11 @@ where
     // `piston_head` really is `BLOCK` and a passing piston head really does stop a
     // push.
     let arm_pos = direction.relative(piston_pos);
-    let masked = |p: BlockPos| -> String {
+    let masked = |p: BlockPos| -> redstone::WorldState {
         if !extending && p == arm_pos {
             let state = lookup(p);
             if is_piston_head(&state) {
-                return "minecraft:air".to_string();
+                return crate::chunk::air_state_arc();
             }
         }
         lookup(p)
@@ -451,7 +451,7 @@ struct Resolver<'a, F> {
 
 impl<F> Resolver<'_, F>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> redstone::WorldState,
 {
     /// `PistonStructureResolver.addBlockLine`.
     fn add_block_line(&mut self, start: BlockPos, direction: Direction) -> bool {
@@ -623,7 +623,7 @@ fn axis_of(direction: Direction) -> char {
 #[must_use]
 pub fn has_extend_signal<F>(lookup: &F, pos: BlockPos, push_direction: Direction) -> bool
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> redstone::WorldState,
 {
     for direction in ALL_DIRECTIONS {
         if direction != push_direction
@@ -677,7 +677,7 @@ pub fn apply_move<F>(
     sticky: bool,
 ) -> Vec<MoveWrite>
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> redstone::WorldState,
 {
     let mut writes = Vec::new();
     let air = "minecraft:air".to_string();
@@ -693,7 +693,7 @@ where
     for pos in resolution.to_push.iter().rev() {
         let state = (lookup)(*pos);
         let target = resolution.push_direction.relative(*pos);
-        writes.push(MoveWrite { pos: target, to: state });
+        writes.push(MoveWrite { pos: target, to: state.to_string() });
         vacated.push(*pos);
     }
 
@@ -1154,15 +1154,14 @@ mod tests {
     /// A fake world: an explicit position→state map, air everywhere else — the same
     /// "pure decision, fake world via closure" shape `crate::redstone`'s own tests
     /// use.
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> String + use<> {
-        let entries: Vec<(BlockPos, String)> =
-            entries.iter().map(|(p, s)| (*p, (*s).to_string())).collect();
+    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> redstone::WorldState + use<> {
+        let entries: Vec<(BlockPos, redstone::WorldState)> = entries.iter().map(|(p, s)| (*p, redstone::WorldState::from(*s))).collect();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
                 .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| "minecraft:air".to_string())
+                .unwrap_or_else(crate::chunk::air_state_arc)
         }
     }
 
@@ -1411,11 +1410,11 @@ mod tests {
             .collect()
     }
 
-    fn reader(w: &FakeWorld) -> impl Fn(BlockPos) -> String + '_ {
+    fn reader(w: &FakeWorld) -> impl Fn(BlockPos) -> redstone::WorldState + '_ {
         move |p: BlockPos| {
             w.get(&(p.x, p.y, p.z))
-                .cloned()
-                .unwrap_or_else(|| "minecraft:air".to_string())
+                .map(|s| redstone::WorldState::from(s.as_str()))
+                .unwrap_or_else(crate::chunk::air_state_arc)
         }
     }
 
@@ -1454,7 +1453,7 @@ mod tests {
             Resolution { to_push: Vec::new(), ..resolution }
         };
         let writes = apply_move(&reader(w), &resolution, piston, facing, extending, sticky);
-        Some((piston_state, writes))
+        Some((piston_state.to_string(), writes))
     }
 
     /// The world the **one-step** path leaves behind: every write applied at once,

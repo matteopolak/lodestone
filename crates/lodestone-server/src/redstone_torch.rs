@@ -40,7 +40,7 @@
 //! repo's own "islands" rule warns against.
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{self, is_wall_torch, torch_lit, wall_torch_facing};
+use crate::redstone::{self, is_wall_torch, torch_lit, wall_torch_facing, WorldState};
 use lodestone_model::BlockPos;
 
 pub use crate::redstone::{TORCH, WALL_TORCH};
@@ -74,7 +74,7 @@ pub fn set_lit(state: &str, lit: bool) -> String {
 #[must_use]
 pub fn has_neighbor_signal<F>(lookup: &F, pos: BlockPos, state: &str) -> bool
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let watch_direction = if is_wall_torch(state) { wall_torch_facing(state).opposite() } else { Direction::Down };
     redstone::signal_at(lookup, watch_direction.relative(pos), watch_direction, false) > 0
@@ -114,14 +114,14 @@ pub fn run_scheduled_tick(state: &str, has_signal: bool) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> String + use<> {
-        let entries: Vec<(BlockPos, String)> = entries.iter().map(|(p, s)| (*p, s.to_string())).collect();
+        fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
                 .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| "minecraft:air".to_string())
+                .unwrap_or_else(crate::chunk::air_state_arc)
         }
     }
 

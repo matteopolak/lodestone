@@ -46,7 +46,7 @@
 //! `power=N` property.
 
 use crate::neighbor_update::Direction;
-use crate::redstone::{self, is_redstone_conductor, wire_power};
+use crate::redstone::{self, is_redstone_conductor, wire_power, WorldState};
 use lodestone_model::BlockPos;
 
 pub use crate::redstone::WIRE;
@@ -63,7 +63,7 @@ pub fn set_power(power: u8) -> String {
 #[must_use]
 pub fn incoming_wire_signal<F>(lookup: &F, pos: BlockPos) -> u8
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let above_state = lookup(Direction::Up.relative(pos));
     let above_is_conductor = is_redstone_conductor(&above_state);
@@ -91,7 +91,7 @@ where
 #[must_use]
 pub fn calculate_target_strength<F>(lookup: &F, pos: BlockPos) -> u8
 where
-    F: Fn(BlockPos) -> String,
+    F: Fn(BlockPos) -> WorldState,
 {
     let block_signal = redstone::best_neighbor_signal(lookup, pos, true);
     if block_signal >= 15 {
@@ -104,14 +104,14 @@ where
 mod tests {
     use super::*;
 
-    fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> String + use<> {
-        let entries: Vec<(BlockPos, String)> = entries.iter().map(|(p, s)| (*p, s.to_string())).collect();
+        fn world(entries: &[(BlockPos, &str)]) -> impl Fn(BlockPos) -> WorldState + use<> {
+        let entries: Vec<(BlockPos, WorldState)> = entries.iter().map(|(p, s)| (*p, WorldState::from(*s))).collect();
         move |p: BlockPos| {
             entries
                 .iter()
                 .find(|(pos, _)| *pos == p)
                 .map(|(_, s)| s.clone())
-                .unwrap_or_else(|| "minecraft:air".to_string())
+                .unwrap_or_else(crate::chunk::air_state_arc)
         }
     }
 

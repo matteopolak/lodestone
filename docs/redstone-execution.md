@@ -283,6 +283,101 @@ or the number is a hypothesis about contamination rather than about redstone.
 
 ---
 
+## The lookup allocation removal
+
+The classification above cut what a notification costs to decide whether to
+react at all. It left the read itself untouched: every `redstone::*`/
+`redstone_wire::*`/`redstone_torch::*`/`redstone_diode::*`/
+`redstone_observer::*`/`redstone_rail::*`/`redstone_tripwire::*`/
+`redstone_openable::*`/`redstone_dispenser::*`/`piston::*`/`block_support::*`/
+`block_placement::*` query function takes a `lookup: F` closure, and every one
+of those closures used to return an owned `String` — a fresh heap allocation
+and byte copy on **every call**, even though `ChunkColumn::block_state` and
+`RedstoneColumns::state` were both already reading from data already sitting
+in memory.
+
+**The fix is a shared type, not a per-call-site rewrite.** `redstone::WorldState`
+is `std::sync::Arc<str>`, and it replaces `String` in every one of those
+closures' bound (`F: Fn(BlockPos) -> WorldState`) and in `redstone_dispenser`'s
+two `&dyn Fn(BlockPos) -> WorldState` parameters. `ChunkColumn` gains a fourth
+per-palette-entry derived table, `palette_arc: Vec<Arc<str>>`, built in the same
+two places (`intern`, `recalc_ticking_counts`) as `palette_ticking`/
+`palette_state_ids`/`palette_reaction` — so `ChunkColumn::block_state_arc`
+answers a read with one `Arc::clone` (an atomic increment) instead of a fresh
+allocation, exactly the way `block_state`'s `&str` answer was already free.
+`RedstoneColumns::state`/`raw_state` (the cross-chunk read) call it through
+whichever column — home or an already-loaded neighbour — the position falls
+in; nothing about *which* column answers a read, or the residency boundary
+that gates it, changed. `chunk::air_state_arc()` is the equivalent for the
+"outside every reachable column" answer: a `LazyLock<Arc<str>>` built once per
+process and cloned, not allocated, on every out-of-bounds read.
+
+**Because `Arc<str>` derefs to `&str` exactly like `String` does**, almost
+every call site needed no body change at all — `&state`, `.starts_with(..)`,
+`base_name(&state)`, `is_wire(&state)` and every other read-only use kept
+compiling unchanged. The real edits were at the boundary: a handful of places
+that build a *new* owned `String` to write back to the world, store in a
+`RandomTickEvent`, or feed a `ScheduledTickQueue<String>` now call
+`.to_string()` once, at the point that actually needs ownership, rather than
+every closure call needing it up front. `redstone_tripwire::WireSource::state`
+became `WorldState` outright (the field is filled once, in
+`find_controlling_hooks`, and read many times inside a 41-cell scan, the same
+"build once, clone cheaply" shape as the palette table).
+
+### Correctness
+
+**Update order is untouched.** This is a return-type change on a query
+closure; it touches nothing that decides which notification fires, in what
+order, or how many count against the chained-update cap.
+
+**Byte-identical counters, re-run against the same real contraption.**
+`redstone_contraptions_report` (the same production tick loop, the same
+`raid_farm.litematic` fixture, its own two captured repeater rechecks
+re-injected) reads, after this change:
+
+```
+notifications_issued=837  cell_reads=5899  state_parses=55
+signal_queries=164  wire_recomputes=157
+schedules_requested=3  schedules_deduped=15  max_notifications_per_drain=726
+```
+
+— identical to every reading before it, including the one taken before the
+classification work landed. A pure allocation-strategy change cannot show up
+in a counter that only tracks decisions, and this run is the proof it does not.
+
+### The measurement, and why it is not a wall-clock number
+
+`TickStats.mspt_avg` from that same harness run swung from 3.6ms to 15.9ms on
+one fixture and from 5.8ms to 54.3ms on another, in the same process, with no
+code change between iterations — this machine runs several agents' concurrent
+`cargo` builds, exactly the unreliability the harness's own module doc already
+warns about. Wall-clock is not a fair instrument here.
+
+What is fair: an **allocation count**, which is deterministic regardless of
+concurrent load, cross-checked against a control that proves the counting
+instrument actually counts (build a one-time `Arc<str>` pool and assert the
+allocator saw it: nonzero, as expected — an instrument that always reads zero
+would make the "zero" result below worthless). Replaying `raid_farm.litematic`'s
+own measured while-active read rate (5899 cell reads, the real per-tick number
+above, not a round one) against the real per-family mix of the fixture's 142
+redstone components, under a counting global allocator, in a standalone
+program independent of `lodestone-server`:
+
+```
+OLD (String::to_string() per read):  5899 allocations, 349224 bytes
+NEW (Arc<str>::clone() per read):       0 allocations,      0 bytes
+```
+
+5899 heap allocations and 349 KB removed per active tick, at the real
+production read rate measured on a real downloaded contraption. This is a
+result about the operation this change actually replaces (a heap allocation
+plus byte copy vs. an atomic increment), scaled by a real, independently
+measured multiplier — not a claim about total tick time, which the harness's
+own wall-clock caveat above already rules out measuring honestly on this
+machine.
+
+---
+
 ## How to change it
 
 Adding a family to the dispatch is **three** edits, and the exhaustive gate

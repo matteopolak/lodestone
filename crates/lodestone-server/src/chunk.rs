@@ -74,6 +74,17 @@ pub(crate) fn intern_calls() -> u64 {
 
 pub(crate) const AIR: &str = "minecraft:air";
 pub(crate) const STONE: &str = "minecraft:stone";
+
+/// A shared, lazily-built `Arc<str>` for [`AIR`] — the out-of-column /
+/// out-of-height answer every redstone lookup gives, and the one case with no
+/// [`ChunkColumn`] palette to clone an entry out of. Cloning this bumps a
+/// refcount; it never allocates after the first call on a process. See
+/// [`ChunkColumn::block_state_arc`] and issue #548's `make_lookup` allocation
+/// removal.
+pub(crate) fn air_state_arc() -> std::sync::Arc<str> {
+    static AIR_ARC: std::sync::LazyLock<std::sync::Arc<str>> = std::sync::LazyLock::new(|| std::sync::Arc::from(AIR));
+    AIR_ARC.clone()
+}
 /// Rows per implicit section. [`ChunkColumn`] has no per-section struct — a
 /// "section" here is a 16-row window of the one flat grid, counted from
 /// `min_y` — so this is the only place the window height is written down.
@@ -219,6 +230,21 @@ pub struct ChunkColumn {
     /// why a palette-derived table has no staleness class, and
     /// `docs/redstone-execution.md` for the measured split.
     palette_reaction: Vec<crate::redstone_graph::ReactionClass>,
+    /// `palette_arc[id]` is an `Arc<str>` holding the same bytes as
+    /// `palette[id]`, computed once per palette entry as that entry is
+    /// appended — the fourth per-palette-entry derived table, sound for
+    /// exactly the reason [`palette_ticking`](Self::palette_ticking) is, and
+    /// maintained in the same two places.
+    ///
+    /// **This is what makes a redstone lookup closure cheap to call
+    /// repeatedly.** Every `redstone::*`/`redstone_wire::*`/… signal query
+    /// takes a `Fn(BlockPos) -> Arc<str>` "world" closure
+    /// ([`crate::redstone::make_lookup`]); before this table existed, every
+    /// call cloned [`block_state`](Self::block_state)'s borrowed `&str` onto
+    /// a fresh heap allocation to satisfy that signature, on a path measured
+    /// at 5899 reads in one active tick. Cloning an `Arc<str>` is one atomic
+    /// increment, not a copy.
+    palette_arc: Vec<std::sync::Arc<str>>,
     /// How many cells in each implicit 16-row window hold a randomly-ticking
     /// state — vanilla's own per-section ticking-block counter,
     /// one entry per section, `len =
@@ -348,6 +374,8 @@ impl ChunkColumn {
             // assumed so the one place a class is decided stays
             // `redstone_graph::classify`.
             palette_reaction: vec![crate::redstone_graph::classify(AIR)],
+            // Fourth derived table, same append-time contract.
+            palette_arc: vec![std::sync::Arc::from(AIR)],
             section_ticking: vec![0u16; (height as usize).div_ceil(SECTION_ROWS)],
             biome_quarts: std::array::from_fn(|_| DEFAULT_BIOME.to_string()),
             biome_palette: vec![DEFAULT_BIOME.to_string()],
@@ -426,6 +454,7 @@ impl ChunkColumn {
             palette_ticking: Vec::new(),
             palette_state_ids: Vec::new(),
             palette_reaction: Vec::new(),
+            palette_arc: Vec::new(),
             section_ticking: Vec::new(),
             biome_quarts,
             biome_palette,
@@ -769,6 +798,10 @@ impl ChunkColumn {
             .iter()
             .map(|state| crate::redstone_graph::classify(state))
             .collect();
+        // And the fourth, for the same reason: this constructor adopts a
+        // palette `intern` never saw, so the append-time `Arc` build in
+        // `intern` cannot have run for any of its entries.
+        self.palette_arc = self.palette.iter().map(|state| std::sync::Arc::from(state.as_str())).collect();
         let sections = (self.height as usize).div_ceil(SECTION_ROWS);
         let mut counts = vec![0u16; sections];
         for s in 0..sections {
@@ -809,6 +842,10 @@ impl ChunkColumn {
         // itself never evaluates a string predicate. See
         // `crate::redstone_graph`.
         self.palette_reaction.push(crate::redstone_graph::classify(name));
+        // And the fourth: build the `Arc<str>` once per entry so a redstone
+        // lookup closure can hand one out on every call for the cost of an
+        // atomic increment. See `palette_arc`.
+        self.palette_arc.push(std::sync::Arc::from(name));
         debug_assert_eq!(
             self.palette.len(),
             self.palette_ticking.len(),
@@ -823,6 +860,11 @@ impl ChunkColumn {
             self.palette.len(),
             self.palette_reaction.len(),
             "palette and its reaction classification must stay the same length"
+        );
+        debug_assert_eq!(
+            self.palette.len(),
+            self.palette_arc.len(),
+            "palette and its Arc<str> mirror must stay the same length"
         );
         (self.palette.len() - 1) as u16
     }
@@ -923,6 +965,23 @@ impl ChunkColumn {
             return AIR;
         }
         &self.palette[self.blocks.get(x, y_local, z) as usize]
+    }
+
+    /// [`block_state`](Self::block_state), but cheap to call repeatedly on a
+    /// hot read path: an `Arc<str>` clone (one atomic increment) rather than
+    /// a fresh heap allocation and copy. Out-of-range Y clones the shared
+    /// [`air_state_arc`] instead of allocating a new "minecraft:air".
+    ///
+    /// This is what [`crate::redstone::make_lookup`] and
+    /// [`crate::random_tick::RedstoneColumns`]'s reads call — see
+    /// [`palette_arc`](Self::palette_arc).
+    #[must_use]
+    pub fn block_state_arc(&self, x: i32, y: i32, z: i32) -> std::sync::Arc<str> {
+        let y_local = y - self.min_y;
+        if !(0..self.height).contains(&y_local) {
+            return air_state_arc();
+        }
+        self.palette_arc[self.blocks.get(x, y_local, z) as usize].clone()
     }
 
     /// The **global 26.2 block-state id** at a local `(x, z)` in `0..16` and
