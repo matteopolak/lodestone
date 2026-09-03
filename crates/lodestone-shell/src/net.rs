@@ -2097,7 +2097,33 @@ impl NetClient {
     /// ([`ACTION_RELAY_CAPACITY`] — meaning the net thread is not draining,
     /// i.e. already dead or wedged), the send is silently dropped and the
     /// shell keeps rendering regardless.
+    ///
+    /// # Why the authorised-pose rewrite happens *here* as well as at the drain
+    ///
+    /// Staleness is a property of the moment a `Move` was **built**, not of the
+    /// moment it is drained, and the two are up to a full net-loop iteration
+    /// apart (that loop waits on inbound events with a 15 ms timeout, so a
+    /// queued action can sit that long). The drain site alone therefore misses
+    /// the ordering the survival oracle actually produced: the simulation
+    /// queues a `Move` from the pre-teleport pose, *then* adopts the teleport —
+    /// at which point the drain's own test reads "level with the server" and
+    /// waves the stale claim through, after the confirmation for that teleport
+    /// is already on the wire. Measured on that oracle: the surviving margin
+    /// was 1.0 ms, and the server answered the stale claim with a corrective
+    /// teleport on roughly half of all teleports.
+    ///
+    /// Sampling the same condition at queue time closes exactly that ordering,
+    /// because the counters here describe the pose this action was built from.
+    /// The drain-site rewrite stays: it covers the mirror case, a `Move` queued
+    /// while the simulation was level and overtaken by a teleport before it was
+    /// drained. Both are inert outside their window, and applying both is
+    /// idempotent — the second rewrite either writes the same pose or the newer
+    /// one, which is the one the server is waiting to hear.
     pub fn send_action(&self, action: ClientAction) {
+        let action = match pending_authorised_pose() {
+            Some(pose) => with_authorised_pose(action, pose),
+            None => action,
+        };
         let _ = self.action_tx.try_send(action);
     }
 
@@ -6712,6 +6738,59 @@ mod tests {
         };
         assert_eq!(pos, Vec3::new(11.0, 1.0, 4.0));
         assert!(on_ground, "the untouched action keeps the pose it was built with");
+    }
+
+    /// The ordering [`NetClient::send_action`]'s own rewrite exists for, stated
+    /// as a property of the bookkeeping rather than of a live session.
+    ///
+    /// [`TeleportSync::pending`] answers about the instant it is called, so one
+    /// unchanged stale `Move` reads **behind** while it is being built and
+    /// **level** one adoption later — and the drain may run either side of that
+    /// adoption, up to a full net-loop iteration after the `Move` was queued.
+    /// From the counters alone the drain therefore cannot tell a claim built
+    /// before the teleport from one built after it, which is exactly how a
+    /// pre-teleport position reached the survival oracle after its own
+    /// confirmation had already gone out. Asking the same question where the
+    /// claim is *built* is what removes the coin flip; this test is the reason
+    /// the rewrite is applied at both ends of the channel rather than one.
+    #[test]
+    fn one_stale_move_reads_behind_while_it_is_built_and_level_one_adoption_later() {
+        let authorised = AuthorisedPose {
+            pos: Vec3::new(-44.5, 220.0, -376.5),
+            rotation: Some(Rotation::new(0.0, 0.0)),
+        };
+        // The pose the simulation still holds while the teleport is in flight —
+        // deliberately the shape the oracle produced, a claim 153 blocks below
+        // the target rather than a nearby one, so a rewrite that silently did
+        // nothing could not pass for a correct one.
+        let stale = ClientAction::Move {
+            pos: Vec3::new(-43.5, 67.0, -376.5),
+            rotation: Rotation::new(0.0, 0.0),
+            on_ground: true,
+            horizontal_collision: false,
+        };
+
+        let sync = TeleportSync::default();
+        sync.note_forwarded(Some(authorised));
+
+        // Build time: behind, so the claim is replaced by the server's target.
+        let at_build = sync
+            .pending()
+            .expect("a forwarded, unadopted teleport must authorise a pose");
+        let ClientAction::Move { pos, .. } = with_authorised_pose(stale.clone(), at_build) else {
+            panic!("a Move must stay a Move");
+        };
+        assert_eq!(pos, authorised.pos);
+
+        // Drain time, one adoption later: the *same* action now reads level and
+        // would go out claiming the pose the server has already replaced.
+        sync.note_applied();
+        assert_eq!(
+            sync.pending(),
+            None,
+            "once the counters are level `pending` reports level, whatever the queued action \
+             was built from — the property that makes a drain-site-only rewrite unsound"
+        );
     }
 
     /// A teleport with a relative positional component cannot be resolved on

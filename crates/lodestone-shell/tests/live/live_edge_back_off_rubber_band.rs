@@ -13,15 +13,27 @@
 //! adopted teleport inside `Sim::poll_net`). Two things about that check are
 //! easy to get backwards without a live server to watch:
 //!
-//! 1. **The comparison is purely horizontal.** The vertical component is
-//!    always zeroed before the threshold is applied (an "always true"
-//!    disjunction in the real rule), so a claim can disagree on `y` by any
-//!    amount and never trigger a correction on that account alone. An
+//! 1. **The disagreement comparison is purely horizontal.** The vertical
+//!    component is always zeroed before the threshold is applied (an "always
+//!    true" disjunction in the real rule), so a claim can disagree on `y` by
+//!    any amount and never trigger a correction on that account alone. An
 //!    ordinary fall reaches well over 0.25 blocks of vertical travel in a
 //!    single tick within a few ticks of leaving the ground — if the vertical
 //!    component were checked the same way as horizontal, *every* fall of any
 //!    real height would rubber-band constantly, which is not what playing
 //!    the game looks like.
+//!
+//!    **But that is not the only rule that teleports a player back**, and
+//!    reading it as though it were is how this file was first written. A
+//!    second, *speed* check runs before it and is genuinely
+//!    three-dimensional — the vertical term is not zeroed for it. Its budget
+//!    is a squared distance of `100` per packet per tick, so ten blocks of
+//!    claimed travel in one packet. A fall cannot reach that at any height
+//!    (terminal speed is `3.92` blocks/tick), which is what makes "a fall is
+//!    never corrected" a real guarantee — but a *stale* claim can reach it
+//!    trivially, and the oracle's own log names which of the two fired. When
+//!    this gate goes red, read that log before reading anything here: the two
+//!    rules have different causes and only one of them is about falling.
 //! 2. **The sneak-at-a-ledge back-off exists precisely so ordinary walking
 //!    never disagrees with the server enough to trip the horizontal check.**
 //!    `crates/lodestone-physics/tests/edge_back_off.rs` and `golden.rs`
@@ -82,6 +94,31 @@ const PROTOCOL: i32 = 776;
 /// exact figure.
 const CORRECTION_THRESHOLD_BLOCKS: f64 = 0.25;
 
+/// The **other** rule that can teleport a player back, and the one this file
+/// used to overlook: a speed check that is genuinely three-dimensional — the
+/// vertical term is *not* zeroed for it. It compares the squared distance a
+/// packet claims against a budget of `100` per packet per tick, so the limit is
+/// ten blocks of travel in one packet. Free fall cannot reach it at any height
+/// (see [`FALL_TERMINAL_BLOCKS_PER_TICK`]), which is what makes "a fall never
+/// gets corrected" a real guarantee rather than a coincidence of this drop.
+const SPEED_BUDGET_BLOCKS_PER_TICK: f64 = 10.0;
+
+/// Free fall's per-tick drag factor and the terminal speed it converges to:
+/// `v <- (v - 0.08) * 0.98` has fixed point `-0.08 * 0.98 / 0.02 = -3.92`
+/// blocks per tick. Both are stated here as arithmetic, deliberately not read
+/// from `lodestone-physics` — an expected value taken from the code under test
+/// is satisfied by any pair of matching mistakes.
+const FALL_DRAG: f64 = 0.98;
+/// See [`FALL_DRAG`].
+const FALL_TERMINAL_BLOCKS_PER_TICK: f64 = 3.92;
+/// The index of the last *complete* tick of this file's own drop. Summing
+/// `|v_n| = 3.92 * (1 - 0.98^n)` first passes `FALL_FROM_Y - GROUND_Y` = 151
+/// blocks during tick 78, so tick 77 is the fastest one that runs to its full
+/// length and tick 78 is cut short by the collision that lands the player —
+/// making `3.92 * (1 - 0.98^77)` the largest per-tick delta the fall can show.
+/// Fixed by this file's own drop height, and by nothing else.
+const FULL_FALL_TICKS: i32 = 77;
+
 /// Far from the origin and from every other live gate's own coordinates
 /// (`live_stands_on_server_ground.rs`/`live_respawn_ground_trace.rs` both use
 /// `(-45, ~72, -377)`), well above real terrain height in this seed so a
@@ -119,6 +156,27 @@ fn connect_rcon() -> RconClient {
              with `--features live`."
         )
     })
+}
+
+/// Installs the `tracing` subscriber the failure messages in this file tell an
+/// operator to reach for, so that instruction is real rather than decorative:
+/// without one, `RUST_LOG=warn,transfer=debug` sets an environment variable that
+/// nothing reads.
+///
+/// The default filter is `warn`, so an ordinary green run prints nothing new —
+/// but the version adapter escalates to `warn` on exactly the event this gate
+/// exists to catch (the first movement packet after a teleport claiming a
+/// position far from that teleport's target), so a red run explains itself
+/// without needing to be re-run with the variable set. `try_init` because the
+/// three tests here share one process with every other live gate.
+fn install_trace_subscriber() {
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_test_writer()
+        .try_init();
 }
 
 /// Joins under a fresh identity and drives ticks until the server has placed
@@ -225,6 +283,7 @@ fn rcon_teleport_and_confirm(sim: &mut Sim, rcon: &mut RconClient, username: &st
 #[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
 fn the_teleport_counter_control_an_rcon_teleport_is_observed_and_counted() {
     let _serialized = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    install_trace_subscriber();
     let probe = Sim::new(live_config());
     assert!(
         probe.vanilla_atlas().is_some(),
@@ -317,6 +376,7 @@ fn build_platform_and_land_on_it(sim: &mut Sim, rcon: &mut RconClient, username:
 #[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
 fn sneaking_at_a_real_ledge_on_the_oracle_produces_no_server_correction() {
     let _serialized = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    install_trace_subscriber();
     let probe = Sim::new(live_config());
     assert!(
         probe.vanilla_atlas().is_some(),
@@ -443,6 +503,7 @@ fn sneaking_at_a_real_ledge_on_the_oracle_produces_no_server_correction() {
 #[ignore = "requires the survival 26.2 oracle on :25565 (+ RCON :25566), the vanilla assets under .cache/mc/26.2, and `--features live`"]
 fn a_real_fall_never_triggers_a_vertical_correction_despite_exceeding_the_threshold() {
     let _serialized = SERVER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    install_trace_subscriber();
     let probe = Sim::new(live_config());
     assert!(
         probe.vanilla_atlas().is_some(),
@@ -456,7 +517,12 @@ fn a_real_fall_never_triggers_a_vertical_correction_despite_exceeding_the_thresh
     // walkable plains ground at y≈69-70, established there independently of
     // this file.
     const SPAWN_X: i32 = -45;
-    const SPAWN_Y: i32 = 72;
+    /// The feet-`y` this column actually settles at, measured on the oracle
+    /// (`final_y=69.000`, repeatably) rather than guessed from the launch
+    /// column. `FALL_FROM_Y - GROUND_Y` is the drop height every predicted
+    /// number below is derived from, so it has to be the settled figure and not
+    /// a nearby round one.
+    const GROUND_Y: i32 = 69;
     const SPAWN_Z: i32 = -377;
     const FALL_FROM_Y: f64 = 220.0;
 
@@ -509,34 +575,82 @@ fn a_real_fall_never_triggers_a_vertical_correction_despite_exceeding_the_thresh
         sim.player().position.y
     );
     // The fall must land back on the *known* plains ground
-    // `live_stands_on_server_ground.rs` measured at this exact column
-    // (y≈69-70), not merely "somewhere below the launch height" — a wide
-    // tolerance around `SPAWN_Y`, since RCON `tp` set the launch column, not
-    // the exact settled feet-`y`.
+    // `live_stands_on_server_ground.rs` established at this exact column, not
+    // merely "somewhere below the launch height". The tolerance is tight
+    // because `GROUND_Y` is the settled figure this drop actually reaches, and
+    // because the drop height it defines is what every predicted number below
+    // is derived from: a landing a block out is a different fall, and the
+    // prediction would then be checking the wrong one.
     assert!(
-        (sim.player().position.y - f64::from(SPAWN_Y)).abs() < 5.0,
-        "the fall landed at y={:.3}, far from the known ground height {SPAWN_Y} at this \
+        (sim.player().position.y - f64::from(GROUND_Y)).abs() < 1.5,
+        "the fall landed at y={:.3}, far from the known ground height {GROUND_Y} at this \
          column — the fall may have caught on something other than the real ground this test \
          intends to measure against.",
         sim.player().position.y
     );
-    // The premise this whole test depends on: the fall must actually have
-    // reached a per-tick vertical delta bigger than the horizontal
-    // correction threshold, or "zero corrections" below is vacuous — a fall
-    // that never got going proves nothing about the clamp.
+    // The premise, as a *predicted number* rather than a direction. Free fall
+    // integrates `v <- (v - 0.08) * 0.98` from rest, whose fixed point is
+    // `-0.08 * 0.98 / 0.02 = -3.92` blocks/tick and whose closed form is
+    // `v_n = -3.92 * (1 - 0.98^n)`. Summing `|v_n|` reaches this drop's
+    // `FALL_FROM_Y - GROUND_Y` = 151 blocks during tick 78, so the largest
+    // *complete* tick of the fall is the 77th and the 78th is clipped short by
+    // the collision that lands the player. `FALL_TERMINAL_BLOCKS_PER_TICK` and
+    // the exponent are therefore both fixed by this test's own constants and by
+    // arithmetic that never runs the code under test — the value below is
+    // predicted, not read back.
+    let predicted_max_abs_delta_y =
+        FALL_TERMINAL_BLOCKS_PER_TICK * (1.0 - FALL_DRAG.powi(FULL_FALL_TICKS));
+    assert!(
+        (max_abs_delta_y - predicted_max_abs_delta_y).abs() < 0.05,
+        "the fall's largest per-tick |dy| was {max_abs_delta_y:.4}, not the predicted \
+         {predicted_max_abs_delta_y:.4} that a {}-block drop under `v <- (v - 0.08) * 0.98` \
+         must produce. Either the drop height changed or the fall is no longer this engine's \
+         own free fall — until that agrees, nothing below is a statement about the server.",
+        FALL_FROM_Y - f64::from(GROUND_Y)
+    );
+    // What that number buys, and it is the whole point of predicting it: the
+    // fall is fast enough to be well past the 0.25-block single-packet
+    // disagreement threshold in its vertical component (so the run is not
+    // vacuous), and still far short of the *other* rule that can teleport a
+    // player back — the speed check, which unlike the disagreement check is
+    // genuinely three-dimensional and includes the vertical term. Its budget is
+    // a squared distance of 100 per packet per tick, i.e. ten blocks in one
+    // packet; free fall cannot reach it at any height, because 3.92 blocks/tick
+    // is a hard ceiling. Both arms of the sandwich are checked, so a future
+    // edit that moves either constant fails here rather than silently.
     assert!(
         max_abs_delta_y > CORRECTION_THRESHOLD_BLOCKS,
         "the fall never reached a per-tick |dy| past the {CORRECTION_THRESHOLD_BLOCKS}-block \
-         correction threshold (max observed {max_abs_delta_y:.4}) — this run cannot tell apart \
-         'the clamp works' from 'this fall was too gentle to test it'. Increase FALL_FROM_Y."
+         disagreement threshold (max observed {max_abs_delta_y:.4}) — this run cannot tell \
+         apart 'the vertical component is exempt' from 'this fall was too gentle to test it'. \
+         Increase FALL_FROM_Y."
     );
+    assert!(
+        max_abs_delta_y < SPEED_BUDGET_BLOCKS_PER_TICK,
+        "the fall reached {max_abs_delta_y:.4} blocks/tick, at or past the server's own \
+         {SPEED_BUDGET_BLOCKS_PER_TICK}-block per-packet speed budget — at that speed the \
+         server is *entitled* to teleport the player back, and the assertion below would be \
+         asking for a guarantee it never made."
+    );
+    // With both arms of that sandwich established, zero corrections is a claim
+    // about the server's guarantee and not about the fall's luck: the
+    // disagreement check cannot fire on a fall (it zeroes the vertical term
+    // before comparing) and the speed check cannot fire either (the fall is
+    // four times inside its budget). Anything the counter records here is
+    // therefore movement *we* claimed and the server did not authorise — in
+    // practice a claim built from a pose the server had already replaced, which
+    // is what this window has produced before.
     assert_eq!(
         sim.teleport_count, baseline,
-        "the server issued {} correction(s) during an ordinary fall that reached a per-tick \
-         vertical delta of {max_abs_delta_y:.4} blocks (past the \
-         {CORRECTION_THRESHOLD_BLOCKS}-block threshold). The vertical-disagreement clamp — \
-         which always zeroes the vertical component before the correction check — should make \
-         this impossible regardless of fall speed.",
+        "the server issued {} correction(s) across a fall that both rules exempt: its largest \
+         per-tick |dy| was {max_abs_delta_y:.4} blocks, past the \
+         {CORRECTION_THRESHOLD_BLOCKS}-block disagreement threshold (which zeroes the vertical \
+         term before comparing, so it cannot fire on a fall) and far inside the \
+         {SPEED_BUDGET_BLOCKS_PER_TICK}-block per-packet speed budget (which does include the \
+         vertical term). Neither rule can account for this, so look for a movement packet \
+         claiming a position the server had already overruled — run again with \
+         `RUST_LOG=warn,transfer=debug` and read the `xfer:` lines either side of the \
+         teleport, and check the oracle's own log for which rule it named.",
         sim.teleport_count - baseline,
     );
 }
