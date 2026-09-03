@@ -376,6 +376,70 @@ pub(super) fn recipe_item_identifier(id: i32) -> Option<lodestone_model::Identif
     lodestone_data::items::item_name(id)?.parse().ok()
 }
 
+/// Resolves a server-sent ghost recipe's result display to one drawable
+/// stack, for [`crate::container::ContainerFrame::recipe_ghost`].
+///
+/// `result_items` can list several candidate item ids for a tag-shaped
+/// display (e.g. "any plank"); vanilla animates through every candidate, and
+/// this draws the first this build's item table can name — the same "pick
+/// one, do not guess a name" contract [`recipe_item_identifier`] itself
+/// already keeps, and the one `crate::container::merchant::cost_item_stack`
+/// documents for its own id table. `None` when no candidate resolves, which
+/// draws nothing rather than a guessed icon.
+pub(super) fn ghost_result_stack(
+    ghost: &lodestone_game::recipe_sync::GhostRecipe,
+) -> Option<lodestone_game::item::ItemStack> {
+    ghost
+        .result_items
+        .iter()
+        .find_map(|&id| Some(lodestone_game::item::ItemStack::new(recipe_item_identifier(id)?, 1)))
+}
+
+#[cfg(test)]
+mod ghost_result_stack_tests {
+    use super::ghost_result_stack;
+    use lodestone_game::recipe_sync::GhostRecipe;
+
+    /// A real, resolvable id must produce a real stack — the positive half,
+    /// so the negative control below is not vacuously true of a function
+    /// that always returns `None`.
+    #[test]
+    fn a_resolvable_id_becomes_a_stack() {
+        // `minecraft:torch`'s registry id in the generated protocol-776 item
+        // table — see `lodestone_data::items::item_name`'s own doc for why
+        // this family is the one this build resolves.
+        let id = lodestone_data::items::item_id("minecraft:torch")
+            .expect("the generated table must know minecraft:torch");
+        let ghost = GhostRecipe { window_id: 1, result_items: vec![id] };
+        let stack = ghost_result_stack(&ghost).expect("a real id must resolve");
+        assert_eq!(stack.item().to_string(), "minecraft:torch");
+        assert_eq!(stack.count(), 1);
+    }
+
+    /// The executed negative control: an id outside the generated table
+    /// resolves to nothing, never a guessed icon.
+    #[test]
+    fn an_unresolvable_id_resolves_to_nothing() {
+        let ghost = GhostRecipe { window_id: 1, result_items: vec![i32::MAX] };
+        assert!(
+            ghost_result_stack(&ghost).is_none(),
+            "an out-of-range id must draw nothing, not a placeholder icon"
+        );
+    }
+
+    /// A tag-shaped display lists several candidates; this picks the first
+    /// that resolves rather than the first in the list unconditionally —
+    /// the case that would fail if the fallback lookup were skipped.
+    #[test]
+    fn the_first_resolvable_candidate_wins_over_an_earlier_unresolvable_one() {
+        let id = lodestone_data::items::item_id("minecraft:torch")
+            .expect("the generated table must know minecraft:torch");
+        let ghost = GhostRecipe { window_id: 1, result_items: vec![i32::MAX, id] };
+        let stack = ghost_result_stack(&ghost).expect("the second candidate must resolve");
+        assert_eq!(stack.item().to_string(), "minecraft:torch");
+    }
+}
+
 /// One toast icon: a single-item [`HotbarSlot`] for `id`.
 ///
 /// `None` for an id the [`ResourceLocation`] parser rejects, which suppresses
