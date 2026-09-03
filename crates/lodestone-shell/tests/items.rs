@@ -11,6 +11,8 @@ mod firework_rocket_pixels;
 mod framed_map_pixels;
 #[path = "items/item_frame_pixels.rs"]
 mod item_frame_pixels;
+#[path = "items/new_particle_families_pixels.rs"]
+mod new_particle_families_pixels;
 #[path = "items/sheet_particle_atlas_pixels.rs"]
 mod sheet_particle_atlas_pixels;
 #[path = "items/special_item_world_pixels.rs"]
