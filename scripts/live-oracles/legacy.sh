@@ -10,6 +10,7 @@
 #   1.10.2    v1-9    25582      25583      lodestone-mc1102
 #   1.11.2    v1-9    25584      25585      lodestone-mc1112
 #   1.12.2    v1-9    25568      25569      lodestone-legacy-1-12
+#   1.13.2    v1-13   25590      25591      lodestone-mc1132
 #   1.14.4    v1-14   25586      25587      lodestone-mc1144
 #   1.15.2    v1-14   25588      25589      lodestone-mc1152
 #   1.16.5    v1-14   25573      25574      lodestone-mc1165
@@ -21,7 +22,10 @@
 # their ports avoid every port already used here and are named by
 # crates/versions/1.9/tests/capture_join.rs. The two 1.14-era rows arrived
 # the same way, when crates/versions/1.14 gained 498 and 578; their ports are
-# named by crates/versions/1.14/tests/capture_join.rs.)
+# named by crates/versions/1.14/tests/capture_join.rs. The 1.13.2 row arrived
+# the same way, when crates/versions/1.13 landed as a single-version era; its
+# ports are the next two free above every port already listed here, and are
+# named by crates/versions/1.13/tests/capture_join.rs.)
 #
 # 1.12.2 already had a working script (legacy-1.12.sh); this one covers the
 # rest, and also answers for 1.12.2 so one entry point serves them all.
@@ -30,7 +34,7 @@
 # works.
 #
 # Usage: ./legacy.sh <version>
-#        (1.8.9 | 1.9.4 | 1.10.2 | 1.11.2 | 1.12.2 | 1.14.4 | 1.15.2 | 1.16.5)
+#        (1.8.9 | 1.9.4 | 1.10.2 | 1.11.2 | 1.12.2 | 1.13.2 | 1.14.4 | 1.15.2 | 1.16.5)
 #
 # Runtime: Apple `container`, not Docker -- see docs/oracles-and-benchmarks.md
 # ("Oracle runtimes: Apple container"). That content used to live in
@@ -52,7 +56,7 @@ set -euo pipefail
 
 usage() {
   echo "usage: $0 <version>" >&2
-  echo "  supported versions: 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.14.4, 1.15.2, 1.16.5 (v1-14)" >&2
+  echo "  supported versions: 1.8.9 (v1-8); 1.9.4, 1.10.2, 1.11.2, 1.12.2 (v1-9); 1.13.2 (v1-13); 1.14.4, 1.15.2, 1.16.5 (v1-14)" >&2
   exit 1
 }
 
@@ -68,6 +72,13 @@ VERSION="${1:-}"
 #   - v1-9 at 1.9.4/1.10.2/1.11.2 (capture_join.rs): a flat world only, so a
 #     join capture is small and its chunk columns are the same shape every
 #     run; nothing there depends on mobs
+#   - v1-13 at 1.13.2 (capture_join.rs): a flat world only, for the same
+#     reason. `FLAT` is still the right spelling here despite 1.13's
+#     namespacing sweep -- measured, by booting with each spelling and reading
+#     the resulting level.dat's generator name back: `FLAT` gives `flat`,
+#     while `minecraft:flat` matches nothing and falls back to `default`
+#     without warning. An unrecognised level-type is silent, not fatal, so
+#     the check is the world, never the log
 #   - v1-14 at 1.14.4/1.15.2 (capture_join.rs): a flat world only, so a join
 #     capture is small and its chunk columns are the same shape every run;
 #     nothing there depends on mobs
@@ -107,6 +118,12 @@ case "$VERSION" in
     GAME_PORT=25568
     RCON_PORT=25569
     EXTRA_PROPS=()
+    ;;
+  1.13.2)
+    NAME=lodestone-mc1132
+    GAME_PORT=25590
+    RCON_PORT=25591
+    EXTRA_PROPS=(level-type=FLAT)
     ;;
   1.14.4)
     NAME=lodestone-mc1144
