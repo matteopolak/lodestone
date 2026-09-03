@@ -87,6 +87,10 @@ fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+/// `(block name, sorted (key, value) properties) -> 26.2 state id`, the shape
+/// [`canonical_reverse_index`] builds and every bridging step reads.
+type ReverseIndex = HashMap<(String, Vec<(String, String)>), u32>;
+
 /// One source-version state: its flat wire id and sorted `(key, value)`
 /// properties.
 struct SourceState {
@@ -151,7 +155,7 @@ fn parse_dump(doc: &str) -> Vec<SourceState> {
 
 /// `(name, sorted properties) -> 26.2 state id`, built once from
 /// `lodestone_data::block_states`.
-fn canonical_reverse_index() -> HashMap<(String, Vec<(String, String)>), u32> {
+fn canonical_reverse_index() -> ReverseIndex {
     let mut index = HashMap::with_capacity(block_states::STATE_COUNT as usize);
     for id in 0..block_states::STATE_COUNT {
         let name = block_states::block_name(id).expect("id in 0..STATE_COUNT");
@@ -196,11 +200,7 @@ fn bridge_name(name: &str) -> &str {
 /// Deliberately total in its strictness — a source state whose property set
 /// 26.2 does not carry verbatim has no answer here, so it surfaces in
 /// [`generate`]'s panic instead of being approximated.
-fn resolve(
-    name: &str,
-    properties: &[(String, String)],
-    reverse: &HashMap<(String, Vec<(String, String)>), u32>,
-) -> Option<u32> {
+fn resolve(name: &str, properties: &[(String, String)], reverse: &ReverseIndex) -> Option<u32> {
     reverse
         .get(&(bridge_name(name).to_owned(), properties.to_vec()))
         .copied()
@@ -212,10 +212,7 @@ fn resolve(
 /// a future occurrence means a jar or registry update introduced a case this
 /// generator does not cover, and that must be loud, not silently defaulted to
 /// air at generation time.
-fn generate(
-    states: &[SourceState],
-    reverse: &HashMap<(String, Vec<(String, String)>), u32>,
-) -> String {
+fn generate(states: &[SourceState], reverse: &ReverseIndex) -> String {
     let air_id = *reverse
         .get(&("minecraft:air".to_owned(), Vec::new()))
         .expect("26.2 registry always defines minecraft:air with no properties");
