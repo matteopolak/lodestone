@@ -41,7 +41,7 @@
 //!
 //! ```text
 //! LODESTONE_REGEN=1 cargo test -p lodestone-v1-13 --test entity_types \
-//!     committed_table_matches_minecraft_data -- --ignored --nocapture
+//!     committed_tables_match_their_sources -- --ignored --nocapture
 //! ```
 //!
 //! and, for the oracle (needs `./scripts/live-oracles/legacy.sh 1.13.2`):
@@ -57,9 +57,32 @@ use std::path::PathBuf;
 
 use lodestone_v1_13::entity_types;
 
-/// `minecraft-data`'s own 1.13.2 entity list, committed to the vendor tree.
-const MINECRAFT_DATA_ENTITIES: &str =
-    include_str!("../../../../vendor/minecraft-data/data/pc/1.13.2/entities.json");
+/// `minecraft-data`'s own 1.13.2 entity list, read from the vendor tree.
+///
+/// A runtime read rather than an `include_str!`, because `/vendor/` is
+/// git-ignored: it is a developer's local checkout of a third-party dataset,
+/// not repo state. A compile-time read makes the whole test binary
+/// unbuildable wherever that tree is absent — every CI runner, every fresh
+/// clone — even though the only caller is the ignored generator below, which
+/// a developer runs deliberately and with the dataset in hand. The wire
+/// oracle in `tests/captures/` is what checks this table on an ordinary
+/// `cargo test`, and it is committed.
+///
+/// `lodestone-data`'s own light-properties test states the same rule for the
+/// opposite resolution: where a check must run everywhere, commit an extract
+/// of the dataset instead of reaching into `vendor/`.
+fn minecraft_data_entities() -> String {
+    let path = manifest_dir().join("../../../vendor/minecraft-data/data/pc/1.13.2/entities.json");
+    std::fs::read_to_string(&path).unwrap_or_else(|err| {
+        panic!(
+            "{} is required to regenerate or drift-check the 1.13 entity table, and is \
+             absent ({err}). `/vendor/` is git-ignored; populate it with a minecraft-data \
+             checkout. 1.13.2's data generator emits no registry report, so this dataset \
+             is the only machine-readable source for the numbering.",
+            path.display()
+        )
+    })
+}
 
 /// The wire transcript this table is checked against.
 const WIRE_ORACLE: &str = include_str!("captures/entity_types_1_13_2.txt");
@@ -116,7 +139,7 @@ fn correct_name(name: &str) -> &str {
 /// dropping the legacy object rows (see the module docs).
 fn parse_unified_registry() -> Vec<(i32, String)> {
     let value: serde_json::Value =
-        serde_json::from_str(MINECRAFT_DATA_ENTITIES).expect("entities.json is valid JSON");
+        serde_json::from_str(&minecraft_data_entities()).expect("entities.json is valid JSON");
     let rows = value.as_array().expect("entities.json is an array");
     let jar = jar_entity_names();
     let mut by_id: BTreeMap<i32, String> = BTreeMap::new();
