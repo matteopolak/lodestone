@@ -111,24 +111,78 @@ just because someone attached a window to watch it.
 
 ## Configuration
 
-- Cargo feature `runtime-presentation` on `lodestone-shell`, in `default`. Off: `Mode` is fixed at startup
-  exactly as before this issue, and none of `Sim::attach_presentation`/`detach_presentation`,
-  `WindowApp::attach_presentation`/`detach_presentation`, `AppEvent`, or `Mode::HeadlessSession` compile in
-  — checked by `cargo check -p lodestone-shell --no-default-features` (part of `just check-seam`) staying
-  green with none of those symbols in the binary. `crate::sim::presentation::PresentationSet` itself stays
-  unconditional (a zero-cost marker), so the four plugins need no `cfg` of their own.
+- Cargo feature `runtime-presentation` on `lodestone-shell`, in `default`, and **implies `window`** (its
+  own GPU/window half lives entirely inside the `app` module, so it cannot compile without it — see
+  `window`'s own entry just below). Off: `Mode` is fixed at startup exactly as before this feature existed,
+  and none of `Sim::attach_presentation`/`detach_presentation`, `WindowApp::attach_presentation`/
+  `detach_presentation`, `AppEvent`, or `Mode::HeadlessSession` compile in — checked by `cargo check -p
+  lodestone-shell --no-default-features` (part of `just check-seam`) staying green with none of those
+  symbols in the binary. `crate::sim::presentation::PresentationSet` itself stays unconditional (a
+  zero-cost marker), so the four plugins need no `cfg` of their own.
 - `--headless-session` CLI flag (native only, behind the feature): starts `Mode::HeadlessSession` — see
   `app::runners::run_headless_session`'s own doc for the stdin command set.
+- Cargo feature `window` on `lodestone-shell`, in `default`. Gates the whole `app` module (`#[cfg(feature =
+  "window")] pub mod app;` in `lib.rs`) — `WindowApp`'s `ApplicationHandler`, every winit event type, the
+  windowed and `--headless-session` runners — and pulls in `winit` itself (`dep:winit`) plus
+  `lodestone-render`'s own `window` feature. See the winit-free headless build section below for what stays
+  and what does not with it off.
 
-### A known limitation, stated plainly
+### The genuinely winit-free headless build
 
-`winit` remains an **unconditional** dependency of `lodestone-shell` — `cargo tree -p lodestone-shell` (any
-feature combination) still lists it, because `WindowApp`/`Mode::Window` needed it before this issue and
-still do. Making a genuinely winit-free build of this crate possible would mean gating the pre-existing
-windowed implementation itself, which reaches beyond `app/`/`sim/` into `keybinds.rs`, `config.rs`,
-`hud.rs` and `menu/nav.rs` (the last of which is outside this issue's assigned scope). That refactor is
-real and larger than this issue; it was not attempted here. What `runtime-presentation` off does prove,
-checkably, is that none of the *new* attach/detach machinery this issue adds is present in the binary.
+A prior version of this doc reported `winit` as an unconditional dependency of `lodestone-shell` —
+`cargo tree -p lodestone-shell` listed it under every feature combination, because `WindowApp`/
+`Mode::Window` needed it and the crate had no seam separating "needs a window" from "needs nothing but a
+GPU adapter, or nothing at all". That gap is closed:
+
+```
+$ cargo tree -p lodestone-shell --no-default-features -i winit
+error: package ID specification `winit` did not match any packages
+```
+
+`winit` is not merely unused with `--no-default-features` — it is **absent from the resolved dependency
+graph**, checked by `cargo xtask check-no-winit-headless` (`xtask/src/no_winit_headless.rs`, part of `just
+check-seam`), which runs exactly that command and fails if `winit` is reachable. The guard has been run
+against a deliberately reintroduced unconditional `winit` dependency and confirmed to fail (exit 1,
+reporting the dependency path) before being restored — an absence-detector is only evidence once it has
+been watched to detect something.
+
+**What moved, and why:**
+
+- `winit` itself became optional (`winit = { workspace = true, optional = true }`) and is pulled in only
+  by the `window` feature (`window = ["dep:winit", "lodestone-render/window"]`). `lodestone-render`'s own
+  dependency dropped its hardcoded `features = ["window"]` for the same reason — that crate's `winit`
+  dependency was already correctly optional behind its own `window` feature; `lodestone-shell` was the one
+  requesting it unconditionally.
+- The `app` module — `WindowApp`, every winit event type, the windowed and `--headless-session` runners —
+  is now `#[cfg(feature = "window")]` in `lib.rs`. It did not need internal restructuring: it was already
+  the one cohesive "windowed driver" the module doc describes, so gating the whole module at the `lib.rs`
+  boundary was the correct grain, not a partial `#[cfg]` sprinkled through it.
+- `Mode::Headless` (one-shot offscreen GPU render, no window) and `Mode::Connect` (the live event-stream
+  diagnostic, no GPU at all) moved out of `app`/`app::runners` into a new, always-compiled
+  `crate::diagnostics` module — unconditional and winit-free by construction, so a headless build keeps
+  both rather than losing them along with the rest of `app`. `crate::run` (in `lib.rs`) is the entry point
+  that dispatches correctly either way: it delegates to `app::run` when `window` is on, and to
+  `crate::diagnostics` directly (refusing `Mode::Window` with a named error) when it is off. `main.rs` calls
+  `crate::run`, not `app::run`, for exactly that reason; the browser build (`web/`) keeps calling `app::run`
+  directly, since it always builds with `window` on and never selects a diagnostic mode.
+- The one real reach-in: `crate::keybinds::Binding` (persisted in `options.json`, read by `crate::config`
+  and `crate::menu::nav` — none of which should need `winit`) held a `winit::keyboard::KeyCode` and a
+  `winit::event::MouseButton` directly. `keybinds.rs` now defines its own `Key`/`MouseButton` enums —
+  exact, exhaustive mirrors of winit 0.30's own variants, not a redesign — and `Binding` names those
+  instead. `From<winit::keyboard::KeyCode> for Key` / `From<winit::event::MouseButton> for MouseButton`
+  are the one place a raw winit key becomes one of these, and both exist only behind the `window` feature;
+  every call site that used to hand `Binding::Key`/`Keybinds::is` a winit type directly now converts with
+  `.into()` at that boundary (all inside `app`, which already has winit in scope). `config.rs`, `hud.rs`
+  and `menu/nav.rs` needed **no changes at all** — re-checking rather than trusting the earlier "reaches
+  into these files" claim found that `hud.rs` and `menu/nav.rs`'s own production code never named a winit
+  type in the first place (only test code, and only `menu/nav.rs` at that), and `config.rs`'s one winit
+  reference was also test-only. A predecessor's blocker, re-verified, was evidence about an unfinished
+  search rather than about the tree.
+
+**What a `--no-default-features` build can still do**: `Mode::Headless` and `Mode::Connect` both work
+exactly as before (`crate::diagnostics::run_headless`/`run_connect`). What it cannot do is open a window —
+`Mode::Window` (and, since `runtime-presentation` implies `window`, `Mode::HeadlessSession`) refuse with a
+named error from `crate::run` rather than failing to compile or silently downgrading.
 
 ## Dependencies
 

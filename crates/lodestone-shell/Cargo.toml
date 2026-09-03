@@ -67,7 +67,14 @@ lodestone-entity.workspace = true
 # jar-derived census `lodestone-physics`/`lodestone-worldgen` consumers use,
 # not a guessed offset — see `crates/lodestone-shell/src/gpu/nametag.rs`.
 lodestone-data = { workspace = true }
-lodestone-render = { path = "../lodestone-render", features = ["window"] }
+# Not `features = ["window"]` here: that feature (and its `winit` dependency)
+# is requested by *this* crate's own `window` Cargo feature below
+# (`lodestone-render/window`), not unconditionally — see the `[features]`
+# table's `window` entry and `docs/runtime-presentation.md`'s section on the
+# winit-free headless build. A plain `--no-default-features` build of this
+# crate never asks for it, so `lodestone-render` compiles here with no window
+# feature and no winit in its own graph either.
+lodestone-render = { path = "../lodestone-render" }
 lodestone-physics = { path = "../lodestone-physics" }
 # Vanilla particle simulation (block-break debris, hit fragments). The shell
 # owns the join between a particle's block state and its atlas sprite, because
@@ -152,9 +159,13 @@ lodestone-auth = { workspace = true }
 # `GameTick` schedule, and assert real displacement on jar-derived collision —
 # so nothing about its correctness depended on the shell registering it.
 
-# GPU / windowing / math.
+# GPU / math. `wgpu` stays unconditional — the headless render/diagnostics
+# path (`Mode::Headless`, `diagnostics::run_headless`) needs a GPU adapter but
+# never a window. `winit` is windowing only and is optional, pulled in solely
+# by the `window` feature below — see that feature's own comment and
+# `docs/runtime-presentation.md`.
 wgpu = { workspace = true }
-winit = { workspace = true }
+winit = { workspace = true, optional = true }
 glam = { workspace = true }
 bytemuck = { workspace = true }
 
@@ -387,7 +398,7 @@ harness = false
 # explicitly instead — `cargo check -p lodestone-shell --no-default-features` is in
 # `CLAUDE.md`'s health checks. Keep it there; it is the only thing standing between
 # the seam and a hardcoded `v26-2` dependency creeping into shell code.
-default = ["live", "runtime-presentation"]
+default = ["live", "runtime-presentation", "window"]
 live = ["lodestone-registry/v26-2"]
 # Switches a running session between headless and windowed at
 # runtime rather than only at startup. Gates `Sim::attach_presentation`/
@@ -405,7 +416,39 @@ live = ["lodestone-registry/v26-2"]
 # in. `PresentationSet` itself (the marker every presentation system is
 # tagged with) stays unconditional — it costs nothing unused and keeping the
 # tag off a feature gate means the four plugins need no `cfg` of their own.
-runtime-presentation = []
+#
+# **Implies `window`**: the GPU/window half of this feature
+# (`WindowApp::attach_presentation`/`detach_presentation`, `AppEvent`,
+# `run_headless_session`'s own `EventLoop`) lives entirely inside the `app`
+# module and structurally needs winit's `ActiveEventLoop`/`EventLoopProxy`
+# regardless of whether a window is ever actually open — `--headless-session`
+# still pumps a real winit event loop, just with no window created. Without
+# this edge, `runtime-presentation` on its own would add `Mode::HeadlessSession`
+# to `Config` (gated on this feature alone, in `config.rs`) with nothing in
+# `main.rs` able to reach it once `window` is off — a dead, unreachable mode
+# rather than a compile error. Requiring `window` here closes that gap instead
+# of leaving it as a trap.
+runtime-presentation = ["window"]
+# Native windowing: `WindowApp` (the winit `ApplicationHandler`), the whole
+# `app` module, and the `winit` dependency itself. See
+# `docs/runtime-presentation.md`'s "genuinely winit-free headless build"
+# section for the shape of what this gates and why.
+#
+# **Off is a real, checked configuration, not just a flag that compiles.**
+# `cargo tree -p lodestone-shell --no-default-features -i winit` reports
+# nothing when this (and therefore `live`'s sibling defaults) are off — `just
+# check-seam` covers it. `Mode::Headless` (one-shot offscreen GPU render) and
+# `Mode::Connect` (event-stream diagnostic) do **not** need this feature —
+# they live in `crate::diagnostics`, which has never imported `winit` — so a
+# `--no-default-features` build keeps both, and only `Mode::Window` (and, per
+# `runtime-presentation`'s own note, `Mode::HeadlessSession`) become
+# unreachable without it. `main.rs`'s dispatch says so at runtime rather than
+# failing to compile.
+#
+# `lodestone-render/window` rides along: this crate's own `winit::window::Window`
+# usage (`WindowApp`) and `lodestone-render`'s (`lodestone_render::window::attach_window`,
+# the real swapchain target) are the same windowed path and turn on together.
+window = ["dep:winit", "lodestone-render/window"]
 # Test-only discriminator for `sim::build`'s physics-profile wiring
 # (`lodestone_registry::physics_profile_for_protocol`). With only `live`
 # (`v26-2`) compiled, every protocol this crate can ever see resolves to

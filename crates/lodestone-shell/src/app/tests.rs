@@ -1651,8 +1651,8 @@ fn slash_opens_chat_with_the_command_prefix_and_t_opens_it_without() {
     // slash key. Rebinding chat and command to other keys must carry the
     // distinction with them.
     let mut binds = Keybinds::new();
-    binds.set(InputAction::Command, Binding::Key(KeyCode::Backquote));
-    binds.set(InputAction::Chat, Binding::Key(KeyCode::KeyY));
+    binds.set(InputAction::Command, Binding::Key(KeyCode::Backquote.into()));
+    binds.set(InputAction::Chat, Binding::Key(KeyCode::KeyY.into()));
     assert_eq!(
         resolve_key(&binds, playing(), Some(KeyCode::Backquote), true, false, None),
         Some(KeyOutcome::OpenChat { command: true })
@@ -2558,7 +2558,7 @@ fn toggle_pause_on_lost_focus_flips_the_option_both_ways() {
 #[test]
 fn a_rebind_moves_the_behaviour_to_the_new_key_and_off_the_old_one() {
     let mut binds = Keybinds::new();
-    binds.set(InputAction::Inventory, Binding::Key(KeyCode::KeyI));
+    binds.set(InputAction::Inventory, Binding::Key(KeyCode::KeyI.into()));
     assert_eq!(
         resolve_key(&binds, playing(), Some(KeyCode::KeyI), true, false, None),
         Some(KeyOutcome::OpenContainer)
@@ -2607,8 +2607,8 @@ fn attack_and_use_are_keyboard_dispatchable_once_rebound_off_the_mouse() {
     assert_eq!(resolve(playing(), KeyCode::KeyR, true), None);
 
     let mut binds = Keybinds::new();
-    binds.set(InputAction::Attack, Binding::Key(KeyCode::KeyR));
-    binds.set(InputAction::Use, Binding::Key(KeyCode::KeyV));
+    binds.set(InputAction::Attack, Binding::Key(KeyCode::KeyR.into()));
+    binds.set(InputAction::Use, Binding::Key(KeyCode::KeyV.into()));
     assert_eq!(
         resolve_key(&binds, playing(), Some(KeyCode::KeyR), true, false, None),
         Some(KeyOutcome::Attack(true))
@@ -2655,8 +2655,8 @@ fn the_mouse_path_resolves_the_default_attack_and_use_buttons() {
 
     // Swapping the two buttons is a supported rebind.
     let mut swapped = binds;
-    swapped.set(InputAction::Attack, Binding::Mouse(MouseButton::Right));
-    swapped.set(InputAction::Use, Binding::Mouse(MouseButton::Left));
+    swapped.set(InputAction::Attack, Binding::Mouse(MouseButton::Right.into()));
+    swapped.set(InputAction::Use, Binding::Mouse(MouseButton::Left.into()));
     assert_eq!(
         mouse_action_for(&swapped, MouseButton::Right),
         Some(InputAction::Attack)
@@ -2673,7 +2673,7 @@ fn a_movement_action_can_be_driven_from_a_mouse_button() {
     // both input kinds — and the mouse handler routes it, so it is not an
     // island.
     let mut binds = Keybinds::new();
-    binds.set(InputAction::Jump, Binding::Mouse(MouseButton::Middle));
+    binds.set(InputAction::Jump, Binding::Mouse(MouseButton::Middle.into()));
     let action = mouse_action_for(&binds, MouseButton::Middle);
     assert_eq!(action, Some(InputAction::Jump));
     assert_eq!(action.and_then(InputAction::movement), Some(Action::Jump));
@@ -5000,7 +5000,7 @@ fn rebinding_toggle_perspective_in_the_controls_screen_takes_effect_without_a_re
     // Vanilla's own default, and the control for the second half below.
     assert_eq!(
         app.keybinds().binding(InputAction::TogglePerspective),
-        Binding::Key(KeyCode::F5),
+        Binding::Key(KeyCode::F5.into()),
         "precondition: the app starts on vanilla's F5"
     );
 
@@ -5049,12 +5049,12 @@ fn rebinding_toggle_perspective_in_the_controls_screen_takes_effect_without_a_re
         Some(CaptureKey::Bind(KeyCode::KeyG)),
         "a G keydown must forward as CaptureKey::Bind(KeyG)"
     );
-    app.nav.capture_binding(Binding::Key(KeyCode::KeyG));
+    app.nav.capture_binding(Binding::Key(KeyCode::KeyG.into()));
 
     // --- the consumer: the app's own table, with no restart in between.
     assert_eq!(
         app.keybinds().binding(InputAction::TogglePerspective),
-        Binding::Key(KeyCode::KeyG),
+        Binding::Key(KeyCode::KeyG.into()),
         "the rebind must reach the table the resolver reads, not just the file"
     );
 
@@ -5144,7 +5144,7 @@ fn a_rebound_f3_chord_fires_on_its_new_key_and_stops_on_its_old_one() {
     assert_eq!(
         app.keybinds()
             .binding(InputAction::DebugShowChunkBorders),
-        Binding::Key(KeyCode::KeyG)
+        Binding::Key(KeyCode::KeyG.into())
     );
 
     app.ui.open_settings();
@@ -5178,7 +5178,7 @@ fn a_rebound_f3_chord_fires_on_its_new_key_and_stops_on_its_old_one() {
     }
     app.nav.key(&mut app.ui, MenuKey::Enter);
     assert!(app.nav.awaiting_key_capture());
-    app.nav.capture_binding(Binding::Key(KeyCode::KeyJ));
+    app.nav.capture_binding(Binding::Key(KeyCode::KeyJ.into()));
 
     let binds = app.keybinds();
     let mut chord = playing();

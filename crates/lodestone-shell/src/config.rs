@@ -3116,16 +3116,16 @@ mod tests {
             ..Options::default()
         };
         opts.keybinds
-            .set(InputAction::Inventory, Binding::Key(KeyCode::KeyI));
+            .set(InputAction::Inventory, Binding::Key(KeyCode::KeyI.into()));
         opts.keybinds
-            .set(InputAction::Jump, Binding::Mouse(winit::event::MouseButton::Middle));
+            .set(InputAction::Jump, Binding::Mouse(winit::event::MouseButton::Middle.into()));
         opts.save_to(&path).unwrap();
 
         let loaded = Options::load_from(&path);
         assert_eq!(loaded, opts);
-        assert!(loaded.keybinds.is(InputAction::Inventory, KeyCode::KeyI));
+        assert!(loaded.keybinds.is(InputAction::Inventory, KeyCode::KeyI.into()));
         assert!(
-            !loaded.keybinds.is(InputAction::Inventory, KeyCode::KeyE),
+            !loaded.keybinds.is(InputAction::Inventory, KeyCode::KeyE.into()),
             "the old default must not still fire"
         );
         // The unrelated setting rode along untouched.

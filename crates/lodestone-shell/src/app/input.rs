@@ -429,7 +429,7 @@ pub(crate) fn resolve_key(
         return Some(KeyOutcome::Chat);
     }
     let code = code?;
-    if binds.is(InputAction::Pause, code) && pressed {
+    if binds.is(InputAction::Pause, code.into()) && pressed {
         Some(KeyOutcome::Pause)
     } else if gate.recipe_search && pressed {
         // **Before the container swallow, after Pause.** Order is the whole
@@ -468,15 +468,15 @@ pub(crate) fn resolve_key(
         // already in place and tested. Asked **before** the hotbar keys, matching
         // the hotbar-swap key handling's own order, so rebinding the off-hand key onto
         // a number key swaps with slot `40` rather than that number's slot.
-        if binds.is(InputAction::Inventory, code) {
+        if binds.is(InputAction::Inventory, code.into()) {
             Some(KeyOutcome::CloseContainer)
-        } else if binds.is(InputAction::SwapOffhand, code) {
+        } else if binds.is(InputAction::SwapOffhand, code.into()) {
             Some(KeyOutcome::ContainerSwap {
                 button: OFFHAND_SWAP_BUTTON,
             })
         } else if let Some(slot) = hotbar_slot_for(binds, code) {
             Some(KeyOutcome::ContainerSwap { button: slot as i32 })
-        } else if binds.is(InputAction::PickItem, code) {
+        } else if binds.is(InputAction::PickItem, code.into()) {
             // Before the `Drop` arm below, matching vanilla's own
             // pick-item-then-drop order in vanilla's container-screen key
             // handler. The
@@ -484,7 +484,7 @@ pub(crate) fn resolve_key(
             // resolves here and produces zero clicks downstream, exactly as the
             // `Drop` arm's own comment describes.
             Some(KeyOutcome::ContainerPickItem)
-        } else if binds.is(InputAction::Drop, code) {
+        } else if binds.is(InputAction::Drop, code.into()) {
             // Vanilla checks this *after* the hotbar-swap key handling returns,
             // not folded into it — vanilla's container-screen key handler is
             // two separate `if`s, one wrapping the hotbar-swap check and a
@@ -508,7 +508,7 @@ pub(crate) fn resolve_key(
         // cannot leak past this arm into whatever gameplay binding happens
         // to share the same physical key.
         Some(KeyOutcome::PluginConsumed)
-    } else if binds.is(InputAction::DebugOverlay, code) {
+    } else if binds.is(InputAction::DebugOverlay, code.into()) {
         // **Both edges**, and the toggle has moved to the release — that fix's
         // chords. Vanilla's own rule is that releasing the debug-modifier key
         // toggles the overlay only
@@ -517,14 +517,14 @@ pub(crate) fn resolve_key(
         // hitboxes, which is why the modifier cannot just be a held flag with
         // the old press-toggle left in place.
         Some(KeyOutcome::DebugModifier(pressed))
-    } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowHitboxes, code) {
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowHitboxes, code.into()) {
         // `key.debug.showHitboxes`. Table-driven, not a literal `KeyCode::KeyB`:
         // vanilla declares this a debug-category key binding and dispatches
         // it through its own key-matching logic — see `InputAction::DebugShowHitboxes`.
         // The `gate.debug_held` conjunct stays, because the F3 *modifier* is a
         // gate flag here rather than an eighth bindable action.
         Some(KeyOutcome::ToggleHitboxes)
-    } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowChunkBorders, code) {
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowChunkBorders, code.into()) {
         // `key.debug.showChunkBorders` — table-driven, as above.
         Some(KeyOutcome::ToggleChunkBorders)
     } else if gate.debug_held
@@ -542,13 +542,13 @@ pub(crate) fn resolve_key(
         // [`KeyOutcome::ProfilerChartSelect`]'s doc for why this is chorded
         // rather than a bare press.
         Some(KeyOutcome::ProfilerChartSelect(digit))
-    } else if gate.debug_held && pressed && binds.is(InputAction::DebugSpectate, code) {
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugSpectate, code.into()) {
         // `key.debug.spectate` — table-driven, as above.
         Some(KeyOutcome::ToggleSpectator)
-    } else if gate.debug_held && pressed && binds.is(InputAction::DebugSwitchGameMode, code) {
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugSwitchGameMode, code.into()) {
         // `key.debug.switchGameMode` — table-driven, as above.
         Some(KeyOutcome::CycleGameMode)
-    } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowAdvancedTooltips, code) {
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugShowAdvancedTooltips, code.into()) {
         // `key.debug.showAdvancedTooltips` — table-driven, as above. **Not gated on
         // `gate.gameplay`**, the same as its two siblings: F3 chords are debug
         // instruments and vanilla's own debug-key handling runs
@@ -556,27 +556,27 @@ pub(crate) fn resolve_key(
         // for the others, because the thing it changes is only *visible* with a
         // container screen open.
         Some(KeyOutcome::ToggleAdvancedTooltips)
-    } else if gate.debug_held && pressed && binds.is(InputAction::DebugFocusPause, code) {
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugFocusPause, code.into()) {
         // `key.debug.focusPause` — table-driven, as above. Same "not gated on
         // `gate.gameplay`" reasoning as its siblings above.
         Some(KeyOutcome::TogglePauseOnLostFocus)
-    } else if gate.debug_held && pressed && binds.is(InputAction::DebugCopyLocation, code) {
+    } else if gate.debug_held && pressed && binds.is(InputAction::DebugCopyLocation, code.into()) {
         // `key.debug.copyLocation` — table-driven, as above. Vanilla additionally
         // gates this on `!player.isReducedDebugInfo()`, a concept this client
         // does not model yet — see `docs/keybindings.md`'s F3 section.
         Some(KeyOutcome::CopyLocation)
-    } else if binds.is(InputAction::Screenshot, code) && pressed {
+    } else if binds.is(InputAction::Screenshot, code.into()) && pressed {
         // Same tier as `DebugOverlay` immediately above, and for the same
         // reason: vanilla's `key.screenshot` is `Category.MISC` and takes no
         // account of what the player is doing. So it is gated on `pressed`
         // only — **not** on `gate.gameplay`, which would make a screenshot
         // impossible with the debug overlay's own subject on screen.
         Some(KeyOutcome::Screenshot)
-    } else if binds.is(InputAction::PlayerList, code) && gate.gameplay {
+    } else if binds.is(InputAction::PlayerList, code.into()) && gate.gameplay {
         // Deliberately *not* gated on `pressed`: this tracks a held state, so it
         // needs both edges. Gating it would leave the overlay stuck on.
         Some(KeyOutcome::PlayerList(pressed))
-    } else if (binds.is(InputAction::Chat, code) || binds.is(InputAction::Command, code))
+    } else if (binds.is(InputAction::Chat, code.into()) || binds.is(InputAction::Command, code.into()))
         && pressed
         && gate.gameplay
     {
@@ -584,11 +584,11 @@ pub(crate) fn resolve_key(
         // from the `||` above, so binding both actions to one key yields the
         // command prefix instead of depending on which side matched first.
         Some(KeyOutcome::OpenChat {
-            command: binds.is(InputAction::Command, code),
+            command: binds.is(InputAction::Command, code.into()),
         })
-    } else if binds.is(InputAction::Inventory, code) && pressed && gate.gameplay {
+    } else if binds.is(InputAction::Inventory, code.into()) && pressed && gate.gameplay {
         Some(KeyOutcome::OpenContainer)
-    } else if binds.is(InputAction::TogglePerspective, code) && pressed && gate.gameplay {
+    } else if binds.is(InputAction::TogglePerspective, code.into()) && pressed && gate.gameplay {
         Some(KeyOutcome::TogglePerspective)
     } else if hotbar_slot_for(binds, code).is_some() && pressed && gate.gameplay && gate.spectator {
         // Issue #613's `TeleportToEntity` remainder: while spectating, every
@@ -604,7 +604,7 @@ pub(crate) fn resolve_key(
         && gate.gameplay
     {
         Some(KeyOutcome::SelectSlot(slot))
-    } else if binds.is(InputAction::SwapOffhand, code) && pressed && gate.gameplay {
+    } else if binds.is(InputAction::SwapOffhand, code.into()) && pressed && gate.gameplay {
         // The *gameplay* half of `key.swapOffhand`. The container
         // half is up in the `gate.container_open` arm and is a different
         // mechanism — see [`KeyOutcome::SwapOffhand`].
@@ -617,23 +617,23 @@ pub(crate) fn resolve_key(
         // onto a number key, and matching each context's own source is cheaper
         // than picking one and being wrong in half the cases.
         Some(KeyOutcome::SwapOffhand)
-    } else if binds.is(InputAction::Drop, code) && pressed && gate.gameplay {
+    } else if binds.is(InputAction::Drop, code.into()) && pressed && gate.gameplay {
         // Vanilla's client-side key handling asks the drop key immediately
         // after the off-hand-swap key and before the attack/use keys
         // — matched here for the same reason the off-hand arm's
         // own doc gives: the two orders (this one and the container arm's)
         // only diverge once someone rebinds one action onto another's key.
         Some(KeyOutcome::Drop { ctrl })
-    } else if binds.is(InputAction::Attack, code) && gate.gameplay {
+    } else if binds.is(InputAction::Attack, code.into()) && gate.gameplay {
         // Only reachable once `key.attack` has been rebound off its default
         // mouse button; the mouse path is what fires out of the box. Both edges
         // matter — mining is hold-to-dig.
         Some(KeyOutcome::Attack(pressed))
-    } else if binds.is(InputAction::Use, code) && gate.gameplay {
+    } else if binds.is(InputAction::Use, code.into()) && gate.gameplay {
         // As above: dormant under the default mouse binding. Both edges
         // matter here too, not just on press — see `KeyOutcome::Use`'s docs.
         Some(KeyOutcome::Use(pressed))
-    } else if binds.is(InputAction::PickItem, code) && pressed && gate.gameplay {
+    } else if binds.is(InputAction::PickItem, code.into()) && pressed && gate.gameplay {
         // Press-only: vanilla's pick-block-or-entity handling is a one-shot, unlike
         // attack/use whose release edge also matters. Reachable by keyboard only
         // once `key.pickItem` is rebound off its default middle mouse button;

@@ -23,8 +23,13 @@
 //! the whole of what a browser consumes, and it is the thing that has to stay
 //! wasm-clean.
 
+// `lodestone::run`, not `lodestone::app::run` directly: `app` (and every
+// winit type in it) compiles in only behind the `window` Cargo feature, so
+// `app::run` does not exist for a `--no-default-features` build. `run`
+// dispatches to it when `window` is on and to `lodestone::diagnostics`
+// directly when it is off — see `lodestone`'s own crate doc.
 #[cfg(not(target_arch = "wasm32"))]
-use lodestone::{CliOutcome, Config, app};
+use lodestone::{CliOutcome, Config, run};
 
 /// The browser build's do-nothing `main`. See this module's docs — `web/` is the
 /// real entry point, and this only satisfies the `[[bin]]` target.
@@ -42,11 +47,11 @@ fn main() -> anyhow::Result<()> {
             // that live in both. An explicit flag still wins for
             // this run; everything else takes the persisted value, so the
             // consumers in `sim`/`app` read the resolved number without knowing
-            // a settings screen exists. Must happen before `app::run`, which
+            // a settings screen exists. Must happen before `run`, which
             // hands `config` straight to `Sim`.
             config.resolve_persisted(&lodestone::config::Options::load());
             tracing::info!(?config.mode, "starting lodestone");
-            app::run(config)
+            run(config)
         }
         CliOutcome::Help(text) => {
             print!("{text}");
