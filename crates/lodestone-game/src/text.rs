@@ -1,5 +1,5 @@
-//! Chat-component interaction spans: the click/hover-carrying flatten a chat
-//! hit-test needs.
+//! Chat-component interaction spans: the click/hover/insertion-carrying
+//! flatten a chat hit-test needs.
 //!
 //! ## Why resolution comes first
 //!
@@ -22,12 +22,12 @@
 use lodestone_model::Text;
 
 // ---------------------------------------------------------------------------
-// Interactive spans: `to_spans()` with `click`/`hover` kept.
+// Interactive spans: `to_spans()` with `click`/`hover`/`insertion` kept.
 // ---------------------------------------------------------------------------
 
 /// One drawn run of text with its fully-inherited style and, when the
-/// component tree set one, the `click`/`hover` interaction that applies to
-/// the whole run.
+/// component tree set one, the `click`/`hover`/`insertion` interaction that
+/// applies to the whole run.
 ///
 /// [`lodestone_model::ResolvedText::to_spans`] cannot supply this: its
 /// [`lodestone_model::text::TextSpan`] output carries only `text` and
@@ -54,6 +54,13 @@ pub struct InteractiveSpan {
     /// The hover action covering this run, if any component from this run up
     /// to the tree root set one.
     pub hover: Option<lodestone_model::text::HoverEvent>,
+    /// The shift-click insertion text covering this run, inherited the same
+    /// way as [`Self::click`].
+    ///
+    /// Separate from [`Self::click`] because the two are alternatives, not
+    /// companions: a shift-click consumes the insertion and leaves the click
+    /// action alone, and an unshifted click does the reverse.
+    pub insertion: Option<String>,
 }
 
 /// Flattens `text` into [`InteractiveSpan`]s: `translate` nodes resolved
@@ -66,10 +73,6 @@ pub struct InteractiveSpan {
 /// own. Delegating there rather than keeping that walk means there is exactly
 /// one implementation of "how `click`/`hover` inherit down a `Text` tree",
 /// owned by the crate that owns `Text` itself.
-///
-/// The `insertion` field `InteractiveTextSpan` carries is dropped at this
-/// boundary — nothing under `crate::tablist`/`crate::chat` reads it yet; see
-/// [`InteractiveSpan`]'s own doc if that changes.
 #[must_use]
 pub fn interactive_spans(
     text: &Text,
@@ -83,6 +86,7 @@ pub fn interactive_spans(
             style: span.style,
             click: span.click,
             hover: span.hover,
+            insertion: span.insertion,
         })
         .collect()
 }
@@ -254,5 +258,39 @@ mod tests {
         assert_eq!(spans.len(), 1);
         assert_eq!(spans[0].click, None);
         assert_eq!(spans[0].hover, None);
+        assert_eq!(spans[0].insertion, None);
+    }
+
+    /// `insertion` reaches the span and inherits down the tree the same way
+    /// `click` does — the shift-click half of a server-decorated player name,
+    /// which is where the field is actually populated in practice (a chat
+    /// sender's own component carries `insertion: "<name>"`).
+    #[test]
+    fn insertion_reaches_the_span_and_inherits_into_children() {
+        let msg = Text {
+            insertion: Some("Notch".to_string()),
+            extra: vec![
+                Text::literal("inherits"),
+                Text {
+                    insertion: Some("Herobrine".to_string()),
+                    ..Text::literal("overrides")
+                },
+            ],
+            ..Text::literal("<Notch> ")
+        };
+
+        let spans = interactive_spans(&msg, &no_tr);
+        let by_text = |t: &str| spans.iter().find(|s| s.text == t).expect(t);
+        assert_eq!(by_text("<Notch> ").insertion.as_deref(), Some("Notch"));
+        assert_eq!(
+            by_text("inherits").insertion.as_deref(),
+            Some("Notch"),
+            "a child with no insertion of its own must inherit the parent's"
+        );
+        assert_eq!(
+            by_text("overrides").insertion.as_deref(),
+            Some("Herobrine"),
+            "a child's own insertion must win over the inherited one"
+        );
     }
 }
