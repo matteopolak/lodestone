@@ -80,9 +80,9 @@ pub enum ClientAction {
     },
     /// Send player movement.
     ///
-    /// Carries the same two boolean status bits vanilla's
-    /// `ServerboundMovePlayerPacket` family packs into its flags byte:
-    /// `on_ground` and `horizontal_collision`. Both are simulation outputs —
+    /// Carries the same two boolean status bits vanilla's own movement
+    /// packets pack into their flags byte: `on_ground` and
+    /// `horizontal_collision`. Both are simulation outputs —
     /// the caller's physics step decides them — never something a version
     /// adapter should derive on its own. A version adapter that sends
     /// movement at vanilla's own cadence chooses *which* concrete packet
@@ -374,8 +374,8 @@ pub enum ClientAction {
         right: bool,
     },
     /// Report the locally authoritative position of the vehicle the player
-    /// is riding, once per tick while mounted (vanilla's
-    /// `LocalPlayer.tick()` passenger branch).
+    /// is riding, once per tick while mounted — the passenger branch of
+    /// vanilla's own per-tick local-player update.
     MoveVehicle {
         /// Vehicle's absolute position.
         pos: Vec3,
@@ -733,11 +733,11 @@ pub enum StructureRotation {
     CounterClockwise90,
 }
 
-/// A jigsaw block's joint type (`JigsawBlockEntity.JointType`).
+/// A jigsaw block's joint type.
 ///
-/// **Serialized as its lowercase name, not as an ordinal** —
-/// `ServerboundSetJigsawBlockPacket` writes `joint.getSerializedName()` and the
-/// server falls back to [`Self::Aligned`] for anything it does not recognise.
+/// **Serialized as its lowercase name, not as an ordinal** — the packet writes
+/// the joint's serialized-name string, and the server falls back to
+/// [`Self::Aligned`] for anything it does not recognise.
 /// That is the one field of this packet a transliterated "everything is a
 /// VarInt enum" encoder would get wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
