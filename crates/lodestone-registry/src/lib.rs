@@ -165,6 +165,15 @@ const FAMILIES: &[Family] = &[
         protocols: lodestone_v1_19::PROTOCOLS,
         make: |protocol| Box::new(lodestone_v1_19::adapter_for(protocol)),
     },
+    #[cfg(feature = "v1-20-6")]
+    Family {
+        label: "v1-20-6",
+        // 766 -- Minecraft 1.20.5 and 1.20.6, one wire version for two
+        // releases. Read off the jar's own metadata and then off the crate,
+        // never off the folder name.
+        protocols: lodestone_v1_20_6::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v1_20_6::adapter_for(protocol)),
+    },
 ];
 
 /// Resolves `protocol` against an arbitrary family table.
@@ -226,7 +235,7 @@ struct PhysicsFamily {
 ///   site hardcoded `mc_1_21()` unconditionally, which happened to be correct
 ///   only because `v26-2` was the only family ever actually joined.
 /// - **`v1-9` (1.9.4-1.12.2), `v1-13` (1.13.2), `v1-14` (1.14.4-1.16.5) and
-///   `v1-17` (1.17.1-1.18.2), `v1-19` (1.19.4) →
+///   `v1-17` (1.17.1-1.18.2), `v1-19` (1.19.4), `v1-20-6` (1.20.5-1.20.6) →
 ///   `mc_1_21`, as an approximation, not a validated fit.** None of the three
 ///   vanilla eras is a clean match for either profile: all post-date the 1.9
 ///   input-pipeline rewrite ([`InputModel::UnitSquareProjection`], which
@@ -277,6 +286,11 @@ const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
     #[cfg(feature = "v1-19")]
     PhysicsFamily {
         protocols: lodestone_v1_19::PROTOCOLS,
+        profile: lodestone_physics::PhysicsProfile::mc_1_21,
+    },
+    #[cfg(feature = "v1-20-6")]
+    PhysicsFamily {
+        protocols: lodestone_v1_20_6::PROTOCOLS,
         profile: lodestone_physics::PhysicsProfile::mc_1_21,
     },
 ];
@@ -419,7 +433,8 @@ mod tests {
             feature = "v1-13",
             feature = "v1-14",
             feature = "v1-17",
-            feature = "v1-19"
+            feature = "v1-19",
+            feature = "v1-20-6"
         ))) {
             assert!(compiled_families().is_empty());
             assert!(adapter_for_protocol(47).is_none());
