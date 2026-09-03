@@ -802,9 +802,6 @@ fn decode_single_nbt_text(payload: &[u8]) -> Result<Text, AdapterError> {
 /// Delta-position scale: each `i16` is `1/4096` of a block.
 const MOVE_DELTA_SCALE: f64 = 4096.0;
 
-/// Velocity scale: each `i16` is `1/8000` of a block per tick.
-const VELOCITY_SCALE: f64 = 8000.0;
-
 /// Converts a signed-byte angle to degrees (256 steps per full circle).
 fn unpack_degrees(packed: i8) -> f32 {
     lodestone_core::unpack_degrees(packed)
@@ -1303,16 +1300,16 @@ impl V774Adapter {
             })?
             .parse()
             .map_err(|_| AdapterError::Decode(format!("entity type id {type_id} is not a key")))?;
-        // Velocity is always on the wire, but a stationary entity still
-        // reports zero; forward `None` only when every component is zero, to
-        // match "no motion" rather than "explicit zero motion".
-        let velocity = if body.velocity_x == 0 && body.velocity_y == 0 && body.velocity_z == 0 {
+        // Velocity is always on the wire, but this era spells a stationary
+        // entity's as a single zero byte; forward `None` for it, to match "no
+        // motion" rather than "explicit zero motion".
+        let velocity = if body.velocity.is_zero() {
             None
         } else {
             Some(Vec3::new(
-                f64::from(body.velocity_x) / VELOCITY_SCALE,
-                f64::from(body.velocity_y) / VELOCITY_SCALE,
-                f64::from(body.velocity_z) / VELOCITY_SCALE,
+                body.velocity.x,
+                body.velocity.y,
+                body.velocity.z,
             ))
         };
         Ok(vec![Directive::Emit(ClientEvent::EntitySpawned {
@@ -1439,11 +1436,7 @@ impl V774Adapter {
         let body: SetEntityMotion = adapter.decode_body(payload)?;
         Ok(vec![Directive::Emit(ClientEvent::EntityVelocity {
             entity_id: body.entity_id,
-            velocity: Vec3::new(
-                f64::from(body.velocity_x) / VELOCITY_SCALE,
-                f64::from(body.velocity_y) / VELOCITY_SCALE,
-                f64::from(body.velocity_z) / VELOCITY_SCALE,
-            ),
+            velocity: Vec3::new(body.velocity.x, body.velocity.y, body.velocity.z),
         })])
     }
 
