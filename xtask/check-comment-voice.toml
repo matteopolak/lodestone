@@ -1606,100 +1606,10 @@ owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
 
 [[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 9
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 10
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 32
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 56
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 61
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 67
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 68
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 71
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 76
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 77
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 660
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 701
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 734
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
-file = "xtask/src/comment_voice.rs"
-line = 1008
-owner = "issue-553"
-reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
-
-[[allow]]
 file = "xtask/src/lib.rs"
-line = 8281
+text = "#12/#72/#98/#121"
 owner = "issue-553"
-reason = "verbatim reproduction of the exact issue-reference-shaped text a real ATX-heading regression test must reproduce to prove the fix; not a citation of a real issue"
-
-[[allow]]
-file = "xtask/src/lib.rs"
-line = 10844
-owner = "issue-553"
-reason = "verbatim reproduction of the exact issue-reference-shaped text a real ATX-heading regression test must reproduce to prove the fix; not a citation of a real issue"
+reason = "verbatim reproduction of the exact issue-reference-shaped text a real ATX-heading regression test must reproduce to prove the fix; not a citation of a real issue. Keyed on text, not line: both entries were pinned at 8281/10844 and broke the same day when an unrelated edit ten lines above pushed them to 8291/10854"
 
 [[allow]]
 file = "docs/repo-tooling.md"

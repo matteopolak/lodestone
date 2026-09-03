@@ -93,8 +93,11 @@
 //! (`xtask/check-comment-voice.toml`) is a `[[allow]]`-entry TOML-subset
 //! file, each entry requiring a non-empty `owner` and `reason` so an
 //! exception is a recorded decision. An entry names a `file` (relative to
-//! the workspace root) and may optionally narrow to one `line`; omitting
-//! `line` allows every hit in that file. This is deliberately coarser than
+//! the workspace root) and may optionally narrow it, either by `text` (a
+//! substring of the masked comment) or by `line`. **Prefer `text`**: a line
+//! number breaks whenever anything above it moves, which in a checkout
+//! several agents edit at once means the guard fails on hits it was told to
+//! allow. Omitting both allows every hit in that file. This is deliberately coarser than
 //! `check-ptr-const`'s per-call-site precision, because the volume this
 //! scanner starts from (thousands of pre-existing issue references) is
 //! cleared file-by-file and crate-by-crate, not line-by-line in one pass —
@@ -120,6 +123,19 @@ const EXCLUDED_DIR_NAMES: &[&str] = &["target", ".git", ".cache", "node_modules"
 /// day this guard was added (excluding the dirs above); set well under
 /// that, mirroring `check-ptr-const`'s `MIN_FILES_SCANNED`.
 const MIN_FILES_SCANNED: usize = 1500;
+
+/// This scanner's own source, excluded from its own scan.
+///
+/// A detector necessarily contains every pattern it detects: the file that
+/// knows to flag `this PR` has to spell `this PR`. Allowlisting each such
+/// line instead was tried first and cost ten entries that all broke the
+/// moment anything above them moved. `scripts/clean-room-census.py` excludes
+/// itself for exactly this reason and says so in its own header.
+///
+/// The cost is real and worth naming: a genuine comment-voice defect in this
+/// one file goes unseen. That is preferable to a guard whose self-entries
+/// rot, because a guard that reports false failures gets switched off.
+const SELF_SOURCE: &str = "xtask/src/comment_voice.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PatternKind {
@@ -192,6 +208,16 @@ impl Report {
 struct AllowEntry {
     file: String,
     line: Option<usize>,
+    /// Matches on the hit's masked comment text instead of its line number.
+    ///
+    /// A line number is a poor key in a shared checkout: any edit ABOVE a
+    /// pinned line silently invalidates the entry, and the guard then fails
+    /// on a hit it was told to allow. That happened the first day this
+    /// scanner ran -- two entries pinned at 8281/10844 broke when an
+    /// unrelated change ten lines earlier pushed the same comments to
+    /// 8291/10854. A guard that cries wolf gets switched off, so prefer
+    /// `text`; it survives arbitrary movement within the file.
+    text: Option<String>,
     owner: String,
     reason: String,
 }
@@ -201,6 +227,7 @@ fn parse_allowlist(contents: &str) -> Result<Vec<AllowEntry>> {
     struct Builder {
         file: Option<String>,
         line: Option<usize>,
+        text: Option<String>,
         owner: Option<String>,
         reason: Option<String>,
     }
@@ -228,6 +255,7 @@ fn parse_allowlist(contents: &str) -> Result<Vec<AllowEntry>> {
         out.push(AllowEntry {
             file,
             line: builder.line,
+            text: builder.text,
             owner,
             reason,
         });
@@ -262,6 +290,7 @@ fn parse_allowlist(contents: &str) -> Result<Vec<AllowEntry>> {
             "file" => builder.file = Some(parse_toml_string(raw_value)?),
             "owner" => builder.owner = Some(parse_toml_string(raw_value)?),
             "reason" => builder.reason = Some(parse_toml_string(raw_value)?),
+            "text" => builder.text = Some(parse_toml_string(raw_value)?),
             "line" => {
                 let n: usize = raw_value
                     .parse()
@@ -277,7 +306,7 @@ fn parse_allowlist(contents: &str) -> Result<Vec<AllowEntry>> {
 
     let mut seen = BTreeSet::new();
     for entry in &out {
-        let key = (entry.file.clone(), entry.line);
+        let key = (entry.file.clone(), entry.line, entry.text.clone());
         if !seen.insert(key) {
             bail!(
                 "duplicate check-comment-voice allowlist entry for {:?} line {:?}",
@@ -807,6 +836,9 @@ fn scan_paths(files: &[PathBuf], workspace_root: &Path) -> Result<Report> {
             .unwrap_or(path)
             .to_string_lossy()
             .replace('\\', "/");
+        if rel == SELF_SOURCE {
+            continue;
+        }
         let text = match std::fs::read_to_string(path) {
             Ok(text) => text,
             // A shared checkout: tolerate a file vanishing mid-walk, as
@@ -850,7 +882,17 @@ fn apply_allowlist(report: &mut Report, entries: &[AllowEntry]) {
     for hit in &mut report.hits {
         if let Some(pos) = entries
             .iter()
-            .position(|e| e.file == hit.file && (e.line.is_none() || e.line == Some(hit.line)))
+            .position(|e| {
+                e.file == hit.file
+                    && match (e.text.as_deref(), e.line) {
+                        // `text` is checked first and on its own: it is the
+                        // drift-proof key, so an entry carrying one is not
+                        // also bound to a line that will move.
+                        (Some(text), _) => hit.snippet.contains(text),
+                        (None, Some(line)) => line == hit.line,
+                        (None, None) => true,
+                    }
+            })
         {
             used[pos] = true;
             hit.allowed = Some(AllowedBy {
@@ -863,9 +905,10 @@ fn apply_allowlist(report: &mut Report, entries: &[AllowEntry]) {
         .iter()
         .zip(used)
         .filter(|(_, used)| !used)
-        .map(|(e, _)| match e.line {
-            Some(l) => format!("{}:{l}", e.file),
-            None => e.file.clone(),
+        .map(|(e, _)| match (&e.text, e.line) {
+            (Some(t), _) => format!("{} text={t:?}", e.file),
+            (None, Some(l)) => format!("{}:{l}", e.file),
+            (None, None) => e.file.clone(),
         })
         .collect();
 }
