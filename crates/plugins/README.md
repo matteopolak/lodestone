@@ -55,6 +55,7 @@ repo-wide claim.
 | `lodestone-plugin-support` | shared, non-engine conveniences: a per-plugin data directory and typed config helper (`paths`/`config`), and an in-memory namespaced key-value store attachable to an entity or a chunk (`persistent_data`). `MIT OR Apache-2.0`, no licensing table row needed. |
 | `lodestone-worldedit` | a WorldEdit-class bulk-edit plugin: region fill/replace with a per-session undo/redo stack, built on `lodestone_world::World::fill_region_capturing` and `lodestone_ecs::ChunkWorldWrite`. `MIT OR Apache-2.0`, no licensing table row needed. |
 | `lodestone-key-toggle` | a toy input-interception plugin (the `PluginKeybinds`/`PluginKeyEvent` registration point work): claims one physical key in `Consume` mode and flips a shared flag on every press, reached through a real `TickSet::Input`/`GameTick` schedule rather than called directly. `MIT OR Apache-2.0`, no licensing table row needed. |
+| `lodestone-block-jobs` | a queued `BreakIntent`/`PlaceIntent` producer: the first production consumer of the intent doctrine's write side (both components previously had zero non-test call sites). Runs one submitted `BlockJob` at a time through a real `TickSet::Intent` system, polling `BreakOutcome`/`PlaceOutcome` for completion. `MIT OR Apache-2.0`, no licensing table row needed. |
 
 `lodestone-nav`/`lodestone-autopilot` are documented in
 [`docs/autonomous-navigation.md`](../../docs/autonomous-navigation.md), against the
@@ -68,3 +69,5 @@ priority ordering" section.
 [`docs/worldedit-plugin.md`](../../docs/worldedit-plugin.md).
 `lodestone-key-toggle` is documented in
 [`docs/plugin-api.md`](../../docs/plugin-api.md)'s input-interception section.
+`lodestone-block-jobs` is documented in
+[`docs/plugin-api.md`](../../docs/plugin-api.md)'s "The intent doctrine" section.
