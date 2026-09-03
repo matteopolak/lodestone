@@ -271,6 +271,55 @@ click resolution for a non-zero window (a client's own predicted diff is
 applied verbatim); and nothing sends `container_close` when the block backing
 an open window is broken out from under it.
 
+### Why placement resolution is two functions
+
+`block_entity_for_item` matches an item id down to a small `PlacedBlockEntity`
+descriptor (`placed_block_entity_for_item`), and only
+`PlacedBlockEntity::instantiate` ever builds a `BlockEntity`. The split is a
+stack-frame constraint rather than taste, and collapsing it back into one match
+breaks unrelated suites in a way that looks nothing like this code.
+
+A debug build gives every arm of a `match` its own stack slot for that arm's
+temporaries, so such a frame is the *sum* over the arms rather than the largest
+of them. `size_of::<BlockEntity>()` is 16,504 bytes — its `Crafter` variant
+holds an inline `[Option<ItemStack>; 9]`, and `size_of::<ItemStack>()` is 1,832
+on its own — so a single forty-arm item-id match materialising one `BlockEntity`
+per arm reserves 1,357,056 bytes in its prologue, more than a default thread
+stack. The symptom is a stack overflow inside a single frame, with no recursion
+anywhere: *calling* the function is enough to abort the process. Split in two, the same
+call path reserves 33,200 + 17,392 = 50,592 bytes across the two frames that are
+live at once. Boxing the payload is not an alternative — `Box::new(expr)`
+evaluates `expr` into a stack temporary before the move, so each arm still
+reserves its 16,504 bytes.
+
+Read the frame, do not estimate it. It is the `sub sp, sp, …` immediate (or, for
+a frame over a page, the bound of the probe loop that precedes it) in the
+prologue:
+
+```bash
+ar x target/debug/liblodestone_server.rlib   # rlib members are the objects
+llvm-objdump -d --disassemble-symbols=<mangled symbol> <member>.o | head -20
+```
+
+A census over every member of the rlib finds the sibling frames, all downstream
+of that same 16,504-byte enum: `BlockEntityRegistry::tick_hopper` (200,080 — it
+holds three `Option<BlockEntity>` across its remove/tick/reinsert),
+`chunk_nbt::block_entity_from_nbt` (153,584), `structure_loot::chests_for_chunk`
+(101,104), and the `HashMap::insert`/`Vec` collect instantiations over
+`(BlockPos, BlockEntity)` (about 66,000 each). None is overflow-scale alone. The
+one change that shrinks all of them at once is boxing `BlockEntity::Crafter`'s
+slot array, which drops the enum to the `Furnace` variant's ~5.5 KB; it touches
+every `Crafter { .. }` pattern in the crate and is deliberately not part of the
+overflow fix.
+
+`block_entities::tests::resolving_a_placement_fits_a_modest_stack` is the guard,
+since the type system cannot state "this frame stays small" and the regression
+is invisible until some unrelated suite dies. It re-execs the test binary and
+resolves one item per descriptor variant on a thread holding
+`PLACEMENT_STACK_BUDGET`; an over-budget frame trips that thread's guard page,
+and running it in a child turns the resulting abort into a named assertion in
+the parent rather than a bare `SIGABRT` that takes the whole suite with it.
+
 ### Bone meal
 
 `apply_bone_meal(state, above_state, rng)` is a pure decide-then-apply
