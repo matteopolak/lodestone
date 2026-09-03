@@ -261,16 +261,33 @@ server had already overruled, and the speed check is what names it: measured
 on the survival oracle, a stale claim of the pre-teleport pose reported a
 vertical term of 153 blocks against a target 153 blocks above it.
 
-That stale claim is a real window and it is closed at **both** ends of the
-outbound action channel (`net.rs`: `NetClient::send_action` and the net loop's
-own drain). Staleness is a property of the moment a movement action was
-*built*, not of the moment it is drained, and the two are up to a full net-loop
-iteration apart — so a rewrite that only consults the teleport bookkeeping at
-drain time reads "level with the server" for an action built before the
-simulation adopted the teleport, and waves it through after the confirmation
-for that teleport is already on the wire. Measured margin on the oracle: 1.0 ms
-either way, i.e. a coin flip, with the server answering the losing side with a
-corrective teleport.
+That stale claim is a real window, and closing it takes a rewrite at **three**
+points because a movement action crosses three queues on its way out: the
+simulation's own action channel (`net.rs`, `NetClient::send_action`), the net
+loop's drain of it, and the driver's queue inside the client
+(`V770Adapter::select_move_packet`). Staleness is a property of the moment an
+action was *built*, not of the moment it is drained, and each pair of adjacent
+points is up to a full loop iteration apart — so a rewrite that only consults
+the teleport bookkeeping at one of them reads "level with the server" for an
+action built before the simulation adopted the teleport, and waves it through
+after the confirmation is already on the wire.
+
+**The last of the three is the one that actually guarantees it**, and the
+measurements say so. Rewriting at the first two alone still left five
+corrections in twelve teleports against the oracle, because the driver writes
+the confirmation the instant the packet decodes while an action that had
+already left the shell sits in its queue and is encoded afterwards — out of
+reach of everything upstream. The adapter's movement mutex is where the
+confirmation is recorded, so it is the last point that can see both; it rewrites
+the first move after an absolute teleport onto that teleport's target whenever
+the claim lands more than a block away (one tick of real movement is well under
+half a block, so nothing legitimate is inside that branch). The two upstream
+rewrites are kept rather than deleted: each closes an ordering the next one down
+cannot see, all three write the same pose, so applying them together is
+idempotent. A relative teleport authorises no absolute target and therefore
+*clears* the yardstick — the previous target is where the player was before the
+relative move, so snapping a later claim onto it would be worse than doing
+nothing.
 
 `crates/lodestone-shell/tests/live/live_edge_back_off_rubber_band.rs` is the
 live confirmation of all of it against the survival oracle: sneaking at a real

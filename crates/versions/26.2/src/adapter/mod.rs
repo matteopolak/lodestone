@@ -504,6 +504,48 @@ impl V770Adapter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
+        // **The first movement packet after a teleport must claim that
+        // teleport's own target**, and this is the only place in the client
+        // that can guarantee it. A vanilla client applies the pose, confirms
+        // the teleport and sends its next movement packet on one thread, so a
+        // claim built from the pre-teleport pose cannot exist there. Here the
+        // shell's pose lives on the frame thread, three queues upstream of this
+        // one, and the driver writes the confirmation the instant the packet
+        // decodes — so a movement action that had already left the shell sits
+        // in the driver's own queue and is encoded *after* the confirmation,
+        // still claiming where the player used to be. Neither end of the
+        // shell's channel can reach that action any more; this mutex, which the
+        // confirmation itself is recorded under, is the last point that can.
+        //
+        // Measured against the survival oracle before this held: the server
+        // answered such a claim with `moved too quickly!` and a corrective
+        // teleport on roughly half of all teleports, reading a vertical term of
+        // exactly the distance from the old pose to the target — the *speed*
+        // rule, which unlike the positional-disagreement rule does not zero the
+        // vertical component.
+        //
+        // Only the first move is rewritten, and only past
+        // [`xfer::STALE_MOVE_BLOCKS`]: one tick of real movement is well under
+        // half a block, so nothing a simulation that had adopted the teleport
+        // could legitimately produce is inside this branch.
+        let stale_claim = state.moves_since_teleport == 0
+            && state
+                .last_teleport
+                .is_some_and(|teleport| teleport.distance_to(pos) > xfer::STALE_MOVE_BLOCKS);
+        let claimed = pos;
+        let pos = match state.last_teleport {
+            Some(teleport) if stale_claim => teleport.target,
+            _ => pos,
+        };
+        // Vanilla's own post-teleport send passes `false` for both rather than
+        // forwarding what the client last computed, and the flags below are
+        // built from these two.
+        let (on_ground, horizontal_collision) = if stale_claim {
+            (false, false)
+        } else {
+            (on_ground, horizontal_collision)
+        };
+
         let delta_x = pos.x - state.last_pos.x;
         let delta_y = pos.y - state.last_pos.y;
         let delta_z = pos.z - state.last_pos.z;
@@ -592,10 +634,12 @@ impl V770Adapter {
         if let Some((packet_id, _)) = packet.as_ref() {
             let teleport = state.last_teleport;
             let distance = teleport.map(|teleport| teleport.distance_to(pos));
-            let stale = state.moves_since_teleport == 0
-                && distance.is_some_and(|distance| distance > xfer::STALE_MOVE_BLOCKS);
             let seq = xfer::next_seq();
-            if stale {
+            if stale_claim {
+                // `x`/`y`/`z` are what actually went on the wire, so they are
+                // the teleport's own target and `dist_from_teleport` is zero;
+                // the interesting number is `claimed`, the position the
+                // simulation had built and this send replaced.
                 tracing::warn!(
                     target: "transfer",
                     seq,
@@ -608,9 +652,12 @@ impl V770Adapter {
                     teleport_seq = teleport.map(|teleport| teleport.seq),
                     teleport_id = teleport.map(|teleport| teleport.id),
                     dist_from_teleport = distance,
-                    "xfer: move packet -- FIRST move after a teleport claims a \
-                     position far from the teleport target; the server will read \
-                     this as movement it did not authorise"
+                    claimed_x = claimed.x,
+                    claimed_y = claimed.y,
+                    claimed_z = claimed.z,
+                    "xfer: move packet -- FIRST move after a teleport was built from a \
+                     pre-teleport pose and has been rewritten to the teleport target; the \
+                     server would have read the original as movement it did not authorise"
                 );
             } else {
                 tracing::debug!(
@@ -661,13 +708,16 @@ impl V770Adapter {
     /// `ACCEPT_TELEPORTATION`, and emits the `transfer` target's inbound line.
     ///
     /// `absolute_target` is `Some` only when every positional component of the
-    /// packet's `relatives` mask was absolute; a relative teleport leaves the
-    /// previous yardstick in place rather than inventing one, because this
-    /// adapter holds no player position to resolve a delta against. See
-    /// [`xfer`]'s module doc.
+    /// packet's `relatives` mask was absolute; a relative teleport **clears**
+    /// the yardstick rather than inventing one, because this adapter holds no
+    /// player position to resolve a delta against. See [`xfer`]'s module doc.
     ///
-    /// Diagnostic only: nothing in the encode or decode path reads what this
-    /// stores.
+    /// Clearing, not keeping: a relative teleport has moved the player away
+    /// from the previous absolute target, so measuring the next claim against
+    /// that target answers a question nobody asked. That was merely misleading
+    /// while this state only chose a log level; it would be wrong now that
+    /// [`V770Adapter::select_move_packet`] rewrites a first post-teleport claim
+    /// onto the target it finds here.
     pub(super) fn note_accepted_teleport(
         &self,
         id: i32,
@@ -693,9 +743,8 @@ impl V770Adapter {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.moves_since_teleport = 0;
-        if let Some(target) = absolute_target {
-            state.last_teleport = Some(xfer::AcceptedTeleport { seq, id, target });
-        }
+        state.last_teleport =
+            absolute_target.map(|target| xfer::AcceptedTeleport { seq, id, target });
     }
 }
 

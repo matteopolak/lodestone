@@ -338,3 +338,194 @@ fn move_is_not_selected_outside_play_state() {
         .expect("encode");
     assert_eq!(encoded, None, "movement is a play-state action only");
 }
+
+// ---------------------------------------------------------------------------
+// The first move after a teleport
+// ---------------------------------------------------------------------------
+
+/// A [`WorldSink`] that ignores everything — a teleport is not terrain.
+#[derive(Default)]
+struct NullSink;
+
+impl lodestone_world::WorldSink for NullSink {
+    fn load(&mut self, _pos: lodestone_world::ChunkPos, _chunk: lodestone_world::LoadedChunk) {}
+    fn merge(&mut self, _pos: lodestone_world::ChunkPos, _patch: lodestone_world::ColumnPatch) {}
+    fn set_block(&mut self, _x: i32, _y: i32, _z: i32, _state: u32) {}
+    fn set_blocks(
+        &mut self,
+        _section_x: i32,
+        _section_y: i32,
+        _section_z: i32,
+        _blocks: &[(u8, u8, u8, u32)],
+    ) {
+    }
+    fn merge_light(&mut self, _pos: lodestone_world::ChunkPos, _patch: lodestone_world::LightPatch) {
+    }
+    fn merge_biomes(
+        &mut self,
+        _pos: lodestone_world::ChunkPos,
+        _patch: lodestone_world::BiomePatch,
+    ) {
+    }
+    fn unload(&mut self, _pos: lodestone_world::ChunkPos) {}
+    fn set_block_entity(&mut self, _x: i32, _y: i32, _z: i32, _type_id: u32, _nbt: lodestone_core::Nbt) {}
+    fn sync_block_entity(
+        &mut self,
+        _x: i32,
+        _y: i32,
+        _z: i32,
+        _block_entity_type: Option<u32>,
+    ) -> lodestone_world::BlockEntitySync {
+        lodestone_world::BlockEntitySync::ChunkAbsent
+    }
+}
+
+/// Hand-built clientbound teleport body: varint id, absolute `x`/`y`/`z`,
+/// a delta-movement triple this adapter discards, `f32` yaw and pitch, then the
+/// `relatives` mask. Built here from `to_be_bytes` rather than from any encoder
+/// in the crate under test.
+fn player_position_payload(id: u8, x: f64, y: f64, z: f64, relatives: i32) -> Vec<u8> {
+    assert!(id < 0x80, "single-byte varint only");
+    let mut bytes = vec![id];
+    for value in [x, y, z, 0.0, 0.0, 0.0] {
+        bytes.extend_from_slice(&value.to_be_bytes());
+    }
+    bytes.extend_from_slice(&0.0f32.to_be_bytes());
+    bytes.extend_from_slice(&0.0f32.to_be_bytes());
+    bytes.extend_from_slice(&relatives.to_be_bytes());
+    bytes
+}
+
+fn accept_teleport(adapter: &V770Adapter, id: u8, target: Vec3, relatives: i32) {
+    adapter
+        .handle_packet(
+            &mut NullSink,
+            ConnectionState::Play,
+            play::clientbound::PLAYER_POSITION,
+            &player_position_payload(id, target.x, target.y, target.z, relatives),
+        )
+        .expect("handle teleport");
+}
+
+/// The teleport target used below. Deliberately 151 blocks above the baseline
+/// pose and one block off in `z`, the shape the survival oracle actually
+/// produced — a rewrite that quietly did nothing could not pass for a correct
+/// one against a target a hand's breadth away.
+const TELEPORT_TARGET: Vec3 = Vec3 {
+    x: -44.5,
+    y: 220.0,
+    z: -376.5,
+};
+
+/// **The invariant**: once this adapter has confirmed a teleport, the next
+/// movement packet it writes claims that teleport's target, whatever pose the
+/// simulation upstream had already built its claim from.
+///
+/// A vanilla client cannot violate this — it applies the pose, confirms, and
+/// sends, on one thread. Ours can: the confirmation is written the instant the
+/// packet decodes, while a movement action built from the old pose may already
+/// be sitting in the driver's queue, three hops downstream of the simulation
+/// and out of reach of everything above. The real server answers such a claim
+/// with a corrective teleport (its speed rule, which unlike its
+/// positional-disagreement rule does not zero the vertical component), so
+/// getting this wrong rubber-bands the player on ordinary teleports.
+#[test]
+fn the_first_move_after_a_teleport_claims_the_teleport_target_not_the_stale_pose() {
+    let adapter = V770Adapter::new();
+    establish_baseline(&adapter);
+
+    accept_teleport(&adapter, 7, TELEPORT_TARGET, 0);
+
+    // The claim the simulation had already built: still the pre-teleport pose.
+    let encoded = adapter
+        .encode_action(
+            ConnectionState::Play,
+            &move_action(BASE_POS, BASE_ROT, true, true),
+        )
+        .expect("encode move")
+        .expect("a move this far from the last sent position always sends");
+
+    // `PosRot` is not asserted here — rotation dirtiness is the sibling tests'
+    // subject. What matters is the three coordinates and the flags byte.
+    let (packet_id, body) = encoded;
+    assert_eq!(packet_id, play::serverbound::MOVE_PLAYER_POS);
+    let decoded: MovePlayerPos = decode(&body);
+    assert_eq!(
+        (decoded.x, decoded.y, decoded.z),
+        (TELEPORT_TARGET.x, TELEPORT_TARGET.y, TELEPORT_TARGET.z),
+        "the first move after a teleport must claim the target, not the pose the simulation \
+         still held"
+    );
+    assert_eq!(
+        decoded.flags, 0x00,
+        "vanilla's own post-teleport send passes neither on-ground nor horizontal-collision, \
+         whatever the caller computed"
+    );
+}
+
+/// The control for the test above: the same adapter, the same teleport, and a
+/// claim that is *already* the target moved by one ordinary tick is left
+/// exactly as the caller built it. Without this, a rewrite that fired on every
+/// move would pass the test above and destroy all movement.
+#[test]
+fn a_first_move_that_already_agrees_with_the_teleport_is_left_alone() {
+    let adapter = V770Adapter::new();
+    establish_baseline(&adapter);
+
+    accept_teleport(&adapter, 8, TELEPORT_TARGET, 0);
+
+    // One tick of free fall from the target: 0.0784 blocks, far inside the
+    // one-block staleness threshold and far outside the send-dirty epsilon.
+    let honest = Vec3 {
+        x: TELEPORT_TARGET.x,
+        y: TELEPORT_TARGET.y - 0.0784,
+        z: TELEPORT_TARGET.z,
+    };
+    let (packet_id, body) = adapter
+        .encode_action(
+            ConnectionState::Play,
+            &move_action(honest, BASE_ROT, false, false),
+        )
+        .expect("encode move")
+        .expect("0.0784 blocks is well past the send-dirty epsilon");
+    assert_eq!(packet_id, play::serverbound::MOVE_PLAYER_POS);
+    let decoded: MovePlayerPos = decode(&body);
+    assert_eq!(
+        (decoded.x, decoded.y, decoded.z),
+        (honest.x, honest.y, honest.z),
+        "a claim that already agrees with the teleport must reach the wire untouched"
+    );
+}
+
+/// A **relative** teleport authorises no absolute target — this adapter holds
+/// no player position to resolve a delta against — so the claim after one is
+/// left alone rather than snapped onto whatever absolute target preceded it.
+/// That target is where the player *was* before the relative move, so writing
+/// it would be worse than doing nothing.
+#[test]
+fn a_relative_teleport_clears_the_target_and_the_next_move_is_untouched() {
+    let adapter = V770Adapter::new();
+    establish_baseline(&adapter);
+
+    accept_teleport(&adapter, 9, TELEPORT_TARGET, 0);
+    // Relative in x, y and z. The mask's exact bit layout is the decoder's
+    // business; what matters is that a nonzero positional mask is not absolute.
+    accept_teleport(&adapter, 10, Vec3 { x: 1.0, y: 2.0, z: 3.0 }, 0b111);
+
+    let claim = Vec3 {
+        x: BASE_POS.x + 5.0,
+        y: BASE_POS.y,
+        z: BASE_POS.z,
+    };
+    let (_, body) = adapter
+        .encode_action(ConnectionState::Play, &move_action(claim, BASE_ROT, true, false))
+        .expect("encode move")
+        .expect("five blocks always sends");
+    let decoded: MovePlayerPos = decode(&body);
+    assert_eq!(
+        (decoded.x, decoded.y, decoded.z),
+        (claim.x, claim.y, claim.z),
+        "a relative teleport must not leave a superseded absolute target behind for the next \
+         claim to be snapped onto"
+    );
+}
