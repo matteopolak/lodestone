@@ -3095,6 +3095,7 @@ dependencies = [
  "lodestone-model",
  "lodestone-physics",
  "lodestone-server",
+ "lodestone-v1-13",
  "lodestone-v1-14",
  "lodestone-v1-8",
  "lodestone-v1-9",

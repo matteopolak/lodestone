@@ -72,13 +72,16 @@ VERSION="${1:-}"
 #   - v1-9 at 1.9.4/1.10.2/1.11.2 (capture_join.rs): a flat world only, so a
 #     join capture is small and its chunk columns are the same shape every
 #     run; nothing there depends on mobs
-#   - v1-13 at 1.13.2 (capture_join.rs): a flat world only, for the same
-#     reason. `FLAT` is still the right spelling here despite 1.13's
-#     namespacing sweep -- measured, by booting with each spelling and reading
-#     the resulting level.dat's generator name back: `FLAT` gives `flat`,
-#     while `minecraft:flat` matches nothing and falls back to `default`
-#     without warning. An unrecognised level-type is silent, not fatal, so
-#     the check is the world, never the log
+#   - v1-13 at 1.13.2 (capture_join.rs, entity_types.rs): a flat world, plus
+#     the same quiet-world properties 1.16.5 uses. `FLAT` is still the right
+#     spelling here despite 1.13's namespacing sweep -- measured, by booting
+#     with each spelling and reading the resulting level.dat's generator name
+#     back: `FLAT` gives `flat`, while `minecraft:flat` matches nothing and
+#     falls back to `default` without warning. An unrecognised level-type is
+#     silent, not fatal, so the check is the world, never the log. The
+#     no-natural-spawn properties are what entity_types.rs's wire oracle needs:
+#     it correlates one `/summon` with one spawn packet, and a naturally
+#     spawning world puts unrelated spawns in the same window
 #   - v1-14 at 1.14.4/1.15.2 (capture_join.rs): a flat world only, so a join
 #     capture is small and its chunk columns are the same shape every run;
 #     nothing there depends on mobs
@@ -123,7 +126,7 @@ case "$VERSION" in
     NAME=lodestone-mc1132
     GAME_PORT=25590
     RCON_PORT=25591
-    EXTRA_PROPS=(level-type=FLAT)
+    EXTRA_PROPS=(level-type=FLAT spawn-monsters=false spawn-animals=false difficulty=peaceful)
     ;;
   1.14.4)
     NAME=lodestone-mc1144
