@@ -64,8 +64,15 @@ check-all:
 # cargo check -p lodestone-shell --no-default-features — the version-seam
 # check. No protocol family is enabled by default; this is the only thing
 # that proves the shell still compiles with NONE of them.
+#
+# The second line is a different claim from the first. Compiling without a
+# family proves the seam; it does not prove the windowing stack is gone,
+# because an unused dependency still compiles fine. check-no-winit-headless
+# asks the resolved dependency graph instead, so a headless or server build
+# cannot quietly start linking winit again.
 check-seam:
     cargo check -p lodestone-shell --no-default-features {{jflag}} --target-dir {{tdir}}
+    cargo run -p xtask -- check-no-winit-headless
 
 # cargo test --workspace --no-fail-fast. Plain `cargo test` stops at the
 # first failing test BINARY, hiding every alphabetically-later crate's
