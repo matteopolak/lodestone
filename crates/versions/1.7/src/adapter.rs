@@ -442,8 +442,19 @@ fn velocity_vec(x: i16, y: i16, z: i16) -> Vec3 {
 ///
 /// This takes the third, and it is checkable rather than asserted: a real
 /// server's own login-success response is the oracle, since that is the server
-/// computing the same value for the same name. `tests/player_list.rs` pins a
-/// recorded name-and-UUID pair from a real join against this function.
+/// computing the same value for the same name. `tests/capture_join.rs` pins it
+/// against a recorded join, comparing this function's output for a name the
+/// *server* chose against the UUID the *server* sent in a different packet of
+/// the same recording — so neither side of that comparison comes from here.
+///
+/// # Why the MD5 is spelled out rather than taken from `Uuid::new_v3`
+///
+/// A version-3 UUID is normally `md5(namespace_bytes ++ name)`, and the `uuid`
+/// crate's constructor has no way to express an *absent* namespace. The
+/// derivation a server uses hashes the bare string bytes with no namespace at
+/// all, so `Uuid::new_v3` with any namespace — the nil UUID included, which
+/// prepends sixteen zero bytes — produces a different, silently wrong value.
+/// The version and variant bits are then stamped exactly as version 3 requires.
 ///
 /// **It is wrong against an online-mode server**, where the real UUID is
 /// assigned centrally and unrelated to the name. It is right for the only kind
@@ -456,10 +467,12 @@ fn velocity_vec(x: i16, y: i16, z: i16) -> Vec3 {
 /// UUID.
 #[must_use]
 pub fn offline_player_uuid(name: &str) -> uuid::Uuid {
-    uuid::Uuid::new_v3(
-        &uuid::Uuid::NAMESPACE_OID,
-        format!("OfflinePlayer:{name}").as_bytes(),
-    )
+    use md5::Digest as _;
+
+    let mut digest: [u8; 16] = md5::Md5::digest(format!("OfflinePlayer:{name}").as_bytes()).into();
+    digest[6] = (digest[6] & 0x0f) | 0x30;
+    digest[8] = (digest[8] & 0x3f) | 0x80;
+    uuid::Uuid::from_bytes(digest)
 }
 
 /// Applies one decoded column to the world and returns its notification.
