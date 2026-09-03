@@ -156,6 +156,43 @@ pub struct FlatLayer<'a> {
     pub height: i32,
 }
 
+/// One layer of vanilla's own flat generator, read back — the owned
+/// counterpart of [`FlatLayer`] (which
+/// [`WorldGenSettings::with_overworld_flat_generator`] only ever borrows
+/// from its caller; a reader has no caller-owned string to borrow from).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadFlatLayer {
+    pub block: String,
+    pub height: i32,
+}
+
+/// The overworld dimension's `"generator"` field, classified — the
+/// read-back counterpart of
+/// [`WorldGenSettings::with_overworld_flat_generator`]/
+/// [`WorldGenSettings::with_overworld_fixed_biome_generator`]. See
+/// [`WorldGenSettings::overworld_generator`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum OverworldGenerator {
+    /// `type: "minecraft:flat"` — the "Customize Type" screen's Flat half.
+    Flat {
+        /// Bottom-to-top, matching [`FlatLayer`]'s own order.
+        layers: Vec<ReadFlatLayer>,
+        biome: String,
+        features: bool,
+        lakes: bool,
+    },
+    /// `type: "minecraft:noise"` with a `biome_source.type: "minecraft:fixed"`
+    /// — the "Customize Type" screen's Single Biome half.
+    FixedBiome { biome: String },
+    /// A `generator` field this crate does not classify further: a real
+    /// `minecraft:noise` overworld with its own biome-parameter source
+    /// (`Normal`/`LargeBiomes`/`Amplified`, whose generator this crate
+    /// already reconstructs from `seed` alone and needs no on-disk
+    /// override for), or an unrecognized shape. Distinct from this method
+    /// returning `None`, which means no `generator` field exists at all.
+    Other,
+}
+
 /// A parsed `world_gen_settings.dat`: the full root NBT tree, preserved as-is
 /// so a field this crate does not model (notably `dimensions`) survives a
 /// read/modify/write cycle.
@@ -384,6 +421,95 @@ impl WorldGenSettings {
         ]);
         self.set_overworld_generator(generator);
         self
+    }
+
+    /// Classifies the overworld dimension's `"generator"` field — the
+    /// inverse of [`Self::with_overworld_flat_generator`]/
+    /// [`Self::with_overworld_fixed_biome_generator`], and the read-back a
+    /// world's launch path needs: it finds out what the "Customize Type"
+    /// screen actually chose, instead of falling back to a bundled default
+    /// regardless of the player's choice.
+    ///
+    /// `None` when there is no `data`/`dimensions`/`minecraft:overworld`/
+    /// `generator` field at all — a settings file [`Self::from_seed`] wrote
+    /// with no `dimensions` compound, before any customization landed.
+    /// [`OverworldGenerator::Other`] is the *present-but-not-Flat-or-
+    /// FixedBiome* case (a real vanilla `Normal`/`LargeBiomes`/`Amplified`
+    /// world's own `minecraft:noise` generator, whose `biome_source` is not
+    /// `minecraft:fixed`) — verified against four real 26.2 worlds' own
+    /// files, two shapes each: `minecraft:flat` with the bundled Classic
+    /// Flat layer stack, and `minecraft:noise` with a
+    /// `minecraft:multi_noise` biome source that must **not** be
+    /// misclassified as `FixedBiome`.
+    #[must_use]
+    pub fn overworld_generator(&self) -> Option<OverworldGenerator> {
+        let data = self.data()?;
+        let dimensions = compound_field(data, "dimensions")?;
+        let overworld = compound_field(dimensions, "minecraft:overworld")?;
+        let generator = compound_field(overworld, "generator")?;
+        let Some(Nbt::String(kind)) = compound_field(generator, "type") else {
+            return Some(OverworldGenerator::Other);
+        };
+        match kind.as_str() {
+            "minecraft:flat" => {
+                let Some(settings) = compound_field(generator, "settings") else {
+                    return Some(OverworldGenerator::Other);
+                };
+                let Some(Nbt::String(biome)) = compound_field(settings, "biome") else {
+                    return Some(OverworldGenerator::Other);
+                };
+                let features =
+                    matches!(compound_field(settings, "features"), Some(Nbt::Byte(b)) if *b != 0);
+                let lakes =
+                    matches!(compound_field(settings, "lakes"), Some(Nbt::Byte(b)) if *b != 0);
+                let layers = match compound_field(settings, "layers") {
+                    Some(Nbt::List { elements, .. }) => elements
+                        .iter()
+                        .filter_map(|element| {
+                            let Nbt::Compound(_) = element else {
+                                return None;
+                            };
+                            let Some(Nbt::String(block)) = compound_field(element, "block") else {
+                                return None;
+                            };
+                            let Some(Nbt::Int(height)) = compound_field(element, "height") else {
+                                return None;
+                            };
+                            Some(ReadFlatLayer {
+                                block: block.clone(),
+                                height: *height,
+                            })
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                Some(OverworldGenerator::Flat {
+                    layers,
+                    biome: biome.clone(),
+                    features,
+                    lakes,
+                })
+            }
+            "minecraft:noise" => {
+                let Some(biome_source) = compound_field(generator, "biome_source") else {
+                    return Some(OverworldGenerator::Other);
+                };
+                let is_fixed = matches!(
+                    compound_field(biome_source, "type"),
+                    Some(Nbt::String(s)) if s == "minecraft:fixed"
+                );
+                if !is_fixed {
+                    return Some(OverworldGenerator::Other);
+                }
+                match compound_field(biome_source, "biome") {
+                    Some(Nbt::String(biome)) => {
+                        Some(OverworldGenerator::FixedBiome { biome: biome.clone() })
+                    }
+                    _ => Some(OverworldGenerator::Other),
+                }
+            }
+            _ => Some(OverworldGenerator::Other),
+        }
     }
 
     /// `generate_structures`, or `None` if absent/mistyped.
@@ -798,5 +924,115 @@ mod tests {
         assert!(dimensions_after.contains(&end_before), "the end entry must be untouched");
         let biome_source = compound_field(overworld_generator(&reloaded), "biome_source").expect("biome_source");
         assert_eq!(compound_field(biome_source, "biome"), Some(&Nbt::String("minecraft:jungle".to_string())));
+    }
+
+    /// **The oracle, for the reader this time.** The checked-in real 26.2
+    /// file above is itself a Flat world (verified independently with
+    /// Python's stdlib `gzip`, not this crate's own writer) — bedrock 1,
+    /// dirt 2, grass_block 1, on plains, features and lakes both off. This
+    /// is the exact stack [`WorldGenSettings::overworld_generator`] must
+    /// recover from bytes this crate never wrote.
+    #[test]
+    fn overworld_generator_classifies_a_real_vanilla_flat_world() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/support/world_gen_settings_26_2_vanilla.dat");
+        let settings = read_from_file(&path).expect("fixture decodes");
+
+        let Some(OverworldGenerator::Flat { layers, biome, features, lakes }) =
+            settings.overworld_generator()
+        else {
+            panic!("the fixture is a real vanilla Flat world");
+        };
+        assert_eq!(biome, "minecraft:plains");
+        assert!(!features);
+        assert!(!lakes);
+        assert_eq!(
+            layers,
+            vec![
+                ReadFlatLayer { block: "minecraft:bedrock".to_string(), height: 1 },
+                ReadFlatLayer { block: "minecraft:dirt".to_string(), height: 2 },
+                ReadFlatLayer { block: "minecraft:grass_block".to_string(), height: 1 },
+            ]
+        );
+    }
+
+    /// **The control.** A real vanilla `Normal`-type world's own
+    /// `minecraft:noise` generator (`biome_source.type: "minecraft:multi_noise"`,
+    /// not `"minecraft:fixed"`) — checked in at
+    /// `tests/support/world_gen_settings_26_2_vanilla_normal.dat`, a copy of
+    /// this repo's own `survival` oracle world's file, independently
+    /// decoded the same way as the Flat fixture above. Proves the detector
+    /// distinguishes a customized world from an ordinary one rather than
+    /// classifying every `minecraft:noise` generator as `FixedBiome` — the
+    /// control this crate's own standards require for an absence claim.
+    #[test]
+    fn overworld_generator_classifies_a_real_vanilla_normal_world_as_other() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/support/world_gen_settings_26_2_vanilla_normal.dat");
+        let settings = read_from_file(&path).expect("fixture decodes");
+
+        assert_eq!(
+            settings.overworld_generator(),
+            Some(OverworldGenerator::Other),
+            "a real Normal-type world must not be misread as Flat or FixedBiome"
+        );
+    }
+
+    /// A settings file with no `dimensions` compound at all (what
+    /// [`WorldGenSettings::from_seed`] alone produces, before any
+    /// customization) reports no generator — distinct from `Other`, which
+    /// means a generator field exists but is not Flat/FixedBiome.
+    #[test]
+    fn overworld_generator_is_none_with_no_dimensions_compound() {
+        let settings = WorldGenSettings::from_seed(1);
+        assert_eq!(settings.overworld_generator(), None);
+    }
+
+    /// Predicts the exact layer stack for a **non-default** preset (not
+    /// Classic Flat, and not a round number of layers) round-tripped
+    /// through the real writer and the new reader — the standard-of-proof
+    /// rule that a round-number input is the one most likely to make a
+    /// wrong implementation coincidentally agree.
+    #[test]
+    fn overworld_generator_round_trips_a_non_default_flat_preset() {
+        let layers = [
+            FlatLayer { block: "minecraft:bedrock", height: 1 },
+            FlatLayer { block: "minecraft:stone", height: 3 },
+            FlatLayer { block: "minecraft:sandstone", height: 2 },
+            FlatLayer { block: "minecraft:sand", height: 5 },
+        ];
+        let settings = WorldGenSettings::from_seed(7)
+            .with_overworld_flat_generator(&layers, "minecraft:desert", true, true);
+        let reloaded = read(&write(&settings).expect("encodes")).expect("decodes");
+
+        assert_eq!(
+            reloaded.overworld_generator(),
+            Some(OverworldGenerator::Flat {
+                layers: vec![
+                    ReadFlatLayer { block: "minecraft:bedrock".to_string(), height: 1 },
+                    ReadFlatLayer { block: "minecraft:stone".to_string(), height: 3 },
+                    ReadFlatLayer { block: "minecraft:sandstone".to_string(), height: 2 },
+                    ReadFlatLayer { block: "minecraft:sand".to_string(), height: 5 },
+                ],
+                biome: "minecraft:desert".to_string(),
+                features: true,
+                lakes: true,
+            })
+        );
+    }
+
+    /// The fixed-biome half of the same round trip, with a biome that is
+    /// not the bundled default — a wrong implementation that always reports
+    /// the default biome would still pass a test using the default.
+    #[test]
+    fn overworld_generator_round_trips_a_fixed_biome_choice() {
+        let settings =
+            WorldGenSettings::from_seed(7).with_overworld_fixed_biome_generator("minecraft:jungle");
+        let reloaded = read(&write(&settings).expect("encodes")).expect("decodes");
+
+        assert_eq!(
+            reloaded.overworld_generator(),
+            Some(OverworldGenerator::FixedBiome { biome: "minecraft:jungle".to_string() })
+        );
     }
 }
