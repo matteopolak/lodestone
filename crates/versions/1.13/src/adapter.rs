@@ -493,8 +493,8 @@ impl V404Adapter {
     }
 
     /// Records one recipe book's pane state and returns all four, so the
-    /// 498/578 packet — which re-states every pane at once — can be built
-    /// from the caller's single-pane request without inventing the rest.
+    /// packet — which re-states every pane at once — can be built from the
+    /// caller's single-pane request without inventing the rest.
     ///
     /// A poisoned lock falls back to the caller's own request in every slot
     /// rather than failing the action: the panes are a client-side UI hint
@@ -610,10 +610,9 @@ fn game_mode(value: u8) -> Result<GameMode, AdapterError> {
 ///
 /// Pre-1.16 join packets carried the dimension as a signed integer (`-1`
 /// nether, `0` overworld, `1` end); 1.16 replaced that with a namespaced
-/// **world name** string alongside an NBT dimension codec. The adapter maps the
-/// string straight through — the model already speaks namespaced identifiers —
-/// so no numeric table is involved. [`legacy_dimension_name`] is the 498/578
-/// side of the same seam.
+/// **world name** string alongside an NBT dimension codec. The model already
+/// speaks namespaced identifiers, so this parses one — and
+/// [`legacy_dimension_name`] is what turns 404's integer into one first.
 fn dimension_id(name: &str) -> Result<lodestone_model::DimensionId, AdapterError> {
     name.parse()
         .map_err(|_| AdapterError::Decode(format!("invalid dimension identifier {name}")))
@@ -1477,9 +1476,9 @@ impl V404Adapter {
         })])
     }
 
-    /// `minecraft:block_change`. A packed 1.14+ `position` (x/z/y bit
-    /// order, unlike the pre-1.14 x/y/z order), then a varint **flat
-    /// block-state id**. 1.16.5 is post-Flattening, so unlike
+    /// `minecraft:block_change`. A packed **pre-1.14** `position` (x/y/z bit
+    /// order, with y in the middle — 1.14 repacked it), then a varint **flat
+    /// block-state id**. 404 is post-Flattening, so unlike
     /// `lodestone-v1-9`'s legacy `(id << 4) | meta` composite there is no
     /// metadata split: the wire value is already a single state id in
     /// *this protocol's own* id space, bridged to a real 26.2 state id via
@@ -1721,10 +1720,11 @@ impl V404Adapter {
         let mut suggestions = Vec::with_capacity(count.min(reader.remaining()));
         for _ in 0..count {
             let text = reader.string(32_767).map_err(dec_err)?;
-            // The tooltip is a real JSON text component, and protocol 754
-            // (1.16.5) postdates 1.16's hex-colour introduction, so it can
-            // carry a `TextColor::Rgb` — keep it as a real `Text` rather
-            // than flattening through `Text::to_legacy_string`.
+            // The tooltip is a real JSON text component. 404 predates 1.16's
+            // hex colours, so it cannot carry a `TextColor::Rgb` — but it is
+            // still kept as a real `Text` rather than flattened through
+            // `Text::to_legacy_string`, because the component tree carries
+            // click/hover data a legacy string would discard.
             let tooltip = if reader.bool().map_err(dec_err)? {
                 Some(Text::from_json(&reader.string(32_767).map_err(dec_err)?))
             } else {
@@ -2780,7 +2780,7 @@ impl VersionAdapter for V404Adapter {
     }
 
     fn minecraft_versions(&self) -> &'static [&'static str] {
-        &["1.14.4", "1.15.2", "1.16.5"]
+        &["1.13.2"]
     }
 
     fn supports(&self, protocol: i32) -> bool {
@@ -3387,6 +3387,22 @@ mod dispatch_coverage_tests {
                 table.err()
             );
         }
+    }
+
+    /// The adapter reports the release it actually serves.
+    ///
+    /// Cheap, and worth having: this crate was scaffolded from the 1.14 era's
+    /// and this list is one of the two places a copied literal survives
+    /// compilation without meaning anything (the other, the protocol constant,
+    /// is checked by every id assertion in the crate).
+    #[test]
+    fn the_adapter_names_its_own_release() {
+        use lodestone_model::VersionAdapter as _;
+        let adapter = adapter_for(PROTOCOL_1_13_2);
+        assert_eq!(adapter.minecraft_versions(), &["1.13.2"]);
+        assert_eq!(adapter.protocol_version(), 404);
+        assert!(adapter.supports(404));
+        assert!(!adapter.supports(340) && !adapter.supports(498));
     }
 
     /// The dispatch table really is keyed by **this** protocol's own ids,
