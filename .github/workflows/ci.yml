@@ -3,7 +3,7 @@
 # that doc carries the count and a warning that it is stale), and how to
 # reproduce any of these jobs locally.
 #
-# Six jobs, eight legs: `check-default` is a 3-OS matrix (Linux / macOS /
+# Seven jobs, nine legs: `check-default` is a 3-OS matrix (Linux / macOS /
 # Windows) and every other job is Linux-only on purpose — see that job's comment
 # for which axis each one varies and why re-running it per OS would measure the
 # same thing three times. GitHub bills macOS runner minutes at 10x and Windows at
@@ -24,11 +24,12 @@
 # instead — it is a cheap text scan with no OS/feature axis worth a job of
 # its own, unlike the four above.
 #
-# plus one that is not a "Build and test" health check but is the only
-# automatic runner of the wasm32 tripwire — see the `wasm` job's own comment for
-# why it is here and not in `just health`:
+# plus two that are not "Build and test" health checks but are the only
+# automatic runners of their respective tripwires — see each job's own comment
+# for why it is here and not in `just health`:
 #
 #   just wasm-check   # cargo xtask wasm-check
+#   just fuzz-smoke   # ./fuzz/smoke.sh 30
 #
 # `just` is the canonical *command* layer (docs/task-runner.md) — calling the
 # recipe instead of retyping the raw invocation makes command drift between
@@ -372,6 +373,91 @@ jobs:
             | tar xz -C "$HOME/.cargo/bin" trunk
           trunk --version
       - run: just wasm-check
+
+  # The cargo-fuzz tripwire, and it exists for the same reason the wasm job
+  # above does: `fuzz/` was a real, working, eleven-target libFuzzer workspace
+  # that NOTHING RAN AUTOMATICALLY. A fuzz target nobody executes is an island
+  # with a corpus — it keeps compiling while the code under it changes shape,
+  # and the first person to run it months later cannot tell a fresh regression
+  # from a bug that has been sitting there the whole time.
+  #
+  # Thirty seconds per target is not a campaign and is not pretending to be
+  # one. What this bounded run actually gates:
+  #
+  #   * every target still builds under ASan and still links its entry point;
+  #   * every target still loads its committed seeds and reaches real decode
+  #     code (a target whose entry point started returning early would show up
+  #     as a collapsed exec count, which -print_final_stats=1 puts in the log);
+  #   * the whole committed seed corpus is replayed — that is the regression
+  #     half, and it is deterministic rather than luck-of-the-mutator;
+  #   * a *new* shallow panic reachable within seconds of the seeds fails the
+  #     push that introduced it.
+  #
+  # Long campaigns stay a human's job (`just fuzz-run-seeded <target>
+  # -max_total_time=…`). Deliberately NOT in `just health`: health is four
+  # full workspace builds already and this adds an ASan release build of the
+  # whole graph, but more decisively, a command someone chooses to run cannot
+  # answer "nothing runs this automatically".
+  #
+  # `fuzz/` is its own Cargo workspace with its own Cargo.lock (libFuzzer's
+  # instrumentation flags must not leak into a plain `cargo build
+  # --workspace`), so it needs its own `workspaces:` cache row exactly like
+  # `web/` does above — without it a dependency bump there is invisible to the
+  # cache.
+  fuzz:
+    name: "fuzz: just fuzz-smoke (cargo-fuzz, seeded corpus)"
+    runs-on: ubuntu-latest
+    # Bounded because the ASan build below is a from-scratch release build of
+    # lodestone-server, lodestone-worldgen and the v26-2 family with
+    # codegen-units=1. On a cold cache that dominates the job; the fuzzing
+    # itself is ~5 minutes of the total. A stuck build should report as this
+    # job timing out rather than eating the workflow's budget.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system audio dev headers (alsa-sys build dependency)
+        timeout-minutes: 10
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libasound2-dev pkg-config
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          # Inert, like every other job's — `rust-toolchain.toml` pins the
+          # nightly that cargo actually resolves. That pin is load-bearing
+          # HERE and nowhere else in this file: libFuzzer's `-Zsanitizer` and
+          # `-Cpasses=sancov-module` flags are nightly-only, so this job is
+          # the one that would break first if the pin were ever dropped for a
+          # stable channel. See this job's entry in docs/fuzzing.md.
+          toolchain: "1.95.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: fuzz-smoke
+          workspaces: |
+            .
+            fuzz
+      - uses: mozilla-actions/sccache-action@v0.0.11
+      - name: Install just
+        uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+      # `--locked` so a fresh cargo-fuzz release cannot change what this job
+      # runs without a commit here. Built from source rather than taken from a
+      # third-party installer action to avoid adding a new trust dependency
+      # for a two-minute build in a job that already spends far longer than
+      # that compiling the fuzz targets themselves.
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: just fuzz-smoke
+        run: just fuzz-smoke 30
+      # A crashing input is the whole product of a failing fuzz run, and it is
+      # written to a path inside the runner that vanishes with the job. Upload
+      # it so the reproducer is `just fuzz-repro <target> <downloaded-file>`
+      # rather than "re-run the fuzzer and hope it finds the same thing".
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
 
   test:
     name: "test: just test"

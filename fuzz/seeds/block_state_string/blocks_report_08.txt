@@ -1,0 +1,1 @@
+minecraft:acacia_sign[rotation=0,waterlogged=true]

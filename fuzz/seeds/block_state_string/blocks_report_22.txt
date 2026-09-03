@@ -1,0 +1,1 @@
+minecraft:acacia_trapdoor[facing=north,half=top,open=true,powered=true,waterlogged=true]

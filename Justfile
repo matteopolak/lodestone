@@ -541,3 +541,41 @@ fuzz-build:
 [doc("cargo fuzz run <target> [libfuzzer-flags...] -- ALWAYS pass -max_total_time=N")]
 fuzz-run target *args:
     cd fuzz && cargo fuzz run {{target}} -- {{args}}
+
+# cargo fuzz run <target> starting from the COMMITTED seed corpus rather than
+# from whatever `fuzz/corpus/` happens to hold. Prefer this over `fuzz-run` for
+# any real campaign: a decoder started from an empty corpus spends its first
+# minutes rediscovering that a packet begins with a varint, while
+# `fuzz/seeds/<target>/` already carries bytes a real vanilla server wrote.
+# libFuzzer writes new units only into the FIRST corpus directory, so the
+# committed seeds stay read-only. Same "ALWAYS pass -max_total_time" rule as
+# `fuzz-run`.
+[doc("cargo fuzz run <target> from the committed seeds -- ALWAYS pass -max_total_time=N")]
+fuzz-run-seeded target *args:
+    cd fuzz && cargo fuzz run {{target}} corpus/{{target}} seeds/{{target}} -- {{args}}
+
+# Re-run one saved crash/timeout artifact under the target that produced it --
+# the first thing to do with a `fuzz/artifacts/...` file, and what CI's failure
+# message points at. Deterministic: one input, one execution, no mutation.
+[doc("cargo fuzz run <target> <artifact-file> -- reproduce one saved crash")]
+fuzz-repro target artifact:
+    cd fuzz && cargo fuzz run {{target}} {{artifact}}
+
+# Bounded run of EVERY fuzz target from the committed seeds -- the recipe CI's
+# `fuzz` job calls. Gates on panics, OOM and hangs; exclusions (with reasons)
+# live in fuzz/smoke-exclusions.txt. The default 30s per target is a tripwire,
+# not a campaign: it proves each target still builds, loads its seeds and
+# reaches real code, and it replays the whole committed corpus.
+[doc("bounded cargo-fuzz run of every target from committed seeds (CI's fuzz job)")]
+fuzz-smoke seconds="30":
+    ./fuzz/smoke.sh {{seconds}}
+
+# Rebuild fuzz/seeds/** from data this repo did not author: the vanilla
+# packet-id and block-state reports, captured 26.2 wire payloads, the vanilla
+# data pack, and a world save a real vanilla server wrote. Needs a populated
+# `.cache/mc` (not repo state -- see docs/fuzzing.md); a missing source is a
+# hard error rather than a quietly smaller corpus. The seeds it writes ARE
+# committed, so this is only needed when a new capture or a new target lands.
+[doc("regenerate fuzz/seeds/** from .cache/mc vanilla data (needs a populated .cache)")]
+fuzz-seeds-regen:
+    python3 fuzz/seeds/generate-seeds.py
