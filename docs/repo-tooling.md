@@ -18,8 +18,9 @@ parses Rust/workspace structure or needs its own test, `just` owns the one-to-th
 canonical invocation, and `scripts/*` owns any script body at its existing path (kept there
 deliberately — dozens of docs already reference `scripts/…` paths by name, so leaving script
 bodies in place is what keeps those links correct). `just check`/`check-all`/`check-seam`/`test`
-are exactly the four commands this project's own working rules require, and `just health` runs
-all four in order; `just -n <recipe>` prints a recipe's expanded command with no side effects,
+, plus `check-comment-voice`, are exactly the five commands this project's own working rules
+require, and `just health` runs all five in order; `just -n <recipe>` prints a recipe's expanded
+command with no side effects,
 which is how to verify a recipe stays byte-for-byte faithful to the raw command it names.
 
 Every cargo-invoking recipe passes `--target-dir {{tdir}}` and `-j {{jobs}}`, both sourced from
@@ -42,7 +43,7 @@ asserting.
 ### CI (`.github/workflows/ci.yml`)
 
 Runs on every push to `main` and every pull request, so an agent can push and let a hosted
-runner verify the four canonical health checks instead of running heavy builds on the one
+runner verify the five canonical health checks instead of running heavy builds on the one
 shared dev machine. It is **not** a replacement for the live/GPU gates, which still need a real
 GPU adapter, a fetched vanilla jar, or a running oracle server — none of which exist on a hosted
 runner — and stay exactly as `#[ignore]`d as they are locally; CI proves the hermetic majority of
@@ -180,6 +181,15 @@ cannot: `connectedness` only ever asks "does this clientbound packet reach anyth
 - **Over-claiming in `world-coverage` is invisible in the output** — a claim rule that is too
   broad turns a stranded subject into a falsely-drawn one, and nothing in the report shows it.
   Under-claiming merely produces noise you can see and correct.
+- **`cargo xtask check-comment-voice`** (`xtask/src/comment_voice.rs`) fails on a comment or doc
+  comment written in the voice of the change that introduced it: a bare `#123`-shaped issue
+  reference, or a word-bounded, case-insensitive "this change"/"this commit"/"this patch"/"before
+  this change"/"this PR". Both rot the same way -- they read as authoritative long after they stop
+  being accurate, because both were true only at the moment they were written. It is the fifth
+  `just health` check and runs in CI's `xtask-structural-checks` job. Exceptions are recorded in
+  `xtask/check-comment-voice.toml`, each with an `owner` and a `reason`; a stale entry (matching
+  zero hits) is reported, not silently ignored, which is what makes shrinking the allowlist
+  file-by-file tractable.
 
 ## Configuration
 

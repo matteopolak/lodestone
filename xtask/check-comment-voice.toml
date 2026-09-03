@@ -1701,3 +1701,26 @@ line = 10844
 owner = "issue-553"
 reason = "verbatim reproduction of the exact issue-reference-shaped text a real ATX-heading regression test must reproduce to prove the fix; not a citation of a real issue"
 
+[[allow]]
+file = "docs/repo-tooling.md"
+line = 185
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern check-comment-voice detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "docs/repo-tooling.md"
+line = 186
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern check-comment-voice detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "docs/repo-tooling.md"
+line = 187
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern check-comment-voice detects, as documentation of the scanner itself, not decay"
+
+
+[[allow]]
+file = "crates/plugins/lodestone-block-jobs/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
