@@ -1,0 +1,1703 @@
+# Explicit exceptions for `cargo xtask check-comment-voice`.
+#
+# Each entry needs a `file` (relative to the workspace root), an `owner` and a
+# `reason` so an exception is a recorded decision, not a silent miss. `line`
+# is optional -- omit it to allow every hit in that file, or set it to allow
+# only that one line. Delete entries as their file/line is swept clean; a
+# stale entry (matching zero hits) is reported, not silently ignored.
+[[allow]]
+file = "crates/lodestone-auth/src/cache.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-auth/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-auth/src/login.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-auth/src/paths.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-auth/src/store.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-auth/src/tls.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-auth/tests/tls_provider.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-client/src/driver.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-client/src/state.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-dedicated-server/src/main.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-fuzz/src/differential.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-fuzz/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-fuzz/tests/fuzz_regressions.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-fuzz/tests/length_prefix_allocation.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-registry/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-registry/src/version_table.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/benches/meshing.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/benches/render_submit.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/banner_pattern.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/biome_tint.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/block.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/camera.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/entity.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/entity_anim.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/entity_pipeline.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/fog.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/light.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/model_pipeline.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/models.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/screen_effects.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/shaders/block.wgsl"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/shaders/entity.wgsl"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/shaders/model.wgsl"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/shaders/sky_cloud.wgsl"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/sky.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/sky_pipeline.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/target.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/src/texture.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/atlas/atlas_mip_edge_bleed_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/atlas/gui_atlas_edge_bleed_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/entities/arrow_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/entities/bow_draw_pose_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/entities/creeper_swell_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/entities/creeper_white_overlay_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/entities/entity_depth_coincident_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/entities/entity_diffuse_two_lights_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/entities/entity_hurt_overlay_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/entities/entity_light_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/entities/entity_night_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/entities/sheep_wool_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/items/banner_pattern_layer_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/pipeline/gpu.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/pipeline/screen_effects_pipeline_gpu.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/sky/cloud_face_cache_counts.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/sky/sky_gradient_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/sky/sky_light_factor_timeline.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/sky/sky_pipeline_gpu.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/sky/sunrise_sunset_timeline.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/sky/weather_probe_query_counts.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/biome_tint_row_identity_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/block_models_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/block_texture_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/fluid_lava_backface_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/fluid_mesh_identity_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/fluid_shoreline_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/grass_light_response_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/model_ao_corner_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/model_census.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/packed_cube_layer_gate.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-render/tests/terrain/packed_night_fog_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/build.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/advancements.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/block_drops.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/block_entities.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/border.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/chunk.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/chunk_nbt.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/chunk_store.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/container_click.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/crafting.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/dimension.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/dragon/fight.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/ecs/mod.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/effects.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/game_rules.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/hand_use.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/integrated.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/inventory.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/item_use.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/join_scheduler.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/loot.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mob_effects.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mob_spawn.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/dragon.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/fishing.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/items.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/lightning.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/mod.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/piston_shove.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/projectiles.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/raid.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/sniffer.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/species.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/villager/conversion.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/villager/gossip.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/villager/mod.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/villager/reputation.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/warden.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/mobs/world.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/natural_spawn.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/piston.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/players.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/poi_storage.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/protocol.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/random_tick.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/rcon.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/redstone.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/redstone_counters.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/redstone_note_block.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/redstone_rail.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/region_source.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/scheduled_tick.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/server.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/sleep.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/tick.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/ticket.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/vitals.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/weather.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/world_state.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/src/worldgen_data.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/block_entity_persistence.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/builtin_commands.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/entity_persistence_round_trip.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/hostile_mob_attack_reaches_the_wire.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/integrated_memory.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/lan_world_tick.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/mob_attack.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/mob_idle_throttle.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/mob_melee_damages_player.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/mob_roster.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/mob_sim.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/natural_spawn.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/open_to_lan_online_mode.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/poi_persistence_round_trip.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/portal_persistence_restart.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/random_tick_section_counters.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/scheduled_tick_persistence.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/serve_play.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/ticket_residency_live.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/world_persistence_round_trip.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-server/tests/write_path_jvm_oracle.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/app/container_input.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/app/input.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/app/lifecycle.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/app/pacing.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/app/recipe_book_wiring.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/app/redraw.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/app/session.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/app/tests.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/collision.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/config.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/container.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/container/background.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/container/player_preview.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/container/tests.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/entities.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/gpu/entity_passes.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/gpu/nametag.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/gpu/pixel_gates.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/gpu/state.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/gpu/tests.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/hud.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/hud/anim.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/hud/locator.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/hud/vanilla_font.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/interact.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/accounts.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/edit_box.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/focus.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/layout.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/nav.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/options.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/packs.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/render.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/render/draw.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/render/frame.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/render/measure.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/render/renderer.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/render/screens.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/render/tests.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/server_links.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/sign_edit.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/social.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/stats.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/text_area.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/menu/widget.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/mesher.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/net.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/remote_skins.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/resources.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/saves.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/shaders/particles.wgsl"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/sim.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/sim/build.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/sim/collide.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/sim/meshing.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/sim/net_apply.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/sim/placement.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/sim/render_sources.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/sim/session.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/src/sim/tests.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/block_entities/conduit_block_entity_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/block_entities/decorated_pot_block_entity_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/containers/container_background_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/entities/aggressive_bow_pose_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/entities/armor_stand_hologram_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/hud/legacy_codes_never_reach_a_glyph.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/interaction/break_intent.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/interaction/break_particle_tint.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/interaction/command_tree_completion.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/interaction/mining_deadlock.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/interaction/mining_destroy_burst.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/live/live_respawn_ground_trace.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/session/client_chunk_cycles.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/session/offline_identity_is_stable.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/session/paperdoll_skin_resolver.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/session/singleplayer_persistence.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/session/singleplayer_terrain_arrives.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/world/biome_tint_live_mesh.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/world/distant_flat_terrain_holes.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/world/sky_pixels.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-shell/tests/world/uneven_terrain_holes.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-sound/tests/ambient_loops.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-testsupport/src/bench_fixtures.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-testsupport/src/directives.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/src/abi.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/src/capability.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/src/host.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/src/manifest.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/tests/loads_a_separately_built_wasm_file.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/tests/manifest_loading.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/tests/memory_denial.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/tests/network_denial.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/tests/preemption.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-wasm-host/tests/reaches_the_real_action_queue.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-world/src/world.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-worldgen-parity/examples/breakdown_by_block_pair.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-worldgen-parity/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-worldgen-parity/tests/chunk_parity.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-worldgen/src/biome/mod.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/lodestone-worldgen/tests/vegetation_parity.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/README.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-autopilot/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-chat-responder-wasm/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-crafting-warden/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-event-logger/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-event-logger/tests/observes_a_real_session.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-key-toggle/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-nav/src/view.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-plugin-support/src/reentrancy.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-server-brand/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-server-brand/tests/reaches_a_plugin_from_captured_bytes.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-shop-api/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-shop-stats/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-shop-stats/tests/cross_plugin_message.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-shop-stats/tests/dependency_direction.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-shop/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-void-world/src/lib.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/plugins/lodestone-void-world/tests/drives_a_real_dimension_through_a_joined_client.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/src/adapter/chat.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/src/adapter/player.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/src/generated/stat_debug_registries.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/src/packets/metadata.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/src/packets/player_info.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/src/packets/registry.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/src/server_protocol.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/tests/command/beacon_wiring.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/tests/command/book_content_wiring.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/tests/live/live_terrain_light.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/tests/server/server_command_block.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "crates/versions/26.2/tests/session/player_list.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/README.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/fuzzing.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/mining-and-drops.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/oracle-assets.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/chunk-lifecycle.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/issue-batching.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/mob-ai-roster.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/multi-version-protocol-dedup.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/multi-version-protocol.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/paper-nms-bridge.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/random-tick-counter.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/redstone-execution-model.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/regionised-server-ticking.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/runtime-plugin-loading.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/server-ecs-migration.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/structures.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/villager-economy.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/world-state.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/worldgen-parity.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plans/worldgen-rewrite.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plugin-crafting-hooks.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/plugin-worldgen-api.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/redstone-execution.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/roadmap/README.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/roadmap/benchmarks.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/roadmap/client-rendering.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/roadmap/client-simulation.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/roadmap/plugin-framework.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/roadmap/protocol.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/roadmap/server-entities.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "docs/roadmap/server-simulation.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "fuzz/fuzz_targets/anvil_region_parse.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "fuzz/fuzz_targets/text_chat_json.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "fuzz/fuzz_targets/v26_2_clientbound_decode_by_id.rs"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "web/README.md"
+owner = "issue-553"
+reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 9
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 10
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 32
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 56
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 61
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 67
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 68
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 71
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 76
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 77
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 660
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 701
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 734
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/comment_voice.rs"
+line = 1008
+owner = "issue-553"
+reason = "self-referential: this line names the literal pattern the scanner detects, as documentation of the scanner itself, not decay"
+
+[[allow]]
+file = "xtask/src/lib.rs"
+line = 8281
+owner = "issue-553"
+reason = "verbatim reproduction of the exact issue-reference-shaped text a real ATX-heading regression test must reproduce to prove the fix; not a citation of a real issue"
+
+[[allow]]
+file = "xtask/src/lib.rs"
+line = 10844
+owner = "issue-553"
+reason = "verbatim reproduction of the exact issue-reference-shaped text a real ATX-heading regression test must reproduce to prove the fix; not a citation of a real issue"
+

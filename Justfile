@@ -73,8 +73,16 @@ check-seam:
 test:
     cargo test --workspace --no-fail-fast {{jflag}} --target-dir {{tdir}}
 
-# All four checks above, in order.
-health: check check-all check-seam test
+# cargo xtask check-comment-voice — fails on issue references and
+# change-voice comments ("this change", "this commit", ...) in .rs/.md/.wgsl
+# comments and doc comments that are not covered by
+# xtask/check-comment-voice.toml. See that file's header and
+# xtask/src/comment_voice.rs's module doc for what counts and why.
+check-comment-voice:
+    cargo run -q -p xtask {{jflag}} --target-dir {{tdir}} -- check-comment-voice
+
+# All five checks above, in order.
+health: check check-all check-seam test check-comment-voice
 
 # --- Running the game -------------------------------------------------------
 
