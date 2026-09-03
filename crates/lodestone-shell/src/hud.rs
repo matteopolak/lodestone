@@ -40,7 +40,7 @@ use lodestone_render::{
 };
 
 use lodestone_assets::ItemAtlas;
-use lodestone_model::text::{Text, TextColor, TextSpan, TextStyle};
+use lodestone_model::text::{TextColor, TextSpan, TextStyle};
 
 use item_icon::{ColourStream, IconAssets, IconRenderer, IconSink, SpecialIconDraw};
 

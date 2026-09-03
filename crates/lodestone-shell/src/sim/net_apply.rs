@@ -25,7 +25,6 @@
 use super::*;
 // Not reachable through `super::*`: the disconnect and failure arms build a
 // `SessionEnd` whose reason is a styled `Text` rather than a formatted string.
-use lodestone_model::Text;
 
 impl Sim {
     /// Fold this frame's entity state into the render-side component set, so

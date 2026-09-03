@@ -180,7 +180,7 @@ use lodestone_command::{
 use lodestone_model::command_tree::{
     ArgumentParser, CommandSuggestionEntry, CommandTree, NodeKind, StringKind,
 };
-use lodestone_model::text::{ResolvedText, Text};
+use lodestone_model::text::ResolvedText;
 
 /// Vanilla's cap on the recent-chat store — a 100-entry deque plus the
 /// size-at-least-100-drops-oldest guard in vanilla's own add-recent-chat handling.
@@ -3313,7 +3313,7 @@ mod tests {
 
             let entries = vec![CommandSuggestionEntry {
                 text: "@a".to_string(),
-                tooltip: Some(Text::literal("all players")),
+                tooltip: Some(lodestone_model::Text::literal("all players")),
             }];
             let received = requests.receive(id, entries, &|_| None).expect("current id honoured");
             assert_eq!(received.len(), 1);
