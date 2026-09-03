@@ -532,6 +532,30 @@ added to v26-2 has no construction-time check to catch it.
 An earlier note in this plan said Stage 1 shipped "with no `crates/versions/*` family converted to
 use either yet". That was true when written and is now stale — the check above is one grep.
 
+### Measured cost, and where the estimate was wrong
+
+Three eras have now landed, and the numbers separate two cases the plan treated as one.
+
+| era | protocols | era-crate source | marginal cost per added version |
+|---|---|---|---|
+| 1.9 | 110, 210, 316, 340 | ~1,008 | ~20 lines |
+| 1.14 | 498, 578, 754 | 1,524 | 69 lines |
+| 1.13 | 404 (singleton) | 5,531 | n/a |
+
+**The mechanism works, and the falsifier is passed** — adding a version to an era that already
+exists costs 20-70 hand-written lines against a ~500-line threshold, versus ~5.5k for a
+copy-forward. That is the claim this plan was built on and it holds.
+
+**Founding a new era is a different cost, and the estimate was about half of it.** A singleton
+era pays for a whole adapter and shares nothing: 1.13 came in at 5,531 source lines against a
+projected ~2-2.5k. `codegen-ratio` puts it beside 1.14's 6,257, i.e. a new era costs roughly what
+an established multi-protocol one does. So the payoff is entirely in the *second and subsequent*
+version of an era, and a version that neighbours a break on both sides — as 1.13.2 does, at 72%
+and 73% — carries close to full freight however the crate is arranged.
+
+Read that as guidance about ordering, not about whether to continue: fold versions into existing
+eras first, and treat each new era as its own decision.
+
 Every stage leaves `just health` green; each names what proves it. Sizes are hand-written lines,
 estimated from the measurements above. **Prerequisites for family #5 are marked ★.**
 
