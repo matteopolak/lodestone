@@ -1770,174 +1770,361 @@ impl V5Adapter {
 pub type PlayHandlerFn =
     fn(&V5Adapter, &mut dyn WorldSink, &[u8]) -> Result<Vec<Directive>, AdapterError>;
 
-/// Binds one packet name to a handler over this family's whole protocol range.
-const fn entry(
-    name: &'static str,
-    handler: PlayHandlerFn,
-) -> (&'static str, lodestone_core::dispatch::Handler<PlayHandlerFn>) {
-    (
-        name,
-        lodestone_core::dispatch::Handler::new(lodestone_core::ProtocolRange::ALL, handler),
-    )
-}
-
 /// Every `play::clientbound` packet this family translates, keyed by the same
 /// canonical name `crate::packet_ids::play::clientbound::ENTRIES` uses.
 ///
 /// `pub` so `tests/dispatch_coverage.rs` can rebuild — and deliberately
 /// corrupt — this same table from outside the crate.
 pub static CLIENTBOUND: &[(&str, lodestone_core::dispatch::Handler<PlayHandlerFn>)] = &[
-    entry("minecraft:login", V5Adapter::handle_play_login),
-    entry("minecraft:keep_alive", V5Adapter::handle_play_keep_alive),
-    entry("minecraft:chat", V5Adapter::handle_play_chat),
-    entry("minecraft:update_time", V5Adapter::handle_play_update_time),
-    entry(
+    (
+        "minecraft:login",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_login as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:keep_alive",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_keep_alive as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:chat",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_chat as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:update_time",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_update_time as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:update_health",
-        V5Adapter::handle_play_update_health,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_update_health as PlayHandlerFn,
+        ),
     ),
-    entry("minecraft:respawn", V5Adapter::handle_play_respawn),
-    entry("minecraft:position", V5Adapter::handle_play_position),
-    entry(
+    (
+        "minecraft:respawn",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_respawn as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:position",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_position as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:spawn_position",
-        V5Adapter::handle_play_spawn_position,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_spawn_position as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:held_item_slot",
-        V5Adapter::handle_play_held_item_slot,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_held_item_slot as PlayHandlerFn,
+        ),
     ),
-    entry("minecraft:experience", V5Adapter::handle_play_experience),
-    entry("minecraft:abilities", V5Adapter::handle_play_abilities),
-    entry(
+    (
+        "minecraft:experience",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_experience as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:abilities",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_abilities as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:game_state_change",
-        V5Adapter::handle_play_game_state_change,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_game_state_change as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:kick_disconnect",
-        V5Adapter::handle_play_kick_disconnect,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_kick_disconnect as PlayHandlerFn,
+        ),
     ),
-    entry("minecraft:player_info", V5Adapter::handle_play_player_info),
-    entry("minecraft:map_chunk", V5Adapter::handle_play_map_chunk),
-    entry(
+    (
+        "minecraft:player_info",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_player_info as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:map_chunk",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_map_chunk as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:map_chunk_bulk",
-        V5Adapter::handle_play_map_chunk_bulk,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_map_chunk_bulk as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:block_change",
-        V5Adapter::handle_play_block_change,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_block_change as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:multi_block_change",
-        V5Adapter::handle_play_multi_block_change,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_multi_block_change as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:block_action",
-        V5Adapter::handle_play_block_action,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_block_action as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:block_break_animation",
-        V5Adapter::handle_play_block_break_animation,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_block_break_animation as PlayHandlerFn,
+        ),
     ),
-    entry("minecraft:world_event", V5Adapter::handle_play_world_event),
-    entry(
+    (
+        "minecraft:world_event",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_world_event as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:named_sound_effect",
-        V5Adapter::handle_play_named_sound_effect,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_named_sound_effect as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:open_sign_entity",
-        V5Adapter::handle_play_open_sign_entity,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_open_sign_entity as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:spawn_entity",
-        V5Adapter::handle_play_spawn_entity,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_spawn_entity as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:spawn_entity_living",
-        V5Adapter::handle_play_spawn_entity_living,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_spawn_entity_living as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:named_entity_spawn",
-        V5Adapter::handle_play_named_entity_spawn,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_named_entity_spawn as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:spawn_entity_painting",
-        V5Adapter::handle_play_spawn_entity_painting,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_spawn_entity_painting as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:spawn_entity_experience_orb",
-        V5Adapter::handle_play_spawn_entity_experience_orb,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_spawn_entity_experience_orb as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:spawn_entity_weather",
-        V5Adapter::handle_play_spawn_entity_weather,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_spawn_entity_weather as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:rel_entity_move",
-        V5Adapter::handle_play_rel_entity_move,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_rel_entity_move as PlayHandlerFn,
+        ),
     ),
-    entry("minecraft:entity_look", V5Adapter::handle_play_entity_look),
-    entry(
+    (
+        "minecraft:entity_look",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_entity_look as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:entity_move_look",
-        V5Adapter::handle_play_entity_move_look,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_entity_move_look as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:entity_teleport",
-        V5Adapter::handle_play_entity_teleport,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_entity_teleport as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:entity_head_rotation",
-        V5Adapter::handle_play_entity_head_rotation,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_entity_head_rotation as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:entity_velocity",
-        V5Adapter::handle_play_entity_velocity,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_entity_velocity as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:entity_destroy",
-        V5Adapter::handle_play_entity_destroy,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_entity_destroy as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:entity_metadata",
-        V5Adapter::handle_play_entity_metadata,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_entity_metadata as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:entity_status",
-        V5Adapter::handle_play_entity_status,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_entity_status as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:attach_entity",
-        V5Adapter::handle_play_attach_entity,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_attach_entity as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:entity_effect",
-        V5Adapter::handle_play_entity_effect,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_entity_effect as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:remove_entity_effect",
-        V5Adapter::handle_play_remove_entity_effect,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_remove_entity_effect as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:entity_equipment",
-        V5Adapter::handle_play_entity_equipment,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_entity_equipment as PlayHandlerFn,
+        ),
     ),
-    entry("minecraft:collect", V5Adapter::handle_play_collect),
-    entry("minecraft:animation", V5Adapter::handle_play_animation),
-    entry(
+    (
+        "minecraft:collect",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_collect as PlayHandlerFn,
+        ),
+    ),
+    (
+        "minecraft:animation",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_animation as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:update_attributes",
-        V5Adapter::handle_play_update_attributes,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_update_attributes as PlayHandlerFn,
+        ),
     ),
-    entry("minecraft:open_window", V5Adapter::handle_play_open_window),
-    entry(
+    (
+        "minecraft:open_window",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_open_window as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:close_window",
-        V5Adapter::handle_play_close_window,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_close_window as PlayHandlerFn,
+        ),
     ),
-    entry("minecraft:set_slot", V5Adapter::handle_play_set_slot),
-    entry(
+    (
+        "minecraft:set_slot",
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_set_slot as PlayHandlerFn,
+        ),
+    ),
+    (
         "minecraft:window_items",
-        V5Adapter::handle_play_window_items,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_window_items as PlayHandlerFn,
+        ),
     ),
-    entry(
+    (
         "minecraft:craft_progress_bar",
-        V5Adapter::handle_play_craft_progress_bar,
+        lodestone_core::dispatch::Handler::new(
+            lodestone_core::ProtocolRange::ALL,
+            V5Adapter::handle_play_craft_progress_bar as PlayHandlerFn,
+        ),
     ),
 ];
 
