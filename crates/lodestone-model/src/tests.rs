@@ -1636,3 +1636,197 @@ fn a_dangling_section_sign_is_dropped() {
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].text, "tail");
 }
+
+
+/// Resolution: lowering `translate` nodes to literals against a language table.
+///
+/// A tiny table so these do not depend on any real asset — the keys are the
+/// shapes that broke in production: a nested translate argument, indexed and
+/// sequential placeholders, and a `fallback`.
+mod resolve {
+    use super::*;
+
+    fn tr(key: &str) -> Option<String> {
+        let value = match key {
+            "death.attack.mob" => "%1$s was slain by %2$s",
+            "entity.minecraft.spider" => "Spider",
+            "multiplayer.player.joined" => "%s joined the game",
+            "chat.type.text" => "<%s> %s",
+            "commands.seed.success" => "Seed: %s",
+            _ => return None,
+        };
+        Some(value.to_owned())
+    }
+
+    #[test]
+    fn nested_translation_resolves_the_killer_name() {
+        // death.attack.mob with the killer itself a translate node — the exact
+        // shape of the ENTITY.MINECRAFT.SPIDER defect.
+        let msg = Text::translate(
+            "death.attack.mob",
+            vec![
+                Text::literal("Lodestone"),
+                Text::translate("entity.minecraft.spider", vec![]),
+            ],
+        );
+        assert_eq!(
+            msg.resolve(&tr).to_plain_string(),
+            "Lodestone was slain by Spider"
+        );
+    }
+
+    #[test]
+    fn missing_key_falls_back_to_the_key_itself() {
+        let msg = Text::translate("totally.unknown.key", vec![]);
+        assert_eq!(msg.resolve(&tr).to_plain_string(), "totally.unknown.key");
+    }
+
+    #[test]
+    fn missing_key_prefers_the_components_fallback_string() {
+        let msg = Text {
+            content: TextContent::Translate {
+                key: "unknown.key".to_string(),
+                with: vec![Text::literal("X")],
+                fallback: Some("fallback %s here".to_string()),
+            },
+            ..Text::default()
+        };
+        assert_eq!(msg.resolve(&tr).to_plain_string(), "fallback X here");
+    }
+
+    #[test]
+    fn sequential_and_indexed_placeholders_both_work() {
+        let seq = Text::translate("chat.type.text", vec![Text::literal("bob"), Text::literal("hi")]);
+        assert_eq!(seq.resolve(&tr).to_plain_string(), "<bob> hi");
+
+        let indexed = Text::translate(
+            "death.attack.mob",
+            vec![Text::literal("A"), Text::literal("B")],
+        );
+        assert_eq!(indexed.resolve(&tr).to_plain_string(), "A was slain by B");
+    }
+
+    #[test]
+    fn literal_percent_escape_is_preserved() {
+        let msg = Text {
+            content: TextContent::Translate {
+                key: "unknown".to_string(),
+                with: vec![],
+                fallback: Some("100%% sure".to_string()),
+            },
+            ..Text::default()
+        };
+        assert_eq!(msg.resolve(&tr).to_plain_string(), "100% sure");
+    }
+
+    #[test]
+    fn trailing_and_leading_literals_around_placeholder() {
+        let msg = Text::translate("commands.seed.success", vec![Text::literal("lodestone")]);
+        assert_eq!(msg.resolve(&tr).to_plain_string(), "Seed: lodestone");
+    }
+
+    #[test]
+    fn resolved_tree_contains_no_translate_nodes() {
+        let msg = Text::translate(
+            "death.attack.mob",
+            vec![
+                Text::literal("A"),
+                Text::translate("entity.minecraft.spider", vec![]),
+            ],
+        );
+        let resolved = msg.resolve(&tr);
+        assert!(no_translate_nodes(&resolved), "resolution must lower every translate node");
+    }
+
+    fn no_translate_nodes(text: &Text) -> bool {
+        matches!(text.content, TextContent::Literal(_))
+            && text.extra.iter().all(no_translate_nodes)
+    }
+
+    #[test]
+    fn style_inherits_down_a_nested_extra_chain() {
+        // A red-bold root with a child that only sets italic: the child must end
+        // up red + bold + italic (inherited colour and bold, own italic). This is
+        // the part naive resolvers drop.
+        let root = Text {
+            content: TextContent::Literal("parent ".to_string()),
+            style: TextStyle {
+                font: None,
+                color: Some(TextColor::Red),
+                bold: Some(true),
+                ..TextStyle::default()
+            },
+            extra: vec![Text {
+                content: TextContent::Literal("child".to_string()),
+                style: TextStyle {
+                    font: None,
+                    italic: Some(true),
+                    ..TextStyle::default()
+                },
+                ..Text::default()
+            }],
+            ..Text::default()
+        };
+        let resolved = root.resolve(&tr);
+        let spans = resolved.to_spans();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].text, "parent ");
+        assert_eq!(spans[0].style.color, Some(TextColor::Red));
+        assert_eq!(spans[0].style.bold, Some(true));
+
+        assert_eq!(spans[1].text, "child");
+        // Inherited from the parent:
+        assert_eq!(spans[1].style.color, Some(TextColor::Red));
+        assert_eq!(spans[1].style.bold, Some(true));
+        // The child's own attribute:
+        assert_eq!(spans[1].style.italic, Some(true));
+    }
+
+    #[test]
+    fn argument_keeps_its_own_style_and_inherits_the_translation_node_style() {
+        // The translation node is gold; the victim argument is aqua. After
+        // resolution the argument span must be aqua (its own colour wins) while a
+        // plain literal chunk of the pattern stays gold (inherited).
+        let msg = Text {
+            content: TextContent::Translate {
+                key: "death.attack.mob".to_string(),
+                with: vec![
+                    Text {
+                        content: TextContent::Literal("Victim".to_string()),
+                        style: TextStyle {
+                            font: None,
+                            color: Some(TextColor::Aqua),
+                            ..TextStyle::default()
+                        },
+                        ..Text::default()
+                    },
+                    Text::literal("Zombie"),
+                ],
+                fallback: None,
+            },
+            style: TextStyle {
+                font: None,
+                color: Some(TextColor::Gold),
+                ..TextStyle::default()
+            },
+            ..Text::default()
+        };
+        let spans = msg.resolve(&tr).to_spans();
+        // Expect: [ "Victim"(aqua), " was slain by "(gold), "Zombie"(gold) ].
+        let victim = spans.iter().find(|s| s.text == "Victim").expect("victim span");
+        assert_eq!(victim.style.color, Some(TextColor::Aqua));
+        let middle = spans
+            .iter()
+            .find(|s| s.text.contains("was slain by"))
+            .expect("pattern literal span");
+        assert_eq!(middle.style.color, Some(TextColor::Gold));
+        let killer = spans.iter().find(|s| s.text == "Zombie").expect("killer span");
+        assert_eq!(killer.style.color, Some(TextColor::Gold));
+    }
+
+    #[test]
+    fn plain_literal_is_returned_unchanged() {
+        let msg = Text::literal("just words");
+        assert_eq!(msg.resolve(&tr).to_plain_string(), "just words");
+    }
+}

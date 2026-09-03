@@ -410,8 +410,10 @@ impl Default for TextContent {
 ///
 /// Construct literals with [`Text::literal`] and translations with
 /// [`Text::translate`]; parse wire forms with [`Text::from_json`] /
-/// [`Text::from_nbt`] / [`Text::from_legacy`]; and render with
-/// [`Text::to_plain_string`] or [`Text::to_legacy_string`].
+/// [`Text::from_nbt`] / [`Text::from_legacy`]; flatten to plain text for a log
+/// or an oracle with [`Text::to_plain_string`]; and reach every *styled*
+/// renderer through [`Text::resolve`], which yields the [`ResolvedText`] those
+/// renderers hang off.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Text {
     /// This node's own content.
@@ -430,7 +432,7 @@ pub struct Text {
 }
 
 /// A resolved run of text with its fully-inherited style, produced by
-/// [`Text::to_spans`].
+/// [`ResolvedText::to_spans`].
 ///
 /// `Hash` (alongside the derived `Eq`) is what lets a `Vec<TextSpan>` key a
 /// wrap cache the way a plain `String` already keys `hud::ChatWrapCache` —
@@ -447,18 +449,18 @@ pub struct TextSpan {
 
 /// [`TextSpan`]'s interactive sibling: the same flattened, fully-inherited run,
 /// plus whichever `click`/`hover`/`insertion` apply to it — produced by
-/// [`Text::to_interactive_spans`].
+/// [`ResolvedText::to_interactive_spans`].
 ///
 /// **A new type rather than new fields on [`TextSpan`] itself.** `click_event`/
 /// `hover_event` decode into [`Text::click`]/[`Text::hover`] correctly and
 /// always have (see `json_click`/`json_hover`/`nbt_click`/`nbt_hover`), but
-/// [`Text::to_spans`] — the function every existing consumer flattens a tree
-/// through — never read them, so they were silently discarded exactly at the
-/// tree-to-span boundary. Sixteen call sites across `lodestone-shell` build a
+/// [`ResolvedText::to_spans`] — the function every existing consumer flattens a
+/// tree through — never read them, so they were silently discarded exactly at
+/// the tree-to-span boundary. Sixteen call sites across `lodestone-shell` build a
 /// `TextSpan` struct literal directly, so widening that type would be a
-/// breaking change landing blind in a crate two other agents hold. This is
-/// additive instead: a chat hit-test can call [`Text::to_interactive_spans`]
-/// once it exists, and nothing that already calls [`Text::to_spans`] changes.
+/// breaking change landing blind in a crate two other agents hold. It is
+/// additive instead: a chat hit-test calls [`ResolvedText::to_interactive_spans`],
+/// and nothing that already calls [`ResolvedText::to_spans`] is disturbed.
 ///
 /// No `Hash` derive (unlike [`TextSpan`]): [`HoverEvent`] carries a `Box<Text>`
 /// payload, and hashing a whole nested component tree is not a cost this type
@@ -521,16 +523,13 @@ impl Text {
     ///     == "container.crafting"      // the raw key, on screen
     /// ```
     ///
-    /// Safe uses are (a) a tree with no `translate` nodes at all — notably the
-    /// output of `lodestone_game::text::resolve`, which lowers every `translate`
-    /// node to a literal first, and (b) logs, panics and tests, where a key is a
-    /// perfectly good identifier.
+    /// Safe uses are (a) a tree with no `translate` nodes at all — notably a
+    /// [`ResolvedText`], where the type already proves it — and (b) logs, panics
+    /// and tests, where a key is a perfectly good identifier.
     ///
     /// **Anything that reaches a pixel must go through the language table**, i.e.
-    /// `lodestone_game::text::resolve_to_string(&text, translate)` or
-    /// [`Self::to_plain_string_with`]. Four shell surfaces already do (chat, the
-    /// tab list, the scoreboard sidebar, boss bars); the container-screen title
-    /// did not, and shipped `container.crafting` where "Crafting" belonged.
+    /// [`Self::resolve`] (whose [`ResolvedText`] is the only thing the styled
+    /// renderers accept) or [`Self::to_plain_string_with`].
     #[must_use]
     pub fn to_plain_string(&self) -> String {
         self.to_plain_string_with(&default_translation)
@@ -606,7 +605,7 @@ impl Text {
     /// collapse to plain within that run); literal and `extra` inheritance is
     /// modelled exactly.
     #[must_use]
-    pub fn to_spans(&self) -> Vec<TextSpan> {
+    pub(crate) fn to_spans(&self) -> Vec<TextSpan> {
         let mut out = Vec::new();
         for span in self.to_spans_ignoring_legacy_codes() {
             if !span.text.contains(LEGACY_PREFIX) {
@@ -644,7 +643,7 @@ impl Text {
     /// [`to_legacy_string`]: Self::to_legacy_string
     /// [`to_spans`]: Self::to_spans
     #[must_use]
-    pub fn to_spans_ignoring_legacy_codes(&self) -> Vec<TextSpan> {
+    pub(crate) fn to_spans_ignoring_legacy_codes(&self) -> Vec<TextSpan> {
         let mut spans = Vec::new();
         self.collect_spans(&TextStyle::default(), &default_translation, &mut spans, 0);
         spans
@@ -687,7 +686,7 @@ impl Text {
     /// `click`/`hover`/`insertion` — see [`InteractiveTextSpan`]'s own doc for
     /// why this is a separate method rather than a change to [`TextSpan`].
     #[must_use]
-    pub fn to_interactive_spans(&self) -> Vec<InteractiveTextSpan> {
+    pub(crate) fn to_interactive_spans(&self) -> Vec<InteractiveTextSpan> {
         let mut out = Vec::new();
         for span in self.to_interactive_spans_ignoring_legacy_codes() {
             if !span.text.contains(LEGACY_PREFIX) {
@@ -826,7 +825,7 @@ impl Text {
     /// flatten straight into this call before `CommandSuggestionEntry::
     /// tooltip` was widened to carry a real [`Text`] end to end).
     #[must_use]
-    pub fn to_legacy_string(&self) -> String {
+    pub(crate) fn to_legacy_string(&self) -> String {
         let mut out = String::new();
         let mut previous = TextStyle::default();
         for span in self.to_spans_ignoring_legacy_codes() {
@@ -934,6 +933,354 @@ impl Text {
     #[must_use]
     pub fn from_nbt(nbt: &Nbt) -> Self {
         text_from_nbt(nbt, 0)
+    }
+
+    /// Lowers every `translate` node in this tree against `translate`,
+    /// producing an equivalent tree of literals — **the only way to obtain a
+    /// [`ResolvedText`]**, and therefore the only route from a decoded
+    /// component to any styled rendering of it.
+    ///
+    /// - `translate` returns the format string for a key, or `None` to fall
+    ///   back to the node's `fallback` and then to the key itself. Losing a
+    ///   translation must never cost the message.
+    /// - Sequential `%s`, indexed `%N$s` and escaped `%%` placeholders,
+    ///   nested `extra`, and full style inheritance are all preserved: each
+    ///   substituted argument and each `extra` child keeps its own style and
+    ///   inherits the resolving node's.
+    /// - Interactivity (`click`, `hover`, `insertion`) is carried through
+    ///   unchanged.
+    ///
+    /// `lodestone_assets::Language::translator` produces a suitable closure
+    /// from a real language pack. When no table is available at all — a
+    /// server-list ping decoded before any pack is loaded, say — passing
+    /// `&|_| None` is the honest form: every key lowers to its own name, so
+    /// the tree is genuinely literal and a reader sees the key rather than an
+    /// empty line.
+    #[must_use]
+    pub fn resolve(&self, translate: &dyn Fn(&str) -> Option<String>) -> ResolvedText {
+        ResolvedText(resolve_node(self, translate, 0))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Resolved trees
+// ---------------------------------------------------------------------------
+
+/// A [`Text`] tree that provably contains no `translate` nodes, because it came
+/// out of [`Text::resolve`] or was built from a form that cannot carry one.
+///
+/// # Why the state is a type
+///
+/// A component arrives from the wire as *structure*, not prose: a death message
+/// is `translate("death.attack.mob", [victim, killer])` where the killer is
+/// itself a `translate` node. Turning those keys into words needs the language
+/// pack, and a surface that skips that step draws the raw key — which shipped
+/// three separate times (container titles, boss-bar titles, disconnect reasons)
+/// while a doc comment on [`Text::to_plain_string`] correctly warned against it.
+///
+/// So the styled renderers — [`Self::to_spans`], [`Self::to_interactive_spans`],
+/// [`Self::to_legacy_string`] — hang off this type and not off [`Text`], and
+/// there is no constructor taking an arbitrary [`Text`]. Reaching a draw site
+/// with an unresolved tree is a compile error rather than a silent defect:
+///
+/// ```compile_fail
+/// use lodestone_model::Text;
+/// // No `to_spans` on an unresolved tree — the language table was never
+/// // consulted, so `container.crafting` would go straight to the screen.
+/// let spans = Text::translate("container.crafting", vec![]).to_spans();
+/// ```
+///
+/// The same tree, resolved first, is what a draw site is allowed to hold — and
+/// this compiles, which is what makes the rejection above evidence rather than
+/// an assertion about a name that simply does not exist:
+///
+/// ```
+/// use lodestone_model::Text;
+/// let table = |key: &str| (key == "container.crafting").then(|| "Crafting".to_owned());
+/// let spans = Text::translate("container.crafting", vec![]).resolve(&table).to_spans();
+/// assert_eq!(spans[0].text, "Crafting");
+/// ```
+///
+/// # What it is not
+///
+/// It is not a claim that the wording is *correct* — resolving against an empty
+/// table lowers every key to its own name, and that is a resolved tree. It is a
+/// claim that the language table has been consulted, which is the step whose
+/// omission is invisible at the draw call.
+///
+/// [`Text`] keeps [`Text::to_plain_string`] for logs, panics, tests and the
+/// cross-format oracle, where a key is a perfectly good identifier and no pixel
+/// is involved.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ResolvedText(Text);
+
+impl ResolvedText {
+    /// A literal string, which cannot contain a `translate` node by
+    /// construction. The escape hatch for text a surface authored itself.
+    #[must_use]
+    pub fn literal(content: impl Into<String>) -> Self {
+        Self(Text::literal(content))
+    }
+
+    /// Parses legacy `§`-coded text. The legacy format has no representation
+    /// for a translation key, so the result is resolved by construction — see
+    /// [`Text::from_legacy`] for the parsing rules.
+    #[must_use]
+    pub fn from_legacy(input: &str) -> Self {
+        Self(Text::from_legacy(input))
+    }
+
+    /// The underlying tree, for the operations [`Text`] still owns
+    /// (serialisation, equality, `extra` inspection).
+    #[must_use]
+    pub const fn as_text(&self) -> &Text {
+        &self.0
+    }
+
+    /// Consumes this wrapper, yielding the resolved tree. Named rather than a
+    /// `From` impl because it discards the guarantee, and a reader should see
+    /// where that happens.
+    #[must_use]
+    pub fn into_text(self) -> Text {
+        self.0
+    }
+
+    /// Flattens to plain text: no style, no interactivity. Unlike
+    /// [`Text::to_plain_string`] this consults no translation table, because
+    /// there is nothing left to translate.
+    #[must_use]
+    pub fn to_plain_string(&self) -> String {
+        self.0.to_plain_string()
+    }
+
+    /// Flattens this tree into styled runs ready to draw: inheritance resolved
+    /// against an empty root style, **and** legacy `§` codes found inside
+    /// literal content expanded into their own runs.
+    ///
+    /// This is the one function a render surface should call. There is no
+    /// non-expanding string path at draw time anywhere in vanilla either: every
+    /// text-draw and text-measure entry point applies `§` codes as it walks the
+    /// string. That is why a plugin server can put `§7` inside a modern
+    /// component and have it colour, and why a client that flattens without
+    /// expanding puts `§7` on screen as two glyphs.
+    ///
+    /// Both conventions live in one field, and a server-list MOTD is where they
+    /// collide hardest: `description` arrives as a bare string full of `§c`
+    /// codes, or as a component tree with `color` keys, or — routinely — as a
+    /// component tree whose `text` values *also* contain `§` codes, because the
+    /// server built the string with a legacy formatter and wrapped it in modern
+    /// JSON. All three shapes are handled here.
+    ///
+    /// An expanded run inherits the enclosing component's style
+    /// ([`TextStyle::inherit`]), so `{"color":"gold","text":"a§cb"}` yields gold
+    /// `a` then red `b` — the legacy code overrides the colour it names and the
+    /// component's colour still governs the run before it. `§r` resets to the
+    /// *enclosing component's* style rather than to nothing.
+    ///
+    /// Adjacent runs are **not** merged.
+    #[must_use]
+    pub fn to_spans(&self) -> Vec<TextSpan> {
+        self.0.to_spans()
+    }
+
+    /// [`Self::to_spans`]'s interactive sibling: the same flattening, plus
+    /// `click`/`hover`/`insertion` — see [`InteractiveTextSpan`] for why that is
+    /// a separate type rather than extra fields on [`TextSpan`].
+    #[must_use]
+    pub fn to_interactive_spans(&self) -> Vec<InteractiveTextSpan> {
+        self.0.to_interactive_spans()
+    }
+
+    /// Renders back to a legacy `§`-code string. Colour and each active format
+    /// flag are emitted as codes ahead of each run; a `§r` reset is emitted
+    /// whenever a run turns a flag *off* relative to the previous run. Hex
+    /// colours have no legacy code and are dropped.
+    ///
+    /// # What this is for
+    ///
+    /// Two call shapes are legitimate; a third is a bug.
+    ///
+    /// 1. **Serialising into an actual legacy-string wire field** — a protocol
+    ///    whose own packet definition carries a `§`-coded string, e.g. the
+    ///    pre-1.13 scoreboard-team prefix/suffix, where the flattening is the
+    ///    wire format's own lossiness rather than one introduced here. No
+    ///    encoder in this workspace constructs such a field today: the two
+    ///    families that carry one only ever *decode* it
+    ///    ([`Text::from_legacy`], the reverse direction), because neither hosts
+    ///    a server and so never emits that packet.
+    /// 2. **A colour-blind, non-drawing use** — box-width measurement through a
+    ///    `§`-aware width table, or an identity comparison that only needs a
+    ///    stable content key — where the flattened string is never itself
+    ///    painted, so a dropped hex colour changes nothing.
+    ///
+    /// Anything **draw-adjacent** — building the string a renderer actually puts
+    /// on screen — is a bug: hex colours (`TextColor::Rgb`, added in 1.16) have
+    /// no legacy code and silently vanish. Use [`Self::to_spans`] and draw the
+    /// spans instead. That was the shape of three now-fixed production defects:
+    /// the tooltip title and held-item draw sites, the chat HUD draw path, and a
+    /// 1.14 tab-completion tooltip that flattened into this call before its
+    /// carrier was widened to a real [`Text`] end to end.
+    #[must_use]
+    pub fn to_legacy_string(&self) -> String {
+        self.0.to_legacy_string()
+    }
+}
+
+impl std::ops::Deref for ResolvedText {
+    type Target = Text;
+
+    fn deref(&self) -> &Text {
+        &self.0
+    }
+}
+
+/// Walks `node`, replacing every `translate` node with the equivalent literal
+/// subtree and substituting the (recursively resolved) arguments as styled
+/// children.
+fn resolve_node(node: &Text, translate: &dyn Fn(&str) -> Option<String>, depth: usize) -> Text {
+    if depth > MAX_DEPTH {
+        return Text::default();
+    }
+
+    // Resolve the node's own extra children up front; they render after this
+    // node's content and inherit its style, unchanged by translation.
+    let resolved_extra: Vec<Text> = node
+        .extra
+        .iter()
+        .map(|child| resolve_node(child, translate, depth + 1))
+        .collect();
+
+    let mut out = Text {
+        style: node.style,
+        click: node.click.clone(),
+        hover: node.hover.clone(),
+        insertion: node.insertion.clone(),
+        ..Text::default()
+    };
+
+    match &node.content {
+        TextContent::Literal(literal) => {
+            out.content = TextContent::Literal(literal.clone());
+            out.extra = resolved_extra;
+        }
+        TextContent::Translate {
+            key,
+            with,
+            fallback,
+        } => {
+            let pattern = translate(key)
+                .or_else(|| fallback.clone())
+                .unwrap_or_else(|| key.clone());
+            let resolved_args: Vec<Text> = with
+                .iter()
+                .map(|arg| resolve_node(arg, translate, depth + 1))
+                .collect();
+            // Expand the pattern into this node's literal content plus a run of
+            // children; the node's original `extra` follows those children.
+            let mut pattern_children = Vec::new();
+            expand_pattern(
+                &pattern,
+                &resolved_args,
+                &mut out.content,
+                &mut pattern_children,
+            );
+            pattern_children.extend(resolved_extra);
+            out.extra = pattern_children;
+        }
+    }
+
+    out
+}
+
+/// Expands a translation format `pattern`, substituting `args`, into a leading
+/// literal `content` plus a sequence of `children`.
+///
+/// The text before the first placeholder becomes `content`; every later literal
+/// run becomes a plain-[`Text`] child, and every placeholder becomes the
+/// matching resolved argument (itself styled). Supports `%s` (sequential),
+/// `%N$s` (1-based indexed) and `%%` (literal `%`). An out-of-range or absent
+/// argument contributes nothing, matching [`write_translation`], the
+/// plain-string formatter this mirrors.
+fn expand_pattern(
+    pattern: &str,
+    args: &[Text],
+    content: &mut TextContent,
+    children: &mut Vec<Text>,
+) {
+    let mut leading = String::new();
+    let mut seen_placeholder = false;
+    // Accumulates a literal run once we are past the leading segment.
+    let mut buffer = String::new();
+
+    let flush_run = |buffer: &mut String, children: &mut Vec<Text>| {
+        if !buffer.is_empty() {
+            children.push(Text::literal(std::mem::take(buffer)));
+        }
+    };
+
+    let mut chars = pattern.chars().peekable();
+    let mut next_auto = 0usize;
+    while let Some(character) = chars.next() {
+        if character != '%' {
+            if seen_placeholder {
+                buffer.push(character);
+            } else {
+                leading.push(character);
+            }
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('%') => {
+                chars.next();
+                if seen_placeholder {
+                    buffer.push('%');
+                } else {
+                    leading.push('%');
+                }
+            }
+            Some('s') => {
+                chars.next();
+                flush_run(&mut buffer, children);
+                push_resolved_arg(args, next_auto, children);
+                next_auto += 1;
+                seen_placeholder = true;
+            }
+            Some(digit) if digit.is_ascii_digit() => {
+                let mut index = 0usize;
+                while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
+                    chars.next();
+                    index = index
+                        .saturating_mul(10)
+                        .saturating_add((d as usize) - ('0' as usize));
+                }
+                if chars.peek() == Some(&'$') {
+                    chars.next();
+                    if chars.peek() == Some(&'s') {
+                        chars.next();
+                    }
+                }
+                flush_run(&mut buffer, children);
+                push_resolved_arg(args, index.saturating_sub(1), children);
+                seen_placeholder = true;
+            }
+            _ => {
+                if seen_placeholder {
+                    buffer.push('%');
+                } else {
+                    leading.push('%');
+                }
+            }
+        }
+    }
+    // Flush any trailing literal run that followed the last placeholder.
+    flush_run(&mut buffer, children);
+
+    *content = TextContent::Literal(leading);
+}
+
+fn push_resolved_arg(args: &[Text], index: usize, children: &mut Vec<Text>) {
+    if let Some(arg) = args.get(index) {
+        children.push(arg.clone());
     }
 }
 
