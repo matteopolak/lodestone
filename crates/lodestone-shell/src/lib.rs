@@ -146,3 +146,21 @@ pub fn run(config: Config) -> anyhow::Result<()> {
         }
     }
 }
+
+/// [`run`], around a caller-composed [`lodestone_app::App`] — the seam a
+/// downstream crate uses to register a plugin into the real, on-screen game
+/// rather than a headless consumer only. Build the `App` from [`sim::Sim::client_app`],
+/// `add_plugins` the plugin, then hand the result here in place of a plain
+/// [`Config`]. See `docs/plugin-api.md`'s "Registration" section.
+///
+/// Only exists with `window` on: there is no windowed entry point to reach
+/// without it, and `window`-off builds have no use for an `App` that only
+/// `Mode::Window` consumes (see [`app::run_with_app`]'s own doc for why every
+/// other mode is refused there rather than silently dropping the plugin).
+///
+/// # Errors
+/// Same as [`run`], plus a named error if `config.mode` is not [`Mode::Window`].
+#[cfg(all(not(target_arch = "wasm32"), feature = "window"))]
+pub fn run_with_app(app: lodestone_app::App, config: Config) -> anyhow::Result<()> {
+    app::run_with_app(app, config)
+}

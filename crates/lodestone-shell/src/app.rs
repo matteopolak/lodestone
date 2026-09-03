@@ -132,6 +132,8 @@ use recipe_panel::{
 };
 #[allow(unused_imports)]
 use runners::run_windowed;
+#[allow(unused_imports)]
+use runners::run_windowed_with_app;
 // Same carried-`cfg` reasoning as the import just below, but for the
 // runtime-presentation runner: `run_headless_session` only exists for
 // `cfg(all(not(wasm32), feature = "runtime-presentation"))`.
@@ -234,6 +236,38 @@ pub fn run(config: Config) -> anyhow::Result<()> {
              which a browser session has. A browser session is always Mode::Window."
         )),
         Mode::Window => run_windowed(config),
+    }
+}
+
+/// [`run`], around a caller-composed [`lodestone_app::App`] instead of
+/// [`Sim::client_app`]'s own — the missing half of the plugin-registration seam:
+/// `Sim` could already adopt a pre-built `App` (`Sim::from_app`), but every real
+/// entry point into the *windowed* client (`run`, `run_windowed`, `WindowApp::new`)
+/// built its own with no way for a caller to add a plugin, so a third-party plugin
+/// could reach a headless consumer (`ClientBuilder::ecs`) but never the shipped,
+/// on-screen game. This is that entry point: a downstream crate calls
+/// `Sim::client_app()`, adds its plugin, and hands the result here instead of to
+/// `Sim::from_app` directly, to get the real winit-driven, GPU-rendered client
+/// rather than a bare ticked `Sim`.
+///
+/// Only [`Mode::Window`] has a use for the extra `App` — `Headless`/`Connect`
+/// are CLI diagnostics gated behind an ownership check with their own
+/// unconditional composition (`crate::diagnostics`), and a headless *session*
+/// or bot consumer already has `ClientBuilder::ecs` — so every other mode is
+/// refused rather than silently dropping the caller's plugins.
+///
+/// # Errors
+/// Returns an error if GPU bring-up or the event loop fails, or if `config.mode`
+/// is not [`Mode::Window`].
+pub fn run_with_app(app: lodestone_app::App, config: Config) -> anyhow::Result<()> {
+    match config.mode {
+        Mode::Window => run_windowed_with_app(app, config),
+        other => Err(anyhow::anyhow!(
+            "run_with_app only supports Mode::Window: {other:?} has its own \
+             composition route (Sim::from_app directly for a diagnostic, or \
+             ClientBuilder::ecs for a headless session/bot) that does not need \
+             a windowed WindowApp at all."
+        )),
     }
 }
 

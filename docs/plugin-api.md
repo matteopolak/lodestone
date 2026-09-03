@@ -44,6 +44,18 @@ or rendered, via `Sim::client_app()` (= `client_app()` plus the shell's own rend
 through the identical function a consumer calls — no private composition path can drift from the public
 one.
 
+`Sim::from_app` accepting a plugin was necessary but not sufficient: every real entry point into the
+*windowed* client (`lodestone_shell::run`, `app::run`, `WindowApp::new`) still built its own `Sim::new`
+under the hood, so a plugin could reach a headless consumer but never the shipped, on-screen game. The
+entry point for that is `WindowApp::new_with_app` (and, above it, `run_with_app` at both `app::` and the
+crate root) — a downstream crate composes an `App` from `Sim::client_app()`, adds its plugin, and calls
+`lodestone_shell::run_with_app(app, config)` in place of `run(config)` to get the real winit-driven,
+GPU-rendered client with the plugin's systems running, rather than a bare ticked `Sim`. Only
+`Mode::Window` accepts an `App` this way — `Headless`/`Connect` are ownership-gated CLI diagnostics with
+their own composition, and a headless session or bot consumer already has `ClientBuilder::ecs`.
+`crates/lodestone-shell/src/app/tests.rs`'s `window_app_new_with_app_wires_a_callers_plugin_into_the_real_constructor`
+is the gate, with a negative control on plain `WindowApp::new`.
+
 Not every internal plugin can live in the renderer-free `client_app()`: the terrain mesher and the
 pick-target/interaction plugin are coupled to shell-internal types, so a headless consumer gets
 entity/local-player/session state and the `ActionQueue` egress, but no mesher, pick target, or

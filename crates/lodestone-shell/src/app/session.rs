@@ -6,7 +6,23 @@ use super::*;
 
 impl WindowApp {
     pub(super) fn new(config: Config) -> Self {
-        let sim = Sim::new(config.clone());
+        Self::new_with_app(Sim::client_app(), config)
+    }
+
+    /// Build the windowed shell around a **caller-composed** [`lodestone_app::App`]
+    /// instead of [`Sim::client_app`]'s own — the rendered half of the seam
+    /// `crates/lodestone-shell/tests/interaction/rendered_client_takes_a_plugin.rs`
+    /// proves against a bare [`Sim`], wired one level further down into the exact
+    /// struct the real winit driver (`super::runners::run_windowed_with_app`)
+    /// constructs. `new` above is the special case with nothing added: every field
+    /// below is identical to what it built before this split, just fed from
+    /// [`Sim::from_app`] instead of [`Sim::new`].
+    ///
+    /// The `App` must carry at least what [`Sim::client_app`] installs — see that
+    /// function's own doc for why starting from it is the straightforward way to
+    /// guarantee that.
+    pub(super) fn new_with_app(app: lodestone_app::App, config: Config) -> Self {
+        let sim = Sim::from_app(app, config.clone());
         let benchmark = config.benchmark.map(BenchmarkDriver::new);
         let show_debug = config.benchmark.is_some_and(|benchmark| {
             benchmark.debug_overlay == crate::config::BenchmarkDebugOverlay::Open

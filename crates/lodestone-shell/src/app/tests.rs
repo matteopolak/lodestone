@@ -5260,3 +5260,118 @@ fn detach_presentation_on_an_already_headless_app_is_a_safe_no_op() {
     assert!(!app.presentation_desired);
     assert!(!app.input_armed);
 }
+
+/// **The plugin-registration seam's remaining gap, closed**: before `WindowApp::new_with_app`
+/// existed, `WindowApp::new` (and therefore `run_windowed`, and therefore
+/// `Mode::Window` — the shipped, on-screen client) built its own `Sim::new`
+/// with no parameter a caller could use to add a plugin. `Sim::client_app()` +
+/// `Sim::from_app` already let a caller compose an `App` and drive a bare
+/// `Sim` by hand (`tests/interaction/rendered_client_takes_a_plugin.rs`), but
+/// nothing fed that composed `App` into the actual struct the real winit
+/// driver constructs — `Sim::from_app` proved the ECS half accepts a plugin,
+/// not that the shipped binary's entry point does.
+///
+/// This test is that missing half, one level down from the bare-`Sim` gate:
+/// build the identical `JumpPlugin`-shaped marker, hand it to
+/// `WindowApp::new_with_app` (what `run_windowed_with_app`, and therefore
+/// `crate::run_with_app`, now call instead of `WindowApp::new`), and drive
+/// real `GameTick`s through `app.sim.step` — the same driver
+/// `app::redraw`'s per-frame loop calls in production. Registration is
+/// proven by the player's position changing, not by a flag.
+struct MarkerPlugin;
+
+impl lodestone_ecs::app::Plugin for MarkerPlugin {
+    fn build(&self, app: &mut lodestone_ecs::app::App) {
+        use bevy_ecs::schedule::IntoScheduleConfigs;
+        app.add_systems(
+            lodestone_ecs::GameTick,
+            mark_jump
+                .after(lodestone_ecs::TickSet::Intent)
+                .before(lodestone_ecs::TickSet::Physics),
+        );
+    }
+}
+
+fn mark_jump(
+    mut q: bevy_ecs::prelude::Query<
+        &mut lodestone_ecs::player::MovementIntent,
+        bevy_ecs::prelude::With<lodestone_ecs::player::LocalPlayer>,
+    >,
+) {
+    for mut intent in &mut q {
+        intent.0.forward = 0.0;
+        intent.0.strafe = 0.0;
+        intent.0.jump = true;
+        intent.0.sneak = false;
+        intent.0.sprint = false;
+    }
+}
+
+fn marker_test_config() -> Config {
+    Config {
+        mode: Mode::Headless,
+        render_distance: 2,
+        ..Config::default()
+    }
+}
+
+#[test]
+fn window_app_new_with_app_wires_a_callers_plugin_into_the_real_constructor() {
+    let mut plugin_app = Sim::client_app();
+    plugin_app.add_plugins(MarkerPlugin);
+    let mut app = WindowApp::new_with_app(plugin_app, marker_test_config());
+
+    let start = app.sim.player().position;
+    let mut apex = 0.0f64;
+    for _ in 0..60 {
+        app.sim.step(1.0 / 20.0);
+        apex = apex.max(app.sim.player().position.y - start.y);
+    }
+    let now = app.sim.player().position;
+    let horizontal = ((now.x - start.x).powi(2) + (now.z - start.z).powi(2)).sqrt();
+
+    assert!(
+        (0.9..1.6).contains(&apex),
+        "a plugin handed to `WindowApp::new_with_app` must drive the real, \
+         windowed-shell `Sim`'s local player through a real `GameTick`: \
+         expected a vanilla jump apex near 1.2522 blocks, measured {apex:.4} \
+         (horizontal displacement {horizontal:.4})"
+    );
+    assert!(
+        horizontal < 0.1,
+        "premise: a jump-in-place plugin must not travel, or the apex above \
+         is measuring terrain rather than the jump; horizontal displacement \
+         was {horizontal:.4}"
+    );
+}
+
+/// The negative control: `WindowApp::new` — what every real `Mode::Window`
+/// run still builds when no caller supplies an `App` — registers no such
+/// plugin, so the identical budget must leave the player's position
+/// unchanged. Without this, a demo-world `Sim` whose player slid for any
+/// unrelated reason would make the positive assertion above read as a pass
+/// for the wrong reason.
+#[test]
+fn without_a_supplied_app_window_app_new_still_leaves_the_player_put() {
+    let mut app = WindowApp::new(marker_test_config());
+
+    let start = app.sim.player().position;
+    let mut apex = 0.0f64;
+    for _ in 0..60 {
+        app.sim.step(1.0 / 20.0);
+        apex = apex.max(app.sim.player().position.y - start.y);
+    }
+    let now = app.sim.player().position;
+    let horizontal = ((now.x - start.x).powi(2) + (now.z - start.z).powi(2)).sqrt();
+
+    assert!(
+        apex < 0.05,
+        "control: with no plugin supplied, nothing may lift the player, yet \
+         the apex was {apex:.4} blocks"
+    );
+    assert!(
+        horizontal < 0.05,
+        "control: with no plugin supplied, nothing may move the player \
+         horizontally, yet displacement was {horizontal:.4} blocks"
+    );
+}
