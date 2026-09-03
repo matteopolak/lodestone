@@ -460,6 +460,7 @@ mod tests {
         // keeps the default build version-free. Feature-enabled behaviour is
         // covered by the client's live tests, which turn a family on.
         if cfg!(not(any(
+            feature = "v1-7",
             feature = "v1-8",
             feature = "v26-2",
             feature = "v1-9",
