@@ -95,7 +95,7 @@ use crate::{redstone, redstone_torch, redstone_wire};
 /// the dust square immediately adjacent to it. Transcribed verbatim from the
 /// 26.2 oracle run described in this module's doc comment (reading 2, the
 /// lit-torch source); the `redstone_block` source produced the same profile.
-const ORACLE_DUST_ATTENUATION: &[(i32, u8)] = &[
+pub(crate) const ORACLE_DUST_ATTENUATION: &[(i32, u8)] = &[
     (1, 15),
     (2, 14),
     (3, 13),

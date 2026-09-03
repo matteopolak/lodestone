@@ -3257,7 +3257,8 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                     // The getter has existed and been tested since #327; this line
                     // is the reader it was missing, and `/gamerule
                     // random_tick_speed 0` now really does stop crop growth.
-                    let events = random_ticks.tick_chunk(&mut column, cx, cz, tick_speed, &mut block_ticks, game_tick);
+                    let events =
+                        random_ticks.tick_chunk(&mut column, cx, cz, tick_speed, &mut block_ticks, game_tick, &*world);
                     for event in events {
                         let (x, y, z) = event.pos;
                         world.set_block(x, y, z, &event.to);
