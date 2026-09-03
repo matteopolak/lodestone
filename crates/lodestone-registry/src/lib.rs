@@ -104,6 +104,12 @@ impl std::fmt::Debug for Family {
 /// default build with no family features is empty. Each entry is gated so that
 /// deleting a family's folder (and its feature) removes exactly one line here.
 const FAMILIES: &[Family] = &[
+    #[cfg(feature = "v1-7")]
+    Family {
+        label: "v1-7",
+        protocols: lodestone_v1_7::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v1_7::adapter_for(protocol)),
+    },
     #[cfg(feature = "v1-8")]
     Family {
         label: "v1-8",
@@ -230,6 +236,13 @@ struct PhysicsFamily {
 ///
 /// - **`v1-8` (1.8.9) → `mc_1_8`.** Exact family match — this is the profile
 ///   the movement core was ported and golden-traced against for that era.
+/// - **`v1-7` (1.7.6-1.7.10) → `mc_1_8`.** Not an exact match, but the
+///   structurally right half of the choice: protocol 5 pre-dates the 1.9
+///   input-pipeline rewrite, so `mc_1_8`'s input model is the algorithm this
+///   era actually ran, where `mc_1_21`'s would be the wrong one on every tick.
+///   Its constants are 1.8's rather than 1.7's and have not been traced
+///   against this era, so treat it as "the pre-1.9 profile, unvalidated for
+///   this era" until one is ported and golden-traced.
 /// - **`v26-2` (26.2) → `mc_1_21`.** Exact family match, and the only mapping
 ///   that mattered before this table existed: every production construction
 ///   site hardcoded `mc_1_21()` unconditionally, which happened to be correct
@@ -253,6 +266,11 @@ struct PhysicsFamily {
 ///   parity — until an era-specific profile is ported and golden-traced the
 ///   way `mc_1_8` was.
 const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
+    #[cfg(feature = "v1-7")]
+    PhysicsFamily {
+        protocols: lodestone_v1_7::PROTOCOLS,
+        profile: lodestone_physics::PhysicsProfile::mc_1_8,
+    },
     #[cfg(feature = "v1-8")]
     PhysicsFamily {
         protocols: lodestone_v1_8::PROTOCOLS,
