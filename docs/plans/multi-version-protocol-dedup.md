@@ -573,8 +573,64 @@ event (`declare_recipes` read as `entity_effect` becomes a levitation
 See [`docs/protocol-1-17-era.md`](../protocol-1-17-era.md) for that era crate's
 own documentation.
 
+**Stage 8's third era, 1.19.4, and the two things it settles.** Diffed
+against `8ff165e2`, excluding the two generated tables (24,852 lines), the
+committed jar dumps (252,350), the generated neighbour-name table (246) and
+the captured bytes (221):
+
+| bucket | lines added |
+|---|---|
+| era-crate source (`crates/versions/1.19/src`, excluding `generated/`) | 6,811 |
+| shared-crate source (eight `lodestone-protocol-common` range widenings) plus registry and workspace wiring | 72 |
+| tests (`tests/*.rs`) plus the captures' README | 2,035 |
+| oracle script rows | 36 |
+| **hand-written total** | **8,954** |
+
+A **singleton era has no marginal figure**, so the plan's ~500-line falsifier
+does not apply; the comparable number is the whole-family one. At 6,811 source
+lines it is the largest era yet — above 1.17's 6,229 and 1.13's 5,531 — and the
+projection for it here was ~2-2.5k. The gap is not the mechanism failing. It is
+that "77% + chat signing hoisted from v26-2" assumed a hoist, and stage 6 has
+not run: v26-2's chat module is 776's shape, which differs from 762's in three
+ways that each silently mis-frame a stream (components are JSON strings not
+network NBT, there is no server-global message index, there is no
+acknowledgement checksum byte). So this era wrote its own chat rather than
+sharing one, and the same is true of its `player_info` decoder, which 1.19.3
+changed from an action ordinal to an action bitmask. **Every projection below
+that says "hoisted from v26-2" should be read as conditional on stage 6 having
+actually run.**
+
+Two corrections to the record this era forces. First, **a shared definition can
+be dangerous to widen in a direction the derive cannot detect.** The serverbound
+`chat` packet still begins with the message string at 762, so a widened range
+would encode an acceptable *prefix* and fail only at the server, with the
+connection closing rather than a decoder erroring — the one case where the
+`protocols` guard's loud failure is strictly better than the wire's own. Eight
+other definitions widened; this one deliberately did not.
+
+Second, **the login handshake can itself be the era boundary.** The 762 adapter
+cannot join either neighbour at all, over one byte at the end of `login_start`:
+758 reads a bare username and treats 762's presence byte as the next packet's
+start, and 766 reads a *required* 16-byte profile UUID. That made the neighbour
+captures impossible to record through the adapter, so they use a hand-written
+login — and it is the strongest whole-stream boundary statement any era has
+produced.
+
+The negative control came out matching the 1.13 era's answer, not the 1.14
+era's, and more strongly. Across the lower neighbour's 64 packets, 35 error, 19
+go silent and **10 produce a real, well-formed, wrong gameplay event**. The
+upper neighbour gives the sharpest single result: two of its three plausible
+wrong events come from an id whose *name agrees on both sides* —
+`spawn_entity` is id 1 at 762 and at 766 — so nothing about the routing is
+wrong, only the shape and the entity registry, and a 1.20.6 minecart spawn
+comes out as a spawner minecart at a plausible position with a plausible
+velocity. The guarantee this crate offers is the whole-stream one.
+
+See [`docs/protocol-1-19-era.md`](../protocol-1-19-era.md) for that era crate's
+own documentation.
+
 `cargo xtask connectedness` currently reports v1-8 59/74, v1-9 62/80, v1-13 51/86,
-v1-14 54/92, v1-17 65/103, v26-2 141/141 clientbound, with zero
+v1-14 54/92, v1-17 65/103, v1-19 67/111, v26-2 141/141 clientbound, with zero
 decoded-but-stranded in every family.
 
 **v26-2 has not migrated and that is deliberate** — it is Stage 6, explicitly deferred and not a
@@ -595,6 +651,7 @@ Three eras have now landed, and the numbers separate two cases the plan treated 
 | 1.14 | 498, 578, 754 | 1,524 | 69 lines |
 | 1.13 | 404 (singleton) | 5,531 | n/a |
 | 1.17 | 756, 758 | 6,229 | 131 lines |
+| 1.19 | 762 (singleton) | 6,811 | n/a |
 
 The 1.17 figure is the **strongest** reading the marginal claim has had, not the weakest: 1.9's
 ~20 and 1.14's 69 were both on top of chunk framing that did not change across their era, while
@@ -693,8 +750,8 @@ load-bearing rather than confirmatory. Proof: 1.16.5's canonicalisation gate unc
 captures for 498 and 578 from the jars already on disk, and a replay that lands the flat
 preset's floor in canonical ids.
 
-**Stage 8 — remaining eras, in the order the existing plan's value ranking gives** (1.13.2 and
-1.17.1/1.18.2 landed; then 1.19.4, 1.20.6, 1.21.11, 1.7.10 last). Each is stage-5 scaffold + era-specific three
+**Stage 8 — remaining eras, in the order the existing plan's value ranking gives** (1.13.2,
+1.17.1/1.18.2 and 1.19.4 landed; then 1.20.6, 1.21.11, 1.7.10 last). Each is stage-5 scaffold + era-specific three
 modules + captures. 1.7.10 is the outlier: 29% identity with 1.8.9, no minecraft-data, no jar, and
 therefore captures are its *only* shape source — budget it last and alone.
 
@@ -717,7 +774,7 @@ real count before quoting further):
 | 1.15.2, 1.18.2 | same | ~0.3–0.5k each | 96% / 94% (6 / 10 packets + a `chunk.rs` branch) |
 | 1.9.4, 1.14.4, 1.17.1 | same | ~1.5–2.5k each | 69% / 73% / 79% — new era adjacent to an existing one; ~35–40 changed packets + one or two era modules |
 | 1.13.2 | same | ~2–2.5k | 72%; first native-state era, own `chunk.rs`, command tree from `lodestone-command` |
-| 1.19.4 | same | ~2–2.5k | 77% + chat signing hoisted from v26-2 |
+| 1.19.4 | same | ~2–2.5k projected; **6,811 measured** | 77%; the projection assumed chat signing hoisted from v26-2, and stage 6 has not run, so this era wrote its own |
 | 1.20.6, 1.21.11 | same | ~2–3k each (≈1.5k if stage 6 is done first) | 57% / 64%; config phase + components hoisted from v26-2 |
 | 1.7.10 | same | ~3.5–4.5k | 29%, captures only |
 | **twelve versions** | **~66k src + ~70k tests** | **~20–25k src + ~15–20k tests** | |
