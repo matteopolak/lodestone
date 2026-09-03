@@ -616,6 +616,7 @@ impl RandomTickScheduler {
         tick_speed: u32,
         block_ticks: &mut ScheduledTickQueue<String>,
         current_tick: u64,
+        world: &dyn ChunkSource,
     ) -> Vec<RandomTickEvent> {
         let mut events = Vec::new();
         if tick_speed == 0 {
@@ -685,6 +686,7 @@ impl RandomTickScheduler {
                         column,
                         min_x,
                         min_z,
+                        world,
                         x,
                         y,
                         z,
@@ -712,6 +714,7 @@ impl RandomTickScheduler {
         column: &mut crate::chunk::ChunkColumn,
         min_x: i32,
         min_z: i32,
+        world: &dyn ChunkSource,
         x: i32,
         y: i32,
         z: i32,
@@ -743,7 +746,16 @@ impl RandomTickScheduler {
         // scheduling a torch/diode/observer recheck.
         let mutated: Vec<(i32, i32, i32)> = events.iter().map(|e| e.pos).collect();
         for (ex, ey, ez) in mutated {
-            events.extend(propagate_and_react(column, min_x, min_z, ex, ey, ez, block_ticks, current_tick));
+            // A grass, crop, sapling or leaf cell that mutates on the last
+            // column of its chunk owes the notification to its east or south
+            // neighbour just as much as to the five inside its own footprint
+            // — an observer one cell over the seam watches that mutation and
+            // must pulse for it. `world` is what makes those two cells
+            // reachable; see [`RedstoneColumns`] for the residency boundary
+            // that still stops the cascade at the edge of loaded simulation.
+            events.extend(propagate_and_react_with_entities_across_chunks(
+                column, min_x, min_z, world, ex, ey, ez, block_ticks, current_tick, None,
+            ));
         }
         events
     }
@@ -1329,7 +1341,7 @@ pub(crate) fn react_at_placement(
     block_ticks: &mut ScheduledTickQueue<String>,
     current_tick: u64,
 ) -> Vec<RandomTickEvent> {
-    react_at_placement_with_entities(column, min_x, min_z, x, y, z, block_ticks, current_tick, None)
+    react_at_placement_with_entities(column, min_x, min_z, &NoNeighbors, x, y, z, block_ticks, current_tick, None)
 }
 
 /// [`react_at_placement`], plus a live [`BlockEntityHandle`] threaded into its
@@ -1341,6 +1353,7 @@ pub(crate) fn react_at_placement_with_entities(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
+    world: &dyn ChunkSource,
     x: i32,
     y: i32,
     z: i32,
@@ -1351,15 +1364,17 @@ pub(crate) fn react_at_placement_with_entities(
     let pos = BlockPos::new(x, y, z);
     let mut own = Vec::new();
     {
-        // No wider world reachable from this entry point (its callers are
-        // `crate::server`, every oracle gate, and every unit test in this
-        // crate — none holds a `ChunkSource`), so this stays single-column
-        // via [`NoNeighbors`], exactly as before [`RedstoneColumns`]
-        // existed. The neighbour-pass fan-out below, which *is*
-        // cross-chunk-capable at its four `crate::tick` call sites, still
-        // runs unconditionally.
-        let no_neighbors = NoNeighbors;
-        let columns = RedstoneColumns::new(column, min_x, min_z, &no_neighbors);
+        // A placed block's own `setPlacedBy` reactions read and write through
+        // the same multi-column view the neighbour-pass fan-out below uses:
+        // a hopper placed one cell from a chunk seam is locked by a lever on
+        // the far side of it, a placed powered rail reads a signal from
+        // across it, and a tripwire run is legal up to
+        // `redstone_tripwire::WIRE_DIST_MAX - 1` cells long — two and a half
+        // columns — so a scan bounded to one 16x16 footprint cannot find the
+        // controlling hook of most real runs. `world` decides how far that
+        // reaches: a real [`ChunkSource`] reaches every resident neighbour,
+        // [`NoNeighbors`] reaches none.
+        let columns = RedstoneColumns::new(column, min_x, min_z, world);
         if columns.reachable(pos) {
             let state = columns.raw_state(pos);
             // Vanilla's own hopper-block on-place hook calls the same
@@ -1473,8 +1488,8 @@ pub(crate) fn react_at_placement_with_entities(
             }
         }
     }
-    own.extend(propagate_and_react_with_entities(
-        column, min_x, min_z, x, y, z, block_ticks, current_tick, block_entities,
+    own.extend(propagate_and_react_with_entities_across_chunks(
+        column, min_x, min_z, world, x, y, z, block_ticks, current_tick, block_entities,
     ));
     own
 }
@@ -1570,6 +1585,7 @@ pub(crate) fn react_at_removal(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
+    world: &dyn ChunkSource,
     x: i32,
     y: i32,
     z: i32,
@@ -1582,10 +1598,12 @@ pub(crate) fn react_at_removal(
         return own;
     }
     let pos = BlockPos::new(x, y, z);
-    // No wider world reachable from this entry point either — see
-    // `react_at_placement_with_entities`'s own note on [`NoNeighbors`].
-    let no_neighbors = NoNeighbors;
-    let columns = RedstoneColumns::new(column, min_x, min_z, &no_neighbors);
+    // The hook this scan is looking for sits up to
+    // `redstone_tripwire::WIRE_DIST_MAX - 1` cells south or west of the
+    // broken cell, so for most legal run lengths it is in a different chunk
+    // column than the cell the player just broke — see
+    // `react_at_placement_with_entities`'s own note on `world`.
+    let columns = RedstoneColumns::new(column, min_x, min_z, world);
     let found = {
         let lookup = redstone::make_columns_lookup(&columns);
         redstone_tripwire::on_wire_removed(&lookup, pos, wire_state_before_removal)
@@ -1807,19 +1825,26 @@ impl<'h, 'w> RedstoneColumns<'h, 'w> {
     }
 }
 
-/// A [`ChunkSource`] that reports every chunk not resident — the
-/// single-column behaviour every pre-cross-chunk caller of
-/// [`propagate_and_react`]/[`propagate_and_react_with_entities`]/
-/// [`react_at_placement_with_entities`] still gets (every oracle gate and
-/// every pre-existing test in this crate, none of which has a wider world
-/// to hand in): a [`RedstoneColumns`] built over this reports every
-/// neighbour unloaded, so a cascade truncates at exactly the boundary it
-/// always truncated at. `column`/`block_state`/`biome_state_at`/`set_block`
-/// are never called (all four would panic) because
-/// [`RedstoneColumns::ensure`] short-circuits on `is_column_resident`
-/// before reaching any of them.
+/// A [`ChunkSource`] that reports every chunk not resident, so a
+/// [`RedstoneColumns`] built over it reaches nothing outside its home
+/// column.
+///
+/// **Test-only, and the `#[cfg(test)]` is the guard, not a convenience.**
+/// Every production entry point in this module takes a `world: &dyn
+/// ChunkSource` and is reached from `crate::server` or `crate::tick`, both
+/// of which hold the live world; a single-column cascade is a
+/// *fixture-shaped* thing, useful for a rig that has one column and wants
+/// its reach bounded to it. Gating the type out of non-test builds makes
+/// "no production redstone cascade is bounded to one chunk column" a
+/// property the compiler checks rather than one a comment asserts.
+///
+/// `column`/`block_state`/`biome_state_at`/`set_block` are never called
+/// (all four would panic) because [`RedstoneColumns::ensure`]
+/// short-circuits on `is_column_resident` before reaching any of them.
+#[cfg(test)]
 struct NoNeighbors;
 
+#[cfg(test)]
 impl ChunkSource for NoNeighbors {
     fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
         unreachable!("NoNeighbors::is_column_resident is always false, so RedstoneColumns never calls this")
@@ -1838,6 +1863,11 @@ impl ChunkSource for NoNeighbors {
     }
 }
 
+/// [`propagate_and_react_with_entities`] with no block-entity registry.
+///
+/// Test-only, for the same reason [`NoNeighbors`] is: a rig that holds one
+/// column and wants a cascade bounded to it.
+#[cfg(test)]
 pub(crate) fn propagate_and_react(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
@@ -1851,16 +1881,17 @@ pub(crate) fn propagate_and_react(
     propagate_and_react_with_entities(column, min_x, min_z, x, y, z, block_ticks, current_tick, None)
 }
 
-/// [`propagate_and_react`], plus a live [`BlockEntityHandle`] for the one
-/// family whose `neighborChanged` reaction lives in a block *entity* rather
-/// than in the block-state string every other reaction here mutates —
-/// command blocks (`CommandBlock.neighborChanged` →
-/// `CommandBlock.setPoweredAndUpdate`, `crate::command_block::on_power_changed`).
-/// `None` is exactly equivalent to calling [`propagate_and_react`] itself, so
-/// every caller with no block-entity registry in scope (every oracle gate and
-/// unit test in this crate) keeps working unchanged; the real world-tick
-/// call sites in `tick.rs`/`crate::server` — the ones a redstone edge or a
-/// block placement actually reaches through — pass `Some`.
+/// [`propagate_and_react_with_entities_across_chunks`] bounded to the home
+/// column: the same fan-out and the same dispatch, over a
+/// [`RedstoneColumns`] built on [`NoNeighbors`], so nothing outside
+/// `column`'s own 16x16 footprint is read, written or notified.
+///
+/// Test-only. The `block_entities` handle is the registry the one family
+/// whose power reaction lives in a block *entity* rather than in a
+/// block-state string needs — command blocks, via
+/// `crate::command_block::on_power_changed`; `None` skips that family and is
+/// what a rig with no registry in scope passes.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn propagate_and_react_with_entities(
     column: &mut crate::chunk::ChunkColumn,
@@ -1878,19 +1909,20 @@ pub(crate) fn propagate_and_react_with_entities(
     propagate_and_react_over(&columns, x, y, z, block_ticks, current_tick, block_entities)
 }
 
-/// [`propagate_and_react_with_entities`], extended to reach an
-/// already-loaded neighbouring chunk (issue #548's cross-chunk
-/// propagation): `world` answers [`ChunkSource::is_column_resident`] for
-/// real, so a cascade that steps off the edge of `column`'s own 16×16
-/// footprint keeps going into whichever neighbour is currently resident,
-/// instead of truncating at the column edge. `crate::tick`'s four
-/// production call sites that drive a live redstone edge — a scheduled-tick
-/// flip, a target-block hit, a falling block's landing, and the two
-/// same-tick signal reads a torch/repeater/comparator scheduled tick makes
-/// before it re-propagates — use this; every oracle gate and unit test in
-/// this crate still calls [`propagate_and_react_with_entities`] itself,
-/// which behaves identically to before this function existed (see
-/// [`NoNeighbors`]).
+/// The neighbour fan-out every production redstone edge runs through:
+/// `world` answers [`ChunkSource::is_column_resident`] for real, so a
+/// cascade that steps off the edge of `column`'s own 16x16 footprint keeps
+/// going into whichever neighbour is currently resident instead of
+/// truncating at an administrative boundary redstone has no concept of.
+///
+/// Every path a player or the world tick can drive reaches this:
+/// `crate::tick`'s scheduled-tick drain (including the torch/repeater/
+/// comparator reads that precede a re-propagate), target-block hits,
+/// falling-block landings and the random-tick pass, plus
+/// [`react_at_placement_with_entities`]/[`react_at_removal`] under
+/// `crate::server`'s placement and break handlers. The residency gate is
+/// the only remaining boundary, and it is the real one — a circuit does not
+/// propagate into a chunk nobody is simulating (see [`RedstoneColumns`]).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn propagate_and_react_with_entities_across_chunks(
     column: &mut crate::chunk::ChunkColumn,
@@ -2754,6 +2786,7 @@ fn section_has_randomly_ticking_block(
 mod tests {
     use super::*;
     use crate::chunk::ChunkColumn;
+    use std::collections::HashSet;
     use std::sync::Mutex;
 
     // # `next_random_tick_pos`: predicted values computed independently
@@ -2822,7 +2855,7 @@ mod tests {
         }
         let mut scheduler = RandomTickScheduler::new(12345, 0);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        let events = scheduler.tick_chunk(&mut column, 0, 0, 5, &mut block_ticks, 0);
+        let events = scheduler.tick_chunk(&mut column, 0, 0, 5, &mut block_ticks, 0, &NoNeighbors);
         assert!(events.is_empty());
 
         // An ineligible SECTION draws zero — confirmed by the position LCG
@@ -2864,7 +2897,7 @@ mod tests {
 
         let mut scheduler = RandomTickScheduler::new(12345, 0);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        scheduler.tick_chunk(&mut column, 0, 0, 5, &mut block_ticks, 0);
+        scheduler.tick_chunk(&mut column, 0, 0, 5, &mut block_ticks, 0, &NoNeighbors);
 
         let mut expected_state = 12345i32;
         for _ in 0..5 {
@@ -2947,7 +2980,7 @@ mod tests {
         // hits it.
         let mut converted = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
             if events.iter().any(|e| e.pos == (3, 5, 3) && e.to == DIRT_BLOCK) {
                 converted = true;
                 break;
@@ -2969,7 +3002,7 @@ mod tests {
         let mut scheduler = RandomTickScheduler::new(1, 1);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..500 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0, &NoNeighbors);
             assert!(
                 !events.iter().any(|e| e.to == DIRT_BLOCK),
                 "an air-exposed grass block must never die to dirt"
@@ -3154,7 +3187,7 @@ mod tests {
         let mut scheduler = RandomTickScheduler::new(1, 1);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
             assert!(
                 !events.iter().any(|e| e.to == DIRT_BLOCK),
                 "grass under short grass must never die to dirt"
@@ -3193,7 +3226,7 @@ mod tests {
         // (P(zero) ~ 3e-6).
         let mut spread = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
             if events.iter().any(|e| e.pos == (6, 5, 5) && base_name(&e.to) == GRASS_BLOCK) {
                 spread = true;
                 break;
@@ -3240,7 +3273,7 @@ mod tests {
             let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
             let mut all = Vec::new();
             for _ in 0..50 {
-                all.extend(scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0));
+                all.extend(scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0, &NoNeighbors));
             }
             all
         }
@@ -3273,7 +3306,7 @@ mod tests {
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut grew = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
             if events.iter().any(|e| e.pos == (4, 5, 4) && e.to == "minecraft:wheat[age=1]") {
                 grew = true;
                 break;
@@ -3293,7 +3326,7 @@ mod tests {
         let mut scheduler = RandomTickScheduler::new(21, 21);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..500 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0, &NoNeighbors);
             assert!(events.is_empty(), "a max-age crop must never be selected for a random tick at all");
         }
         assert_eq!(column.block_state(4, 5, 4), "minecraft:wheat[age=7]");
@@ -3310,7 +3343,7 @@ mod tests {
         let mut scheduler = RandomTickScheduler::new(21, 21);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..500 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0, &NoNeighbors);
             assert!(events.is_empty(), "a covered wheat crop must never grow (or draw at all)");
         }
         assert_eq!(column.block_state(4, 5, 4), "minecraft:wheat[age=0]");
@@ -3325,7 +3358,7 @@ mod tests {
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut advanced = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
             if events.iter().any(|e| e.pos == (2, 5, 2) && e.to == "minecraft:oak_sapling[stage=1]") {
                 advanced = true;
                 break;
@@ -3347,7 +3380,7 @@ mod tests {
         let mut scheduler = RandomTickScheduler::new(9, 9);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
             assert!(events.is_empty(), "a stage-1 sapling must never mutate — no tree feature exists");
         }
         assert_eq!(column.block_state(2, 5, 2), "minecraft:oak_sapling[stage=1]");
@@ -3365,7 +3398,7 @@ mod tests {
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut decayed = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
             if events.iter().any(|e| e.pos == (6, 5, 6) && e.to == "minecraft:air") {
                 decayed = true;
                 break;
@@ -3385,7 +3418,7 @@ mod tests {
         let mut scheduler = RandomTickScheduler::new(4, 4);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..500 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0, &NoNeighbors);
             assert!(events.is_empty(), "a persistent leaf must never be selected for a random tick");
         }
         assert_eq!(column.block_state(6, 5, 6), "minecraft:oak_leaves[distance=7,persistent=true]");
@@ -3400,7 +3433,7 @@ mod tests {
         let mut scheduler = RandomTickScheduler::new(4, 4);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..500 {
-            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, 0, 0, 8, &mut block_ticks, 0, &NoNeighbors);
             assert!(events.is_empty(), "a leaf within range of a log must never be selected for a random tick");
         }
         assert_eq!(column.block_state(6, 5, 6), "minecraft:oak_leaves[distance=3,persistent=false]");
@@ -3452,7 +3485,7 @@ mod tests {
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         let mut scheduled = false;
         for _ in 0..3000 {
-            scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
             if block_ticks.has_scheduled((6, 5, 5), &gravity_tick::TICK_GRAVITY.to_string()) {
                 scheduled = true;
                 break;
@@ -3558,7 +3591,7 @@ mod tests {
         let kind = gravity_tick::TICK_GRAVITY.to_string();
         let mut scheduled = false;
         for _ in 0..3000 {
-            scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0);
+            scheduler.tick_chunk(&mut column, 0, 0, 200, &mut block_ticks, 0, &NoNeighbors);
             if block_ticks.has_scheduled((6, 5, 5), &kind) {
                 scheduled = true;
                 break;
@@ -3631,7 +3664,7 @@ mod tests {
         // ~0.0042 per call, so 3000 calls gives ~12.7 expected hits.
         let mut spread = false;
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, CX, CZ, 200, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, CX, CZ, 200, &mut block_ticks, 0, &NoNeighbors);
             if events.iter().any(|e| e.pos == target_abs && base_name(&e.to) == GRASS_BLOCK) {
                 spread = true;
                 break;
@@ -3681,7 +3714,7 @@ mod tests {
         let mut scheduler = RandomTickScheduler::new(2, 2);
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for _ in 0..3000 {
-            let events = scheduler.tick_chunk(&mut column, CX, CZ, 200, &mut block_ticks, 0);
+            let events = scheduler.tick_chunk(&mut column, CX, CZ, 200, &mut block_ticks, 0, &NoNeighbors);
             assert!(
                 !events.iter().any(|e| base_name(&e.to) == GRASS_BLOCK),
                 "no grass conversion is legal here, but one landed at {:?} (#472: the probe read \
@@ -3927,7 +3960,7 @@ mod tests {
             let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
             let before = predicate_calls::get();
             for _ in 0..TICKS {
-                scheduler.tick_chunk(&mut column, 0, 0, TICK_SPEED, &mut block_ticks, 0);
+                scheduler.tick_chunk(&mut column, 0, 0, TICK_SPEED, &mut block_ticks, 0, &NoNeighbors);
             }
             let during = predicate_calls::get() - before;
             // Nothing mutated, so the palette never grew: the count is exact.
@@ -4199,7 +4232,7 @@ mod tests {
         column.set_block(4, 5, 0, "minecraft:tripwire_hook[facing=west,attached=true,powered=false]");
 
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        let events = react_at_removal(&mut column, 0, 0, 2, 5, 0, &broken, &mut block_ticks, 0);
+        let events = react_at_removal(&mut column, 0, 0, &NoNeighbors, 2, 5, 0, &broken, &mut block_ticks, 0);
 
         let hook_now = column.block_state(0, 5, 0).to_string();
         assert_eq!(
@@ -4259,7 +4292,7 @@ mod tests {
         column.set_block(1, 5, 0, "minecraft:tripwire[attached=true,powered=false,disarmed=false]");
         let broken = "minecraft:stone".to_string();
         let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        let events = react_at_removal(&mut column, 0, 0, 2, 5, 0, &broken, &mut block_ticks, 0);
+        let events = react_at_removal(&mut column, 0, 0, &NoNeighbors, 2, 5, 0, &broken, &mut block_ticks, 0);
         assert!(events.is_empty(), "breaking stone must not touch any tripwire hook: {events:?}");
         assert!(block_ticks.drain_due(u64::MAX, usize::MAX).is_empty());
     }
@@ -4276,15 +4309,31 @@ mod tests {
     /// leave every other chunk genuinely unloaded.
     struct TestWorld {
         columns: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+        /// Chunks whose data this world holds but which it reports **not**
+        /// resident.
+        ///
+        /// This is what lets a control keep a fixture's far half seeded —
+        /// so an assertion can read it back and say "this cell was not
+        /// rewritten" — while the cascade under test is genuinely unable to
+        /// reach it. Without the split, "unloaded" and "unseeded" are the
+        /// same state and a control cannot tell a truncated cascade from an
+        /// empty fixture.
+        unloaded: Mutex<HashSet<(i32, i32)>>,
     }
 
     impl TestWorld {
         fn new() -> Self {
-            Self { columns: Mutex::new(HashMap::new()) }
+            Self { columns: Mutex::new(HashMap::new()), unloaded: Mutex::new(HashSet::new()) }
         }
 
         fn insert(&self, cx: i32, cz: i32, column: ChunkColumn) {
             self.columns.lock().expect("test world poisoned").insert((cx, cz), column);
+        }
+
+        /// Declares `(cx, cz)` not resident while keeping whatever column
+        /// was inserted for it readable through [`Self::block_state`].
+        fn unload_but_keep(&self, cx: i32, cz: i32) {
+            self.unloaded.lock().expect("test world poisoned").insert((cx, cz));
         }
     }
 
@@ -4322,6 +4371,9 @@ mod tests {
         // test inserted a column for that chunk", never the trait's own
         // "assume resident" default — see this type's own doc comment.
         fn is_column_resident(&self, cx: i32, cz: i32) -> bool {
+            if self.unloaded.lock().expect("test world poisoned").contains(&(cx, cz)) {
+                return false;
+            }
             self.columns.lock().expect("test world poisoned").contains_key(&(cx, cz))
         }
     }
@@ -4442,6 +4494,472 @@ mod tests {
         assert!(
             !world.is_column_resident(1, 0),
             "control: chunk (1, 0) must still read as not resident — this is what the cascade is gated on"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // The three entry points a player action or the world tick reaches
+    // redstone through, each driven across a chunk seam.
+    //
+    // # Where the expected values come from
+    //
+    // Two outside sources, neither of them this crate:
+    //
+    // * [`crate::redstone_oracle_gate::ORACLE_DUST_ATTENUATION`] — dust
+    //   power by distance from its source, probed cell-by-cell on a **live
+    //   26.2 server** with `execute if block <pos>
+    //   minecraft:redstone_wire[power=N]`, three independent readings that
+    //   agreed exactly. That module carries the full provenance.
+    // * **Spatial-boundary invariance.** A 16x16 chunk column is an
+    //   administrative unit of storage; redstone has no player-visible
+    //   concept of one. So the same relative geometry must produce the same
+    //   result whether or not a seam happens to fall inside it, and the
+    //   reference reading is the same fixture laid out inside one column.
+    //
+    // # Why the coordinates are what they are
+    //
+    // Every fixture here is placed so the three candidate models disagree at
+    // the *first* cell past the seam, rather than only in aggregate:
+    //
+    // | model | dust power at world x=16, 3 cells from the source |
+    // |---|---|
+    // | seam-invariant (the oracle) | 13 |
+    // | cascade truncates at the column edge | 0 |
+    // | cascade crosses but restarts at full strength | 15 |
+    //
+    // A run whose far end sat at power 0 or 15 under the correct model would
+    // make two of those three coincide, so the runs below are sized to end
+    // on neither.
+
+    const SEAM_FLOOR_Y: i32 = 0;
+    const SEAM_ROW_Y: i32 = 1;
+    const SEAM_ROW_Z: i32 = 8;
+
+    /// A column with a stone floor across its whole footprint, so no rig
+    /// below reads air where a real world would have ground.
+    fn seam_column_with_floor() -> ChunkColumn {
+        let mut column = ChunkColumn::new(0, 16);
+        for x in 0..16 {
+            for z in 0..16 {
+                column.set_block(x, SEAM_FLOOR_Y, z, "minecraft:stone");
+            }
+        }
+        column
+    }
+
+    /// The canonical tripwire-hook state string, in
+    /// `redstone_tripwire`'s own property order so a seeded hook is
+    /// comparable to a computed one byte for byte.
+    fn seam_hook(facing: &str, attached: bool, powered: bool) -> String {
+        format!("minecraft:tripwire_hook[facing={facing},attached={attached},powered={powered}]")
+    }
+
+    const SEAM_TRIPWIRE: &str = "minecraft:tripwire[attached=true,powered=false,disarmed=false]";
+
+    /// **Placement.** `crate::server::propagate_placement_with_entities` is
+    /// the fan-out every block a player places or breaks owes its
+    /// neighbours — `apply_use_item_on`'s placement arm, its hand-use arm
+    /// (a lever or button click) and `destroy_block`'s post-break cascade
+    /// all reach it. A redstone block dropped at world x=13 must drive a
+    /// 12-long dust run to the live server's attenuation profile even
+    /// though the run leaves chunk (0, 0) after two cells.
+    ///
+    /// The predicted profile is `ORACLE_DUST_ATTENUATION`'s first twelve
+    /// entries — `15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4` — asserted per
+    /// coordinate rather than as an aggregate, so a failure names the cell.
+    /// Ten of those twelve cells lie in the neighbouring column, and the
+    /// far end reads 4: not 0, so a truncating model is distinguishable,
+    /// and not 15, so a model that re-seeds full strength at the seam is
+    /// distinguishable too.
+    #[test]
+    fn a_placed_source_drives_its_dust_run_across_a_chunk_seam_to_the_live_server_profile() {
+        const SOURCE_X: i32 = 13;
+        const RUN: i32 = 12;
+
+        let world = TestWorld::new();
+        world.insert(0, 0, seam_column_with_floor());
+        world.insert(1, 0, seam_column_with_floor());
+        for step in 1..=RUN {
+            world.set_block(SOURCE_X + step, SEAM_ROW_Y, SEAM_ROW_Z, &redstone_wire::set_power(0));
+        }
+        // The seam really is inside the run, not beyond it — a fixture that
+        // drifted entirely into one column would pass while proving nothing.
+        assert_eq!((SOURCE_X + 1).div_euclid(16), 0, "the run must start in chunk (0, 0)");
+        assert_eq!((SOURCE_X + RUN).div_euclid(16), 1, "the run must end in chunk (1, 0)");
+
+        // The block is written first and the fan-out follows, which is the
+        // order `apply_use_item_on` performs a placement in.
+        world.set_block(SOURCE_X, SEAM_ROW_Y, SEAM_ROW_Z, redstone::REDSTONE_BLOCK);
+        let (changed, _scheduled) = crate::server::propagate_placement_with_entities(
+            &world,
+            BlockPos::new(SOURCE_X, SEAM_ROW_Y, SEAM_ROW_Z),
+            None,
+        );
+
+        let expected: Vec<(i32, u8)> = crate::redstone_oracle_gate::ORACLE_DUST_ATTENUATION
+            .iter()
+            .copied()
+            .take(RUN as usize)
+            .collect();
+        let measured: Vec<(i32, u8)> = (1..=RUN)
+            .map(|step| {
+                (
+                    step,
+                    redstone::wire_power(&world.block_state(SOURCE_X + step, SEAM_ROW_Y, SEAM_ROW_Z)),
+                )
+            })
+            .collect();
+
+        for (&(distance, oracle_power), &(step, measured_power)) in expected.iter().zip(measured.iter()) {
+            assert_eq!(distance, step, "rig misalignment: oracle distance {distance} vs run step {step}");
+            let x = SOURCE_X + step;
+            assert_eq!(
+                measured_power, oracle_power,
+                "dust at world (x={x}, y={SEAM_ROW_Y}, z={SEAM_ROW_Z}) in chunk ({}, 0), \
+                 {distance} cell(s) from the placed source: our model says power={measured_power}, \
+                 the live 26.2 server measured power={oracle_power}. full profile: {measured:?}",
+                x.div_euclid(16)
+            );
+        }
+        assert_eq!(
+            changed.len(),
+            RUN as usize,
+            "every dust cell in the run must be reported as changed, and nothing else: {changed:?}"
+        );
+
+        // The control. The identical fixture, with the neighbouring chunk's
+        // data still seeded and readable but declared not resident: the
+        // cascade must stop at the home column's own edge, leaving every
+        // cell from the seam onward at the `power=0` it was laid with. This
+        // is the reading the same assertions produce when the cross-seam
+        // reach is absent, so "the profile matched" above is a
+        // discrimination rather than something the rig produces regardless.
+        let control = TestWorld::new();
+        control.insert(0, 0, seam_column_with_floor());
+        control.insert(1, 0, seam_column_with_floor());
+        for step in 1..=RUN {
+            control.set_block(SOURCE_X + step, SEAM_ROW_Y, SEAM_ROW_Z, &redstone_wire::set_power(0));
+        }
+        control.unload_but_keep(1, 0);
+        control.set_block(SOURCE_X, SEAM_ROW_Y, SEAM_ROW_Z, redstone::REDSTONE_BLOCK);
+        let _ = crate::server::propagate_placement_with_entities(
+            &control,
+            BlockPos::new(SOURCE_X, SEAM_ROW_Y, SEAM_ROW_Z),
+            None,
+        );
+        assert!(
+            !control.is_column_resident(1, 0),
+            "control premise: chunk (1, 0) must read as not resident"
+        );
+        for step in 1..=RUN {
+            let x = SOURCE_X + step;
+            let power = redstone::wire_power(&control.block_state(x, SEAM_ROW_Y, SEAM_ROW_Z));
+            if x.div_euclid(16) == 0 {
+                assert_eq!(
+                    power,
+                    (16 - step) as u8,
+                    "control: dust still inside the home column must attenuate normally, at x={x}"
+                );
+            } else {
+                assert_eq!(
+                    power, 0,
+                    "control failed: dust at x={x} is past an unloaded seam and must be untouched, \
+                     so the assertions above can distinguish a truncated cascade from a reaching one"
+                );
+            }
+        }
+    }
+
+    /// **Removal.** `crate::server::propagate_removal_with_entities` is the
+    /// hook `destroy_block` calls with the state it just overwrote, and the
+    /// only family that reacts to it scans up to
+    /// `redstone_tripwire::WIRE_DIST_MAX - 1` = 41 cells for the hook that
+    /// controls the broken string. Forty-one cells is two and a half chunk
+    /// columns, so a scan bounded to one column cannot find the controlling
+    /// hook of most legal runs at all.
+    ///
+    /// The predicted values are the two hook state strings and the recheck
+    /// schedule, and the reference for them is the same fixture short
+    /// enough to fit inside one column: breaking a cell of a taut, armed
+    /// run must leave **both** endpoints
+    /// `attached=true, powered=true` — the instantaneous pulse a snapped
+    /// string fires — and schedule one recheck at the scanning hook,
+    /// `redstone_tripwire::RECHECK_DELAY` = 10 ticks out. Run length is not
+    /// part of that answer for any length in the legal range, so the long
+    /// run that crosses a seam must produce byte-identical hook states.
+    #[test]
+    fn breaking_a_tripwire_reaches_the_hook_in_the_next_chunk_and_matches_the_single_column_run() {
+        // The reference: hooks at x=2 and x=7, four wire cells between
+        // them, the middle one broken. Entirely inside chunk (0, 0).
+        let reference = TestWorld::new();
+        reference.insert(0, 0, seam_column_with_floor());
+        reference.set_block(2, SEAM_ROW_Y, SEAM_ROW_Z, &seam_hook("east", true, false));
+        for x in 3..=6 {
+            reference.set_block(x, SEAM_ROW_Y, SEAM_ROW_Z, SEAM_TRIPWIRE);
+        }
+        reference.set_block(7, SEAM_ROW_Y, SEAM_ROW_Z, &seam_hook("west", true, false));
+        reference.set_block(5, SEAM_ROW_Y, SEAM_ROW_Z, "minecraft:air");
+        let (reference_changed, reference_scheduled) = crate::server::propagate_removal_with_entities(
+            &reference,
+            BlockPos::new(5, SEAM_ROW_Y, SEAM_ROW_Z),
+            SEAM_TRIPWIRE,
+        );
+        let reference_scanning = reference.block_state(2, SEAM_ROW_Y, SEAM_ROW_Z);
+        let reference_receiving = reference.block_state(7, SEAM_ROW_Y, SEAM_ROW_Z);
+        assert_eq!(
+            reference_scanning,
+            seam_hook("east", true, true),
+            "reference premise: a snapped armed string must pulse the scanning hook"
+        );
+        assert_eq!(
+            reference_receiving,
+            seam_hook("west", true, true),
+            "reference premise: one scan rewrites both endpoints"
+        );
+        assert_eq!(reference_changed.len(), 2, "reference premise: exactly the two hooks: {reference_changed:?}");
+        assert_eq!(reference_scheduled.len(), 1, "reference premise: one recheck: {reference_scheduled:?}");
+        assert_eq!(
+            (
+                reference_scheduled[0].pos,
+                reference_scheduled[0].kind.as_str(),
+                reference_scheduled[0].trigger_tick,
+            ),
+            (
+                (2, SEAM_ROW_Y, SEAM_ROW_Z),
+                redstone_tripwire::TICK_TRIPWIRE_RECHECK,
+                u64::from(redstone_tripwire::RECHECK_DELAY),
+            ),
+            "reference premise: the recheck belongs to the scanning hook, {} ticks out",
+            redstone_tripwire::RECHECK_DELAY
+        );
+
+        // The cross-seam case: the same shape at a legal longer length —
+        // hooks at x=2 (chunk 0) and x=21 (chunk 1), the broken cell at
+        // x=18 (chunk 1). The scan runs from a chunk-1 cell 16 cells west
+        // into chunk 0 to find its hook, then back east past the seam to
+        // find the receiver, and writes to both chunks.
+        const BREAK_X: i32 = 18;
+        const SCANNING_X: i32 = 2;
+        const RECEIVING_X: i32 = 21;
+        assert_eq!(BREAK_X.div_euclid(16), 1, "the broken cell must sit in chunk (1, 0)");
+        assert_eq!(SCANNING_X.div_euclid(16), 0, "the controlling hook must sit in chunk (0, 0)");
+        assert_eq!(RECEIVING_X.div_euclid(16), 1, "the receiving hook must sit in chunk (1, 0)");
+        assert!(
+            RECEIVING_X - SCANNING_X < redstone_tripwire::WIRE_DIST_MAX,
+            "the run must be a length a real hook scan would still reach"
+        );
+
+        let world = TestWorld::new();
+        world.insert(0, 0, seam_column_with_floor());
+        world.insert(1, 0, seam_column_with_floor());
+        world.set_block(SCANNING_X, SEAM_ROW_Y, SEAM_ROW_Z, &seam_hook("east", true, false));
+        for x in SCANNING_X + 1..RECEIVING_X {
+            world.set_block(x, SEAM_ROW_Y, SEAM_ROW_Z, SEAM_TRIPWIRE);
+        }
+        world.set_block(RECEIVING_X, SEAM_ROW_Y, SEAM_ROW_Z, &seam_hook("west", true, false));
+        world.set_block(BREAK_X, SEAM_ROW_Y, SEAM_ROW_Z, "minecraft:air");
+
+        let (changed, scheduled) = crate::server::propagate_removal_with_entities(
+            &world,
+            BlockPos::new(BREAK_X, SEAM_ROW_Y, SEAM_ROW_Z),
+            SEAM_TRIPWIRE,
+        );
+
+        assert_eq!(
+            world.block_state(SCANNING_X, SEAM_ROW_Y, SEAM_ROW_Z),
+            reference_scanning,
+            "the controlling hook at world x={SCANNING_X} is in chunk (0, 0) while the broken cell is in \
+             chunk (1, 0); its state must not depend on where the seam fell"
+        );
+        assert_eq!(
+            world.block_state(RECEIVING_X, SEAM_ROW_Y, SEAM_ROW_Z),
+            reference_receiving,
+            "the receiving hook at world x={RECEIVING_X}"
+        );
+        assert_eq!(changed.len(), 2, "exactly the two hooks may be rewritten: {changed:?}");
+        assert_eq!(scheduled.len(), 1, "exactly one recheck: {scheduled:?}");
+        assert_eq!(
+            (scheduled[0].pos, scheduled[0].kind.as_str(), scheduled[0].trigger_tick),
+            (
+                (SCANNING_X, SEAM_ROW_Y, SEAM_ROW_Z),
+                redstone_tripwire::TICK_TRIPWIRE_RECHECK,
+                u64::from(redstone_tripwire::RECHECK_DELAY),
+            ),
+            "the recheck must land on the scanning hook across the seam, at the same delay"
+        );
+        // No wire cell may be rewritten: the run's `attached` did not flip,
+        // so a model that rewrote every scanned segment would be caught
+        // here rather than passing on the hook states alone.
+        for x in [SCANNING_X + 1, 15, 16, RECEIVING_X - 1] {
+            assert_eq!(
+                world.block_state(x, SEAM_ROW_Y, SEAM_ROW_Z),
+                SEAM_TRIPWIRE,
+                "wire cell at world x={x} must be untouched"
+            );
+        }
+
+        // The control: the same cross-seam fixture with chunk (0, 0)'s data
+        // seeded and readable but declared not resident. The westward scan
+        // must run out at the home column's edge and find no hook, so
+        // nothing is rewritten and nothing is scheduled.
+        let control = TestWorld::new();
+        control.insert(0, 0, seam_column_with_floor());
+        control.insert(1, 0, seam_column_with_floor());
+        control.set_block(SCANNING_X, SEAM_ROW_Y, SEAM_ROW_Z, &seam_hook("east", true, false));
+        for x in SCANNING_X + 1..RECEIVING_X {
+            control.set_block(x, SEAM_ROW_Y, SEAM_ROW_Z, SEAM_TRIPWIRE);
+        }
+        control.set_block(RECEIVING_X, SEAM_ROW_Y, SEAM_ROW_Z, &seam_hook("west", true, false));
+        control.set_block(BREAK_X, SEAM_ROW_Y, SEAM_ROW_Z, "minecraft:air");
+        control.unload_but_keep(0, 0);
+        let (control_changed, control_scheduled) = crate::server::propagate_removal_with_entities(
+            &control,
+            BlockPos::new(BREAK_X, SEAM_ROW_Y, SEAM_ROW_Z),
+            SEAM_TRIPWIRE,
+        );
+        assert!(!control.is_column_resident(0, 0), "control premise: chunk (0, 0) must read as not resident");
+        assert!(
+            control_changed.is_empty() && control_scheduled.is_empty(),
+            "control failed: with the controlling hook's chunk unloaded the scan must find nothing — \
+             got {control_changed:?} / {control_scheduled:?}"
+        );
+        assert_eq!(
+            control.block_state(SCANNING_X, SEAM_ROW_Y, SEAM_ROW_Z),
+            seam_hook("east", true, false),
+            "control failed: the unreachable hook must keep the state it was seeded with"
+        );
+    }
+
+    /// **The random-tick fan-out.** `RandomTickScheduler::tick_chunk` is
+    /// what `crate::tick::run_tick_loop`'s random-tick pass calls once per
+    /// chunk in the follow area, and every mutation it makes owes its six
+    /// neighbours a notification. An observer watches whatever cell sits in
+    /// its facing direction and pulses when that cell's state changes, so
+    /// an observer one cell over a chunk seam from a spreading grass block
+    /// is the discriminating case: its pulse depends on a notification
+    /// leaving the mutated cell's own column.
+    ///
+    /// The predicted value is the whole scheduled tick, not its existence:
+    /// position `(16, 1, 8)`, kind `redstone:observer`, and trigger tick
+    /// `4175` — the observer's own two-tick delay added to a deliberately
+    /// unround `current_tick` of `4173`, so a model that scheduled at the
+    /// current tick, at a repeater's `2 * delay`, or under another kind
+    /// lands somewhere else. The reference for it is the same three-cell
+    /// arrangement laid out inside one column.
+    #[test]
+    fn a_random_tick_mutation_notifies_the_observer_across_a_chunk_seam() {
+        const CURRENT_TICK: u64 = 4173;
+        const OBSERVER_DELAY: u64 = 2;
+
+        /// Ticks a rig until the dirt cell at `target` becomes grass,
+        /// returning the scheduled ticks that accumulated. Grass spread is
+        /// a per-call probability, so this is a bounded wait rather than a
+        /// single call — the same shape
+        /// `grass_spreads_at_a_chunk_whose_local_and_absolute_z_differ`
+        /// already uses.
+        fn spread_then_collect(
+            column: &mut ChunkColumn,
+            world: &dyn ChunkSource,
+            target: (i32, i32, i32),
+        ) -> Vec<crate::scheduled_tick::ScheduledTick<String>> {
+            let mut scheduler = RandomTickScheduler::new(7, 7);
+            let mut block_ticks: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+            for _ in 0..3000 {
+                let events = scheduler.tick_chunk(column, 0, 0, 200, &mut block_ticks, CURRENT_TICK, world);
+                if events.iter().any(|e| e.pos == target && base_name(&e.to) == GRASS_BLOCK) {
+                    return block_ticks.drain_due(u64::MAX, usize::MAX);
+                }
+            }
+            panic!("the dirt cell at {target:?} never became grass, so nothing was ever notified");
+        }
+
+        // The reference: grass source, the dirt it spreads onto, and the
+        // observer watching that dirt, all inside chunk (0, 0).
+        let mut reference_column = seam_column_with_floor();
+        reference_column.set_block(11, SEAM_ROW_Y, SEAM_ROW_Z, GRASS_BLOCK);
+        reference_column.set_block(12, SEAM_ROW_Y, SEAM_ROW_Z, DIRT_BLOCK);
+        reference_column.set_block(
+            13,
+            SEAM_ROW_Y,
+            SEAM_ROW_Z,
+            &redstone_observer::set_observer(Direction::West, false),
+        );
+        let reference_scheduled = spread_then_collect(
+            &mut reference_column,
+            &NoNeighbors,
+            (12, SEAM_ROW_Y, SEAM_ROW_Z),
+        );
+        assert_eq!(
+            reference_scheduled
+                .iter()
+                .map(|t| (t.pos, t.kind.as_str(), t.trigger_tick))
+                .collect::<Vec<_>>(),
+            vec![(
+                (13, SEAM_ROW_Y, SEAM_ROW_Z),
+                redstone::TICK_OBSERVER,
+                CURRENT_TICK + OBSERVER_DELAY
+            )],
+            "reference premise: an observer beside a spreading grass block schedules exactly one pulse"
+        );
+
+        // The cross-seam case: the same three cells shifted so the observer
+        // lands in chunk (1, 0) while the mutation stays in chunk (0, 0).
+        let mut column = seam_column_with_floor();
+        column.set_block(14, SEAM_ROW_Y, SEAM_ROW_Z, GRASS_BLOCK);
+        column.set_block(15, SEAM_ROW_Y, SEAM_ROW_Z, DIRT_BLOCK);
+        let mut neighbor = seam_column_with_floor();
+        neighbor.set_block(
+            0,
+            SEAM_ROW_Y,
+            SEAM_ROW_Z,
+            &redstone_observer::set_observer(Direction::West, false),
+        );
+        let world = TestWorld::new();
+        world.insert(1, 0, neighbor);
+
+        let scheduled = spread_then_collect(&mut column, &world, (15, SEAM_ROW_Y, SEAM_ROW_Z));
+        assert_eq!(
+            scheduled
+                .iter()
+                .map(|t| (t.pos, t.kind.as_str(), t.trigger_tick))
+                .collect::<Vec<_>>(),
+            vec![(
+                (16, SEAM_ROW_Y, SEAM_ROW_Z),
+                redstone::TICK_OBSERVER,
+                CURRENT_TICK + OBSERVER_DELAY
+            )],
+            "the observer across the seam must be scheduled exactly as the single-column reference was, \
+             at the same delay and under the same kind"
+        );
+
+        // The control: the same fixture with the observer's chunk seeded
+        // and readable but declared not resident. Nothing may be
+        // scheduled, which is the reading the assertion above produces when
+        // the notification cannot leave its column.
+        let mut control_column = seam_column_with_floor();
+        control_column.set_block(14, SEAM_ROW_Y, SEAM_ROW_Z, GRASS_BLOCK);
+        control_column.set_block(15, SEAM_ROW_Y, SEAM_ROW_Z, DIRT_BLOCK);
+        let mut control_neighbor = seam_column_with_floor();
+        control_neighbor.set_block(
+            0,
+            SEAM_ROW_Y,
+            SEAM_ROW_Z,
+            &redstone_observer::set_observer(Direction::West, false),
+        );
+        let control = TestWorld::new();
+        control.insert(1, 0, control_neighbor);
+        control.unload_but_keep(1, 0);
+        let control_scheduled =
+            spread_then_collect(&mut control_column, &control, (15, SEAM_ROW_Y, SEAM_ROW_Z));
+        assert!(!control.is_column_resident(1, 0), "control premise: chunk (1, 0) must read as not resident");
+        assert!(
+            control_scheduled.is_empty(),
+            "control failed: with the observer's chunk unloaded nothing may be scheduled — got {control_scheduled:?}"
+        );
+        assert_eq!(
+            control.block_state(16, SEAM_ROW_Y, SEAM_ROW_Z),
+            redstone_observer::set_observer(Direction::West, false),
+            "control failed: the unreachable observer must keep the state it was seeded with"
         );
     }
 }

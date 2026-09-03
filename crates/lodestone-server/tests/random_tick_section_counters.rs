@@ -136,6 +136,35 @@ fn compare_counters(column: &ChunkColumn, what: &str) -> Result<(), String> {
     }
 }
 
+/// A [`ChunkSource`] reporting every chunk unloaded, so the redstone fan-out a
+/// mutation triggers is bounded to the one column each gate here holds.
+///
+/// The gates below measure the random-tick *position stream* and the
+/// per-section ticking counters, both of which are properties of a single
+/// column. Handing the fan-out a real world would let a cascade reach cells
+/// outside the column under measurement and write there, which no assertion
+/// here covers. `column`/`block_state`/`biome_state_at`/`set_block` are
+/// unreachable: the fan-out consults `is_column_resident` first and stops.
+struct NoNeighbors;
+
+impl ChunkSource for NoNeighbors {
+    fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+        unreachable!("is_column_resident is always false, so this is never reached")
+    }
+    fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+        unreachable!("is_column_resident is always false, so this is never reached")
+    }
+    fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+        unreachable!("is_column_resident is always false, so this is never reached")
+    }
+    fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
+        unreachable!("is_column_resident is always false, so this is never reached")
+    }
+    fn is_column_resident(&self, _cx: i32, _cz: i32) -> bool {
+        false
+    }
+}
+
 /// Which sections the *definition* says randomly tick, from the recount.
 fn definitional_booleans(column: &ChunkColumn) -> Vec<bool> {
     recount_sections(column).into_iter().map(|c| c > 0).collect()
@@ -533,7 +562,7 @@ fn the_counter_decision_reproduces_the_definitional_draw_sequence() {
         per_tick_draws.push(draws);
         total_draws += draws;
 
-        events.extend(scheduler.tick_chunk(&mut column, cx, cz, TICK_SPEED, &mut block_ticks, 0));
+        events.extend(scheduler.tick_chunk(&mut column, cx, cz, TICK_SPEED, &mut block_ticks, 0, &NoNeighbors));
 
         // The replay above read the column as it stood at the start of the tick.
         // That is exact only if no mutation inside the tick changed any section's
@@ -613,7 +642,7 @@ fn a_wrong_draw_count_does_not_reproduce_the_lcg_stream() {
     for _ in 0..4 {
         let _ = replay_one_tick(&column, &mut right, cx, cz, TICK_SPEED);
         let _ = replay_one_tick(&column, &mut wrong, cx, cz, TICK_SPEED + 1);
-        scheduler.tick_chunk(&mut column, cx, cz, TICK_SPEED, &mut block_ticks, 0);
+        scheduler.tick_chunk(&mut column, cx, cz, TICK_SPEED, &mut block_ticks, 0, &NoNeighbors);
     }
     assert_eq!(scheduler.position_state(), right, "the correct replay must match");
     assert_ne!(
@@ -691,7 +720,7 @@ fn corrupting_a_counter_trips_the_consumption_site_tripwire() {
         // this triggers is expected to propagate out of the test function itself
         // and be caught by libtest's own outer machinery, verified by
         // `#[should_panic]`'s `expected` string above.
-        scheduler.tick_chunk(&mut column, 0, 0, 3, &mut block_ticks, 0);
+        scheduler.tick_chunk(&mut column, 0, 0, 3, &mut block_ticks, 0, &NoNeighbors);
     } else {
         // Release: no `debug_assert!`. The corruption is then only observable as
         // a wrong decision — which is exactly the failure mode being guarded.
@@ -749,7 +778,7 @@ fn counters_survive_real_ticking_over_a_generated_column() {
         // A deliberately large `tick_speed`: the point is to land real hits on
         // real surface blocks within a short run, so mutations (and their
         // neighbour cascades) actually happen.
-        events.extend(scheduler.tick_chunk(&mut column, 4, -7, 64, &mut block_ticks, 0));
+        events.extend(scheduler.tick_chunk(&mut column, 4, -7, 64, &mut block_ticks, 0, &NoNeighbors));
         compare_counters(&column, &format!("generated column after tick {tick}"))
             .expect("counter parity under real mutations");
     }

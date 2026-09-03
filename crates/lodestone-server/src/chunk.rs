@@ -1595,6 +1595,80 @@ impl<S: ChunkSource + ?Sized> ChunkSource for Arc<S> {
     }
 }
 
+/// A borrowed source, forwarding every method to the referent.
+///
+/// This exists so a caller holding `&S` for an `S` that may itself be
+/// unsized (`S: ChunkSource + ?Sized`, the bound most of `crate::server`'s
+/// packet handlers carry, so a type-erased `dyn ChunkSource` satisfies them)
+/// can still produce a `&dyn ChunkSource` for an API that wants one: an
+/// unsizing coercion needs a `Sized` source type, while `&S` is `Sized`
+/// whatever `S` is. `&` is `#[fundamental]`, so the impl is coherent here in
+/// the trait's own crate, same as `Arc`'s above.
+///
+/// **When you add a method to [`ChunkSource`], add its forward here too** —
+/// see the `Arc` impl's own note for what an unforwarded defaulted method
+/// silently costs.
+impl<S: ChunkSource + ?Sized> ChunkSource for &S {
+    fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+        (**self).column(cx, cz)
+    }
+
+    fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+        (**self).block_state(x, y, z)
+    }
+
+    fn biome_state_at(&self, x: i32, y: i32, z: i32) -> String {
+        (**self).biome_state_at(x, y, z)
+    }
+
+    fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+        (**self).set_block(x, y, z, name);
+    }
+
+    fn block_entity(&self, x: i32, y: i32, z: i32) -> Option<crate::block_entities::BlockEntity> {
+        (**self).block_entity(x, y, z)
+    }
+
+    fn is_column_resident(&self, cx: i32, cz: i32) -> bool {
+        (**self).is_column_resident(cx, cz)
+    }
+
+    fn unload(&self, cx: i32, cz: i32) {
+        (**self).unload(cx, cz);
+    }
+
+    fn set_retention_radius(&self, view_radius: i32) {
+        (**self).set_retention_radius(view_radius);
+    }
+
+    fn world_registries(&self) -> Option<WorldRegistries> {
+        (**self).world_registries()
+    }
+
+    fn dimension(&self) -> Option<crate::dimension::Dimension> {
+        (**self).dimension()
+    }
+
+    fn sibling(
+        &self,
+        dimension: crate::dimension::Dimension,
+    ) -> Option<std::sync::Arc<dyn ChunkSource>> {
+        (**self).sibling(dimension)
+    }
+
+    fn portal_index(&self) -> Option<&crate::portal::PortalIndex> {
+        (**self).portal_index()
+    }
+
+    fn block_tick_feed(&self) -> Option<crate::tick::BlockTickFeed> {
+        (**self).block_tick_feed()
+    }
+
+    fn claim_dragon_fight_start(&self) -> bool {
+        (**self).claim_dragon_fight_start()
+    }
+}
+
 /// The live registries a persistent [`ChunkSource`] owns, handed to a
 /// server constructor so the tick loop and the save path share one instance.
 ///

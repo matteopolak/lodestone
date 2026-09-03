@@ -7912,6 +7912,13 @@ where
         &mut column,
         min_x,
         min_z,
+        // The live world, so the placed block's own reactions and the
+        // neighbour fan-out both reach an already-loaded neighbouring
+        // column. `&source` rather than `source`: `S` is `?Sized` here (a
+        // connection is served a type-erased `dyn ChunkSource`), and `&S`
+        // is what unsizes to the `&dyn ChunkSource` this wants — see
+        // `chunk`'s borrowed-source forwarding impl.
+        &source,
         target.x,
         target.y,
         target.z,
@@ -7967,6 +7974,10 @@ where
         &mut column,
         min_x,
         min_z,
+        // Same live world, same reason as `propagate_placement_with_entities`:
+        // a tripwire's controlling hook is up to 41 cells away, so it is
+        // usually not in the column holding the cell that was broken.
+        &source,
         target.x,
         target.y,
         target.z,
