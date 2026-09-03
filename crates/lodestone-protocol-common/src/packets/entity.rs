@@ -11,7 +11,7 @@
 //! [`AttachEntity`], [`Collect`], [`EntityMoveLook`], [`EntityTeleport`],
 //! [`RelEntityMove`], [`RemoveEntityEffect`], [`SetPassengers`] and
 //! [`TeleportConfirm`] are shared only between v1-9 and v1-14 (declared
-//! `#[mc(protocols = "110..=754")]`): each is a 1.9+ packet (offhand,
+//! `#[mc(protocols = "110..=758")]`): each is a 1.9+ packet (offhand,
 //! `f64` positions, wider relative-move deltas, or a packet 1.8 lacks
 //! entirely), so v1-8 either has no equivalent or a genuinely different
 //! shape and keeps its own definition. The lower bound is 110 rather than
@@ -86,7 +86,7 @@ pub struct EntityVelocityPacket {
 /// Wire layout: two raw (non-VarInt) `i32`s. A `vehicle_id` of `0` means "no
 /// holder" -- the same sentinel the modern `SET_ENTITY_LINK` packet uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:attach_entity", state = Play, bound = Client, protocols = "110..=754")]
+#[mc(name = "minecraft:attach_entity", state = Play, bound = Client, protocols = "110..=758")]
 pub struct AttachEntity {
     /// Leashed entity id.
     pub entity_id: i32,
@@ -99,7 +99,7 @@ pub struct AttachEntity {
 ///
 /// Wire layout: a VarInt vehicle id then a VarInt-counted VarInt array.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:set_passengers", state = Play, bound = Client, protocols = "110..=754")]
+#[mc(name = "minecraft:set_passengers", state = Play, bound = Client, protocols = "110..=758")]
 pub struct SetPassengers {
     /// Vehicle entity id.
     #[mc(varint)]
@@ -117,7 +117,7 @@ pub struct SetPassengers {
 /// third VarInt stack size from 316 on. Before that the client had to infer
 /// the amount from the item entity it already tracked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:collect", state = Play, bound = Client, protocols = "110..=754")]
+#[mc(name = "minecraft:collect", state = Play, bound = Client, protocols = "110..=758")]
 pub struct Collect {
     /// The entity that was picked up.
     #[mc(varint)]
@@ -137,7 +137,7 @@ pub struct Collect {
 /// Wire layout: varint entity id, three `i16` deltas in `1/4096` block
 /// units, boolean on-ground.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:rel_entity_move", state = Play, bound = Client, protocols = "110..=754")]
+#[mc(name = "minecraft:rel_entity_move", state = Play, bound = Client, protocols = "110..=758")]
 pub struct RelEntityMove {
     /// Entity id.
     #[mc(varint)]
@@ -155,7 +155,7 @@ pub struct RelEntityMove {
 /// Clientbound `entity_move_look` -- a combined relative move and rotation.
 /// Shared only 340..=754 -- see the module docs.
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:entity_move_look", state = Play, bound = Client, protocols = "110..=754")]
+#[mc(name = "minecraft:entity_move_look", state = Play, bound = Client, protocols = "110..=758")]
 pub struct EntityMoveLook {
     /// Entity id.
     #[mc(varint)]
@@ -178,7 +178,7 @@ pub struct EntityMoveLook {
 /// Shared only 340..=754 -- see the module docs (1.8 sent fixed-point `i32`
 /// coordinates, not `f64`).
 #[derive(Debug, Clone, PartialEq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:entity_teleport", state = Play, bound = Client, protocols = "110..=754")]
+#[mc(name = "minecraft:entity_teleport", state = Play, bound = Client, protocols = "110..=758")]
 pub struct EntityTeleport {
     /// Entity id.
     #[mc(varint)]
@@ -197,8 +197,14 @@ pub struct EntityTeleport {
     pub on_ground: bool,
 }
 
-/// Clientbound `remove_entity_effect`. Shared only 340..=754 -- see the
+/// Clientbound `remove_entity_effect`. Shared only 110..=756 -- see the
 /// module docs.
+///
+/// The upper bound stops one release short of its neighbours because 1.18
+/// **retyped** the effect id from a signed byte to a VarInt. That is a
+/// retype, not a field appearing or disappearing, so no `since`/`until`
+/// predicate can express it and the era that speaks 758 carries its own
+/// struct.
 ///
 /// Wire layout: varint entity id, signed byte legacy effect id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
@@ -206,7 +212,7 @@ pub struct EntityTeleport {
     name = "minecraft:remove_entity_effect",
     state = Play,
     bound = Client,
-    protocols = "110..=754"
+    protocols = "110..=756"
 )]
 pub struct RemoveEntityEffect {
     /// Target entity id.
@@ -220,7 +226,7 @@ pub struct RemoveEntityEffect {
 /// teleport id. Shared only 340..=754 -- see the module docs (1.8 has no
 /// teleport confirmation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:teleport_confirm", state = Play, bound = Server, protocols = "110..=754")]
+#[mc(name = "minecraft:teleport_confirm", state = Play, bound = Server, protocols = "110..=758")]
 pub struct TeleportConfirm {
     /// Teleport id echoed from the clientbound position packet.
     #[mc(varint)]

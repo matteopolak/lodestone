@@ -10,7 +10,7 @@
 //! plan names.
 //!
 //! [`ServerboundChat`] and [`ServerboundArmAnimation`] are shared only
-//! between v1-9 and v1-14 (declared `#[mc(protocols = "110..=754")]`): 1.8
+//! between v1-9 and v1-14 (declared `#[mc(protocols = "110..=758")]`): 1.8
 //! capped the chat message at 100 characters (1.11+ raised it to 256), and
 //! 1.8 has no separate arm-swing hand field at all (added with the 1.9
 //! off-hand).
@@ -35,7 +35,7 @@ pub struct ClientboundChat {
 ///
 /// Wire layout: a single string (max 256 chars).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:chat", state = Play, bound = Server, protocols = "110..=754")]
+#[mc(name = "minecraft:chat", state = Play, bound = Server, protocols = "110..=758")]
 pub struct ServerboundChat {
     /// Message text (or `/command`), at most 256 characters (1.11+ raised this
     /// from the 100-character 1.8 limit).
@@ -50,7 +50,7 @@ pub struct ServerboundChat {
 ///
 /// Wire layout: a single varint hand (`0` main, `1` off).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:arm_animation", state = Play, bound = Server, protocols = "110..=754")]
+#[mc(name = "minecraft:arm_animation", state = Play, bound = Server, protocols = "110..=758")]
 pub struct ServerboundArmAnimation {
     /// Hand that swung: `0` = main hand, `1` = off hand.
     #[mc(varint)]

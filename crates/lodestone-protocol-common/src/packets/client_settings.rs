@@ -112,7 +112,7 @@ pub struct Settings {
     name = "minecraft:resource_pack_receive",
     state = Play,
     bound = Server,
-    protocols = "110..=754"
+    protocols = "110..=758"
 )]
 pub struct ResourcePackReceive {
     /// Echo of the pushed pack's hash. Protocol 110 only; empty and unsent

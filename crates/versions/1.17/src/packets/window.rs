@@ -1,4 +1,4 @@
-//! Inventory / window packets for protocol 754 (Minecraft 1.16.5).
+//! Inventory / window packets for this era (protocols 756 and 758).
 //!
 //! `CloseWindow`, `EnchantItem`, `HeldItemSlot`, `ServerboundCloseWindow`
 //! and `ServerboundHeldItemSlot` carry no `Slot` field and are byte-identical

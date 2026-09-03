@@ -1,4 +1,4 @@
-//! Handshake-state packets for protocol 754.
+//! Handshake-state packets for this era (protocols 756 and 758).
 
 use lodestone_macros::{Decode, Encode, Packet};
 
@@ -12,7 +12,7 @@ use lodestone_macros::{Decode, Encode, Packet};
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:set_protocol", state = Handshaking, bound = Server)]
 pub struct SetProtocol {
-    /// Protocol version the client speaks (754 for 1.16.5).
+    /// Protocol version the client speaks (756 for 1.17.1, 758 for 1.18.2).
     #[mc(varint)]
     pub protocol_version: i32,
     /// Hostname or IP literal the client used to connect.

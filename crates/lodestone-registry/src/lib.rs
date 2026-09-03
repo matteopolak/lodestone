@@ -147,6 +147,15 @@ const FAMILIES: &[Family] = &[
         protocols: lodestone_v1_14::PROTOCOLS,
         make: |protocol| Box::new(lodestone_v1_14::adapter_for(protocol)),
     },
+    #[cfg(feature = "v1-17")]
+    Family {
+        label: "v1-17",
+        // 756 and 758 -- 1.17.1 and 1.18.2. 755 is 1.17, which this era does
+        // not serve; both numbers are read off each jar's own metadata and
+        // then off the crate, never off the folder name.
+        protocols: lodestone_v1_17::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v1_17::adapter_for(protocol)),
+    },
 ];
 
 /// Resolves `protocol` against an arbitrary family table.
@@ -197,7 +206,7 @@ struct PhysicsFamily {
 }
 
 /// Only two [`lodestone_physics::PhysicsProfile`]s exist
-/// (`mc_1_8`/`mc_1_21`), against **four** client families. This table is the
+/// (`mc_1_8`/`mc_1_21`), against **six** client families. This table is the
 /// one place that says which of the two each family gets, and it is
 /// deliberately not a 1:1 fit for two of them:
 ///
@@ -207,7 +216,8 @@ struct PhysicsFamily {
 ///   that mattered before this table existed: every production construction
 ///   site hardcoded `mc_1_21()` unconditionally, which happened to be correct
 ///   only because `v26-2` was the only family ever actually joined.
-/// - **`v1-9` (1.12.2), `v1-13` (1.13.2) and `v1-14` (protocol 754, 1.16.5) →
+/// - **`v1-9` (1.9.4-1.12.2), `v1-13` (1.13.2), `v1-14` (1.14.4-1.16.5) and
+///   `v1-17` (1.17.1-1.18.2) →
 ///   `mc_1_21`, as an approximation, not a validated fit.** None of the three
 ///   vanilla eras is a clean match for either profile: all post-date the 1.9
 ///   input-pipeline rewrite ([`InputModel::UnitSquareProjection`], which
@@ -220,7 +230,7 @@ struct PhysicsFamily {
 ///   known-correct one. `mc_1_21` is still the nearer pick: the input model
 ///   is live on *every* tick a player takes, while the fluid model only
 ///   diverges while actually in a fluid, so getting the input pipeline
-///   structurally right dominates. Treat movement through v1-9/v1-13/v1-14 as
+///   structurally right dominates. Treat movement through v1-9/v1-13/v1-14/v1-17 as
 ///   "the modern profile, unvalidated for this era" — not as bit-exact
 ///   parity — until an era-specific profile is ported and golden-traced the
 ///   way `mc_1_8` was.
@@ -248,6 +258,11 @@ const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
     #[cfg(feature = "v1-14")]
     PhysicsFamily {
         protocols: lodestone_v1_14::PROTOCOLS,
+        profile: lodestone_physics::PhysicsProfile::mc_1_21,
+    },
+    #[cfg(feature = "v1-17")]
+    PhysicsFamily {
+        protocols: lodestone_v1_17::PROTOCOLS,
         profile: lodestone_physics::PhysicsProfile::mc_1_21,
     },
 ];
@@ -388,7 +403,8 @@ mod tests {
             feature = "v26-2",
             feature = "v1-9",
             feature = "v1-13",
-            feature = "v1-14"
+            feature = "v1-14",
+            feature = "v1-17"
         ))) {
             assert!(compiled_families().is_empty());
             assert!(adapter_for_protocol(47).is_none());

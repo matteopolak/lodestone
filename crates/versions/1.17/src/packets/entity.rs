@@ -1,4 +1,5 @@
-//! Entity packets for protocol 754 that carry [`EntityMetadata`].
+//! Entity packets for this era (protocols 756 and 758) that carry
+//! [`EntityMetadata`].
 //!
 //! Both the mob-spawn packet and the standalone metadata packet end with a
 //! metadata list; because [`EntityMetadata`](super::metadata::EntityMetadata)
@@ -28,7 +29,7 @@ pub struct SpawnEntityLiving {
     pub entity_id: i32,
     /// Entity UUID.
     pub entity_uuid: Uuid,
-    /// Mob type id (VarInt, 1.16 numbering).
+    /// Mob type id (VarInt) into this era's unified entity registry.
     #[mc(varint)]
     pub kind: i32,
     /// X coordinate.
@@ -69,7 +70,7 @@ pub struct EntityMetadataPacket {
 // RelEntityMove/EntityMoveLook/EntityTeleport are byte-identical to v1-9's
 // own definitions (measured) but not to v1-8's (1.8 used a narrower
 // signed-byte delta and fixed-point coordinates), so they are shared via
-// `lodestone-protocol-common` ranged 340..=754. EntityLook/
+// `lodestone-protocol-common` ranged 340..=758. EntityLook/
 // EntityVelocityPacket carry no such divergence and are shared across all
 // three (v1-8 included) with the derive's default ProtocolRange::ALL -- see
 // `packets::entity`'s module docs.
@@ -92,7 +93,7 @@ pub struct SpawnObject {
     pub entity_id: i32,
     /// Entity UUID.
     pub object_uuid: Uuid,
-    /// Object type id (VarInt, 1.16 entity-type numbering).
+    /// Object type id (VarInt) into this era's unified entity registry.
     #[mc(varint)]
     pub kind: i32,
     /// X coordinate.
@@ -140,7 +141,8 @@ pub struct NamedEntitySpawn {
     pub pitch: i8,
 }
 
-// `EntityDestroy` is byte-identical across v1-8/v1-9/v1-14 (measured), shared
+// `EntityDestroy` is byte-identical across the 1.8, 1.9, 1.14 and 1.17 eras
+// (measured), shared
 // via `lodestone-protocol-common` -- see `packets::entity`'s module docs.
 pub use lodestone_protocol_common::packets::entity::EntityDestroy;
 
