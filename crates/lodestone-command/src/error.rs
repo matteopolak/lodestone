@@ -102,6 +102,13 @@ pub enum ParseErrorKind {
     ExpectedStartOfQuote,
     UnclosedQuote,
     InvalidEscape(char),
+
+    /// A nested value in an argument's own syntax was deeper than the parser
+    /// will walk. Distinct from a malformed value: the input is well-formed,
+    /// there is simply more of it than any value the game constructs, and the
+    /// nesting depth is the sender's choice with nothing in the grammar
+    /// bounding it. Carries the limit so the message names it.
+    NestingTooDeep { limit: usize },
 }
 
 impl fmt::Display for ParseErrorKind {
@@ -138,6 +145,9 @@ impl fmt::Display for ParseErrorKind {
             Self::ExpectedStartOfQuote => write!(f, "expected quote to start a string"),
             Self::UnclosedQuote => write!(f, "unclosed quoted string"),
             Self::InvalidEscape(c) => write!(f, "invalid escape sequence '{c}' in quoted string"),
+            Self::NestingTooDeep { limit } => {
+                write!(f, "value nests deeper than the permitted {limit} levels")
+            }
         }
     }
 }

@@ -87,7 +87,7 @@ pub enum SnbtValue {
 /// compound.
 pub fn parse_value(text: &str) -> Result<SnbtValue, ParseError> {
     let mut reader = StringReader::new(text);
-    let value = read_value(&mut reader)?;
+    let value = read_value_at(&mut reader, 0)?;
     skip_whitespace(&mut reader);
     if reader.can_read() {
         return Err(ParseError::new(reader.cursor(), ParseErrorKind::UnknownArgument));
@@ -115,11 +115,42 @@ fn skip_whitespace(reader: &mut StringReader) {
     }
 }
 
-fn read_value(reader: &mut StringReader) -> Result<SnbtValue, ParseError> {
+/// Maximum nesting this parser will walk.
+///
+/// Compounds and lists nest, so the grammar recurses once per `{` or `[` and
+/// nothing in it bounds the depth: the command text is the sender's, and the
+/// string that carries a command is read with the protocol's default cap of
+/// 32767 characters, which is 32767 available levels. Unbounded, one command
+/// of nothing but open brackets exhausts the parsing thread's stack and aborts
+/// the process — on a server that is a client crashing its host.
+///
+/// The bound is 512, the depth past which the game's own reader refuses a
+/// serialized structure as too complex — read off the jar's own nesting limit
+/// rather than off this codebase's NBT reader, which enforces the same number
+/// from the same source. Nothing this parser produces is useful past it: the
+/// value's whole purpose is to become a stored or transmitted structure, and a
+/// deeper one would be refused at that point anyway. Measured on the platform
+/// default 2 MiB stack, this parser walks 1024 levels and not 4096, so the
+/// bound sits inside the measurement with room to spare.
+const MAX_NESTING: usize = 512;
+
+/// Reads one value, `depth` levels inside enclosing compounds and lists.
+///
+/// The bound is checked here rather than at the two call sites that descend,
+/// because this is the one function both of them reach a nested value through:
+/// a compound reads its entries' values through it and a list its items', so a
+/// nesting form added to either inherits the bound.
+fn read_value_at(reader: &mut StringReader, depth: usize) -> Result<SnbtValue, ParseError> {
+    if depth > MAX_NESTING {
+        return Err(ParseError::new(
+            reader.cursor(),
+            ParseErrorKind::NestingTooDeep { limit: MAX_NESTING },
+        ));
+    }
     skip_whitespace(reader);
     match reader.peek() {
-        Some('{') => read_compound(reader),
-        Some('[') => read_list_or_array(reader),
+        Some('{') => read_compound(reader, depth),
+        Some('[') => read_list_or_array(reader, depth),
         Some('"' | '\'') => reader.read_string().map(SnbtValue::String),
         Some(_) => read_unquoted(reader),
         None => Err(ParseError::new(reader.cursor(), ParseErrorKind::ExpectedInt)),
@@ -136,7 +167,7 @@ fn expect(reader: &mut StringReader, c: char) -> Result<(), ParseError> {
     }
 }
 
-fn read_compound(reader: &mut StringReader) -> Result<SnbtValue, ParseError> {
+fn read_compound(reader: &mut StringReader, depth: usize) -> Result<SnbtValue, ParseError> {
     expect(reader, '{')?;
     let mut entries = Vec::new();
     skip_whitespace(reader);
@@ -148,7 +179,7 @@ fn read_compound(reader: &mut StringReader) -> Result<SnbtValue, ParseError> {
         skip_whitespace(reader);
         let key = read_key(reader)?;
         expect(reader, ':')?;
-        let value = read_value(reader)?;
+        let value = read_value_at(reader, depth + 1)?;
         entries.push((key, value));
         skip_whitespace(reader);
         match reader.peek() {
@@ -182,7 +213,7 @@ fn read_key(reader: &mut StringReader) -> Result<String, ParseError> {
 /// `[…]`, dispatching on the `X;` lookahead that distinguishes a typed array
 /// from a plain list — checked *before* consuming a first element, exactly
 /// as vanilla's own list reader peeks two characters ahead.
-fn read_list_or_array(reader: &mut StringReader) -> Result<SnbtValue, ParseError> {
+fn read_list_or_array(reader: &mut StringReader, depth: usize) -> Result<SnbtValue, ParseError> {
     expect(reader, '[')?;
     skip_whitespace(reader);
     if let Some(kind) = reader.peek() {
@@ -199,7 +230,7 @@ fn read_list_or_array(reader: &mut StringReader) -> Result<SnbtValue, ParseError
         return Ok(SnbtValue::List(items));
     }
     loop {
-        items.push(read_value(reader)?);
+        items.push(read_value_at(reader, depth + 1)?);
         skip_whitespace(reader);
         match reader.peek() {
             Some(',') => {
@@ -411,7 +442,7 @@ pub struct NbtTagArg;
 impl ArgumentType for NbtTagArg {
     fn parse(&self, reader: &mut StringReader) -> Result<ParsedValue, ParseError> {
         let start = reader.cursor();
-        match read_value(reader) {
+        match read_value_at(reader, 0) {
             Ok(value) => Ok(ParsedValue::dynamic(value)),
             Err(e) => {
                 reader.set_cursor(start);
@@ -437,7 +468,7 @@ pub struct NbtCompoundArg;
 impl ArgumentType for NbtCompoundArg {
     fn parse(&self, reader: &mut StringReader) -> Result<ParsedValue, ParseError> {
         let start = reader.cursor();
-        match read_value(reader) {
+        match read_value_at(reader, 0) {
             Ok(SnbtValue::Compound(entries)) => Ok(ParsedValue::dynamic(entries)),
             Ok(_) => {
                 reader.set_cursor(start);
@@ -585,6 +616,76 @@ mod tests {
         assert_eq!(
             *value.downcast_ref::<Vec<(String, SnbtValue)>>().unwrap(),
             vec![("a".to_string(), SnbtValue::Int(1))]
+        );
+    }
+}
+
+#[cfg(test)]
+mod nesting_budget {
+    //! Compounds and lists nest, the depth is the sender's choice, and the
+    //! string that carries a command is read with the protocol's default cap
+    //! of 32767 characters — so a command of nothing but open brackets is a
+    //! 32767-level parse unless something bounds it. These gates pin both
+    //! halves of [`MAX_NESTING`]: that a value nested to the bound still
+    //! parses, so the bound is reachable rather than a stack overflow behind
+    //! an accepted input, and that one level past it is refused by the bound
+    //! rather than by running out of input.
+
+    use super::{MAX_NESTING, parse_value};
+    use lodestone_command::ParseErrorKind;
+
+    /// Runs on a thread with the platform default stack the real parse gets,
+    /// rather than the test harness's own, so the gate measures the stack that
+    /// matters.
+    fn on_a_default_stack<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(f)
+            .expect("spawn")
+            .join()
+            .expect("the parse overflowed the stack it will actually run on")
+    }
+
+    fn brackets(levels: usize) -> String {
+        "[".repeat(levels) + &"]".repeat(levels)
+    }
+
+    #[test]
+    fn a_value_nested_to_the_bound_still_parses() {
+        let text = brackets(MAX_NESTING);
+        let outcome = on_a_default_stack(move || parse_value(&text).map(|_| ()));
+        assert!(
+            outcome.is_ok(),
+            "a value nested to the bound of {MAX_NESTING} was refused: {outcome:?} — a bound \
+             the parser cannot itself reach is a stack overflow behind an accepted input"
+        );
+    }
+
+    #[test]
+    fn a_value_nested_past_the_bound_is_refused_by_the_bound() {
+        let text = brackets(MAX_NESTING + 2);
+        let error = on_a_default_stack(move || parse_value(&text).map(|_| ()))
+            .expect_err("a value nested past the bound parsed");
+        assert!(
+            matches!(error.kind, ParseErrorKind::NestingTooDeep { limit } if limit == MAX_NESTING),
+            "past the bound this failed for some other reason, so the input proves nothing \
+             about the bound: {:?}",
+            error.kind
+        );
+    }
+
+    /// The control: the whole of a 32767-character command's worth of nesting
+    /// is what the bound exists to refuse, and before it existed this input
+    /// aborted the process rather than returning.
+    #[test]
+    fn a_full_length_command_of_open_brackets_returns_an_error() {
+        let text = "[".repeat(32767);
+        let error = on_a_default_stack(move || parse_value(&text).map(|_| ()))
+            .expect_err("32767 open brackets parsed");
+        assert!(
+            matches!(error.kind, ParseErrorKind::NestingTooDeep { .. }),
+            "{:?}",
+            error.kind
         );
     }
 }

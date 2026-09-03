@@ -115,6 +115,28 @@ and waits for a matching reply, safely over-approximating rather than risking a 
   visited-node set, not merely a bound on remaining input length.
 - The tree a client renders is pruned by permission level per-connection — a lower-permission
   player isn't shown a greyed-out command, it simply never receives that subtree at all.
+- **Command text is remote input, and command *arguments* can nest.** The string carrying a
+  command is read with the protocol's default cap of 32767 characters, so anything in an
+  argument's own grammar that recurses per character has 32767 available levels. The SNBT
+  parser behind `minecraft:nbt_tag`/`minecraft:nbt_compound_tag` is the case that matters:
+  compounds and lists nest, so a command of nothing but open brackets recursed once per
+  bracket and aborted the process — a client crashing its own host. It is bounded at 512
+  levels (`snbt::MAX_NESTING`), the depth past which the game's own reader refuses a
+  serialized structure as too complex; nothing the parser produces is useful past that,
+  since the value's purpose is to become a stored or transmitted structure that would be
+  refused there anyway. The check sits at the top of `read_value_at`, the one function both
+  the compound and the list reader reach a nested value through, so a nesting form added to
+  either inherits it. Measured on the platform default 2 MiB stack the parser walks 1024
+  levels and not 4096, so the bound is comfortably reachable — which matters, because a
+  bound the parser overflows before reaching is a crash behind an accepted input rather
+  than a bound. `ParseErrorKind::NestingTooDeep` is the refusal.
+- **`CommandTree::parse`'s recursion is still bounded only by input length.** Every redirect
+  hop consumes at least one character before recursing, which makes an ordinary redirect
+  cycle deep rather than infinite — but "deep" here means up to a command's full 32767
+  characters. Measured on a 2 MiB stack, a self-redirecting literal parses 1024 hops and
+  overflows before 2048, so a long enough `/execute run execute run …` still aborts the
+  process. The visited-`(node, cursor)` guard does not help: those pairs are all distinct.
+  This one is unbounded as things stand.
 
 ## Configuration
 
