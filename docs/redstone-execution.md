@@ -363,6 +363,45 @@ truncation exactly. `TestWorld` carries a seeded-but-unloaded split for this:
 without it, "unloaded" and "unseeded" are the same state and a control cannot
 read back the cell it is proving was not written.
 
+## A live contraption, ticked against a real server
+
+The three gates above are cross-seam assertions inside this crate. What they
+cannot answer is whether the *timeline* matches a real server over many ticks,
+which is where an ordering bug lives. That comparison exists, in
+`crates/lodestone-fuzz` — see [`fuzzing.md`](./fuzzing.md)'s Track B for the
+harness, the measured alignment discipline and the failure modes — and it
+matters here for three reasons.
+
+**It drives this crate's two production tick paths, not a copy of them.**
+`differential::redstone::RedstoneModelOracle` calls
+`random_tick::react_at_placement_with_entities` for the world edit and
+`block_tick_reaction::run_due_block_tick` for every entry the drain resolves.
+The second of those is the reason `block_tick_reaction` is a module at all: the
+torch/repeater/comparator/observer decision and its cascade used to be inline
+in the world tick loop, reachable only by standing up a mob simulation, a
+block-entity registry, a weather handle and a command tree — so no test ran a
+*chain* of delayed components across several ticks, which is the only way their
+delays and their relative order are observable.
+
+**The numbers are from the server, not from us.** A 20-cell row — source,
+dust, repeaters at `delay` 1, 4 and 2 — crossing a chunk boundary on its first
+hop and again at cell 17. Measured against the live server's own tick counter,
+three trials, identical: cell 1 reaches power 15 on tick 0, cell 16 power 8 on
+tick 10, cell 18 power 15 on tick 14. Our model produces exactly that timeline,
+and the tick-by-tick comparison agrees over the whole run.
+`crates/lodestone-fuzz/tests/redstone_contraption_ticks.rs` pins it with no
+server needed.
+
+**It has a watched failure on both sides.** In process, the same layout against
+a model with no cross-column reach leaves every probed cell at power 0 for the
+whole trace; against the live server, the comparison is required to catch that
+model on tick 0 at cell 1, naming the tick and the position.
+
+The limit worth knowing before extending it: the vanilla read primitive can
+only answer for positions whose possible states the caller enumerates, so
+widening the contraption means predicting each new cell's states up front, not
+just adding blocks.
+
 ## The lookup allocation removal
 
 The classification above cut what a notification costs to decide whether to
@@ -488,15 +527,18 @@ Gotchas:
 
 ## What to do next, in order of value
 
-1. **A contraption-scale differential against a live server.** Every reading
-   here is either an outside-sourced expected value replayed through the
-   production path (the attenuation table, the tripwire scan constants, the
-   observer delay) or a counter identity. What none of them covers is a whole
-   downloaded contraption ticked side by side against a real 26.2 server for
-   many ticks, which is the only instrument that can catch an *ordering*
-   divergence rather than a final-state one. `.cache/redstone-benchmarks/`
-   holds the fixtures; the harness already replays their captured pending
-   ticks through production dispatch.
+1. **A larger contraption in the live differential.** A first one has landed —
+   see "A live contraption, ticked against a real server" above — but it is one
+   row with three repeaters, and everything it exercises is dust plus repeater
+   delay. The families with the most room for an ordering divergence
+   (comparators reading a container, observers, piston commit phases) are not
+   in it. The obstacle is not the harness: it is the probe, which can only read
+   positions whose possible states the caller enumerates up front, so a wide
+   contraption needs its predicted states enumerated cell by cell.
+   `.cache/redstone-benchmarks/` holds downloaded fixtures and
+   `crates/lodestone-anvil/tests/redstone_benchmark.rs` already replays their
+   captured pending ticks through production dispatch — but a fixture has no
+   predicted state table, which is the actual missing piece.
 2. **The remaining reads that are not classified per palette entry.** The
    neighbour-sensitive predicates named in the table above stay inside their
    arms' bodies, so an inert cell adjacent to one still pays for the read.

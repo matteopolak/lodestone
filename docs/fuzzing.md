@@ -222,7 +222,7 @@ was discovered only because a codegen change surfaced it.
 
 ### Track B: the differential-fuzzing harness (`differential.rs`)
 
-**Status: skeleton, not a finished fuzzer.** What exists:
+**Status: two live comparisons, no generation.** What exists:
 
 - [`Action`]/[`ScriptStep`]/[`Script`] — a fixed, hand-written action sequence
   type. **No generation or shrinking over the alphabet** — proving the harness
@@ -262,15 +262,35 @@ was discovered only because a codegen change surfaced it.
   increments a counter and drains exactly the ticks due at that number, so our
   side's tick numbering is exact and the whole tick-alignment error budget
   sits on the RCON side alone.
+- `differential::redstone::RedstoneModelOracle` — the **our-side** oracle over
+  the redstone model, driving two production entry points rather than one:
+  `lodestone_server::react_at_placement_with_entities` for a world edit, and
+  `lodestone_server::block_tick_reaction::run_due_block_tick` for each entry
+  the world tick loop's block-tick drain resolves. Both are needed because a
+  redstone signal crosses dust inside the edit and then waits at a repeater,
+  re-entering the cascade from a *drained* tick — a comparison driving only
+  the edit path cannot see a delay or ordering bug at all.
+
+  Its world is a map of whole `ChunkColumn`s, all resident, created on demand
+  with a floor. That is load-bearing: the reaction dispatch's reach is decided
+  by the `ChunkSource` it is handed, so a single-column rig answers air one
+  cell past a seam and every cross-seam question comes back "no signal" with
+  nothing distinguishing that from a real model bug.
+  `RedstoneModelOracle::without_neighbours` is the same rig with residency
+  denied — the single-column reach that existed before the cross-chunk work —
+  and exists purely as the control that proves a cross-seam assertion has a
+  detector behind it.
 - `differential::state_matches` — gives the in-process side the vanilla side's
   matching semantics, so `minecraft:water` matches `minecraft:water[level=3]`
   on both and the two sides answer in one alphabet.
-- **A live run, against a real vanilla 26.2 server.**
-  `crates/lodestone-fuzz/tests/differential_live_fluid_spread.rs` (`#[ignore]`d)
-  pairs `FluidModelOracle` with `RconOracle` and compares a water front
-  spreading down a closed stone channel, after every tick. It found a real
-  divergence on the first tick either side ran — see "the first live finding"
-  below.
+- **Two live runs, against a real vanilla 26.2 server**, both `#[ignore]`d.
+  `crates/lodestone-fuzz/tests/differential_live_fluid_spread.rs` pairs
+  `FluidModelOracle` with `RconOracle` over a water front spreading down a
+  closed stone channel, and found a real divergence on the first tick either
+  side ran. `differential_live_redstone_contraption.rs` pairs
+  `RedstoneModelOracle` with `RconOracle` over a repeater chain crossing two
+  chunk seams, out to fourteen ticks, and agrees. See the two "live finding"
+  sections below.
 
 ### Two measured facts about reading and stepping a live world
 
@@ -317,6 +337,91 @@ direction, where a broken rig reports agreement.
   `lodestone-server` still has no `/tick` command of its own, so an
   RCON-driven comparison of *our* server would face the same constraint — one
   more reason the in-process oracle above is the useful shape.
+
+### Two more measured facts, about *aligning* a live comparison
+
+Both were found by taking a comparison out to fourteen ticks. The fluid
+comparison diverges on tick 0, so neither could show up there.
+
+- **A torn-down circuit is not a clean one: block ticks outlive the blocks
+  that scheduled them.** Filling a rig back to air does not retract the
+  scheduled ticks its components had already queued at those coordinates, so a
+  rebuild drops fresh repeaters onto a queue that still holds stale entries
+  for them.
+
+  What makes that destructive rather than untidy is the shape of a repeater's
+  own scheduled-tick rule: an unpowered repeater that is ticked turns **on**,
+  unconditionally, and only then schedules the tick that will turn it back off
+  `2 · delay` later. (That is the pulse-lengthening behaviour, and it is
+  correct.) So a stale entry does not expire harmlessly — it fires a spurious
+  pulse. Measured: a comparison started during one reported the far cell of a
+  20-cell row powered on its **first** tick, which no correct model of that
+  row can produce; and the same test alone, on its own coordinates, measured
+  the true 14. A fixed ten-tick sleep before energising was not enough (four
+  failures in five runs), because the stale entries do not fire until the
+  chunk itself starts ticking. The fix that works is a positive check —
+  `differential_live_redstone_contraption.rs`'s `settle_until_quiescent` waits
+  for twelve consecutive ticks with every repeater unpowered, one more than
+  the longest pulse the row can hold — plus a distinct coordinate lane per
+  test, which is what `RconOracle`'s `origin` parameter is for.
+
+- **Real-time alignment has two separate error terms, and each shifts every
+  tick label by a whole tick.** The first is *accumulated*: every
+  `block_state` probe is a round trip between two sleeps, so a fixed
+  `sleep(TICK_MILLIS)` per tick runs slower than the server and the server's
+  tick count creeps ahead. Measured on a three-position, two-candidate region:
+  an arrival whose true game tick is 10 was reported at harness tick 8.
+  `RconOracle::advance_tick` therefore sleeps to a **schedule** anchored at
+  the first call, absorbing probe cost into the same 50 ms budget the server
+  uses, and `RconOracle::missed_deadlines` counts the ticks that were already
+  overdue — assert it is zero before believing any tick label.
+
+  The second is *constant*: the phase between the harness's sleeps and the
+  server's tick boundaries. Land on the boundary and a millisecond of jitter
+  decides whether a probe sees `k` or `k + 1` ticks; observed as the same test
+  alternating between agreeing and reporting a lead, flipped by three extra
+  round trips. The fix is to start mid-tick — wait for `time query gametime`
+  to advance, then sleep half a tick — which puts a 25 ms margin either side
+  of every sample. `time query gametime` is also the right instrument for a
+  one-off arrival measurement, being the server's own monotonic tick counter
+  rather than elapsed wall time.
+
+### Track B's second live finding: our redstone matches vanilla across two chunk seams
+
+`crates/lodestone-fuzz/tests/differential_live_redstone_contraption.rs`
+(`#[ignore]`d, four tests) compares a 20-cell row — source, dust, three
+repeaters at `delay` 1, 4 and 2, dust between them — laid out so it crosses a
+chunk boundary on its **first** hop and again at cell 17. Three cells are
+probed after every tick, each with a two-candidate alphabet holding only its
+predicted power and zero, so a side writing any other power answers `None` and
+is reported at that position rather than matching something looser.
+
+Measured on a live 26.2 server against its own tick counter, three trials,
+identical each time: cell 1 reaches power 15 on tick 0, cell 16 reaches power
+**8** on tick 10, cell 18 reaches power 15 on tick 14. Our model produces
+exactly that, and the live comparison agrees over the whole run. The two
+plausible wrong timelines land nowhere near: reading a repeater's delay as
+`delay` game ticks rather than `2 · delay` gives 1/5/7, and reading the flat
+one-tick on-place delay gives 1/2/3.
+
+Both halves have a watched failure rather than a description of one. In
+process, `redstone_contraption_ticks.rs` runs the same layout against
+`RedstoneModelOracle::without_neighbours` and every probed cell stays at power
+0 for the whole trace; against a live server,
+`a_model_with_no_cross_column_reach_is_caught_on_the_first_tick` requires the
+comparison to catch that same model on tick 0 at cell 1, naming the tick and
+the position. And because every probe here reads the same *block* and differs
+only in a numeric property, the read primitive needs its own control on a
+property rather than on a block name —
+`the_rcon_read_primitive_discriminates_a_dust_power_level` asserts both arms,
+since a probe matching the base name alone would report the predicted power
+everywhere and agree unconditionally.
+
+`redstone_contraption_ticks.rs` is the half that runs with no server, no
+network and no feature flag, so it is what keeps those numbers from
+regressing; the layout and the predictions are shared between the two files
+(`crates/lodestone-fuzz/tests/contraption/mod.rs`) so neither can drift from
+the other.
 
 ### Track B's first live finding: our water front starts four ticks early
 

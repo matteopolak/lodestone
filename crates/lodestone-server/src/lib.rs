@@ -118,6 +118,11 @@ mod block_entities;
 pub mod block_drops;
 mod block_placement;
 mod block_support;
+/// One due entry from the scheduled block-tick queue, resolved into the state
+/// the block becomes plus the cascade that change drives. Public because the
+/// consumer that is not the tick loop is a differential oracle in
+/// `crates/lodestone-fuzz`, which holds none of the loop's handles.
+pub mod block_tick_reaction;
 /// Bone meal's instant-growth right-click — the rule layer for one item, on top
 /// of the growth families [`growth_tick`] already models. Public because the
 /// producer is a right-click handler outside the tick loop.
@@ -593,7 +598,7 @@ pub mod entity_event {
 pub use random_tick::{
     DEFAULT_RANDOM_TICK_SPEED, GrassOutcome, RandomTickEvent, RandomTickScheduler,
     can_propagate_onto, grass_random_tick, is_air_variant, is_randomly_ticking,
-    next_random_tick_pos,
+    next_random_tick_pos, react_at_placement_with_entities,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use rcon::{DEFAULT_RCON_PORT, RconConfig};
