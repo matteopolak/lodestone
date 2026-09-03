@@ -53,6 +53,7 @@ lodestone-v1-14 = { workspace = true, optional = true }
 lodestone-v1-17 = { workspace = true, optional = true }
 lodestone-v1-19 = { workspace = true, optional = true }
 lodestone-v1-20-6 = { workspace = true, optional = true }
+lodestone-v1-21-11 = { workspace = true, optional = true }
 
 [features]
 # One feature per version family. Enabling a feature compiles that family in and
@@ -66,3 +67,4 @@ v1-14 = ["dep:lodestone-v1-14"]
 v1-17 = ["dep:lodestone-v1-17"]
 v1-19 = ["dep:lodestone-v1-19"]
 v1-20-6 = ["dep:lodestone-v1-20-6"]
+v1-21-11 = ["dep:lodestone-v1-21-11"]

@@ -98,6 +98,7 @@ lodestone-v1-14 = { path = "crates/versions/1.14" }
 lodestone-v1-17 = { path = "crates/versions/1.17" }
 lodestone-v1-19 = { path = "crates/versions/1.19" }
 lodestone-v1-20-6 = { path = "crates/versions/1.20.6" }
+lodestone-v1-21-11 = { path = "crates/versions/1.21.11" }
 lodestone-ecs  = { path = "crates/lodestone-ecs" }
 # The composed client `App` (`docs/plugin-registration.md`), between
 # `lodestone-controller` and `lodestone-shell`: `client_app()` is the one
