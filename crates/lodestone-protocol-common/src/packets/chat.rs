@@ -9,11 +9,24 @@
 //! it -- a widening without one is the inheritance-by-range hazard the dedup
 //! plan names.
 //!
-//! [`ServerboundChat`] and [`ServerboundArmAnimation`] are shared only
-//! between v1-9 and v1-14 (declared `#[mc(protocols = "110..=758")]`): 1.8
-//! capped the chat message at 100 characters (1.11+ raised it to 256), and
-//! 1.8 has no separate arm-swing hand field at all (added with the 1.9
-//! off-hand).
+//! [`ServerboundChat`] and [`ServerboundArmAnimation`] are shared only from
+//! 110 up: 1.8 capped the chat message at 100 characters (1.11+ raised it to
+//! 256), and 1.8 has no separate arm-swing hand field at all (added with the
+//! 1.9 off-hand). Their **upper** bounds differ, and the difference is the
+//! point: `ServerboundArmAnimation` widened to 762 with the 1.19 era, but
+//! `ServerboundChat` stops at 758 and must stay there. 1.19 replaced sending
+//! a message with sending a signed, timestamped, salted body plus a last-seen
+//! acknowledgement window; the string is still first, so a widened definition
+//! would encode a prefix the server reads and then reject the connection for
+//! the missing tail rather than fail here.
+
+//!
+//! The upper bound moved 758 -> 762 when the 1.19 era landed. `minecraft-data`
+//! reports each widened packet's shape identical from 758 to 762 (named types
+//! inlined, primitive aliases kept), and each additionally decodes or encodes
+//! out of the committed real-join capture at
+//! `crates/versions/1.19/tests/captures/join_1_19_4.txt` -- a widening without
+//! one is the inheritance-by-range hazard the dedup plan names.
 
 use lodestone_macros::{Decode, Encode, Packet};
 
@@ -50,7 +63,7 @@ pub struct ServerboundChat {
 ///
 /// Wire layout: a single varint hand (`0` main, `1` off).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:arm_animation", state = Play, bound = Server, protocols = "110..=758")]
+#[mc(name = "minecraft:arm_animation", state = Play, bound = Server, protocols = "110..=762")]
 pub struct ServerboundArmAnimation {
     /// Hand that swung: `0` = main hand, `1` = off hand.
     #[mc(varint)]
