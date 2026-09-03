@@ -484,6 +484,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   compile time and run time on every agent's every iteration. A test earns its place
   by catching a regression that would realistically happen. Everything else is
   deleted.
+- [Text resolution](./text-resolution.md) — A chat component arrives from the wire
+  as *structure* — translation keys and placeholders — and something has to turn
+  it into words before it is drawn. `ResolvedText` makes that step a type rather than
+  a convention: the styled flatteners live on it, so a surface that forgot to consult
+  the language table fails to compile instead of drawing a raw key.
 - [Tick scheduling: random ticks, scheduled ticks, block entities, and profiling](./tick-scheduling.md) —
   The foundation every per-block-tick feature (crop growth, gravity blocks, fluid
   flow, fire spread, the redstone family) is built on: a vanilla-shaped random-tick
