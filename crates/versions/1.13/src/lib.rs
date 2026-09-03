@@ -60,6 +60,17 @@ pub(crate) mod generated_entity_types;
 #[path = "generated/canonical.rs"]
 pub mod generated_canonical;
 
+/// Generated object-type id→name table for protocol 404 — a **second** id
+/// space, not the unified registry.
+///
+/// At 404 `spawn_entity` still carries the pre-1.13 object numbering, so this
+/// table exists and disagrees with [`generated_entity_types`] on almost every
+/// id. Generated from the wire transcript in
+/// `tests/captures/entity_types_1_13_2.txt`, since no dataset covers it
+/// usably; see `tests/entity_types.rs`.
+#[path = "generated/object_types.rs"]
+pub(crate) mod generated_object_types;
+
 pub mod adapter;
 pub mod canonical;
 pub mod entity_types;
