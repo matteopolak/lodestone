@@ -26,7 +26,7 @@
 //! When `newCount <= 0`: `level.explode(this, x, eyeY, z, 7.0F, false, MOB)`
 //! — the emergence blast, [`WitherEffect::EmergeBlast`] and
 //! [`EMERGE_EXPLOSION_POWER`]. This is the "damage-aura pulse against nearby
-//! entities" issue #278 names: a single radius-based `MOB`-interaction
+//! entities": a single radius-based `MOB`-interaction
 //! explosion at the moment invulnerability ends, not a recurring aura —
 //! there is no separate periodic entity-damage pulse anywhere in
 //! Vanilla's own wither-boss entity (its only other periodic effect,

@@ -204,7 +204,7 @@ pub struct GolemConstruction {
     pub consumed: Vec<BlockPos>,
 }
 
-/// Issue #239: block-pattern detection and spawn for the snow and iron
+/// Block-pattern detection and spawn for the snow and iron
 /// golem. Every world in this module is a bare `HashMap`-backed closure —
 /// `try_construct_golem` takes a pure block oracle, not a [`ChunkWorld`], so
 /// there is nothing else to build.

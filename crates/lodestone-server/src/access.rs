@@ -1,4 +1,4 @@
-//! Server access control (issue #336): ops, whitelist, player bans and IP bans,
+//! Server access control: ops, whitelist, player bans and IP bans,
 //! in vanilla's own four JSON files, enforced at join.
 //!
 //! ## What it is

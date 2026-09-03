@@ -221,7 +221,7 @@ pub(crate) fn spawn_for_dimension(
             scheduled,
             world_state,
             follow,
-            // Issue #580: same "fresh, disposable, no producer reaches it"
+            // Same "fresh, disposable, no producer reaches it"
             // shape as `sleep_vote`/`sleep_feed` above — the overworld is
             // the one dimension a `/worldborder` command (and a real player)
             // reaches today, so a per-dimension border here would be an

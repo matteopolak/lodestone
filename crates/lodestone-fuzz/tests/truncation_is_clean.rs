@@ -22,7 +22,7 @@
 //!   it proves nothing about whether we understood the protocol correctly,
 //!   only that truncating *something structurally packet-shaped* doesn't
 //!   panic. `v1-8`/`v1-9`/`v1-14` have no captured-fixture corpus at all today
-//!   (issue #282 didn't add JVM-oracle capture for the legacy families);
+//!   (JVM-oracle capture was never added for the legacy families);
 //!   that gap is real and is called out in `docs/fuzz-harness.md`.
 
 // The corpus is built from `lodestone_v26_2`'s own packet-id tables, so this file

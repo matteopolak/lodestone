@@ -36,7 +36,7 @@ use super::{
 /// extraction, only
 /// the sprite id differs. Needed by
 /// [`ContainerBackground::sprite_subregion_quad`] to rescale the sub-rect for
-/// a resource pack whose real pixels exceed this baseline — issue #582.
+/// a resource pack whose real pixels exceed this baseline.
 const FURNACE_LIT_DECLARED: (f32, f32) = (14.0, 14.0);
 /// As [`FURNACE_LIT_DECLARED`], for the burn-progress bar —
 /// `blitSprite(pipeline, burnProgressSprite, 24, 16, 0, 0, x, y, w, 16)`.

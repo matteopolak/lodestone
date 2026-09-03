@@ -5,7 +5,7 @@
 //! `MobSim::spawn_wandering_trader` (the entity-creation half) already had its
 //! own tests; `MobSim::run_wandering_trader_spawn_cycle` (the timer/delay/
 //! chance cycle and the position search around it) did not, because it did
-//! not exist until issue #240's spawn-cycle pass. This is the
+//! not exist until a later spawn-cycle pass added it. This is the
 //! `pillager_patrols.rs` shape applied to the trader: drive the cycle through
 //! its own public API — never call `spawn_wandering_trader` directly — and
 //! assert the world effect (a real trader and its llamas, leashed) rather

@@ -1,4 +1,4 @@
-//! The loom (issue #150, station half): a real, server-computed banner
+//! The loom (station half): a real, server-computed banner
 //! pattern list and result — `LoomMenu`'s own `getSelectablePatterns` /
 //! `setupResultSlot`.
 //!

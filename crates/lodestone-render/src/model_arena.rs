@@ -7,7 +7,7 @@
 //! cost four encoder calls: `set_bind_group` (dynamic offset),
 //! `set_vertex_buffer`, `set_index_buffer`, `draw_indexed`. At the shipped render
 //! distance 8 that is ~931 sections at a measured **19,024 instructions per
-//! section** — 17.7M per frame (issue #543). Suballocating every mesh out of a
+//! section** — 17.7M per frame. Suballocating every mesh out of a
 //! handful of shared buffers moves the two buffer binds **out of the per-section
 //! loop**: the caller binds once per arena block and then issues bind+draw per
 //! section, and thousands of small buffer objects collapse into a handful of

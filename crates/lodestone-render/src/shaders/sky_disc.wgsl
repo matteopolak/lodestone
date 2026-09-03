@@ -6,7 +6,7 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 
 // The fog end used to be a module-level constant here, fixed at 512 blocks — the
-// `EnvironmentAttributes.SKY_FOG_END_DISTANCE` *default*. Issue #399: vanilla
+// `EnvironmentAttributes.SKY_FOG_END_DISTANCE` *default*. Vanilla
 // clamps that attribute to the render distance in blocks before the shader ever
 // reads it (vanilla's own atmospheric fog environment), so a constant is only right at
 // render distance 32 and stretched the ramp 4x too far at the client default of

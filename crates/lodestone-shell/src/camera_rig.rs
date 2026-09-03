@@ -50,7 +50,7 @@
 //! tick from the *post-tick* pose's eye height, and read back through
 //! [`EyeHeightSmoother::lerp`] with the frame's interpolation alpha wherever
 //! `Sim::camera` currently reads `interp.eye_height` raw. That call site was out
-//! of this change's original scope — see `docs/swimming.md`
+//! of this module's original scope — see `docs/swimming.md`
 //! for the exact patch to apply there.
 //!
 //! # Riding needs nothing here, and that is a measured claim

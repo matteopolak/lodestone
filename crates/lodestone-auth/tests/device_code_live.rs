@@ -24,7 +24,7 @@
 use lodestone_auth::{AuthError, MOJANG_CLIENT_ID, PendingLogin, request_device_code};
 
 fn client() -> reqwest::Client {
-    // Issue #446: reqwest is built with `rustls-no-provider`, so `build()` panics
+    // reqwest is built with `rustls-no-provider`, so `build()` panics
     // unless a rustls crypto provider is installed. Idempotent.
     lodestone_auth::install_crypto_provider();
     reqwest::Client::builder()

@@ -775,7 +775,7 @@ impl DebugLineRenderer {
 /// renderer cannot reach the ECS `DebugLines` resource directly (this crate
 /// has no dependency edge back to whoever owns the `World`), and threading it
 /// through [`RenderState::render`]'s signature would touch every call site —
-/// which, for this change, means `app.rs`'s `render(...)` calls, and
+/// which, in practice, means `app.rs`'s `render(...)` calls, and
 /// `app.rs` is out of scope for this work (a different agent holds it; see
 /// `docs/plugin-api.md`).
 ///

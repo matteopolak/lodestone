@@ -504,7 +504,7 @@ fn a_tamed_wolf_sits_when_ordered_and_walks_to_its_owner_when_not() {
     );
 }
 
-/// Same shape as the wolf's gate above, but for the **cat** — issue #229's
+/// Same shape as the wolf's gate above, but for the **cat** — a
 /// reported gap: cat and parrot were tameable and ownable with no roster
 /// entry at all, so a tamed one could be owned and would never sit or follow.
 ///

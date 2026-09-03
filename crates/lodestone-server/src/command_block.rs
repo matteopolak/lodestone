@@ -1,8 +1,7 @@
 //! Command blocks (`minecraft:command_block`/`chain_command_block`/
 //! `repeating_command_block`) — the data model and pure tick semantics ported
 //! from vanilla's own command-block entity, base command-block state and
-//! command-block behaviour,
-//! the second half of issue #48's remainder.
+//! command-block behaviour.
 //!
 //! # What this closes, and what it does not
 //!

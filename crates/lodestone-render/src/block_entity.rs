@@ -1,5 +1,5 @@
 //! Block-entity renderers: the cuboid rigs vanilla draws, per block entity
-//! type, for blocks whose block model does not describe them (issue #23).
+//! type, for blocks whose block model does not describe them.
 //!
 //! Chest today. The module is shaped so a second type is an entry in
 //! [`lodestone_assets::block_entity_models::BLOCK_ENTITY_MODELS`] plus a

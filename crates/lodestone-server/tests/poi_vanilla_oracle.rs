@@ -1,5 +1,4 @@
-//! `crate::poi_storage` against **vanilla's own bytes** (issue
-//! [#303](https://github.com/matteopolak/lodestone/issues/303)'s second half).
+//! `crate::poi_storage` against **vanilla's own bytes**.
 //!
 //! # Why this file is the load-bearing one
 //!

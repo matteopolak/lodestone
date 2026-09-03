@@ -1,5 +1,5 @@
 //! Bundle scroll-to-select tracking — `BUNDLE_ITEM_SELECTED` /
-//! #613's `SelectBundleItem` remainder, the client (producer) half.
+//! `SelectBundleItem`, the client (producer) half.
 //!
 //! ## What it is
 //!

@@ -26,7 +26,7 @@
 //! the "power when the string is broken" half of the issue body, not the
 //! "power when an entity crosses it" half.
 //!
-//! # What this needs of the execution model (for issue #548)
+//! # What this needs of the execution model
 //!
 //! * **Trigger**: not a neighbour notification at all — vanilla drives this
 //!   from **placement** (`setPlacedBy`/`onPlace`) and from a **periodic

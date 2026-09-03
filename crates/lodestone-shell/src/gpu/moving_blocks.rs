@@ -1403,7 +1403,7 @@ mod tests {
     /// `mesh_moving_block_quads`) — and the plain `minecraft:minecart` is the
     /// **negative control**, run through the exact same code, producing none.
     ///
-    /// Before this change `default_minecart_contents` did not exist at all, so
+    /// Before `default_minecart_contents` existed at all,
     /// every subtype (plain included) took this file's `None` arm — the
     /// assertions below would have failed identically for chest/furnace/
     /// tnt/hopper, which is what makes the plain-cart control meaningful

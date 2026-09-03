@@ -2,13 +2,13 @@
 //! codec every packet passes through *before* any `VersionAdapter` sees
 //! it — must never panic, and must always terminate, on arbitrary bytes.
 //!
-//! Issue #282's own body calls this codec out by name as the reason its
-//! scope could stay narrow: `MAX_LENGTH_VARINT_BYTES`, `MAX_PACKET_LEN`, and
+//! This codec is named as the reason a narrower fuzzing scope was
+//! acceptable: `MAX_LENGTH_VARINT_BYTES`, `MAX_PACKET_LEN`, and
 //! `MAX_DECOMPRESSED_LEN` in `crates/lodestone-net/src/codec.rs` bound the
 //! length prefix and both compressed/decompressed sizes *before allocating*,
 //! so "the immediate risk is lower than a malformed packet panics the
-//! server" — but, per the issue, "that conclusion currently rests on manual
-//! code reading, not on any automated adversarial-input regression net."
+//! server" — but that conclusion rested on manual
+//! code reading, not on any automated adversarial-input regression net.
 //! This file is that regression net for this one piece.
 
 use lodestone_fuzz::catch;

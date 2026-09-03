@@ -17,8 +17,8 @@
 //! # Data source
 //!
 //! The 66 filenames under `data/minecraft/worldgen/biome/*.json` in 26.2's
-//! own generated/client data (CLAUDE.md data-source #1 — Mojang's own
-//! generator, not a community dataset) — the same "vanilla ships this as base
+//! own generated/client data (the highest-authority data source per
+//! CLAUDE.md: Mojang's own generator, not a community dataset) — the same "vanilla ships this as base
 //! data, not a datapack addition" category
 //! [`crate::block`]/`lodestone_server::loot`'s bundled loot tables are in.
 //! Every biome's own worldgen definition (climate parameters, surface rules,

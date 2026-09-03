@@ -290,7 +290,7 @@ pub trait CommandSink: Send + Sync {
 /// Shaped like [`crate::BlockTickFeed`] and `ExplosionFeed`: a `Default` that
 /// is inert, so every existing `serve_connection*` entry point can pass one
 /// without changing behaviour, and one new entry point takes a live one. That
-/// is what keeps this change off every call site in
+/// is what keeps the live dispatch off every call site in
 /// `crates/protocol/v770/tests/*` and out of `integrated.rs`.
 #[derive(Clone, Default)]
 pub struct CommandDispatch {

@@ -1980,7 +1980,7 @@ async fn respawning_into_another_dimension_updates_the_read_model() {
     );
 }
 
-/// Issue #390: **drown, die, respawn — the bubble meter must be gone.**
+/// **Drown, die, respawn — the bubble meter must be gone.**
 ///
 /// Reported from play. `Vitals::air` was written only by
 /// `apply_local_player_air_supply`, so the dying reading (`0`) survived the

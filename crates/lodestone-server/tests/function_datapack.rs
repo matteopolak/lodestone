@@ -1,4 +1,4 @@
-//! `/function` and `/reload` (issue #48's remainder) driven end to end: a
+//! `/function` and `/reload` driven end to end: a
 //! real `.mcfunction` file under a real datapack directory on disk, loaded
 //! by [`FunctionHandle::load_from`] the same way `IntegratedServer`'s own
 //! persistent-world constructor does, dispatched through the real

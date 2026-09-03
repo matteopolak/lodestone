@@ -1,5 +1,4 @@
-//! Per-player persistence: the schema half of `<world>/players/data/<uuid>.dat`
-//! (issue [#302](https://github.com/matteopolak/lodestone/issues/302)).
+//! Per-player persistence: the schema half of `<world>/players/data/<uuid>.dat`.
 //!
 //! # What it is
 //!

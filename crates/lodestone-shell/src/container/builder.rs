@@ -471,7 +471,8 @@ mod tests {
     /// exercise without a real `client.jar`. A control through
     /// [`Builder::shadowed_label`] (the `String`/`Text::to_legacy_string`
     /// path `styled_hover_name` used before its spans sibling existed)
-    /// proves the loss really lives where issue #656 says it does.
+    /// proves the loss really lives in that legacy conversion path, not in
+    /// `shadowed_label_spans`'s own vertex output.
     #[test]
     fn shadowed_label_spans_carries_hex_named_and_inline_legacy_colour_to_distinct_vertices() {
         use lodestone_model::text::{Text, TextColor, TextContent, TextStyle};

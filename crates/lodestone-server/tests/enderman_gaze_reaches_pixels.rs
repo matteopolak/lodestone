@@ -1,4 +1,4 @@
-//! Closes the last hop of issue #607's third symptom ("if i look at an
+//! Closes the last hop of a reported symptom ("if i look at an
 //! enderman in the eyes it doesnt do anything"): does a sustained stare
 //! actually turn into *behaviour* through the real production `MobSim`, not
 //! just into the `is_being_stared_at` boolean.

@@ -473,8 +473,8 @@ mod tests {
 
     #[test]
     fn registry_tick_despawns_only_the_item_that_reaches_despawn_age() {
-        // Three items at different starting ages; only #2 crosses 6000 after
-        // two registry ticks. This drives the despawn purely through
+        // Three items at different starting ages; only the second crosses
+        // 6000 after two registry ticks. This drives the despawn purely through
         // `ItemEntityRegistry::tick`, never touching `ItemLifecycle::tick`
         // directly, so it proves the *driver* — not just the predicate —
         // actually removes the entity.

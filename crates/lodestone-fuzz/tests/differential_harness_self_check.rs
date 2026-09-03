@@ -1,7 +1,7 @@
 //! Hermetic proof that `lodestone_fuzz::differential`'s comparison loop itself
 //! is correct — no server, no network, no container, runs in milliseconds.
 //!
-//! Issue #549's suggested order puts "prove the harness agrees on a script
+//! The suggested order puts "prove the harness agrees on a script
 //! with no known divergence" before ever adding randomness or a real oracle.
 //! This file is that proof, done twice: once with two identical fake worlds
 //! (must agree at every tick), and once with two fakes that are made to
