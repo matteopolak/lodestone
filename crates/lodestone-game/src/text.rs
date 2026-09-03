@@ -95,7 +95,7 @@ pub fn interactive_spans(
 mod tests {
     use super::*;
     use lodestone_model::{Text, TextColor, TextStyle};
-    use lodestone_model::text::{ClickAction, ClickEvent, HoverAction, HoverEvent};
+    use lodestone_model::text::{ClickAction, ClickEvent, HoverEvent};
 
     /// A tiny table so tests do not depend on any real asset.
     fn tr(key: &str) -> Option<String> {
@@ -145,10 +145,7 @@ mod tests {
             action: ClickAction::RunCommand,
             value: "/spawn".to_string(),
         });
-        msg.hover = Some(HoverEvent {
-            action: HoverAction::ShowText,
-            value: Box::new(Text::literal("tooltip")),
-        });
+        msg.hover = Some(HoverEvent::ShowText(Box::new(Text::literal("tooltip"))));
 
         let spans = interactive_spans(&msg, &no_tr);
         assert_eq!(spans.len(), 1);
@@ -161,7 +158,10 @@ mod tests {
                 value: "/spawn".to_string()
             })
         );
-        assert_eq!(spans[0].hover.as_ref().map(|h| &h.action), Some(&HoverAction::ShowText));
+        assert_eq!(
+            spans[0].hover.as_ref().map(HoverEvent::action_name),
+            Some("show_text")
+        );
     }
 
     /// `click`/`hover` inherit into children exactly like colour —

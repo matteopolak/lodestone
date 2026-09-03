@@ -1698,6 +1698,17 @@ impl WindowApp {
         // reaches for), so a hex-coloured `show_text` hover no longer has to
         // flatten through `to_legacy_string`'s sixteen-code ceiling the way
         // `SuggestionLayer::Tooltip`'s plain-string popup still does.
+        //
+        // `hud::hover_tooltip_spans`, not a `resolve_text(..).to_spans()` on a
+        // single payload field: an item hover's body is the same line-gather
+        // an inventory slot's tooltip uses and an entity hover's is three
+        // composed lines, so all three actions come from that one function.
+        // Without this the typed payloads reach the hit-test and paint
+        // nothing — the `show_item` half of chat hover would still be an
+        // island. `advanced_item_tooltips` is the player's own option, read
+        // from the same place the container tooltip reads it, so the two
+        // surfaces cannot disagree about whether the id and durability lines
+        // show.
         let chat_hover_tooltip_spans: Option<Vec<lodestone_model::TextSpan>> = chat_open
             .then(|| {
                 let entries = self.sim.recent_chat_interactive(100);
@@ -1714,7 +1725,13 @@ impl WindowApp {
             })
             .flatten()
             .and_then(|hit| hit.hover)
-            .map(|hover| self.sim.resolve_text(&hover.value).to_spans());
+            .map(|hover| {
+                crate::hud::hover_tooltip_spans(
+                    &hover,
+                    self.sim.translator().as_ref(),
+                    self.nav.options().advanced_item_tooltips,
+                )
+            });
 
         // The top-right status-effect overlay's own list, resolved before the
         // frame is built because the draw borrows it as a slice.

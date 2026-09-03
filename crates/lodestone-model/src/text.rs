@@ -2,9 +2,11 @@
 //!
 //! A Minecraft text component is a *tree*: a node carries some content (a
 //! literal string or a `translate` key with arguments), a partial style, an
-//! ordered list of `extra` child components, and optional interactivity
-//! (`clickEvent`, `hoverEvent`, `insertion`). The **same tree** is serialized
-//! two different ways on the wire depending on protocol era:
+//! ordered list of `extra` child components, and optional interactivity (a
+//! click event, a hover event, an insertion string — see
+//! [`CLICK_EVENT_FIELD`] for the two spellings those fields have had). The
+//! **same tree** is serialized two different ways on the wire depending on
+//! protocol era:
 //!
 //! * pre-1.20.3 (including 1.8, protocol 47) sends it as a **JSON string**;
 //! * modern versions send it as **binary NBT**.
@@ -346,7 +348,44 @@ impl ClickAction {
             other => Self::Other(other.to_owned()),
         }
     }
+
+    /// The field an action's argument is written under.
+    ///
+    /// **Each action names its argument for itself.** A `run_command` carries
+    /// `command`, an `open_url` carries `url`, a `change_page` carries a
+    /// numeric `page`, an `open_file` carries `path`, and only
+    /// `copy_to_clipboard` still says `value`. Older protocols wrote every
+    /// action's argument as a string under `value`, which is why the parse
+    /// falls back to that name — see [`click_argument`]'s callers.
+    ///
+    /// `None` for an unrecognised action, whose argument field this build
+    /// cannot know.
+    fn value_field(&self) -> Option<&'static str> {
+        Some(match self {
+            Self::OpenUrl => "url",
+            Self::OpenFile => "path",
+            Self::RunCommand | Self::SuggestCommand => "command",
+            Self::ChangePage => "page",
+            Self::CopyToClipboard => "value",
+            Self::Other(_) => return None,
+        })
+    }
 }
+
+/// The style field a `clickEvent` is written under, and the name it had before
+/// component fields were spelled in snake case.
+///
+/// Both are read, newest first: a single build talks to servers across the
+/// whole protocol range this workspace supports, and a name that misses means
+/// no interactivity at all rather than a visible error.
+const CLICK_EVENT_FIELD: &str = "click_event";
+/// See [`CLICK_EVENT_FIELD`].
+const CLICK_EVENT_FIELD_LEGACY: &str = "clickEvent";
+/// The style field a `hoverEvent` is written under — see
+/// [`CLICK_EVENT_FIELD`].
+const HOVER_EVENT_FIELD: &str = "hover_event";
+/// See [`HOVER_EVENT_FIELD`].
+const HOVER_EVENT_FIELD_LEGACY: &str = "hoverEvent";
 
 /// A `clickEvent`: an action plus its string value.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -357,28 +396,108 @@ pub struct ClickEvent {
     pub value: String,
 }
 
-/// A `hoverEvent` action.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HoverAction {
-    /// Show a text tooltip.
-    ShowText,
-    /// Show an item tooltip (payload kept as raw text).
-    ShowItem,
-    /// Show an entity tooltip (payload kept as raw text).
-    ShowEntity,
-    /// An action name this version of the model does not recognise.
-    Other(String),
+/// `show_entity`'s payload: which entity is being described, and how to name
+/// it.
+///
+/// The three fields are exactly the three lines the tooltip shows, in the
+/// order it shows them: the name (when the payload carried one), the entity
+/// type, and the entity's UUID as text.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct HoverEntity {
+    /// The entity **type**'s registry key — `minecraft:pig`, not the
+    /// entity's own identity. `None` when the payload named a type this
+    /// parse could not read as an identifier.
+    ///
+    /// A renderer turns this into words through the type's own description
+    /// key, which is the namespace and path joined by dots under an `entity.`
+    /// prefix; see [`Self::type_translation_key`].
+    pub kind: Option<crate::ids::ResourceKey>,
+    /// The entity's UUID. `None` when the payload omitted it or it did not
+    /// parse.
+    pub uuid: Option<uuid::Uuid>,
+    /// The entity's display name, when the payload carried one. Optional in
+    /// the wire form, so optional here.
+    pub name: Option<Box<Text>>,
 }
 
-/// A `hoverEvent`. For `show_text` the payload is itself a text component; for
-/// the item/entity variants the payload is preserved as a literal text node so
-/// no information is lost even though this model does not interpret it.
+impl HoverEntity {
+    /// The translation key for [`Self::kind`]'s description — `entity.` plus
+    /// the namespace and path joined by a dot, e.g. `entity.minecraft.pig`.
+    ///
+    /// `None` when there is no readable type, which is the one case a
+    /// renderer must not paint a type line for: a fabricated key would show
+    /// as the key itself.
+    #[must_use]
+    pub fn type_translation_key(&self) -> Option<String> {
+        let kind = self.kind.as_ref()?;
+        Some(format!("entity.{}.{}", kind.namespace(), kind.path()))
+    }
+}
+
+/// A `hoverEvent`, carrying the payload its action actually has.
+///
+/// # Why this is an enum and not an action plus a `Box<Text>`
+///
+/// The three actions do not share a payload shape. `show_text`'s payload is a
+/// component; `show_item`'s is an item stack (an id, a count and a component
+/// patch); `show_entity`'s is a type, a UUID and an optional name. A single
+/// `Box<Text>` field could only hold the first, and the earlier shape of this
+/// type — an action tag beside one such field — did not merely fail to
+/// *interpret* the other two, it **discarded** them: a payload compound
+/// carries no `text` and no `translate` key, so the component parser this
+/// crate applied to it returned an empty node. The claim that the payload was
+/// "preserved as a literal text node so no information is lost" held only for
+/// the pre-1.16 form, where the payload really was a string of serialised
+/// item data.
+///
+/// So the item and entity payloads are parsed into the shapes they have. An
+/// unknown action keeps [`Self::Other`]'s component payload, because that is
+/// all a parse that does not know the action's schema can honestly claim.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HoverEvent {
-    /// What hovering shows.
-    pub action: HoverAction,
-    /// The tooltip contents.
-    pub value: Box<Text>,
+pub enum HoverEvent {
+    /// `show_text`: the tooltip is itself a component.
+    ShowText(Box<Text>),
+    /// `show_item`: an item stack, whose tooltip a renderer composes the same
+    /// way it composes an inventory slot's.
+    ShowItem(Box<crate::item::ItemStack>),
+    /// `show_entity`: a type, a UUID and an optional name.
+    ShowEntity(Box<HoverEntity>),
+    /// An action name this build does not recognise, with whatever a
+    /// component parse could make of its payload.
+    Other {
+        /// The action name as it appeared on the wire.
+        action: String,
+        /// The payload, parsed as a component.
+        value: Box<Text>,
+    },
+}
+
+impl HoverEvent {
+    /// The wire action name — the string a `hoverEvent`'s `action` field
+    /// holds for this variant.
+    #[must_use]
+    pub fn action_name(&self) -> &str {
+        match self {
+            Self::ShowText(_) => "show_text",
+            Self::ShowItem(_) => "show_item",
+            Self::ShowEntity(_) => "show_entity",
+            Self::Other { action, .. } => action,
+        }
+    }
+
+    /// The component payload, for the two variants that have one.
+    ///
+    /// `None` for `show_item`/`show_entity`: those have no component to
+    /// return, and the whole point of the typed payload is that a caller
+    /// reaches for [`Self::ShowItem`]/[`Self::ShowEntity`] rather than being
+    /// handed an empty node.
+    #[must_use]
+    pub fn text_payload(&self) -> Option<&Text> {
+        match self {
+            Self::ShowText(value) | Self::Other { value, .. } => Some(value),
+            Self::ShowItem(_) | Self::ShowEntity(_) => None,
+        }
+    }
 }
 
 /// The content of a single text node: either a literal string, or a translation
@@ -1491,8 +1610,12 @@ fn text_from_json(value: &JsonValue, depth: usize) -> Text {
                 Some(JsonValue::String(s)) => Some(s.clone()),
                 _ => None,
             };
-            text.click = json_click(get("clickEvent"));
-            text.hover = json_hover(get("hoverEvent"), depth);
+            text.click =
+                json_click(get(CLICK_EVENT_FIELD).or_else(|| get(CLICK_EVENT_FIELD_LEGACY)));
+            text.hover = json_hover(
+                get(HOVER_EVENT_FIELD).or_else(|| get(HOVER_EVENT_FIELD_LEGACY)),
+                depth,
+            );
 
             if let Some(JsonValue::Array(extra)) = get("extra") {
                 text.extra = extra.iter().map(|c| text_from_json(c, depth + 1)).collect();
@@ -1538,36 +1661,209 @@ fn json_click(value: Option<&JsonValue>) -> Option<ClickEvent> {
         Some(JsonValue::String(name)) => ClickAction::from_name(name),
         _ => return None,
     };
-    let value = match lookup_json(fields, "value") {
-        Some(JsonValue::String(v)) => v.clone(),
-        _ => String::new(),
-    };
+    let scalar = |key: &str| json_click_argument(lookup_json(fields, key));
+    let value = action
+        .value_field()
+        .and_then(scalar)
+        .or_else(|| scalar("value"))
+        .unwrap_or_default();
     Some(ClickEvent { action, value })
 }
+
+/// A click argument read as a string, whichever scalar shape it has.
+///
+/// `change_page`'s argument is a *number* on the wire while
+/// [`ClickEvent::value`] is a string, so the number is rendered rather than
+/// rejected — a page click whose argument silently became empty is exactly
+/// the inert-`change_page` shape this parse exists to avoid.
+fn json_click_argument(value: Option<&JsonValue>) -> Option<String> {
+    match value? {
+        JsonValue::String(v) => Some(v.clone()),
+        JsonValue::Number(n) => Some(n.clone()),
+        _ => None,
+    }
+}
+
+/// Whether a component-patch key is a *removal* marker rather than a value.
+///
+/// A serialised patch spells "this component is removed" by prefixing the
+/// component's own name with `!`. A removal carries no value to decode, and no
+/// field on [`crate::item::ItemComponents`] distinguishes "removed" from
+/// "absent", so a removal counts towards
+/// [`crate::item::ItemComponents::has_unmodeled`] like any other component
+/// this parse does not represent.
+const PATCH_REMOVED_PREFIX: char = '!';
+
+/// The component names an item hover payload's patch is decoded for.
+///
+/// Deliberately a short list. Every other component in the patch — and there
+/// are hundreds — sets
+/// [`crate::item::ItemComponents::has_unmodeled`] instead, the escape hatch
+/// that type already documents for a partially understood stack. These four
+/// are the ones a tooltip actually reads: the name line, the body lines, and
+/// the two halves of the durability line.
+mod hover_item_component {
+    /// The name line's override.
+    pub const CUSTOM_NAME: &str = "minecraft:custom_name";
+    /// The authored body lines below the name.
+    pub const LORE: &str = "minecraft:lore";
+    /// Damage taken, for the durability line.
+    pub const DAMAGE: &str = "minecraft:damage";
+    /// Maximum damage, the durability line's other half.
+    pub const MAX_DAMAGE: &str = "minecraft:max_damage";
+}
+
+/// The count a `show_item` payload means when it names none.
+///
+/// The payload's own codec defaults the field to `1`, so an omitted count is
+/// one item and never zero — a zero would make the stack empty and the
+/// tooltip blank.
+const HOVER_ITEM_DEFAULT_COUNT: u32 = 1;
 
 fn json_hover(value: Option<&JsonValue>, depth: usize) -> Option<HoverEvent> {
     let JsonValue::Object(fields) = value? else {
         return None;
     };
     let action = match lookup_json(fields, "action") {
-        Some(JsonValue::String(name)) => match name.as_str() {
-            "show_text" => HoverAction::ShowText,
-            "show_item" => HoverAction::ShowItem,
-            "show_entity" => HoverAction::ShowEntity,
-            other => HoverAction::Other(other.to_owned()),
-        },
+        Some(JsonValue::String(name)) => name.as_str(),
         _ => return None,
     };
-    // Modern uses `contents`; legacy uses `value`. Either can be a component.
-    let payload = lookup_json(fields, "contents").or_else(|| lookup_json(fields, "value"));
-    let value = match payload {
+    // Where the payload lives has changed twice. The modern form puts the
+    // payload's fields **directly on the hover object** beside `action`
+    // (`show_text` keeping its under `value`); before that they sat nested
+    // under `contents`; before that, under `value`. So: take a nested object
+    // when there is one, and otherwise read the hover object itself.
+    let nested = lookup_json(fields, "contents").or_else(|| lookup_json(fields, "value"));
+    let payload = match nested {
+        Some(JsonValue::Object(inner)) => inner.as_slice(),
+        _ => fields.as_slice(),
+    };
+    let as_text = || match nested {
         Some(v) => text_from_json(v, depth + 1),
         None => Text::default(),
     };
-    Some(HoverEvent {
-        action,
-        value: Box::new(value),
+    let unreadable = |action: &str| HoverEvent::Other {
+        action: action.to_owned(),
+        value: Box::new(as_text()),
+    };
+    match action {
+        "show_text" => Some(HoverEvent::ShowText(Box::new(as_text()))),
+        "show_item" => Some(match json_hover_item(payload, depth) {
+            Some(stack) => HoverEvent::ShowItem(Box::new(stack)),
+            // The pre-typed-payload form of `show_item` really was text: a
+            // component whose literal held the stack's serialised data. That
+            // is the one case where falling back to a component payload
+            // loses nothing, so it is the one case that falls back.
+            None => unreadable(action),
+        }),
+        "show_entity" => {
+            let entity = json_hover_entity(payload, depth);
+            Some(if entity == HoverEntity::default() {
+                unreadable(action)
+            } else {
+                HoverEvent::ShowEntity(Box::new(entity))
+            })
+        }
+        other => Some(unreadable(other)),
+    }
+}
+
+/// A `show_item` payload's stack: `id`, an optional `count`, and an optional
+/// component patch.
+///
+/// `None` when there is no readable `id` — without an item there is no stack,
+/// and inventing one would put a name on screen the server never sent.
+fn json_hover_item(fields: &[(String, JsonValue)], depth: usize) -> Option<crate::item::ItemStack> {
+    let item: crate::ids::ResourceKey = match lookup_json(fields, "id") {
+        Some(JsonValue::String(id)) => id.parse().ok()?,
+        _ => return None,
+    };
+    let count = match lookup_json(fields, "count") {
+        Some(JsonValue::Number(n)) => n.parse::<u32>().unwrap_or(HOVER_ITEM_DEFAULT_COUNT),
+        _ => HOVER_ITEM_DEFAULT_COUNT,
+    };
+    let mut components = crate::item::ItemComponents::default();
+    if let Some(JsonValue::Object(patch)) = lookup_json(fields, "components") {
+        for (key, value) in patch {
+            match key.as_str() {
+                hover_item_component::CUSTOM_NAME => {
+                    components.custom_name = Some(text_from_json(value, depth + 1));
+                }
+                hover_item_component::LORE => {
+                    if let JsonValue::Array(lines) = value {
+                        components.lore =
+                            lines.iter().map(|l| text_from_json(l, depth + 1)).collect();
+                    }
+                }
+                hover_item_component::DAMAGE => {
+                    components.damage = json_u32(value);
+                }
+                hover_item_component::MAX_DAMAGE => {
+                    components.max_damage = json_u32(value);
+                }
+                _ => components.has_unmodeled = true,
+            }
+            if key.starts_with(PATCH_REMOVED_PREFIX) {
+                components.has_unmodeled = true;
+            }
+        }
+    }
+    Some(crate::item::ItemStack {
+        item,
+        count,
+        components,
     })
+}
+
+/// A `show_entity` payload's three parts.
+///
+/// The type and the UUID are both spelled `id` in one era or another, which
+/// the presence of a sibling field disambiguates: a payload carrying `type`
+/// is the older shape, where `type` is the entity type and `id` is the UUID;
+/// otherwise `id` is the entity type and the UUID is under `uuid`.
+fn json_hover_entity(fields: &[(String, JsonValue)], depth: usize) -> HoverEntity {
+    let string = |key: &str| match lookup_json(fields, key) {
+        Some(JsonValue::String(v)) => Some(v.as_str()),
+        _ => None,
+    };
+    let (kind, uuid) = match string("type") {
+        Some(kind) => (Some(kind), string("id").or_else(|| string("uuid"))),
+        None => (string("id"), string("uuid")),
+    };
+    HoverEntity {
+        kind: kind.and_then(|k| k.parse().ok()),
+        // A UUID is written as four signed 32-bit words, most significant
+        // first, and only the older textual form is a string — so both are
+        // read here exactly as they are in [`nbt_hover_entity`].
+        uuid: uuid
+            .and_then(|u| u.parse().ok())
+            .or_else(|| json_uuid(lookup_json(fields, "uuid"))),
+        name: lookup_json(fields, "name").map(|v| Box::new(text_from_json(v, depth + 1))),
+    }
+}
+
+/// A UUID written as a JSON array of four signed 32-bit words.
+fn json_uuid(value: Option<&JsonValue>) -> Option<uuid::Uuid> {
+    let JsonValue::Array(parts) = value? else {
+        return None;
+    };
+    let words: Vec<i32> = parts
+        .iter()
+        .filter_map(|p| match p {
+            JsonValue::Number(n) => n.parse().ok(),
+            _ => None,
+        })
+        .collect();
+    uuid_from_words(&words)
+}
+
+/// A patch value read as a non-negative count. Both fronts store their
+/// numbers as text, so this parses rather than casts.
+fn json_u32(value: &JsonValue) -> Option<u32> {
+    match value {
+        JsonValue::Number(n) => n.parse().ok(),
+        _ => None,
+    }
 }
 
 fn lookup_json<'a>(fields: &'a [(String, JsonValue)], key: &str) -> Option<&'a JsonValue> {
@@ -1623,8 +1919,12 @@ fn text_from_nbt(nbt: &Nbt, depth: usize) -> Text {
                 Some(Nbt::String(s)) => Some(s.clone()),
                 _ => None,
             };
-            text.click = nbt_click(get("clickEvent"));
-            text.hover = nbt_hover(get("hoverEvent"), depth);
+            text.click =
+                nbt_click(get(CLICK_EVENT_FIELD).or_else(|| get(CLICK_EVENT_FIELD_LEGACY)));
+            text.hover = nbt_hover(
+                get(HOVER_EVENT_FIELD).or_else(|| get(HOVER_EVENT_FIELD_LEGACY)),
+                depth,
+            );
 
             if let Some(Nbt::List { elements, .. }) = get("extra") {
                 text.extra = elements
@@ -1674,11 +1974,26 @@ fn nbt_click(value: Option<&Nbt>) -> Option<ClickEvent> {
         Some(Nbt::String(name)) => ClickAction::from_name(name),
         _ => return None,
     };
-    let value = match lookup_nbt(fields, "value") {
-        Some(Nbt::String(v)) => v.clone(),
-        _ => String::new(),
-    };
+    let scalar = |key: &str| nbt_click_argument(lookup_nbt(fields, key));
+    let value = action
+        .value_field()
+        .and_then(scalar)
+        .or_else(|| scalar("value"))
+        .unwrap_or_default();
     Some(ClickEvent { action, value })
+}
+
+/// [`json_click_argument`]'s NBT twin — see it for why a number is rendered
+/// rather than rejected.
+fn nbt_click_argument(value: Option<&Nbt>) -> Option<String> {
+    match value? {
+        Nbt::String(v) => Some(v.clone()),
+        Nbt::Byte(v) => Some(v.to_string()),
+        Nbt::Short(v) => Some(v.to_string()),
+        Nbt::Int(v) => Some(v.to_string()),
+        Nbt::Long(v) => Some(v.to_string()),
+        _ => None,
+    }
 }
 
 fn nbt_hover(value: Option<&Nbt>, depth: usize) -> Option<HoverEvent> {
@@ -1686,23 +2001,136 @@ fn nbt_hover(value: Option<&Nbt>, depth: usize) -> Option<HoverEvent> {
         return None;
     };
     let action = match lookup_nbt(fields, "action") {
-        Some(Nbt::String(name)) => match name.as_str() {
-            "show_text" => HoverAction::ShowText,
-            "show_item" => HoverAction::ShowItem,
-            "show_entity" => HoverAction::ShowEntity,
-            other => HoverAction::Other(other.to_owned()),
-        },
+        Some(Nbt::String(name)) => name.as_str(),
         _ => return None,
     };
-    let payload = lookup_nbt(fields, "contents").or_else(|| lookup_nbt(fields, "value"));
-    let value = match payload {
+    // See [`json_hover`] for why the payload is looked for in two places.
+    let nested = lookup_nbt(fields, "contents").or_else(|| lookup_nbt(fields, "value"));
+    let payload = match nested {
+        Some(Nbt::Compound(inner)) => inner.as_slice(),
+        _ => fields.as_slice(),
+    };
+    let as_text = || match nested {
         Some(v) => text_from_nbt(v, depth + 1),
         None => Text::default(),
     };
-    Some(HoverEvent {
-        action,
-        value: Box::new(value),
+    let unreadable = |action: &str| HoverEvent::Other {
+        action: action.to_owned(),
+        value: Box::new(as_text()),
+    };
+    match action {
+        "show_text" => Some(HoverEvent::ShowText(Box::new(as_text()))),
+        "show_item" => Some(match nbt_hover_item(payload, depth) {
+            Some(stack) => HoverEvent::ShowItem(Box::new(stack)),
+            None => unreadable(action),
+        }),
+        "show_entity" => {
+            let entity = nbt_hover_entity(payload, depth);
+            Some(if entity == HoverEntity::default() {
+                unreadable(action)
+            } else {
+                HoverEvent::ShowEntity(Box::new(entity))
+            })
+        }
+        other => Some(unreadable(other)),
+    }
+}
+
+/// [`json_hover_item`]'s NBT twin — same fields, same defaults, same
+/// decoded-component set.
+fn nbt_hover_item(fields: &[(String, Nbt)], depth: usize) -> Option<crate::item::ItemStack> {
+    let item: crate::ids::ResourceKey = match lookup_nbt(fields, "id") {
+        Some(Nbt::String(id)) => id.parse().ok()?,
+        _ => return None,
+    };
+    let count = nbt_u32(lookup_nbt(fields, "count")).unwrap_or(HOVER_ITEM_DEFAULT_COUNT);
+    let mut components = crate::item::ItemComponents::default();
+    if let Some(Nbt::Compound(patch)) = lookup_nbt(fields, "components") {
+        for (key, value) in patch {
+            match key.as_str() {
+                hover_item_component::CUSTOM_NAME => {
+                    components.custom_name = Some(text_from_nbt(value, depth + 1));
+                }
+                hover_item_component::LORE => {
+                    if let Nbt::List { elements, .. } = value {
+                        components.lore = elements
+                            .iter()
+                            .map(|l| text_from_nbt(l, depth + 1))
+                            .collect();
+                    }
+                }
+                hover_item_component::DAMAGE => {
+                    components.damage = nbt_u32(Some(value));
+                }
+                hover_item_component::MAX_DAMAGE => {
+                    components.max_damage = nbt_u32(Some(value));
+                }
+                _ => components.has_unmodeled = true,
+            }
+            if key.starts_with(PATCH_REMOVED_PREFIX) {
+                components.has_unmodeled = true;
+            }
+        }
+    }
+    Some(crate::item::ItemStack {
+        item,
+        count,
+        components,
     })
+}
+
+/// [`json_hover_entity`]'s NBT twin, with the same `type`/`id`/`uuid`
+/// disambiguation.
+fn nbt_hover_entity(fields: &[(String, Nbt)], depth: usize) -> HoverEntity {
+    let string = |key: &str| match lookup_nbt(fields, key) {
+        Some(Nbt::String(v)) => Some(v.as_str()),
+        _ => None,
+    };
+    let (kind, uuid) = match string("type") {
+        Some(kind) => (Some(kind), string("id").or_else(|| string("uuid"))),
+        None => (string("id"), string("uuid")),
+    };
+    HoverEntity {
+        kind: kind.and_then(|k| k.parse().ok()),
+        // An NBT payload may spell the UUID as four ints rather than as text,
+        // which is the form the binary component model uses everywhere else.
+        uuid: uuid
+            .and_then(|u| u.parse().ok())
+            .or_else(|| nbt_uuid(lookup_nbt(fields, "uuid"))),
+        name: lookup_nbt(fields, "name").map(|v| Box::new(text_from_nbt(v, depth + 1))),
+    }
+}
+
+/// A numeric NBT tag read as a non-negative count.
+fn nbt_u32(value: Option<&Nbt>) -> Option<u32> {
+    match value? {
+        Nbt::Byte(v) => u32::try_from(*v).ok(),
+        Nbt::Short(v) => u32::try_from(*v).ok(),
+        Nbt::Int(v) => u32::try_from(*v).ok(),
+        Nbt::Long(v) => u32::try_from(*v).ok(),
+        _ => None,
+    }
+}
+
+/// A UUID stored as the four-`int` array form.
+fn nbt_uuid(value: Option<&Nbt>) -> Option<uuid::Uuid> {
+    let Nbt::IntArray(parts) = value? else {
+        return None;
+    };
+    uuid_from_words(parts)
+}
+
+/// Assembles a UUID from four signed 32-bit words, most significant first —
+/// the 128 bits in big-endian order.
+fn uuid_from_words(words: &[i32]) -> Option<uuid::Uuid> {
+    let [a, b, c, d] = *words else {
+        return None;
+    };
+    let mut bytes = [0u8; 16];
+    for (slot, word) in bytes.chunks_exact_mut(4).zip([a, b, c, d]) {
+        slot.copy_from_slice(&word.to_be_bytes());
+    }
+    Some(uuid::Uuid::from_bytes(bytes))
 }
 
 fn lookup_nbt<'a>(fields: &'a [(String, Nbt)], key: &str) -> Option<&'a Nbt> {

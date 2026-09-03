@@ -2249,16 +2249,17 @@ pub struct SuggestionPopup<'a> {
     pub cursor: Option<(f32, f32)>,
 }
 
-/// What [`HudFrame::chat_hover_tooltip`] needs to draw a `hover_event`
-/// tooltip near the cursor — vanilla's `GuiGraphics.setTooltipForNextFrame`.
+/// What [`HudFrame::chat_hover_tooltip`] needs to draw a hover tooltip near
+/// the cursor.
 ///
-/// `show_item`/`show_entity` are drawn with the same field, and that is a
-/// deliberate narrowing rather than an oversight: `lodestone_model::text::
-/// HoverEvent`'s own doc says their payload is "preserved as a literal text
-/// node" precisely so no information is lost even though this model does
-/// not interpret it — the raw text is real content, just not vanilla's
-/// icon/attribute tooltip render. `docs/chat.md` names this gap explicitly
-/// rather than claiming full parity.
+/// All three hover actions are drawn through this one field, because all
+/// three end up as the same thing: a stack of styled lines in a box.
+/// [`hover_tooltip_spans`] is what turns each payload into those lines —
+/// `show_text`'s component directly, `show_item`'s stack through the same
+/// line-gathering an inventory slot's tooltip uses, and `show_entity`'s three
+/// parts into its three lines. What is *not* reproduced is the item tooltip's
+/// non-text furniture: no bundle grid, no icon, no nine-slice sprite frame,
+/// since this box is painted from the HUD's untextured colour stream.
 #[derive(Debug, Clone, Copy)]
 pub struct ChatHoverTooltip<'a> {
     /// The tooltip body, via [`lodestone_model::Text::to_spans`] so a
@@ -4217,6 +4218,128 @@ const CHAT_TOOLTIP_PAD: f32 = 3.0;
 /// longer than a couple of words.
 const CHAT_TOOLTIP_MAX_WIDTH: f32 = 200.0;
 
+/// The tooltip body a hover event should paint, as styled runs with a literal
+/// `\n` between lines — the shape [`ChatHoverTooltip::spans`] carries and
+/// [`chat_hover_tooltip_layout`] splits on.
+///
+/// # Each action reaches an existing renderer rather than a new one
+///
+/// * `show_text` resolves its component and flattens it. Nothing else to do.
+/// * `show_item` composes the *same* lines an inventory slot's tooltip shows,
+///   through [`crate::container::tooltip::tooltip_lines`]. Writing a second
+///   item-tooltip layout here would be free to disagree with the one a player
+///   sees when they open their inventory — same stack, two different names.
+///   `advanced` is the player's own advanced-tooltips option, threaded through
+///   so the two surfaces answer that question the same way too.
+/// * `show_entity` has three lines and they are all component-shaped: the
+///   name when the payload carried one, the type through the entity type's own
+///   description key, and the UUID as text. Composed here rather than in the
+///   model crate because the type line needs the language table, which the
+///   version-free, asset-free model deliberately cannot reach.
+///
+/// # Why a colour and not a style on the composed lines
+///
+/// [`crate::container::tooltip::TooltipLine`] carries either real
+/// [`TextSpan`]s (when the line came from an authored component tree that
+/// might hold a hex colour) or a flat RGBA it draws in. The flat ones convert
+/// to [`lodestone_model::TextColor::Rgb`] rather than being matched back to a
+/// named colour: the round trip through 8-bit channels is exact, and a new
+/// tooltip colour needs no new arm here.
+#[must_use]
+pub fn hover_tooltip_spans(
+    hover: &lodestone_model::text::HoverEvent,
+    translate: &dyn Fn(&str) -> Option<String>,
+    advanced: bool,
+) -> Vec<TextSpan> {
+    use lodestone_model::text::HoverEvent;
+
+    match hover {
+        HoverEvent::ShowText(value) | HoverEvent::Other { value, .. } => {
+            value.resolve(translate).to_spans()
+        }
+        HoverEvent::ShowItem(stack) => {
+            let stack = lodestone_game::item::ItemStack::from(stack.as_ref());
+            join_tooltip_lines(&crate::container::tooltip::tooltip_lines(&stack, advanced))
+        }
+        HoverEvent::ShowEntity(entity) => {
+            entity_tooltip_text(entity).resolve(translate).to_spans()
+        }
+    }
+}
+
+/// The three lines a `show_entity` tooltip shows, as one component tree with a
+/// literal newline between them.
+///
+/// The order is the payload's own: the name first when there is one, then the
+/// type, then the UUID. The type line is a translation with the type's
+/// description as its single argument — two nested keys, both resolved by the
+/// caller's table, so an unknown type shows the key rather than a fabricated
+/// name. A payload with no readable type contributes no type line at all,
+/// which is the honest answer: [`lodestone_model::text::HoverEntity::
+/// type_translation_key`] returns `None` exactly then.
+fn entity_tooltip_text(entity: &lodestone_model::text::HoverEntity) -> lodestone_model::Text {
+    use lodestone_model::Text;
+
+    let mut lines: Vec<Text> = Vec::with_capacity(3);
+    if let Some(name) = &entity.name {
+        lines.push((**name).clone());
+    }
+    if let Some(key) = entity.type_translation_key() {
+        lines.push(Text::translate(
+            ENTITY_TOOLTIP_TYPE_KEY,
+            vec![Text::translate(key, Vec::new())],
+        ));
+    }
+    if let Some(uuid) = entity.uuid {
+        lines.push(Text::literal(uuid.to_string()));
+    }
+
+    let mut root = Text::literal("");
+    for (i, line) in lines.into_iter().enumerate() {
+        if i > 0 {
+            root.extra.push(Text::literal("\n"));
+        }
+        root.extra.push(line);
+    }
+    root
+}
+
+/// The translation key wrapping a `show_entity` payload's type — `"Type: %s"`
+/// in the English table, with the entity type's own description as the
+/// argument.
+const ENTITY_TOOLTIP_TYPE_KEY: &str = "gui.entity_tooltip.type";
+
+/// Flattens gathered tooltip lines into one span run with a literal `\n`
+/// between lines. See [`hover_tooltip_spans`] for why a flat line's colour
+/// becomes an explicit RGB style.
+fn join_tooltip_lines(lines: &[crate::container::tooltip::TooltipLine]) -> Vec<TextSpan> {
+    let mut out: Vec<TextSpan> = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push(TextSpan { text: "\n".to_string(), style: TextStyle::default() });
+        }
+        match &line.spans {
+            Some(spans) => out.extend(spans.iter().cloned()),
+            None => out.push(TextSpan {
+                text: line.text.clone(),
+                style: TextStyle {
+                    color: Some(lodestone_model::TextColor::Rgb(rgba_to_rgb(line.colour))),
+                    ..TextStyle::default()
+                },
+            }),
+        }
+    }
+    out
+}
+
+/// A 0..1 RGBA tooltip colour as the packed `0xrrggbb` a
+/// [`lodestone_model::TextColor::Rgb`] holds. Alpha is dropped — the tooltip
+/// box's own opacity is the background's, not the text's.
+fn rgba_to_rgb(colour: [f32; 4]) -> u32 {
+    let channel = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (channel(colour[0]) << 16) | (channel(colour[1]) << 8) | channel(colour[2])
+}
+
 /// The pure half of [`draw_chat_hover_tooltip`]: wraps the tooltip body and
 /// resolves its background rect in logical-canvas pixels (`x, y, w, h`),
 /// taking the width-measuring/wrapping primitives as parameters exactly the
@@ -5461,7 +5584,6 @@ fn wrap_interactive_with(
     max_width_px: f32,
 ) -> Vec<Vec<lodestone_game::text::InteractiveSpan>> {
     use lodestone_game::text::InteractiveSpan;
-    use lodestone_model::text::{ClickEvent, HoverEvent};
 
     if spans.is_empty() {
         return vec![Vec::new()];
@@ -5474,14 +5596,15 @@ fn wrap_interactive_with(
         return vec![spans.to_vec()];
     }
 
-    type Chr<'a> = (char, TextStyle, Option<&'a ClickEvent>, Option<&'a HoverEvent>);
+    // The whole source span rides along with each character, rather than a
+    // tuple of its interaction fields: every field of `InteractiveSpan` other
+    // than `text` applies uniformly to the run, so carrying the run itself
+    // means a new interaction field (as `insertion` was) needs no change to
+    // the wrap at all.
+    type Chr<'a> = (char, TextStyle, &'a InteractiveSpan);
     let chars: Vec<Chr<'_>> = spans
         .iter()
-        .flat_map(|s| {
-            s.text
-                .chars()
-                .map(move |c| (c, s.style, s.click.as_ref(), s.hover.as_ref()))
-        })
+        .flat_map(|s| s.text.chars().map(move |c| (c, s.style, s)))
         .collect();
 
     let measure_current = |current: &[Chr<'_>]| -> f32 {
@@ -5507,8 +5630,8 @@ fn wrap_interactive_with(
 
         let before_word = current.len();
         if !current.is_empty() {
-            let &(_, s, c, h) = current.last().expect("just checked non-empty");
-            current.push((' ', s, c, h));
+            let &(_, style, source) = current.last().expect("just checked non-empty");
+            current.push((' ', style, source));
         }
         current.extend_from_slice(word);
         if measure_current(&current) <= max_width_px {
@@ -5521,13 +5644,13 @@ fn wrap_interactive_with(
         current.extend_from_slice(word);
         if measure_current(&current) > max_width_px {
             current.clear();
-            for &(ch, style, click, hover) in word {
+            for &(ch, style, source) in word {
                 let was_empty = current.is_empty();
-                current.push((ch, style, click, hover));
+                current.push((ch, style, source));
                 if !was_empty && measure_current(&current) > max_width_px {
                     current.pop();
                     flush(&mut rows, &mut current);
-                    current.push((ch, style, click, hover));
+                    current.push((ch, style, source));
                 }
             }
         }
@@ -5536,32 +5659,31 @@ fn wrap_interactive_with(
     rows
 }
 
-/// [`merge_styled_chars`]'s sibling for the `(char, style, click, hover)`
-/// stream [`wrap_interactive_with`] threads through — consecutive characters
-/// sharing style **and** interaction collapse into one run, so a click
-/// boundary always lands on a span boundary too.
+/// [`merge_styled_chars`]'s sibling for the `(char, style, source run)` stream
+/// [`wrap_interactive_with`] threads through — consecutive characters sharing
+/// style **and** interaction collapse into one run, so a click boundary always
+/// lands on a span boundary too.
 fn merge_interactive_chars(
-    chars: &[(
-        char,
-        TextStyle,
-        Option<&lodestone_model::text::ClickEvent>,
-        Option<&lodestone_model::text::HoverEvent>,
-    )],
+    chars: &[(char, TextStyle, &lodestone_game::text::InteractiveSpan)],
 ) -> Vec<lodestone_game::text::InteractiveSpan> {
     use lodestone_game::text::InteractiveSpan;
 
     let mut out: Vec<InteractiveSpan> = Vec::new();
-    for &(ch, style, click, hover) in chars {
+    for &(ch, style, source) in chars {
         let continues = |last: &InteractiveSpan| {
-            last.style == style && last.click.as_ref() == click && last.hover.as_ref() == hover
+            last.style == style
+                && last.click == source.click
+                && last.hover == source.hover
+                && last.insertion == source.insertion
         };
         match out.last_mut() {
             Some(last) if continues(last) => last.text.push(ch),
             _ => out.push(InteractiveSpan {
                 text: ch.to_string(),
                 style,
-                click: click.cloned(),
-                hover: hover.cloned(),
+                click: source.click.clone(),
+                hover: source.hover.clone(),
+                insertion: source.insertion.clone(),
             }),
         }
     }
@@ -5743,7 +5865,7 @@ mod chat_interaction_tests {
         interactive_span_at, wrap_interactive_with,
     };
     use lodestone_game::text::InteractiveSpan;
-    use lodestone_model::text::{ClickAction, ClickEvent, HoverAction, HoverEvent};
+    use lodestone_model::text::{ClickAction, ClickEvent, HoverEvent};
 
     fn plain(text: &str) -> InteractiveSpan {
         InteractiveSpan {
@@ -5751,6 +5873,7 @@ mod chat_interaction_tests {
             style: TextStyle::default(),
             click: None,
             hover: None,
+            insertion: None,
         }
     }
 
@@ -5960,10 +6083,9 @@ mod chat_interaction_tests {
     fn chat_interaction_at_finds_a_hover_and_a_neighbouring_pixel_does_not() {
         let mut tipped = clickable("tip", "unused");
         tipped.click = None;
-        tipped.hover = Some(HoverEvent {
-            action: HoverAction::ShowText,
-            value: Box::new(lodestone_model::Text::literal("tooltip body")),
-        });
+        tipped.hover = Some(HoverEvent::ShowText(Box::new(
+            lodestone_model::Text::literal("tooltip body"),
+        )));
         let entries = vec![(vec![plain("see "), tipped], 0.0)];
         let canvas_w = 400.0;
         let canvas_h = 200.0;
@@ -12293,6 +12415,127 @@ mod recipe_toast_gate {
     }
 }
 
+#[cfg(test)]
+mod hover_payload_tests {
+    use super::hover_tooltip_spans;
+    use lodestone_model::Text;
+    use lodestone_model::text::HoverEvent;
+
+    /// The same jar-authored capture `lodestone_model::tests` reads — one
+    /// fixture, one provenance. See
+    /// `crates/lodestone-model/oracle-java/HoverEventOracle.java` for how it
+    /// is produced and why it is captured rather than written by hand.
+    const CAPTURE: &str =
+        include_str!("../../lodestone-model/tests/data/hover_events_26_2.json");
+
+    /// The hover event carried by the captured component named `name`.
+    fn captured_hover(name: &str) -> HoverEvent {
+        let prefix = format!("{name}=");
+        let json = CAPTURE
+            .lines()
+            .find_map(|l| l.strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("the capture has no `{name}` line"));
+        // Through the production flatten, not a private one: this is the same
+        // call `HudRenderer::chat_interaction_at`'s input goes through.
+        lodestone_game::text::interactive_spans(&Text::from_json(json), &|_| None)
+            .into_iter()
+            .find_map(|span| span.hover)
+            .expect("the captured component carries a hover event")
+    }
+
+    /// The tooltip body as lines, undoing the `\n` joining
+    /// [`hover_tooltip_spans`] does for the layout pass.
+    fn lines(hover: &HoverEvent, advanced: bool) -> Vec<String> {
+        let spans = hover_tooltip_spans(hover, &|_| None, advanced);
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        joined.split('\n').map(str::to_owned).collect()
+    }
+
+    /// A `show_item` hover paints the item's own tooltip: the custom name and
+    /// then the two authored lore lines, in that order. Every value comes
+    /// from the capture, and the *composition* comes from the same
+    /// line-gathering an inventory slot uses, so a player hovering the sword
+    /// in chat and the sword in their inventory reads the same thing.
+    #[test]
+    fn a_captured_show_item_hover_paints_the_items_own_tooltip() {
+        let hover = captured_hover("show_item");
+        assert!(
+            matches!(hover, HoverEvent::ShowItem(_)),
+            "the capture must reach this as a typed item payload: {hover:?}"
+        );
+        assert_eq!(
+            lines(&hover, false),
+            ["Widowmaker", "Forged in the deep", "Bane of spiders"]
+        );
+    }
+
+    /// With advanced tooltips on, the same hover grows the three lines the
+    /// inventory tooltip grows: durability (the captured `1561` maximum less
+    /// the captured `431` of damage), the item id, and the count of decoded
+    /// components. Predicted from the capture's own numbers, not read back
+    /// from the code.
+    #[test]
+    fn an_advanced_show_item_hover_adds_durability_id_and_component_count() {
+        assert_eq!(
+            lines(&captured_hover("show_item"), true),
+            [
+                "Widowmaker",
+                "Forged in the deep",
+                "Bane of spiders",
+                "Durability: 1130 / 1561",
+                "minecraft:diamond_sword",
+                "4 Component(s)",
+            ]
+        );
+    }
+
+    /// A `show_entity` hover paints its three lines in the payload's own
+    /// order: name, type, UUID. The type line goes through two nested
+    /// translation keys, so a table that knows them produces words and one
+    /// that does not falls back to the keys — checked both ways, because a
+    /// key reaching the screen is the defect the resolve step exists to stop.
+    #[test]
+    fn a_captured_show_entity_hover_paints_name_type_and_uuid() {
+        let hover = captured_hover("show_entity");
+        assert!(
+            matches!(hover, HoverEvent::ShowEntity(_)),
+            "the capture must reach this as a typed entity payload: {hover:?}"
+        );
+        assert_eq!(
+            lines(&hover, false),
+            [
+                "Boris",
+                "gui.entity_tooltip.type",
+                "6ba7b810-9dad-11d1-80b4-00c04fd430c8",
+            ],
+            "with no table the keys stand in for the words"
+        );
+
+        // The two strings the English table actually holds for those keys.
+        let table = |key: &str| match key {
+            "gui.entity_tooltip.type" => Some("Type: %s".to_owned()),
+            "entity.minecraft.spider" => Some("Spider".to_owned()),
+            _ => None,
+        };
+        let spans = hover_tooltip_spans(&hover, &table, false);
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(
+            joined.split('\n').collect::<Vec<_>>(),
+            ["Boris", "Type: Spider", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"]
+        );
+    }
+
+    /// **The control.** A `show_text` hover is the one action whose payload a
+    /// component flatten was always right for, and it still is — so a green
+    /// item/entity result above cannot be explained by this function simply
+    /// flattening everything it is given.
+    #[test]
+    fn a_show_text_hover_still_flattens_its_component_verbatim() {
+        let hover = HoverEvent::ShowText(Box::new(Text::literal("plain body")));
+        assert_eq!(lines(&hover, false), ["plain body"]);
+    }
+}
+
 /// Gate for the chat `hover_event` tooltip (`docs/chat.md`'s
 /// "Interactivity": the hit-test already found the hover, but nothing drew
 /// it — the one link that stopped short of pixels).
@@ -12444,13 +12687,12 @@ mod chat_hover_tooltip_gate {
     /// a hex-coloured `show_text` hover keeps its real colour.
     #[test]
     fn a_hover_events_value_survives_to_spans_for_the_frame() {
-        use lodestone_model::text::{HoverAction, HoverEvent};
+        use lodestone_model::text::HoverEvent;
 
-        let hover = HoverEvent {
-            action: HoverAction::ShowText,
-            value: Box::new(lodestone_model::Text::literal("Diamond Sword")),
-        };
-        let spans = hover.value.resolve(&|_| None).to_spans();
+        let hover = HoverEvent::ShowText(Box::new(lodestone_model::Text::literal(
+            "Diamond Sword",
+        )));
+        let spans = super::hover_tooltip_spans(&hover, &|_| None, false);
         let text: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(
             text, "Diamond Sword",
