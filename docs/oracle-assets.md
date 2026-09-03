@@ -29,8 +29,8 @@ are read from `crates/lodestone-registry/src/generated/version_table.rs`, not re
 | 1.11.2 | 316 | **absent** | — | — | — | n/a — not fetched at all |
 | 1.12.2 | 340 | yes | yes | yes | 44 MB | `scripts/live-oracles/legacy-1.12.sh` (+ now also `legacy.sh 1.12.2`) backing v1-9's four `#[ignore]`d live gates (`live_chunk.rs`, `live_entity.rs`, `live_interaction.rs`, `live_canonical.rs`; container `lodestone-legacy-1-12`, game `:25568`, RCON `:25569`); `crates/lodestone-anvil/tests/region_real_world.rs` (ignored) |
 | 1.13.2 | 404 | yes | no | no | 32 MB | **not a live gate** — a one-shot JVM-oracle dump: `crates/lodestone-canonical/tests/flattening.rs` + committed extract `tests/support/flattening_1_13_2_jvm.txt` (regenerate via `JAR=.cache/mc/1.13.2/server.jar`, `LODESTONE_REGEN=1`); `crates/versions/1.9/src/particle_ids.rs` + `tests/particle_ids.rs` (same jar, decompiled under `container` for the legacy particle-id table) |
-| 1.14.4 | 498 | yes | no | no | 34 MB | **referenced by nothing** — fetched by `xtask version-table`, no test or script names `.cache/mc/1.14.4` |
-| 1.15.2 | 578 | yes | no | no | 35 MB | **referenced by nothing** |
+| 1.14.4 | 498 | yes | no | yes | 34 MB | `scripts/live-oracles/legacy.sh 1.14.4` (container `lodestone-mc1144`, game `:25586`, RCON `:25587`) backing `crates/versions/1.14/tests/capture_join.rs`'s `#[ignore]`d recorder; the jar's own `--reports` dump is committed at `crates/versions/1.14/tests/support/{blocks,registries}_1_14_4_jar.json` and generates that protocol's block-state and entity tables |
+| 1.15.2 | 578 | yes | no | yes | 35 MB | `scripts/live-oracles/legacy.sh 1.15.2` (container `lodestone-mc1152`, game `:25588`, RCON `:25589`), same recorder; same committed `--reports` dumps at `..._1_15_2_jar.json`. Also the source world for the vanilla upgrade oracle in `crates/versions/1.14/tests/support/state_upgrade_1_15_2_to_26_2.txt` |
 | 1.16.5 | 754 | yes | no | yes | 39 MB | v1-14's `#[ignore]`d live gates (`live_chunk.rs`, `live_entity.rs`, `live_interaction.rs`; container `lodestone-mc1165`, game `:25573`, RCON `:25574`); `crates/versions/1.14/src/canonical.rs` + `tests/canonicalisation.rs` (jar decompiled under `container` for the 754 canonicalisation table); `crates/lodestone-anvil/tests/region_real_world.rs` (ignored) |
 | 1.17.1 | 756 | yes | no | no | 42 MB | **referenced by nothing** |
 | 1.18.2 | 758 | yes | no | no | 44 MB | **referenced by nothing** |
@@ -44,10 +44,10 @@ Missing entirely (never fetched): **1.7.10, 1.9.4, 1.10.2, 1.11.2** — four of 
 version-table targets. `xtask version-table --fetch-missing` would fetch them; nothing in this
 repo currently asks it to.
 
-**The eight "referenced by nothing" jars are exactly the plan's finding, confirmed by a fresh
-grep rather than copied from it**: `1.14.4, 1.15.2, 1.17.1, 1.18.2, 1.19.4, 1.20.1, 1.20.6,
-1.21.11`. Each was checked with `grep -rF ".cache/mc/<version>" crates xtask scripts docs` — the
-only hits for any of them are this document and the dedup plan's own open-decision prose about
+**The "referenced by nothing" jars are the plan's finding, confirmed by a fresh grep rather
+than copied from it.** The list was eight; the 1.14-era merge consumed two of them, leaving
+six: `1.17.1, 1.18.2, 1.19.4, 1.20.1, 1.20.6, 1.21.11`. Each was checked with `grep -rF ".cache/mc/<version>" crates xtask scripts docs` — the
+only hits for any of the six are this document and the dedup plan's own open-decision prose about
 *fetching* Mojang reports from `1.21.11`'s jar in the future, which is a proposal, not a consumer.
 
 ### The 1.21.11 asset-identity trap this table exists to prevent
