@@ -3102,97 +3102,39 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 continue;
             }
 
-            // Issue #548: the torch/repeater/comparator reads below used to
-            // go through `redstone::make_lookup(&column, ..)`, home column
-            // only. They now build a `RedstoneColumns` over the same
-            // `column` plus `world`, so a repeater/comparator whose input or
-            // side reaches across a chunk border reads whatever an
-            // already-loaded neighbour actually holds there instead of air.
-            // Scoped to this one `let` so the borrow it holds on `column`
-            // ends before the direct `column.set_block` a few lines below
-            // and the fresh `RedstoneColumns` the subsequent
-            // `propagate_and_react_with_entities_across_chunks` call builds.
-            let new_state = {
-                let columns = crate::random_tick::RedstoneColumns::new(&mut column, min_x, min_z, &*world);
-                if due.kind == crate::redstone::TICK_TORCH {
-                    let has_signal = crate::redstone_torch::has_neighbor_signal(&crate::redstone::make_columns_lookup(&columns), BlockPos::new(x, y, z), &state);
-                    crate::redstone_torch::run_scheduled_tick(&state, has_signal)
-                } else if due.kind == crate::redstone::TICK_REPEATER {
-                    let facing = crate::redstone::diode_facing(&state);
-                    let should_on =
-                        crate::redstone_diode::repeater_should_turn_on(&crate::redstone::make_columns_lookup(&columns), BlockPos::new(x, y, z), facing);
-                    match crate::redstone_diode::run_scheduled_tick(&state, should_on) {
-                        crate::redstone_diode::RepeaterTickOutcome::TurnedOff(s) => Some(s),
-                        crate::redstone_diode::RepeaterTickOutcome::TurnedOn { new_state, reschedule } => {
-                            if reschedule {
-                                let delay = crate::redstone_diode::repeater_delay(&new_state);
-                                block_ticks.schedule((x, y, z), crate::redstone::TICK_REPEATER.to_string(), game_tick + u64::from(delay), TickPriority::VeryHigh);
-                            }
-                            Some(new_state)
-                        }
-                        crate::redstone_diode::RepeaterTickOutcome::Locked | crate::redstone_diode::RepeaterTickOutcome::NoChange => None,
-                    }
-                } else if due.kind == crate::redstone::TICK_COMPARATOR {
-                    let facing = crate::redstone::diode_facing(&state);
-                    let input = crate::redstone::input_signal(&crate::redstone::make_columns_lookup(&columns), BlockPos::new(x, y, z), facing);
-                    let side = crate::redstone::alternate_signal(&crate::redstone::make_columns_lookup(&columns), BlockPos::new(x, y, z), facing, false);
-                    crate::redstone_diode::run_scheduled_comparator_tick(&state, input, side)
-                } else if due.kind == crate::redstone::TICK_OBSERVER {
-                let (new_state, reschedule) = crate::redstone_observer::run_scheduled_tick(&state);
-                if reschedule {
-                    block_ticks.schedule((x, y, z), crate::redstone::TICK_OBSERVER.to_string(), game_tick + 2, TickPriority::Normal);
-                }
-                Some(new_state)
-            } else if due.kind == crate::redstone_target::TICK_TARGET_DECAY {
-                // `TargetBlock.tick` (`:85-89`) — decay the analog `power`
-                // back to 0. Issue #322: scheduled for real now, by the
-                // projectile-block-hit resolution earlier in this same
-                // `scheduled.with` region (search this file for
-                // `crate::mobs::ProjectileBlockHit`) — a target's `power`
-                // set by a projectile hit no longer decays from nothing.
-                crate::redstone_target::run_scheduled_tick(&state)
-            } else if due.kind == crate::hand_use::TICK_BUTTON {
-                // Issue #532: a pressed button releasing itself after its
-                // `ticksToStayPressed`. The same shape as the redstone families
-                // above — a pure decision on the state, re-propagated below — so a
-                // button feeding a door closes it again when the button pops up.
-                crate::hand_use::release_button(&state)
-            } else if crate::piston::is_finish_kind(&due.kind) {
-                // The second phase of a piston move —
-                // `PistonMovingBlockEntity.tick`'s commit branch. The state to write
-                // travels in the tick's own kind, because the pending tick *is* this
-                // crate's moving block entity (see `piston::finish_kind`).
-                //
-                // Vanilla's `if (level.getBlockState(pos).is(Blocks.MOVING_PISTON))`
-                // guard is reproduced: anything else already rewrote this cell (a
-                // player broke it, a second move claimed it), and committing over
-                // that would resurrect a block from a move that no longer exists.
-                if crate::piston::is_moving_piston(&state) {
-                    crate::piston::parse_finish_kind(&due.kind).map(|entity| entity.moved_state)
-                } else {
-                    None
-                }
-            } else {
-                    // No other block-tick behaviour is modeled — see this
-                    // function's own doc comment.
-                    None
-                }
-            };
-
-            if let Some(new_state) = new_state {
+            // The torch/repeater/comparator/observer decision, plus the
+            // cascade it drives, both live in `block_tick_reaction` rather
+            // than inline here: standing this loop up needs a mob sim, a
+            // block-entity registry, a weather handle and a command tree,
+            // none of which a delayed-redstone chain depends on, and that
+            // dependency was the whole reason no test ran such a chain across
+            // several ticks. Reads inside go through a multi-column view, so
+            // a repeater whose input or side is across a chunk seam sees what
+            // the resident neighbour actually holds instead of air.
+            //
+            // The wire half stays here, because it needs the feeds this
+            // module has and the reaction does not.
+            let reaction = crate::block_tick_reaction::run_due_block_tick(
+                &mut column,
+                min_x,
+                min_z,
+                &*world,
+                &due.kind,
+                BlockPos::new(x, y, z),
+                &state,
+                &mut block_ticks,
+                game_tick,
+                Some(&block_entities),
+            );
+            if let Some(new_state) = reaction.new_state {
                 if new_state != state {
-                    // Issue #530: a door, trapdoor or fence gate a scheduled tick
-                    // just toggled — vanilla's `DoorBlock.playSound`. The one
-                    // openable path that is genuinely server-driven, so nothing
-                    // predicts it and it was silent.
+                    // A door, trapdoor or fence gate a scheduled tick just
+                    // toggled. The one openable path that is genuinely
+                    // server-driven, so nothing predicts it and it was silent.
                     publish_openable_sound(&block_tick_out, BlockPos::new(x, y, z), &state, &new_state, game_tick);
-                    column.set_block(lx, y, lz, &new_state);
-                    world.set_block(x, y, z, &new_state);
                     block_tick_out.publish(x, y, z, new_state);
                 }
-                for event in crate::random_tick::propagate_and_react_with_entities_across_chunks(
-                    &mut column, min_x, min_z, &*world, x, y, z, &mut block_ticks, game_tick, Some(&block_entities),
-                ) {
+                for event in reaction.events {
                     let (ex, ey, ez) = event.pos;
                     publish_openable_sound(&block_tick_out, BlockPos::new(ex, ey, ez), &event.from, &event.to, game_tick);
                     world.set_block(ex, ey, ez, &event.to);

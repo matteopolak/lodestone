@@ -308,6 +308,7 @@ pub mod rcon {
     use super::{Action, WorldOracle};
     use lodestone_testsupport::RconClient;
     use std::net::ToSocketAddrs;
+    use std::time::Instant;
 
     #[derive(Debug)]
     pub struct RconOracle {
@@ -318,6 +319,26 @@ pub mod rcon {
         /// clobbering the other's — see `docs/fuzzing.md`'s self-consistency
         /// proof, which does exactly this against one live oracle.
         origin: (i32, i32, i32),
+        /// When this oracle's *next* tick is due, on a fixed schedule
+        /// anchored at the first [`WorldOracle::advance_tick`] call.
+        ///
+        /// A fixed `sleep(TICK_MILLIS)` per tick is not the same thing, and
+        /// the difference is measurable rather than theoretical: every
+        /// `block_state` probe is a round trip that happens *between* two
+        /// sleeps, so a comparison probing k positions runs slower than the
+        /// server and the server's tick count runs **ahead** of the
+        /// harness's, cumulatively. Measured on a three-position,
+        /// two-candidate region: a signal whose true arrival is game tick 10
+        /// was reported at harness tick 8 — a wrong tick label, and one that
+        /// reads exactly like a real timing divergence. Sleeping to a
+        /// schedule instead absorbs the probe cost into the same 50 ms
+        /// budget the server is using, so the drift does not accumulate.
+        next_tick_at: Option<Instant>,
+        /// How many ticks were already overdue when they came up — the
+        /// instrument's own error count. Non-zero means the probes for one
+        /// tick cost more than a tick, so nothing about *when* something
+        /// happened can be concluded from that run.
+        missed_deadlines: u32,
     }
 
     impl RconOracle {
@@ -328,11 +349,23 @@ pub mod rcon {
             Ok(Self {
                 client: RconClient::connect(addr, password)?,
                 origin,
+                next_tick_at: None,
+                missed_deadlines: 0,
             })
         }
 
         fn world_pos(&self, pos: (i32, i32, i32)) -> (i32, i32, i32) {
             (self.origin.0 + pos.0, self.origin.1 + pos.1, self.origin.2 + pos.2)
+        }
+
+        /// How many of this oracle's ticks were already overdue when they
+        /// came up. **Assert this is zero before believing any tick label
+        /// from a comparison this oracle took part in** — see
+        /// [`next_tick_at`](Self::next_tick_at) for the measurement that
+        /// motivates it.
+        #[must_use]
+        pub fn missed_deadlines(&self) -> u32 {
+            self.missed_deadlines
         }
     }
 
@@ -356,8 +389,18 @@ pub mod rcon {
         fn advance_tick(&mut self) -> Result<(), Self::Error> {
             // Real time, deliberately never `/tick step` — see this module's
             // top-level doc for why that command cannot be trusted to
-            // advance a scheduled block tick.
-            std::thread::sleep(super::TICK_MILLIS);
+            // advance a scheduled block tick. Sleeping to a schedule rather
+            // than for a fixed interval, so probe round trips do not push the
+            // harness behind the server — see `next_tick_at`.
+            let now = Instant::now();
+            let due = self.next_tick_at.unwrap_or(now) + super::TICK_MILLIS;
+            if due > now {
+                std::thread::sleep(due - now);
+                self.next_tick_at = Some(due);
+            } else {
+                self.missed_deadlines += 1;
+                self.next_tick_at = Some(now);
+            }
             Ok(())
         }
 
@@ -620,6 +663,270 @@ pub mod fluid {
                 let pos = BlockPos::new(entry.pos.0, entry.pos.1, entry.pos.2);
                 changes.clear();
                 run_scheduled_tick(&self.rig, self.env, pos, &mut self.queue, self.tick, &mut changes);
+            }
+            Ok(())
+        }
+
+        fn block_state(&mut self, pos: (i32, i32, i32), candidates: &[String]) -> Result<Option<String>, Self::Error> {
+            let (x, y, z) = self.world_pos(pos);
+            let state = self.rig.block_state(x, y, z);
+            Ok(candidates
+                .iter()
+                .find(|candidate| state_matches(&state, candidate))
+                .cloned())
+        }
+    }
+}
+
+pub mod redstone {
+    //! [`RedstoneModelOracle`]: the *our-side* [`WorldOracle`] over this
+    //! workspace's redstone model, driven through the same two production
+    //! entry points a real session uses — the placement reaction a world edit
+    //! runs, and the scheduled block-tick drain the world tick loop runs.
+    //!
+    //! ## Why this exists next to [`super::fluid`]
+    //!
+    //! Fluid spread is a single-cell rule iterated by one scheduled kind.
+    //! Redstone is not: a signal crosses dust synchronously, waits `2d` game
+    //! ticks at a repeater, and re-enters the cascade from a *drained* tick
+    //! rather than from the edit. Those are two different production paths,
+    //! and a comparison that drives only one of them cannot see an ordering
+    //! or delay bug at all.
+    //!
+    //! ## The multi-column rig, and why it is not one column
+    //!
+    //! The store behind this oracle is a map of **whole chunk columns**, all
+    //! resident, created on demand with a solid floor. That is load-bearing
+    //! rather than convenient: our reaction dispatch reads and writes through
+    //! a cascade-scoped multi-column view whose reach is decided by the
+    //! [`ChunkSource`] it is handed, so a single-column rig would answer air
+    //! one cell past a seam and every cross-seam question would come back
+    //! "no signal" with nothing to distinguish that from a real model bug.
+    //! A contraption laid out across two seams is the whole point of the
+    //! comparison this oracle serves.
+    //!
+    //! ## Exact stepping
+    //!
+    //! Nothing here sleeps. `advance_tick` increments a counter, drains every
+    //! entry due at that number and runs it, so this side's tick numbering is
+    //! exact and the whole alignment error budget of a comparison sits on the
+    //! real-time side — the same asymmetry [`super::fluid`] documents, for
+    //! the same reason.
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    use lodestone_model::BlockPos;
+    use lodestone_server::block_tick_reaction::run_due_block_tick;
+    use lodestone_server::{ChunkColumn, ChunkSource, ScheduledTickQueue, react_at_placement_with_entities};
+
+    use super::{Action, WorldOracle, state_matches};
+
+    /// Vertical extent of the rig, matching an overworld dimension's own
+    /// build limits so any below-the-world guard in the model behaves as it
+    /// does in production.
+    const MIN_Y: i32 = -64;
+    const HEIGHT: i32 = 384;
+
+    /// A resident-everywhere flat world of real [`ChunkColumn`]s.
+    #[derive(Debug)]
+    struct ColumnRig {
+        columns: Mutex<HashMap<(i32, i32), ChunkColumn>>,
+        floor_y: i32,
+        floor_state: String,
+        /// When set, this source claims **no** column is resident, which is
+        /// what a cascade-scoped multi-column view needs to hear in order to
+        /// behave like the single-column reach it replaced: it never fetches
+        /// a neighbour, so a read one cell past a seam answers air and a
+        /// write there is dropped. Used only by
+        /// [`RedstoneModelOracle::without_neighbours`], as the control that
+        /// proves a cross-seam assertion has a detector behind it.
+        deny_neighbours: bool,
+    }
+
+    impl ColumnRig {
+        fn with_column<R>(&self, cx: i32, cz: i32, f: impl FnOnce(&mut ChunkColumn) -> R) -> R {
+            let mut guard = self.columns.lock().expect("rig lock");
+            let column = guard.entry((cx, cz)).or_insert_with(|| {
+                let mut fresh = ChunkColumn::new(MIN_Y, HEIGHT);
+                for lx in 0..16 {
+                    for lz in 0..16 {
+                        fresh.set_block(lx, self.floor_y, lz, &self.floor_state);
+                    }
+                }
+                fresh
+            });
+            f(column)
+        }
+    }
+
+    impl ChunkSource for ColumnRig {
+        fn column(&self, cx: i32, cz: i32) -> ChunkColumn {
+            self.with_column(cx, cz, |column| column.clone())
+        }
+
+        fn block_state(&self, x: i32, y: i32, z: i32) -> String {
+            let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+            self.with_column(cx, cz, |column| {
+                if y < column.min_y || y >= column.min_y + column.height {
+                    return "minecraft:air".to_owned();
+                }
+                column.block_state(x - cx * 16, y, z - cz * 16).to_owned()
+            })
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            "minecraft:plains".to_owned()
+        }
+
+        fn set_block(&self, x: i32, y: i32, z: i32, name: &str) {
+            let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+            self.with_column(cx, cz, |column| {
+                if y >= column.min_y && y < column.min_y + column.height {
+                    column.set_block(x - cx * 16, y, z - cz * 16, name);
+                }
+            });
+        }
+
+        fn is_column_resident(&self, _cx: i32, _cz: i32) -> bool {
+            !self.deny_neighbours
+        }
+    }
+
+    /// Our side of a differential comparison, over the redstone model.
+    #[derive(Debug)]
+    pub struct RedstoneModelOracle {
+        rig: ColumnRig,
+        queue: ScheduledTickQueue<String>,
+        tick: u64,
+        origin: (i32, i32, i32),
+    }
+
+    impl RedstoneModelOracle {
+        /// `origin` is added to every position an [`Action`] or a
+        /// `block_state` query names, mirroring the RCON oracle's own offset
+        /// so one script can be written in relative coordinates and run on
+        /// both sides. `floor_y` is relative to `origin`.
+        #[must_use]
+        pub fn new(origin: (i32, i32, i32), floor_y: i32, floor_state: &str) -> Self {
+            Self::with_reach(origin, floor_y, floor_state, false)
+        }
+
+        /// The same oracle with its cross-column reach taken away: the world
+        /// behind it reports no column resident, so the reaction dispatch
+        /// falls back to the one column it was handed and a signal cannot
+        /// leave it.
+        ///
+        /// This is a **control**, not a mode anything should use. A
+        /// cross-seam assertion is an assertion about an absence — no signal
+        /// is lost at a boundary — and an absence needs a case that would be
+        /// missed, watched failing. Building that case out of the same rig
+        /// and the same script as the real comparison is what makes it
+        /// evidence about the detector rather than about a second rig.
+        #[must_use]
+        pub fn without_neighbours(origin: (i32, i32, i32), floor_y: i32, floor_state: &str) -> Self {
+            Self::with_reach(origin, floor_y, floor_state, true)
+        }
+
+        fn with_reach(origin: (i32, i32, i32), floor_y: i32, floor_state: &str, deny_neighbours: bool) -> Self {
+            Self {
+                rig: ColumnRig {
+                    columns: Mutex::new(HashMap::new()),
+                    floor_y: origin.1 + floor_y,
+                    floor_state: floor_state.to_owned(),
+                    deny_neighbours,
+                },
+                queue: ScheduledTickQueue::new(),
+                tick: 0,
+                origin,
+            }
+        }
+
+        /// Writes a block WITHOUT running the placement reaction — for laying
+        /// out a contraption before a script runs, where each component must
+        /// not fire the circuit as it appears.
+        pub fn place_static(&mut self, pos: (i32, i32, i32), state: &str) {
+            let (x, y, z) = self.world_pos(pos);
+            self.rig.set_block(x, y, z, state);
+        }
+
+        fn world_pos(&self, pos: (i32, i32, i32)) -> (i32, i32, i32) {
+            (self.origin.0 + pos.0, self.origin.1 + pos.1, self.origin.2 + pos.2)
+        }
+
+        /// The tick number this oracle has advanced to. Exact by
+        /// construction, unlike a real-time-aligned oracle's.
+        #[must_use]
+        pub fn tick(&self) -> u64 {
+            self.tick
+        }
+    }
+
+    impl WorldOracle for RedstoneModelOracle {
+        type Error = std::convert::Infallible;
+
+        fn apply(&mut self, action: &Action) -> Result<(), Self::Error> {
+            match action {
+                Action::SetBlock { pos, state } => {
+                    let (x, y, z) = self.world_pos(*pos);
+                    self.rig.set_block(x, y, z, state);
+                    let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+                    let mut column = self.rig.column(cx, cz);
+                    // The same reaction a world edit runs in production: the
+                    // placed block's own on-place half plus the neighbour
+                    // fan-out, both across chunk seams because `rig` reaches
+                    // every column.
+                    let events = react_at_placement_with_entities(
+                        &mut column,
+                        cx * 16,
+                        cz * 16,
+                        &self.rig,
+                        x,
+                        y,
+                        z,
+                        &mut self.queue,
+                        self.tick,
+                        None,
+                    );
+                    for event in events {
+                        let (ex, ey, ez) = event.pos;
+                        self.rig.set_block(ex, ey, ez, &event.to);
+                    }
+                }
+                Action::RunCommand(_) => {
+                    // No command grammar on this side by design — see
+                    // `super::fluid`'s own arm for the reasoning. Layout goes
+                    // through `place_static` instead.
+                }
+            }
+            Ok(())
+        }
+
+        fn advance_tick(&mut self) -> Result<(), Self::Error> {
+            self.tick += 1;
+            for due in self.queue.drain_due(self.tick, usize::MAX) {
+                let (x, y, z) = due.pos;
+                let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
+                let mut column = self.rig.column(cx, cz);
+                if y < column.min_y || y >= column.min_y + column.height {
+                    continue;
+                }
+                let state = column.block_state(x - cx * 16, y, z - cz * 16).to_owned();
+                let reaction = run_due_block_tick(
+                    &mut column,
+                    cx * 16,
+                    cz * 16,
+                    &self.rig,
+                    &due.kind,
+                    BlockPos::new(x, y, z),
+                    &state,
+                    &mut self.queue,
+                    self.tick,
+                    None,
+                );
+                for event in reaction.events {
+                    let (ex, ey, ez) = event.pos;
+                    self.rig.set_block(ex, ey, ez, &event.to);
+                }
             }
             Ok(())
         }

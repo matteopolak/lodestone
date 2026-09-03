@@ -1348,8 +1348,13 @@ pub(crate) fn react_at_placement(
 /// [`propagate_and_react_with_entities`] fan-out — see that function's own doc
 /// for why the parameter exists and who needs it. `None` behaves exactly like
 /// [`react_at_placement`] itself.
+///
+/// Public because the tick loop is not the only consumer: a differential
+/// oracle in `crates/lodestone-fuzz` drives a contraption through this exact
+/// entry point, which is the only way the placement half of a circuit can be
+/// compared against a real server tick for tick.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn react_at_placement_with_entities(
+pub fn react_at_placement_with_entities(
     column: &mut crate::chunk::ChunkColumn,
     min_x: i32,
     min_z: i32,
