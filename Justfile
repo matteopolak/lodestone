@@ -514,7 +514,7 @@ install-hooks:
     git config core.hooksPath .githooks
     @echo "core.hooksPath -> $(git config core.hooksPath)"
 
-# --- Fuzzing (issue #549, docs/fuzzing.md) ----------------------------------
+# --- Fuzzing (docs/fuzzing.md) ----------------------------------------------
 #
 # `fuzz/` is its own cargo-fuzz workspace (own Cargo.lock, own empty
 # `[workspace]` table), the same reason `web/` and the wasm guests under

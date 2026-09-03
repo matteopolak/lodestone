@@ -37,19 +37,18 @@ lodestone-core = { path = "../crates/lodestone-core" }
 lodestone-model = { path = "../crates/lodestone-model" }
 lodestone-server = { path = "../crates/lodestone-server" }
 lodestone-v26-2 = { path = "../crates/versions/26.2" }
-# Added for the widened Track A scope (issue #549's "obvious first targets"
-# list: loot tables, block-state strings, the density compiler, the unihex
-# HEX parser) — each a leaf/near-leaf crate pulled in for exactly one parse
-# entry point, not for any of these crates' own heavier subsystems.
+# For the widened Track A scope -- loot tables, block-state strings, the
+# density compiler, the unihex HEX parser -- each a leaf/near-leaf crate
+# pulled in for exactly one parse entry point, not for any of these crates'
+# own heavier subsystems.
 lodestone-data = { path = "../crates/lodestone-data" }
 lodestone-worldgen-core = { path = "../crates/lodestone-worldgen-core" }
 lodestone-assets = { path = "../crates/lodestone-assets" }
 serde_json = "1"
-# Added for issue #549's remaining "obvious first targets": chunk/region
-# deserialization (`RegionFile::parse` + `read_chunk_nbt_bytes`) and the
-# text-component JSON/NBT front-ends in `lodestone-model` (`Text::from_json`,
-# `Text::from_nbt`) — the latter already depended on via `lodestone-model`
-# above.
+# For chunk/region deserialization (`RegionFile::parse` +
+# `read_chunk_nbt_bytes`) and the text-component JSON/NBT front-ends in
+# `lodestone-model` (`Text::from_json`, `Text::from_nbt`) -- the latter
+# already depended on via `lodestone-model` above.
 lodestone-anvil = { path = "../crates/lodestone-anvil" }
 
 [[bin]]

@@ -1741,6 +1741,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "keyring",
+ "lodestone-time",
  "num-bigint",
  "rand 0.8.7",
  "reqwest",
@@ -1754,6 +1755,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "web-sys",
 ]
 
 [[package]]
@@ -1809,10 +1811,10 @@ dependencies = [
  "lodestone-model",
  "lodestone-net",
  "lodestone-server",
- "lodestone-v340",
- "lodestone-v47",
- "lodestone-v735",
- "lodestone-v770",
+ "lodestone-v1-14",
+ "lodestone-v1-8",
+ "lodestone-v1-9",
+ "lodestone-v26-2",
  "lodestone-world",
  "uuid",
 ]
@@ -1829,7 +1831,7 @@ dependencies = [
  "lodestone-fuzz",
  "lodestone-model",
  "lodestone-server",
- "lodestone-v770",
+ "lodestone-v26-2",
  "lodestone-worldgen-core",
  "serde_json",
 ]
@@ -1893,6 +1895,16 @@ name = "lodestone-physics"
 version = "0.1.0"
 
 [[package]]
+name = "lodestone-protocol-common"
+version = "0.1.0"
+dependencies = [
+ "lodestone-core",
+ "lodestone-macros",
+ "lodestone-model",
+ "uuid",
+]
+
+[[package]]
 name = "lodestone-server"
 version = "0.1.0"
 dependencies = [
@@ -1911,6 +1923,7 @@ dependencies = [
  "lodestone-model",
  "lodestone-net",
  "lodestone-physics",
+ "lodestone-time",
  "lodestone-world",
  "lodestone-worldgen",
  "reqwest",
@@ -1921,7 +1934,6 @@ dependencies = [
  "uuid",
  "wasm-bindgen-futures",
  "web-sys",
- "web-time",
 ]
 
 [[package]]
@@ -1932,7 +1944,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "lodestone-v340"
+name = "lodestone-v1-14"
+version = "0.1.0"
+dependencies = [
+ "lodestone-core",
+ "lodestone-data",
+ "lodestone-macros",
+ "lodestone-model",
+ "lodestone-protocol-common",
+ "lodestone-world",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lodestone-v1-8"
 version = "0.1.0"
 dependencies = [
  "lodestone-canonical",
@@ -1940,13 +1966,14 @@ dependencies = [
  "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
+ "lodestone-protocol-common",
  "lodestone-world",
  "tracing",
  "uuid",
 ]
 
 [[package]]
-name = "lodestone-v47"
+name = "lodestone-v1-9"
 version = "0.1.0"
 dependencies = [
  "lodestone-canonical",
@@ -1954,26 +1981,14 @@ dependencies = [
  "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
+ "lodestone-protocol-common",
  "lodestone-world",
  "tracing",
  "uuid",
 ]
 
 [[package]]
-name = "lodestone-v735"
-version = "0.1.0"
-dependencies = [
- "lodestone-core",
- "lodestone-data",
- "lodestone-macros",
- "lodestone-model",
- "lodestone-world",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "lodestone-v770"
+name = "lodestone-v26-2"
 version = "0.1.0"
 dependencies = [
  "getrandom 0.2.17",

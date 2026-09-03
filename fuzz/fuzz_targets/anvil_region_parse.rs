@@ -1,8 +1,8 @@
 //! libFuzzer target: `lodestone_anvil::region::RegionFile::parse` (and the
 //! chunk payload it hands back) must never panic on arbitrary bytes.
 //!
-//! Issue #549's "obvious first targets" list names "chunk/region
-//! deserialization in `lodestone-anvil`" directly — a `.mca` region file is
+//! Chunk/region deserialization is one of the highest-value untrusted-input
+//! surfaces here — a `.mca` region file is
 //! attacker-controlled the moment a player can supply one at all (importing a
 //! world, loading a schematic-adjacent structure, or simply a corrupted save
 //! on disk after a crash mid-write), and `RegionFile::parse` is the single
@@ -29,12 +29,14 @@
 //! that decompresses to a hostile NBT document is covered end to end in one
 //! target rather than needing a second corpus.
 //!
-//! No corpus is bundled: unlike the packet decoders, no real captured `.mca`
-//! bytes live in this repo today (`.cache/mc/*` holds real vanilla region
-//! files under a live oracle's world save, but those are gitignored inputs,
-//! not fixtures this crate can commit) — a human wanting a head start can
-//! seed `fuzz/corpus/anvil_region_parse/` from a small saved region file
-//! directly; the format is verbatim disk bytes, no wrapper needed.
+//! The committed seed (`fuzz/seeds/anvil_region_parse/`) is one real region
+//! file a vanilla server wrote, trimmed to its smallest single populated
+//! chunk: the header's offset/length encoding, the compression-scheme byte,
+//! the deflate stream and the chunk NBT inside it are all verbatim vanilla
+//! bytes, with only the other 1023 header slots zeroed and the unused sectors
+//! dropped. A whole region is megabytes and every interesting arm of this
+//! parser is reachable from one populated slot. See `docs/fuzzing.md` for how
+//! the seeds are regenerated.
 
 #![no_main]
 

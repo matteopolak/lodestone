@@ -8,9 +8,9 @@
 //! catch-all, which is not new coverage and gives the mutator nothing to climb
 //! toward a specific id. In practice this biases fuzzing time toward whichever
 //! packets are easiest to *stumble onto* rather than spreading budget evenly —
-//! exactly the risk named in issue #549: "a target covering every clientbound
-//! packet id rather than the ones that look risky." The OOM this harness
-//! already found (issue #549's own motivating incident) was in a hand-written
+//! which is the wrong shape of coverage: the point is to cover every declared
+//! clientbound packet id, not the ones that look risky. The unbounded
+//! allocation this harness has already found was in a hand-written
 //! decode arm whose packet id is not especially easy to reach by chance; there
 //! is no reason to assume every other rarely-hit arm is safe just because
 //! nothing has found it yet.
