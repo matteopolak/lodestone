@@ -437,16 +437,22 @@ impl ChatLog {
     }
 
     /// The most recent `n` lines, oldest-first (render order, top to bottom),
-    /// each flattened to a legacy `§`-code string at read time (colour survives
-    /// once the adapter preserves it) and paired with its arrival timestamp.
+    /// each resolved against `translate` and then flattened to a legacy
+    /// `§`-code string at read time (colour survives once the adapter preserves
+    /// it), paired with its arrival timestamp.
     #[must_use]
-    pub fn recent(&self, n: usize) -> Vec<(String, f64)> {
+    pub fn recent(&self, n: usize, translate: &dyn Fn(&str) -> Option<String>) -> Vec<(String, f64)> {
         let start = self.feed.len().saturating_sub(n);
         self.feed
             .iter()
             .zip(self.times.iter())
             .skip(start)
-            .map(|(entry, at)| (entry_display(entry).to_legacy_string(), *at))
+            .map(|(entry, at)| {
+                (
+                    entry_display(entry).resolve(translate).to_legacy_string(),
+                    *at,
+                )
+            })
             .collect()
     }
 
@@ -456,8 +462,13 @@ impl ChatLog {
     /// A line stamped in the future (only reachable if a caller passes a clock
     /// that went backwards) reads as age `0.0` rather than negative.
     #[must_use]
-    pub fn recent_ages(&self, n: usize, now: f64) -> Vec<(String, f32)> {
-        self.recent(n)
+    pub fn recent_ages(
+        &self,
+        n: usize,
+        now: f64,
+        translate: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<(String, f32)> {
+        self.recent(n, translate)
             .into_iter()
             .map(|(line, at)| (line, (now - at).max(0.0) as f32))
             .collect()
@@ -465,22 +476,26 @@ impl ChatLog {
 
     /// The most recent `n` lines' full styled spans, oldest-first, paired with
     /// each entry's arrival timestamp — the span sibling of
-    /// [`recent`](Self::recent): same walk, `to_spans()` in place of
-    /// `to_legacy_string()`, so a colour `to_legacy_string` cannot represent
-    /// (any `TextColor::Rgb`) survives.
+    /// [`recent`](Self::recent): same walk and same resolution, `to_spans()` in
+    /// place of `to_legacy_string()`, so a colour `to_legacy_string` cannot
+    /// represent (any `TextColor::Rgb`) survives.
     ///
     /// `recent`'s own flattening is the loss point named in
     /// `docs/text-colour.md`'s "Chat is still hex-blind" section: `ChatEntry`
     /// already stores a full [`Text`] per entry, so nothing about storage
     /// changes here, only how one is read out.
     #[must_use]
-    pub fn recent_spans(&self, n: usize) -> Vec<(Vec<TextSpan>, f64)> {
+    pub fn recent_spans(
+        &self,
+        n: usize,
+        translate: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<(Vec<TextSpan>, f64)> {
         let start = self.feed.len().saturating_sub(n);
         self.feed
             .iter()
             .zip(self.times.iter())
             .skip(start)
-            .map(|(entry, at)| (entry_display(entry).to_spans(), *at))
+            .map(|(entry, at)| (entry_display(entry).resolve(translate).to_spans(), *at))
             .collect()
     }
 
@@ -490,8 +505,13 @@ impl ChatLog {
     /// at zero" projection, composed over [`recent_spans`](Self::recent_spans)
     /// instead of [`recent`](Self::recent).
     #[must_use]
-    pub fn recent_ages_spans(&self, n: usize, now: f64) -> Vec<(Vec<TextSpan>, f32)> {
-        self.recent_spans(n)
+    pub fn recent_ages_spans(
+        &self,
+        n: usize,
+        now: f64,
+        translate: &dyn Fn(&str) -> Option<String>,
+    ) -> Vec<(Vec<TextSpan>, f32)> {
+        self.recent_spans(n, translate)
             .into_iter()
             .map(|(spans, at)| (spans, (now - at).max(0.0) as f32))
             .collect()
@@ -584,6 +604,12 @@ impl ChatLog {
 mod log_tests {
     use super::*;
 
+    /// The empty language table: every key lowers to its own name, which is what
+    /// these tests already assert against since they push literals.
+    fn no_tr(_: &str) -> Option<String> {
+        None
+    }
+
     #[test]
     fn log_keeps_newest_and_bounds_length() {
         let mut log = ChatLog::new();
@@ -595,7 +621,7 @@ mod log_tests {
             DEFAULT_CHAT_CAPACITY,
             "log must evict oldest at capacity"
         );
-        let recent: Vec<String> = log.recent(3).into_iter().map(|(line, _)| line).collect();
+        let recent: Vec<String> = log.recent(3, &no_tr).into_iter().map(|(line, _)| line).collect();
         // The three newest survive, oldest-first.
         assert_eq!(
             recent,
@@ -612,13 +638,13 @@ mod log_tests {
         let mut log = ChatLog::new();
         log.push_system(Text::literal("only"), 0.0);
         assert_eq!(
-            log.recent(10)
+            log.recent(10, &no_tr)
                 .into_iter()
                 .map(|(l, _)| l)
                 .collect::<Vec<_>>(),
             vec!["only".to_string()]
         );
-        assert!(ChatLog::new().recent(5).is_empty());
+        assert!(ChatLog::new().recent(5, &no_tr).is_empty());
     }
 
     #[test]
@@ -627,7 +653,7 @@ mod log_tests {
         log.push_system(Text::literal("first"), 1.5);
         log.push_system(Text::literal("second"), 4.25);
         assert_eq!(
-            log.recent(2),
+            log.recent(2, &no_tr),
             vec![("first".to_string(), 1.5), ("second".to_string(), 4.25)]
         );
     }
@@ -640,7 +666,7 @@ mod log_tests {
         log.push_system(Text::literal("old"), 1.0);
         log.push_system(Text::literal("new"), 9.0);
         assert_eq!(
-            log.recent_ages(2, 10.0),
+            log.recent_ages(2, 10.0, &no_tr),
             vec![("old".to_string(), 9.0), ("new".to_string(), 1.0)]
         );
     }
@@ -651,7 +677,7 @@ mod log_tests {
     fn a_line_stamped_in_the_future_reads_as_age_zero() {
         let mut log = ChatLog::new();
         log.push_system(Text::literal("ahead"), 5.0);
-        assert_eq!(log.recent_ages(1, 1.0), vec![("ahead".to_string(), 0.0)]);
+        assert_eq!(log.recent_ages(1, 1.0, &no_tr), vec![("ahead".to_string(), 0.0)]);
     }
 
     /// The discriminating input for this whole gap: an RGB colour has no
@@ -666,13 +692,13 @@ mod log_tests {
         styled.style.color = Some(lodestone_model::TextColor::Rgb(0x1a_2b3c));
         log.push_system(styled, 1.0);
 
-        let (line, _) = &log.recent(1)[0];
+        let (line, _) = &log.recent(1, &no_tr)[0];
         assert_eq!(
             line, "hex",
             "the legacy string is the control: it must show the loss, not accidentally dodge it"
         );
 
-        let spans = log.recent_spans(1);
+        let spans = log.recent_spans(1, &no_tr);
         assert_eq!(spans.len(), 1);
         let (spans, at) = &spans[0];
         assert_eq!(*at, 1.0);
@@ -700,7 +726,7 @@ mod log_tests {
         new.style.color = Some(lodestone_model::TextColor::Aqua);
         log.push_system(new, 9.0);
 
-        let out = log.recent_ages_spans(2, 10.0);
+        let out = log.recent_ages_spans(2, 10.0, &no_tr);
         assert_eq!(out.len(), 2);
         let (old_spans, old_age) = &out[0];
         assert_eq!(*old_age, 9.0, "must match recent_ages's own arithmetic exactly");

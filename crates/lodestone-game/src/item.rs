@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use lodestone_model::{
     ArmorTrim, AuthoredEnchantment, BannerPatternLayer, Identifier, ItemEnchantment, ItemProfile,
-    PotDecorations, Text, TextSpan, ToolPatch, WrittenBookContent,
+    PotDecorations, ResolvedText, Text, TextSpan, ToolPatch, WrittenBookContent,
 };
 
 /// The default maximum stack size when an item carries no
@@ -1434,14 +1434,14 @@ pub fn styled_hover_name(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<S
 
 /// The span-carrying sibling of [`styled_hover_name`]: identical construction
 /// (custom name or best-effort base name, forced italic when custom), but
-/// returned as [`TextSpan`]s via [`Text::to_spans`] instead of flattened
-/// through [`Text::to_legacy_string`].
+/// returned as [`TextSpan`]s via [`ResolvedText::to_spans`] instead of
+/// flattened through [`ResolvedText::to_legacy_string`].
 ///
 /// `to_legacy_string` cannot represent a `TextColor::Rgb` custom name
 /// (`TextColor::legacy_code` returns `None` for it), so a hex-coloured custom
 /// item name silently lost its colour at every `styled_hover_name` draw site
-/// — the same bug `Text::to_legacy_string`'s own doc and the chat draw path
-/// already carry a fix for. A draw site that wants the colour to survive
+/// — the same bug `ResolvedText::to_legacy_string`'s own doc and the chat draw
+/// path already carry a fix for. A draw site that wants the colour to survive
 /// should call this and draw the spans, not `styled_hover_name`.
 #[must_use]
 pub fn styled_hover_name_spans(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<String>) -> Vec<TextSpan> {
@@ -1449,8 +1449,8 @@ pub fn styled_hover_name_spans(stack: &ItemStack, translate: &dyn Fn(&str) -> Op
 }
 
 /// The **plain** sibling of [`styled_hover_name`]: identical construction,
-/// flattened through [`Text::to_plain_string_with`] instead of
-/// [`Text::to_legacy_string`] — vanilla's own plain-string hover-name getter,
+/// flattened through [`ResolvedText::to_plain_string`] instead of
+/// [`ResolvedText::to_legacy_string`] — vanilla's own plain-string hover-name getter,
 /// which strips styling entirely rather than encoding it as `§` codes.
 ///
 /// This is the accessor an anvil's rename box should seed from
@@ -1465,7 +1465,7 @@ pub fn styled_hover_name_spans(stack: &ItemStack, translate: &dyn Fn(&str) -> Op
 /// nowhere to put colour either way.
 #[must_use]
 pub fn plain_hover_name(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<String>) -> String {
-    styled_hover_text(stack, translate).to_plain_string_with(translate)
+    styled_hover_text(stack, translate).to_plain_string()
 }
 
 /// The shared construction behind [`styled_hover_name`] and
@@ -1473,7 +1473,10 @@ pub fn plain_hover_name(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<St
 /// wrapped in an empty root forced italic when a custom name is present. See
 /// [`styled_hover_name`]'s own doc for the vanilla mirror and its two
 /// documented gaps.
-fn styled_hover_text(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<String>) -> Text {
+fn styled_hover_text(
+    stack: &ItemStack,
+    translate: &dyn Fn(&str) -> Option<String>,
+) -> ResolvedText {
     let custom = match stack.components().get_str(CUSTOM_NAME_COMPONENT) {
         Some(ComponentValue::Text(text)) => Some(text.clone()),
         _ => None,
@@ -1505,7 +1508,10 @@ fn styled_hover_text(stack: &ItemStack, translate: &dyn Fn(&str) -> Option<Strin
         root.style.italic = Some(true);
     }
     root.extra.push(hover);
-    root
+    // The table is already in hand, so resolve here rather than handing a draw
+    // site a tree it would have to remember to resolve: a custom name is a
+    // literal, but a base display name is a `translate` key by construction.
+    root.resolve(translate)
 }
 
 /// The best-effort plain display name for `item` with no custom-name
