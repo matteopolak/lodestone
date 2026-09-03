@@ -1,0 +1,948 @@
+{
+ "minecraft:block_entity_type": {
+  "entries": {
+   "minecraft:banner": {
+    "protocol_id": 20
+   },
+   "minecraft:barrel": {
+    "protocol_id": 27
+   },
+   "minecraft:beacon": {
+    "protocol_id": 15
+   },
+   "minecraft:bed": {
+    "protocol_id": 25
+   },
+   "minecraft:beehive": {
+    "protocol_id": 34
+   },
+   "minecraft:bell": {
+    "protocol_id": 31
+   },
+   "minecraft:blast_furnace": {
+    "protocol_id": 29
+   },
+   "minecraft:brewing_stand": {
+    "protocol_id": 12
+   },
+   "minecraft:brushable_block": {
+    "protocol_id": 41
+   },
+   "minecraft:calibrated_sculk_sensor": {
+    "protocol_id": 36
+   },
+   "minecraft:campfire": {
+    "protocol_id": 33
+   },
+   "minecraft:chest": {
+    "protocol_id": 1
+   },
+   "minecraft:chiseled_bookshelf": {
+    "protocol_id": 39
+   },
+   "minecraft:command_block": {
+    "protocol_id": 23
+   },
+   "minecraft:comparator": {
+    "protocol_id": 19
+   },
+   "minecraft:conduit": {
+    "protocol_id": 26
+   },
+   "minecraft:copper_golem_statue": {
+    "protocol_id": 48
+   },
+   "minecraft:crafter": {
+    "protocol_id": 43
+   },
+   "minecraft:creaking_heart": {
+    "protocol_id": 10
+   },
+   "minecraft:daylight_detector": {
+    "protocol_id": 17
+   },
+   "minecraft:decorated_pot": {
+    "protocol_id": 42
+   },
+   "minecraft:dispenser": {
+    "protocol_id": 5
+   },
+   "minecraft:dropper": {
+    "protocol_id": 6
+   },
+   "minecraft:enchanting_table": {
+    "protocol_id": 13
+   },
+   "minecraft:end_gateway": {
+    "protocol_id": 22
+   },
+   "minecraft:end_portal": {
+    "protocol_id": 14
+   },
+   "minecraft:ender_chest": {
+    "protocol_id": 3
+   },
+   "minecraft:furnace": {
+    "protocol_id": 0
+   },
+   "minecraft:hanging_sign": {
+    "protocol_id": 8
+   },
+   "minecraft:hopper": {
+    "protocol_id": 18
+   },
+   "minecraft:jigsaw": {
+    "protocol_id": 32
+   },
+   "minecraft:jukebox": {
+    "protocol_id": 4
+   },
+   "minecraft:lectern": {
+    "protocol_id": 30
+   },
+   "minecraft:mob_spawner": {
+    "protocol_id": 9
+   },
+   "minecraft:piston": {
+    "protocol_id": 11
+   },
+   "minecraft:sculk_catalyst": {
+    "protocol_id": 37
+   },
+   "minecraft:sculk_sensor": {
+    "protocol_id": 35
+   },
+   "minecraft:sculk_shrieker": {
+    "protocol_id": 38
+   },
+   "minecraft:shelf": {
+    "protocol_id": 40
+   },
+   "minecraft:shulker_box": {
+    "protocol_id": 24
+   },
+   "minecraft:sign": {
+    "protocol_id": 7
+   },
+   "minecraft:skull": {
+    "protocol_id": 16
+   },
+   "minecraft:smoker": {
+    "protocol_id": 28
+   },
+   "minecraft:structure_block": {
+    "protocol_id": 21
+   },
+   "minecraft:test_block": {
+    "protocol_id": 46
+   },
+   "minecraft:test_instance_block": {
+    "protocol_id": 47
+   },
+   "minecraft:trapped_chest": {
+    "protocol_id": 2
+   },
+   "minecraft:trial_spawner": {
+    "protocol_id": 44
+   },
+   "minecraft:vault": {
+    "protocol_id": 45
+   }
+  },
+  "protocol_id": 10
+ },
+ "minecraft:data_component_type": {
+  "entries": {
+   "minecraft:attack_range": {
+    "protocol_id": 30
+   },
+   "minecraft:attribute_modifiers": {
+    "protocol_id": 16
+   },
+   "minecraft:axolotl/variant": {
+    "protocol_id": 99
+   },
+   "minecraft:banner_patterns": {
+    "protocol_id": 70
+   },
+   "minecraft:base_color": {
+    "protocol_id": 71
+   },
+   "minecraft:bees": {
+    "protocol_id": 75
+   },
+   "minecraft:block_entity_data": {
+    "protocol_id": 58
+   },
+   "minecraft:block_state": {
+    "protocol_id": 74
+   },
+   "minecraft:blocks_attacks": {
+    "protocol_id": 37
+   },
+   "minecraft:break_sound": {
+    "protocol_id": 78
+   },
+   "minecraft:bucket_entity_data": {
+    "protocol_id": 57
+   },
+   "minecraft:bundle_contents": {
+    "protocol_id": 48
+   },
+   "minecraft:can_break": {
+    "protocol_id": 15
+   },
+   "minecraft:can_place_on": {
+    "protocol_id": 14
+   },
+   "minecraft:cat/collar": {
+    "protocol_id": 101
+   },
+   "minecraft:cat/variant": {
+    "protocol_id": 100
+   },
+   "minecraft:charged_projectiles": {
+    "protocol_id": 47
+   },
+   "minecraft:chicken/variant": {
+    "protocol_id": 93
+   },
+   "minecraft:consumable": {
+    "protocol_id": 24
+   },
+   "minecraft:container": {
+    "protocol_id": 73
+   },
+   "minecraft:container_loot": {
+    "protocol_id": 77
+   },
+   "minecraft:cow/variant": {
+    "protocol_id": 92
+   },
+   "minecraft:creative_slot_lock": {
+    "protocol_id": 20
+   },
+   "minecraft:custom_data": {
+    "protocol_id": 0
+   },
+   "minecraft:custom_model_data": {
+    "protocol_id": 17
+   },
+   "minecraft:custom_name": {
+    "protocol_id": 6
+   },
+   "minecraft:damage": {
+    "protocol_id": 3
+   },
+   "minecraft:damage_resistant": {
+    "protocol_id": 27
+   },
+   "minecraft:damage_type": {
+    "protocol_id": 8
+   },
+   "minecraft:death_protection": {
+    "protocol_id": 36
+   },
+   "minecraft:debug_stick_state": {
+    "protocol_id": 55
+   },
+   "minecraft:dyed_color": {
+    "protocol_id": 42
+   },
+   "minecraft:enchantable": {
+    "protocol_id": 31
+   },
+   "minecraft:enchantment_glint_override": {
+    "protocol_id": 21
+   },
+   "minecraft:enchantments": {
+    "protocol_id": 13
+   },
+   "minecraft:entity_data": {
+    "protocol_id": 56
+   },
+   "minecraft:equippable": {
+    "protocol_id": 32
+   },
+   "minecraft:firework_explosion": {
+    "protocol_id": 66
+   },
+   "minecraft:fireworks": {
+    "protocol_id": 67
+   },
+   "minecraft:food": {
+    "protocol_id": 23
+   },
+   "minecraft:fox/variant": {
+    "protocol_id": 83
+   },
+   "minecraft:frog/variant": {
+    "protocol_id": 95
+   },
+   "minecraft:glider": {
+    "protocol_id": 34
+   },
+   "minecraft:horse/variant": {
+    "protocol_id": 96
+   },
+   "minecraft:instrument": {
+    "protocol_id": 59
+   },
+   "minecraft:intangible_projectile": {
+    "protocol_id": 22
+   },
+   "minecraft:item_model": {
+    "protocol_id": 10
+   },
+   "minecraft:item_name": {
+    "protocol_id": 9
+   },
+   "minecraft:jukebox_playable": {
+    "protocol_id": 62
+   },
+   "minecraft:kinetic_weapon": {
+    "protocol_id": 39
+   },
+   "minecraft:llama/variant": {
+    "protocol_id": 98
+   },
+   "minecraft:lock": {
+    "protocol_id": 76
+   },
+   "minecraft:lodestone_tracker": {
+    "protocol_id": 65
+   },
+   "minecraft:lore": {
+    "protocol_id": 11
+   },
+   "minecraft:map_color": {
+    "protocol_id": 43
+   },
+   "minecraft:map_decorations": {
+    "protocol_id": 45
+   },
+   "minecraft:map_id": {
+    "protocol_id": 44
+   },
+   "minecraft:map_post_processing": {
+    "protocol_id": 46
+   },
+   "minecraft:max_damage": {
+    "protocol_id": 2
+   },
+   "minecraft:max_stack_size": {
+    "protocol_id": 1
+   },
+   "minecraft:minimum_attack_charge": {
+    "protocol_id": 7
+   },
+   "minecraft:mooshroom/variant": {
+    "protocol_id": 89
+   },
+   "minecraft:note_block_sound": {
+    "protocol_id": 69
+   },
+   "minecraft:ominous_bottle_amplifier": {
+    "protocol_id": 61
+   },
+   "minecraft:painting/variant": {
+    "protocol_id": 97
+   },
+   "minecraft:parrot/variant": {
+    "protocol_id": 85
+   },
+   "minecraft:piercing_weapon": {
+    "protocol_id": 38
+   },
+   "minecraft:pig/variant": {
+    "protocol_id": 91
+   },
+   "minecraft:pot_decorations": {
+    "protocol_id": 72
+   },
+   "minecraft:potion_contents": {
+    "protocol_id": 49
+   },
+   "minecraft:potion_duration_scale": {
+    "protocol_id": 50
+   },
+   "minecraft:profile": {
+    "protocol_id": 68
+   },
+   "minecraft:provides_banner_patterns": {
+    "protocol_id": 63
+   },
+   "minecraft:provides_trim_material": {
+    "protocol_id": 60
+   },
+   "minecraft:rabbit/variant": {
+    "protocol_id": 90
+   },
+   "minecraft:rarity": {
+    "protocol_id": 12
+   },
+   "minecraft:recipes": {
+    "protocol_id": 64
+   },
+   "minecraft:repair_cost": {
+    "protocol_id": 19
+   },
+   "minecraft:repairable": {
+    "protocol_id": 33
+   },
+   "minecraft:salmon/size": {
+    "protocol_id": 84
+   },
+   "minecraft:sheep/color": {
+    "protocol_id": 102
+   },
+   "minecraft:shulker/color": {
+    "protocol_id": 103
+   },
+   "minecraft:stored_enchantments": {
+    "protocol_id": 41
+   },
+   "minecraft:suspicious_stew_effects": {
+    "protocol_id": 51
+   },
+   "minecraft:swing_animation": {
+    "protocol_id": 40
+   },
+   "minecraft:tool": {
+    "protocol_id": 28
+   },
+   "minecraft:tooltip_display": {
+    "protocol_id": 18
+   },
+   "minecraft:tooltip_style": {
+    "protocol_id": 35
+   },
+   "minecraft:trim": {
+    "protocol_id": 54
+   },
+   "minecraft:tropical_fish/base_color": {
+    "protocol_id": 87
+   },
+   "minecraft:tropical_fish/pattern": {
+    "protocol_id": 86
+   },
+   "minecraft:tropical_fish/pattern_color": {
+    "protocol_id": 88
+   },
+   "minecraft:unbreakable": {
+    "protocol_id": 4
+   },
+   "minecraft:use_cooldown": {
+    "protocol_id": 26
+   },
+   "minecraft:use_effects": {
+    "protocol_id": 5
+   },
+   "minecraft:use_remainder": {
+    "protocol_id": 25
+   },
+   "minecraft:villager/variant": {
+    "protocol_id": 79
+   },
+   "minecraft:weapon": {
+    "protocol_id": 29
+   },
+   "minecraft:wolf/collar": {
+    "protocol_id": 82
+   },
+   "minecraft:wolf/sound_variant": {
+    "protocol_id": 81
+   },
+   "minecraft:wolf/variant": {
+    "protocol_id": 80
+   },
+   "minecraft:writable_book_content": {
+    "protocol_id": 52
+   },
+   "minecraft:written_book_content": {
+    "protocol_id": 53
+   },
+   "minecraft:zombie_nautilus/variant": {
+    "protocol_id": 94
+   }
+  },
+  "protocol_id": 64
+ },
+ "minecraft:entity_type": {
+  "default": "minecraft:pig",
+  "entries": {
+   "minecraft:acacia_boat": {
+    "protocol_id": 0
+   },
+   "minecraft:acacia_chest_boat": {
+    "protocol_id": 1
+   },
+   "minecraft:allay": {
+    "protocol_id": 2
+   },
+   "minecraft:area_effect_cloud": {
+    "protocol_id": 3
+   },
+   "minecraft:armadillo": {
+    "protocol_id": 4
+   },
+   "minecraft:armor_stand": {
+    "protocol_id": 5
+   },
+   "minecraft:arrow": {
+    "protocol_id": 6
+   },
+   "minecraft:axolotl": {
+    "protocol_id": 7
+   },
+   "minecraft:bamboo_chest_raft": {
+    "protocol_id": 8
+   },
+   "minecraft:bamboo_raft": {
+    "protocol_id": 9
+   },
+   "minecraft:bat": {
+    "protocol_id": 10
+   },
+   "minecraft:bee": {
+    "protocol_id": 11
+   },
+   "minecraft:birch_boat": {
+    "protocol_id": 12
+   },
+   "minecraft:birch_chest_boat": {
+    "protocol_id": 13
+   },
+   "minecraft:blaze": {
+    "protocol_id": 14
+   },
+   "minecraft:block_display": {
+    "protocol_id": 15
+   },
+   "minecraft:bogged": {
+    "protocol_id": 16
+   },
+   "minecraft:breeze": {
+    "protocol_id": 17
+   },
+   "minecraft:breeze_wind_charge": {
+    "protocol_id": 18
+   },
+   "minecraft:camel": {
+    "protocol_id": 19
+   },
+   "minecraft:camel_husk": {
+    "protocol_id": 20
+   },
+   "minecraft:cat": {
+    "protocol_id": 21
+   },
+   "minecraft:cave_spider": {
+    "protocol_id": 22
+   },
+   "minecraft:cherry_boat": {
+    "protocol_id": 23
+   },
+   "minecraft:cherry_chest_boat": {
+    "protocol_id": 24
+   },
+   "minecraft:chest_minecart": {
+    "protocol_id": 25
+   },
+   "minecraft:chicken": {
+    "protocol_id": 26
+   },
+   "minecraft:cod": {
+    "protocol_id": 27
+   },
+   "minecraft:command_block_minecart": {
+    "protocol_id": 29
+   },
+   "minecraft:copper_golem": {
+    "protocol_id": 28
+   },
+   "minecraft:cow": {
+    "protocol_id": 30
+   },
+   "minecraft:creaking": {
+    "protocol_id": 31
+   },
+   "minecraft:creeper": {
+    "protocol_id": 32
+   },
+   "minecraft:dark_oak_boat": {
+    "protocol_id": 33
+   },
+   "minecraft:dark_oak_chest_boat": {
+    "protocol_id": 34
+   },
+   "minecraft:dolphin": {
+    "protocol_id": 35
+   },
+   "minecraft:donkey": {
+    "protocol_id": 36
+   },
+   "minecraft:dragon_fireball": {
+    "protocol_id": 37
+   },
+   "minecraft:drowned": {
+    "protocol_id": 38
+   },
+   "minecraft:egg": {
+    "protocol_id": 39
+   },
+   "minecraft:elder_guardian": {
+    "protocol_id": 40
+   },
+   "minecraft:end_crystal": {
+    "protocol_id": 45
+   },
+   "minecraft:ender_dragon": {
+    "protocol_id": 43
+   },
+   "minecraft:ender_pearl": {
+    "protocol_id": 44
+   },
+   "minecraft:enderman": {
+    "protocol_id": 41
+   },
+   "minecraft:endermite": {
+    "protocol_id": 42
+   },
+   "minecraft:evoker": {
+    "protocol_id": 46
+   },
+   "minecraft:evoker_fangs": {
+    "protocol_id": 47
+   },
+   "minecraft:experience_bottle": {
+    "protocol_id": 48
+   },
+   "minecraft:experience_orb": {
+    "protocol_id": 49
+   },
+   "minecraft:eye_of_ender": {
+    "protocol_id": 50
+   },
+   "minecraft:falling_block": {
+    "protocol_id": 51
+   },
+   "minecraft:fireball": {
+    "protocol_id": 52
+   },
+   "minecraft:firework_rocket": {
+    "protocol_id": 53
+   },
+   "minecraft:fishing_bobber": {
+    "protocol_id": 156
+   },
+   "minecraft:fox": {
+    "protocol_id": 54
+   },
+   "minecraft:frog": {
+    "protocol_id": 55
+   },
+   "minecraft:furnace_minecart": {
+    "protocol_id": 56
+   },
+   "minecraft:ghast": {
+    "protocol_id": 57
+   },
+   "minecraft:giant": {
+    "protocol_id": 59
+   },
+   "minecraft:glow_item_frame": {
+    "protocol_id": 60
+   },
+   "minecraft:glow_squid": {
+    "protocol_id": 61
+   },
+   "minecraft:goat": {
+    "protocol_id": 62
+   },
+   "minecraft:guardian": {
+    "protocol_id": 63
+   },
+   "minecraft:happy_ghast": {
+    "protocol_id": 58
+   },
+   "minecraft:hoglin": {
+    "protocol_id": 64
+   },
+   "minecraft:hopper_minecart": {
+    "protocol_id": 65
+   },
+   "minecraft:horse": {
+    "protocol_id": 66
+   },
+   "minecraft:husk": {
+    "protocol_id": 67
+   },
+   "minecraft:illusioner": {
+    "protocol_id": 68
+   },
+   "minecraft:interaction": {
+    "protocol_id": 69
+   },
+   "minecraft:iron_golem": {
+    "protocol_id": 70
+   },
+   "minecraft:item": {
+    "protocol_id": 71
+   },
+   "minecraft:item_display": {
+    "protocol_id": 72
+   },
+   "minecraft:item_frame": {
+    "protocol_id": 73
+   },
+   "minecraft:jungle_boat": {
+    "protocol_id": 74
+   },
+   "minecraft:jungle_chest_boat": {
+    "protocol_id": 75
+   },
+   "minecraft:leash_knot": {
+    "protocol_id": 76
+   },
+   "minecraft:lightning_bolt": {
+    "protocol_id": 77
+   },
+   "minecraft:lingering_potion": {
+    "protocol_id": 106
+   },
+   "minecraft:llama": {
+    "protocol_id": 78
+   },
+   "minecraft:llama_spit": {
+    "protocol_id": 79
+   },
+   "minecraft:magma_cube": {
+    "protocol_id": 80
+   },
+   "minecraft:mangrove_boat": {
+    "protocol_id": 81
+   },
+   "minecraft:mangrove_chest_boat": {
+    "protocol_id": 82
+   },
+   "minecraft:mannequin": {
+    "protocol_id": 83
+   },
+   "minecraft:marker": {
+    "protocol_id": 84
+   },
+   "minecraft:minecart": {
+    "protocol_id": 85
+   },
+   "minecraft:mooshroom": {
+    "protocol_id": 86
+   },
+   "minecraft:mule": {
+    "protocol_id": 87
+   },
+   "minecraft:nautilus": {
+    "protocol_id": 88
+   },
+   "minecraft:oak_boat": {
+    "protocol_id": 89
+   },
+   "minecraft:oak_chest_boat": {
+    "protocol_id": 90
+   },
+   "minecraft:ocelot": {
+    "protocol_id": 91
+   },
+   "minecraft:ominous_item_spawner": {
+    "protocol_id": 92
+   },
+   "minecraft:painting": {
+    "protocol_id": 93
+   },
+   "minecraft:pale_oak_boat": {
+    "protocol_id": 94
+   },
+   "minecraft:pale_oak_chest_boat": {
+    "protocol_id": 95
+   },
+   "minecraft:panda": {
+    "protocol_id": 96
+   },
+   "minecraft:parched": {
+    "protocol_id": 97
+   },
+   "minecraft:parrot": {
+    "protocol_id": 98
+   },
+   "minecraft:phantom": {
+    "protocol_id": 99
+   },
+   "minecraft:pig": {
+    "protocol_id": 100
+   },
+   "minecraft:piglin": {
+    "protocol_id": 101
+   },
+   "minecraft:piglin_brute": {
+    "protocol_id": 102
+   },
+   "minecraft:pillager": {
+    "protocol_id": 103
+   },
+   "minecraft:player": {
+    "protocol_id": 155
+   },
+   "minecraft:polar_bear": {
+    "protocol_id": 104
+   },
+   "minecraft:pufferfish": {
+    "protocol_id": 107
+   },
+   "minecraft:rabbit": {
+    "protocol_id": 108
+   },
+   "minecraft:ravager": {
+    "protocol_id": 109
+   },
+   "minecraft:salmon": {
+    "protocol_id": 110
+   },
+   "minecraft:sheep": {
+    "protocol_id": 111
+   },
+   "minecraft:shulker": {
+    "protocol_id": 112
+   },
+   "minecraft:shulker_bullet": {
+    "protocol_id": 113
+   },
+   "minecraft:silverfish": {
+    "protocol_id": 114
+   },
+   "minecraft:skeleton": {
+    "protocol_id": 115
+   },
+   "minecraft:skeleton_horse": {
+    "protocol_id": 116
+   },
+   "minecraft:slime": {
+    "protocol_id": 117
+   },
+   "minecraft:small_fireball": {
+    "protocol_id": 118
+   },
+   "minecraft:sniffer": {
+    "protocol_id": 119
+   },
+   "minecraft:snow_golem": {
+    "protocol_id": 121
+   },
+   "minecraft:snowball": {
+    "protocol_id": 120
+   },
+   "minecraft:spawner_minecart": {
+    "protocol_id": 122
+   },
+   "minecraft:spectral_arrow": {
+    "protocol_id": 123
+   },
+   "minecraft:spider": {
+    "protocol_id": 124
+   },
+   "minecraft:splash_potion": {
+    "protocol_id": 105
+   },
+   "minecraft:spruce_boat": {
+    "protocol_id": 125
+   },
+   "minecraft:spruce_chest_boat": {
+    "protocol_id": 126
+   },
+   "minecraft:squid": {
+    "protocol_id": 127
+   },
+   "minecraft:stray": {
+    "protocol_id": 128
+   },
+   "minecraft:strider": {
+    "protocol_id": 129
+   },
+   "minecraft:tadpole": {
+    "protocol_id": 130
+   },
+   "minecraft:text_display": {
+    "protocol_id": 131
+   },
+   "minecraft:tnt": {
+    "protocol_id": 132
+   },
+   "minecraft:tnt_minecart": {
+    "protocol_id": 133
+   },
+   "minecraft:trader_llama": {
+    "protocol_id": 134
+   },
+   "minecraft:trident": {
+    "protocol_id": 135
+   },
+   "minecraft:tropical_fish": {
+    "protocol_id": 136
+   },
+   "minecraft:turtle": {
+    "protocol_id": 137
+   },
+   "minecraft:vex": {
+    "protocol_id": 138
+   },
+   "minecraft:villager": {
+    "protocol_id": 139
+   },
+   "minecraft:vindicator": {
+    "protocol_id": 140
+   },
+   "minecraft:wandering_trader": {
+    "protocol_id": 141
+   },
+   "minecraft:warden": {
+    "protocol_id": 142
+   },
+   "minecraft:wind_charge": {
+    "protocol_id": 143
+   },
+   "minecraft:witch": {
+    "protocol_id": 144
+   },
+   "minecraft:wither": {
+    "protocol_id": 145
+   },
+   "minecraft:wither_skeleton": {
+    "protocol_id": 146
+   },
+   "minecraft:wither_skull": {
+    "protocol_id": 147
+   },
+   "minecraft:wolf": {
+    "protocol_id": 148
+   },
+   "minecraft:zoglin": {
+    "protocol_id": 149
+   },
+   "minecraft:zombie": {
+    "protocol_id": 150
+   },
+   "minecraft:zombie_horse": {
+    "protocol_id": 151
+   },
+   "minecraft:zombie_nautilus": {
+    "protocol_id": 152
+   },
+   "minecraft:zombie_villager": {
+    "protocol_id": 153
+   },
+   "minecraft:zombified_piglin": {
+    "protocol_id": 154
+   }
+  },
+  "protocol_id": 6
+ }
+}
