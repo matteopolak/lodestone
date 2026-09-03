@@ -1,0 +1,24 @@
+[package]
+name = "lodestone-v1-21-11"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-core = { workspace = true }
+lodestone-data = { workspace = true }
+lodestone-macros = { workspace = true }
+lodestone-model = { workspace = true }
+lodestone-protocol-common = { workspace = true }
+lodestone-world = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+lodestone-net = { workspace = true }
+lodestone-testsupport = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
