@@ -119,18 +119,31 @@ pub struct Respawn {
 
 /// Clientbound `position` (player position and look).
 ///
-/// Wire layout: `f64` x/y/z, `f32` yaw/pitch, `bool` on-ground. The `y` is
-/// the player's **feet**. Protocol 47 replaces the trailing boolean with a
+/// Wire layout: `f64` x/[`stance`](Self::stance)/z, `f32` yaw/pitch, `bool`
+/// on-ground. Protocol 47 replaces the trailing boolean with a
 /// relative-coordinate flags byte, so a decoder for that era reads this
 /// packet's `on_ground` as a flags mask — `true` becomes `0x01`, a relative
 /// x — and teleports the player to the wrong place rather than erroring.
+///
+/// # The middle coordinate is the eye position, not the feet
+///
+/// Unlike every later protocol, the second `f64` here is the **stance**: the
+/// same eye-height value the serverbound packets carry in their own `stance`
+/// slot. Measured, because the two readings differ by a constant and so look
+/// equally plausible in isolation: teleporting a player to an exact `y` of
+/// 80.0 over RCON produced 81.62 in this field, and a fresh login the server's
+/// own log placed at `y` 2.0 produced 3.62. Reading it as feet puts the player
+/// 1.62 blocks in the air on every teleport, and — because the confirmation
+/// echo derives its own stance from the value — makes that echo carry a stance
+/// the server refuses, so it rubber-bands every subsequent move instead of
+/// accepting it.
 #[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:position", state = Play, bound = Client)]
 pub struct ClientboundPositionLook {
     /// Absolute x.
     pub x: f64,
-    /// Absolute y, at the player's feet.
-    pub y: f64,
+    /// Absolute eye height, **not** the feet: see the type's own docs.
+    pub stance: f64,
     /// Absolute z.
     pub z: f64,
     /// Yaw in degrees.
@@ -143,21 +156,34 @@ pub struct ClientboundPositionLook {
 
 /// Serverbound `position`.
 ///
-/// # The stance field
+/// # The stance field, and the order it sits in
 ///
 /// This era's movement packets carry a `stance` alongside `y`: the eye
-/// height, `y + 1.62` for a standing player. Protocol 47 removed it. The
-/// server validates it loosely, and sending `y` for it gets the connection
-/// closed for "illegal stance", so it is computed rather than omitted.
+/// height, `y + 1.62` for a standing player. Protocol 47 removed it.
+///
+/// The field order — `x`, `y`, `stance`, `z`, with the stance **after** the
+/// feet — was measured, because getting it wrong is silent. Until the client
+/// echoes a position matching the one the server teleported it to, the server
+/// holds the player and discards movement without logging anything or closing
+/// the connection; with `stance` and `y` transposed the echo never matches, so
+/// the hold never lifts. Measured both ways against a real server by walking
+/// 320 blocks and reading the outcome three independent ways: with the
+/// transposition the server re-sent its own position 65-70 times, streamed no
+/// further chunk columns, and saved the player at the spawn point on logout;
+/// with this order it re-sent its position once, streamed new columns, and
+/// began sending chunk unloads for the columns left behind. The stance check
+/// the server would otherwise fail on never runs, because the held-player
+/// branch returns before reaching it — which is why the wrong order produces
+/// no error at all.
 #[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:position", state = Play, bound = Server)]
 pub struct ServerboundPosition {
     /// Absolute x.
     pub x: f64,
-    /// Eye height: feet `y` plus the standing eye offset.
-    pub stance: f64,
     /// Absolute y, at the player's feet.
     pub y: f64,
+    /// Eye height: feet `y` plus the standing eye offset.
+    pub stance: f64,
     /// Absolute z.
     pub z: f64,
     /// Whether the client believes it is on the ground.
@@ -177,15 +203,19 @@ pub struct ServerboundLook {
 }
 
 /// Serverbound `position_look`, position and rotation together.
+///
+/// Same `x`, `y`, `stance`, `z` order as [`ServerboundPosition`], and the same
+/// measurement stands behind it. This is also the packet the clientbound
+/// teleport is confirmed with.
 #[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
 #[mc(name = "minecraft:position_look", state = Play, bound = Server)]
 pub struct ServerboundPositionLook {
     /// Absolute x.
     pub x: f64,
-    /// Eye height: feet `y` plus the standing eye offset.
-    pub stance: f64,
     /// Absolute y, at the player's feet.
     pub y: f64,
+    /// Eye height: feet `y` plus the standing eye offset.
+    pub stance: f64,
     /// Absolute z.
     pub z: f64,
     /// Yaw in degrees.
