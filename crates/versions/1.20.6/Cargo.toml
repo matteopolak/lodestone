@@ -1,0 +1,27 @@
+[package]
+name = "lodestone-v1-20-6"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+lodestone-core = { workspace = true }
+lodestone-data = { workspace = true }
+lodestone-macros = { workspace = true }
+lodestone-model = { workspace = true }
+# Packet definitions measured identical (wire shape and codec) to their
+# counterparts in the eras below; see that crate's module docs for which
+# packets and their protocol ranges.
+lodestone-protocol-common = { workspace = true }
+lodestone-world = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+lodestone-net = { workspace = true }
+lodestone-testsupport = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
