@@ -1,0 +1,40 @@
+# lodestone clientbound join capture -- Minecraft 1.7.10 (protocol 5)
+# recorded against ./scripts/live-oracles/legacy.sh 1.7.10, flat overworld
+# real server bytes; the outside oracle for this protocol's ids and shapes.
+# <state> <packet id> <body, hex>
+#
+# Trimmed to at most three bodies per packet id, and two for a chunk packet,
+# in the order the wire produced them. Every distinct id the join produced is
+# still represented, which is the property this file is evidence for; the
+# hundredth rel-move or column adds nothing a replay can use and would make
+# every checkout carry megabytes.
+#
+# One absence is real rather than a trimming artefact: a join in this era
+# streams its terrain entirely through map_chunk_bulk (id 38) and never sends
+# a single-column map_chunk (id 33). That packet's own path is exercised by
+# tests/chunk.rs instead.
+login 2 2432366565666261662d326639612d333436392d383635312d616339346262653236643432094c6f646573746f6e65
+play 1 000000160000011404666c6174
+play 63 084d437c4272616e64000776616e696c6c61
+play 5 fffffe6f00000004fffffeca
+play 57 003d4ccccd3dcccccd
+play 9 00
+play 55 00
+play 56 094c6f646573746f6e65010000
+play 8 c07958000000000040167ae148000000c073f80000000000000000000000000000
+play 3 00000000000007920000000000000792
+play 48 00002dffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+play 47 ffffffffff
+play 38 0005000000a701789ceddac90d80000cc0308e07fb4f0c4b548a44ed29f2c8f3ec76b3dab5dc01000000000000c02fbc00ac742e57ff87b5fabfa355ff87b5babf010000000000009851ff370034eaffb056ff87b5fabfa355ff87b5babf010000000000009851ff370034eaffb056ff87b5fabfa355ff87b5babf010000000000009851ff370034eaffb056ff87b5fabfa355ff87b5babf010000000000009851ff370034eaffb0f601b2c733c3ffffffe6ffffffec00010000ffffffe7ffffffec00010000ffffffe7ffffffed00010000ffffffe6ffffffed00010000ffffffe5ffffffed00010000
+play 28 000000160000100021012c710000000052000000006641a000004700000000080009007f
+play 32 00000016000000011567656e657269632e6d6f76656d656e7453706565643fb99999a00000000000
+play 3 00000000000007930000000000000793
+play 38 0005000000a701789ceddac90d80000cc0308e07fb4f0c4b548a44ed29f2c8f3ec76b3dab5dc01000000000000c02fbc00ac742e57ff87b5fabfa355ff87b5babf010000000000009851ff370034eaffb056ff87b5fabfa355ff87b5babf010000000000009851ff370034eaffb056ff87b5fabfa355ff87b5babf010000000000009851ff370034eaffb056ff87b5fabfa355ff87b5babf010000000000009851ff370034eaffb0f601b2c733c3ffffffe5ffffffec00010000ffffffe5ffffffeb00010000ffffffe6ffffffeb00010000ffffffe7ffffffeb00010000ffffffe8ffffffeb00010000
+play 3 00000000000007a700000000000007a7
+play 0 0001b25b
+play 35 fffffee903fffffec70300
+play 35 fffffeed03fffffec70300
+play 35 fffffee503fffffed50300
+play 34 ffffffefffffffec000200000008d2030030f30403c7
+play 0 0001ba60
+play 0 0001c25f

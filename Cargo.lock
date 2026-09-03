@@ -3100,6 +3100,7 @@ dependencies = [
  "lodestone-v1-17",
  "lodestone-v1-19",
  "lodestone-v1-20-6",
+ "lodestone-v1-7",
  "lodestone-v1-8",
  "lodestone-v1-9",
  "lodestone-v26-2",
@@ -3408,6 +3409,27 @@ dependencies = [
  "lodestone-protocol-common",
  "lodestone-testsupport",
  "lodestone-world",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "lodestone-v1-7"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "lodestone-canonical",
+ "lodestone-core",
+ "lodestone-data",
+ "lodestone-macros",
+ "lodestone-model",
+ "lodestone-net",
+ "lodestone-protocol-common",
+ "lodestone-testsupport",
+ "lodestone-world",
+ "md-5",
  "serde_json",
  "tokio",
  "tracing",

@@ -146,6 +146,10 @@ fontdue = { version = "0.9", default-features = false, features = ["hashbrown"] 
 tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "time", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# MD5, for the one offline-mode UUID derivation protocol 5 forces (see
+# `lodestone_v1_7::adapter::offline_player_uuid`). Already in the graph as
+# `uuid`'s own v3 backend, so this adds a name rather than a build.
+md-5 = "0.10"
 uuid = { version = "1", features = ["v3", "v4", "js"] }
 flate2 = "1"
 wasm-bindgen-futures = "0.4"
