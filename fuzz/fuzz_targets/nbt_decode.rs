@@ -12,13 +12,11 @@
 //! the direct target that doc's own "reasonable follow-up... not this
 //! harness's most valuable next dollar" line names.
 //!
-//! No corpus seed is bundled here beyond libFuzzer's own empty start: the
-//! packet decoders above already carry the real vanilla-capture corpus
-//! (`crates/lodestone-fuzz/tests/fixtures`, `crates/versions/26.2/tests/
-//! fixtures`), which is a stronger source of "real" NBT bytes than anything
-//! this target could construct standalone — a human wanting a head start can
-//! seed `fuzz/corpus/nbt_decode/` from those `.hex` fixtures directly (parse
-//! with the same `#`-comment format `lodestone_fuzz::read_hex_fixture` uses).
+//! The committed seeds (`fuzz/seeds/nbt_decode/`) are documents a real vanilla
+//! server wrote: a world's `level.dat`, one player's `.dat`, and three chunk
+//! payloads decompressed out of a region file. Those are a stronger source of
+//! "real" NBT than anything this target could construct standalone, and none
+//! of them passed through our own writer on the way in.
 
 #![no_main]
 

@@ -1,8 +1,8 @@
 //! libFuzzer target: `lodestone_model::text::Text::from_json` must never
 //! panic on arbitrary (but UTF-8) bytes.
 //!
-//! Issue #549's "obvious first targets" list names "text/JSON parsing in
-//! `lodestone-model`" — this is it. Pre-1.20.3 protocol families (`v1-8`,
+//! Text-component JSON parsing is one of the highest-value untrusted-input
+//! surfaces here. Pre-1.20.3 protocol families (`v1-8`,
 //! `v1-9`, `v1-14`) send every chat message, sign line, book page and
 //! scoreboard entry as a JSON-encoded text component, decoded by this one
 //! function; `from_json`'s own doc already claims "never panics and is
