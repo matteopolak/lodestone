@@ -1,9 +1,13 @@
 //! Legacy (pre-1.19 signing) chat packets.
 //!
-//! [`ClientboundChat`] is shared only between v1-8 and v1-9 (protocols 47 and
-//! 340): 1.16 (v1-14, protocol 754) added a `sender: Uuid` field, so it is
-//! declared `#[mc(protocols = "47..=340")]` and v1-14 keeps its own
-//! three-field version.
+//! [`ClientboundChat`] is shared by v1-8, v1-9 and v1-13 (protocols 47
+//! through 404): 1.16 (v1-14, protocol 754) added a `sender: Uuid` field, so
+//! it is declared `#[mc(protocols = "47..=404")]` and v1-14 keeps its own
+//! three-field version. The upper bound moved 340 -> 404 when the 1.13 era
+//! landed, with a real 1.13.2 join capture
+//! (`crates/versions/1.13/tests/captures/join_1_13_2.txt`) decoding through
+//! it -- a widening without one is the inheritance-by-range hazard the dedup
+//! plan names.
 //!
 //! [`ServerboundChat`] and [`ServerboundArmAnimation`] are shared only
 //! between v1-9 and v1-14 (declared `#[mc(protocols = "110..=754")]`): 1.8
@@ -13,12 +17,12 @@
 
 use lodestone_macros::{Decode, Encode, Packet};
 
-/// Clientbound `chat` packet. Shared only 47..=340 -- see the module docs.
+/// Clientbound `chat` packet. Shared 47..=404 -- see the module docs.
 ///
 /// Wire layout: string message (JSON), signed byte position (`0` chat, `1`
 /// system, `2` action bar).
 #[derive(Debug, Clone, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:chat", state = Play, bound = Client, protocols = "47..=340")]
+#[mc(name = "minecraft:chat", state = Play, bound = Client, protocols = "47..=404")]
 pub struct ClientboundChat {
     /// JSON-encoded chat component.
     pub message: String,

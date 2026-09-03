@@ -1,14 +1,14 @@
 //! The pre-1.14 packed block `position` wire type, and the two packets that
 //! embed it.
 //!
-//! # Why this is shared only 47..=340, not with v1-14
+//! # Why this is shared 47..=404, not with v1-14
 //!
 //! `cargo xtask protocol-dup`'s struct-identity scan reports `Position` (and
-//! `BlockDig`/`SpawnPosition`, which embed it) as identical across all three
+//! `BlockDig`/`SpawnPosition`, which embed it) as identical across all the
 //! legacy families -- but that scan compares only a struct's own field list,
 //! never a hand-written `Encode`/`Decode` impl beside it. Diffed by hand:
-//! v1-14's packed-position codec genuinely differs. 1.8 through 1.13
-//! (protocols 47 and 340) pack `x(26) | y(12) | z(26)` from the most
+//! v1-14's packed-position codec genuinely differs. 1.8 through 1.13.2
+//! (protocols 47, 340 and 404) pack `x(26) | y(12) | z(26)` from the most
 //! significant bit down (y in the middle); 1.14+ (protocol 754, this crate's
 //! v1-14) repacks to `x(26) | z(26) | y(12)` (y in the low bits). Same
 //! newtype shape, same field name in every crate, **incompatible bytes on
@@ -16,9 +16,13 @@
 //! generally: a naive detector sees a matching field list and misses a
 //! divergent implementation behind it.
 //!
-//! So `Position`, `BlockDig` and `SpawnPosition` are shared only between v1-8
-//! and v1-9. `Position` has no `Packet` derive (it is a field type embedded
-//! in other packets, not a packet itself) so it has no
+//! It is also the single most widespread difference between the 1.13 era and
+//! the 1.14 one: fifteen of the twenty-eight packets whose shape changes
+//! between 1.13.2 and 1.14.4 change *only* because they carry a position.
+//!
+//! So `Position`, `BlockDig` and `SpawnPosition` are shared by v1-8, v1-9 and
+//! v1-13. `Position` has no `Packet` derive (it is a field type embedded in
+//! other packets, not a packet itself) so it has no
 //! `#[mc(protocols = ...)]` to enforce this -- this doc comment is the only
 //! place the range is recorded, and v1-14 must keep (and does keep) its own
 //! incompatible `Position` type rather than importing this one.
@@ -107,8 +111,8 @@ impl Decode for Position {
 
 /// Serverbound `block_dig` (player digging) -- start, cancel, or finish
 /// breaking a block, plus the drop/shoot/eat status codes that share this
-/// packet. Shared only 47..=340 -- see the module docs (it embeds
-/// [`Position`]).
+/// packet. Shared 47..=404 -- see the module docs (it embeds [`Position`]);
+/// 1.14 is where the packed layout moved, not 1.13.
 ///
 /// # Divergence
 ///
@@ -122,7 +126,7 @@ impl Decode for Position {
 ///
 /// Wire layout: varint status, packed `position`, signed-byte face.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:block_dig", state = Play, bound = Server, protocols = "47..=340")]
+#[mc(name = "minecraft:block_dig", state = Play, bound = Server, protocols = "47..=404")]
 pub struct BlockDig {
     /// Digging status code.
     #[mc(varint)]
@@ -134,11 +138,12 @@ pub struct BlockDig {
 }
 
 /// Clientbound `spawn_position` packet setting the client's compass target.
-/// Shared only 47..=340 -- see the module docs (it embeds [`Position`]).
+/// Shared 47..=404 -- see the module docs (it embeds [`Position`]); 1.14 is
+/// where the packed layout moved, not 1.13.
 ///
 /// Wire layout: a single packed pre-1.14 [`Position`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:spawn_position", state = Play, bound = Client, protocols = "47..=340")]
+#[mc(name = "minecraft:spawn_position", state = Play, bound = Client, protocols = "47..=404")]
 pub struct SpawnPosition {
     /// Compass target block position.
     pub location: Position,

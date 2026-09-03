@@ -8,10 +8,14 @@
 //! though the wire shape is identical). No `#[mc(protocols = ...)]` is
 //! declared; it keeps the derive's default `ProtocolRange::ALL`.
 //!
-//! [`PlayerAbilities`] is shared only between v1-8 and v1-9 (declared
-//! `#[mc(protocols = "47..=340")]`): both carry two trailing `f32` speed
+//! [`PlayerAbilities`] is shared by v1-8, v1-9 and v1-13 (declared
+//! `#[mc(protocols = "47..=404")]`): all three carry two trailing `f32` speed
 //! fields the vanilla server ignores serverbound; 1.16 (v1-14) dropped them
-//! to a single flags byte.
+//! to a single flags byte. The upper bound moved 340 -> 404 when the 1.13 era
+//! landed; 1.13 leaves this packet alone (it is absent from the 1.12.2 ->
+//! 1.13.2 shape diff) and the widening is checked on the wire by
+//! `lodestone-v1-13`'s live abilities gate, since a serverbound shape is not
+//! something a clientbound capture can speak to.
 //!
 //! [`Settings`] and [`ResourcePackReceive`] are shared only between v1-9 and
 //! v1-14 (declared `#[mc(protocols = "110..=754")]`): 1.8's `Settings`
@@ -54,13 +58,13 @@ pub struct BrandPayload {
 }
 
 /// Serverbound `abilities` (player abilities) -- the client toggling
-/// flight. Shared only 47..=340 -- see the module docs.
+/// flight. Shared 47..=404 -- see the module docs.
 ///
 /// Wire layout: signed-byte flags (bit `0x02` = flying), f32 flying speed,
 /// f32 walking speed (both server-ignored serverbound, sent as vanilla
 /// defaults).
 #[derive(Debug, Clone, Copy, PartialEq, Encode, Decode, Packet)]
-#[mc(name = "minecraft:abilities", state = Play, bound = Server, protocols = "47..=340")]
+#[mc(name = "minecraft:abilities", state = Play, bound = Server, protocols = "47..=404")]
 pub struct PlayerAbilities {
     /// Ability flag bitset; bit `0x02` marks the client as flying.
     pub flags: i8,
