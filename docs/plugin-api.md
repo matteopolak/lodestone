@@ -102,6 +102,11 @@ predictor directly, through shell-only resources a plugin cannot reach. A plugin
 plugin's dig but has no way to veto a human's, because the human path never asks the intent seam
 anything.
 
+`crates/plugins/lodestone-block-jobs` is a reference producer: a plain queue of `BlockJob`s
+(`Break`/`Place`, each a `pos`/`face` pair) that a `TickSet::Intent` system installs one at a time,
+polling `BreakOutcome`/`PlaceOutcome` for completion before starting the next. It is the first
+production call site for either component — see that crate's own doc for the state machine.
+
 ### What stays privileged
 
 Two things are off-limits by construction, not by a permission check a plugin could route around:
