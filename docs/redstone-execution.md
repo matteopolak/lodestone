@@ -163,7 +163,7 @@ Stated up front rather than discovered later.
 | **Repeater/comparator delay, tick scheduling** | Untouched. Scheduling happens inside the arms; the queue, its `DRAIN_ORDER` and its dedup are not involved. |
 | **Property-sensitive dispatch** | Works. A palette entry is a whole canonical state string, so a predicate reading `powered=true` classifies correctly per entry. |
 | **Neighbour-sensitive dispatch** | **Not supported, by design.** A predicate that reads any *other* cell cannot be a per-entry classification. Such a test must stay inside its arm's body. `redstone_graph`'s module doc states this as the rule for adding a family. |
-| **Chunk boundaries** | **Closed for the live propagation path (issue #548).** `lodestone_server::random_tick::RedstoneColumns` replaces the single `&ChunkColumn` `react_to_notification`, `propagate_and_react_with_entities` and the placement/tripwire arms read and write through: home stays a plain `&mut` borrow, and any neighbouring column a cascade actually reaches is fetched lazily via `ChunkSource::is_column_resident` (never generated) and cached for the rest of that one cascade. `crate::tick`'s four production call sites — the scheduled-tick drain (including the torch/repeater/comparator reads that precede a re-propagate), target-block hits, and falling-block landings — build it over the real `ChunkStore`; every oracle gate and pre-existing test still gets the old single-column behaviour by construction (`RedstoneColumns` built over a `NoNeighbors` source, which reports every neighbour unloaded). **Two paths still stop at the home column, deliberately, pending their own pass:** the random-tick-triggered notify (`RandomTickScheduler::tick_randomly_ticking_block`'s own call into `propagate_and_react`, for a grass/crop/lava/sapling/leaf mutation's fan-out) and the two entry points `crate::server` calls directly (`react_at_placement_with_entities`, `react_at_removal`) — none of their call sites currently hold a `ChunkSource` to hand in. |
+| **Chunk boundaries** | **Closed on every path a player action or the world tick can drive.** `lodestone_server::random_tick::RedstoneColumns` replaces the single `&ChunkColumn` the reaction dispatch, the placement arms and the tripwire arms read and write through: home stays a plain `&mut` borrow, and any neighbouring column a cascade actually reaches is fetched lazily via `ChunkSource::is_column_resident` (never generated) and cached for the rest of that one cascade. Every production entry point takes a `world: &dyn ChunkSource` and builds it over the real `ChunkStore` — `crate::tick`'s scheduled-tick drain (including the torch/repeater/comparator reads that precede a re-propagate), target-block hits, falling-block landings and `RandomTickScheduler::tick_chunk`'s notify fan-out, plus `random_tick::react_at_placement_with_entities` and `react_at_removal` under `crate::server`'s placement and break handlers. The single-column form is `#[cfg(test)]`: `propagate_and_react`, `propagate_and_react_with_entities` and the `NoNeighbors` source they build over do not exist outside a test build, which is what makes "no production cascade is bounded to one chunk column" a compiler-checked property rather than a comment. |
 | **Unloaded chunks** | Unchanged. The table is derived data: a column unloading drops it, a reload rebuilds it from the palette. Nothing is persisted, so there is no reload staleness. `RedstoneColumns`'s own neighbour cache is stricter than a full reload would need: it is scoped to one cascade and dropped at the end of the call, so nothing about cross-chunk reach is retained between notifications either. |
 | **Piston/slime movability** | Out of scope. "Which blocks move when this piston fires" is a connected-component query over a different relation with different edges. It shares the caching *idea* and none of the topology. |
 
@@ -282,6 +282,86 @@ narrow enough to exclude every other `propagate_and_react` caller in the crate,
 or the number is a hypothesis about contamination rather than about redstone.
 
 ---
+
+## Crossing a chunk seam: the three entry points, and their evidence
+
+The reaction dispatch reached across a chunk seam before the placement, removal
+and random-tick entry points did, so a circuit was cross-chunk only if the edge
+that drove it arrived through the scheduled-tick drain. A block a *player*
+placed or broke, and any mutation the random-tick pass made, still truncated at
+the home column's own 16-wide footprint. Each of the three now takes a
+`world: &dyn ChunkSource`.
+
+### Where the expected values come from
+
+Neither source is this crate.
+
+**The live-server attenuation table.** `redstone_oracle_gate`'s
+`ORACLE_DUST_ATTENUATION` is dust power by distance from its source, probed
+cell-by-cell on a real 26.2 server with
+`execute if block <pos> minecraft:redstone_wire[power=N]` for `N` in `0..=15`,
+three independent readings that agreed exactly. That module carries the full
+provenance.
+
+**Spatial-boundary invariance.** A 16x16 column is an administrative unit of
+*storage*; redstone has no player-visible concept of one. So the same relative
+geometry must produce the same result whether or not a seam falls inside it,
+and the reference reading is the same fixture laid out inside one column. For
+the tripwire case the reference cannot be the same *length* — a legal run
+reaches 41 cells, which is two and a half columns — so it is the same shape at
+a shorter legal length, and the invariant asserted is that a hook's resulting
+state does not depend on run length within the legal range or on where the seam
+fell.
+
+### The three gates, and what each predicts
+
+All three live in `random_tick`'s test module and drive the **production**
+entry point, not the reaction dispatch directly.
+
+| gate | driven through | predicted value |
+|---|---|---|
+| `a_placed_source_drives_its_dust_run_across_a_chunk_seam_to_the_live_server_profile` | `server::propagate_placement_with_entities` | `15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4` at world x=14..25, per coordinate |
+| `breaking_a_tripwire_reaches_the_hook_in_the_next_chunk_and_matches_the_single_column_run` | `server::propagate_removal_with_entities` | both hooks `attached=true, powered=true`; one recheck at the scanning hook, 10 ticks out |
+| `a_random_tick_mutation_notifies_the_observer_across_a_chunk_seam` | `RandomTickScheduler::tick_chunk` | exactly `[((16, 1, 8), "redstone:observer", 4175)]` |
+
+The coordinates are chosen so the candidate models disagree at the *first* cell
+past the seam rather than only in aggregate. For the dust run, at world x=16 —
+three cells from the source:
+
+| model | power at x=16 |
+|---|---|
+| seam-invariant (the oracle) | 13 |
+| cascade truncates at the column edge | 0 |
+| cascade crosses but restarts at full strength | 15 |
+
+A run ending on 0 or 15 under the correct model would make two of those three
+coincide, which is why the run is twelve long and ends on 4. The observer gate
+predicts the whole scheduled tick rather than its existence, over a deliberately
+unround `current_tick` of 4173: a model scheduling at the current tick, at a
+repeater's `2 * delay`, or under another kind lands somewhere else than 4175.
+
+### The controls
+
+Two per gate, and the second is the one that makes the first evidence.
+
+**Watched fail.** With the three `world` arguments at the production call sites
+replaced by the single-column source and nothing else changed, all three gates
+fail at the cross-seam assertion while their single-column reference arms still
+pass — so the failure is the seam, not the rig:
+
+```
+dust at world (x=16, y=1, z=8) in chunk (1, 0), 3 cell(s) from the placed source:
+  our model says power=0, the live 26.2 server measured power=13.
+  full profile: [(1, 15), (2, 14), (3, 0), (4, 0), ... (12, 0)]
+the controlling hook at world x=2 ... left: powered=false, right: powered=true
+the observer across the seam ... left: [], right: [((16, 1, 8), "redstone:observer", 4175)]
+```
+
+**Residency.** Each gate re-runs its own fixture with the far chunk's data
+seeded and readable but declared *not* resident, and requires the pre-existing
+truncation exactly. `TestWorld` carries a seeded-but-unloaded split for this:
+without it, "unloaded" and "unseeded" are the same state and a control cannot
+read back the cell it is proving was not written.
 
 ## The lookup allocation removal
 
@@ -408,24 +488,20 @@ Gotchas:
 
 ## What to do next, in order of value
 
-1. **`redstone::make_lookup`'s allocation.** It returns
-   `impl Fn(BlockPos) -> String` and heap-allocates a fresh `String` per read;
-   `ChunkColumn::block_state` already returns `&str`, so the allocation is pure
-   waste. 5899 of them in one active tick on `raid_farm`, against 837
-   notifications — this is the largest remaining constant factor by a wide
-   margin, and #548's cross-chunk landing did not touch it:
-   `RedstoneColumns::state` still returns an owned `String` (it has to, to keep
-   satisfying every `redstone::*`/`redstone_wire::*`/… function's existing
-   `F: Fn(BlockPos) -> String` bound unchanged). It is a signature change
-   across roughly 60 call sites spanning `redstone*.rs`, `piston.rs`, `fire.rs`,
-   `fluid.rs`, `block_placement.rs` and `server.rs`, which is why it is still
-   not folded into any change so far.
-2. **The two remaining single-column call sites named in the table above**
-   (the random-tick notify fan-out, and `crate::server`'s placement/removal
-   entry points) — smaller than #1, but each is a real place a contraption can
-   still truncate at a chunk edge. Both need only a `ChunkSource` threaded one
-   or two calls deeper; neither needs a new abstraction, `RedstoneColumns`
-   already does the work once it is handed one.
+1. **A contraption-scale differential against a live server.** Every reading
+   here is either an outside-sourced expected value replayed through the
+   production path (the attenuation table, the tripwire scan constants, the
+   observer delay) or a counter identity. What none of them covers is a whole
+   downloaded contraption ticked side by side against a real 26.2 server for
+   many ticks, which is the only instrument that can catch an *ordering*
+   divergence rather than a final-state one. `.cache/redstone-benchmarks/`
+   holds the fixtures; the harness already replays their captured pending
+   ticks through production dispatch.
+2. **The remaining reads that are not classified per palette entry.** The
+   neighbour-sensitive predicates named in the table above stay inside their
+   arms' bodies, so an inert cell adjacent to one still pays for the read.
+   Worth measuring before touching: `notifications_by_class` already says how
+   many notifications reach each family.
 3. **A listener index**, only if 1 and 2 land and counters still show
    notification dispatch dominating. The bar is deliberately high: it is the one
    change here that introduces a defect class this subsystem currently cannot

@@ -9,8 +9,8 @@ cross-column world view, and, **only if counters then justify it**, an increment
 listener index. It is written against the device set that landed first (`docs/redstone.md`'s
 "what each device needs of the execution model" table) rather than against an imagined redstone,
 and its first finding is that the issue's own premise needs correcting: **there is no per-tick
-rescan to replace**. The expensive thing is the per-event constant factor, and the missing thing
-is cross-chunk propagation — not incrementality, which the current model already has.
+rescan to replace**. The expensive thing is the per-event constant factor, and the correctness gap
+this plan closes is cross-chunk propagation — not incrementality, which the model already has.
 
 ## Status
 
@@ -24,18 +24,43 @@ block-state `String` clone are both gone. `redstone_counters::Snapshot::notifica
 is the instrument. Landed behaviour, measurements and the design's fallback cases are in
 [`../redstone-execution.md`](../redstone-execution.md).
 
-Still open, in the order that doc argues for:
+**Layer A's second half and Layer C have both landed since.** `redstone::WorldState`
+(`std::sync::Arc<str>`) replaced `String` in every world-lookup closure across the redstone
+family, so a read is a refcount bump rather than a heap allocation and byte copy.
+`random_tick::RedstoneColumns` is Layer C's multi-column view — the home column the caller
+already holds `&mut`, plus any *already-loaded* neighbour a cascade reaches, fetched lazily
+through `ChunkSource::is_column_resident` and never generated — and every production entry point
+now takes the `&dyn ChunkSource` it is built over: the scheduled-tick drain, target-block hits,
+falling-block landings, the dispenser fire arm's world reads, `RandomTickScheduler::tick_chunk`'s
+notify fan-out, and `random_tick::react_at_placement_with_entities`/`react_at_removal` under
+`crate::server`'s placement and break handlers. The single-column form is `#[cfg(test)]`, so
+"no production cascade is bounded to one chunk column" is compiler-checked.
 
-- **Layer A's remaining half — `redstone::make_lookup`'s per-read `String` allocation.** Not
-  done: it is a signature change across ~60 call sites reaching outside the redstone family
-  (`fire.rs`, `fluid.rs`, `block_placement.rs`, `server.rs`), and it is now the largest remaining
-  constant factor by a wide margin — 5899 allocating reads against 837 notifications on
-  `raid_farm.litematic`'s active tick.
-- **Layer C, the cross-column seam.** Untouched, and still the largest *correctness* gap.
+Layer C's design differs from §5's sketch in one way worth recording: the view is *reach-driven*
+rather than a fixed 3x3. Nothing enumerates a neighbourhood up front; a column enters the view
+only when a read, a write or a notification actually lands in it, which makes the boundary the
+edge of loaded simulation rather than an arbitrary radius, and costs nothing for the common
+cascade that never leaves its home column.
+
+**The `ScheduledTickQueue` question §5 anticipated is not forced by Layer C.** The queue was
+already one world-wide container keyed by absolute position, and the drain already fetched a
+column per due entry, so cross-column *reactions* schedule into exactly the structure
+cross-column *ticks* already used. What remains genuinely open is narrower and predates this:
+the real engine collects due entries from per-chunk containers and our single container
+tie-breaks by global insertion order, so two ticks scheduled in the same game tick at the same
+priority in different chunks can drain in a different relative order. No oracle here
+discriminates that yet, and none of the order gates covers it.
+
+Still open:
+
 - **§3.3's `WritePlan` unification (U4).** Untouched.
 - **Layer D, the listener index (U7).** Deliberately not built; §8's argument stands and
-  `../redstone-execution.md` records why the classification captures its win without its
-  staleness class.
+  [`../redstone-execution.md`](../redstone-execution.md) records why the classification captures
+  its win without its staleness class.
+- **A contraption-scale differential against a live server.** Layer C is what made this possible
+  at all; it has not been built. Every expected value so far is either an outside-sourced
+  constant replayed through the production path or a counter identity, and none of those can
+  catch an *ordering* divergence over many ticks.
 
 §9's first open question ("the actual cost split") is answered there against a real contraption
 rather than the 15-cell proxy.

@@ -2665,11 +2665,18 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                         let item_str = item.to_string();
                         let face = crate::redstone_dispenser::facing(&state);
                         let center = (f64::from(x) + 0.5, f64::from(y) + 0.5, f64::from(z) + 0.5);
-                        // Bounded to this dispenser's own 16x16 column, the
-                        // same approximation `crate::redstone::make_lookup`'s
-                        // every other caller in this file already accepts —
-                        // a target one cell past a chunk edge reads as air.
-                        let lookup = crate::redstone::make_lookup(&column, min_x, min_z);
+                        // A dispenser sitting on the last cell of its chunk
+                        // fires *into* the next one, so every read below —
+                        // where a spawn egg's mob or a dispensed boat or
+                        // minecart lands, and what block is in front — goes
+                        // through the same multi-column view the reaction
+                        // dispatch uses rather than a bounded column that
+                        // answers air one cell past the seam. Read-only for
+                        // the whole arm: the world edits it makes go through
+                        // `world`, so nothing here needs a write path.
+                        let columns =
+                            crate::random_tick::RedstoneColumns::new(&mut column, min_x, min_z, &*world);
+                        let lookup = crate::redstone::make_columns_lookup(&columns);
 
                         // `consumed`: one item leaves the picked slot.
                         // `toss`: additionally becomes a tossed item entity.
