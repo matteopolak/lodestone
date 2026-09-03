@@ -916,7 +916,7 @@ impl V735Adapter {
         let pos = ChunkPos::new(data.x, data.z);
         world.load(
             WorldChunkPos::new(data.x, data.z),
-            LoadedChunk::new(data.column, data.light, Heightmaps::new(), Vec::new()),
+            LoadedChunk::new(data.column, data.light, Heightmaps::new(), data.block_entities),
         );
         Ok(vec![Directive::Emit(ClientEvent::ChunkLoaded { pos })])
     }

@@ -21,9 +21,11 @@
 //! [`PalettedContainer::decode`] round-trips — the test pins the *framing*
 //! around the container, which is the version-specific part.
 
-use lodestone_core::{Reader, Writer};
+use lodestone_core::{Nbt, Reader, Writer, write_named_nbt};
+use lodestone_data::block_states;
+use lodestone_v1_14::canonical;
 use lodestone_v1_14::packets::chunk::{ChunkShape, MapChunk, UpdateLight};
-use lodestone_world::{LongArrayFraming, PaletteKind, PalettedContainer};
+use lodestone_world::{LongArrayFraming, PaletteKind, PalettedContainer, SignText};
 
 // Flat 1.16.5 *wire* block-state ids (post-flattening: no `(blockId << 4) |
 // meta`) — 1.16.5's own global-palette numbering, used to build fixtures
@@ -127,6 +129,99 @@ fn decodes_full_chunk_zero_trailing_bytes() {
     assert_eq!(chunk.column.section_count(), 16);
     // 1.16 light is not in map_chunk.
     assert!(chunk.light.sky(1).get(0).is_none());
+}
+
+// ---- Block entities: kept, not discarded, and a sign's text survives. ----
+
+/// Finds a wire block-state id in this protocol's own global palette that
+/// canonicalises to one of the sign block types. Derived from the same
+/// generated wire -> canonical table [`MapChunk::decode`] itself calls
+/// through `ChunkShape::canonical`, which is an outside source relative to
+/// the block-entity translation this test exercises: that translation reads
+/// the block state already resolved at the entity's position, it does not
+/// consult this table (or this crate's own `id`-string field) at all.
+fn find_wire_sign_id(table: &canonical::CanonicalTable) -> u32 {
+    (0..table.state_count())
+        .find(|&wire| {
+            table
+                .resolve(wire)
+                .and_then(block_states::block_name)
+                .is_some_and(|name| name.ends_with("_sign"))
+        })
+        .expect("1.16.5's table has at least one wire state that canonicalises to a sign")
+}
+
+/// A real 1.16.5-shaped sign block entity: `x`/`y`/`z` and `id` embedded in
+/// the compound itself (no wire header), `Text1` a JSON chat-component
+/// string — the pre-1.20 wire form every legacy protocol here uses for chat
+/// and sign text alike.
+fn sign_block_entity_nbt(x: i32, y: i32, z: i32) -> Nbt {
+    Nbt::Compound(vec![
+        ("id".to_owned(), Nbt::String("minecraft:sign".to_owned())),
+        ("x".to_owned(), Nbt::Int(x)),
+        ("y".to_owned(), Nbt::Int(y)),
+        ("z".to_owned(), Nbt::Int(z)),
+        (
+            "Text1".to_owned(),
+            Nbt::String("{\"text\":\"LODESTONE PROBE 42\"}".to_owned()),
+        ),
+    ])
+}
+
+#[test]
+fn sign_text_survives_the_legacy_block_entity_list() {
+    let table = canonical::table_for(lodestone_v1_14::PROTOCOL);
+    let sign_wire_id = find_wire_sign_id(table);
+
+    // A sign at world (5, 3, 8) inside chunk (0, 0) — section-relative
+    // (5, 3, 8) — clear of the bedrock floor this fixture also carries at
+    // y=0, so the two block-state writes cannot be confused for each other.
+    let section = section_body(|x, y, z| match (x, y, z) {
+        (5, 3, 8) => sign_wire_id,
+        (_, 0, _) => BEDROCK_WIRE,
+        _ => AIR_WIRE,
+    });
+    let mut w = Writer::default();
+    w.i32(0);
+    w.i32(0);
+    w.bool(true); // groundUp (full column)
+    w.var_i32(0x0001); // bitmask: section 0 present
+    w.bytes(&HEIGHTMAPS_NBT);
+    w.var_i32(1024);
+    for _ in 0..1024 {
+        w.var_i32(1); // biome id, irrelevant here
+    }
+    w.var_i32(section.len() as i32);
+    w.bytes(&section);
+    w.var_i32(1); // one block entity
+    write_named_nbt(&mut w, "", &sign_block_entity_nbt(5, 3, 8)).expect("encode sign nbt");
+    let body = w.into_vec();
+
+    let mut r = Reader::new(&body);
+    let chunk = MapChunk::decode(&mut r, &ChunkShape::overworld(lodestone_v1_14::PROTOCOL))
+        .expect("decode");
+    r.ensure_empty()
+        .expect("the block-entity list must still leave zero trailing bytes");
+
+    assert_eq!(
+        chunk.block_entities.len(),
+        1,
+        "the sign must survive decode as a real BlockEntity, not be thrown away"
+    );
+    let entity = &chunk.block_entities[0];
+    assert_eq!(entity.rel_x, 5);
+    assert_eq!(entity.rel_z, 8);
+    assert_eq!(entity.y, 3);
+
+    let text = SignText::parse(&entity.nbt);
+    let line: String = text.front.lines[0]
+        .iter()
+        .map(|span| span.text.as_str())
+        .collect();
+    assert_eq!(
+        line, "LODESTONE PROBE 42",
+        "a sign with known text must decode to that exact text, not an empty or default line"
+    );
 }
 
 #[test]
