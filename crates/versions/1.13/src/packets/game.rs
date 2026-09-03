@@ -81,7 +81,7 @@ pub struct ClientboundPositionLook {
     /// Relative-coordinate bitmask.
     pub flags: i8,
     /// Teleport id the client must echo back in a `teleport_confirm` packet.
-    /// Added in 1.9 (protocol 754 is 1.16.5); absent in 1.8.
+    /// Added in 1.9; absent in 1.8.
     #[mc(varint)]
     pub teleport_id: i32,
 }
