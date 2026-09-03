@@ -370,6 +370,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   crate, after [`1.9`](./protocol-1-9-era.md), [`1.14`](./protocol-1-14-era.md),
   [`1.13`](./protocol-1-13-era.md), [`1.17`](./protocol-1-17-era.md) and
   [`1.19`](./protocol-1-19-era.md).
+- [Protocol 5 era (Minecraft 1.7.6-1.7.10)](./protocol-1-7-era.md) —
+  `lodestone-v1-7` is the client protocol crate for **protocol 5**, spoken by
+  Minecraft 1.7.6 through 1.7.10 — the bottom of the version ladder and the only era
+  that shares almost nothing with its neighbour. It implements the **joining direction
+  only**: there is no `ServerProtocol`, so this version can be joined but not hosted.
 - [The 1.9 era crate: one family, four protocols](./protocol-1-9-era.md) —
   `crates/versions/1.9` (package `lodestone-v1-9`) is the first *era* crate in this
   repo: one family serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 — protocols

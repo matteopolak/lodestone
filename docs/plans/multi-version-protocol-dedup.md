@@ -629,9 +629,81 @@ velocity. The guarantee this crate offers is the whole-stream one.
 See [`docs/protocol-1-19-era.md`](../protocol-1-19-era.md) for that era crate's
 own documentation.
 
-`cargo xtask connectedness` currently reports v1-8 59/74, v1-9 62/80, v1-13 51/86,
-v1-14 54/92, v1-17 65/103, v1-19 67/111, v1-20-6 61/122, v26-2 141/141 clientbound,
-with zero decoded-but-stranded in every family.
+**Stage 8's last era, 1.7.10, and the three things it settles.** Diffed
+against `1ead3edc`, excluding the generated tables (983 lines):
+
+| bucket | lines added |
+|---|---|
+| era-crate source (`crates/versions/1.7/src`, excluding `generated/`) | 5,772 |
+| shared-crate source (one `lodestone-protocol-common` range widening) plus registry and workspace wiring | 38 |
+| tests (`tests/*.rs`) plus the captures and their README | 2,421 |
+| oracle script row | 25 |
+| **hand-written total** | **8,256** |
+
+The projection for this era was ~3.5-4.5k and it came in at 5,772, so the
+projection was low by about a third — but this is the **closest** any singleton
+era has come, and it is the only one below 1.17's 6,229, 1.19's 6,811 and
+1.20.6's 7,437. That is worth stating plainly because the reason is not the
+mechanism: 1.7.10 has the *least* to inherit of any era on the ladder and still
+cost less than three eras that had far more, which says the founding cost of a
+singleton is dominated by writing an adapter at all rather than by how much of
+the neighbour it can reuse. The one substantial thing it did inherit —
+`lodestone-canonical`'s pre-Flattening `(id << 4) | meta` table, shared with the
+1.8 and 1.9 eras — is exactly the kind of reuse this plan is about, and it is
+also the single largest module this era did not have to write.
+
+Three corrections to the record this era forces.
+
+First, **the identity figure holds and the era-grouping threshold is nowhere
+near being met.** Measured independently of this plan's own table — every
+packet definition in both directions and all four states, named types inlined —
+protocol 5 and protocol 47 agree on **37 of 112** shapes, 33%, against an
+85% threshold. Eight of the 37 are the handshake and status packets that have
+never changed in any version, so the real figure is lower still. This plan's
+29% and that 33% are the same conclusion counted from opposite ends.
+
+Second, **`decode(encode(x)) == x` is not merely weak here, it is actively
+misleading, and so is a length check.** This era's defining hazard is a field
+order inside a run of same-typed fields, and three of them landed in one
+chain: the serverbound movement packets' `stance` sits after the feet rather
+than between `x` and `y`; the clientbound teleport's middle `f64` is the eye
+position, not the feet; and the teleport has to be confirmed by echoing a
+matching `position_look` back. Every one of the three encodes to a body of
+exactly the right length, round-trips perfectly, and replays a recorded join
+without complaint. A protocol 5 server's response to all three is the same and
+is completely silent: it holds the player and discards movement, with no error,
+no disconnect and nothing in its log. The measured discriminator over a
+320-block walk was 65-70 server position corrections versus 1, zero chunk
+unloads versus 420, and — read a third way, out of the server's own saved
+player data on logout — the player still at the spawn point having discarded
+1,600 movement packets. **The lesson generalises past this era: a plan that
+measures shape identity by comparing field *types* cannot see this class at
+all, because the types agree.** Nothing but a live server found it, and the
+guard that keeps it found reads the encoded body at byte offsets rather than
+through the struct that produced it.
+
+Third, **the shared-definition range guard earned its keep in the direction
+nobody was worried about.** Founding this era widened exactly one definition,
+`LoginSuccess`, from `47..=578` to `5..=578`. The mistake was the *missing*
+widening, not a wrong one, and because the range is enforced at decode it
+surfaced as a loud runtime refusal naming both the protocol and the declared
+range — which is how it was found at all, since the era's login flow was
+otherwise complete and compiled clean.
+
+The negative control this era offers is unusual: with only 33% shape identity
+there is no plausible-wrong-event arm to measure, because a 47-era adapter
+pointed at a protocol 5 stream does not get far enough to produce one. The
+whole-stream boundary statement is stronger than any per-packet one, and it is
+the same statement the login handshake makes at 762.
+
+See [`docs/protocol-1-7-era.md`](../protocol-1-7-era.md) for that era crate's
+own documentation, including the one concept protocol 5 has that has no
+canonical equivalent — its player list carries no profile UUID at all — and
+what this crate does about it.
+
+`cargo xtask connectedness` currently reports v1-7 50/65, v1-8 59/74, v1-9 62/80,
+v1-13 51/86, v1-14 54/92, v1-17 65/103, v1-19 67/111, v1-20-6 61/122, v26-2 141/141
+clientbound, with zero decoded-but-stranded in every family.
 
 **v26-2 has not migrated and that is deliberate** — it is Stage 6, explicitly deferred and not a
 blocker. It still dispatches through the if-arm chain with no `Handler::new` and no `IGNORED` list.
@@ -653,6 +725,7 @@ Several eras have now landed, and the numbers separate two cases the plan treate
 | 1.17 | 756, 758 | 6,229 | 131 lines |
 | 1.19 | 762 (singleton) | 6,811 | n/a |
 | 1.20.6 | 766 (singleton as shipped) | 7,437 | n/a |
+| 1.7 | 5 (singleton) | 5,772 | n/a |
 
 The 1.17 figure is the **strongest** reading the marginal claim has had, not the weakest: 1.9's
 ~20 and 1.14's 69 were both on top of chunk framing that did not change across their era, while
@@ -769,8 +842,11 @@ preset's floor in canonical ids.
 
 **Stage 8 — remaining eras, in the order the existing plan's value ranking gives** (1.13.2,
 1.17.1/1.18.2 and 1.19.4 landed; then 1.20.6, 1.21.11, 1.7.10 last). Each is stage-5 scaffold + era-specific three
-modules + captures. 1.7.10 is the outlier: 29% identity with 1.8.9, no minecraft-data, no jar, and
-therefore captures are its *only* shape source — budget it last and alone.
+modules + captures. 1.7.10 is the outlier: 29% identity with 1.8.9, and no jar-derived source of
+any kind, so captures are its authority — budget it last and alone. (The "no minecraft-data" this
+paragraph originally claimed was wrong, and contradicted this plan's own shape table above, which
+reads 1.7.10 out of that dataset: `vendor/minecraft-data/data/pc/1.7/` exists and carries 17 files.
+It is still cross-check grade, never an authority.)
 
 Hosting (a per-era `ServerProtocol`, v26-2's is 9,350 lines) is out of scope here; the existing
 plan's H0–H4 stand, and the same hoist logic applies to `server_protocol.rs` when phase 2 opens.
@@ -793,7 +869,7 @@ real count before quoting further):
 | 1.13.2 | same | ~2–2.5k | 72%; first native-state era, own `chunk.rs`, command tree from `lodestone-command` |
 | 1.19.4 | same | ~2–2.5k projected; **6,811 measured** | 77%; the projection assumed chat signing hoisted from v26-2, and stage 6 has not run, so this era wrote its own |
 | 1.20.6, 1.21.11 | same | ~2–3k each (≈1.5k if stage 6 is done first) | 57% / 64%; config phase + components hoisted from v26-2 |
-| 1.7.10 | same | ~3.5–4.5k | 29%, captures only |
+| 1.7.10 | same | ~3.5–4.5k projected; **5,772 measured** | 29%, captures the authority |
 | **twelve versions** | **~66k src + ~70k tests** | **~20–25k src + ~15–20k tests** | |
 
 Roughly a 3× reduction in hand-written source and 4× in tests, concentrated where the owner said it
