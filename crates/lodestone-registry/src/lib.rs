@@ -156,6 +156,15 @@ const FAMILIES: &[Family] = &[
         protocols: lodestone_v1_17::PROTOCOLS,
         make: |protocol| Box::new(lodestone_v1_17::adapter_for(protocol)),
     },
+    #[cfg(feature = "v1-19")]
+    Family {
+        label: "v1-19",
+        // 762 -- 1.19.4, read off the jar's own metadata and then off the
+        // crate. The other 1.19.x releases carry different numbers and a
+        // different chat shape; none is served here.
+        protocols: lodestone_v1_19::PROTOCOLS,
+        make: |protocol| Box::new(lodestone_v1_19::adapter_for(protocol)),
+    },
 ];
 
 /// Resolves `protocol` against an arbitrary family table.
@@ -217,7 +226,7 @@ struct PhysicsFamily {
 ///   site hardcoded `mc_1_21()` unconditionally, which happened to be correct
 ///   only because `v26-2` was the only family ever actually joined.
 /// - **`v1-9` (1.9.4-1.12.2), `v1-13` (1.13.2), `v1-14` (1.14.4-1.16.5) and
-///   `v1-17` (1.17.1-1.18.2) →
+///   `v1-17` (1.17.1-1.18.2), `v1-19` (1.19.4) →
 ///   `mc_1_21`, as an approximation, not a validated fit.** None of the three
 ///   vanilla eras is a clean match for either profile: all post-date the 1.9
 ///   input-pipeline rewrite ([`InputModel::UnitSquareProjection`], which
@@ -263,6 +272,11 @@ const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
     #[cfg(feature = "v1-17")]
     PhysicsFamily {
         protocols: lodestone_v1_17::PROTOCOLS,
+        profile: lodestone_physics::PhysicsProfile::mc_1_21,
+    },
+    #[cfg(feature = "v1-19")]
+    PhysicsFamily {
+        protocols: lodestone_v1_19::PROTOCOLS,
         profile: lodestone_physics::PhysicsProfile::mc_1_21,
     },
 ];
@@ -404,7 +418,8 @@ mod tests {
             feature = "v1-9",
             feature = "v1-13",
             feature = "v1-14",
-            feature = "v1-17"
+            feature = "v1-17",
+            feature = "v1-19"
         ))) {
             assert!(compiled_families().is_empty());
             assert!(adapter_for_protocol(47).is_none());
