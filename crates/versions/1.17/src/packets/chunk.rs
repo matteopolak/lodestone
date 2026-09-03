@@ -99,10 +99,13 @@
 //! the exact-length half of it is given up, and only where the wire forces
 //! it.
 
-use lodestone_core::{Nbt, Reader, read_named_nbt};
+use lodestone_core::{Nbt, NbtTag, Reader, read_named_nbt};
+use lodestone_data::block_entity_types::block_entity_type;
+use lodestone_data::block_states;
 use lodestone_macros::Packet;
+use lodestone_model::Text;
 use lodestone_world::{
-    ChunkColumn, ChunkSection, ColumnLight, LightPatch, LongArrayFraming, PaletteKind,
+    BlockEntity, ChunkColumn, ChunkSection, ColumnLight, LightPatch, LongArrayFraming, PaletteKind,
     PalettedContainer, Result,
 };
 
@@ -248,6 +251,10 @@ pub struct ChunkData {
     /// Column light. Empty at 756, where light still arrives in the separate
     /// `update_light` packet; decoded from this packet's own tail at 758.
     pub light: ColumnLight,
+    /// Block entities within the column — see the module docs for how each
+    /// protocol's own shape (756's embedded compound, 758's positioned
+    /// record) becomes one of these.
+    pub block_entities: Vec<BlockEntity>,
     /// How many blocks in this column had a wire state id outside this era's
     /// own state range while bridging to a canonical 26.2 state — see
     /// [`CanonicalTable::resolve_or_air`]. Zero for every real-world column;
@@ -354,7 +361,7 @@ impl MapChunk {
         // geometry; any slack is a misparse.
         blob.ensure_empty()?;
 
-        consume_named_block_entities(r)?;
+        let block_entities = decode_named_block_entities(r, &column)?;
 
         report(x, z, shape, fallback);
         Ok(ChunkData {
@@ -362,6 +369,7 @@ impl MapChunk {
             z,
             column,
             light: ColumnLight::new(shape.section_count),
+            block_entities,
             fallback,
         })
     }
@@ -402,14 +410,27 @@ impl MapChunk {
 
         // Block entities became a positioned record rather than a bare NBT
         // compound: a packed `(x << 4) | z` nibble pair, a whole-world `y`,
-        // the block-entity type, then the data. Consumed but not retained, to
-        // keep the zero-trailing-bytes gate honest.
+        // the block-entity type, then the data. The wire's own type id is
+        // this era's own registry number, not 26.2's, so it is read and
+        // discarded — [`block_entity_from_state`] re-derives the canonical
+        // type id from the block state at the same position instead.
         let entries = read_length(r)?;
+        let mut block_entities = Vec::with_capacity(entries.min(4096));
         for _ in 0..entries {
-            let _packed_xz = r.u8()?;
-            let _y = r.i16()?;
+            let packed_xz = r.u8()?;
+            let y = r.i16()?;
             let _kind = r.var_i32()?;
-            let _ = read_named_nbt(r)?;
+            let (_name, nbt) = read_named_nbt(r)?;
+            let rel_x = packed_xz >> 4;
+            let rel_z = packed_xz & 0x0F;
+            let state = column.get_block(rel_x as usize, i32::from(y), rel_z as usize);
+            block_entities.push(block_entity_from_state(
+                rel_x,
+                rel_z,
+                i32::from(y),
+                state,
+                nbt,
+            ));
         }
 
         // The light payload, in exactly the shape `update_light` carries it.
@@ -422,6 +443,7 @@ impl MapChunk {
             z,
             column,
             light,
+            block_entities,
             fallback,
         })
     }
@@ -521,13 +543,23 @@ fn read_length(r: &mut Reader<'_>) -> Result<usize> {
     Ok(usize::try_from(raw).map_err(|_| lodestone_core::Error::NegativeLength(raw))?)
 }
 
-/// Consumes a `varint`-counted list of bare named-NBT block entities (756).
-fn consume_named_block_entities(r: &mut Reader<'_>) -> Result<()> {
+/// Decodes a `varint`-counted list of bare named-NBT block entities (756) —
+/// each compound carries its own `x`/`y`/`z` and a string `id` rather than a
+/// wire header, so [`block_entity_from_embedded_nbt`] reads the position
+/// back out of the compound itself.
+fn decode_named_block_entities(
+    r: &mut Reader<'_>,
+    column: &ChunkColumn,
+) -> Result<Vec<BlockEntity>> {
     let count = read_length(r)?;
+    let mut block_entities = Vec::with_capacity(count.min(4096));
     for _ in 0..count {
-        let _ = read_named_nbt(r)?;
+        let (_name, nbt) = read_named_nbt(r)?;
+        if let Some(entity) = block_entity_from_embedded_nbt(nbt, column) {
+            block_entities.push(entity);
+        }
     }
-    Ok(())
+    Ok(block_entities)
 }
 
 /// Logs any canonicalisation fallbacks for one column.
@@ -655,4 +687,119 @@ fn read_light_arrays(r: &mut Reader<'_>) -> Result<Vec<lodestone_world::NibbleAr
         out.push(lodestone_world::NibbleArray::from_bytes(r.bytes(LIGHT_BYTES)?)?);
     }
     Ok(out)
+}
+
+/// Builds a canonical block entity from 756's compound, which carries its
+/// own `x`/`y`/`z` position (and a string `id`) inline rather than in the
+/// wire header 758's positioned record has. Returns `None` when the
+/// compound has no int `x`/`y`/`z` triplet — that shape gives a
+/// `BlockEntity` nothing to key itself on, so this reports it as absent
+/// rather than fabricating a position.
+fn block_entity_from_embedded_nbt(nbt: Nbt, column: &ChunkColumn) -> Option<BlockEntity> {
+    let Nbt::Compound(fields) = &nbt else {
+        return None;
+    };
+    let int = |key: &str| {
+        fields.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+            Nbt::Int(i) => Some(*i),
+            _ => None,
+        })
+    };
+    let x = int("x")?;
+    let y = int("y")?;
+    let z = int("z")?;
+    let rel_x = (x & 0xF) as u8;
+    let rel_z = (z & 0xF) as u8;
+    let state = column.get_block(rel_x as usize, y, rel_z as usize);
+    Some(block_entity_from_state(rel_x, rel_z, y, state, nbt))
+}
+
+/// Finishes a block entity given the canonical state already resolved at its
+/// position.
+///
+/// Neither era's own type identifier is used to derive
+/// [`BlockEntity::type_id`] — 756 embeds a string `id` and 758 sends a
+/// `varint` type from that era's own block-entity-type registry, and
+/// neither means the same thing in canonical space.
+/// [`lodestone_data::block_entity_types::block_entity_type`] is the same
+/// state-to-type derivation `World::sync_block_entity` uses for a block
+/// entity created by a state write, so a block entity carried in the chunk
+/// packet gets a type id from the same source as one created any other
+/// way — nothing downstream reads [`BlockEntity::type_id`] to decide what a
+/// block entity is; the block state does that (see `lodestone-shell`'s
+/// `block_entities` module docs).
+///
+/// The NBT payload is reshaped to the canonical schema only where a mapping
+/// is known — currently a sign's `Text1`..`Text4`/`Color`/`GlowingText`
+/// fields (see [`legacy_sign_nbt`]), the same flat shape at both 756 and 758
+/// (the `front_text`/`back_text` split arrived after this era). Every other
+/// block-entity type's payload is passed through exactly as decoded: chest
+/// contents, spawner data and banner patterns all use an item-stack or
+/// id-list shape that has changed since, and reshaping those without an
+/// outside oracle for the target shape would be an invented mapping.
+fn block_entity_from_state(rel_x: u8, rel_z: u8, y: i32, state: u32, nbt: Nbt) -> BlockEntity {
+    let type_id = block_entity_type(state).unwrap_or(0);
+    let nbt = if is_sign_state(state) {
+        legacy_sign_nbt(&nbt)
+    } else {
+        nbt
+    };
+    BlockEntity {
+        rel_x,
+        rel_z,
+        y: y as i16,
+        type_id,
+        nbt,
+    }
+}
+
+/// Whether the canonical block at `state` is one of the sign block types —
+/// checked against the resolved 26.2 block name rather than either era's own
+/// `id`/type, neither of which is a resource location this crate can match
+/// on directly.
+fn is_sign_state(state: u32) -> bool {
+    block_states::block_name(state).is_some_and(|name| name.ends_with("_sign"))
+}
+
+/// Reshapes a legacy sign's flat `Text1`..`Text4` (each a JSON chat
+/// component — the same pre-1.20 wire form [`Text::from_json`] already
+/// parses for chat and disconnect reasons) into the `front_text`/`messages`
+/// compound `lodestone_world::SignText::parse` reads. Only the line content
+/// survives: a legacy sign carries no per-run styling this reconstructs,
+/// only a whole-side `Color`/`GlowingText`, which are carried straight
+/// across.
+fn legacy_sign_nbt(nbt: &Nbt) -> Nbt {
+    let Nbt::Compound(fields) = nbt else {
+        return nbt.clone();
+    };
+    let field = |key: &str| fields.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+    let messages = ["Text1", "Text2", "Text3", "Text4"]
+        .into_iter()
+        .map(|key| {
+            let json = match field(key) {
+                Some(Nbt::String(s)) => s.as_str(),
+                _ => "",
+            };
+            Nbt::String(Text::from_json(json).to_plain_string())
+        })
+        .collect();
+    let color = match field("Color") {
+        Some(Nbt::String(s)) => s.clone(),
+        _ => "black".to_owned(),
+    };
+    let glowing = matches!(field("GlowingText"), Some(Nbt::Byte(b)) if *b != 0);
+    Nbt::Compound(vec![(
+        "front_text".to_owned(),
+        Nbt::Compound(vec![
+            (
+                "messages".to_owned(),
+                Nbt::List {
+                    element_type: NbtTag::String,
+                    elements: messages,
+                },
+            ),
+            ("color".to_owned(), Nbt::String(color)),
+            ("has_glowing_text".to_owned(), Nbt::Byte(i8::from(glowing))),
+        ]),
+    )])
 }
