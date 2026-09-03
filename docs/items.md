@@ -71,6 +71,54 @@ right elsewhere. Test gotcha: never use a component about to be modelled as a
 test's "unmodelled" stand-in, and a single-item fixture cannot see a list
 caller that ignores the decode verdict.
 
+### Consuming a component's bytes is not the same as keeping its value
+
+A component arm has two independent jobs: advance the reader by exactly the
+right number of bytes, and put the value somewhere. Only the first has a
+failure mode any instrument can see. Get the width wrong and the rest of the
+packet decodes as garbage; read the width correctly and drop the value, and the
+packet still decodes, still emits, and still scores fully connected under
+`cargo xtask connectedness` — a round trip cannot see it either, because both
+halves agree about a field neither retains.
+
+So the rule for a new arm is: **either the value lands in `ItemComponents`, or
+the arm says at the site why dropping it is correct**. There is no third state,
+and "no consumer yet" is not the second one — a field with no consumer is
+cheap, and a value silently dropped at decode time cannot be recovered by a
+consumer added later.
+
+The components whose value is retained beyond what a renderer reads:
+
+| component | field | shape note |
+|---|---|---|
+| `minecraft:repairable` | `repairable_items` | a `RegistrySet` |
+| `minecraft:equippable` | `equippable_allowed_entities` | a `RegistrySet`, patch-shaped (unlike the effective `equippable` slot) |
+| `minecraft:damage_resistant` | `damage_resistant` | a `RegistrySet` |
+| `minecraft:blocks_attacks` | `blocks_attacks` | `BlocksAttacks`, floats as raw bits behind accessors |
+| `minecraft:provides_banner_patterns` | `provides_banner_patterns` | a `RegistrySet` |
+| `minecraft:consumable` | `consume_effects` | `Vec<ConsumeEffect>`; the component's animation/sound/timing fields are alignment-only |
+| `minecraft:death_protection` | `death_protection_effects` | `Vec<ConsumeEffect>` |
+| `minecraft:trim` (inline form) | `ArmorTrim`'s four inline-only fields | descriptions, per-armour asset overrides, decal flag |
+
+`RegistrySet` is the one shape worth understanding before touching any of them.
+Every registry set on this wire is a single leading VarInt: `0` then a tag
+name, or `n` then `n - 1` bare registry ids. **The tag name is part of the
+value, not framing.** A tag's membership is server-side data that never reaches
+the client, so a decoder that reduced the tag arm to its (empty) id list turns
+"every item in `#minecraft:planks`" into "no item at all" — and the tag arm is
+what a real server sends for vanilla's own repair materials, saddle-equippable
+entities and banner-pattern unlocks, so it is the common case rather than the
+exotic one. `RecipePropertySetsUpdated`'s stonecutter ingredient is the one
+place still narrowed to explicit ids; widening it reaches consumers outside the
+version crate.
+
+Two things are still consumed for alignment on purpose, and both say so at
+their site: a **sound reference** (an inline definition or a session-scoped
+registry id — nothing here plays a sound sourced from an item component), and a
+mob-effect instance's nested **hidden effect** (the weaker effect to restore
+when a stronger one expires — holder-side bookkeeping whose own record omits
+the effect id, so `MobEffectInstance` cannot represent it).
+
 ### Item prototypes: what the wire omits
 
 A clientbound stack's patch is a **delta** from the item's built-in prototype

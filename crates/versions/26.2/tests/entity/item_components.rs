@@ -150,7 +150,7 @@ fn decodes_modeled_components() {
     // enchantments: a VarInt map of Holder<Enchantment> -> VarInt level. The
     // key is a *bare* registry id, not the offset-by-one form
     // `minecraft:instrument`'s holder uses elsewhere in this crate — see
-    // `read_enchantments`'s own doc, and `docs/item-data-component-decode.md`,
+    // `read_enchantments`'s own doc, and `docs/items.md`,
     // for why.
     patch.var_i32(component_id("minecraft:enchantments"));
     patch.var_i32(1); // one entry
@@ -1606,7 +1606,7 @@ fn merchant_offers_abandons_the_packet_instead_of_reading_past_a_partial_result(
 /// The bug this section is named for: `minecraft:enchantments`' map key is a
 /// *bare* registry id, not the offset-by-one, either-id-or-inline holder shape
 /// other component families (`minecraft:instrument`) really do use — see
-/// `read_enchantments`'s own doc and `docs/item-data-component-decode.md` for
+/// `read_enchantments`'s own doc and `docs/items.md` for
 /// the wire citation. Wire id `0` is therefore an ordinary registry
 /// reference, not an "inline holder" marker — the decoder used to reject it
 /// outright and fail the whole packet.
