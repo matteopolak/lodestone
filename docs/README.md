@@ -139,18 +139,20 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   and forgetting to wire it is a compile error rather than a silent nothing — the
   *island* defect class this repo's architecture rules name as its most expensive
   recurring bug.
-- [Fuzzing (issue #549)](./fuzzing.md) — Two independent fuzzing tracks, per issue
-  #549's own split. **Track A** (`fuzz/`, a `cargo-fuzz`/libFuzzer workspace) is
-  coverage-guided, in-process fuzzing over pure parsing functions — packet decoders,
-  NBT, loot-table JSON, block-state strings, the density compiler, the unihex font
-  parser, region-file deserialization, and chat-text JSON/NBT. It finds panics, hangs
-  and decode crashes on malformed input; it has no oracle for correctness. **Track B**
+- [Fuzzing](./fuzzing.md) — Two independent fuzzing tracks. **Track A** (`fuzz/`, a
+  `cargo-fuzz`/libFuzzer workspace) is coverage-guided, in-process fuzzing over pure
+  parsing functions — packet decoders, NBT, loot-table JSON, block-state strings,
+  the density compiler, the unihex font parser, region-file deserialization, and
+  chat-text JSON/NBT. It finds panics, hangs and decode crashes on malformed input; it
+  has no oracle for correctness. **Track B**
   (`crates/lodestone-fuzz/src/differential.rs`) is a tick-aligned differential-fuzzing
   *harness* against a real vanilla oracle, for the class of bug Track A structurally
   cannot see — wrong behaviour that never panics (the motivating example: breaking a
   waterlogged block used to destroy the water too, which is not the real mechanic).
-  Track B is a skeleton today, not a finished fuzzer — see its own section below for
-  exactly how far it got.
+  Track B is a narrow slice rather than a finished fuzzer — one fixed action script,
+  one compared dimension, no generation and no shrinking — but it does run that
+  comparison end to end against a live vanilla server, and doing so found a real
+  divergence. Its own section below says exactly what is and is not there.
 - [`gpu/` module layout and shader conventions](./gpu-module-layout.md) — How
   `crates/lodestone-shell`'s render coordinator (`RenderState`) is split across
   `gpu.rs` and a `gpu/` folder of submodules, plus the convention every WGSL shader in
