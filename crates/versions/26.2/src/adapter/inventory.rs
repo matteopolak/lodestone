@@ -2667,8 +2667,11 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
     let mut stonecutter_results = Vec::with_capacity(stonecutter_count.min(4096));
     for _ in 0..stonecutter_count {
         // `SingleInputEntry`: an `Ingredient` (HolderSet<Item>) then a
-        // `SlotDisplay` — a bare display, not a whole `RecipeDisplay`.
-        let _input = read_holder_set(&mut reader)?;
+        // `SlotDisplay` — a bare display, not a whole `RecipeDisplay`. The input
+        // is kept, not discarded: a stonecutter shows only the results reachable
+        // from whatever its input slot holds, so a consumer needs the ingredient
+        // each result is keyed by, not just the result.
+        let input = read_holder_set(&mut reader)?;
         let display = read_slot_display(&mut reader, 0)?;
         if !display.complete {
             // Emit what was decoded before the unmodeled entry rather than the
@@ -2681,7 +2684,7 @@ fn decode_update_recipes(payload: &[u8]) -> Result<Vec<Directive>, AdapterError>
                 },
             )]);
         }
-        stonecutter_results.push(display.items);
+        stonecutter_results.push((input, display.items));
     }
     reader.ensure_empty().map_err(dec_err)?;
     Ok(vec![Directive::Emit(

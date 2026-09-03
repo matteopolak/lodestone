@@ -79,7 +79,7 @@ pub struct RecipeBookSync {
     known: BTreeMap<i32, KnownRecipe>,
     ghost: Option<GhostRecipe>,
     property_sets: BTreeMap<Identifier, Vec<i32>>,
-    stonecutter_results: Vec<Vec<i32>>,
+    stonecutter_results: Vec<(Vec<i32>, Vec<i32>)>,
     /// Whether any `recipe_book_add` has arrived. Distinct from `known.is_empty()`
     /// for [`crate::recipe::RecipeUnlockState`]'s reason: an add followed by a
     /// remove empties `known` again, and without this flag a consumer could not
@@ -131,10 +131,20 @@ impl RecipeBookSync {
         self.property_sets.len()
     }
 
-    /// Per-stonecutter-recipe result item ids.
+    /// Per-stonecutter-recipe `(input item ids, result item ids)`.
     #[must_use]
-    pub fn stonecutter_results(&self) -> &[Vec<i32>] {
+    pub fn stonecutter_results(&self) -> &[(Vec<i32>, Vec<i32>)] {
         &self.stonecutter_results
+    }
+
+    /// Result item ids reachable from a stonecutter whose input slot holds
+    /// `input_item_id` — the subset a stonecutter screen actually shows, as
+    /// opposed to every entry the server ever sent.
+    pub fn stonecutter_results_for(&self, input_item_id: i32) -> impl Iterator<Item = &[i32]> {
+        self.stonecutter_results
+            .iter()
+            .filter(move |(input, _)| input.contains(&input_item_id))
+            .map(|(_, result)| result.as_slice())
     }
 
     /// Every unlocked recipe whose result includes `item_id` — the join a recipe
@@ -307,10 +317,20 @@ mod tests {
         let key: lodestone_model::Identifier = "minecraft:furnace_input".parse().unwrap();
         store.apply(&ClientEvent::RecipePropertySetsUpdated {
             item_sets: vec![(key.clone(), vec![1, 2, 3])],
-            stonecutter_results: vec![vec![7]],
+            stonecutter_results: vec![(vec![4], vec![7])],
         });
         assert_eq!(store.property_set(&key), Some(&[1, 2, 3][..]));
         assert_eq!(store.stonecutter_results().len(), 1);
+        assert_eq!(
+            store.stonecutter_results_for(4).collect::<Vec<_>>(),
+            vec![&[7][..]],
+            "a result must be reachable through the input it is keyed by"
+        );
+        assert_eq!(
+            store.stonecutter_results_for(99).count(),
+            0,
+            "an input nothing was keyed by must not spuriously match"
+        );
 
         store.apply(&ClientEvent::RecipePropertySetsUpdated {
             item_sets: Vec::new(),

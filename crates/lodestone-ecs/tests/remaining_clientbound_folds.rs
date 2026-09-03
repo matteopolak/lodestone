@@ -165,7 +165,7 @@ fn every_new_event() -> Vec<ClientEvent> {
         },
         ClientEvent::RecipePropertySetsUpdated {
             item_sets: vec![(key("minecraft:furnace_input"), vec![1, 2])],
-            stonecutter_results: vec![vec![3]],
+            stonecutter_results: vec![(vec![1], vec![3])],
         },
         ClientEvent::MerchantOffersReceived {
             window_id: 5,

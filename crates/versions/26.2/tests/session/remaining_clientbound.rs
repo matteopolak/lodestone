@@ -818,9 +818,14 @@ fn update_recipes_decodes_property_sets_then_the_stonecutter_list() {
     assert_eq!(item_sets[0].0, key("minecraft:furnace_input"));
     assert_eq!(item_sets[0].1, vec![5, 6]);
     assert_eq!(stonecutter_results.len(), 2);
-    assert_eq!(stonecutter_results[0], vec![9]);
+    assert_eq!(stonecutter_results[0].0, vec![3], "the explicit-id ingredient");
+    assert_eq!(stonecutter_results[0].1, vec![9]);
     assert!(
-        stonecutter_results[1].is_empty(),
+        stonecutter_results[1].0.is_empty(),
+        "a tag-form ingredient yields no explicit item id"
+    );
+    assert!(
+        stonecutter_results[1].1.is_empty(),
         "a `tag` display consumes an Identifier and yields no item id"
     );
 }
