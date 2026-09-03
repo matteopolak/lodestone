@@ -1,0 +1,155 @@
+//! Resolves a flat block-state id from either protocol in this era (756,
+//! 758) to the canonical **26.2** block-state id
+//! (`lodestone_data::block_states`) that `lodestone-world`'s
+//! `PalettedContainer` consumers (the mesher's atlas, collision) are actually
+//! built from.
+//!
+//! # Why this exists
+//!
+//! Both protocols here are post-Flattening: a chunk-section palette entry is
+//! already a single flat state id, not the pre-1.13 `(blockId << 4) | meta`
+//! composite the 1.8 and 1.9 eras bridge through
+//! `lodestone_canonical::canonical`. But each release's flat id space is
+//! **its own** — the game inserts new blocks into the global palette as they
+//! are added, so a given block's numeric id drifts release to release.
+//! Storing a wire id straight into `lodestone-world` storage unmapped
+//! silently renders as whichever unrelated 26.2 block happens to share that
+//! number today — no error, no panic, just the wrong terrain.
+//!
+//! # Why *one* table here, when the 1.14 era needs three
+//!
+//! Measured, not assumed. The two jars' `--reports` `blocks.json` dumps are
+//! **byte-identical** (MD5 `644230a6388623ab774fac03cc154a9e`, 898 blocks and
+//! 20,342 states in both): 1.18 was a world-generation release and added no
+//! block and renumbered no state. `tests/canonicalisation.rs` re-derives that
+//! identity from the committed dump rather than trusting this paragraph, and
+//! [`table_for`] still routes through the negotiated protocol so a third
+//! member that *did* renumber could not silently inherit this table.
+//!
+//! # How it works
+//!
+//! There is nothing left to compute at runtime: a flat state id has no cases
+//! needing block-entity or neighbour context (that was an `id:meta`
+//! ambiguity problem), so the whole `wire id -> 26.2 id` mapping is baked
+//! into a flat generated array at regeneration time.
+//! [`CanonicalTable::resolve`] is therefore a plain array index — see
+//! `tests/canonicalisation.rs` for the generator, the rename/property
+//! bridging it applies, and its data provenance (Mojang's own data generator
+//! run against the real `.cache/mc/1.17.1/server.jar`).
+//!
+//! # What a caller does with an out-of-range id
+//!
+//! A state id `>= state_count()` names no block in either protocol at all —
+//! no real vanilla server of that version sends one — so
+//! [`CanonicalTable::resolve_or_air`] substitutes the table's own air id and
+//! counts it in a [`FallbackTally`], the same visible, counted-not-silent
+//! policy `lodestone_canonical::canonical::resolve_or_air` uses for its own
+//! out-of-bounds case. The **caller** (`packets/chunk.rs`) decides to
+//! substitute air and logs the tally; this module only resolves and counts.
+
+use crate::generated_canonical;
+
+/// One protocol's `wire state id -> canonical 26.2 state id` mapping.
+///
+/// Held by value in a `static` per protocol and handed out by [`table_for`];
+/// `packets/chunk.rs` carries a `&'static CanonicalTable` inside its
+/// `ChunkShape` so a decode can never reach for a different protocol's table
+/// than the adapter was constructed for.
+#[derive(Debug)]
+pub struct CanonicalTable {
+    /// `states[wire_id]` is the canonical 26.2 state id.
+    states: &'static [u32],
+    /// The canonical 26.2 `minecraft:air` state id, baked into the same
+    /// generated file as `states`.
+    air: u32,
+}
+
+impl CanonicalTable {
+    /// Number of block states in this protocol's own global palette; valid
+    /// wire ids are `0..state_count()`.
+    #[must_use]
+    pub const fn state_count(&self) -> u32 {
+        self.states.len() as u32
+    }
+
+    /// The canonical 26.2 `minecraft:air` state id. Baked into the generated
+    /// table (see its module docs for why that is no less current than the
+    /// rest of the table) rather than looked up at runtime, so this crate
+    /// carries no runtime dependency on `lodestone-data` — `cargo xtask
+    /// check-deletable` stays accurate.
+    #[must_use]
+    pub const fn air_state_id(&self) -> u32 {
+        self.air
+    }
+
+    /// Resolves a flat wire state id to its canonical 26.2 state id, or
+    /// [`None`] if `state_id` is not a real state in this protocol
+    /// (`state_id >= state_count()`).
+    #[must_use]
+    pub fn resolve(&self, state_id: u32) -> Option<u32> {
+        self.states.get(state_id as usize).copied()
+    }
+
+    /// Resolves `state_id` to a canonical 26.2 state id, substituting
+    /// [`Self::air_state_id`] and recording into `tally` when out of range.
+    /// The single integration point `packets/chunk.rs` calls per decoded
+    /// cell.
+    #[must_use]
+    pub fn resolve_or_air(&self, state_id: u32, tally: &mut FallbackTally) -> u32 {
+        match self.resolve(state_id) {
+            Some(id) => id,
+            None => {
+                tally.out_of_range += 1;
+                self.air
+            }
+        }
+    }
+}
+
+/// The era's single block-state table, shared by 756 and 758 because the two
+/// jars' own dumps are byte-identical — see the module docs.
+static TABLE: CanonicalTable = CanonicalTable {
+    states: &generated_canonical::STATE_TO_CANONICAL,
+    air: generated_canonical::AIR_STATE_ID,
+};
+
+/// Resolves a negotiated protocol to its block-state table.
+///
+/// # Panics
+///
+/// Panics for a protocol outside [`crate::PROTOCOLS`], for the same reason
+/// `crate::adapter`'s `ids_for` does: answering with some other protocol's
+/// table is precisely the silent wrong-terrain failure this module exists to
+/// prevent, so it must be impossible rather than merely unlikely.
+#[must_use]
+pub fn table_for(protocol: i32) -> &'static CanonicalTable {
+    match protocol {
+        crate::adapter::PROTOCOL_1_17_1 | crate::adapter::PROTOCOL_1_18_2 => &TABLE,
+        other => panic!(
+            "protocol {other} is outside this family's PROTOCOLS ({:?}); callers must test \
+             membership before resolving a block-state table",
+            crate::PROTOCOLS
+        ),
+    }
+}
+
+/// Count of wire state ids that could not be resolved because they named no
+/// real state in the source protocol at all — see the module docs. Mirrors
+/// `lodestone_canonical::canonical::FallbackTally`'s shape (a per-column
+/// tally the consuming family logs), reduced to the one failure mode this
+/// crate's mapping can actually produce.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FallbackTally {
+    /// Blocks substituted because the wire state id was `>=
+    /// state_count()` — outside the range any real server of that version
+    /// sends.
+    pub out_of_range: u32,
+}
+
+impl FallbackTally {
+    /// Whether any block in this tally needed a fallback substitution.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.out_of_range == 0
+    }
+}
