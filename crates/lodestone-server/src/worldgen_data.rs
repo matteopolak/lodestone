@@ -1120,12 +1120,12 @@ impl crate::chunk::ChunkSource for FlatChunkSource {
 /// [`world_preset_flat_settings`] to rebuild `settings`, then this, exactly
 /// as [`overworld_chunk_source_of_type`] does for [`WorldType`].
 ///
-/// **What a UI would still need to call**: this crate now exposes the
-/// generator and the `ChunkSource`; nothing outside `lodestone-worldgen`/
-/// this file constructs one yet. Wiring `flat_chunk_source` into world
-/// creation is a `crate::server`/`crate::integrated` change (outside this
-/// file's ownership boundary), and offering the choice in
-/// `create_world.rs` is a `lodestone-shell` change — both untouched here.
+/// Called from two places outside this crate: `crates/lodestone-shell/src/net.rs`'s
+/// `preset_chunk_source`, for `WorldTypePreset::Flat`/`FlatAllDimensions`'s
+/// bundled-default arms, and this file's own
+/// [`overworld_chunk_source_override`], for a world whose own
+/// `world_gen_settings.dat` stores a customized layer stack — the choice
+/// `crate::menu::create_world::CustomizeEditor` (`lodestone-shell`) collects.
 #[must_use]
 pub fn flat_chunk_source(
     settings: lodestone_worldgen::flat::FlatLevelGeneratorSettings,
@@ -1153,22 +1153,17 @@ pub fn flat_chunk_source(
 /// crate already reconstructs from `seed` alone and needs no on-disk
 /// override for.
 ///
-/// # Where this is not yet called from
+/// # Where this is called from
 ///
-/// `crates/lodestone-shell/src/net.rs`'s `preset_chunk_source` is the sole
-/// place that builds a persistent world's chunk source, and today its
-/// `WorldTypePreset::Flat | WorldTypePreset::FlatAllDimensions` and
-/// `WorldTypePreset::SingleBiomeSurface` arms call
+/// `crates/lodestone-shell/src/net.rs`'s singleplayer/LAN open calls this
+/// first, whenever a `world_dir` is in scope, and only falls back to
+/// `preset_chunk_source`'s bundled-default arms (which still call
 /// [`world_preset_flat_settings`]/[`world_preset_single_biome_default_biome`]
-/// unconditionally — the bundled default, regardless of what
-/// `world_gen_settings.dat` (already written by the time that function
-/// runs; `world_dir` is in scope there) actually says. That file was out of
-/// this session's ownership (a concurrent movement investigation), the same
-/// reason [`overworld_chunk_source_checked`]'s own doc already names for
-/// the `Origin::Integrated`/`overworld_chunk_source` pair — this function is
-/// built, tested, and ready for whoever next owns that call site to adopt:
-/// call this first with `world_dir`, and only fall back to the bundled
-/// default on `Ok(None)`.
+/// unconditionally, for the case that reaches them: no stored override, i.e.
+/// `Ok(None)` here) when this returns nothing to override. That makes a
+/// saved world's own generator win over `WorldTypePreset` — the menu's
+/// choice at creation time, which carries none of what a Flat or
+/// Single Biome customization collected.
 ///
 /// # Errors
 ///

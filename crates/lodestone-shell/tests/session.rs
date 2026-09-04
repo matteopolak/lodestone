@@ -5,6 +5,8 @@
 
 #[path = "session/client_chunk_cycles.rs"]
 mod client_chunk_cycles;
+#[path = "session/customize_type_reaches_the_generator.rs"]
+mod customize_type_reaches_the_generator;
 #[path = "session/no_production_source_names_testsupport.rs"]
 mod no_production_source_names_testsupport;
 #[path = "session/no_test_touches_the_real_saves_dir.rs"]
