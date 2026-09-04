@@ -308,13 +308,14 @@ struct MovementSendState {
     /// Ticks since the last full position update; forces one every 20 ticks
     /// even with zero movement, matching `positionReminder >= 20`.
     position_reminder: u32,
-    /// Diagnostic only — the `transfer` tracing target's yardstick. Vanilla has
-    /// no equivalent field; see [`xfer`]'s module doc for what it measures and
+    /// The `transfer` tracing target's yardstick, and half of the staleness
+    /// test [`V770Adapter::select_move_packet`] applies. Vanilla has no
+    /// equivalent field; see [`xfer`]'s module doc for what it measures and
     /// why the answer cannot be read off the packets alone.
     last_teleport: Option<xfer::AcceptedTeleport>,
-    /// Diagnostic only — outbound movement packets emitted since
-    /// `last_teleport` was recorded. Zero on the *first* move after a teleport,
-    /// which is the only one whose distance from the target is diagnostic.
+    /// Outbound movement packets emitted since `last_teleport` was recorded.
+    /// Zero on the *first* move after a teleport, the only one that can have
+    /// been overtaken by it.
     moves_since_teleport: u32,
 }
 
@@ -524,14 +525,30 @@ impl V770Adapter {
         // rule, which unlike the positional-disagreement rule does not zero the
         // vertical component.
         //
-        // Only the first move is rewritten, and only past
-        // [`xfer::STALE_MOVE_BLOCKS`]: one tick of real movement is well under
-        // half a block, so nothing a simulation that had adopted the teleport
-        // could legitimately produce is inside this branch.
+        // Only the first move is rewritten, and only when it carries **both**
+        // halves of the signature staleness actually has: it is more than
+        // [`xfer::STALE_MOVE_BLOCKS`] from the teleport target (a producer that
+        // had adopted the teleport could not have got that far in one tick),
+        // *and* it is still within that same distance of the pose this adapter
+        // last put on the wire — because a claim the teleport overtook was
+        // built from the pre-teleport pose, which is that one.
+        //
+        // Distance from the target alone is not that signature, and reading it
+        // as one silently swallows a caller's own deliberate long move. A
+        // headless caller (`ClientHandle::move_to`/`set_position`/`walk_to`,
+        // which run no physics and place the player wherever asked) routinely
+        // makes its first move after a join placement hundreds of blocks away,
+        // built long after that placement landed. Rewritten onto the target,
+        // that move leaves the server believing the player never moved, with
+        // no error on either end — and every consequence of moving is then
+        // computed at the spawn: the streamed view never follows, no column is
+        // ever forgotten, and a melee knockback direction measured from the
+        // attacker's tracked position points from the wrong place.
         let stale_claim = state.moves_since_teleport == 0
             && state
                 .last_teleport
-                .is_some_and(|teleport| teleport.distance_to(pos) > xfer::STALE_MOVE_BLOCKS);
+                .is_some_and(|teleport| teleport.distance_to(pos) > xfer::STALE_MOVE_BLOCKS)
+            && xfer::distance(pos, state.last_pos) <= xfer::STALE_MOVE_BLOCKS;
         let claimed = pos;
         let pos = match state.last_teleport {
             Some(teleport) if stale_claim => teleport.target,

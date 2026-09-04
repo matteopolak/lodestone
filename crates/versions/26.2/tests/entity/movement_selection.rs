@@ -529,3 +529,61 @@ fn a_relative_teleport_clears_the_target_and_the_next_move_is_untouched() {
          claim to be snapped onto"
     );
 }
+
+/// The **discriminating** control for the rewrite above, and the one the two
+/// tests either side of it cannot supply: a first post-teleport claim that is
+/// neither the teleport target nor the pose this adapter last sent, but a
+/// third location entirely.
+///
+/// That shape is what a caller driving the client library directly produces —
+/// `ClientHandle::move_to`/`set_position`/`walk_to` run no physics and place
+/// the player wherever the caller asks, so a headless caller's first move
+/// after any absolute teleport (a join placement, a respawn, a server-issued
+/// teleport) is routinely many blocks from that teleport's target while having
+/// nothing to do with the pre-teleport pose. It is not stale: nothing
+/// overtook it, because it was built after the teleport landed.
+///
+/// The staleness the rewrite exists to catch has a sharper signature than
+/// "far from the target": a claim overtaken by a teleport still carries the
+/// pose this adapter last put on the wire, because that is what the producer
+/// upstream was still holding. A claim that has moved on from that pose was
+/// built by something that had already seen the teleport, and lying about it
+/// hides a move the server is entitled to see and to judge for itself.
+///
+/// Without this arm, a rewrite keyed on distance alone silently swallows the
+/// first movement of every headless session — the client reports the spawn it
+/// was placed at, the server agrees the player never moved, and every
+/// consequence of moving (view streaming, chunk unload, a knockback direction
+/// measured from the attacker's position) is computed at the wrong place with
+/// no error anywhere.
+#[test]
+fn a_first_move_to_a_third_location_is_the_callers_own_and_reaches_the_wire() {
+    let adapter = V770Adapter::new();
+    establish_baseline(&adapter);
+
+    accept_teleport(&adapter, 11, TELEPORT_TARGET, 0);
+
+    // 160 blocks along x from the target: far outside the staleness threshold,
+    // and 160-ish blocks from `BASE_POS` too, so neither of the two poses the
+    // adapter knows about can be mistaken for this one.
+    let deliberate = Vec3 {
+        x: TELEPORT_TARGET.x + 160.0,
+        y: TELEPORT_TARGET.y,
+        z: TELEPORT_TARGET.z,
+    };
+    let (packet_id, body) = adapter
+        .encode_action(
+            ConnectionState::Play,
+            &move_action(deliberate, BASE_ROT, true, false),
+        )
+        .expect("encode move")
+        .expect("160 blocks always sends");
+    assert_eq!(packet_id, play::serverbound::MOVE_PLAYER_POS);
+    let decoded: MovePlayerPos = decode(&body);
+    assert_eq!(
+        (decoded.x, decoded.y, decoded.z),
+        (deliberate.x, deliberate.y, deliberate.z),
+        "a first post-teleport claim that has moved on from the last sent pose was built \
+         after the teleport, not before it, and must reach the wire as the caller built it"
+    );
+}
