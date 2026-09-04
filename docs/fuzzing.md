@@ -14,10 +14,10 @@ bug Track A structurally cannot see — wrong behaviour that never panics (the
 motivating example: breaking a waterlogged block used to destroy the water
 too, which is not the real mechanic). Track B is a narrow slice rather than a
 finished fuzzer: fixed scripts run end to end against a live vanilla server,
-and bounded generated fluid scripts now run against that oracle with per-case
-reset, timing-boundary checks, semantic shrinking, and replay. The generator's
-general properties are also proven against fresh in-memory oracles. Its own
-section below says exactly what is and is not there.
+and bounded generated fluid and redstone scripts now run against that oracle
+with per-case reset, timing-boundary checks, semantic shrinking, and replay.
+The generator's general properties are also proven against fresh in-memory
+oracles. Its own section below says exactly what is and is not there.
 
 This complements, not replaces, `crates/lodestone-fuzz`'s existing
 `proptest`-based harness (`docs/fuzz-harness.md`) — that harness runs under a
@@ -561,11 +561,11 @@ agreement or disagreement.
   about blocks/entities/inventory after replaying a packet stream (rather than
   comparing rendered pixels, which two different renderers will differ on in
   ways that are not bugs) is entirely unaddressed.
-- **Generated live cases cover fluids only.** Redstone has a fixed live
-  comparison, but no generated redstone, piston, falling-block, container or
-  waterlogging action domain exists. Every comparison still covers only block
-  states over a caller-named region; the entity list, player inventory and
-  scheduled-tick queue are unimplemented dimensions.
+- **Generated live cases cover fluids and redstone.** Both have bounded
+  generated action domains, but no generated piston, falling-block, container
+  or waterlogging action domain exists. Every comparison still covers only
+  block states over a caller-named region; the entity list, player inventory
+  and scheduled-tick queue are unimplemented dimensions.
 - **Our side of the live comparison is the fluid model, not the whole
   server.** `FluidModelOracle` drives `lodestone_server::fluid`'s production
   scheduled-tick entry point over a sparse world, not a running

@@ -7,10 +7,9 @@ tick into independently-ticked regions (Folia's model: groups of nearby chunks, 
 its own thread, with explicit hand-off for anything crossing a boundary), so throughput can
 scale past one core the way vanilla structurally cannot. It is deliberately a **later** item:
 this doc grounds that timing in the tick-loop architecture and profiling instrumentation that
-now actually exist, rather than in intuition. Written 2026-08-16 against a re-verified tree —
-every claim below was
-checked against `crates/lodestone-server/src/tick.rs`, `docs/tick-and-worldgen-profiling.md`,
-and `docs/plans/server-ecs-migration.md` for this pass, not inherited from an external tracker.
+now actually exist, rather than in intuition. The current profiling guidance lives in
+`docs/tick-scheduling.md`; the design below applies those measurements to the regionisation
+decision.
 
 **This is not an implementation plan with phases ready to dispatch**, unlike
 `docs/plans/server-ecs-migration.md`. Section ["Preconditions"](#preconditions-and-why-none-are-fully-met-yet)
@@ -42,8 +41,9 @@ either.
 
 ## What the profiler already shows
 
-Two independent instruments now exist (`docs/tick-and-worldgen-profiling.md` is the full
-writeup; this section extracts what a regionisation decision needs from it):
+Two independent instruments now exist (the [profiling guidance in tick scheduling](../tick-scheduling.md#profiling-the-tick-loop-and-world-generation)
+explains their shared measurement discipline; this section extracts what a regionisation decision
+needs from them):
 
 - **Tick loop, `TickPhase`** (`crates/lodestone-server/src/tick.rs`): three phases, split at lock
   boundaries rather than at even time or complexity — see
@@ -265,8 +265,9 @@ from an assumption.
 - `docs/plans/server-ecs-migration.md` — the ECS substrate this plan's partitioning question
   (one `World` per region vs. one partitioned `World`) is downstream of; Phase 1 there is a
   precondition for answering it against real code.
-- `docs/tick-and-worldgen-profiling.md` — the two profiling instruments this plan's "profile
-  first" step would extend to a populated-world reading.
+- [`docs/tick-scheduling.md`](../tick-scheduling.md#profiling-the-tick-loop-and-world-generation)
+  — the two profiling instruments this plan's "profile first" step would extend to a
+  populated-world reading.
 - `docs/server-gameplay-gap-census.md` and friends — where single-threaded parity work is
   currently tracked (not as a single milestone yet; see "Sequencing" step 3).
 - The plugin-compatibility scope remains distinct from this throughput-focused design; both

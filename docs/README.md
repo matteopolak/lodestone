@@ -164,10 +164,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   cannot see — wrong behaviour that never panics (the motivating example: breaking a
   waterlogged block used to destroy the water too, which is not the real mechanic).
   Track B is a narrow slice rather than a finished fuzzer: fixed scripts run end to
-  end against a live vanilla server, and bounded generated fluid scripts now run
-  against that oracle with per-case reset, timing-boundary checks, semantic shrinking,
-  and replay. The generator's general properties are also proven against fresh
-  in-memory oracles. Its own section below says exactly what is and is not there.
+  end against a live vanilla server, and bounded generated fluid and redstone scripts
+  now run against that oracle with per-case reset, timing-boundary checks, semantic
+  shrinking, and replay. The generator's general properties are also proven against
+  fresh in-memory oracles. Its own section below says exactly what is and is not
+  there.
 - [`gpu/` module layout and shader conventions](./gpu-module-layout.md) — How
   `crates/lodestone-shell`'s render coordinator (`RenderState`) is split across
   `gpu.rs` and a `gpu/` folder of submodules, plus the convention every WGSL shader in
@@ -647,11 +648,9 @@ every issue under it inherits.
   **client and server** — with a plugin framework deep enough to host a port of any
   Java plugin.
 - [Benchmarks and performance-regression detection](./roadmap/benchmarks.md) — The
-  decomposition behind epic [#78](https://github.com/matteopolak/lodestone/issues/78):
-  what gets measured, why those things and not others, the harness shape, and how a
-  regression is caught without turning CI into a flake generator. The individual
-  measurements are filed as sub-issues of #78 (see the table below); this doc is the
-  argument for the shape they share, not a duplicate of any one of them.
+  workspace benchmark architecture: the explicit targets that measure production
+  subsystems, the per-crate Criterion harness they share, and the two kinds of
+  regression comparison. It records the current target census rather than a work plan.
 - [Client rendering and UI: the remaining visual and audio surface](./roadmap/client-rendering.md) —
   The decomposition of everything the player *sees or hears* that is not yet at 1:1
   parity with vanilla 26.2: block entity renderers, sky and weather, smooth lighting,
@@ -840,10 +839,9 @@ of these caught the *brief* being wrong rather than the code.
   a boundary), so throughput can scale past one core the way vanilla structurally
   cannot. It is deliberately a **later** item: this doc grounds that timing in the
   tick-loop architecture and profiling instrumentation that now actually exist, rather
-  than in intuition. Written 2026-08-16 against a re-verified tree — every claim
-  below was checked against `crates/lodestone-server/src/tick.rs`,
-  `docs/tick-and-worldgen-profiling.md`, and `docs/plans/server-ecs-migration.md` for
-  this pass, not inherited from an external tracker.
+  than in intuition. The current profiling guidance lives in
+  `docs/tick-scheduling.md`; the design below applies those measurements to the
+  regionisation decision.
 - [Plan: render performance — culling first, then submission](./plans/render-performance.md) —
   The sequenced plan for making terrain rendering scale from the shipped render
   distance 8 to 16 and 32: frustum culling, vanilla's circular view-membership
