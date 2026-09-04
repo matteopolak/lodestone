@@ -38,17 +38,18 @@
 
 use lodestone_model::{PathType, PathTypeRegistry};
 
+use crate::block_states::StateId;
 use crate::generated_path_types as table;
 
 pub use table::STATE_COUNT;
 
-/// The base navigation [`PathType`] for block-state `id`, or `None` if `id` is
-/// not in `0..`[`STATE_COUNT`].
+/// The base navigation [`PathType`] for a validated block-state id.
 ///
-/// Zero-heap: a direct index into rodata. O(1), no search.
+/// [`StateId`] proves the index is in the complete generated table, so this
+/// lookup is total. Zero-heap: a direct index into rodata. O(1), no search.
 #[must_use]
-pub fn path_type(id: u32) -> Option<PathType> {
-    table::STATE_PATH_TYPE.get(id as usize).copied()
+pub fn path_type(id: StateId) -> PathType {
+    table::STATE_PATH_TYPE[id.raw() as usize]
 }
 
 /// Zero-sized [`PathTypeRegistry`] over the generated protocol-776 table.
@@ -67,7 +68,7 @@ pub struct PathTypes;
 
 impl PathTypeRegistry for PathTypes {
     fn path_type(&self, id: u32) -> Option<PathType> {
-        path_type(id)
+        StateId::new(id).map(path_type)
     }
 
     fn state_count(&self) -> u32 {

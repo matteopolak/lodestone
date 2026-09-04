@@ -39,10 +39,10 @@ for it). A geometry-only derivation is wrong for 2,618 of 32,366 states across 2
 checked exhaustively.
 
 The complete 26.2 state tables in `lodestone-data` use `block_states::StateId` as their public boundary:
-`light_props` and `block_solidity::legacy_solid` return totals once a raw id has been validated with
-`StateId::new`. Raw compatibility entry points retain `Option` only where callers still own an unvalidated
-wire id; keep that conversion at the boundary so generated-table indexing cannot receive an out-of-range
-value.
+`light_props`, `block_solidity::legacy_solid`, and `path_types::path_type` return totals once a raw id
+has been validated with `StateId::new`. Raw compatibility entry points retain `Option` only where callers
+still own an unvalidated wire id; `PathTypeRegistry` is one such version-free adapter. Keep that conversion
+at the boundary so generated-table indexing cannot receive an out-of-range value.
 
 The block-break hardness census follows the same rule: `hardness(StateId)` returns its complete
 `Hardness` record without an `Option`, while `hardness_raw` is the explicit fallible boundary for
