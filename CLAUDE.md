@@ -192,7 +192,7 @@ Data sources, in order of authority:
 3. **minecraft-data** — bootstrap and cross-check for **1.8–1.21.11 only**; no 26.x data.
 
 Prefer interrogating the real jar over any community dataset: per-block-state tables come from booting
-the real server headlessly and walking `Block.BLOCK_STATE_REGISTRY` (see
+the real server headlessly and walking its own block-state registry (see
 `crates/lodestone-data/tests/`, and the `just regen-*` recipes). `oracle-java/` is **per-crate**, not at
 the repo root. A vanilla-authored oracle world sits at `.cache/mc/survival/world`. Entity metadata
 indices come from `EntityDataIndexOracle.java` — never hand-count one.
