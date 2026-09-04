@@ -1147,9 +1147,9 @@ pub const CONTENT_MARGIN_TOP: f32 = 30.0;
 /// (`setHeaderHeight`/`setFooterHeight`). Nothing is computed until
 /// `arrange_elements`, so reading a content rect earlier gives a plausible,
 /// stable, wrong answer. Vanilla dodges it by reading `this.screen.width/height`
-/// live; we take the screen size as constructor arguments plus
-/// [`Self::set_screen_size`], because this shell has no `Screen` object to hold —
-/// and because the canvas is only known at draw time (`render::logical_canvas`).
+/// live; this shell constructs the layout with the current screen size because
+/// it has no `Screen` object to hold and the canvas is only known at draw time
+/// (`render::logical_canvas`).
 #[derive(Debug)]
 pub struct HeaderAndFooterLayout {
     screen_width: i32,
@@ -1196,14 +1196,6 @@ impl HeaderAndFooterLayout {
             contents: FrameLayout::new(),
             footer: FrameLayout::new(),
         }
-    }
-
-    /// The canvas this layout arranges against. Vanilla reads `screen.width` and
-    /// `screen.height` live; this is the seam that replaces it, and it must be
-    /// called before `arrange_elements` on a resize.
-    pub fn set_screen_size(&mut self, width: f32, height: f32) {
-        self.screen_width = ipx(width);
-        self.screen_height = ipx(height);
     }
 
     /// `getHeaderHeight()`.
