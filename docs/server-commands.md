@@ -130,13 +130,18 @@ and waits for a matching reply, safely over-approximating rather than risking a 
   levels and not 4096, so the bound is comfortably reachable — which matters, because a
   bound the parser overflows before reaching is a crash behind an accepted input rather
   than a bound. `ParseErrorKind::NestingTooDeep` is the refusal.
-- **`CommandTree::parse`'s recursion is still bounded only by input length.** Every redirect
-  hop consumes at least one character before recursing, which makes an ordinary redirect
-  cycle deep rather than infinite — but "deep" here means up to a command's full 32767
-  characters. Measured on a 2 MiB stack, a self-redirecting literal parses 1024 hops and
-  overflows before 2048, so a long enough `/execute run execute run …` still aborts the
-  process. The visited-`(node, cursor)` guard does not help: those pairs are all distinct.
-  This one is unbounded as things stand.
+- **`CommandTree::parse`'s redirect walk is iterative, not recursive, precisely because of the
+  above.** Every redirect hop used to cost one Rust call-stack frame; measured on a 2 MiB stack, a
+  self-redirecting literal parsed 1024 hops and overflowed before 2048, well inside a command's
+  32767-character cap, so a long enough `/execute run execute run …` aborted the process. Vanilla
+  declares no parse-depth limit (a JVM stack overflow is recoverable there), so there was no outside
+  source to derive a cap from — the fix removes the failure mode instead of bounding it: the walk
+  keeps its own explicit heap stack (a `Vec` of pending redirect fallbacks) in place of the call
+  stack, the same shape the neighbor-update propagator uses for its own chained notifications, so
+  depth costs heap, not stack frames. The visited-`(node, cursor)` guard is unrelated and still
+  needed for the separate case it always covered — an adversarial custom `ArgumentType` that rewinds
+  the cursor, defeating the "every hop consumes a character" bound from outside `parse`'s own
+  control.
 
 ## Configuration
 
