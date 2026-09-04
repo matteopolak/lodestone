@@ -108,6 +108,30 @@ pub enum SearchOutcome {
     },
 }
 
+/// Re-evaluates the same candidate after a timing timeout, up to an explicit
+/// attempt bound. Each call must perform its own fresh setup. Gameplay
+/// divergences and non-timeout oracle failures are returned immediately.
+pub fn retry_oracle_timeouts<E>(attempts: u32, mut evaluate: E) -> DifferentialOutcome
+where
+    E: FnMut() -> DifferentialOutcome,
+{
+    assert!(attempts > 0, "a retry budget needs at least one attempt");
+    for attempt in 1..=attempts {
+        let outcome = evaluate();
+        if matches!(
+            outcome,
+            DifferentialOutcome::OracleFailed(OracleFailure {
+                kind: lodestone_fuzz::differential::OracleFailureKind::Timeout,
+                ..
+            }) if attempt < attempts
+        ) {
+            continue;
+        }
+        return outcome;
+    }
+    unreachable!("a positive bounded attempt loop always returns on its last iteration")
+}
+
 fn bounded_oracle_ticks(last_tick: u64, settle_ticks: u64, context: &str) -> Result<u64, String> {
     let oracle_ticks = last_tick
         .checked_add(settle_ticks)
@@ -185,7 +209,10 @@ pub fn sample_scripts(domain: &GenerationDomain, budget: SearchBudget) -> Result
 }
 
 fn same_divergence_class(first: &Divergence, candidate: &Divergence) -> bool {
-    first.pos == candidate.pos && first.left == candidate.left && first.right == candidate.right
+    first.tick == candidate.tick
+        && first.pos == candidate.pos
+        && first.left == candidate.left
+        && first.right == candidate.right
 }
 
 fn evaluate_fresh<L, R, F>(
@@ -215,6 +242,28 @@ where
     R: WorldOracle,
     F: FnMut() -> (L, R),
 {
+    search_and_shrink_with(domain, budget, region, settle_ticks, |script, region, settle_ticks| {
+        evaluate_fresh(&mut fresh_oracles, script, region, settle_ticks)
+    })
+}
+
+/// Searches and shrinks through a caller-owned candidate evaluator.
+///
+/// The factory-based [`search_and_shrink`] is the convenient hermetic form.
+/// Live scenarios use this form so every evaluation can reset and verify its
+/// remote rig before running, and can return setup failures as
+/// [`DifferentialOutcome::OracleFailed`] instead of panicking or calling them
+/// gameplay divergences.
+pub fn search_and_shrink_with<E>(
+    domain: &GenerationDomain,
+    budget: SearchBudget,
+    region: &[((i32, i32, i32), Vec<String>)],
+    settle_ticks: u64,
+    mut evaluate: E,
+) -> SearchOutcome
+where
+    E: FnMut(&Script, &[((i32, i32, i32), Vec<String>)], u64) -> DifferentialOutcome,
+{
     if let Err(message) = generated_oracle_ticks(domain, settle_ticks) {
         return SearchOutcome::InvalidConfiguration { message };
     }
@@ -226,12 +275,7 @@ where
             .new_tree(&mut runner)
             .expect("a validated finite generation domain must build a value tree");
         let original_script = tree.current();
-        let original_divergence = match evaluate_fresh(
-            &mut fresh_oracles,
-            &original_script,
-            region,
-            settle_ticks,
-        ) {
+        let original_divergence = match evaluate(&original_script, region, settle_ticks) {
             DifferentialOutcome::Agreed => continue,
             DifferentialOutcome::OracleFailed(failure) => {
                 return SearchOutcome::OracleFailed {
@@ -250,7 +294,7 @@ where
         while has_candidate && shrink_attempts < budget.shrink_attempts {
             shrink_attempts += 1;
             let candidate = tree.current();
-            match evaluate_fresh(&mut fresh_oracles, &candidate, region, settle_ticks) {
+            match evaluate(&candidate, region, settle_ticks) {
                 DifferentialOutcome::OracleFailed(failure) => {
                     return SearchOutcome::OracleFailed {
                         case_index,
@@ -413,6 +457,17 @@ impl ReplayCase {
         R: WorldOracle,
         F: FnMut() -> (L, R),
     {
+        self.replay_with(|script, region, settle_ticks| {
+            evaluate_fresh(&mut fresh_oracles, script, region, settle_ticks)
+        })
+    }
+
+    /// Replays through a caller-owned evaluator so a live scenario can reset
+    /// and validate its remote rig before applying the recorded script.
+    pub fn replay_with<E>(&self, mut evaluate: E) -> Result<DifferentialOutcome, String>
+    where
+        E: FnMut(&Script, &[((i32, i32, i32), Vec<String>)], u64) -> DifferentialOutcome,
+    {
         let script = self.script();
         bounded_oracle_ticks(script.last_tick(), self.settle_ticks, "replay")?;
         let region = self
@@ -420,12 +475,130 @@ impl ReplayCase {
             .iter()
             .map(|probe| (probe.pos, probe.candidates.clone()))
             .collect::<Vec<_>>();
-        Ok(evaluate_fresh(
-            &mut fresh_oracles,
-            &script,
-            &region,
-            self.settle_ticks,
-        ))
+        Ok(evaluate(&script, &region, self.settle_ticks))
+    }
+
+    /// Validates an untrusted replay against one generated `SetBlock` domain
+    /// before allowing the caller-owned evaluator to create an oracle.
+    ///
+    /// A live scenario should use this entry point rather than
+    /// [`Self::replay_with`]: replay JSON can otherwise contain a raw command,
+    /// a relative position outside the reset lane or probes that the scenario
+    /// never clears.
+    pub fn replay_generated_with<E>(
+        &self,
+        expected_scenario: &str,
+        domain: &GenerationDomain,
+        expected_region: &[((i32, i32, i32), Vec<String>)],
+        expected_settle_ticks: u64,
+        evaluate: E,
+    ) -> Result<DifferentialOutcome, String>
+    where
+        E: FnMut(&Script, &[((i32, i32, i32), Vec<String>)], u64) -> DifferentialOutcome,
+    {
+        if self.scenario != expected_scenario {
+            return Err(format!(
+                "replay scenario {:?} does not match expected scenario {expected_scenario:?}",
+                self.scenario
+            ));
+        }
+        if self.settle_ticks != expected_settle_ticks {
+            return Err(format!(
+                "replay settle ticks {} do not match expected settle ticks {expected_settle_ticks}",
+                self.settle_ticks
+            ));
+        }
+
+        let replay_region = self
+            .region
+            .iter()
+            .map(|probe| (probe.pos, probe.candidates.clone()))
+            .collect::<Vec<_>>();
+        if replay_region != expected_region {
+            return Err("replay probe region does not match the live scenario lane".to_owned());
+        }
+        if self.steps.is_empty() {
+            return Err("replay script must contain at least one step".to_owned());
+        }
+        if self.steps.len() > domain.max_steps {
+            return Err(format!(
+                "replay script has {} steps, exceeding the generated domain maximum of {}",
+                self.steps.len(), domain.max_steps
+            ));
+        }
+        if self.steps[0].tick != 0 {
+            return Err("replay script must begin at tick 0".to_owned());
+        }
+
+        for (index, step) in self.steps.iter().enumerate() {
+            if index != 0 {
+                let previous_tick = self.steps[index - 1].tick;
+                let Some(gap) = step.tick.checked_sub(previous_tick) else {
+                    return Err(format!("replay step {index} moves backward in time"));
+                };
+                if gap > domain.max_tick_gap {
+                    return Err(format!(
+                        "replay step {index} has tick gap {gap}, exceeding the generated domain maximum of {}",
+                        domain.max_tick_gap
+                    ));
+                }
+            }
+
+            match &step.action {
+                ReplayAction::SetBlock { pos, state } => {
+                    if !domain.positions.contains(pos) {
+                        return Err(format!(
+                            "replay step {index} position {pos:?} is outside the generated domain"
+                        ));
+                    }
+                    if !domain.states.contains(state) {
+                        return Err(format!(
+                            "replay step {index} state {state:?} is outside the generated domain"
+                        ));
+                    }
+                }
+                ReplayAction::RunCommand { .. } => {
+                    return Err(format!(
+                        "replay step {index} is RunCommand; live generated replays allow SetBlock only"
+                    ));
+                }
+            }
+        }
+
+        let script = self.script();
+        let oracle_ticks = bounded_oracle_ticks(script.last_tick(), self.settle_ticks, "replay")?;
+        if self.divergence.tick >= oracle_ticks {
+            return Err(format!(
+                "replay divergence tick {} is outside the {}-tick execution horizon",
+                self.divergence.tick, oracle_ticks
+            ));
+        }
+        let Some((_, candidates)) = expected_region
+            .iter()
+            .find(|(pos, _)| *pos == self.divergence.pos)
+        else {
+            return Err(format!(
+                "replay divergence position {:?} is outside the probe region",
+                self.divergence.pos
+            ));
+        };
+        for (side, state) in [
+            ("left", self.divergence.left.as_ref()),
+            ("right", self.divergence.right.as_ref()),
+        ] {
+            if let Some(state) = state {
+                if !candidates.contains(state) {
+                    return Err(format!(
+                        "replay divergence {side} state {state:?} is outside the probe alphabet"
+                    ));
+                }
+            }
+        }
+        if self.divergence.left == self.divergence.right {
+            return Err("replay records equal states instead of a divergence".to_owned());
+        }
+
+        self.replay_with(evaluate)
     }
 
     pub fn expected_divergence(&self) -> Divergence {

@@ -48,11 +48,12 @@ uuid = { workspace = true }
 # distinct from the clientbound decoders every family below covers).
 lodestone-server = { path = "../lodestone-server" }
 # Track B (issue #549): the differential-fuzzing harness's `RconOracle` drives
-# any Source-RCON endpoint (real vanilla or our own `IntegratedServer::start_rcon`)
-# through `lodestone_testsupport::RconClient` rather than re-deriving RCON
-# framing — `lodestone-sound`'s Cargo.toml already uses this same
-# optional-non-dev-dependency shape for the same reason: the type appears in a
-# `pub mod` gated by a feature, not only under `#[cfg(test)]`.
+# any Source-RCON endpoint (real vanilla or our own `IntegratedServer::start_rcon`).
+# `lodestone_testsupport::rcon_frame` supplies the shared request framing while
+# `RconOracle` owns the timeout-configured socket needed by live differential
+# runs. `lodestone-sound`'s Cargo.toml already uses this same optional-non-dev-
+# dependency shape for the same reason: the helper appears in a `pub mod` gated
+# by a feature, not only under `#[cfg(test)]`.
 lodestone-testsupport = { workspace = true, optional = true }
 
 [features]

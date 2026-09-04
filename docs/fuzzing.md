@@ -225,7 +225,8 @@ was discovered only because a codegen change surfaced it.
 
 ### Track B: the differential-fuzzing harness (`differential.rs`)
 
-**Status: two fixed live comparisons, plus hermetic generation and shrinking.**
+**Status: two fixed live comparisons, plus generated and shrunk fluid cases on
+both hermetic and live oracle paths.**
 What exists:
 
 - [`Action`]/[`ScriptStep`]/[`Script`] — the shared action-sequence type used
@@ -297,10 +298,13 @@ What exists:
   Generation uses `proptest`'s structured strategies and `ValueTree`, with a
   fixed ChaCha seed and fixed case/shrink-attempt budgets. The driver does not
   use an elapsed-time shrink limit. Every candidate gets a newly-created pair
-  of oracles, an oracle failure aborts the search, and a shrink is accepted
-  only when it preserves the original `(position, left state, right state)`
-  divergence class. The tick may shrink because compacting idle time is part
-  of making a reproducer useful.
+  of in-memory oracles, while the evaluator form lets a live test perform and
+  validate its own reset before each candidate. An oracle failure aborts the
+  search, and a shrink is accepted only when it preserves the original
+  `(tick, position, left state, right state)` divergence class. Keeping the
+  first-divergence tick stable matters more than compacting idle time: a
+  timing failure moved to another tick is a different failure, even when its
+  eventual states are identical.
 
   Before sampling or creating an oracle, the driver checks the domain's
   worst-case execution length, computed as `(max_steps - 1) * max_tick_gap +
@@ -323,14 +327,59 @@ What exists:
   byte stream, but its structured `shrink` method no longer exists;
   libFuzzer's raw-input minimization is not semantic action deletion, tick
   compaction, or state/position minimization.
-- **Two live runs, against a real vanilla 26.2 server**, both `#[ignore]`d.
+- `differential_live_generated_fluid.rs` takes the same generator and shrinker
+  through the real RCON oracle. It generates one to three edits of a channel's
+  source cell from the caller-owned air/water alphabet, then compares the
+  source and three downstream cells after every tick. The in-process side is
+  `FluidModelOracle`, so generated candidates still reach the production fluid
+  scheduling and tick entry points rather than a test copy of the mechanic.
+
+  Every candidate reuses one dedicated coordinate lane only after an explicit
+  reset: force-load, clear the whole rig to air, re-anchor the game-time
+  counter, let six ticks elapse while every fluid position is empty, rebuild
+  the channel, and positively verify all four watched cells are air plus every
+  corresponding floor, roof and side-wall cell is stone. Each query offers the
+  intended state and a discriminating alternative, so an unrecognised response
+  cannot look like the desired baseline. Six is one more than the overworld
+  water scheduler's five-tick delay, so a pending water tick from a previous
+  candidate fires against air and cannot reach the rebuilt rig. Cleanup always
+  attempts clear, counter reset, drain and force-load removal in that order;
+  failure in an earlier step is recorded but cannot skip the removal attempt.
+  Setup, teardown, transport and tick-wait failures are returned as oracle
+  failures; a tick timeout is typed separately from other oracle failures and
+  neither is serialized as a gameplay divergence. A candidate that loses a
+  tick boundary is retried from a fresh reset up to three total attempts;
+  other oracle failures are not retried, and a third timing failure aborts the
+  search. Each RCON connect has a five-second deadline, and each complete frame
+  read or write shares one five-second wall-clock deadline across every partial
+  socket operation. The remaining budget is installed as the socket timeout
+  before each operation, so a peer cannot extend the deadline by drip-feeding
+  bytes. Platform timeout errors are normalised to the typed timeout outcome.
+  This absorbs occasional boundary jitter without accepting a run whose tick
+  labels cannot be trusted or allowing a slow or silent endpoint to stall the
+  retry loop forever.
+
+  The ignored live test runs a deliberately faulty read wrapper first and
+  requires generation to find, shrink, serialize and replay its divergence.
+  That is the negative control for an accidentally always-agreeing generator.
+  A real divergence is likewise replayed immediately after decoding its JSON
+  before the test reports the artifact. Set `LODESTONE_DIFFERENTIAL_REPLAY` to
+  that JSON file on a later run to bypass generation and execute the explicit
+  minimized script from a fresh reset. Replay files are untrusted input: before
+  opening RCON, the live entry point requires the generated-fluid scenario and
+  settle horizon, the exact four-cell probe lane, `SetBlock` actions only,
+  positions and states from the generator's domain, and a recorded divergence
+  inside the probe alphabet and execution horizon. A replay cannot use the
+  general `RunCommand` action to escape the reset lane.
+- **Three live runs, against a real vanilla 26.2 server**, all `#[ignore]`d.
   `crates/lodestone-fuzz/tests/differential_live_fluid_spread.rs` pairs
   `FluidModelOracle` with `RconOracle` over a water front spreading down a
   closed stone channel and requires agreement throughout the complete spread.
   `differential_live_redstone_contraption.rs` pairs
   `RedstoneModelOracle` with `RconOracle` over a repeater chain crossing two
-  chunk seams, out to fourteen ticks, and agrees. See the two "live finding"
-  sections below.
+  chunk seams, out to fourteen ticks, and agrees. The generated fluid run is
+  the reset-and-replay path described immediately above. See the two fixed
+  "live finding" sections below.
 
 ### Two measured facts about reading and stepping a live world
 
@@ -481,17 +530,18 @@ agreement or disagreement.
 ### What Track B still does not do
 - **No validation against a reverted historical fix** — revert a committed fix
   in a scratch worktree and require the harness to rediscover it (flowing
-  water waterlogging a slab, a door dropping nothing, …). Each target still
-  needs a caller-owned action alphabet and independently sourced expected
-  values, plus deterministic reset/tick control before generated scripts can
-  be trusted against a live oracle.
+  water waterlogging a slab, a door dropping nothing, …). Generated live fluid
+  scripts now have a reset and replay path, but the deliberately faulty read
+  control is not a historical production regression.
 - **No client-state comparison.** Comparing what our own *client* believes
   about blocks/entities/inventory after replaying a packet stream (rather than
   comparing rendered pixels, which two different renderers will differ on in
   ways that are not bugs) is entirely unaddressed.
-- **Only one dimension, and only fluids.** The comparison covers block states
-  over a caller-named region. The entity list, the player's inventory and the
-  scheduled-tick queue are all named in the design and none is implemented.
+- **Generated live cases cover fluids only.** Redstone has a fixed live
+  comparison, but no generated redstone, piston, falling-block, container or
+  waterlogging action domain exists. Every comparison still covers only block
+  states over a caller-named region; the entity list, player inventory and
+  scheduled-tick queue are unimplemented dimensions.
 - **Our side of the live comparison is the fluid model, not the whole
   server.** `FluidModelOracle` drives `lodestone_server::fluid`'s production
   scheduled-tick entry point over a sparse world, not a running
@@ -556,6 +606,14 @@ agreement or disagreement.
   in both arms, against the live server — not just that the comparison
   returned `Agreed`. An always-`None` probe produces a perfectly green
   `Agreed` over any world.
+- **Use `search_and_shrink_with` for a live generator.** Its evaluator owns
+  reset, baseline validation, timing alignment and cleanup for one candidate,
+  and returns their failures as `DifferentialOutcome::OracleFailed`. The
+  factory-based `search_and_shrink` remains the smaller form for fresh
+  in-memory oracles. A generated live replay uses
+  `ReplayCase::replay_generated_with`, which validates the scenario, probe
+  lane, action kind, positions and state alphabet before invoking the same
+  resettable evaluator used by generated and shrink candidates.
 
 ## Configuration
 
@@ -564,23 +622,38 @@ agreement or disagreement.
   above.
 - **`just fuzz-smoke [seconds]`** — seconds per target, default `30`; CI
   passes `30` explicitly so the workflow states its own budget.
-- **`LODESTONE_DIFFERENTIAL_RCON`** (`host:port`) — the live endpoint
+- **`LODESTONE_DIFFERENTIAL_RCON`** (`IP:port`) — the live endpoint
   `differential_live_fluid_spread.rs` drives, defaulting to the flat/creative
   oracle's `127.0.0.1:25571`. Any oracle in `scripts/live-oracles/` works: the
   rig is `/fill`ed from scratch, so the world's own terrain never
-  participates. Whichever one you use needs `pause-when-empty-seconds=0` —
-  with nobody logged in, a paused world runs no scheduled block ticks and the
-  comparison reports agreement on a frozen world.
+  participates. The endpoint requires a numeric IPv4 or bracketed IPv6 address;
+  hostnames are rejected before connection work so DNS cannot evade the hard
+  connection deadline. Whichever oracle you use needs
+  `pause-when-empty-seconds=0` — with nobody logged in, a paused world runs no
+  scheduled block ticks and the comparison reports agreement on a frozen
+  world.
+- **`LODESTONE_DIFFERENTIAL_REPLAY`** (path) — when running
+  `differential_live_generated_fluid`, bypasses generation and replays the
+  versioned JSON's explicit minimized script against a freshly reset live
+  lane. The file must satisfy the live scenario's exact generated-domain and
+  probe-lane policy before any oracle connection is attempted. The test then
+  requires the recorded tick, position and states to recur.
 - **`differential::TICK_MILLIS`** — the poll cadence used while
   `RconOracle::advance_tick` waits for the server's own game-time counter,
   currently `50` ms. The counter, not elapsed wall clock, decides whether the
   next nominal tick exists.
+- **`differential::RCON_IO_TIMEOUT`** — the hard wall-clock bound applied to
+  each RCON connection attempt and each complete frame read or write, currently
+  five seconds. Partial socket operations share the frame's original deadline;
+  `WouldBlock` from a platform socket timeout is normalised to `TimedOut` so the
+  generated live runner's bounded retry policy sees one portable kind.
 - **`SearchBudget`** in the generated-script test support — `seed`, `cases`,
   and `shrink_attempts` are all explicit integers. Its proptest configuration
   fixes the RNG to ChaCha, disables failure-persistence-by-seed, and sets
   `max_shrink_time` to zero; the versioned explicit JSON case is the replay
-  artifact. `MAX_ORACLE_TICKS` caps each generated or replayed candidate at
-  4,096 oracle ticks after checked horizon arithmetic.
+  artifact. A shrink preserves the complete first-divergence signature,
+  including tick. `MAX_ORACLE_TICKS` caps each generated or replayed candidate
+  at 4,096 oracle ticks after checked horizon arithmetic.
 - **`rcon-oracle` Cargo feature** on `lodestone-fuzz` — gates the
   `differential::rcon` module and its `lodestone-testsupport` dependency; off
   by default, unlike the four protocol-family features, because it pulls in a

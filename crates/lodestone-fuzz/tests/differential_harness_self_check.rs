@@ -13,7 +13,10 @@
 //! species CLAUDE.md warns about, so this file's second test is not optional
 //! decoration.
 
-use lodestone_fuzz::differential::{Action, DifferentialOutcome, Script, ScriptStep, WorldOracle, run_differential};
+use lodestone_fuzz::differential::{
+    Action, DifferentialOutcome, OracleFailureKind, Script, ScriptStep, WorldOracle,
+    run_differential,
+};
 use std::collections::HashMap;
 
 /// The simplest possible [`WorldOracle`]: a `HashMap` of positions to state
@@ -29,6 +32,39 @@ struct FakeWorld {
     /// spreading) that only this side experiences — the deliberate
     /// divergence the second test needs.
     scripted_reaction: Option<(u64, (i32, i32, i32), String)>,
+}
+
+struct TimedOutWorld;
+
+impl WorldOracle for TimedOutWorld {
+    type Error = std::io::Error;
+
+    fn classify_error(error: &Self::Error) -> OracleFailureKind {
+        if error.kind() == std::io::ErrorKind::TimedOut {
+            OracleFailureKind::Timeout
+        } else {
+            OracleFailureKind::Failure
+        }
+    }
+
+    fn apply(&mut self, _action: &Action) -> Result<(), Self::Error> {
+        Ok(())
+    }
+
+    fn advance_tick(&mut self) -> Result<(), Self::Error> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "live oracle stopped advancing",
+        ))
+    }
+
+    fn block_state(
+        &mut self,
+        _pos: (i32, i32, i32),
+        _candidates: &[String],
+    ) -> Result<Option<String>, Self::Error> {
+        Ok(None)
+    }
 }
 
 impl WorldOracle for FakeWorld {
@@ -173,4 +209,20 @@ fn empty_script_and_empty_region_trivially_agree() {
         DifferentialOutcome::Agreed => {}
         other => panic!("empty script/region must trivially agree, got {other:?}"),
     }
+}
+
+#[test]
+fn an_oracle_timeout_is_typed_and_never_reported_as_gameplay_divergence() {
+    let script = Script::default();
+    let mut left = FakeWorld::default();
+    let mut right = TimedOutWorld;
+
+    let outcome = run_differential(&script, &[], &mut left, &mut right, 0);
+
+    let DifferentialOutcome::OracleFailed(failure) = outcome else {
+        panic!("a timed-out instrument must be an oracle failure, got {outcome:?}");
+    };
+    assert_eq!(failure.kind, OracleFailureKind::Timeout);
+    assert_eq!(failure.tick, 0);
+    assert_eq!(failure.message, "live oracle stopped advancing");
 }
