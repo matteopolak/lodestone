@@ -14,24 +14,21 @@ use crate::entities::EntityDraw;
 use super::*;
 
 /// **Gate A (F1).** The terrain/entity fog colour must carry the
-/// `FOG_COLOR` day/night track, not just the sky disc. Before this fix
-/// `fog_with_clock` returned `self.fog`'s flat day colour unchanged at every
-/// hour — a full-brightness `#87B5EB` terrain fog at midnight against a
-/// near-black sky disc.
+/// `FOG_COLOR` day/night track, not just the sky disc. The colour must vary
+/// with clock time; a flat day colour at midnight would leave full-brightness
+/// `#87B5EB` terrain fog against a near-black sky disc.
 ///
-/// Expected bytes are hand-derived from vanilla, not from this crate's own
-/// formula: `NIGHT_FOG_COLOR_MULTIPLIER_START` is vanilla's own float-to-color
-/// construction of `(1.0, 0.05, 0.05, 0.09)` and `..._END` the same for `(1.0, 0.09, 0.09, 0.09)`
-///, where vanilla's own float-to-8-bit-channel conversion **floors**
-/// (`Mth.floor(value * 255.0F)`) — `0.05*255=12.75`
-/// floors to `12`, `0.09*255=22.95` floors to `22`, giving multiplier
-/// keyframes `(12,12,22)` at tick 13670 and `(22,22,22)` at tick 22330, not
-/// the `(13,13,22)` an earlier draft of this investigation misread from a
-/// rounded guess. At tick 18000 (exactly the segment midpoint, `alpha =
-/// 4330/8660 = 0.5`) `Mth.lerpInt`'s floor gives `(17,17,22)`.
-/// Vanilla's own ARGB channel-multiply is truncating integer division
-/// (`red(lhs) * red(rhs) / 255`), so against our day
-/// base `SKY_COLOR` (`#87B5EB` = `(135,181,235)`):
+/// Expected bytes are derived independently from the reference constants, not
+/// from this crate's own formula. The start and end night multipliers use
+/// `(1.0, 0.05, 0.05, 0.09)` and `(1.0, 0.09, 0.09, 0.09)` respectively,
+/// with float-to-8-bit conversion that **floors** (`floor(value * 255.0)`).
+/// Thus `0.05*255=12.75` floors to `12`, and `0.09*255=22.95` floors to
+/// `22`, giving multiplier keyframes `(12,12,22)` at tick 13670 and
+/// `(22,22,22)` at tick 22330. At tick 18000 (the segment midpoint,
+/// `alpha = 4330/8660 = 0.5`) integer interpolation floors to `(17,17,22)`.
+/// Channel multiplication uses truncating integer division
+/// (`red(lhs) * red(rhs) / 255`), so against our day base `SKY_COLOR`
+/// (`#87B5EB` = `(135,181,235)`):
 ///
 /// | tick | multiplier | predicted (exact integer) |
 /// |---|---|---|
@@ -40,9 +37,9 @@ use super::*;
 /// | 13670 (dusk, on-keyframe) | `(12,12,22)` | `(6,8,20)` |
 ///
 /// This client's `multiply_gamma` round-trips through the continuous
-/// piecewise sRGB transfer function rather than vanilla's raw truncating
-/// byte division, so a **2-byte** tolerance is used — the same allowance
-/// this repo's other gamma-space gates use for that reason.
+/// piecewise sRGB transfer function rather than the reference's raw
+/// truncating byte division, so a **2-byte** tolerance is used for the
+/// conversion between those representations.
 #[test]
 fn fog_with_clock_carries_the_night_track_gate_a() {
     let fog = FogSettings::for_render_distance(SKY_COLOR, 8);
@@ -72,7 +69,7 @@ fn fog_with_clock_carries_the_night_track_gate_a() {
         RenderState::fog_uniform_for(&fog, 6000, 1.0, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
     assert_close("noon", byte_of(&noon), [135, 181, 235]);
 
-    // Midnight: the "too extreme" complaint's root cause.
+    // Midnight: the darkest point in the expected night track.
     let midnight =
         RenderState::fog_uniform_for(&fog, 18000, 0.24, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
     assert_close("midnight", byte_of(&midnight), [9, 12, 20]);
@@ -82,15 +79,14 @@ fn fog_with_clock_carries_the_night_track_gate_a() {
         RenderState::fog_uniform_for(&fog, 13670, 0.5, overworld_ambient, [0.0, 0.0, 0.0], 0.0);
     assert_close("dusk", byte_of(&dusk), [6, 8, 20]);
 
-    // The sky-darken lane is untouched by this change and must still ride
-    // through in end_enabled[2] — proves the fix is additive, not a
-    // replacement of the existing clock plumbing.
+    // The sky-darken lane is independent of the fog colour and must still ride
+    // through in end_enabled[2]. Keeping this lane unchanged distinguishes the
+    // colour track from the existing clock plumbing.
     assert_eq!(midnight.end_enabled[2], 0.24);
 
-    // Negative control, executed and observed to fail: the pre-fix
-    // behaviour (`FogUniform::new` with no clock at all) must land on the
-    // flat day colour at midnight, i.e. the detector actually fires on the
-    // bug this test exists to catch.
+    // Negative control, executed and observed to fail: an unclocked uniform
+    // must land on the flat day colour at midnight, demonstrating that this
+    // assertion distinguishes clocked fog from the unclocked path.
     let unclocked = FogUniform::new(&fog, [0.0, 0.0, 0.0]);
     assert_close("control (no clock)", byte_of(&unclocked), [135, 181, 235]);
     let diff = (byte_of(&unclocked)[2] - byte_of(&midnight)[2]).abs();
@@ -702,4 +698,3 @@ fn third_person_body_state_resolves_through_the_real_corpus() {
         }
     }
 }
-

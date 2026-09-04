@@ -92,9 +92,9 @@ impl RenderState {
             }
         };
         let atlas_bind_group = pipeline.atlas_bind_group(device, &atlas, &uv_buffer);
-        // The packed path's shared camera + per-section origin arena (issue
-        // #76). One bind group over both, built once here; every packed section
-        // draw reuses it and varies only the dynamic offset.
+        // The packed path shares a camera and per-section origin arena. One bind
+        // group covers both, built once here; every packed section draw reuses
+        // it and varies only the dynamic offset.
         let packed_origin_arena = SectionOriginArena::new(
             device,
             queue,
@@ -226,10 +226,9 @@ impl RenderState {
                 .map(|(id, variants)| (id.clone(), variants.clone()))
                 .collect();
             // The shared per-frame half of the section camera (view_proj +
-            // fog) and the per-section origin arena (issue #75 — see the
-            // module doc). One bind group over both, built once; every
-            // section draw and the dropped-item pass reuse it, varying only
-            // the dynamic offset.
+            // fog) and the per-section origin arena use one bind group, built
+            // once; every section draw and the dropped-item pass reuse it,
+            // varying only the dynamic offset.
             let origin_arena = SectionOriginArena::new(
                 device,
                 queue,
@@ -293,8 +292,8 @@ impl RenderState {
         // stand-in in the sheet slots and the shell calls
         // `install_particle_sheet_atlas` once it has the atlas. Until then a
         // sheet particle samples transparent black and is discarded on alpha:
-        // it draws *nothing*, which is wrong but honest, instead of the
-        // arbitrary block texels issue #45 reported.
+        // it draws *nothing*, which is wrong but honest, instead of sampling
+        // arbitrary block texels from an unrelated atlas.
         let particles = ParticleRenderer::new(device, color_format);
         let particle_atlas = model.as_ref().map_or(&atlas, |m| &m.atlas);
         let sheet_placeholder = transparent_placeholder_atlas(device, queue);
@@ -573,9 +572,10 @@ impl RenderState {
     /// `render_distance_chunks` rides along for the same reason `sky_color` is in
     /// the struct: the sky disc's gradient end is `min(render_distance, the
     /// attribute)`, so it is a *second*
-    /// consumer of the same number the fog band already needs. #399 shipped the
-    /// gradient clamp with `SkyFrame` defaulting to the old constant 512 and this
-    /// call site still passing it — the mechanism landed and reached zero pixels.
+    /// consumer of the same number the fog band already needs. The sky gradient
+    /// endpoint is capped by this value, so keeping it explicit prevents the
+    /// sky pass from falling back to its 512-block default and keeps both passes
+    /// synchronized.
     /// Taking it as a parameter rather than adding a `set_render_distance` next
     /// door makes that unrepresentable: you cannot set fog without saying what
     /// distance it is for.
@@ -885,9 +885,8 @@ impl RenderState {
     /// ```
     ///
     /// Without this, every dimension renders the overworld's own grey
-    /// ambient floor: the reported "the entire Nether seems very dark
-    /// compared to vanilla", since the Nether's real floor
-    /// (`#302821`) is markedly brighter than the overworld's (`#0a0a0a`).
+    /// ambient floor, while the Nether's floor (`0x302821`) is markedly brighter
+    /// than the overworld's (`#0a0a0a`).
     pub fn set_ambient_light_source(
         &mut self,
         f: impl Fn() -> Option<[f32; 3]> + Send + Sync + 'static,
@@ -1262,8 +1261,8 @@ impl RenderState {
     /// (flame/smoke/crit sprites) is rebound here to keep pairing with the
     /// *new* block atlas, but its own pixels are not re-stitched — that is
     /// [`Self::install_particle_sheet_atlas`]'s job, and calling it separately
-    /// needs `Particles`' own UV table rebuilt in the same step (issue #45's
-    /// exact trap), which is session (`Sim`) state this module cannot reach.
+    /// needs `Particles`' own UV table rebuilt in the same step; that UV-table
+    /// state belongs to the session (`Sim`) and is outside this module.
     /// Entity textures, the item atlas and the GUI/menu atlases are separate
     /// owners entirely — see `crate::app::lifecycle` for those.
     pub fn reload_block_atlas(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, vanilla: &BlockAtlas) {
@@ -1485,11 +1484,10 @@ impl RenderState {
     /// [`MainHandSource`]), so first person draws the held item instead of a bare
     /// arm.
     ///
-    /// Until installed, the bare arm is drawn unconditionally — vanilla's
-    /// empty-hand branch — which is what this shell did before the item path
-    /// existed. `f` returns the item id of the *selected hotbar slot* together
+    /// Until installed, the bare arm is drawn unconditionally for an empty
+    /// hand. `f` returns the item id of the *selected hotbar slot* together
     /// with whether that stack is enchanted (the foil flag that drives the glint
-    /// second pass, issue #452), or `None` for an empty hand.
+    /// second pass), or `None` for an empty hand.
     ///
     /// **Re-install it every frame**, for the same reason
     /// [`set_hand_swing_source`](Self::set_hand_swing_source) says to: the value
@@ -1540,7 +1538,7 @@ impl RenderState {
         self.equip.advance(selected.as_ref());
     }
 
-    /// Install the source for this frame's block entities (chests, issue #23).
+    /// Install the source for this frame's block entities (including chests).
     ///
     /// **Without this every chest in the world is an invisible hole.** A 26.2
     /// chest has no block model at all (`block/chest.json` declares only a

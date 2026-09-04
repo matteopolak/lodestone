@@ -1735,24 +1735,18 @@ pub struct HudFrame<'a> {
     /// attack-strength value from [`Self::attack_cooldown`] is drawn in —
     /// `options.attackIndicator`, copied here per frame by `app/redraw.rs`.
     ///
-    /// This used to be pinned to `Crosshair`: the crosshair draw site drew the
-    /// 16x4 bar whenever [`Self::crosshair`] and `attack_cooldown` were both
-    /// set, with a comment saying it was scoped to that variant because no
-    /// options row existed. Both draw sites now gate on this, exactly as
-    /// vanilla's two `if`s do — and `Hotbar` is a *different* draw (an 18x18
-    /// gauge filling bottom-up beside the hotbar), not the same bar moved.
+    /// Both draw sites gate on this value, while `Hotbar` is a *different* draw
+    /// (an 18x18 gauge filling bottom-up beside the hotbar), not the same bar
+    /// moved.
     pub attack_indicator: crate::config::AttackIndicator,
     /// The recipe-unlock toast to draw top-right, `Some` only while
-    /// [`lodestone_game::recipe::RecipeToastQueue`] has a live entry (issue
-    /// #163). See [`RecipeToastView`] for the geometry and its vanilla
-    /// citations.
+    /// [`lodestone_game::recipe::RecipeToastQueue`] has a live entry. See
+    /// [`RecipeToastView`] for the geometry and reference-layout notes.
     ///
-    /// **Honestly degraded today**: the queue this comes from is only ever
-    /// filled by the `recipe_book_add` decode, which does not exist yet
-    /// (`crates/protocol/v770` — tracked on #436), so on a live server this
-    /// stays `None`. That is deliberate: the consumer side is wired so the
-    /// toast appears the moment the decode lands, and no fake producer was
-    /// added to make it light up early.
+    /// The queue receives entries only from the `recipe_book_add` decode. Until
+    /// that packet path supplies an entry, live sessions keep this field
+    /// `None`; the consumer is ready for real entries and does not synthesize
+    /// them.
     pub recipe_toast: Option<RecipeToastView>,
     /// The advancement-completion toast, `Some` while one is inside
     /// its 5000 ms window. Drawn in the same top-right slot as
@@ -2257,12 +2251,10 @@ pub struct SuggestionPopup<'a> {
 pub struct ChatHoverTooltip<'a> {
     /// The tooltip body, via [`lodestone_model::Text::to_spans`] so a
     /// hex-coloured `show_text` hover keeps its real colour — a plain
-    /// [`lodestone_model::Text::to_legacy_string`] flatten used to sit here
-    /// and could only represent the sixteen legacy codes, exactly the class
-    /// of bug issue #656 tracks. May contain a literal `\n` — vanilla's
-    /// `show_text` tooltips are routinely multi-line (an enchanted book's
-    /// enchantment list, for instance), and this is split on it before
-    /// word-wrap.
+    /// [`lodestone_model::Text::to_legacy_string`] flatten can only represent
+    /// the sixteen legacy codes. May contain a literal `\n` — chat hover
+    /// payloads can be multi-line (an enchanted book's enchantment list, for
+    /// instance), and this is split on it before word-wrap.
     pub spans: &'a [TextSpan],
     /// The pointer, in logical-canvas pixels — [`HudRenderer::canvas_cursor`]'s
     /// own output, the same anchor [`SuggestionPopup::cursor`] uses.
@@ -2933,11 +2925,11 @@ impl HudGeometry {
                 // just ignoring them while drawing, matching vanilla.
                 let stripped = if opts.colors { None } else { Some(strip_legacy(line)) };
                 let display: &str = stripped.as_deref().unwrap_or(line);
-                // Wrapped once per message, not once per frame (issue #527 (a)):
+                // Wrapped once per message, not once per frame:
                 // the cache keys on the display text plus this frame's box width
                 // and pose scale, so a frame with no new line, no resize and no
-                // options edit performs zero wraps. Without a cache attached this
-                // is the old behaviour, just spelled through the same call.
+                // options edit performs zero wraps. Without a cache, this work
+                // repeats on every frame.
                 let sub_rows = match frame.chat_wrap {
                     Some(cache) => cache.rows(display, chat_box_w, chat_pose_scale, |t| {
                         b.wrap_legacy(t, chat_box_w, chat_pose_scale)
@@ -3066,16 +3058,13 @@ impl HudGeometry {
             b.rect_px(cx - arm, cy - thick * 0.5, arm * 2.0, thick, col);
             b.rect_px(cx - thick * 0.5, cy - arm, thick, arm * 2.0, col);
 
-            // Attack-strength (cooldown) indicator: a small fill bar just below
-            // the crosshair — vanilla's `Hud.extractCrosshair`'s
-            // `CROSSHAIR_ATTACK_INDICATOR_{BACKGROUND,PROGRESS}_SPRITE` branch
-            // (vanilla's own hud rendering, `.cache/mc/26.2/client-src`), gated there on
-            // `AttackIndicatorStatus::CROSSHAIR` (issue #121 scopes this shell
-            // to that variant only — no options-menu toggle exists yet, and no
-            // hotbar-style variant). Native 16x4, anchored at vanilla's own
-            // `(guiWidth/2 - 8, guiHeight/2 - 7 + 16)` — here `(cx - 8, cy + 9)`
-            // against this canvas's own centre, which this block already
-            // computed for the plus above.
+            // Attack-strength (cooldown) indicator: the crosshair variant is a
+            // small left-to-right fill bar just below the crosshair. `Off`
+            // suppresses both indicators; `Hotbar` is rendered separately
+            // beside the hotbar. The menu cycles these three `AttackIndicator`
+            // options, and this branch handles only `Crosshair`. Native 16x4,
+            // anchored at `(cx - 8, cy + 9)` against this canvas's centre,
+            // which this block already computed for the plus above.
             //
             // `b.sprite`/`b.gui_geometry` are no-op-safe with no atlas attached
             // (see `sprite_vitals`'s doc on the same pattern), so a
@@ -4532,11 +4521,10 @@ struct HudAnim {
     /// settled/idle (see `hud/anim::HotbarPop`).
     hotbar_pop: [f32; 9],
     /// Level-up flash strength: `1.0` at the moment of the gain, decaying to
-    /// `0.0` (see `hud/anim::XpFlash`, issue #30).
+    /// `0.0` (see `hud/anim::XpFlash`).
     ///
-    /// **Read `XpFlash`'s doc before treating this as a parity value** — 26.2
-    /// has no XP-bar flash, and this is the effect the issue asked for rather
-    /// than a port of one.
+    /// **This is a client-local effect, not a 26.2 XP-bar parity value** — that
+    /// bar has no corresponding flash in the target protocol family.
     xp_flash: f32,
 }
 
@@ -4641,17 +4629,13 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
     // (it used to live behind `frame.xp.map`) because the locator bar needs
     // the same position on a session with no XP to show at all.
     let bar_top = hy - bar_h - 2.0;
-    // `Hud::nextContextualInfoState`'s priority order, reduced to the two
-    // bars this build models: the locator bar wins whenever there is at
-    // least one waypoint to show, and the XP bar only draws when the
-    // locator bar has nothing. Vanilla's real order additionally prefers a
-    // *recently gained* XP flash over the locator bar for a few seconds
-    // (`Hud::willPrioritizeExperienceInfo`) and a jumpable-vehicle bar over
-    // both — neither is modelled here (this build tracks no jump-vehicle
-    // bar at all, and `anim.xp_flash`'s decay is a different effect, issue
-    // #30's rather than a port of vanilla's own timer), so a player who
-    // both has waypoints and just levelled up sees the locator bar a few
-    // seconds earlier than vanilla would. Documented rather than guessed at.
+    // Contextual-info priority is reduced to the two bars this build models:
+    // the locator bar wins whenever there is at least one waypoint to show,
+    // and the XP bar draws only when the locator bar has nothing. The target
+    // client also gives a recently gained XP flash priority for a few seconds
+    // and supports a jumpable-vehicle bar; neither is modelled here. A player
+    // with waypoints who just levelled up therefore sees the locator bar
+    // immediately.
     if !frame.locator.is_empty() {
         b.sprite("hud/locator_bar_background", hx, bar_top, bar_w, bar_h, white);
         // `Mth.ceil((graphics.guiWidth() - 9) / 2.0F)` — vanilla's own locator-bar rendering.
@@ -4727,11 +4711,9 @@ fn sprite_vitals(b: &mut Builder, frame: &HudFrame, anim: &HudAnim) -> f32 {
             let tx = cx - tw * 0.5;
             let ty = by - 6.0;
             let black = [0.0, 0.0, 0.0, 1.0];
-            // `0x80FF20` (vanilla's own ARGB color helper applied to `(255, 0x80, 0xFF, 0x20)`), the literal
-            // vanilla constant `-8323296` reinterpreted as unsigned ARGB —
-            // brightened toward white for the level-up flash's duration (issue
-            // #30). The mix is in this raw-byte space on purpose; see
-            // `anim::flash_toward_white`.
+            // `0x80FF20` is the base green in raw ARGB bytes; it is brightened
+            // toward white for the level-up flash's duration. The mix is kept
+            // in this raw-byte space; see `anim::flash_toward_white`.
             let green = anim::flash_toward_white([128.0 / 255.0, 1.0, 32.0 / 255.0, 1.0], anim.xp_flash);
             b.text_plain(&s, tx + 1.0, ty, 1.0, black);
             b.text_plain(&s, tx - 1.0, ty, 1.0, black);
@@ -5255,17 +5237,16 @@ fn wrap_legacy_paragraph(
     rows
 }
 
-/// Persisted wrapped-row cache for the chat log — vanilla's `GuiMessage.Line`s,
-/// which `GuiMessage.splitLines` fills **once, when the message arrives**
-/// (`ChatComponent.addMessageToDisplayQueue`) rather than once per frame.
+/// Persisted wrapped-row cache for the chat log. Each message is split into
+/// wrapped rows once when it arrives rather than once per frame.
 ///
 /// ## What it is
 ///
 /// The wrap is a pure function of `(display text, chat box width, chat pose
 /// scale, font)`. The text changes on a `SYSTEM_CHAT`/`PLAYER_CHAT` packet; the
 /// width and scale change on a resize or an options edit. Nothing in that set
-/// changes per frame, so without a cache the whole log is re-wrapped every
-/// frame — the defect issue #527 (a) reports.
+/// changes per frame, so without a cache the whole log would be re-wrapped on
+/// every frame.
 ///
 /// ## How to change it
 ///
@@ -6482,10 +6463,10 @@ impl<'a> Builder<'a> {
     /// Colour codes (`§0`..=`§f`) recolour the following text; `§r` resets to
     /// `base`. With a [`VanillaFont`] attached, the five format codes
     /// (`§k`/`l`/`m`/`n`/`o`) draw real bold/italic/underline/strikethrough/
-    /// obfuscated geometry (issue #117; see `hud/vanilla_font.rs`'s module
-    /// docs). Without one — the fixed-advance debug font — they fall back to
-    /// the pre-#117 behaviour: consumed, not styled, since that font has no
-    /// styled glyph variants at all. Each code pair is **zero-width** either
+    /// obfuscated geometry (see `hud/vanilla_font.rs`'s module docs). Without
+    /// one — the fixed-advance debug font — they are consumed but not styled,
+    /// since that font has no styled glyph variants. Each code pair is
+    /// **zero-width** either
     /// way (beyond whatever geometry the style itself adds, e.g. bold's `+1`
     /// advance), matching vanilla's "`§` codes are 2 chars / 0 width", so
     /// coloured and plain text of the same visible length line up exactly.
@@ -6695,7 +6676,7 @@ pub struct HudRenderer {
     heart_anim: anim::HeartAnim,
     /// Cross-frame per-slot hotbar pop timers (`hud/anim::HotbarPop`).
     hotbar_pop: anim::HotbarPop,
-    /// Cross-frame level-up flash state (`hud/anim::XpFlash`, issue #30).
+    /// Cross-frame level-up flash state (`hud/anim::XpFlash`).
     xp_flash: anim::XpFlash,
     /// Colour-stream buffer for the **recipe-book panel** pass
     /// ([`HudRenderer::render_recipe_book_panel`]), created lazily on the first
@@ -10014,8 +9995,7 @@ mod tests {
     }
 
     /// The held-item name highlight's own version of the chat gate just
-    /// above: `lodestone_game::item::styled_hover_name_spans` (issue #656's
-    /// second remaining `to_legacy_string` caller) feeding
+    /// above: `lodestone_game::item::styled_hover_name_spans` feeding
     /// `HudFrame::held_item_spans` must reach three pairwise-distinct vertex
     /// RGBs, and the legacy `HudFrame::held_item` path built from the same
     /// tree via `styled_hover_name`/`to_legacy_string` must lose the hex —
@@ -12693,12 +12673,11 @@ mod chat_hover_tooltip_gate {
         );
     }
 
-    /// Issue #656: a hex-coloured `show_text` hover must keep its real
-    /// colour through to a drawn vertex, not flatten to the sixteen legacy
-    /// codes `Text::to_legacy_string` is limited to. Same three-clause
-    /// fixture shape (hex / inline `§` / named) as
-    /// `container::builder::tests::shadowed_label_spans_carries_hex_named_and_inline_legacy_colour_to_distinct_vertices`,
-    /// with the same control proving the *old* path really did lose it.
+    /// A hex-coloured `show_text` hover must keep its real colour through to a
+    /// drawn vertex, not flatten to the sixteen legacy codes
+    /// `Text::to_legacy_string` is limited to. The fixture has three clauses
+    /// (hex / inline `§` / named), with a control confirming that conversion
+    /// through the legacy path loses the hex.
     #[test]
     fn a_hex_coloured_hover_tooltip_reaches_distinct_vertices_and_the_legacy_path_loses_it() {
         use lodestone_model::text::{Text, TextColor, TextContent, TextStyle};
