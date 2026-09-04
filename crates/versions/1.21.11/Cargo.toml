@@ -12,12 +12,15 @@ lodestone-core = { workspace = true }
 lodestone-data = { workspace = true }
 lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
+lodestone-server = { path = "../../lodestone-server" }
 lodestone-protocol-common = { workspace = true }
 lodestone-world = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+lodestone-client = { workspace = true }
+lodestone-registry = { workspace = true, features = ["v1-21-11"] }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
 serde_json = { workspace = true }

@@ -69,5 +69,7 @@ pub mod adapter;
 pub mod canonical;
 pub mod entity_types;
 pub mod packets;
+pub mod server_protocol;
+pub use server_protocol::V774ServerProtocol;
 
 pub use adapter::{PROTOCOL, PROTOCOL_1_21_11, PROTOCOLS, V774Adapter, adapter, adapter_for};

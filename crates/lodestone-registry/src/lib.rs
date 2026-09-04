@@ -445,6 +445,18 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
         supports: |protocol| protocol == lodestone_v1_19::PROTOCOL_1_19_4,
         make: |_| Box::new(lodestone_v1_19::V762ServerProtocol),
     },
+    #[cfg(feature = "v1-20-6")]
+    ServerFamily {
+        label: "v1-20-6",
+        supports: |protocol| protocol == lodestone_v1_20_6::PROTOCOL,
+        make: |_| Box::new(lodestone_v1_20_6::V766ServerProtocol),
+    },
+    #[cfg(feature = "v1-21-11")]
+    ServerFamily {
+        label: "v1-21-11",
+        supports: |protocol| protocol == lodestone_v1_21_11::PROTOCOL,
+        make: |_| Box::new(lodestone_v1_21_11::V774ServerProtocol),
+    },
 ];
 
 /// Returns a boxed **server** protocol for `protocol`, if a compiled-in family
