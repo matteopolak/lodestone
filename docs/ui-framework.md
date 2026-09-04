@@ -51,6 +51,8 @@ the other. A spanning grid cell splits its size with Mojang's integer `Divisor` 
 the parts always sum back exactly) and only ever *grows* a row/column that is smaller than the span
 needs. Whole-tree placement goes through `align_in_rectangle`; centred placement is the same call
 with `0.5` on both axes, so it does not have a second convenience entry point to keep in sync.
+`FrameLayout` minimum bounds are likewise changed through the per-axis `set_min_width` and
+`set_min_height` methods; callers that need both set both explicitly.
 
 Using a hand-arithmetic layout instead of a container is legitimate vanilla, too — the title screen,
 for one, hand-centres rather than using any layout class. Whether a screen is layout-driven or
