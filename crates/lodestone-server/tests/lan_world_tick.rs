@@ -1,90 +1,29 @@
 //! A LAN-hosted world must actually tick — exactly **once** per tick, no
 //! matter how many players are connected.
 //!
-//! # What was broken
+//! # Observables
 //!
-//! `tick::run_tick_loop` had exactly one caller,
-//! `IntegratedServer::open_in_memory_with_mobs`. `IntegratedServer::bind` — the
-//! open-to-LAN path — never spawned it, and said so in a comment. So over LAN
-//! block entities held state but never advanced, scheduled and fluid ticks
-//! never drained, random ticks never fired, mobs never ticked, and `game_tick`
-//! never incremented. Everything else about the connection looked perfectly
-//! healthy: join, keep-alives and chunk streaming all worked.
+//! `IntegratedServer::bind` owns one `tick::run_tick_loop` for the world. The
+//! test checks that the loop exists and advances through
+//! `IntegratedServer::tick_stats()`, then compares tick-count deltas with zero
+//! and two connected clients. The bound is between the one-loop and
+//! one-loop-per-client predictions.
 //!
-//! # Why the *count* matters more than the fix
+//! A hand-written counting `ChunkSource` provides a structural check that the
+//! loop visits its tick area. It is intentionally separate from the rate
+//! measurement: cached columns may be read once while the tick counter advances
+//! on every period, so source visits cannot serve as a rate proxy.
 //!
-//! "Spawn a tick loop" has an obvious wrong implementation: spawn it inside the
-//! accept arm, i.e. once per connection. That yields a world advancing at N×
-//! speed with N players, which reads as a physics bug — mobs too fast, furnaces
-//! too quick, crops sprinting — for a long time before anyone suspects the loop
-//! count. It is also exactly the straddle `docs/server-ecs.md` forbids: a
-//! *world* concern living on a *connection*.
+//! The probe chunk lies inside the tick area and outside each connection's view.
+//! That keeps its count attributable to world ticking rather than terrain
+//! streaming. The source returns an all-air column, so random ticks do not add
+//! unrelated feed traffic to this gate.
 //!
-//! So the second assertion below (two connections, still one tick's worth of
-//! work per tick) is the one that distinguishes a correct fix from a plausible
-//! wrong one. A gate without it passes on both.
+//! # Measurement units
 //!
-//! # The instrument, and why it is not `TickClock`
-//!
-//! Two different observables, because neither alone is sufficient:
-//!
-//! * **`IntegratedServer::tick_stats()`** answers "does a loop exist and
-//!   advance". It is `None` on a handle with no loop, which is what `bind`
-//!   returned before this — so `expect()` on it is a control that fails
-//!   loudly against the old code.
-//! * **A counting `ChunkSource`** answers "does the loop iterate its tick area
-//!   at all, and does it reach the source". It is a *structural* control, not
-//!   the rate instrument.
-//!
-//! The counting source is hand-written rather than the real generator on
-//! purpose: `OverworldGenerator` carries a 512-entry memo cache that absorbs a
-//! repeat request for the same `(cx, cz)`, which would make any
-//! generation-count gate vacuous. That trap was already found and fixed once in
-//! `chunk.rs`'s own determinism test.
-//!
-//! # CHANGED by `ChunkStore` (`crates/lodestone-server/src/chunk_store.rs`)
-//!
-//! **The rate instrument used to be the counting source, and that no longer
-//! works — by design.** This section previously read: *"`tick_stats()` cannot
-//! answer that: a per-connection loop would carry its own `TickClock`, so the
-//! server handle's stats would read a perfectly normal 20 TPS while the world
-//! ran at 40. The counting source sees every loop's `column()` calls regardless
-//! of which clock it reports to, which is why the doubling assertion is built
-//! on it."*
-//!
-//! That reasoning was correct and the instrument worked, because
-//! `run_tick_loop` re-fetched every column of its tick area from the source on
-//! **every tick** — so probe visits per second *were* the tick rate.
-//! `IntegratedServer::bind` now wraps its source in a `ChunkStore`, so a column
-//! is generated once and thereafter read from cache. Probe visits over a 1.5 s
-//! window went from ~29 to **1**, and this test's own measurement precondition
-//! caught it and failed rather than silently reporting a ratio computed from
-//! noise. Deleting the per-tick regeneration is the entire point of the
-//! `ChunkStore` change; the instrument was measuring the bug.
-//!
-//! So the rate is now the **`TickStats::tick_count` delta**, and the probe count
-//! is demoted to the structural control described above.
-//!
-//! **What that costs, stated plainly.** The old objection to `tick_stats()` is
-//! not fully answered: a wrong per-connection implementation that constructs its
-//! own `TickClock` rather than cloning `bind`'s would run the world at N× while
-//! the handle reported 1×, and this gate would pass. What is still caught is the
-//! natural form of that mistake — spawning `run_tick_loop` in the accept arm
-//! with `Arc::clone(&clock)`, the only clock in scope there — which doubles
-//! `tick_count` and fails the ratio below. To close the gap properly, expose a
-//! cache-*hit* counter from `ChunkStore` (it already keeps one internally as
-//! `Cache::stamp`) once that type becomes public for the plan's U6/U8, and
-//! restore the ratio on that. It is a rate of per-tick tick-area iteration, so
-//! it has exactly the property the old probe count had, without being defeated
-//! by the caching.
-//!
-//! # Duration species
-//!
-//! Every figure below is a **delta** across a window this test opens and
-//! closes, over counters this test constructs. Nothing read here accumulates
-//! past the gate: `TickStats::ticks` is per-`IntegratedServer` (a fresh
-//! `TickClock` per handle), but it is still read as a delta rather than an
-//! absolute so that stays true if the clock is ever hoisted.
+//! Every reported count is a **delta** across a window opened and closed by this
+//! test. `TickStats` belongs to one `IntegratedServer`, so deltas distinguish
+//! progress during each measurement from ticks that occurred earlier.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -310,11 +249,10 @@ async fn bind_lan(view_radius: i32) -> (IntegratedServer, TickProbe, std::net::S
 /// i.e. until its tick counter is past [`INITIAL_RANDOM_TICK_DEFERRAL_TICKS`].
 ///
 /// Waits on the **tick counter**, not on wall-clock: 40 ticks is 2.0 s only at a
-/// nominal 20 TPS, and this file's own table records the loop managing 2.66
-/// ticks/s on a loaded shared checkout. A `sleep(2.1s)` would therefore be a
-/// load-bound flake in precisely the conditions this repo runs under, and it
-/// would fail as "the store is not in the source path" — a wrong diagnosis
-/// rather than a timeout.
+/// nominal 20 TPS, but a fixed-duration sleep is not a reliable substitute:
+/// scheduler load can delay the loop and make the probe count look like a
+/// source-path failure. Polling the counter keeps the wait tied to the event
+/// that enables the structural check.
 ///
 /// The timeout fails rather than skips, and reports the counter it reached, so a
 /// genuinely stalled loop is distinguishable from a slow one.
@@ -353,8 +291,7 @@ async fn ticks_delta_over(server: &IntegratedServer, window: Duration) -> (u64, 
     (after - before, elapsed)
 }
 
-/// Both halves of the LAN tick fix: the LAN path ticks, and it ticks exactly
-/// once.
+/// Both LAN tick invariants: the path advances, and it advances exactly once.
 ///
 /// # Why `multi_thread` here, when `chunk.rs`'s generation-blocking gate
 /// insists on `current_thread`
@@ -368,22 +305,18 @@ async fn ticks_delta_over(server: &IntegratedServer, window: Duration) -> (u64, 
 /// `current_thread` is load-bearing there, and it asserts the flavour.
 ///
 /// This gate asks *"how many tick loops are there?"*, which is a property of
-/// the count, not of thread scheduling. On `current_thread` the loop competes
-/// with this test body for the one thread — and because `run_tick_loop` still
-/// re-generates every column in its area synchronously **every tick** (the
-/// documented gap in this file's own "CHANGED by `ChunkStore`" section), it
-/// starves: measured 7 ticks in 904 ms, with a 500 ms `sleep` overshooting to
-/// 904 ms. That is a real limitation of the synchronous regeneration, and
-/// letting it add noise here would only make this gate flaky about something
-/// it is not testing. A doubled loop still doubles the count on any number of
-/// worker threads, so the assertion that matters is unaffected.
+/// the count, not of thread scheduling. On `current_thread` the synchronous
+/// work in the tick area competes with this test body for the one thread and
+/// can starve its measurement window. A worker pool isolates the scheduler
+/// while a duplicated loop still doubles the tick count, so the assertion
+/// remains about loop multiplicity.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn lan_bind_runs_exactly_one_world_tick_loop() {
     let (server, probe, addr) = bind_lan(0).await;
 
-    // ---- Control #1: this `expect` is what fails against the old code. ----
-    // `bind` used to construct `Self { tick_task: None, clock: None }`, so
-    // `tick_stats()` returned `None` and there was nothing to advance.
+    // ---- Control 1: a LAN-bound server must expose its tick loop. ----
+    // A handle without a loop returns `None` from `tick_stats()`, so this
+    // precondition distinguishes a missing loop from one that is merely slow.
     let start_stats = server
         .tick_stats()
         .expect("#439: a LAN-bound server must have a world tick loop, so tick_stats() is Some");
@@ -398,7 +331,7 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
     let window = Duration::from_millis(1500);
     // The loop defers its first random-tick pass, and that pass is
     // the only thing that reaches `ChunkSource::column`. Get past it before the
-    // probe is read, or Control #2 below measures a deferral rather than the
+    // probe is read, or the structural control below measures a deferral rather than the
     // source path. Ordered before the rate window so the window itself does not
     // have to be long enough to cover the deferral.
     await_past_random_tick_deferral(&server).await;
@@ -409,14 +342,12 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
         "#439: TickStats::ticks did not advance over {solo_elapsed:?} — the loop exists but is \
          not running"
     );
-    // ---- Control #2: the loop really does iterate its tick area, through the
+    // ---- Control 2: the loop really does iterate its tick area, through the
     // source. ----
-    // This is what the *rate* used to be measured on; since `ChunkStore` landed
-    // it is a one-shot structural check instead (see this file's own
-    // "CHANGED by `ChunkStore`" section). Exactly one visit per chunk is the
-    // property the store exists to create, so this asserts the store is in the
-    // path as well as that the loop reaches the source at all: a `> 0` alone
-    // would also pass if the loop were regenerating every tick.
+    // Cached columns make this a one-shot structural check rather than a rate
+    // instrument. Exactly one visit to the probe verifies that the tick area
+    // reaches the source through the cache; a `> 0` check alone would also pass
+    // if the loop bypassed caching and regenerated every tick.
     assert_eq!(
         probe.probe(),
         1,
@@ -427,35 +358,14 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
          is already past by construction — see `await_past_random_tick_deferral` — so 0 here \
          is a real freeze, not a wait"
     );
-    // `start_stats` exists only for Control #1's `expect`; the rate above is a
+    // `start_stats` exists only for Control 1's `expect`; the rate above is a
     // bracketed delta, per `ticks_delta_over`'s doc comment.
     let _ = start_stats;
 
-    // Report the achieved rate against vanilla's 20 Hz, but do **not** assert
-    // on it — an absolute-rate assertion here would be a load flake that says
-    // nothing about the loop count, which is why the comparison below is a ratio
-    // between two windows measured moments apart under whatever conditions
-    // happen to hold. Measured on the same machine, same code, 5×5 tick area,
-    // when the rate instrument was still probe visits and `run_tick_loop`
-    // re-generated every column every tick:
-    //
-    // | run | probe visits / s | nominal |
-    // |---|---|---|
-    // | shared checkout, unoptimised, ~4 concurrent agents building | **2.66** | 20 |
-    // | shared checkout, `--release` | **19.29** | 20 |
-    // | isolated worktree, **unoptimised**, machine idle | **19.29** | 20 |
-    //
-    // **The dominant variable was machine load, not the build profile** — a
-    // correction worth keeping, because the first two rows alone say
-    // "debug is 7× slower" and that inference is wrong. The third row is the
-    // same unoptimised build as the first, on an idle machine, matching release
-    // exactly.
-    //
-    // Those numbers are now historical: since `ChunkStore` landed the loop no
-    // longer regenerates, so the figure is a real tick rate rather than a
-    // generator throughput, and it should sit near 20 regardless of load. Kept
-    // because they are the evidence that the pre-`ChunkStore` rate was
-    // load-bound rather than profile-bound.
+    // Report the achieved rate against the nominal 20 Hz, but do **not** assert
+    // on it. Absolute-rate assertions are sensitive to machine load and say
+    // nothing about loop multiplicity; the comparison below uses two windows
+    // from the same process instead.
     let nominal = (solo_elapsed.as_millis() / TICK_PERIOD_MILLIS) as u64;
     eprintln!(
         "solo: {solo_delta} ticks over {solo_elapsed:?} (nominal 20 Hz would be {nominal})"
@@ -498,7 +408,8 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
 
     // The load-bearing bound. 1.5× sits strictly between the two hypotheses, so
     // this fails on a per-connection tick loop and passes on a per-world one.
-    // Without this assertion the whole gate is satisfied by the wrong fix.
+    // Without this assertion, a loop spawned per connection could satisfy the
+    // other checks while advancing the world at the wrong speed.
     assert!(
         duo_rate <= solo_rate * 1.5,
         "#439: the world advanced at {duo_rate:.2} ticks/s with 2 connections versus \
@@ -522,13 +433,9 @@ async fn lan_bind_runs_exactly_one_world_tick_loop() {
 /// tick loop must not have broken LAN serving, and a LAN client must still
 /// receive its terrain.
 ///
-/// This also exercises `serve_connection_with_mob_events_and_commands_shared`'s
-/// (the function `IntegratedServer::bind` actually calls today —
-/// `serve_connection_with_mob_events_shared` was the entry point when this
-/// comment was written, but has since been superseded and is now dead code)
-/// non-blocking generation and the per-connection feed pair the relay arm
-/// hands out — both of which are new on this path and neither of which the rate
-/// gate above touches.
+/// This also exercises the non-blocking generation and per-connection feed pair
+/// used by `IntegratedServer::bind`'s connection service; neither is touched by
+/// the rate gate above.
 ///
 /// `multi_thread` for the same reason as the gate above.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
