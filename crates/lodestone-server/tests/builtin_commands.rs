@@ -8,12 +8,11 @@
 //! `V770ServerProtocol`, a real observable effect. It cannot live here, because it
 //! needs a version crate.
 //!
-//! What *this* file covers is the machinery underneath, which that gate exercises
-//! only along the paths the three shipped commands happen to take. The
-//! modifier/fork substrate in particular has **no production caller at all** until
-//! `/execute` lands, so without something here it is an island of precisely the
-//! kind `crate::commands` was built to end. `ServerCommands::from_registrar` is the
-//! seam that lets a gate drive it.
+//! What *this* file covers is the command machinery underneath those connected
+//! paths. Synthetic registrar trees exercise modifier/fork dispatch directly,
+//! while the `/execute` cases below verify that the production registration
+//! reaches the same machinery. `ServerCommands::from_registrar` is the seam
+//! that lets the synthetic gates drive it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -366,9 +365,8 @@ fn a_selector_that_matches_nobody_is_refused_rather_than_succeeding_emptily() {
 }
 
 /// `scores=` against a real scoreboard, with pairwise-distinct holder values
-/// (alice=5, bob=10, carol=15) and dave left with no score at all — the input
-/// this repo's evidence standard names explicitly: "a `scores` filter tests
-/// nothing against a scoreboard where every player has the same score".
+/// (alice=5, bob=10, carol=15) and dave left with no score at all. Distinct
+/// values make a filter that ignores the stored score observable.
 /// Dave's unset score is the second discriminating case: an in-range value a
 /// holder never received must refuse, not default to a pass.
 #[test]
@@ -691,8 +689,8 @@ fn the_correct_key_on_its_own_node_reads_its_value() {
 // ---------------------------------------------------------------------------
 
 /// `/gamerule` writes and reads back through whichever [`RuleStore`] it is given —
-/// including the **production** `WorldStateHandle`, which is the store the old
-/// island's `&GameRulesHandle` parameter could never have reached.
+/// including the **production** `WorldStateHandle`, so the command and the
+/// caller share the same persistent rule store rather than a detached copy.
 #[test]
 fn gamerule_writes_the_store_it_is_handed_including_the_production_world_state() {
     let commands = ServerCommands::new();
@@ -717,8 +715,8 @@ fn gamerule_writes_the_store_it_is_handed_including_the_production_world_state()
         .run(&command_world, &alice, "gamerule random_tick_speed 6")
         .expect("root matched");
     assert!(outcome.response.is_ran(), "{outcome:?}");
-    // The effect read off the *store*, not off the response: the response could be
-    // right while the write went nowhere, which is exactly what the island did.
+    // Read the effect back from the *store*, not from the response: response
+    // text alone cannot prove that the write reached the shared state.
     assert_eq!(world_state.random_tick_speed(), 6);
 
     // The tree enforces the type, so `GameRules::set` never sees "7".
@@ -838,7 +836,7 @@ fn the_effect_outbox_delivers_to_one_player_once_and_refuses_a_stranger() {
 }
 
 // ---------------------------------------------------------------------------
-// The new command set (issue #48)
+// Stateful world and player commands
 // ---------------------------------------------------------------------------
 
 fn run_stateful(
@@ -1169,8 +1167,8 @@ fn say_me_and_msg_produce_the_three_distinct_effect_shapes() {
 }
 
 /// `/spawnpoint` writes a [`Effect::SetRespawnPoint`] rather than moving the
-/// player — the two are easy to conflate and only one exists here (see the
-/// command's own module doc for why `/tp` itself is out of scope for now).
+/// player. The test keeps that effect distinct from the teleport effects in
+/// the `/tp` cases below.
 #[test]
 fn spawnpoint_sets_a_respawn_point_effect_not_a_teleport() {
     use lodestone_server::Effect;
@@ -1254,12 +1252,10 @@ fn tp_relative_and_local_coordinates_diverge_at_a_non_coincident_rotation() {
 }
 
 /// `/tp <targets> <location>` resolves the location against the **command
-/// source**, never the target — vanilla's own `Vec3Argument.getCoordinates`
-/// takes the `CommandSourceStack`, not the entity being moved. Bob (at
-/// `x = 5` per [`roster`]) is teleported relative to Alice's position, not
-/// his own, which is the surprising-in-English but correct behaviour this
-/// test pins. The optional `<yaw> <pitch>` pair is carried through as
-/// `Some`, distinct from the bare form's `None`.
+/// source**, never the target. Bob (at `x = 5` per [`roster`]) is teleported
+/// relative to Alice's position, not his own, which is the surprising-in-English
+/// but correct behaviour this test pins. The optional `<yaw> <pitch>` pair is
+/// carried through as `Some`, distinct from the bare form's `None`.
 #[test]
 fn tp_targets_location_resolves_against_the_source_never_the_target() {
     use lodestone_server::{DirectedEffect, Effect};
@@ -1346,11 +1342,10 @@ fn tp_to_an_entity_resolves_its_current_position() {
 }
 
 /// `/summon` reaches the **same** shared `MobHandle` the world tick loop's
-/// mob population lives behind — the property that keeps a summoned mob from
-/// being an island (see the command's own module doc). Verified by reading
-/// the handle back through [`lodestone_server::EntitySource::snapshots`], the
-/// exact surface `EntityStreamer` diffs to decide what a client is told about
-/// — not a private field of the sim.
+/// mob population lives behind. Verified by reading the handle back through
+/// [`lodestone_server::EntitySource::snapshots`], the exact surface
+/// `EntityStreamer` diffs to decide what a client is told about — not a private
+/// field of the sim.
 #[test]
 fn summon_spawns_into_the_shared_mob_handle_at_the_resolved_position() {
     use lodestone_server::{EntitySource, MobHandle};
@@ -1455,12 +1450,10 @@ fn defaultgamemode_writes_the_store_a_new_join_reads() {
 // ---------------------------------------------------------------------------
 //
 // The substrate tests above (`a_rewrite_modifier_replaces_the_source_the_executor_runs_for`,
-// `a_fork_modifier_runs_the_deepest_executor_once_per_produced_source`) already
-// prove the *mechanism* against a synthetic tree. These prove `/execute`'s own
-// registration wires that mechanism up correctly, and per this crate's own
-// evidence standard, every one of them predicts a rewritten answer that a
-// caller-position/caller-entity reading of the same text would get wrong —
-// never merely "the command succeeded".
+// `a_fork_modifier_runs_the_deepest_executor_once_per_produced_source`) prove
+// the *mechanism* against a synthetic tree. These cases prove `/execute`'s
+// registration reaches that mechanism, with expected values chosen to differ
+// from caller-position or caller-entity resolution.
 
 /// `execute as <other> run kill` must kill the *other* player, never the
 /// caller — the one discriminating property `/execute`'s whole design exists
@@ -1518,8 +1511,8 @@ fn execute_at_then_positioned_lands_where_neither_raw_coordinate_would() {
 /// its position — `PlayerCandidate::rotation`'s whole reason for existing.
 /// Discriminated with a `^`-local `positioned` hop immediately after: local
 /// coordinates resolve against whatever rotation is in the source at that
-/// point, so a version that kept the caller's own rotation (the pre-fix
-/// behaviour) lands on a provably different block.
+/// point, so using the caller's rotation instead lands on a provably different
+/// block.
 #[test]
 fn execute_at_transfers_the_targets_rotation_not_just_its_position() {
     use lodestone_server::Effect;
@@ -1806,7 +1799,7 @@ fn execute_run_reenters_the_root_so_execute_nests() {
 }
 
 // ---------------------------------------------------------------------------
-// `/worldborder` (issue #580)
+// `/worldborder`
 // ---------------------------------------------------------------------------
 
 /// Builds the pieces `/worldborder`'s tests need: real commands, a real
@@ -2226,10 +2219,9 @@ fn execute_if_score_compares_two_holders_inclusively_at_the_boundary() {
     assert!(gt.effects.is_empty(), "5 > 9 is false: {gt:?}");
 }
 
-/// `/scoreboard`'s own store is the **production** `WorldStateHandle` — the
-/// same island shape `/gamerule`'s own history warns about, checked the same
-/// way that gate checks it: read the effect back off the store, not off the
-/// response text.
+/// `/scoreboard` uses the **production** `WorldStateHandle`; the test reads the
+/// value back from that store through a second command tree, rather than
+/// trusting response text from the write operation.
 #[test]
 fn the_store_a_command_writes_is_the_same_one_a_second_call_reads() {
     let commands = ServerCommands::new();
@@ -2385,15 +2377,10 @@ fn modify_reaches_every_option_kind() {
     assert!(!outcome.response.is_ran(), "{outcome:?}");
 }
 
-/// `team list <team>` must actually echo every configurable field back —
-/// the read side that makes `nametagVisibility`/`deathMessageVisibility`/
-/// `collisionRule`/`color`/`prefix`/`suffix`/`displayName` real,
-/// production-reachable values rather than fields only a command's own
-/// write path and this crate's tests ever touch. Confirmed by
-/// `cargo run -q -p xtask -- islands`, which flagged
-/// `Team::nametag_visibility`/`Team::death_message_visibility` as zero
-/// production reads before `register_list`'s single-team branch gained this
-/// second feedback line.
+/// `team list <team>` must echo every configurable field back. The assertions
+/// cover `nametagVisibility`/`deathMessageVisibility`/`collisionRule`/`color`/
+/// `prefix`/`suffix`/`displayName`, so each field is observable through the
+/// command's read path as well as its write path.
 #[test]
 fn list_echoes_every_configurable_field_back() {
     use lodestone_server::commands::team_store::{CollisionRule, Visibility};
@@ -2439,10 +2426,9 @@ fn list_echoes_every_configurable_field_back() {
     }
 }
 
-/// `team=`, `team=<name>` and `team=!<name>` against a real store — the same
-/// discriminating shape this file's own `scores_filters_against_a_real_scoreboard…`
-/// test uses: pairwise-distinct membership (alice on red, bob on blue) plus
-/// two players on **no** team at all (carol, dave), so `team=` bare (matches
+/// `team=`, `team=<name>` and `team=!<name>` against a real store, using
+/// pairwise-distinct membership (alice on red, bob on blue) plus two players
+/// on **no** team at all (carol, dave), so `team=` bare (matches
 /// "no team") and `team=red` cannot be satisfied by the same input.
 #[test]
 fn team_filters_against_a_real_store_including_the_no_team_case() {
@@ -3228,10 +3214,9 @@ fn execute_store_data_storage_scales_and_types_the_value() {
 }
 
 /// The sharpest corner of `/execute store`'s semantics, carried over from
-/// vanilla's own `BuildContexts.execute` (see
-/// `lodestone_server::commands::registrar::StoreSink`'s own doc): when a *forked*
-/// condition later in the chain matches nothing, the wrapped command never
-/// runs at all, and the store target is left exactly as it was — not zeroed.
+/// `lodestone_server::commands::registrar::StoreSink` leaves the target untouched
+/// when a *forked* condition later in the chain matches nothing: the wrapped
+/// command never runs and the store target is not zeroed.
 /// Only a *bare* conditional (nothing after it) reliably reports `0`/`1`,
 /// because that is the executor path, not the fork path.
 #[test]
@@ -3267,8 +3252,8 @@ fn execute_store_target_is_left_untouched_when_a_forked_condition_matches_nothin
 /// `/summon` itself does (this modifier calls
 /// `crate::commands::summon::spawn_entity`, not a second code path), at the
 /// *current* source position — honouring an earlier `positioned` in the same
-/// chain, matching `spawnEntityAndRedirect`'s own `source.getPosition()`
-/// read — and the chain continues afterward (`gamemode creative alice`
+/// chain, reading the current source position — and the chain continues
+/// afterward (`gamemode creative alice`
 /// stands in for "downstream `run` still executes", since this crate's `@s`
 /// selector cannot resolve to the newly summoned non-player source — see
 /// this test's own sibling below for that disclosed gap).

@@ -11,8 +11,8 @@
 //!
 //! The stand-in protocol here uses a trivial wire format, not vanilla 26.2's:
 //! the version-correct client-bound encoders (`join_game`, registry data,
-//! `level_chunk_with_light`) live in the version crate and are a reported seam
-//! (the client stack is decode-only today). What this test *does* prove is the
+//! `level_chunk_with_light`) live in the version crate; this test uses a
+//! decode-only client stand-in. What this test *does* prove is the
 //! full server plumbing: transport → codec → login/configuration/play state
 //! machine → worldgen → client decode, with zero framing errors, over the
 //! shared seam, including the ack-driven state transitions and single
@@ -220,8 +220,7 @@ fn overworld_final_density(seed: i64, root: &Path) -> Density {
 
 #[tokio::test]
 async fn integrated_server_streams_worldgen_chunks_over_memory_transport() {
-    // The worldgen crate owns the staged vanilla data (plan §3 puts it in the
-    // version crate; it is staged as fixtures this session).
+    // The worldgen crate owns the checked-in fixture data resolved below.
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../lodestone-worldgen/tests/support/worldgen_data");
     let seed = 42_i64;
@@ -464,7 +463,7 @@ async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
         }
 
         // No storage: this fixture serves fresh columns and edits are
-        // discarded by design. Explicit rather than inherited — issue #440.
+        // discarded by design. Explicit rather than inherited.
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
             // No storage; edits are discarded by design.
         }
@@ -587,12 +586,10 @@ async fn integrated_server_streams_entity_lifecycle_over_memory_transport() {
     println!("streamed pig lifecycle: spawn -> update -> remove over memory transport");
 }
 
-/// End-to-end proof that issue #284/#285's unified tick clock is not an
-/// island: `IntegratedServer::open_in_memory_with_mobs` — the exact
-/// constructor `lodestone-shell`'s `net.rs` calls to start singleplayer — is
-/// driven through its *public* API only (no `#[path]` shortcut into
-/// `tick.rs`'s own internals), and its `tick_stats()` accessor must report
-/// real, advancing counts.
+/// End-to-end proof that the integrated server's unified tick clock is exposed
+/// through `IntegratedServer::open_in_memory_with_mobs`'s public API and that
+/// `tick_stats()` reports real, advancing counts. No `#[path]` shortcut into
+/// `tick.rs`'s internals is involved.
 ///
 /// `#[tokio::test(start_paused = true)]` makes this deterministic rather than
 /// wall-clock-dependent: `tokio::time::advance` drives the *same* virtual
@@ -630,7 +627,7 @@ async fn open_in_memory_with_mobs_advances_the_unified_clock_and_reports_stats()
         }
 
         // No storage: this fixture serves fresh columns and edits are
-        // discarded by design. Explicit rather than inherited — issue #440.
+        // discarded by design. Explicit rather than inherited.
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
             // No storage; edits are discarded by design.
         }

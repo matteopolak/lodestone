@@ -1,17 +1,14 @@
 //! Entity and player persistence end to end, through the real production entry
-//! point (issues [#302](https://github.com/matteopolak/lodestone/issues/302) and
-//! [#303](https://github.com/matteopolak/lodestone/issues/303)):
+//! point:
 //! `IntegratedServer::open_persistent_with_mobs` → populate → shutdown →
 //! **reopen** → the cow and the dropped diamond are still there.
 //!
 //! # Why this file exists at all rather than a spot check
 //!
-//! Because the defect it guards is silent. Before this work a restart deleted
-//! every mob and every dropped item with **no error anywhere** — the world opened,
-//! the join succeeded, the chunks streamed, and the animals were simply gone. That
-//! is not something playing the game once can distinguish from "the cow wandered
-//! off", which is exactly why `CLAUDE.md` treats silent data loss as the one class
-//! always worth a real assertion.
+//! A restart can silently delete every mob and dropped item with **no error
+//! anywhere** — the world opens, the join succeeds, the chunks stream, and the
+//! animals are simply gone. Playing the game once cannot distinguish that from
+//! "the cow wandered off", so the gate asserts the persisted records directly.
 //!
 //! # What this gate evidences, and what it does not
 //!
@@ -28,11 +25,11 @@
 //! `world_persistence_round_trip.rs` makes for terrain, and the same trade: a
 //! cheap deterministic terrain source, because this gate is about the disk.
 //!
-//! # The race this file had to solve, and why it is a poll rather than a sleep
+//! # Why reseeding requires a poll rather than a sleep
 //!
 //! `MobHandle::reseed` **replaces the whole `MobSim`** once the mob-seeding task
-//! has generated its terrain off-thread (issue #454 moved it off the world-open
-//! critical path). Anything spawned into the sim before that point is discarded.
+//! has generated its terrain off-thread. Anything spawned into the sim before
+//! that point is discarded.
 //! So a test that spawned immediately after `open()` would pass or fail on
 //! scheduler timing, and — worse — would fail in the direction that looks like a
 //! persistence bug.
@@ -135,8 +132,7 @@ const ITEM_POS: Vec3 = Vec3 {
 };
 /// A species whose defaults differ from `MobSim::spawn`'s `minecraft:zombie`
 /// fallback, so "the type was actually persisted" is distinguishable from "a mob
-/// came back with the placeholder type" — the shape of the
-/// `minecraft:acacia_boat` defect this repo has already shipped once.
+/// came back with the placeholder type".
 const COW: &str = "minecraft:cow";
 const DROPPED: &str = "minecraft:diamond";
 const DROPPED_COUNT: u8 = 7;
@@ -199,7 +195,7 @@ fn tempdir(name: &str) -> std::path::PathBuf {
     dir
 }
 
-/// **The gate for #303.** A mob and a dropped item survive close and reopen.
+/// A mob and a dropped item survive close and reopen.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_mob_and_a_dropped_item_survive_close_and_reopen() {
     let dir = tempdir("entities");
@@ -352,8 +348,7 @@ async fn a_fresh_world_has_no_entities_so_the_gate_above_cannot_pass_vacuously()
     server.shutdown().await;
 }
 
-/// **The gate for #302.** A player's inventory, position, health and game mode
-/// survive a disconnect.
+/// A player's inventory, position, health and game mode survive a disconnect.
 ///
 /// Driven through [`lodestone_server::player_data::PlayerDataStore`] against the
 /// world directory the real constructor created, which is the same store
@@ -615,7 +610,7 @@ fn a_save_does_not_delete_entities_this_session_never_owned() {
 }
 
 /// A file this build cannot read is **refused**, not silently replaced
-/// (issue #305).
+/// when the file contains an unsupported data version.
 ///
 /// This is the control that makes the refusal real: the same file with our own
 /// `DataVersion` must read fine, so the failure below is about the version and
