@@ -6226,7 +6226,7 @@ impl MenuNav {
 pub fn on_screen_frame<'a>(
     ui: &UiState,
     nav: &MenuNav,
-    death_message: Option<&str>,
+    death_message: Option<&[lodestone_model::text::InteractiveTextSpan]>,
     statuses: &super::status::StatusCache,
     favicons: &mut super::render::FaviconCache,
 ) -> Option<super::render::MenuFrame<'a>> {
@@ -10314,7 +10314,13 @@ mod tests {
         let (nav, _) = nav(nav_tag);
         let mut ui = UiState::new();
         ui.enter_dev_world();
-        ui.die(Some("blew up".to_string()));
+        ui.die(Some(vec![lodestone_model::text::InteractiveTextSpan {
+            text: "blew up".to_string(),
+            style: lodestone_model::TextStyle::default(),
+            click: None,
+            hover: None,
+            insertion: None,
+        }]));
         assert_eq!(ui.screen(), Screen::Death, "test setup did not reach Death");
         (nav, ui)
     }
