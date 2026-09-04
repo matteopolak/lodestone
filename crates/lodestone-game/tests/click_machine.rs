@@ -148,6 +148,7 @@ fn throw_is_a_noop_when_the_player_cannot_drop_items() {
         infinite_materials: false,
         can_drop: false,
         selected_hotbar_slot: 0,
+        furnace_input_items: None,
     };
     let outcome = Click::drop_one(0).apply(&mut menu, ctx);
     assert!(outcome.dropped.is_empty(), "nothing may be thrown");

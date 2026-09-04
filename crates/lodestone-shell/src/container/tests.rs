@@ -866,7 +866,7 @@ fn the_screens_paint_set_and_the_machines_stay_identical() {
         {
             machine_set = machine.quick_craft_slots().to_vec();
         }
-        click.apply(&mut machine, ctx);
+        click.apply(&mut machine, ctx.clone());
     }
     assert_eq!(
         machine_set, screen_set,

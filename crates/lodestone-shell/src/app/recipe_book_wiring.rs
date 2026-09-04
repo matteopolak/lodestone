@@ -140,8 +140,8 @@ fn two_clicks_per_step_would_dump_the_whole_stack_in_one_cell() {
     // The rejected design: literally two clicks per step, both left.
     let ctx = lodestone_game::click::PlayerCtx::survival();
     for step in &steps {
-        Click::left(step.source_slot).apply(&mut menu, ctx);
-        Click::left(step.cell).apply(&mut menu, ctx);
+        Click::left(step.source_slot).apply(&mut menu, ctx.clone());
+        Click::left(step.cell).apply(&mut menu, ctx.clone());
     }
 
     assert_eq!(

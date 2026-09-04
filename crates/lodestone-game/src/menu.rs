@@ -31,6 +31,7 @@ use crate::{
     item::ItemStack,
     recipe::CraftingGrid,
 };
+use lodestone_model::Identifier;
 
 /// Which menu layout a [`Menu`] uses, selecting the quick-move regions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,10 +454,9 @@ impl Menu {
     /// result slot at menu index 2,
     /// followed by the player's main storage and hotbar.
     ///
-    /// The fuel/smeltable routing vanilla's own furnace-family quick-move step does
-    /// by item kind is deliberately not modelled — see
-    /// [`crate::menus::build_menu`]'s doc comment ("two families are
-    /// genuinely different and are knowingly left on the generic order").
+    /// A server-declared cooking-input property set can route a known input to
+    /// slot 0 during prediction. Fuel routing remains deliberately unmodelled:
+    /// the client has no fuel data and must not invent it.
     /// What *is* modelled, because it needs no recipe/fuel data, is that the
     /// result slot only ever yields, never accepts.
     ///
@@ -1121,6 +1121,17 @@ impl Menu {
     /// craft cannot produce; the server's own loop can, and corrects slot 0 when
     /// it does.
     pub fn quick_move(&mut self, menu_index: usize) -> Option<ItemStack> {
+        self.quick_move_with_furnace_input_items(menu_index, None)
+    }
+
+    /// Quick-move with the server-declared furnace-family input set available
+    /// to the predictor. The public [`quick_move`](Self::quick_move) entry
+    /// retains generic behavior for callers without live recipe-book sync.
+    pub(crate) fn quick_move_with_furnace_input_items(
+        &mut self,
+        menu_index: usize,
+        furnace_input_items: Option<&[Identifier]>,
+    ) -> Option<ItemStack> {
         let original = self.slot_item_cloned(menu_index)?;
         let template = original.clone();
         let mut stack = original;
@@ -1130,7 +1141,12 @@ impl Menu {
                 self.quick_move_crafting(menu_index, container_size, layout, &mut stack)
             }
             (MenuKind::Generic { container_size }, None) => {
-                self.quick_move_generic(menu_index, container_size, &mut stack)
+                self.quick_move_generic(
+                    menu_index,
+                    container_size,
+                    &mut stack,
+                    furnace_input_items,
+                )
             }
         };
         if !moved {
@@ -1158,26 +1174,31 @@ impl Menu {
     /// likewise — so chests, barrels, ender chests, every `generic_9xN`,
     /// hoppers, dispensers, droppers and shulker boxes all share it.
     ///
-    /// What it does **not** cover is the menus that route by *item kind* rather
-    /// than by region: vanilla's own furnace-family quick-move step sends smeltables to
-    /// slot 0 and fuel to slot 1 before falling back to the main↔hotbar hop,
-    /// and its own brewing-stand step does the same for blaze powder,
-    /// ingredients and potions. Neither is modelled: both need a data table we
-    /// do not have (the fuel-value registry and the cooking-recipe input set),
-    /// and inventing one would be a guess. A furnace therefore predicts a
-    /// shift-click into container slot 0 where vanilla would have picked slot 1
-    /// or done nothing, and the server corrects it one round trip later. See
-    /// [`crate::menus::Menus`] for where the layout would be selected.
+    /// A furnace-family menu is the narrow exception: when the server supplied
+    /// its cooking-input property set and the player stack belongs to it, the
+    /// move targets only slot 0. The fuel branch remains absent because no
+    /// fuel data is available. Non-input stacks, and every click before that
+    /// property set arrives, keep the generic order below.
     fn quick_move_generic(
         &mut self,
         menu_index: usize,
         container_size: usize,
         stack: &mut ItemStack,
+        furnace_input_items: Option<&[Identifier]>,
     ) -> bool {
         let total = self.slot_count();
         if menu_index < container_size {
             // container -> player inventory, filling from the back
             self.move_item_stack_to(stack, container_size, total, true)
+        } else if matches!(
+            self.special_layout,
+            Some(SpecialLayout::Furnace | SpecialLayout::BlastFurnace | SpecialLayout::Smoker)
+        ) && furnace_input_items.is_some_and(|items| items.contains(stack.item()))
+        {
+            // A cooking input never takes the fuel slot. If input slot 0 cannot
+            // accept it, the server will reconcile rather than this predictor
+            // guessing a fuel classification or a fallback destination.
+            self.move_item_stack_to(stack, 0, 1, false)
         } else {
             // player inventory -> container
             self.move_item_stack_to(stack, 0, container_size, false)
@@ -1559,12 +1580,12 @@ mod tests {
         menu.set_carried(Some(stack("minecraft:stone", 9)));
         let ctx = PlayerCtx::survival();
 
-        drag(OUTSIDE_SLOT, drag_header::START, drag_type::EVEN).apply(&mut menu, ctx);
-        drag(0, drag_header::ADD, drag_type::EVEN).apply(&mut menu, ctx);
-        drag(1, drag_header::ADD, drag_type::EVEN).apply(&mut menu, ctx);
+        drag(OUTSIDE_SLOT, drag_header::START, drag_type::EVEN).apply(&mut menu, ctx.clone());
+        drag(0, drag_header::ADD, drag_type::EVEN).apply(&mut menu, ctx.clone());
+        drag(1, drag_header::ADD, drag_type::EVEN).apply(&mut menu, ctx.clone());
 
         // The interrupt. A left-click on an occupied slot would normally swap.
-        Click::left(5).apply(&mut menu, ctx);
+        Click::left(5).apply(&mut menu, ctx.clone());
         assert_eq!(
             count_at(&menu, 5),
             Some(8),
@@ -1937,6 +1958,100 @@ mod tests {
         assert_eq!(count_at(&menu, 9), Some(1), "it goes to main storage");
     }
 
+    fn assert_declared_furnace_input_does_not_spill_into_fuel(layout: SpecialLayout) {
+        let mut menu = Menu::furnace(layout);
+        let hotbar = menu.slot_count() - 9;
+        menu.set_slot_item(0, Some(stack("minecraft:stone", 64)));
+        menu.set_slot_item(hotbar, Some(stack("minecraft:raw_iron", 1)));
+
+        Click::shift(hotbar).apply(
+            &mut menu,
+            PlayerCtx::survival().with_furnace_input_items(vec![id("minecraft:raw_iron")]),
+        );
+
+        assert_eq!(count_at(&menu, 0), Some(64), "the full ingredient slot stays intact");
+        assert_eq!(
+            count_at(&menu, 1),
+            None,
+            "a declared input must not spill into the fuel slot"
+        );
+        assert_eq!(count_at(&menu, hotbar), Some(1), "the input remains with the player");
+    }
+
+    fn assert_declared_furnace_input_moves_to_ingredient_slot(layout: SpecialLayout) {
+        let mut menu = Menu::furnace(layout);
+        let hotbar = menu.slot_count() - 9;
+        menu.set_slot_item(hotbar, Some(stack("minecraft:raw_iron", 1)));
+
+        Click::shift(hotbar).apply(
+            &mut menu,
+            PlayerCtx::survival().with_furnace_input_items(vec![id("minecraft:raw_iron")]),
+        );
+
+        assert_eq!(count_at(&menu, 0), Some(1), "the declared input fills slot 0");
+        assert_eq!(count_at(&menu, 1), None, "the fuel slot stays empty");
+        assert_eq!(count_at(&menu, hotbar), None, "the input leaves the player inventory");
+    }
+
+    #[test]
+    fn furnace_declared_input_moves_to_ingredient_slot() {
+        assert_declared_furnace_input_moves_to_ingredient_slot(SpecialLayout::Furnace);
+    }
+
+    #[test]
+    fn blast_furnace_declared_input_moves_to_ingredient_slot() {
+        assert_declared_furnace_input_moves_to_ingredient_slot(SpecialLayout::BlastFurnace);
+    }
+
+    #[test]
+    fn smoker_declared_input_moves_to_ingredient_slot() {
+        assert_declared_furnace_input_moves_to_ingredient_slot(SpecialLayout::Smoker);
+    }
+
+    #[test]
+    fn furnace_declared_input_does_not_spill_into_fuel() {
+        assert_declared_furnace_input_does_not_spill_into_fuel(SpecialLayout::Furnace);
+    }
+
+    #[test]
+    fn blast_furnace_declared_input_does_not_spill_into_fuel() {
+        assert_declared_furnace_input_does_not_spill_into_fuel(SpecialLayout::BlastFurnace);
+    }
+
+    #[test]
+    fn smoker_declared_input_does_not_spill_into_fuel() {
+        assert_declared_furnace_input_does_not_spill_into_fuel(SpecialLayout::Smoker);
+    }
+
+    #[test]
+    fn furnace_non_input_preserves_generic_fuel_slot_fallback() {
+        let mut menu = Menu::furnace(SpecialLayout::Furnace);
+        let hotbar = menu.slot_count() - 9;
+        menu.set_slot_item(0, Some(stack("minecraft:stone", 64)));
+        menu.set_slot_item(hotbar, Some(stack("minecraft:raw_iron", 1)));
+
+        Click::shift(hotbar).apply(
+            &mut menu,
+            PlayerCtx::survival().with_furnace_input_items(vec![id("minecraft:raw_copper")]),
+        );
+
+        assert_eq!(count_at(&menu, 1), Some(1), "non-inputs retain generic ordering");
+        assert_eq!(count_at(&menu, hotbar), None);
+    }
+
+    #[test]
+    fn furnace_without_property_set_preserves_generic_fuel_slot_fallback() {
+        let mut menu = Menu::furnace(SpecialLayout::Furnace);
+        let hotbar = menu.slot_count() - 9;
+        menu.set_slot_item(0, Some(stack("minecraft:stone", 64)));
+        menu.set_slot_item(hotbar, Some(stack("minecraft:raw_iron", 1)));
+
+        Click::shift(hotbar).apply(&mut menu, PlayerCtx::survival());
+
+        assert_eq!(count_at(&menu, 1), Some(1), "missing data retains generic ordering");
+        assert_eq!(count_at(&menu, hotbar), None);
+    }
+
     /// Branches 4 and 5 of vanilla's own player-inventory quick-move step
     /// precede the main↔hotbar hop, so a helmet
     /// in main storage equips rather than moving to the hotbar.
@@ -2185,6 +2300,7 @@ mod tests {
             infinite_materials: false,
             can_drop: true,
             selected_hotbar_slot: 4,
+            furnace_input_items: None,
         };
         Click::hotbar_swap(9, 8).apply(&mut menu, ctx);
 
