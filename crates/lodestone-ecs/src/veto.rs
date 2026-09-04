@@ -30,7 +30,7 @@
 //! [`Verdict`]. It cannot re-enter the `World` because it is handed no way to.
 //! A plugin needing world state to decide keeps it in an `Arc` its own system
 //! refreshes each tick — which is a real constraint, written down in
-//! `docs/cancelable-actions.md` rather than discovered.
+//! `docs/packet-wiring.md` rather than discovered.
 //!
 //! # Reading the decision, and the "and no more" problem
 //!
@@ -50,7 +50,7 @@
 //! | block place | `lodestone_shell::interact::drive_placement` (a system) | **yes** |
 //! | entity damage | `lodestone_shell::sim::actions::Sim::attack_entity` | **yes** |
 //! | player move | `lodestone_controller::ecs::send_player_input` (a system) | **yes** |
-//! | inventory click | `lodestone_client::handle::ClientHandle::menu_click` | *see doc* |
+//! | inventory click | `lodestone_client::state::SharedState::menu_click` | **yes** |
 //! | player interact | `Sim::use_item_live` / `interact_entity` / `use_item_generic` | *see doc* |
 //!
 //! `crates/lodestone-ecs/tests/veto_coverage.rs` asserts which verbs have a live

@@ -82,7 +82,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | capability | client, native | client, WASM | server |
 |---|---|---|---|
 | observe a typed event | **done** — `GameEvent(ClientEvent)` via `MessageReader`, off by default, installed for every shipped `App` by `ServerBrandChannelPlugin` in `lodestone_app::client_app` | partial — 3 event kinds of ~110 | **gap** — no event bus; `dispatch_play_packet` applies inline |
-| cancel an event (`setCancelled`) | partial — `ActionVetoes` for 6 verbs, 4 asked in production | **gap** — no verdict-shaped export | **gap** — `TickSet::Adjudicate` is declared and empty, and `GameTick` never runs after boot; `CraftingStationHooks` is the one Allow/Deny/Replace hook |
+| cancel an event (`setCancelled`) | partial — `ActionVetoes` for 6 verbs, 5 asked in production | **gap** — no verdict-shaped export | **gap** — `TickSet::Adjudicate` is declared and empty, and `GameTick` never runs after boot; `CraftingStationHooks` is the one Allow/Deny/Replace hook |
 | priority order across plugins | **done** — `EventPriority::{Lowest..Monitor}` chained into all four schedules | partial — manifest `priority` orders guests; nothing else | **gap** |
 | `MONITOR` read-only | **done** — checked against bevy's per-system access set; blind to deferred `Commands` | **gap** | **gap** |
 | sync delayed/repeating tasks | **done** — `TaskScheduler::{schedule_once, schedule_repeating, cancel}` | partial — a guest counts its own `on-tick` calls; no cancellation, no off-tick | **gap** — `run_tick_loop` has no registration point (no `dyn Fn` in it) |
@@ -99,7 +99,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | AI goals | ceiling (server state) | ceiling | **done** — `SimMob::add_goal(priority, Box<dyn Goal>)` |
 | attribute writes | partial — `Attributes` readable; no client→server write exists in the protocol | **gap** | partial — reachable through `SimMob`, unaudited |
 | custom menu (`createInventory`) | **done**, local-only — `Menus::open_local`, one menu at a time | **gap** | **gap** — no open-to-remote-player path; `PlayerInventory` is a connection-task local |
-| inventory click veto | **gap** — `Verb::InventoryClick` is defined and deliberately unasked (`ClientHandle::menu_click` bypasses `ActionQueue`) | **gap** | **gap** |
+| inventory click veto | **done** — `SharedState::menu_click` asks before prediction and direct send | **gap** | **gap** |
 | custom items / recipes / station hooks | **done** — `CustomItemRegistry`, `RecipeRegistryExt::add_recipe` | **gap** | **done** — `CraftingStationHooks` (anvil, grindstone, smithing, loom, stonecutter) |
 | per-entity / per-chunk key-value data | partial — `EntityDataStore`/`ChunkDataStore` are in-memory by their own module doc | **gap** — `fs:read` only, no write | **gap** — `NbtStorageHandle` has no save path in `live_save`; nothing plugin-keyed is written to disk |
 | plugin config file / data dir | **done** — `lodestone-plugin-support::{paths, config}` | partial — read-only | **done** for an embedding crate (plain `std`) |
@@ -112,8 +112,8 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | panic isolation | ceiling by decision — trusted code, fatal | **done** — trap/fuel/memory limits, three denial gates | ceiling |
 | registered in the shipped binary | **done** — `run_with_app` / `WindowApp::new_with_app` | **gap** — nothing calls `load_directory` (searched `lodestone-shell`, `lodestone-app`) | **gap** — no constructor takes a plugin; `ServerApp::bootstrap()` is called internally with `ServerCorePlugin` only |
 
-Read by column: the native client column is done or ceiling in every row but three (inventory-click
-veto, durable per-entity data, `RawPacket`). The WASM column is gap in twenty of twenty-eight rows.
+Read by column: the native client column is done or ceiling in every row but two (durable per-entity
+data and `RawPacket`). The WASM column is gap in twenty of twenty-eight rows.
 The server column has real capability in exactly the rows where a hand-built registry could be
 bolted onto plain function calls — worldgen, entity spawn, crafting hooks, plugin channels, player
 registry — and gap in every row that needs a schedule to hang a system in.
@@ -123,13 +123,13 @@ registry — and gap in every row that needs a schedule to hang a system in.
 **Client, native.** Observation is `GameEvent`, and the one write site pushes every `ClientEvent`
 with no `match`, so a new variant cannot miss the bus. Cancellation is `ActionVetoes`: a plugin
 registers a `VetoFn` per `Verb`, priority-keyed; the engine asks *before* the effect is computed, so
-a `Deny` leaves the predictor untouched and nothing reaches the wire. Four verbs are asked in
+a `Deny` leaves the predictor untouched and nothing reaches the wire. Five verbs are asked in
 production, at the sites `crates/lodestone-ecs/tests/veto_coverage.rs` scans for:
 `VerbContext::BlockBreak` in `lodestone_shell::interact::drive_mining`, `VerbContext::BlockPlace`
 in `drive_placement`, `VerbContext::EntityDamage` in `Sim::attack_entity`, `VerbContext::PlayerMove`
-in `lodestone_controller::ecs::send_player_input`. `InventoryClick` and `PlayerInteract` are defined,
-constructible, and documented as unasked — the coverage test asserts both halves, so a verb cannot
-silently lose or gain its wiring.
+in `lodestone_controller::ecs::send_player_input`, and `VerbContext::InventoryClick` in
+`SharedState::menu_click`. `PlayerInteract` is defined, constructible, and documented as unasked —
+the coverage test asserts both halves, so a verb cannot silently lose or gain its wiring.
 
 One correction to `docs/plugin-api.md`'s intent-doctrine section, which says a plugin "has no way
 to veto a human's" dig because the human path never asks the intent seam: that is true of
@@ -282,10 +282,9 @@ Client-side a plugin opens its own menu with `lodestone_game::menus::Menus::open
 reclaims the player's inventory into the screen and refuses to close a server container behind the
 player's back. One menu at a time. Server-side a plugin cannot open a menu on a remote player — the
 container-open packet family and the click echo against a `lodestone-server` container model that
-"barely exists" (the menu issue's own closing note) are both unbuilt. The inventory-click veto is
-defined and unasked on the client because `ClientHandle::menu_click` sends directly and holds a
-guard at the commitment site; asking there is legal (the predicate takes no `World`) and is a
-small change.
+"barely exists" (the menu issue's own closing note) are both unbuilt. The client inventory-click
+veto is asked before prediction inside `SharedState::menu_click`; a denial leaves the menu untouched
+and sends no action despite that path bypassing `ActionQueue`.
 
 ### Persistence
 
@@ -478,8 +477,8 @@ plan, not a sprint.
 10. **WASM: commands, a tick scheduler with cancellation, `fs:write`, `Monitor` enforcement, and
     registering the host in the shipped shell** (`load_directory` from a plugins directory).
     Client, WASM. Medium, four small pieces.
-11. **Client native: ask the two deferred vetoes** (`InventoryClick` at `ClientHandle::menu_click`,
-    `PlayerInteract` at the three `Sim` use sites). Client, native. Small.
+11. **Client native: ask the remaining deferred veto** (`PlayerInteract` at the three `Sim` use
+    sites). Client, native. Small.
 12. **Both: durable per-entity/per-chunk plugin data**, one opaque blob per namespaced key,
     through the world save on the server and the plugin data directory on the client. Both sides,
     native (WASM follows via `fs:write`). Medium; the server half needs the save path to carry an

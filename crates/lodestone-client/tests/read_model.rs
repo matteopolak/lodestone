@@ -4,8 +4,9 @@
 //! Like `driver.rs`, every test uses [`lodestone_net::memory_pair`] and a
 //! hand-written fake [`VersionAdapter`]; none require a real server. The fake
 //! carries no version knowledge — it maps `(state, packet_id)` to canned events
-//! and encodes actions with a stable, inspectable layout so assertions are made
-//! against bytes on the wire, not against the read-model the client authored.
+//! and gives movement, keep-alive, and container-click actions stable,
+//! inspectable encodings so assertions are made against bytes on the wire, not
+//! against the read-model the client authored.
 
 use std::collections::HashMap;
 use std::time::Duration;
@@ -16,6 +17,7 @@ use lodestone_client::{
     ObjectiveMode, ObjectiveRenderType, OpenMenuSnapshot, Rotation, ScoreRenderType,
     ScoreboardSlot, ServerAddress, TeamAction, TeamParameters, Vec3, Visibility, WaitError,
 };
+use lodestone_game::click::{Click, PlayerCtx};
 use lodestone_model::event::{
     ChatKind, EntityAttributeModifier, EntityAttributeSnapshot, EntityEquipment,
     EntityMetadataUpdate, EntityMovement, EntityPose, EquipmentSlot, TeleportFlags,
@@ -32,6 +34,7 @@ use uuid::Uuid;
 
 const MOVE_ID: i32 = 0x11;
 const KEEPALIVE_RESP_ID: i32 = 0x30;
+const CONTAINER_CLICK_ID: i32 = 0x31;
 
 /// A world write the fake adapter applies to the [`WorldSink`] when a given
 /// packet arrives, mirroring how a real adapter decodes chunk packets in place.
@@ -151,6 +154,20 @@ impl lodestone_client::VersionAdapter for FakeAdapter {
             }
             ClientAction::KeepAliveResponse { id } => {
                 Ok(Some((KEEPALIVE_RESP_ID, id.to_be_bytes().to_vec())))
+            }
+            ClientAction::ContainerClick {
+                window_id,
+                state_id,
+                slot,
+                button,
+                ..
+            } => {
+                let mut payload = Vec::new();
+                payload.extend_from_slice(&window_id.to_be_bytes());
+                payload.extend_from_slice(&state_id.to_be_bytes());
+                payload.extend_from_slice(&slot.to_be_bytes());
+                payload.extend_from_slice(&button.to_be_bytes());
+                Ok(Some((CONTAINER_CLICK_ID, payload)))
             }
             _ => Ok(None),
         }
@@ -482,6 +499,133 @@ async fn drop_selected_predicts_into_the_menu_the_ui_reads() {
     assert!(handle.player_menu().slot_item(36).is_none());
 
     drop(handle);
+}
+
+#[tokio::test]
+async fn inventory_click_veto_stops_prediction_and_the_wire_while_allow_preserves_both() {
+    async fn start_case(
+        verdict: lodestone_ecs::veto::Verdict,
+        expected_button: i32,
+    ) -> (
+        lodestone_client::ClientHandle,
+        lodestone_client::EventStream,
+        Connection<tokio::io::DuplexStream>,
+    ) {
+        const CONTENT: i32 = 0x70;
+        let mut items = vec![None; 46];
+        items[36] = Some(stack("diamond", 5));
+        let adapter = FakeAdapter::new()
+            .begin(vec![Directive::SetState(ConnectionState::Play)])
+            .on(
+                ConnectionState::Play,
+                CONTENT,
+                vec![Directive::Emit(ClientEvent::ContainerContent {
+                    window_id: 0,
+                    state_id: 7,
+                    items,
+                    carried_item: None,
+                })],
+            );
+
+        let world = lodestone_ecs::new_ingest_handle();
+        let session = lodestone_ecs::spawn_session(&mut world.write());
+        let mut vetoes = lodestone_ecs::ActionVetoes::default();
+        vetoes.register(
+            lodestone_ecs::Verb::InventoryClick,
+            "wire-test",
+            0,
+            move |ctx| {
+                assert_eq!(
+                    *ctx,
+                    lodestone_ecs::VerbContext::InventoryClick {
+                        window_id: 0,
+                        slot: 36,
+                        button: expected_button,
+                    },
+                    "the public click path must pass its raw button to the veto"
+                );
+                verdict
+            },
+        );
+        world.write().insert_resource(vetoes);
+
+        let (client_io, server_io) = memory_pair();
+        let (handle, mut events) = ClientBuilder::new(server(), profile(), Box::new(adapter))
+            .ecs(world, session)
+            .connect_with(client_io);
+        let mut peer = Connection::new(server_io);
+        peer.write_packet(CONTENT, &[]).await.unwrap();
+        events.recv().await.expect("the inventory content event");
+        (handle, events, peer)
+    }
+
+    let (denied, denied_events, mut denied_peer) =
+        start_case(lodestone_ecs::veto::Verdict::Deny, 0).await;
+    let denied_before = denied.player_menu();
+    assert_eq!(
+        denied.menu_click(Click::left(36), PlayerCtx::survival()),
+        Ok(()),
+        "denial preserves the public no-error API"
+    );
+    assert_eq!(
+        denied.player_menu(),
+        denied_before,
+        "denial must not run the optimistic predictor"
+    );
+    denied
+        .send_action(ClientAction::KeepAliveResponse { id: 91 })
+        .expect("the barrier action must enter the same driver queue");
+    let (packet_id, payload) = tokio::time::timeout(
+        Duration::from_secs(1),
+        denied_peer.read_packet(),
+    )
+    .await
+    .expect("the barrier proves the driver drained everything before it")
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        (packet_id, payload),
+        (KEEPALIVE_RESP_ID, 91i64.to_be_bytes().to_vec()),
+        "the barrier must be the first packet; a container-click packet here means denial queued it"
+    );
+    drop(denied_events);
+    drop(denied);
+
+    let (allowed, allowed_events, mut allowed_peer) =
+        start_case(lodestone_ecs::veto::Verdict::Allow, 1).await;
+    allowed
+        .menu_click(Click::right(36), PlayerCtx::survival())
+        .expect("an allowed click must retain the public success path");
+    let (packet_id, payload) = tokio::time::timeout(
+        Duration::from_secs(1),
+        allowed_peer.read_packet(),
+    )
+    .await
+    .expect("an allowed click must reach the wire")
+    .unwrap()
+    .unwrap();
+    assert_eq!(packet_id, CONTAINER_CLICK_ID);
+    assert_eq!(
+        payload,
+        [0i32, 7, 36, 1]
+            .into_iter()
+            .flat_map(i32::to_be_bytes)
+            .collect::<Vec<_>>(),
+        "the allow control must carry the active window, server state id, slot, and button"
+    );
+    let menu = allowed.player_menu();
+    assert_eq!(
+        menu.slot_item(36).map(lodestone_game::item::ItemStack::count),
+        Some(2),
+        "right-click leaves the smaller half in the source slot"
+    );
+    assert_eq!(
+        menu.carried().map(lodestone_game::item::ItemStack::count),
+        Some(3),
+        "right-click carries the larger half"
+    );
+    drop(allowed_events);
+    drop(allowed);
 }
 
 #[tokio::test]

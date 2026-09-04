@@ -19,7 +19,7 @@
 //! - **Whether the ask is in the right place.** A `VerbContext::BlockBreak`
 //!   built *after* the predictor advanced would satisfy this and be useless.
 //!   Placement is argued in the call site's own comment and in
-//!   `docs/cancelable-actions.md`; only a behavioural test can check it, and the
+//!   `docs/packet-wiring.md`; only a behavioural test can check it, and the
 //!   registry's own unit tests plus `crates/lodestone-shell/tests/break_intent.rs`
 //!   are where that lives.
 //! - **Whether the ask is reachable.** A dead function containing one would pass.
@@ -38,30 +38,21 @@ const WIRED: &[(&str, &str)] = &[
     ("BlockBreak", "lodestone-shell/src/interact.rs"),
     ("BlockPlace", "lodestone-shell/src/interact.rs"),
     ("EntityDamage", "lodestone-shell/src/sim/actions.rs"),
+    ("InventoryClick", "lodestone-client/src/state.rs"),
     ("PlayerMove", "lodestone-controller/src/ecs.rs"),
 ];
 
 /// Verbs the registry defines that **nothing asks about yet**, with the reason.
 ///
-/// Not a silent omission: both commit from call sites with no system-parameter
-/// injection and no `Sim` receiver, so wiring them is a larger change than
-/// adding an argument.
-///
-/// - `InventoryClick` commits in `lodestone_client::handle::ClientHandle::menu_click`
-///   → `SharedState::menu_click`, which builds the action while **holding a
-///   write guard** on the `World`. Asking there means reading
-///   the registry inside that guard, which is legal but wants its own care, and
-///   the app-layer callers (`app/container_input.rs`) have no `World` access at
-///   all.
 /// - `PlayerInteract` commits in three branches of `Sim::use_item_live`, each of
 ///   which also runs the placement predictor and takes a use-sequence number.
 ///   Denying after the sequence is taken forks the counter, which
 ///   `docs/baritone-port.md` §3.6 forbids outright, so the ask has to go in
 ///   ahead of it in all three branches.
 ///
-/// A plugin can register a predicate for either today; it simply will not be
-/// consulted, and `docs/cancelable-actions.md` says so in the same table.
-const NOT_WIRED_YET: &[&str] = &["InventoryClick", "PlayerInteract"];
+/// A plugin can register a predicate today; it simply will not be consulted,
+/// and `docs/packet-wiring.md` says so in the same table.
+const NOT_WIRED_YET: &[&str] = &["PlayerInteract"];
 
 const SCANNED: &[&str] = &["lodestone-shell", "lodestone-controller", "lodestone-client"];
 
@@ -154,7 +145,7 @@ fn the_verbs_documented_as_unwired_really_have_no_ask_site() {
             found.is_empty(),
             "VerbContext::{variant} is documented as not wired yet, but {found:?} \
              constructs it. If it was wired (good), move it from NOT_WIRED_YET to \
-             WIRED in this file and update docs/cancelable-actions.md's table."
+             WIRED in this file and update docs/packet-wiring.md's table."
         );
     }
 }
