@@ -1,7 +1,7 @@
-//! A reference plugin for the worldgen plugin seams — issues #132 (a `dyn
-//! ChunkGenerator` a plugin implements), #134 (registering a custom
-//! dimension backed by it) and #136 (placing a structure template, both at
-//! generation time and into an already-generated live world).
+//! A reference plugin for the worldgen plugin seams: a `dyn ChunkGenerator` a
+//! plugin implements, registering a custom dimension backed by it, and
+//! placing a structure template (both at generation time and into an
+//! already-generated live world).
 //!
 //! [`CheckerboardVoidGenerator`] is deliberately simple — the honest way to
 //! prove the seam is a demo generator a reader can check by eye, not a
@@ -11,7 +11,7 @@
 //! "landmark" structure at generation time via
 //! `lodestone_worldgen::structure::template::StructureTemplate::place` —
 //! the same primitive every vanilla structure in this engine places with.
-//! [`place_marker_live`] is the separate, issue-#136 half: pasting a second
+//! [`place_marker_live`] is the separate, live-placement half: pasting a second
 //! template into a world that has **already** been generated, through
 //! `lodestone_server::structure_placement::place_structure_live`.
 //!
@@ -94,7 +94,7 @@ impl ChunkGenerator for CheckerboardVoidGenerator {
             }
         }
 
-        // Generation-time structure placement (issue #136's first half):
+        // Generation-time structure placement (the generation-time half):
         // the same `StructureTemplate::place` every vanilla structure in
         // this engine uses, called directly from a plugin generator rather
         // than from `lodestone-worldgen`'s own structure-composition stage.
@@ -142,7 +142,7 @@ pub fn register(registry: &DimensionRegistry) {
     });
 }
 
-/// Issue #136's other half: pastes a single emerald-block marker into an
+/// The live-placement half: pastes a single emerald-block marker into an
 /// **already-generated** world at `at` — a dungeon plugin dropping a
 /// landmark into a live save, not a generation-time decoration.
 ///

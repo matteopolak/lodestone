@@ -1,4 +1,5 @@
-//! The "what consumes this" gate for issues #132/#134/#136: a real
+//! The "what consumes this" gate for the worldgen plugin seams (a custom
+//! generator, custom dimension registration, and structure placement): a real
 //! `IntegratedServer`, serving a `PluginChunkSource` obtained purely through
 //! `DimensionRegistry::chunk_source` (never by constructing the generator's
 //! own type directly), joined by a real, wire-decoding `lodestone-client`
@@ -14,10 +15,11 @@
 //! same route a player's own screen would receive it through.
 //!
 //! What would have to break for this to fail: the registry not handing back
-//! a working `ChunkSource` (issue #134), the generator's checkerboard or its
-//! generation-time structure placement not reaching the served chunk (issue
-//! #132/#136), or `place_structure_live` not persisting a live edit the
-//! server actually serves (issue #136's other half).
+//! a working `ChunkSource` (custom dimension registration), the generator's
+//! checkerboard or its generation-time structure placement not reaching the
+//! served chunk (the custom generator or generation-time structure placement),
+//! or `place_structure_live` not persisting a live edit the server actually
+//! serves (the live-placement half of structure placement).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -63,8 +65,8 @@ async fn a_real_client_observes_the_registered_dimensions_terrain_and_both_struc
         .chunk_source(DIMENSION_KEY)
         .expect("just registered under DIMENSION_KEY");
 
-    // Issue #136's live-placement half, exercised *before* anyone joins:
-    // paste a marker into the world through the real `ChunkSource` the
+    // The live-placement half of structure placement, exercised *before*
+    // anyone joins: paste a marker into the world through the real `ChunkSource` the
     // registry handed back, not by reaching into the generator.
     let marker_at = [5, FLOOR_Y + 1, 5];
     let written = lodestone_void_world::place_marker_live(&*source, marker_at);
@@ -95,7 +97,9 @@ async fn a_real_client_observes_the_registered_dimensions_terrain_and_both_struc
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
 
-    // The checkerboard floor, decoded off the real wire (issue #132).
+    // The checkerboard floor, decoded off the real wire (proves the custom
+    // generator is actually reachable through the real protocol, not just
+    // called directly).
     assert_eq!(
         handle.block_at(BlockPos::new(0, FLOOR_Y, 0)),
         Some(state_id("minecraft:stone")),
@@ -112,7 +116,8 @@ async fn a_real_client_observes_the_registered_dimensions_terrain_and_both_struc
         "checkerboard: (0,1) sums odd, expected glass"
     );
 
-    // The generation-time landmark structure (issue #136, first half).
+    // The generation-time landmark structure (the generation-time half of
+    // structure placement).
     assert_eq!(
         handle.block_at(BlockPos::new(0, FLOOR_Y + 1, 0)),
         Some(state_id("minecraft:gold_block")),
@@ -128,8 +133,8 @@ async fn a_real_client_observes_the_registered_dimensions_terrain_and_both_struc
     assert_eq!(
         handle.block_at(BlockPos::new(5, FLOOR_Y + 1, 5)),
         Some(state_id("minecraft:emerald_block")),
-        "the live-placed marker (issue #136, second half), reached through the SAME served \
-         chunk as the generation-time landmark above"
+        "the live-placed marker (the live-placement half of structure placement), reached \
+         through the SAME served chunk as the generation-time landmark above"
     );
     assert_eq!(
         handle.block_at(BlockPos::new(6, FLOOR_Y + 1, 5)),
