@@ -547,8 +547,8 @@ fn assert_matches_full3x3(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32
             identity_mismatches.push(format!("{pos:?}: unexpected write {got} (JVM's FULL3X3 pass wrote nothing here)"));
         }
     }
-    // Named residual #1 (block identity): bounded tight — measured exactly
-    // 1/116 at `vegetation_savanna_neg30_15_jvm.txt`, 0 everywhere else.
+    // Residual block-identity mismatches are bounded tightly: measured exactly
+    // 1/116 at `vegetation_savanna_neg30_15_jvm.txt`, and 0 everywhere else.
     // `<= 2%` (never more than 1-2 cells at fixtures this size) rather than
     // the generous 10% the `distance`-only residual below gets, because
     // this is a rarer, less-understood failure mode and a wider band would
@@ -570,7 +570,7 @@ fn assert_matches_full3x3(name: &str, f: &Fixture, ours: &HashMap<(i32, i32, i32
             identity_mismatches.join("\n")
         );
     }
-    // Named residual #2 (`distance` only): bounded, not silently widened.
+    // Residual distance-only mismatches are bounded and never silently widened.
     // `<= 10%` of the expected cells and every individual delta `<= 1` —
     // measured 11/185 (~5.9%) at `vegetation_savanna_chunk20_neg5_jvm.txt`,
     // 0/57 elsewhere (this residual is specific to that one fixture's

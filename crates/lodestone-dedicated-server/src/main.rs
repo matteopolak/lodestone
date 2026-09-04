@@ -41,21 +41,14 @@ use lodestone_server::{eula, parse_seed};
 /// a clean shutdown can lose at most.
 const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(30);
 
-/// Clamp on the tick/mob-simulation radius derived from `simulation-distance`
-/// (see [`sim_radius`]) — **measured, not guessed**: a fresh world with
-/// vanilla's own real default (`simulation-distance=10`, a 21×21 = 441-column
-/// area) was tried first, unclamped, against this crate's debug build, and
-/// the tick loop fell behind without recovering — "Can't keep up!" at 143
-/// ticks behind within 10 seconds of boot, climbing to 1591 (79.5s) before
-/// the process was killed. `crate::integrated`'s own `LAN_TICK_RADIUS`
-/// constant already documents exactly this cost ("widening it costs a full
-/// generator run per chunk per tick") and keeps LAN hosting at radius 2 (25
-/// columns) for that reason — this mirrors that established, load-tested
-/// number rather than trusting vanilla's `simulation-distance` default
-/// against a tick-loop architecture that (by that same constant's own doc,
-/// issue #289) has no loaded-chunk ticket-driven set yet. `sim_radius` only
-/// clamps **down** from here — an operator's smaller `simulation-distance`
-/// is honoured, a larger one is not, and `docs/dedicated-server.md` says so.
+/// Configured fallback/no-anchor and mob-simulation radius for dedicated
+/// hosting. Radius 2 covers 25 columns for initial mob seeding and for world
+/// ticks before a player anchor is published; connected tick-follow may use
+/// its separate radius-3 area. The shared `ChunkStore` retains resident
+/// columns, so this bound mainly controls initial/warm-up generation and
+/// fallback scan width, not regeneration on every tick. [`sim_radius`] clamps
+/// inputs into `0..=MAX_SIM_RADIUS`: values already in that range are
+/// preserved, and negative values become 0.
 const MAX_SIM_RADIUS: i32 = 2;
 
 #[tokio::main]
@@ -104,13 +97,10 @@ async fn main() {
         tracing::info!("wrote a fresh server.properties with vanilla's own defaults");
     }
 
-    // Access control (issue #336's four JSON files) lives at the server
-    // root, next to server.properties/eula.txt — vanilla's own layout, not
-    // inside the world save directory. A malformed file is a real error
-    // (unlike a missing one, which is an empty list); refusing to start on
-    // one is the safe direction, since starting with silently-ignored bans
-    // would be the wrong failure mode for exactly the file this exists to
-    // enforce.
+    // Access-control lists live at the server root beside the properties and
+    // EULA files, not inside a world save. Missing lists mean no entries, but
+    // malformed lists abort startup so bans, whitelist entries, and operator
+    // records can never be silently ignored.
     let access = match AccessHandle::load(&dir) {
         Ok(access) => access,
         Err(err) => {
@@ -192,9 +182,9 @@ async fn main() {
     // joins through it, so nothing is lost by not reading from it.
     drop(client_end);
 
-    // Issues #327/#328: the default mode/difficulty a fresh world starts
-    // with. Set *before* `publish_with_config` opens the listener, so no
-    // connection can join ahead of it.
+    // Configure the default game mode and difficulty before
+    // `publish_with_config` opens the listener. This makes the initial world
+    // state deterministic for every connection accepted by the server.
     server
         .world_state()
         .set_default_game_mode(props.gamemode);
@@ -385,14 +375,10 @@ fn level_type_to_world_type(level_type: &str) -> WorldType {
     }
 }
 
-/// `simulation-distance` → the tick/mob-simulation area radius, clamped to
-/// [`MAX_SIM_RADIUS`]. There is no dedicated per-config knob for this in
-/// `lodestone-server`'s constructors today (`open_to_lan`'s own
-/// `LAN_TICK_RADIUS` is a fixed constant, by that module's own admission
-/// pending a real loaded-chunk registry — issue #289) — but
-/// `open_persistent_with_mobs` already takes the tick area as a plain
-/// argument, so this is a real, direct use of the config value rather than
-/// an accepted-and-ignored one.
+/// Converts `simulation-distance` to the tick and mob-simulation radius,
+/// clamped to [`MAX_SIM_RADIUS`]. The resulting value is passed directly to
+/// `open_persistent_with_mobs`, so the setting controls the work area rather
+/// than being accepted and ignored.
 fn sim_radius(simulation_distance: i32) -> i32 {
     simulation_distance.clamp(0, MAX_SIM_RADIUS)
 }

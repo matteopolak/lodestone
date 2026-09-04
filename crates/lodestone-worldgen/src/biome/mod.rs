@@ -525,9 +525,8 @@ pub fn usable_overworld_table(table: Vec<BiomeParameterPoint>) -> BiomeTable {
 }
 
 /// Parses the embedded per-biome `temperature` map (`{"minecraft:plains":
-/// 0.8, ...}`, sourced directly from vanilla's own `data/minecraft/worldgen/
-/// biome/*.json` files — Mojang's own generated data, CLAUDE.md's data-source
-/// #1, no oracle needed since this field needs no runtime evaluation).
+/// 0.8, ...}`) from the authoritative generated biome JSON data. This field
+/// is static data and does not require runtime evaluation.
 ///
 /// # Panics
 /// Panics if `value` is not a JSON object of biome-id -> number.
