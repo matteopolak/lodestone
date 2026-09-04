@@ -1,4 +1,4 @@
-//! Fuzz/property-testing harness for lodestone's wire decoders (issue #282).
+//! Fuzz/property-testing harness for lodestone's wire decoders.
 //!
 //! ## What it is
 //!
@@ -219,7 +219,7 @@ pub fn catch<R>(f: impl FnOnce() -> R + std::panic::UnwindSafe) -> Result<R, Str
 /// `crates/versions/26.2/tests/world_state.rs` uses for its captured-bytes
 /// oracles: one or more whitespace-separated hex byte tokens per line, lines
 /// starting with `#` ignored. Used to load `crates/versions/26.2/tests/fixtures/*.hex`
-/// — real vanilla-server bytes, not anything our own encoder produced — as
+/// — captured server bytes, not anything our own encoder produced — as
 /// fuzz-corpus seeds. See `docs/fuzz-harness.md` for which corpus entries
 /// come from here versus from our own encoders.
 pub fn read_hex_fixture(path: &std::path::Path) -> Vec<u8> {
@@ -246,11 +246,10 @@ pub fn v26_2_fixture_path(name: &str) -> std::path::PathBuf {
 ///
 /// These are *regression* inputs rather than corpus seeds: bytes a fuzz target
 /// actually found a defect with, committed so the gate for that defect is
-/// deterministic instead of "whatever proptest's RNG lands on this run". Issue
-/// #450 is the reason this exists — its panic reproduced in a full-crate run
-/// and passed under a single filtered run, twice, which is exactly how a real
-/// remote panic gets written off as flake. Each fixture's header records where
-/// its bytes came from.
+/// deterministic instead of "whatever proptest's RNG lands on this run".
+/// Keeping the literal payload makes a discovered decoder failure reproducible
+/// even when a filtered generator run does not select the same case. Each
+/// fixture's header records where its bytes came from.
 pub fn regression_fixture_path(name: &str) -> std::path::PathBuf {
     std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures")

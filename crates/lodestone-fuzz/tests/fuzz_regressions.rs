@@ -3,12 +3,9 @@
 //! ## Why this file exists at all
 //!
 //! `no_panic_arbitrary_bytes.rs` generates its input, so whether a given run
-//! reaches a defect is a property of proptest's RNG. Issue #450's remote panic
-//! failed a full-crate run and **passed a filtered single-target run twice** —
-//! an intermittent red is harder to act on than a deterministic one and much
-//! easier to write off as flake, which is roughly what happened. So the bytes a
-//! target found a bug with get committed here and asserted directly, and the
-//! gate stops being probabilistic.
+//! reaches a defect is a property of proptest's RNG. The bytes a target finds
+//! are committed here and asserted directly, so the regression gate remains
+//! deterministic even when a filtered generator run does not select the case.
 //!
 //! `tests/no_panic_arbitrary_bytes.proptest-regressions` (committed alongside)
 //! makes proptest replay the same seed first, which is a second, independent
@@ -17,14 +14,12 @@
 //! fixture here pins the literal payload and asserts *what* the decoder does
 //! with it, not merely that it survives.
 //!
-//! ## What "fixed" means here, and why "no panic" is not enough
+//! ## Refusal behaviour
 //!
-//! The #450 multiply panicked in debug and **silently wrapped in release**. A
-//! test that only asserts "did not panic" is satisfied by the wrap, i.e. by the
-//! worse of the two original outcomes. A test that asserts "did not panic and
-//! clamped" is satisfied by inventing a position the packet never named. So
-//! every assertion below is about *refusal*: an `AdapterError::Decode`, and
-//! **zero** writes reaching the world sink.
+//! Chunk-coordinate conversion must refuse an out-of-range value rather than
+//! panic in debug, wrap in release, or clamp it to a position the packet never
+//! named. Every assertion below checks that refusal is an `AdapterError::Decode`
+//! and that **zero** writes reach the world sink.
 
 // This file drives `lodestone_v1_9` directly, so it exists only in a build that
 // compiles that family in. On by default; see the crate manifest's `[features]`.
@@ -42,8 +37,9 @@ use lodestone_world::{
 /// A [`WorldSink`] that records the block writes it is asked to perform.
 ///
 /// `lodestone_fuzz::NullSink` discards everything, which is right for "does this
-/// panic" but cannot distinguish *refused* from *wrapped to a wrong position* —
-/// and that distinction is the entire content of #450's release-mode half.
+/// panic" but cannot distinguish *refused* from *wrapped to a wrong position*.
+/// These regression tests need that distinction to prove a refused packet made
+/// no observable world changes.
 #[derive(Debug, Default, Clone)]
 struct RecordingSink {
     /// `(x, y, z, state)` for every `set_block`, in call order.
@@ -88,7 +84,7 @@ impl WorldSink for RecordingSink {
     }
 }
 
-/// The committed #450 payload, byte for byte.
+/// The committed overflow payload, byte for byte.
 fn overflow_payload() -> Vec<u8> {
     let path =
         lodestone_fuzz::regression_fixture_path("v1_9_multi_block_change_chunk_overflow.hex");
@@ -142,14 +138,14 @@ fn decode_multi_block_change(payload: &[u8]) -> (Result<(), String>, Vec<(i32, i
     }
 }
 
-/// Issue #450. `chunk_x = 134_217_728` makes `chunk_x * 16` exceed `i32::MAX`.
+/// `chunk_x = 134_217_728` makes `chunk_x * 16` exceed `i32::MAX`.
 ///
 /// Three distinct wrong behaviours this must reject, all of which a bare "did
 /// not panic" assertion would accept:
 ///
 /// | behaviour | how this test catches it |
 /// |---|---|
-/// | debug panic (the filed bug) | `PANIC:` prefix, no `Decode` |
+/// | debug panic | `PANIC:` prefix, no `Decode` |
 /// | release wrap to `i32::MIN` | a recorded write at a wrapped coordinate |
 /// | a silent clamp to the border | a recorded write at all |
 #[test]
@@ -182,10 +178,11 @@ fn v340_multi_block_change_refuses_a_chunk_coordinate_that_would_overflow() {
 
 /// The bound is the **world border**, not merely "does not overflow `i32`".
 ///
-/// This is the assertion a `checked_mul`-only fix fails. `chunk_x = 1_875_000`
+/// This is the assertion a checked-multiply-only implementation fails.
+/// `chunk_x = 1_875_000`
 /// multiplies to 30,000,000 — perfectly representable in `i32`, so `checked_mul`
-/// returns `Some` — but it is past `WorldBorder.absoluteMaxSize` (29,999,984),
-/// so it names a block position no vanilla world can contain. Its neighbour
+/// returns `Some` — but it is past the supported world-coordinate limit (29,999,984),
+/// so it names a block position the server must refuse. Its neighbour
 /// `1_874_999` lands on exactly 29,999,984 and must be accepted, which is what
 /// stops this pair from passing for a decoder that simply refuses everything
 /// large.

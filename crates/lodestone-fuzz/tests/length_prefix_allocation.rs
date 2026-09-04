@@ -1,19 +1,10 @@
 //! Property: a length prefix claiming a huge element count must not force
 //! an allocation disproportionate to the bytes actually available.
 //!
-//! ## History (issue #417, fixed)
+//! ## Reservation rule
 //!
-//! This file originally both stated the property and demonstrated that it
-//! was **violated**: `lodestone-macros`' `decode_vec` called
-//! `Vec::with_capacity(len)` on an attacker-chosen VarInt length *before*
-//! checking `len` against the bytes actually remaining, for any `Vec<T>`
-//! field (`T != u8`, or a `#[mc(varint)]` element) with no
-//! `#[mc(max = ...)]` attribute. An 8-byte `GameLogin` payload drove a real
-//! **48,000,000-byte** single allocation, measured with the counting
-//! allocator below.
-//!
-//! Fixed in `decode_vec` (`crates/lodestone-macros/src/lib.rs`) by capping
-//! the *pre-allocation* at `len.min(r.remaining())` — every element this
+//! `lodestone-macros`' `decode_vec` caps a `Vec<T>`'s *pre-allocation* at
+//! `len.min(r.remaining())`. Every element this
 //! loop can possibly decode consumes at least one byte from the reader (no
 //! `Decode` impl in this wire format reads zero bytes: every primitive,
 //! VarInt and string read consumes >=1 byte — see `fixed_codec!` and
@@ -23,24 +14,18 @@
 //! `ensure_nbt_length_fits_remaining`, generalised with the safe universal
 //! per-element minimum of 1 byte (a per-type minimum would allow a tighter
 //! cap but risks a wrong minimum quietly re-opening the hole — see the
-//! policy writeup in `docs/fuzz-harness.md` and the commit that closed
-//! #417). `len` itself, the `#[mc(max = ...)]` check, and the `0..len` loop
+//! policy writeup in `docs/fuzz-harness.md`). `len` itself, the
+//! `#[mc(max = ...)]` check, and the `0..len` loop
 //! bound are all unchanged: a payload that legitimately has more bytes
 //! available still decodes every element; only the up-front reservation is
 //! bounded by what's actually in the buffer.
 //!
-//! This test file now asserts the *fixed*, bounded behaviour instead of the
-//! bug, plus a new test proving the cap tracks `remaining()` (not just
-//! "always near zero"), plus a positive control against a real captured
-//! fixture proving the fix doesn't reject legitimately large vectors.
+//! The tests assert the bounded reservation, prove that it tracks
+//! `remaining()` rather than collapsing to zero, and decode a captured fixture
+//! whose vector has multiple real elements.
 
-// This file's global allocator was originally the only place in the
-// workspace (per `grep -rn "allow(unsafe_code)" crates/`) that opts out of
-// `unsafe_code = "deny"` (`Cargo.toml`'s `[workspace.lints.rust]`) — now one
-// of two, alongside `container_set_content_unbounded_allocation.rs` (a
-// second, independent instance of this exact defect shape, found by
-// `fuzz/fuzz_targets/v26_2_clientbound_decode.rs`). Both are scoped as
-// narrowly as that lint allows:
+// This test binary opts out of the workspace's `unsafe_code = "deny"` lint
+// solely to measure the allocator. The scope is as narrow as the lint allows:
 // `#![allow]` is a crate-root attribute, and cargo compiles every
 // `tests/*.rs` file as its own separate binary/crate, so this cannot leak
 // into `src/lib.rs`, any other test binary, or any other crate. The
@@ -69,31 +54,20 @@ thread_local! {
     /// Largest single allocation request observed **on the calling thread**
     /// since that thread's last reset.
     ///
-    /// ## Why per-thread, and the two designs this replaces (issue #450)
+    /// ## Why measurements are per-thread
     ///
-    /// A `#[global_allocator]` is unavoidably process-wide: it sees every
-    /// allocation on every thread. What is *not* forced is where it records
-    /// them, and the first two attempts both recorded process-wide too:
+    /// `#[global_allocator]` receives allocations from every thread, but its
+    /// accounting storage need not be process-wide. A shared atomic cannot
+    /// distinguish the code under measurement from unrelated allocations. A
+    /// mutex around selected callers cannot repair that ambiguity because an
+    /// uncoordinated fixture read or decode can allocate while the measurement
+    /// window is open.
     ///
-    /// 1. A bare `static PEAK_SINGLE_ALLOC: AtomicUsize`. One test's
-    ///    allocation showed up in another's measurement — caught when the
-    ///    "small payload" test failed only when run alongside the "huge" one,
-    ///    with the identical 48,000,000-byte peak leaking across.
-    /// 2. The same atomic plus a `MEASUREMENT_LOCK: Mutex<()>` held across each
-    ///    reset-call-read span, serialising the *measuring* tests. This is the
-    ///    one that flaked, and the reason is instructive: a lock only excludes
-    ///    code that takes it. `real_registry_data_fixture_still_decodes_cleanly_after_the_fix`
-    ///    in this same file never calls `peak_alloc_during`, so it never takes
-    ///    the lock, and its fixture read plus `RegistryData` decode allocate
-    ///    freely into the shared atomic from a parallel harness thread. The
-    ///    result passed alone and failed in a full parallel run — the classic
-    ///    order-dependent green, on issue #417's own DoS regression gate.
-    ///
-    /// A thread-local needs no cooperation from anything: allocations made by
-    /// other threads land in *their* cell and are structurally invisible here,
-    /// whether or not those threads know this file exists. That property is
-    /// asserted by `a_sibling_threads_allocation_does_not_contaminate_a_measurement`
-    /// below, which fails against both designs above.
+    /// Thread-local storage needs no cooperation from other code: allocations
+    /// made by another thread land in its own cell and are structurally
+    /// invisible here. `a_sibling_threads_allocation_does_not_contaminate_a_measurement`
+    /// verifies that isolation with barriers that place the sibling allocation
+    /// inside this thread's measurement window.
     ///
     /// `const`-initialised on a `Cell<usize>` deliberately: that form compiles
     /// to a plain per-thread slot with no lazy initialisation and no
@@ -137,11 +111,10 @@ const CTX: Ctx = Ctx { version: 776 };
 /// bookkeeping is byte-exact", so a small ceiling is used instead of an exact
 /// equality.
 ///
-/// **Do not widen this.** It is deliberately *far* below the old
-/// ~48,000,000-byte measurement rather than merely under it, so that a partial
-/// regression is still caught. Every observed reason to want it wider so far has
-/// been contamination of the measurement (issue #450) rather than a genuinely
-/// larger correct allocation — fix the measurement, not the ceiling.
+/// **Do not widen this.** The ceiling admits allocator bookkeeping while
+/// remaining far below an attacker-chosen multi-million-element reservation.
+/// A failure means the reservation or the measurement boundary needs scrutiny;
+/// widening the ceiling would weaken the allocation bound.
 const SMALL_CEILING: usize = 4096;
 
 /// `entity_id: i32 = 0`, `hardcore: bool = false`, then a `levels: Vec<String>`
@@ -161,11 +134,9 @@ fn game_login_with_huge_levels_prefix(claimed_len: i32, trailing_bytes: &[u8]) -
 /// Predicted-before-measured: with zero bytes left after the length prefix,
 /// `len.min(r.remaining())` caps the reservation at 0 elements, and
 /// `Vec::with_capacity(0)` is guaranteed by the standard library to perform
-/// no allocation at all. So the correct hypothesis is a peak of exactly 0
-/// bytes. The *rejected* hypothesis is the pre-fix behaviour this same test
-/// used to assert: >=32 MiB (33,554,432 bytes), on the way to the exact
-/// 48,000,000 bytes measured when the bug was filed — a factor of well over
-/// 10^7 away from the correct answer of 0. Measured after the fix: exactly 0.
+/// no allocation at all. The predicted peak is exactly 0 bytes. The rejected
+/// hypothesis is an attacker-chosen reservation of at least 32 MiB
+/// (33,554,432 bytes), more than 10^7 times the predicted value.
 #[test]
 fn huge_length_prefix_no_longer_forces_disproportionate_allocation() {
     const CLAIMED_LEN: i32 = 2_000_000;
@@ -178,8 +149,8 @@ fn huge_length_prefix_no_longer_forces_disproportionate_allocation() {
 
     let (decode_result, peak) = peak_alloc_during(|| GameLogin::decode(&mut Reader::new(&payload), CTX));
 
-    // The decode must still fail cleanly — the fix does not change error
-    // behaviour, only the allocation that happens before the error.
+    // The decode must still fail cleanly: the reservation bound does not alter
+    // the error produced for an incomplete element stream.
     assert!(
         decode_result.is_err(),
         "expected UnexpectedEof after the oversized levels prefix, got {decode_result:?}"
@@ -204,10 +175,9 @@ fn huge_length_prefix_no_longer_forces_disproportionate_allocation() {
 /// `len.min(remaining) == 2_000_000.min(100) == 100` elements, and the
 /// predicted peak allocation is `100 * size_of::<String>()` — 2,400 bytes on
 /// a 64-bit target where `String` is a 24-byte (ptr, len, cap) triple. That
-/// is still four orders of magnitude below the old ~48,000,000-byte
-/// measurement, but it is *not* zero, which is the point: the bound scales
-/// with the bytes actually supplied, not with a constant. Measured after the
-/// fix: exactly 2,400 — the prediction was exact, not just "close".
+/// is *not* zero, which is the point: the bound scales with the bytes actually
+/// supplied, not with a constant. The prediction is 2,400 bytes on a 64-bit
+/// target, rather than merely an upper bound near that value.
 #[test]
 fn claimed_length_beyond_remaining_bytes_caps_allocation_to_remaining_not_zero() {
     const CLAIMED_LEN: i32 = 2_000_000;
@@ -226,8 +196,7 @@ fn claimed_length_beyond_remaining_bytes_caps_allocation_to_remaining_not_zero()
     let predicted_peak = TRAILING * std::mem::size_of::<String>();
     // Same generous-but-bounded slack rationale as the test above: not an
     // exact equality (allocator/std-internals could round), but must land
-    // close to the prediction and nowhere near the old ~48,000,000-byte
-    // figure.
+    // close to the prediction and nowhere near an attacker-chosen reservation.
     let ceiling = predicted_peak * 2;
     assert!(
         peak <= ceiling,
@@ -244,30 +213,25 @@ fn claimed_length_beyond_remaining_bytes_caps_allocation_to_remaining_not_zero()
     );
 }
 
-/// The gate on the measurement technique itself (issue #450's second half).
+/// The measurement technique has its own isolation gate.
 ///
 /// Every other test in this file measures a peak allocation and compares it to
 /// a prediction. That is only meaningful if the number it reads back was
-/// produced by the code under test and nothing else — which the original
-/// process-global `static PEAK_SINGLE_ALLOC: AtomicUsize` could not guarantee,
-/// and which no amount of reading the assertions would reveal. So this test
-/// asserts the *isolation property* directly rather than trusting it.
+/// produced by the code under test and nothing else. A process-global
+/// `static PEAK_SINGLE_ALLOC: AtomicUsize` cannot provide that guarantee, so
+/// this test asserts the *isolation property* directly.
 ///
 /// It is deterministic, not probabilistic: the two barriers pin the sibling's
 /// 48,000,000-byte allocation to the window strictly between this thread's reset
 /// and its read. There is no interleaving in which the sibling allocates outside
-/// the measurement window, so this cannot pass by luck of scheduling — which
-/// matters, because scheduling luck is exactly what made the real defect look
-/// like flake (passing under a filter, failing in a full run).
+/// the measurement window, so no scheduling order can place the sibling
+/// allocation outside the asserted interval.
 ///
-/// 48,000,000 is not an arbitrary large number: it is the exact single
-/// allocation issue #417 measured, so a contaminated reading here is
-/// indistinguishable from the very regression `huge_length_prefix_…` exists to
-/// catch. That is the whole reason this matters — a DoS guard that reports its
-/// sibling's allocations flakes, a flaky guard gets muted, and a muted guard
-/// stops guarding.
-///
-/// Observed before the fix: `measured 48000000 bytes`. After: 0.
+/// 48,000,000 is not an arbitrary large number: it is a deliberately distinct
+/// sibling allocation that is large enough to cross every ceiling in this file.
+/// A contaminated reading is therefore indistinguishable from the oversized
+/// reservation the regression tests exist to catch. A guard that reports a
+/// sibling's allocations is not a usable guard for a reservation bound.
 #[test]
 fn a_sibling_threads_allocation_does_not_contaminate_a_measurement() {
     use std::sync::{Arc, Barrier};
@@ -331,13 +295,12 @@ fn well_formed_small_payload_does_not_trigger_a_large_allocation() {
     );
 }
 
-/// Positive control: the fix must not reject a legitimately large-but-valid
-/// vector by, say, truncating real elements or erroring where the old code
-/// wouldn't have. `registry_data_dimension_type.hex` is real bytes captured
-/// from a live vanilla 26.2 server (not our own encoder — see
+/// Positive control: a legitimately large, valid vector must retain every
+/// element and decode without trailing bytes. `registry_data_dimension_type.hex`
+/// contains captured 26.2 server bytes (not our own encoder — see
 /// `docs/fuzz-harness.md`'s corpus notes) and decodes `RegistryData::entries:
-/// Vec<PackedRegistryEntry>`, one of the fields issue #417 named as
-/// vulnerable. If the cap were computed wrong (e.g. against the wrong
+/// Vec<PackedRegistryEntry>`, a vector field whose length prefix exercises the
+/// reservation bound. If the cap were computed wrong (e.g. against the wrong
 /// `remaining()` snapshot, or off by a field), this is the kind of real
 /// packet that would start failing to decode or would leave trailing bytes.
 #[test]
