@@ -36,7 +36,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         discard;
     }
     // `in.color` is the real `CLOUD_COLOR` attribute times its timeline track:
-    // pure white by day, `#191926` at night, alpha 0.8 throughout. The alpha is
+    // pure white by day, `0x191926` at night, alpha 0.8 throughout. The alpha is
     // load-bearing and only reaches pixels because `CloudPipeline` blends
     // (`CLOUD_BLEND`); with an opaque pipeline it was written to the target and
     // weighted nothing, and clouds painted solid.

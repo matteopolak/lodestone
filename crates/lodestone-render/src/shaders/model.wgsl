@@ -7,8 +7,8 @@
 // `fog_amount` below); `fog_end_enabled.x` is that term's end distance and
 // `.y` is 0/1 enabled. `fog_eye.w` / `fog_end_enabled.w` are vanilla's second,
 // independent **environmental** term's start/end (measured spherically) —
-// two lanes that were unused before issue #401 (F2/F3), so this struct did
-// not grow to add those. `fog_ambient_light.rgb` is a later, genuine growth —
+// two lanes carrying that term, reusing existing struct fields rather than
+// growing it. `fog_ambient_light.rgb` is a later, genuine growth —
 // see its own comment below — and does not cost a bind group: growing one
 // group's uniform buffer is unrelated to the 4-bind-group floor, which limits
 // how many *groups* this shader binds (still four: camera, atlas, palette,
@@ -85,7 +85,8 @@ fn sky_darken() -> f32 {
 // Vanilla's lightmap, one axis at a time. Verbatim from `lightmap.fsh` in the
 // real 26.2 client.jar; mirrored in Rust by `crate::light`, whose module docs
 // carry the derivation, the two vanilla terms deliberately left out, and the
-// measured divergence from issue #386's table. `entity.wgsl` and `fluid.wgsl`
+// measured divergence from applying the curve after the sky-darken multiply.
+// `entity.wgsl` and `fluid.wgsl`
 // hold the same three functions -- WGSL has no include, so change all four
 // together.
 //

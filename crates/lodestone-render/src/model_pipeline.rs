@@ -458,8 +458,8 @@ impl ModelPipeline {
         // (view-projection + fog), identical for every section and every other
         // consumer of this pipeline (dropped items, the held item); binding 1
         // is the per-section world origin, selected per draw by a **dynamic
-        // offset** into one physically resident buffer. Splitting them is the
-        // fix for issue #75 — profiling a live session found `render_inner`
+        // offset** into one physically resident buffer. Splitting them avoids
+        // what a live-play profile once found: `render_inner`
         // rewriting *every* section's whole camera uniform (view_proj bytes
         // included) every frame, ~4000 `queue.write_buffer` calls landing in
         // `RenderState::render`'s hot path (52.9% of main-thread CPU, mostly
@@ -911,7 +911,7 @@ pub struct ModelCameraUniform {
 /// per section and is addressed by a dynamic offset instead of being part of
 /// this struct.
 ///
-/// This split is the fix for issue #75: a live-play profile found
+/// This split exists because a live-play profile once found
 /// `RenderState::render_inner` rewriting a *whole* per-section camera uniform
 /// (view_proj bytes included) via `queue.write_buffer` once per section, every
 /// frame — up to ~4000 calls/frame at the measured `sections=3880`, and 52.9%

@@ -1,7 +1,6 @@
 //! The two full-screen overlays vanilla draws in its screen-effect renderer's
 //! submit function (26.2 decompile):
 //! the underwater tint + scrolling texture, and the looping fire overlay.
-//! Issues #108 and #112.
 //!
 //! # One pass, two textures
 //!
@@ -35,14 +34,14 @@
 //! fills the screen either way.
 //!
 //! **The fire overlay is vanilla's real two-quad geometry, flattened to NDC —
-//! not a tiled strip (issue #420, fixing a regression from #112's original
-//! placement).** Vanilla's fire-overlay submit and quad-building functions
+//! not a tiled strip.** Vanilla's fire-overlay submit and quad-building functions
 //! draw **exactly two** 1×1 unit quads
 //! at local `z = -0.5`, each `translate(±0.24, -0.3, 0.0)` then
 //! `rotateY(∓π/18)` (10°) — never a repeated/tiled sprite. A previous pass
 //! here deliberately tiled four mirrored copies across a bottom strip instead
 //! (both this doc and `docs/screen-overlays.md` said so outright, citing the
-//! same constants and choosing to tile anyway to match #112's wording), which
+//! same constants and choosing to tile anyway to match a plain-language
+//! description of "flame texture across the bottom of the screen"), which
 //! is what the repo owner saw as "the fire texture repeated multiple times"
 //! instead of vanilla's one large licking flame. [`fire_overlay_triangles`]
 //! now reproduces the real transform — `rotateY` then `translate`, exactly
@@ -198,8 +197,8 @@ pub const FIRE_QUAD_OFFSET_Y: f32 = -0.3;
 /// See [`FIRE_QUAD_OFFSET_X`] — vanilla's `Math.PI / 18`, i.e. 10 degrees.
 pub const FIRE_QUAD_TILT_RADIANS: f32 = std::f32::consts::PI / 18.0;
 
-/// Retired by issue #420's fix — [`fire_overlay_triangles`] no longer tiles
-/// and has no fixed strip cap, see [`fire_overlay_vertical_extent`] for the
+/// Retired now that [`fire_overlay_triangles`] no longer tiles
+/// and has no fixed strip cap; see [`fire_overlay_vertical_extent`] for the
 /// real predicted extent. **Kept only as an unused compatibility constant**
 /// so `lib.rs`'s public re-export list (a brokered file — this crate's own
 /// `lib.rs` is not owned by whichever pass lands this fix) does not need an
@@ -336,11 +335,11 @@ pub fn pumpkin_overlay_triangles() -> [ScreenOverlayVertex; 6] {
 }
 
 // ---------------------------------------------------------------------------
-// Freeze overlay (issue #139): vanilla's HUD camera-overlays extraction function's
+// Freeze overlay: vanilla's HUD camera-overlays extraction function's
 // `player.getTicksFrozen() > 0` branch:
 // `extractTextureOverlay(POWDER_SNOW_OUTLINE_LOCATION, player.getPercentFrozen())`.
-// The freeze *mechanic* (`frozen_ticks`/`percent_frozen`) is
-// `lodestone_physics::player::PlayerState`'s (issue #212); this is only the
+// The freeze *mechanic* (`frozen_ticks`/`percent_frozen`) lives in
+// `lodestone_physics::player::PlayerState`; this is only the
 // overlay half.
 // ---------------------------------------------------------------------------
 
@@ -367,7 +366,7 @@ pub fn freeze_overlay_triangles(percent: f32) -> [ScreenOverlayVertex; 6] {
 }
 
 // ---------------------------------------------------------------------------
-// Spyglass overlay (issue #154): vanilla's HUD spyglass-overlay extraction
+// Spyglass overlay: vanilla's HUD spyglass-overlay extraction
 // function. Not the generic `camera_overlay` component path
 // pumpkin uses — `player.isScoping()` gates a *dedicated* method with its own
 // geometry (a centred lens + four solid-black letterbox bars), checked
@@ -479,9 +478,9 @@ pub fn spyglass_letterbox_triangles(aspect: f32) -> [ScreenOverlayVertex; 24] {
 }
 
 // ---------------------------------------------------------------------------
-// Confusion overlay (issue #144, the nausea screen-space half):
-// vanilla's HUD confusion-overlay extraction function. The *other* half of
-// #144 — the world-projection "spinning" warp vanilla applies alongside this
+// Confusion overlay: this is the nausea screen-space half,
+// vanilla's HUD confusion-overlay extraction function. The *other* half —
+// the world-projection "spinning" warp vanilla applies alongside this
 // — is `crate::camera::nausea_portal_warp`, not geometry, so it lives in
 // `camera.rs` rather than here; see that function's doc for why.
 // ---------------------------------------------------------------------------
@@ -520,7 +519,7 @@ pub fn confusion_overlay_triangles(strength: f32) -> [ScreenOverlayVertex; 6] {
 }
 
 // ---------------------------------------------------------------------------
-// Portal overlay (issue #149, the screen-space half):
+// Portal overlay: this is the screen-space half,
 // vanilla's HUD portal-overlay extraction function. The shared "spinning"
 // world-projection warp is `crate::camera::nausea_portal_warp` — see the
 // confusion overlay's module comment above; vanilla drives both this overlay
@@ -753,17 +752,17 @@ pub struct ScreenEffectRenderer {
     underwater_bind_group: wgpu::BindGroup,
     fire_bind_group: wgpu::BindGroup,
     pumpkin_bind_group: wgpu::BindGroup,
-    /// The freezing vignette (issue #139) — `powder_snow_outline.png`.
+    /// The freezing vignette — `powder_snow_outline.png`.
     freeze_bind_group: wgpu::BindGroup,
-    /// The spyglass lens (issue #154) — `spyglass_scope.png`.
+    /// The spyglass lens — `spyglass_scope.png`.
     spyglass_bind_group: wgpu::BindGroup,
     /// A procedural 1x1 opaque-white texture with no backing asset, used by
     /// the spyglass letterbox bars ([`spyglass_letterbox_triangles`]'s doc)
     /// — a flat colour fill needs no real texture content, only opacity.
     white_bind_group: wgpu::BindGroup,
-    /// The confusion overlay (issue #144) — `nausea.png`.
+    /// The confusion overlay — `nausea.png`.
     nausea_bind_group: wgpu::BindGroup,
-    /// The portal overlay (issue #149) — `nether_portal.png`.
+    /// The portal overlay — `nether_portal.png`.
     portal_bind_group: wgpu::BindGroup,
     fire_frame_count: u32,
     /// [`load_portal_overlay_texture`]'s strip is a different image from the
@@ -1086,7 +1085,7 @@ impl ScreenEffectRenderer {
         pass.draw(0..verts.len() as u32, 0..1);
     }
 
-    /// Draws the pumpkin overlay (issue #185) as its own `Load` render pass,
+    /// Draws the pumpkin overlay as its own `Load` render pass,
     /// for the reasons on [`Self::draw_underwater`]. Static geometry — the
     /// vertex buffer was written once at [`Self::new`] and never changes, so
     /// unlike the other two draws this has no per-frame `write_buffer`.
@@ -1125,7 +1124,7 @@ impl ScreenEffectRenderer {
         self.portal_frame_count
     }
 
-    /// Draws the freeze overlay (issue #139) as its own `Load` render pass,
+    /// Draws the freeze overlay as its own `Load` render pass,
     /// for the reasons on [`Self::draw_underwater`]. `percent` is vanilla's
     /// `Entity.getPercentFrozen()` (see [`freeze_overlay_triangles`]) — the
     /// caller is expected to have already checked `percent > 0.0`
@@ -1157,7 +1156,7 @@ impl ScreenEffectRenderer {
         pass.draw(0..verts.len() as u32, 0..1);
     }
 
-    /// Draws the spyglass overlay (issue #154) as its own `Load` render pass:
+    /// Draws the spyglass overlay as its own `Load` render pass:
     /// the lens quad, then the four letterbox bars, both re-derived from
     /// `aspect` every call since a window resize changes it (unlike
     /// [`Self::draw_pumpkin`]'s vertex buffer, these cannot be built once at
@@ -1200,7 +1199,7 @@ impl ScreenEffectRenderer {
         pass.draw(0..lens.len() as u32, 0..1);
     }
 
-    /// Draws the confusion overlay (issue #144, screen-space half) as its own
+    /// Draws the confusion overlay's screen-space half as its own
     /// `Load` render pass. `strength` is vanilla's `overlayStrength` (see
     /// [`confusion_overlay_triangles`]) — the caller is expected to have
     /// already applied the mutual-exclusion-with-portal and
@@ -1231,7 +1230,7 @@ impl ScreenEffectRenderer {
         pass.draw(0..verts.len() as u32, 0..1);
     }
 
-    /// Draws the portal overlay (issue #149, screen-space half) as its own
+    /// Draws the portal overlay's screen-space half as its own
     /// `Load` render pass. `frame` selects the animation frame
     /// (`frame % `[`Self::portal_frame_count`]`, same one-frame-per-tick
     /// cadence as [`Self::draw_fire`]); `intensity` is vanilla's
@@ -1372,10 +1371,9 @@ mod tests {
     }
 
     /// `fire_overlay_triangles` is exactly two quads (12 vertices, two
-    /// six-vertex triangle fans) — never a repeated/tiled sprite. This is
-    /// the property issue #420 exists to restore: a previous pass here drew
-    /// four mirrored copies of one tile instead, which is what the repo
-    /// owner saw as the fire texture "repeated multiple times".
+    /// six-vertex triangle fans) — never a repeated/tiled sprite. A previous
+    /// pass here drew four mirrored copies of one tile instead, which is what
+    /// the repo owner saw as the fire texture "repeated multiple times".
     #[test]
     fn fire_overlay_is_exactly_two_quads_not_a_tiled_strip() {
         let tris = fire_overlay_triangles(0, 32);
@@ -1549,7 +1547,7 @@ mod tests {
         assert_eq!(quad_a_u, quad_b_u, "both quads use the identical mirrored mapping");
     }
 
-    // -- freeze overlay (#139) -----------------------------------------
+    // -- freeze overlay -----------------------------------------------
 
     #[test]
     fn freeze_overlay_covers_the_full_ndc_screen() {
@@ -1580,7 +1578,7 @@ mod tests {
         }
     }
 
-    // -- spyglass overlay (#154) ----------------------------------------
+    // -- spyglass overlay -----------------------------------------------
 
     #[test]
     fn spyglass_lens_half_extent_matches_vanillas_min_dimension_rule() {
@@ -1635,7 +1633,7 @@ mod tests {
         }
     }
 
-    // -- confusion overlay (#144) ----------------------------------------
+    // -- confusion overlay ---------------------------------------------
 
     #[test]
     fn confusion_overlay_always_covers_at_least_the_full_screen() {
@@ -1673,7 +1671,7 @@ mod tests {
         }
     }
 
-    // -- portal overlay (#149) --------------------------------------------
+    // -- portal overlay -------------------------------------------------
 
     #[test]
     fn portal_overlay_alpha_is_identity_at_full_intensity() {

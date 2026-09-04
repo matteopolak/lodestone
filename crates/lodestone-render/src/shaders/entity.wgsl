@@ -8,7 +8,7 @@
 // this frame's sky darkening — see `sky_darken()` below and
 // `EntityCameraUniform::with_sky_darken`. `fog_eye.w` / `fog_end_enabled.w`
 // are vanilla's second, independent **environmental** term's start/end
-// (measured spherically) — two lanes unused before issue #401 (F2/F3).
+// (measured spherically) — two lanes carrying that term, unused elsewhere.
 // `fog_ambient_light.rgb` is this frame's dimension `AMBIENT_LIGHT_COLOR` —
 // see `ambient_light()` below and the model shader's matching field comment.
 struct Camera {
@@ -283,8 +283,8 @@ fn fs_main_player_skin(in: VsOut) -> @location(0) vec4<f32> {
     return shade_entity(in, tex_col);
 }
 
-// `EntityPipeline::banner_layer_pipeline`'s fragment entry point (issue #174
-// step C). Vanilla's `RenderPipelines.BANNER_PATTERN` draws its mask layers
+// `EntityPipeline::banner_layer_pipeline`'s fragment entry point.
+// Vanilla's `RenderPipelines.BANNER_PATTERN` draws its mask layers
 // translucent, depth-write-off, with **no alpha cutout at all** — a banner
 // pattern's antialiased mask edge is meant to blend, not vanish, and `fs_main`'s
 // unconditional `discard` below 0.5 would lose exactly those edge texels. This
@@ -375,8 +375,8 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // vanilla is 1.0 and 0.4), and drops to the 0.4 floor on every normal
     // *perpendicular* to the single direction. Axis-aligned box faces never land
     // on that band, which is why standing mobs looked passable; the first-person
-    // arm is rotated and sat at 0.497 over 97% of its pixels, reported as issue
-    // #383's dark side. Two near-opposing lights have no perpendicular band at
+    // arm is rotated and sat at 0.497 over 97% of its pixels under a single-light
+    // model, reported as a hard dark side. Two near-opposing lights have no perpendicular band at
     // all — their dark region is the underside, which is what a shaded model
     // should have.
     let d0 = max(dot(n, light_0), 0.0);
@@ -398,7 +398,7 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
     // toward black instead of washing it red. Blended in the same gamma-space
     // stage as the tint/shade multiply above, per this shader's convention that
     // colour math happens in gamma bytes, not linear light.
-    // The overlay strength was inverted (issue #371). Vanilla's `entity.fsh:57`:
+    // The mix arguments below must not be swapped. Vanilla's `entity.fsh:57`:
     //
     //     color.rgb = mix(overlayColor.rgb, color.rgb, overlayColor.a);
     //
@@ -454,7 +454,7 @@ fn shade_entity(in: VsOut, tex_col: vec4<f32>) -> vec4<f32> {
 }
 
 // ---------------------------------------------------------------------------
-// Mob fire (issue #434 — player report: "mobs dont show flames yet")
+// Mob fire — a billboarded flame overlay for any entity with the on-fire flag set
 //
 // `EntityPipeline::flame_pipeline`'s vertex/fragment entry points. Distinct
 // from `vs_main`/`fs_main` because the flame instance format

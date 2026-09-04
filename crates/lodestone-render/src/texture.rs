@@ -154,7 +154,7 @@ impl AtlasStats {
 /// Packing occupancy of a stitched 2D atlas: how much of its pixel area is
 /// actually spoken for by sprite rectangles, versus padding/unused space.
 ///
-/// The seam issue #160 asked for and this crate did not have: `AtlasStats`
+/// The seam this crate did not have before: `AtlasStats`
 /// reports sprite/frame *population* (counts), and [`GpuAtlas`] (below)
 /// exposes only `width`/`height` — neither answers "how full is this atlas".
 /// Deliberately CPU-side and GPU-adapter-free: every input
@@ -804,7 +804,7 @@ mod tests {
 
     #[test]
     fn webgpu_measured_caps_are_not_bindless() {
-        // Fix #4 audit: unlike the multi-draw probe (which read a *downlevel
+        // Unlike the multi-draw probe (which read a *downlevel
         // flag* and was optimistic), the bindless probe reads the real
         // `TEXTURE_BINDING_ARRAY` / non-uniform-indexing feature bits, which
         // WebGPU and WebGL2 genuinely do not advertise. So a measured WebGPU

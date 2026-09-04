@@ -30,9 +30,9 @@
 //!   same expression with the dimension's `ambientLight` lerped in, which is
 //!   `0.0` in the overworld.
 //! * **The curve is applied to the raw level, and `SkyFactor` multiplies the
-//!   result.** That order matters and it is the opposite of what issue #386's
-//!   table assumed — see the divergence note at the bottom of this doc.
-//!   `SkyFactor` is vanilla's own per-dimension sky-light-factor attribute, i.e. exactly
+//!   result.** Applying the curve *after* multiplying by `SkyFactor` instead
+//!   gives a different, wrong answer — see the divergence note at the bottom of
+//!   this doc. `SkyFactor` is vanilla's own per-dimension sky-light-factor attribute, i.e. exactly
 //!   [`crate::entity::sky_darken_for_time_of_day`] (JVM-gated tick by tick in
 //!   `tests/sky_light_factor_timeline.rs`).
 //! * [`not_gamma`] is `notGamma`, mixed in at [`BRIGHTNESS_FACTOR`]. This is not
@@ -49,8 +49,8 @@
 //!   (with `BlockFactor` ≈ 1.4 and a warm `BLOCK_LIGHT_TINT`); [`light_term`]
 //!   takes their `max`. Fixing that faithfully makes the light term a *colour*
 //!   rather than a scalar, because `BLOCK_LIGHT_TINT` is not white — which
-//!   widens a vertex output in three shaders. Issue #383's third divergence,
-//!   still open.
+//!   widens a vertex output in three shaders, and is why this combine stays
+//!   unmodelled today.
 //!
 //! # How to change it
 //!
@@ -59,7 +59,7 @@
 //! `#include` and this crate's convention is to duplicate small helpers (see
 //! `srgb_to_linear`, already three-way duplicated). **Change all three plus this
 //! file together**, and note that `shaders/block.wgsl` is the demo-only packed
-//! path tracked separately by #400.
+//! path with its own hand-kept copy of the same terms, not one of these three.
 //!
 //! The gates must *not* call into this module: per `CLAUDE.md`, an expected value
 //! has to originate outside the code under test, so each one writes
@@ -73,25 +73,26 @@
 //! client yet. Wiring one means threading it into the three shaders' uniforms;
 //! `0.0` reproduces vanilla's "Moody" and `1.0` its "Bright".
 //!
-//! # The divergence from issue #386's table
+//! # The divergence from applying the curve after `sky_darken`
 //!
-//! #386 specified `l / (4 - 3l)` applied to `l = max(sky * sky_darken, block)`,
-//! predicting `0.0732` at midnight against our old ramp's `0.3920` — "5.36× too
-//! bright". Both halves of that are off, and in opposite directions:
+//! Applying `l / (4 - 3l)` to `l = max(sky * sky_darken, block)` — curve
+//! *after* the darken multiply — predicts `0.0732` at midnight against the old
+//! ramp's `0.3920`, i.e. "5.36× too bright". Both halves of that are off, and in
+//! opposite directions:
 //!
 //! | midnight, sky 15 | light term |
 //! |---|---|
 //! | old ramp `0.2 + 0.8·l` | 0.3920 |
-//! | #386's table (`curve` **after** `sky_darken`, no `notGamma`) | 0.0732 |
+//! | curve applied **after** `sky_darken`, no `notGamma` | 0.0732 |
 //! | vanilla per `lightmap.fsh` (`curve` **before**, with `notGamma`) | **0.4532** |
 //!
 //! So night was never 5.36× too bright — at full skylight it was ~14% too
-//! *dark*. The ramp is still wrong, and wrong in the way #383 measured, but the
-//! error lives in the **middle** of the range, not at midnight: at sky level 12
-//! in daylight the old ramp gives `0.840` where vanilla gives `0.719`, and at
-//! sky level 4 it gives `0.413` where vanilla gives `0.189`. And the `0.2` floor
-//! really is a hard mechanism, exactly as #386 says: an unlit surface read
-//! `0.200` where vanilla reads [`AMBIENT_LIGHT`]'s `0.0935`.
+//! *dark*. The ramp is still wrong, but the error lives in the **middle** of the
+//! range, not at midnight: at sky level 12 in daylight the old ramp gives
+//! `0.840` where vanilla gives `0.719`, and at sky level 4 it gives `0.413`
+//! where vanilla gives `0.189`. And the `0.2` floor really is a hard mechanism:
+//! an unlit surface read `0.200` where vanilla reads [`AMBIENT_LIGHT`]'s
+//! `0.0935`.
 //!
 //! # Two further corrections, from the jar
 //!
@@ -419,7 +420,7 @@ mod tests {
         0.2 + 0.8 * level
     }
 
-    /// Issue #386's three named proof points, on the bare curve. These are
+    /// Three named proof points on the bare curve. These are
     /// arithmetic on `l / (4 - 3l)` — written out here rather than taken from
     /// [`brightness`]' own output — and they pin the *shape*: the curves cross at
     /// both endpoints, so only an interior point can tell them apart.
@@ -543,8 +544,8 @@ mod tests {
         );
     }
 
-    /// The midnight number this whole change turns on, with issue #386's own
-    /// table as the third hypothesis. All three are computed here from constants
+    /// The midnight number this module's curve-and-combine order turns on, with
+    /// the curve-after-darken table as the third hypothesis. All three are computed here from constants
     /// that originate in vanilla's lightmap fragment shader and gamma option, not from the shader.
     #[test]
     fn midnight_lands_on_vanillas_value_and_not_on_either_wrong_one() {
@@ -553,7 +554,7 @@ mod tests {
 
         // Hypothesis A, the retired ramp: `0.2 + 0.8 * (1.0 * 0.24)`.
         let old = retired_linear_ramp(midnight);
-        // Hypothesis B, #386's table: the curve applied *after* `sky_darken`,
+        // Hypothesis B, the curve applied *after* `sky_darken`,
         // with no `notGamma` — `0.24 / (4 - 3 * 0.24)`.
         let issue_table = midnight / (4.0 - 3.0 * midnight);
         // Hypothesis C, this file's own first version: vanilla's chain but with
@@ -588,7 +589,7 @@ mod tests {
         assert!(
             (ours - vanilla).abs() < 1e-6,
             "midnight must land on vanilla's {vanilla} -- not the retired ramp's \
-             {old}, not issue #386's {issue_table}, and not the ambient-free \
+             {old}, not the curve-after-darken table's {issue_table}, and not the ambient-free \
              {ambient_free}; got {ours}"
         );
     }
@@ -878,7 +879,7 @@ mod tests {
 
     /// **The bug this module's per-dimension `ambient` parameter exists to
     /// fix.** A cave in the Nether must read vanilla's real ambient floor —
-    /// derived here from `#302821` by hand, the same `notGamma` mix
+    /// derived here from `0x302821` by hand, the same `notGamma` mix
     /// [`light_color_from_levels`] applies to `AMBIENT_LIGHT_COLOR` — and that
     /// floor must be **measurably brighter** than the overworld's `#0a0a0a`
     /// floor, not the same number. Passing [`OVERWORLD_AMBIENT_LIGHT`] for a
@@ -886,14 +887,14 @@ mod tests {
     /// constant) is the wrong hypothesis this test discriminates against.
     #[test]
     fn nether_ambient_floor_reads_meaningfully_brighter_than_the_overworlds() {
-        // `#302821` per channel, `notGamma`-mixed at `BRIGHTNESS_FACTOR` —
+        // `0x302821` per channel, `notGamma`-mixed at `BRIGHTNESS_FACTOR` —
         // written out by hand rather than calling `light_color_from_levels`.
         // `notGamma` is **not** a per-channel operation on a non-grey triple:
         // it scales every channel by the *maximum* channel's response
         // (`not_gamma_vec3`'s doc), which is why this cannot reuse
         // `an_unlit_surface_lands_on_vanillas_ambient_floor`'s per-channel
         // arithmetic — that derivation is only exact when the three channels
-        // already agree, which the Nether's `#302821` does not.
+        // already agree, which the Nether's `0x302821` does not.
         let raw = [48.0_f32 / 255.0, 40.0 / 255.0, 33.0 / 255.0];
         let max_component = raw[0].max(raw[1]).max(raw[2]);
         let inv = 1.0 - max_component;
