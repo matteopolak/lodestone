@@ -1,20 +1,15 @@
-//! Live repro for issue #614 ("after any death I end up inside the ground, in
-//! every dimension"), and the regression gate for it.
+//! Live regression gate for a player returning to solid ground at the configured
+//! survival-oracle world spawn after death.
 //!
 //! ## Why this exists
 //!
-//! Three static passes already eliminated the whole chain a unit test can
-//! see: server spawn resolution, the client's `Death`/`Respawned` event
-//! routing, the teleport-application arm, the `tick_collision` hold-until-
-//! loaded gate, `on_column_arrived`, and — the last static lead — a measured
-//! parity check proving `mesher.rs` and `sim/collide.rs` agree on
-//! section-to-world-`y` placement in both the overworld and the Nether. None
-//! of that reproduces or refutes a **timing** defect: a value read before the
-//! player's own column has streamed in, then never corrected. That class of
-//! bug is invisible to every gate above because they all either construct
-//! their world synchronously (no streaming to race) or never observe a
-//! *respawn into an unloaded column* — every existing gate's respawn happens
-//! to land back on ground the client already holds.
+//! Respawn placement crosses several live paths: server spawn resolution,
+//! death and respawn events, teleport application, collision hold-until-loaded
+//! handling, and column arrival. A timing defect can occur when collision reads
+//! the player's destination before that column streams in and never corrects
+//! the result. Hermetic tests do not exercise this race because they construct
+//! their world synchronously; this gate deliberately respawns into an unloaded
+//! column and traces the transition until its terrain is present.
 //!
 //! ## The setup this gate uses to force the race
 //!
@@ -24,9 +19,8 @@
 //! 2. RCON-teleport the player thousands of blocks away — past the oracle's
 //!    `view-distance=10` (160 blocks) — and drive ticks until the spawn
 //!    column has actually left the client's loaded set. This is the
-//!    precondition the race needs: without it, "respawn" always lands
-//!    somewhere already loaded (every existing gate's blind spot) and the
-//!    hold-until-loaded path is never exercised by a respawn at all.
+//!    precondition the race needs: without it, the destination may remain
+//!    loaded and the hold-until-loaded path is not exercised.
 //! 3. RCON-kill the player at the far location, wait for `is_dead()`, then
 //!    call `Sim::respawn()` (the death screen's Respawn click) exactly once
 //!    — a server with no bed sends the player back to world spawn, a column
@@ -50,8 +44,8 @@
 //!
 //! Gated behind `--features live` **and** `#[ignore]`. Per `DESIGN.md` §12 it
 //! **fails** rather than skips when it cannot run — no server, no RCON, or
-//! missing vanilla assets is a failure with a fix hint, because a skip here
-//! reads like a pass.
+//! missing vanilla assets is a failure with an actionable hint, because a skip
+//! here reads like a pass.
 //!
 //! ```text
 //! cargo test -p lodestone-shell --features live \
@@ -445,22 +439,13 @@ fn run_repro(rcon: &mut RconClient, collide_live: bool) -> Outcome {
 
     // Phase 4+5: respawn (the death screen's button click) and trace **from
     // the same tick the call is made** — not from confirmation onward. The
-    // first run showed exactly why this matters: waiting for confirmation
-    // first (in an un-logged loop) let the spawn column reload *during that
-    // wait*, so the very race this gate exists to observe happened entirely
-    // inside the blind spot between "respawn requested" and "respawn
-    // confirmed". Logging every tick of that window is the fix.
-    // Captured *before* the call: `NetUpdate::Respawned` (which flips
-    // `is_dead()` and bumps `respawn_count`) and the position-carrying
-    // `NetUpdate::Teleport` are two separate `NetUpdate`s and are **not**
-    // guaranteed to land in the same tick's `poll_net` batch — measured on
-    // the first run of this gate, where `is_dead()` went false a full tick
-    // before `player.position` moved off the death location. So
-    // "confirmed" (the death-screen signal) and "the server's respawn
-    // position actually landed" are tracked as two separate ticks below;
-    // conflating them is what produced a nonsense 100.00 "respawn y" the
-    // first time this ran (the far-away death altitude, not the real
-    // spawn).
+    // spawn column may reload while confirmation is pending, so omitting this
+    // interval can hide the unloaded-column race. Capture every tick in the
+    // interval. `NetUpdate::Respawned` (which flips `is_dead()` and bumps
+    // `respawn_count`) and the position-carrying `NetUpdate::Teleport` are two
+    // separate updates and are not guaranteed to land in the same
+    // `poll_net` batch. "Confirmed" and "position actually landed" are
+    // therefore tracked as separate ticks below.
     let pre_respawn_y = sim.player().position.y;
     let respawns_before = sim.respawn_count();
     sim.respawn();

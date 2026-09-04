@@ -4,12 +4,10 @@
 //!
 //! # Why instructions and not time
 //!
-//! Wall clock on this machine reproduces to **10.8%** peak-to-peak, and one
-//! worldgen stage swung **22% across three runs of an identical binary** while
-//! an allocation counter read 905,459 to the digit 3 of 3 (`DESIGN.md` §12.98,
-//! §12.103). A duration measured here has already been attributed to the wrong
-//! cause outright — a "debug versus release" story that turned out to be pure
-//! machine load.
+//! Wall clock on this machine varies by **10.8%** peak-to-peak, and a worldgen
+//! stage can vary **22% across three runs of an identical binary** under load
+//! (`DESIGN.md` §12.98, §12.103). A duration therefore mixes machine load with
+//! the work being measured; instruction counts isolate the deterministic part.
 //!
 //! `proc_pid_rusage(getpid(), RUSAGE_INFO_V4, …)` returns `ri_instructions` and
 //! `ri_cycles` for the calling process: populated on Apple Silicon,
@@ -85,9 +83,8 @@
 //! that the same compiled loop taking the same number of steps must retire the
 //! same instructions whether its table is 4 KiB or 16 MiB, while its *cycles*
 //! blow out — which is the separation no scaling test can make, because cycles
-//! scale 4× too. An earlier `IPC > 1.0` control was **premise-false and fired on
-//! correct code**; see [`assert_counters_are_real`] for the measurement and why
-//! it was the dangerous direction of wrong.
+//! scale 4× too. The counter sanity check is kept separate from these controls;
+//! [`assert_counters_are_real`] verifies that the instrument reports real work.
 //!
 //! # What the fixture contains, asserted rather than hoped
 //!
@@ -399,20 +396,15 @@ const KERNEL_SCALE: u64 = 4;
 /// * **zeros** — Intel or Rosetta populates neither field, and a zero delta
 ///   would pass every equality check below while measuring nothing.
 ///
-/// # An earlier control here was premise-false, and this is the record
+/// # Counter-field sanity controls
 ///
-/// The first version of the swapped-field control asserted `IPC > 1.0` on the
-/// SplitMix64 reference kernel, reasoning that "a wide out-of-order core retires
-/// more than one integer op per cycle". It **failed on correct code**, measuring
-/// IPC 0.643 (18,196,013 instructions / 28,285,041 cycles) — because
-/// [`reference_kernel`] is a *serially dependent* chain: two 64-bit multiplies
-/// per iteration, each feeding the next, so it is latency-bound at ~14 cycles
-/// for ~9.1 instructions. Low IPC is the *correct* reading for that kernel. The
-/// premise was wrong, not the counter, and the direction of the error was the
-/// dangerous one: a `< 1.0` assertion would have "passed" on a swapped read.
-/// The locality control replaces it precisely because its expectation comes from
-/// arithmetic — two arms take the same number of steps through the same compiled
-/// loop — and not from any belief about this core's width. (DESIGN.md §12.118.)
+/// The reference kernel is a serially dependent SplitMix64 chain: two 64-bit
+/// multiplies per iteration feed the next iteration, so its instruction-per-
+/// cycle ratio depends on latency and core scheduling. IPC is therefore not a
+/// sound field-identity discriminator. The locality control instead relies on
+/// arithmetic: two arms take the same number of steps through the same compiled
+/// loop, so the correct counter has matching instruction totals while the cycle
+/// counter diverges with memory locality. (DESIGN.md §12.118.)
 /// Non-Darwin arm. The struct-size check and all three controls below are
 /// statements *about* `rusage_info_v4`, so there is nothing here to assert on a
 /// platform that has no such struct. It panics rather than returning `()` because
@@ -550,18 +542,12 @@ fn assert_counters_are_real() {
         cold.cycles
     );
 
-    // The discriminator. **This used to be `separation > 4.0` and that threshold
-    // was a defect**: it encoded one machine's observed DRAM latency ratio (~13)
-    // rather than the hypothesis it claims to separate, and it contradicted the
-    // premise check directly above it — any machine state with a cycle ratio
-    // between 2.0 and 4.0 passes the premise and fails the discriminator while
-    // being nowhere near the swapped reading. That is exactly what happened: under
-    // concurrent-agent memory pressure (`Swapouts` climbing 983,444 → 1,174,980
-    // within one session) the *hot* arm stalls too, the cycle ratio compresses to
-    // 2.8–3.9, and the whole harness became unrunnable for a reason unrelated to
-    // what it measures. `DESIGN.md` §12.128.
+    // The discriminator uses the **instruction** ratio rather than a fixed
+    // hardware-latency threshold. A cycle ratio between 2.0 and 4.0 still
+    // satisfies the premise while varying with memory pressure, so it cannot
+    // identify the field on its own. `DESIGN.md` §12.128.
     //
-    // The primary discriminator is now the **instruction** ratio, which is
+    // The primary discriminator is the **instruction** ratio, which is
     // load-invariant. `chase` takes CHASE_ITERS steps through one compiled loop in
     // both arms, so if the field being read is instructions retired the two arms
     // must agree; the residual is page-fault and TLB handling in the kernel,
@@ -581,7 +567,7 @@ fn assert_counters_are_real() {
         hot.instructions,
         cold.instructions
     );
-    // The ratio of ratios is kept as a secondary check, now with a threshold
+    // The ratio of ratios is kept as a secondary check, with a threshold
     // derived from the premise floor rather than from a machine observation: with
     // `cycle_ratio > 2.0` and `insn_ratio < 1.5` both established, the correct
     // hypothesis puts separation above 1.33 and the swapped one below 0.5, so a
@@ -675,8 +661,8 @@ struct SubmitCost {
     /// encoder setup, queue submit. The term culling cannot remove.
     fixed: Delta,
     /// Instructions for the same frame with every fixture section resident and
-    /// the terrain cull **off** — the pre-#543 behaviour, and the arm the
-    /// per-section marginal cost is derived from.
+    /// the terrain cull **off** — the denominator from which the per-section
+    /// marginal cost is derived.
     loaded: Delta,
     /// Sections the no-cull frame submitted, from `RenderStats`.
     sections_drawn: usize,
@@ -688,10 +674,9 @@ struct SubmitCost {
     culled_sections_drawn: usize,
     /// Draw calls the culled frame issued, both passes.
     culled_draw_calls: usize,
-    /// Vertex+index buffer-bind pairs the no-cull and culled frames issued. Before
-    /// the shared mesh arena this was exactly one per draw call; it is now one per
-    /// arena block actually drawn from, which is what issue #543's second half
-    /// moves.
+    /// Vertex+index buffer-bind pairs issued by the no-cull and culled frames.
+    /// The shared mesh arena emits one pair per arena block actually drawn from,
+    /// so these counts expose how culling changes the source blocks.
     buffer_binds: (usize, usize),
     /// The culled frame's three-way cull split (distance, frustum, occlusion),
     /// opaque pass only — the numbers that must sum with
@@ -780,13 +765,10 @@ fn measure_draw_submission(
     // of the previous frame's driver work. Batching frames per window averages
     // that; the median over windows removes an interrupt landing in one.
     //
-    // This is not a cosmetic change. The first version of this measurement took
-    // one frame per arm after 4 warm-up frames and reported the loaded frame as
-    // *cheaper* than the empty one (4,288,471 against 7,958,869 instructions) —
-    // a negative marginal cost, silently clamped to 0 by a `saturating_sub`.
-    // Lazy Metal pipeline compilation had not settled by frame 4, so the "fixed"
-    // arm absorbed one-off work. Hence 40 warm-up frames, and hence the marginal
-    // cost is asserted **positive** rather than saturated. (DESIGN.md §12.118.)
+    // A one-frame arm is not measurable here: lazy Metal pipeline compilation
+    // and asynchronous driver work can land inside the first window. Forty
+    // warm-up frames let that one-off work settle, and the marginal cost is
+    // asserted **positive** rather than saturated. (DESIGN.md §12.118.)
     const FRAMES_PER_WINDOW: usize = 10;
     const WINDOWS: usize = 5;
     const WARMUP_FRAMES: usize = 40;
@@ -868,9 +850,8 @@ fn measure_draw_submission(
          would read zero for a reason unrelated to submission cost"
     );
 
-    // Arm 2: cull **off**, so this stays comparable with the pre-#543 record and
-    // the per-section marginal rate is derived from a known section count rather
-    // than from whatever this fixture's camera happens to see.
+    // Arm 2: cull **off**, so the per-section marginal rate is derived from a
+    // known section count rather than from whatever this fixture's camera sees.
     state.set_terrain_culling(false);
     let (loaded, stats) = arm(&state, &mut one_frame);
     // `sections_drawn` is incremented only by the opaque pass of
@@ -896,8 +877,7 @@ fn measure_draw_submission(
         stats.draw_calls,
         stats.sections_drawn
     );
-    // A negative marginal cost is a broken measurement, not a fast renderer. The
-    // first version of this function produced exactly that and clamped it to zero.
+    // A negative marginal cost is a broken measurement, not a fast renderer.
     assert!(
         loaded.instructions > fixed.instructions,
         "the frame with {} sections retired FEWER instructions ({}) than the frame with none \
@@ -910,10 +890,10 @@ fn measure_draw_submission(
         fixed.instructions
     );
 
-    // Arm 3: the same resident set with the cull **on** (#543), occlusion graph
-    // explicitly **off** — frustum ∩ distance alone, which is what #543 measured
-    // and the baseline the occlusion arm below is a delta against. Nothing changes
-    // between arms 2 and 3 but `terrain_culling`.
+    // Arm 3: the same resident set with the cull **on** and the occlusion graph
+    // explicitly **off** — frustum ∩ distance alone. This isolates the culling
+    // contribution; the occlusion arm below uses it as its baseline. Nothing
+    // changes between arms 2 and 3 but `terrain_culling`.
     state.set_terrain_culling(true);
     state.set_terrain_occlusion(lodestone::gpu::TerrainOcclusion::Off);
     let (culled, cstats) = arm(&state, &mut one_frame);
@@ -1584,7 +1564,7 @@ fn client_chunk_path_cycle_attribution() {
     if fluid_cells > 0 {
         // The terrain-independent figure, printed rather than divided by hand:
         // the 58.8% share belongs to *this* water-bearing column, but the
-        // per-fluid-cell cost is the number a fix is judged on. Cycles too,
+        // per-fluid-cell cost is the comparison unit. Cycles too,
         // because a locality change can move them without moving instructions
         // — see "Where instructions understate" in `docs/client-chunk-cycles.md`.
         let cells = fluid_cells as f64;
@@ -1731,10 +1711,9 @@ fn client_chunk_path_cycle_attribution() {
         "same set, camera pitched down  {down_off:>13} sections with the graph off / {down_on} \
          with it on ({down_occ} culled by the graph)"
     );
-    // The extrapolation to the one recorded live figure. 931 sections / 441k
-    // quads at default render distance is `45a93e4`'s commit message — the only
-    // measured live section count in the record. Stated as an extrapolation from
-    // the per-section rate above, not as a measurement.
+    // The extrapolation uses the one recorded live section count: 931 sections
+    // and about 441k quads at the default render distance. It derives from the
+    // per-section rate above, not from a new measurement.
     const RECORDED_LIVE_SECTIONS: u64 = 931;
     println!(
         "\nextrapolated to the recorded live frame ({RECORDED_LIVE_SECTIONS} sections, \

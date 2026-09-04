@@ -2,48 +2,26 @@
 //!
 //! # What this is
 //!
-//! Before this fix, the **only** place `Particles::destroy_block` (the burst
-//! emitter) was called on the live path was `Sim::step`'s `NetUpdate::BlockDestroyed`
-//! arm, fed by the server's `ClientboundLevelEventPacket` id `2001`. Verified
-//! against `.cache/mc/26.2/src` (see `crate::interact::drive_mining`'s doc
-//! comment on the fix): the player's own break is handled server-side by
-//! `ServerPlayerGameMode.destroyBlock`, which calls `Level.removeBlock` — a
-//! plain block-state write that never touches `levelEvent` at all. The `2001`
-//! event only exists on the *separate* `Level.destroyBlock` method, which a
-//! cascading break (a torch losing support, fire, an explosion) goes through
-//! instead. So the player's own break could never produce a burst; only a
-//! break some other cause reported could.
+//! A block-destruction burst can arrive through `NetUpdate::BlockDestroyed`
+//! when the server broadcasts protocol event `2001`. A player's own break is
+//! different: the local block-state prediction completes without that event,
+//! so waiting for the network notification cannot produce the player's burst.
+//! `drive_mining` therefore emits the burst locally at the moment its predictor
+//! records the destruction, without waiting for a server round trip.
 //!
-//! The fix adds a local **predicted** emit in `drive_mining` — vanilla's
-//! `MultiPlayerGameMode.destroyBlock` does the identical thing client-side,
-//! synchronously, without waiting for a server round trip.
+//! # Choosing the emission key
 //!
-//! # The same emit, keyed on the wrong thing
+//! The emission must not be keyed solely to the queued
+//! `BlockAction { action: StopDestroy, .. }`. `StopDestroy` identifies the
+//! progressive completion path; a one-shot break queues `StartDestroy` and
+//! completes in the same tick. The particle effect is consequently keyed to
+//! the predictor's destruction latch rather than to either action or to a
+//! network event.
 //!
-//! That fix keyed the emit on the predictor queueing
-//! `BlockAction { action: StopDestroy, .. }`. Reported from play afterwards:
-//! punching grass and saplings still produced no debris, while blocks that take
-//! a real mining cycle did.
-//!
-//! `StopDestroy` is not the moment a block breaks — it is one of the **four**
-//! ways vanilla's `MultiPlayerGameMode` reaches its single `destroyBlock(pos)`
-//! funnel (the two creative branches, `startDestroyBlock`'s instant-break
-//! branch, and `continueDestroyBlock`'s progress-reached-`1.0` branch), and it
-//! is the one a one-shot block never takes: `Mining::start`'s
-//! `progress_per_tick() >= 1.0` branch emits `StartDestroy` and nothing else,
-//! because the block is already gone. The destroy effect hangs off the funnel,
-//! not off a packet — `destroyBlock` → `Block.playerWillDestroy` →
-//! `Block.spawnDestroyParticles` → `level.levelEvent(player, 2001, pos, id)`,
-//! which `ClientLevel` dispatches locally into `LevelEventHandler`'s `case
-//! 2001`.
-//!
-//! So `Mining` now latches the destruction itself
-//! (`Mining::take_destroyed`), both branches set it, and `drive_mining` keys on
-//! that. [`an_instant_break_throws_a_debris_burst_on_its_very_first_tick`] is
-//! the gate for the one-shot path;
-//! [`a_completed_dig_throws_a_debris_burst_on_the_tick_it_finishes`] keeps the
-//! progressive path pinned so the re-keying cannot fix one by breaking the
-//! other.
+//! `Mining` latches the destruction itself (`Mining::take_destroyed`), both
+//! branches set the latch, and `drive_mining` consumes it. The instant-break
+//! test covers the one-shot path while the progressive test covers the
+//! multi-tick path, so both routes must emit a burst.
 //!
 //! # How this gate proves it
 //!
@@ -106,9 +84,8 @@ const STONE: u32 = 1;
 /// *several* ticks, so the "no burst yet" control window exists.
 const STONE_HARDNESS: f32 = 1.0;
 
-/// The name of the instant-break fixture. Grass is what the play report named;
-/// [`instant_break_fixture`] proves it is genuinely one-shot rather than assuming
-/// so.
+/// The name of the instant-break fixture. [`instant_break_fixture`] verifies
+/// that this block is genuinely one-shot rather than assuming so.
 const INSTANT_BREAK_BLOCK: &str = "minecraft:short_grass";
 
 /// The world position of the targeted block, and therefore of the pick target.
@@ -133,7 +110,7 @@ const BURST_THRESHOLD: usize = 8;
 /// Carries the state id and hardness so the two tests can point the *same*
 /// harness, predictor and particle sink at a slow block and at a one-shot one.
 /// The hardness is the only thing that decides which of `Mining`'s two destroy
-/// branches runs, which is exactly what that fix is about.
+/// branches runs, so the fixture selects the branch under test explicitly.
 #[derive(Debug, Clone, Copy)]
 struct OneBlockVersion {
     /// The one block-state id this adapter answers for.
@@ -213,12 +190,11 @@ fn state_id_of(name: &str) -> u32 {
 /// The instant-break fixture, **derived** from the hardness census rather than
 /// asserted against it.
 ///
-/// This is the *precondition* guard the issue calls out. A fixture whose block
-/// takes even one extra tick exercises `Mining::continue_`'s progress branch —
-/// the path that already worked — and the gate below would then pass while the
-/// reported bug was untouched. So the census supplies the hardness the adapter
-/// reports, and this function refuses to hand back anything the predictor's own
-/// formula does not classify as one-shot.
+/// This is the *precondition* guard for the one-shot path. A fixture whose block
+/// takes even one extra tick exercises `Mining::continue_`'s progress branch
+/// instead, leaving the instant-break path untested. The census supplies the
+/// hardness the adapter reports, and this function refuses to hand back
+/// anything the predictor's own formula does not classify as one-shot.
 fn instant_break_fixture() -> OneBlockVersion {
     let state = state_id_of(INSTANT_BREAK_BLOCK);
     let census = lodestone_data::hardness::hardness(state)
@@ -276,15 +252,14 @@ fn progressive_fixture() -> OneBlockVersion {
     version
 }
 
-/// Whether the tick's queued actions contain the `StopDestroy` this emit used to
-/// be keyed on.
+/// Whether the tick's queued actions contain the progressive `StopDestroy` action.
 ///
 /// Deliberately one function used by both tests. The progressive gate asserts it
 /// answers **true** on the finishing tick, which is the control proving the
 /// detector works; the instant-break gate asserts it answers **false** on a tick
-/// that nonetheless bursts, which is what pins the re-keying. Without the shared
-/// helper, "no `StopDestroy`" would be an absence measured by an unproven
-/// detector.
+/// that nonetheless bursts, proving that the burst is keyed to destruction
+/// rather than to this action. Without the shared helper, "no `StopDestroy`"
+/// would be an absence measured by an unproven detector.
 fn stop_destroy_queued(actions: &[ClientAction]) -> bool {
     actions.iter().any(|a| {
         matches!(
@@ -347,9 +322,9 @@ impl Harness {
 
         // The chunk store's read/write halves, named from the *client's* `Arc`
         // so a write through one and a read through the other see each
-        // other — `drive_mining` now takes both, for the local block-edit
-        // prediction (issue #596), the same pair `place_intent.rs`'s
-        // harness already installs for `drive_placement`.
+        // other — `drive_mining` takes both so local block-edit prediction is
+        // visible through the same store that the harness reads below. The
+        // placement harness uses this pair for the same reason.
         let chunk_world = client.chunk_world();
         let chunk_world_write = client.chunk_world_write();
 
@@ -375,9 +350,8 @@ impl Harness {
     }
 
     /// Read a block straight out of the same [`lodestone_ecs::ChunkWorld`]
-    /// `drive_mining`'s local prediction (issue #596) writes through —
-    /// `place_intent.rs`'s identical helper for `drive_placement`'s own
-    /// predicted write.
+    /// `drive_mining`'s local prediction writes through. Reading through the
+    /// same store makes the assertion independent of network acknowledgements.
     fn block_at(&self, pos: [i32; 3]) -> u32 {
         let mut world = self.ecs.write();
         let store = world.resource_mut::<lodestone_ecs::ChunkWorld>().clone();
@@ -413,9 +387,8 @@ fn build_resources(world: &mut EcsWorld, version: OneBlockVersion) {
     // sound seed must never draw from the particle engine's `JavaRandom`.
     world.insert_resource(FrameClock::default());
     world.insert_resource(AudioEngine(None));
-    // `drive_mining`'s local block-edit prediction (issue #596) needs a mesh
-    // scheduler to re-mesh through; a `Demo` classifier is the same
-    // GPU-free choice `place_intent.rs`'s harness makes for `drive_placement`.
+    // `drive_mining`'s local block-edit prediction needs a mesh scheduler to
+    // re-mesh through; a `Demo` classifier keeps this harness GPU-free.
     world.insert_resource(TerrainMesh::new(MeshScheduler::new(
         1,
         lodestone::blocks::ShellClassifier::Demo(lodestone::blocks::DemoClassifier),
@@ -451,9 +424,8 @@ fn column_with(pos: [i32; 3], id: u32) -> LoadedChunk {
     LoadedChunk::new(column, ColumnLight::new(16), Heightmaps::new(), Vec::new())
 }
 
-/// **The gate for the progressive path**, and — since that fix re-keyed
-/// the emit off `StopDestroy` — the control proving
-/// [`stop_destroy_queued`] actually detects something.
+/// **The gate for the progressive path**, and the control proving
+/// [`stop_destroy_queued`] actually detects the completion action.
 ///
 /// Ticks a real dig to completion, recording the per-tick particle-count delta,
 /// and asserts the shape: small (or zero) before completion, large exactly on it.
@@ -514,25 +486,24 @@ fn a_completed_dig_throws_a_debris_burst_on_the_tick_it_finishes() {
     );
 }
 
-/// **The gate for that fix.** A genuinely one-shot block must throw its debris
-/// burst on the very first tick of the dig, on a tick where no `StopDestroy` is
-/// queued at all.
+/// **The gate for the instant-break path.** A genuinely one-shot block must
+/// throw its debris burst on the very first tick of the dig, on a tick where no
+/// `StopDestroy` is queued at all.
 ///
 /// # What each assertion is for
 ///
 /// * The fixture comes from [`instant_break_fixture`], which derives the hardness
 ///   from the jar census and refuses to return anything the predictor's own
 ///   formula does not call one-shot. That is the *precondition* guard: a fixture
-///   with a real `destroySpeed` would quietly turn this into a second copy of the
+///   with an ordinary multi-tick mining speed would quietly turn this into a second copy of the
 ///   progressive test.
-/// * `delta >= BURST_THRESHOLD` on tick 0 is the gate. Pre-fix this was `0`:
-///   `drive_mining` emitted nothing, and it emitted no per-tick mining chip
-///   either, because an instant break leaves `Mining::target()` `None` both
-///   before and after the call.
+/// * `delta >= BURST_THRESHOLD` on tick 0 is the gate. The predictor must emit
+///   the burst even though an instant break leaves `Mining::target()` `None`
+///   both before and after the call.
 /// * **The control**, and the reason this is not simply a duplicate assertion:
 ///   `stop_destroy_queued` must answer **false** on that same tick. That is what
-///   proves the burst did not come back through the old key — the emit really is
-///   keyed on destruction now. The detector itself is proven live by
+///   proves the burst is keyed on destruction rather than on the queued action.
+///   The detector itself is proven live by
 ///   [`a_completed_dig_throws_a_debris_burst_on_the_tick_it_finishes`], which
 ///   calls the same function and requires a `true` from it; without that pairing
 ///   this `false` would be an absence measured by an untested detector.
@@ -596,18 +567,15 @@ fn an_instant_break_throws_a_debris_burst_on_its_very_first_tick() {
 }
 
 // ---------------------------------------------------------------------------
-// Issue #596: the local block-edit prediction
+// Local block-edit prediction
 // ---------------------------------------------------------------------------
 
-/// **The gate for issue #596.** The local chunk store must show air on the
+/// **The local-prediction gate.** The local chunk store must show air on the
 /// exact tick a block is predicted destroyed, with **no server round trip
 /// involved at all**: this harness's `_server_io` end is never read from or
-/// written to after construction, so there is no ack this test could
-/// possibly be observing. If the fix regressed to waiting on the server's
-/// `BLOCK_UPDATE`, this assertion would fail outright rather than merely
-/// landing one tick late — the discriminating property this file's docs ask
-/// for, since a round-trip-shaped gate ("eventually reads air") would pass
-/// either way.
+/// written to after construction, so there is no acknowledgement this test
+/// could possibly be observing. The exact-tick assertion distinguishes local
+/// prediction from a delayed update; an eventual air read would not.
 #[test]
 fn an_instant_break_predicts_air_locally_with_no_server_round_trip() {
     let version = instant_break_fixture();
