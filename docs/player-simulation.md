@@ -280,8 +280,33 @@ already left the shell sits in its queue and is encoded afterwards — out of
 reach of everything upstream. The adapter's movement mutex is where the
 confirmation is recorded, so it is the last point that can see both; it rewrites
 the first move after an absolute teleport onto that teleport's target whenever
-the claim lands more than a block away (one tick of real movement is well under
-half a block, so nothing legitimate is inside that branch). The two upstream
+the claim carries **both** halves of staleness's signature — more than a block
+from the target (one tick of real movement is well under half a block, so a
+producer that had adopted the teleport could not be out there) *and* still
+within a block of the pose the adapter last put on the wire, because that is
+the pre-teleport pose an overtaken claim was built from.
+
+The second half is not optional, and distance from the target alone is not the
+signature. The two upstream rewrites are counter-based — they fire only while
+the simulation is behind the teleports the net thread forwarded — but the
+adapter has no such counter, and reading distance alone as staleness makes it
+swallow a caller's own deliberate long move. That is not hypothetical for a
+library whose headless callers are the product: `ClientHandle::move_to` /
+`set_position` / `walk_to` run no physics and place the player wherever asked,
+so a bot's *first* move after the join placement is routinely hundreds of
+blocks from it and has nothing to do with the pose before it. Rewritten onto
+the target, that move leaves the server believing the player never moved, with
+no error, no disconnect and no log line on either end — and every consequence
+of moving is then computed at the spawn: the streamed view never follows the
+player, no column is ever forgotten, and a melee knockback direction measured
+from the attacker's tracked position points from the wrong place. Four live
+gates failed on exactly that, in three files with nothing in common but this
+one line. The discriminating control is
+`movement_selection::a_first_move_to_a_third_location_is_the_callers_own_and_reaches_the_wire`:
+a first post-teleport claim that is neither the target nor the last sent pose,
+which the stale-claim gate on its own cannot tell from a real stale one.
+
+The two upstream
 rewrites are kept rather than deleted: each closes an ordering the next one down
 cannot see, all three write the same pose, so applying them together is
 idempotent. A relative teleport authorises no absolute target and therefore

@@ -70,8 +70,15 @@
 //! [`super::V770Adapter::select_move_packet`] therefore reports
 //! `moves_since_teleport` and `dist_from_teleport` on every outbound movement
 //! packet, and **rewrites** the *first* move after a teleport onto that
-//! teleport's target when the claim lands more than [`STALE_MOVE_BLOCKS`] away,
-//! warning as it does so. This mutex is the last point in the client that can:
+//! teleport's target when the claim carries both halves of staleness's
+//! signature: more than [`STALE_MOVE_BLOCKS`] from the target, *and* still
+//! within that distance of the pose this adapter last sent — which is the
+//! pre-teleport pose an overtaken claim was built from. The second half is
+//! what separates a stale claim from a caller's own deliberate long move; a
+//! headless caller's first move after a join placement is routinely far from
+//! that placement and has nothing to do with the pose before it, and
+//! rewriting it leaves the server believing the player never moved.
+//! The adapter warns as it rewrites. This mutex is the last point in the client that can:
 //! the confirmation is recorded under it, and by the time the driver reaches
 //! the queued movement action the shell has no way to touch it any more. The
 //! `warn` line is still the hypothesis stated in the log — if it appears, the
@@ -131,11 +138,16 @@ pub(crate) struct AcceptedTeleport {
 impl AcceptedTeleport {
     /// Distance from `pos` to the teleport target.
     pub(crate) fn distance_to(&self, pos: Vec3) -> f64 {
-        let dx = pos.x - self.target.x;
-        let dy = pos.y - self.target.y;
-        let dz = pos.z - self.target.z;
-        (dx * dx + dy * dy + dz * dz).sqrt()
+        distance(pos, self.target)
     }
+}
+
+/// Straight-line distance between two positions, in blocks.
+pub(crate) fn distance(a: Vec3, b: Vec3) -> f64 {
+    let dx = a.x - b.x;
+    let dy = a.y - b.y;
+    let dz = a.z - b.z;
+    (dx * dx + dy * dy + dz * dz).sqrt()
 }
 
 /// How far an outbound move may sit from the teleport target that immediately
@@ -145,8 +157,10 @@ impl AcceptedTeleport {
 /// tops out around `0.4`), so a first post-teleport move beyond a block did not
 /// come from a simulation that had adopted the teleport.
 ///
-/// This used to be diagnostic only. It now decides whether
-/// [`super::V770Adapter::select_move_packet`] rewrites that first claim onto
-/// the teleport target, so raising it re-opens the window the rewrite closes
-/// and lowering it risks rewriting a claim that was merely a fast tick.
+/// This used to be diagnostic only. It now sets both bounds of the staleness
+/// test [`super::V770Adapter::select_move_packet`] applies before rewriting a
+/// first claim onto the teleport target — how far from the target counts as
+/// "could not have adopted it", and how far from the last sent pose still
+/// counts as "was built from it". Raising it re-opens the window the rewrite
+/// closes; lowering it risks reading a fast tick as a stale claim.
 pub(crate) const STALE_MOVE_BLOCKS: f64 = 1.0;
