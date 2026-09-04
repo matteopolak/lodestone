@@ -35,7 +35,7 @@
 //! did that this connection must be told about. See that type's own doc.
 //!
 //! The gotcha is **double-triggering**: `lodestone-shell` predicts its own
-//! block-break and block-place sounds locally (`docs/block-sound-types.md`), so
+//! block-break and block-place sounds locally (`docs/sound.md`), so
 //! an effect the acting client would also predict must not reach *that* client.
 //! Publish it through `BlockTickFeed::publish_effect_except` with the
 //! acting player's uuid — vanilla's own `except` argument on
@@ -43,6 +43,7 @@
 //! `publish_effect` is for effects with
 //! no acting player at all.
 
+use lodestone_data::block_states::StateId;
 use lodestone_model::{BlockPos, SoundCategory, Vec3, Vec3f};
 
 /// One sound, particle burst or level event for a connection to be told about.
@@ -341,9 +342,9 @@ pub fn block_destroyed(pos: BlockPos, state: &str) -> Option<WorldEffect> {
 /// `soundType.getPlaceSound()` at `(volume + 1) / 2` and `pitch * 0.8`.
 #[must_use]
 pub fn block_placed(pos: BlockPos, state: &str, seed: i64) -> Option<WorldEffect> {
-    let id = crate::mobs::block_state_id_or_default(state)?;
+    let id = StateId::new(crate::mobs::block_state_id_or_default(state)?)?;
     let sound = lodestone_data::sound_types::place_sound_name(id)?;
-    let kind = lodestone_data::sound_types::sound_type(id)?;
+    let kind = lodestone_data::sound_types::sound_type(id);
     Some(WorldEffect::Sound {
         sound: sound.to_owned(),
         category: SoundCategory::Block,
@@ -600,6 +601,22 @@ mod tests {
                 data: expected as i32,
                 global: false,
             })
+        );
+    }
+
+    /// A known state crosses the string-to-id boundary and keeps its own sound;
+    /// unknown input remains no effect rather than acquiring a fallback sound.
+    #[test]
+    fn a_placed_block_validates_its_state_before_sound_lookup() {
+        let effect = block_placed(BlockPos::new(4, 5, 6), "minecraft:stone", 17)
+            .expect("stone has a placement sound");
+        assert!(matches!(
+            effect,
+            WorldEffect::Sound { sound, seed: 17, .. }
+                if sound == "minecraft:block.stone.place"
+        ));
+        assert!(
+            block_placed(BlockPos::new(4, 5, 6), "minecraft:not_a_block", 17).is_none()
         );
     }
 

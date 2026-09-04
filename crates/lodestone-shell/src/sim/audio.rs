@@ -529,9 +529,10 @@ impl Sim {
         if is_air_state(state) {
             return;
         }
-        let Some(sound) = lodestone_data::sound_types::sound_type(state) else {
+        let Some(state) = lodestone_data::block_states::StateId::new(state) else {
             return;
         };
+        let sound = lodestone_data::sound_types::sound_type(state);
         let Some(name) = lodestone_data::sound_types::step_sound_name(state) else {
             return;
         };
@@ -619,14 +620,15 @@ impl Sim {
         &mut self,
         block: [i32; 3],
         state: u32,
-        pick: fn(u32) -> Option<&'static str>,
+        pick: fn(lodestone_data::block_states::StateId) -> Option<&'static str>,
     ) {
         if is_air_state(state) {
             return;
         }
-        let Some(sound) = lodestone_data::sound_types::sound_type(state) else {
+        let Some(state) = lodestone_data::block_states::StateId::new(state) else {
             return;
         };
+        let sound = lodestone_data::sound_types::sound_type(state);
         // `None` also covers `minecraft:intentionally_empty`, the sentinel vanilla
         // parks in a slot it does not want to fill (water, lava and bubble columns
         // are the three blocks with no break sound at all).

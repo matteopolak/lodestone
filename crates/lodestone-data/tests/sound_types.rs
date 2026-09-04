@@ -70,10 +70,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use lodestone_data::{block_states, hardness, sound_events, sound_types};
+use lodestone_data::{
+    block_states::{self, StateId},
+    hardness, sound_events, sound_types,
+};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn state_id(raw: u32) -> StateId {
+    StateId::new(raw).unwrap_or_else(|| panic!("state {raw} is in the committed census"))
 }
 
 fn committed_path() -> PathBuf {
@@ -498,10 +505,7 @@ fn committed_entries_match_the_dump() {
     let mut wrong: Vec<(usize, &str)> = Vec::new();
     for id in 0..dump.state_count {
         let expected = dump.entry_of(id);
-        let Some(actual) = sound_types::sound_type(id as u32) else {
-            wrong.push((id, dump.block_of(id)));
-            continue;
-        };
+        let actual = sound_types::sound_type(state_id(id as u32));
         let matches = actual.volume.to_bits() == expected.volume_bits
             && actual.pitch.to_bits() == expected.pitch_bits
             && [
@@ -606,6 +610,7 @@ fn the_common_break_sounds_match_vanilla_by_name() {
             .collect();
         assert!(!ids.is_empty(), "{name} present in the block-state table");
         for id in ids {
+            let id = state_id(id);
             assert_eq!(sound_types::break_sound_name(id), Some(break_sound), "{name} break");
             assert_eq!(sound_types::step_sound_name(id), Some(step_sound), "{name} step");
         }
@@ -619,6 +624,7 @@ fn hard_crop_places_with_the_crop_sound_not_the_wood_one() {
     let id = (0..block_states::STATE_COUNT)
         .find(|&id| block_states::block_name(id) == Some("minecraft:pumpkin_stem"))
         .expect("pumpkin stem is a block");
+    let id = state_id(id);
     assert_eq!(
         sound_types::place_sound_name(id),
         Some("minecraft:item.crop.plant")
@@ -639,7 +645,7 @@ fn break_and_place_scaling_matches_vanilla_for_every_population() {
         let id = (0..block_states::STATE_COUNT)
             .find(|&id| block_states::block_name(id) == Some(name))
             .unwrap_or_else(|| panic!("{name} is a block"));
-        sound_types::sound_type(id).expect("in range")
+        sound_types::sound_type(state_id(id))
     };
 
     // The 124 ordinary sound types: 1.0 / 1.0 -> 1.0 / 0.8.
@@ -673,7 +679,8 @@ fn the_empty_sound_sentinel_is_reported_as_absent() {
     let id = (0..block_states::STATE_COUNT)
         .find(|&id| block_states::block_name(id) == Some("minecraft:cactus_flower"))
         .expect("cactus flower is a block");
-    let sound = sound_types::sound_type(id).expect("in range");
+    let id = state_id(id);
+    let sound = sound_types::sound_type(id);
     // `CACTUS_FLOWER` is `(1.0, 1.0, CACTUS_FLOWER_BREAK, EMPTY, CACTUS_FLOWER_PLACE, EMPTY, EMPTY)`.
     assert_eq!(sound.step_sound_name(), Some(sound_types::EMPTY_SOUND));
     assert_eq!(sound_types::step_sound_name(id), None, "no step sound to play");
@@ -691,14 +698,16 @@ fn the_empty_sound_sentinel_is_reported_as_absent() {
     ));
 }
 
-/// Out-of-range ids report `None` rather than a plausible-looking stone break.
+/// Raw ids are rejected at the boundary; every validated id has a sound type.
 #[test]
-fn unknown_ids_are_none() {
-    assert_eq!(sound_types::sound_type(sound_types::STATE_COUNT), None);
-    assert_eq!(sound_types::break_sound_name(sound_types::STATE_COUNT), None);
-    assert_eq!(sound_types::place_sound_name(sound_types::STATE_COUNT), None);
-    assert_eq!(sound_types::step_sound_name(sound_types::STATE_COUNT), None);
-    assert_eq!(sound_types::sound_type(u32::MAX), None);
+fn validated_state_lookup_is_total_and_invalid_raw_ids_stop_at_boundary() {
+    let air = StateId::new(0).expect("air is a valid state");
+    assert_eq!(
+        sound_types::sound_type(air).break_sound_name(),
+        Some("minecraft:block.stone.break")
+    );
+    assert!(StateId::new(sound_types::STATE_COUNT).is_none());
+    assert!(StateId::new(u32::MAX).is_none());
 }
 
 /// Every state resolves — no hole anywhere in the 32,366, and every referenced
@@ -706,14 +715,11 @@ fn unknown_ids_are_none() {
 /// pass while most of the table was garbage.
 #[test]
 fn every_state_resolves_to_a_named_sound_type() {
-    let mut unresolved_state = 0usize;
     let mut unresolved_sound = 0usize;
     let mut empty_break = Vec::new();
     for id in 0..sound_types::STATE_COUNT {
-        let Some(sound) = sound_types::sound_type(id) else {
-            unresolved_state += 1;
-            continue;
-        };
+        let state = state_id(id);
+        let sound = sound_types::sound_type(state);
         for name in [
             sound.break_sound_name(),
             sound.step_sound_name(),
@@ -725,11 +731,10 @@ fn every_state_resolves_to_a_named_sound_type() {
                 unresolved_sound += 1;
             }
         }
-        if sound_types::break_sound_name(id).is_none() {
+        if sound_types::break_sound_name(state).is_none() {
             empty_break.push(block_states::block_name(id).unwrap_or("?"));
         }
     }
-    assert_eq!(unresolved_state, 0, "states with no sound type");
     assert_eq!(unresolved_sound, 0, "sound ids that resolve to no name");
     // Measured: exactly three blocks carry the empty sound-type constant, and all three are
     // fluids, which no `LEVEL_EVENT` 2001 can name. Asserted by name so a version
