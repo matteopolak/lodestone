@@ -18,7 +18,7 @@ use super::*;
 /// one: that module's seam is private outside `cfg(test)` (`mod
 /// clipboard_seam`, no `pub`), by design — it exists only for
 /// `EditBox::handle_key`, not as a crate-wide clipboard API — so this file
-/// needs its own copy of the same two functions rather than reaching into it.
+/// needs its own clipboard write seam rather than reaching into it.
 #[cfg(not(test))]
 pub(crate) mod clipboard_seam {
     pub fn set(text: &str) {
@@ -27,19 +27,14 @@ pub(crate) mod clipboard_seam {
 }
 
 /// The `#[cfg(test)]` half of [`clipboard_seam`] — a `thread_local` string,
-/// not the OS clipboard. `pub(crate)` (test-only) so
-/// `the_copy_location_chord_writes_the_execute_command_to_the_clipboard`
-/// below can read back what `KeyOutcome::CopyLocation`'s driver arm wrote.
+/// not the OS clipboard. Every test build routes this side effect through the
+/// in-memory seam, so generic tests do not touch the developer's real clipboard.
 #[cfg(test)]
 pub(crate) mod clipboard_seam {
     use std::cell::RefCell;
 
     thread_local! {
         static FAKE: RefCell<String> = const { RefCell::new(String::new()) };
-    }
-
-    pub fn get() -> String {
-        FAKE.with(|c| c.borrow().clone())
     }
 
     pub fn set(text: &str) {
