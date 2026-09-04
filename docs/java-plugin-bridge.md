@@ -160,7 +160,7 @@ a small confident number for input it could not actually read*. The scanner ther
 container run --rm -v <work>:/work -w /work eclipse-temurin:25-jdk \
     java -Dpaperclip.patchonly=true -jar /work/paper.jar
 cargo run --release -p lodestone-nms-census --bin nms-census -- \
-    <work>/versions/26.2/paper-26.2.jar --internal <vanilla's internal package prefix> --top 40
+    <work>/versions/26.2/paper-26.2.jar --prefix <target-package/> --top 40
 ```
 
 Pre-seed `<work>/cache/mojang_26.2.jar` from `.cache/mc/26.2/server.jar` to save paperclip a
@@ -622,7 +622,8 @@ counter while unwinding, so the over-limit control cannot poison later callbacks
 - `lodestone_jni_invocation_spike::REQUEST_DEADLINE` — the prototype's 150 ms deadline, chosen to
   make the silent servicer control fast while the runner's outer 15-second timeout remains an
   independent hang gate.
-- `nms-census --prefix / --internal / --no-recurse / --top / --all` — see `--help`.
+- `nms-census --prefix <target-package/> --internal <replaced-layer-package/> --no-recurse
+  --top <N> --all` — see `--help`.
 
 ## 9. Dependencies
 

@@ -4,7 +4,7 @@
 //!
 //! A pure-Rust scanner that reads a `.jar`, walks every class file's constant
 //! pool and static bytecode, and reports every member of a target package
-//! — by default `net/minecraft/` — that the jar actually uses.
+//! — that a caller selects with an internal-form package prefix.
 //! It is the measurement that makes the Java-plugin bridge estimable:
 //! `docs/java-plugin-bridge.md` explains what the number decides.
 //!
@@ -36,21 +36,21 @@
 //! ### Two traps that were measured, not guessed
 //!
 //! **Jars nest.** The Mojang server jar is a *bundler*: its top level holds
-//! four `net/minecraft/bundler/Main*` classes and the real server as a nested
-//! jar under `META-INF/versions/`. Scanning it without recursion finds 4
-//! classes where recursion finds tens of thousands. Paper ships the same shape
-//! (a "paperclip" launcher wrapping the patched server), so recursion is a
-//! requirement for the real census, not a nicety. [`ScanOptions::recurse_jars`]
+//! a small launcher layer and the real server as a nested jar under a
+//! versioned metadata path. Scanning it without recursion finds only the
+//! launcher classes rather than the real server's classes, so recursion is a
+//! requirement for the real census, not a nicety. Scanning it without recursion
+//! finds 4 classes where recursion finds tens of thousands. Paper ships the same shape
+//! (a launcher wrapping the patched server), so recursion is a requirement for
+//! the real census, not a nicety. [`ScanOptions::recurse_jars`]
 //! controls it and defaults to on. `crates/lodestone-nms-census/tests/vanilla_jar.rs`
 //! records the pinned Paper server's static-site baseline; recursion is
 //! separately available to compare launcher-style nested archives.
 //!
-//! **Who refers matters more than what is referred to.** In a Paper jar,
-//! `net.minecraft` is present *and* referenced by `net.minecraft` itself. Those
-//! internal references are not work: they are calls within the layer the bridge
-//! replaces wholesale. The surface that must be *implemented* is what the
-//! non-`net.minecraft` classes — `org.bukkit.craftbukkit.*`, `io.papermc.*` —
-//! reach for. [`MemberStat`] therefore splits every count into
+//! **Who refers matters more than what is referred to.** In a Paper jar, the
+//! replaced layer is present and referenced by itself. Those internal references
+//! are not bridge work. The surface that must be *implemented* is what the
+//! wrapper and extension classes reach for. [`MemberStat`] therefore splits every count into
 //! [`MemberStat::external`] and a total, and [`Census::external_members`]
 //! reports the former. Collapsing the two would overstate the surface by
 //! roughly the ratio of engine to bridge code.
@@ -58,9 +58,9 @@
 //! ## How to change it
 //!
 //! - The target package is [`ScanOptions::target_prefix`], in **internal form**
-//!   with a trailing slash (`net/minecraft/`), because that is how a constant
-//!   pool spells it. A prefix without the slash would also match
-//!   `net/minecraftforge/`.
+//!   with a trailing slash (`example/target/` in the synthetic default), because
+//!   that is how a constant pool spells it. A prefix without the slash can match
+//!   a sibling package with the same leading components.
 //! - [`ScanOptions::internal_prefixes`] is what "external" means; anything a
 //!   caller considers part of the replaced layer belongs there.
 //! - A class file that fails to parse is **counted, not swallowed**
@@ -92,8 +92,8 @@ use classfile::{ClassFile, MemberUseKind, RefKind};
 pub struct ScanOptions {
     /// Internal-form package prefix to census, **with** its trailing slash.
     ///
-    /// The slash is load-bearing: `net/minecraft` without it also matches
-    /// `net/minecraftforge/`.
+    /// The slash is load-bearing: it prevents a target package from matching a
+    /// sibling package with the same leading components.
     pub target_prefix: String,
     /// Prefixes whose classes count as part of the layer being replaced, so a
     /// reference *from* one of them is internal rather than external.
@@ -108,8 +108,8 @@ pub struct ScanOptions {
 impl Default for ScanOptions {
     fn default() -> Self {
         Self {
-            target_prefix: "net/minecraft/".to_owned(),
-            internal_prefixes: vec!["net/minecraft/".to_owned()],
+            target_prefix: "example/target/".to_owned(),
+            internal_prefixes: vec!["example/target/".to_owned()],
             recurse_jars: true,
         }
     }
@@ -118,11 +118,11 @@ impl Default for ScanOptions {
 /// A member of the target package, as the census keys it.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct MemberKey {
-    /// Owning class in internal form, e.g. `net/minecraft/world/level/Level`.
+    /// Owning class in internal form, e.g. `example/target/World`.
     pub class: String,
-    /// Member name, e.g. `getBlockState` or `<init>`.
+    /// Member name, e.g. `readState` or `<init>`.
     pub name: String,
-    /// JVM descriptor, e.g. `(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;`.
+    /// JVM descriptor, e.g. `(Lexample/target/Point;)Lexample/target/Value;`.
     pub descriptor: String,
     /// Field direction or invocation opcode.
     pub kind: MemberUseKind,
@@ -373,7 +373,7 @@ impl Census {
                     };
                     // An array type appears as a descriptor (`[Lfoo/Bar;`)
                     // rather than a bare internal name; unwrap it so
-                    // `ServerLevel[]` counts as a reference to `ServerLevel`.
+                    // An array type counts as a reference to its element type.
                     let bare = name.trim_start_matches('[');
                     let bare = bare
                         .strip_prefix('L')
@@ -462,9 +462,8 @@ impl std::error::Error for ScanError {}
 
 /// Every object type named inside a field or method descriptor.
 ///
-/// `(Lnet/minecraft/core/BlockPos;I)Lnet/minecraft/world/level/block/state/BlockState;`
-/// yields `net/minecraft/core/BlockPos` and
-/// `net/minecraft/world/level/block/state/BlockState`. Primitives, array
+/// `(Lexample/target/Point;I)Lexample/target/Value;`
+/// yields `example/target/Point` and `example/target/Value`. Primitives, array
 /// brackets and parentheses are skipped; an unterminated `L` at the end is
 /// ignored rather than panicking, because a malformed descriptor must not take
 /// the scan down.
@@ -497,15 +496,15 @@ mod tests {
     #[test]
     fn a_method_descriptor_yields_its_object_parameters_and_return() {
         let found = descriptor_object_types(
-            "(Lnet/minecraft/core/BlockPos;I[Lnet/minecraft/world/item/ItemStack;)\
-             Lnet/minecraft/world/level/block/state/BlockState;",
+            "(Lexample/target/Point;I[Lexample/target/Item;)\
+             Lexample/target/Value;",
         );
         assert_eq!(
             found,
             vec![
-                "net/minecraft/core/BlockPos",
-                "net/minecraft/world/item/ItemStack",
-                "net/minecraft/world/level/block/state/BlockState",
+                "example/target/Point",
+                "example/target/Item",
+                "example/target/Value",
             ]
         );
     }
@@ -525,8 +524,8 @@ mod tests {
     #[test]
     fn an_unterminated_object_type_is_dropped_not_fatal() {
         assert_eq!(
-            descriptor_object_types("(Lnet/minecraft/core/BlockPos;Lbroken"),
-            vec!["net/minecraft/core/BlockPos"]
+            descriptor_object_types("(Lexample/target/Point;Lbroken"),
+            vec!["example/target/Point"]
         );
     }
 }
