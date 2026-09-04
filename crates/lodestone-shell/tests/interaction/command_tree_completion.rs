@@ -310,14 +310,11 @@ fn a_shared_prefix_narrows_to_exactly_the_commands_that_share_it() {
 
 // --- The consumer: the tree reaching the line on screen --------
 //
-// Everything above proves `complete()` walks a real tree correctly. That is
-// still not a pixel: until that fix steps 2 and 3 the *only* callers of `complete`
-// were tests and a `command_block_frame` argument every production caller
-// passed as `None`, which is this repo's island shape exactly. The gates below
-// drive the seams a keystroke actually reaches — `ChatInput::tab` (the chat
-// box's Tab key) and `CommandBlockState::apply_completion` (the edit screen's)
-// — against the same real server tree, so the assertion is on the text that
-// ends up in the field, not on a completion object nobody reads.
+// Everything above proves `complete()` walks a real tree correctly. The gates
+// below drive the seams a keystroke actually reaches — `ChatInput::tab` (the
+// chat box's Tab key) and `CommandBlockState::apply_completion` (the edit
+// screen's) — against the same real server tree, so the assertion is on the
+// text that ends up in the field, not on a completion object nobody reads.
 //
 // What only a live session can confirm: that a joined 26.2 server's tree lands
 // in `net::CommandTreeCell` in time, and that the completed line is legible in
@@ -335,12 +332,11 @@ use lodestone_model::command_tree::{CommandSuggestionEntry, CommandSuggestionsRe
 ///
 /// **This, and not `ChatInput::set`, is the seam production uses.**
 /// `app::menus::handle_chat_key` runs the responder after every edit, which is
-/// what raises the suggestion popup while the player types; `set` is
-/// `ChatScreen.init`'s `setValue`, which deliberately does *not* fire it (see
-/// `ChatCompletion::allow_suggestions`). Every test below that presses Tab has
-/// to arrive here through this function or it is measuring Tab against a popup
-/// that is never up — a *world*-species vacuity, where the flaw is in the input
-/// rather than in the assertion.
+/// what raises the suggestion popup while the player types; the direct setter
+/// deliberately does *not* fire it (see `ChatCompletion::allow_suggestions`).
+/// Every test below that presses Tab has to arrive here through this function or
+/// it is measuring Tab against a popup that is never up — a *world*-species
+/// vacuity, where the flaw is in the input rather than in the assertion.
 fn typing(line: &str, tree: Option<&CommandTree>) -> ChatInput {
     let mut input = ChatInput::new();
     for ch in line.chars() {
@@ -351,9 +347,9 @@ fn typing(line: &str, tree: Option<&CommandTree>) -> ChatInput {
 }
 
 /// Tab against a **half-typed command name** — no trailing space, the input
-/// shape that has now hidden two separate bugs in this feature (a `.trim()`ing
-/// canonicalize, and a `parse_line` that offered a fully-typed token's own
-/// children instead of its parent). The chat line itself must change, and
+/// shape that distinguishes two completion rules: canonicalization must retain
+/// the trailing-space boundary, and a fully typed token must resolve through its
+/// parent rather than its own children. The chat line itself must change, and
 /// pressing Tab again must cycle rather than recompute.
 #[test]
 fn tab_completes_a_half_typed_command_name_and_then_cycles() {
@@ -439,11 +435,10 @@ fn tab_after_a_trailing_space_splices_the_argument_domain_at_the_servers_start()
     assert_eq!(input.as_str(), "/gamemode survival");
 }
 
-/// The control, run rather than described: with the cell empty — exactly the
-/// state before `minecraft:commands` arrives, and the state every caller was
-/// stuck in before that fix — the identical keystroke must leave the line
-/// untouched. Two hypotheses over the same input, so the gate above cannot be
-/// satisfied by a completer that ignores its tree.
+/// The control, run rather than described: with the cell empty — the state when
+/// `minecraft:commands` has not arrived — the identical keystroke must leave the
+/// line untouched. Two hypotheses over the same input, so the gate above cannot
+/// be satisfied by a completer that ignores its tree.
 #[test]
 fn with_no_tree_the_same_tab_press_changes_nothing() {
     let tree = real_server_tree();
@@ -474,8 +469,8 @@ fn with_no_tree_the_same_tab_press_changes_nothing() {
 ///
 /// `/summon ` is a resource argument: no local domain, so the walker defers to
 /// the server rather than guessing — the `Completion::NeedsServer` path, whose
-/// `SuggestionRequests::request`/`::receive` pair had **no production caller**
-/// at all before this change.
+/// `SuggestionRequests::request`/`::receive` pair is the request/response path
+/// for server-backed completion.
 #[test]
 fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
     let tree = real_server_tree();
@@ -492,8 +487,8 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
         tooltip: None,
     };
 
-    // A reply to a *different* request — the stale case. Vanilla's own
-    // `completeCustomSuggestions` id check; ignored, not rendered.
+    // A reply to a *different* request — the stale case. The id check must
+    // ignore it, so it is not rendered.
     let stale = CommandSuggestionsResponse {
         id: id.wrapping_add(1),
         start: 8,
@@ -536,12 +531,9 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
             .collect::<Vec<_>>(),
         vec!["minecraft:creeper", "minecraft:zombie"],
     );
-    // **Re-derived, and this direction is the correction.** This used to assert
-    // the reply *spliced itself into the line*. Vanilla's async reply reaches
-    // `updateUsageInfo`, which ends in `showSuggestions(false)` — it raises the
-    // dropdown and edits nothing; only `useSuggestion` (Tab, or a click) writes
-    // to the `EditBox`. A reply that rewrote the line under a player still
-    // typing is exactly what the popup exists to avoid.
+    // A valid reply populates the candidates while leaving the line unchanged.
+    // Selection occurs only when Tab or a click commits a candidate; rewriting
+    // the line as soon as a reply arrives would race with ongoing typing.
     assert_eq!(
         input.as_str(),
         "/summon ",
@@ -568,9 +560,8 @@ fn a_suggestion_reply_is_applied_only_when_it_answers_the_request_in_flight() {
 /// different lines. An implementation that ignored the response's `start` (or
 /// re-derived its own) could not tell these apart.
 ///
-/// The commit is now a separate Tab press — the reply itself only raises the
-/// dropdown (see the test above) — but the line comparison is unchanged, because
-/// `start` is carried on the list and consumed by the commit.
+/// Selection is a separate Tab press: the reply raises the dropdown, while
+/// `start` remains on the list until the commit consumes it.
 #[test]
 fn the_replies_own_start_decides_where_the_text_lands() {
     let tree = real_server_tree();
@@ -594,8 +585,7 @@ fn the_replies_own_start_decides_where_the_text_lands() {
     let Some(ClientAction::CommandSuggestion { id, .. }) = at_zero.tab(Some(&tree), false) else {
         panic!("expected a round trip");
     };
-    // Not a shape vanilla sends — a deliberately different offset, so the two
-    // hypotheses are distinguishable at all.
+    // A deliberately different offset makes the two hypotheses distinguishable.
     assert!(at_zero.apply_suggestions(&CommandSuggestionsResponse {
         id,
         start: 0,
@@ -610,8 +600,8 @@ fn the_replies_own_start_decides_where_the_text_lands() {
     assert_ne!(at_token.as_str(), at_zero.as_str());
 }
 
-/// Step 2's seam: the command block edit screen's own Tab key, against the same
-/// real tree, plus the `None` control it degraded to before that fix.
+/// The command block edit screen's own Tab key, against the same real tree, plus
+/// the `None` control that leaves the line unchanged without a tree.
 ///
 /// The command field holds a **slash-less** line, so this also covers
 /// `menu::command_block::complete`'s offset shift — a completion spliced one

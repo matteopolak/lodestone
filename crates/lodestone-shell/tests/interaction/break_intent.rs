@@ -58,8 +58,8 @@ const STONE: u32 = 1;
 
 /// Real, oracle-confirmed jar constants (`docs/tool-mining.md`'s reference
 /// table, `crates/lodestone-data/tests/tools.rs`): vanilla stone's hardness is
-/// `1.5` (`Blocks`'s own decompiled source, cross-checked against the committed hardness census
-/// in `block-break-timing.md`), and a diamond pickaxe's `speed 8.0,
+/// `1.5` (the decompiled block data, cross-checked against the committed
+/// hardness census in `block-break-timing.md`), and a diamond pickaxe's `speed 8.0,
 /// correct_tool true` on it is the exact row that table pins at **6 ticks** —
 /// `per_tick = 8.0 / 1.5 / 30.0 ≈ 0.1778`, and replaying
 /// `lodestone_game::mining::BreakInputs::ticks_to_break`'s own
@@ -247,9 +247,9 @@ impl Harness {
 
         // The chunk store's read/write halves, named from the *client's* `Arc`
         // so a write through one and a read through the other see each
-        // other — `drive_mining` now takes both, for the local block-edit
-        // prediction (issue #596), the same pair `place_intent.rs`'s
-        // harness already installs for `drive_placement`.
+        // other — `drive_mining` takes both for local block-edit prediction,
+        // matching the pair `place_intent.rs`'s harness installs for
+        // `drive_placement`.
         let chunk_world = client.chunk_world();
         let chunk_world_write = client.chunk_world_write();
 
@@ -321,9 +321,9 @@ fn build_resources(world: &mut EcsWorld) {
     // requirement does not panic the schedule.
     world.insert_resource(FrameClock::default());
     world.insert_resource(AudioEngine(None));
-    // `drive_mining`'s local block-edit prediction (issue #596) needs a mesh
-    // scheduler to re-mesh through; a `Demo` classifier is the same
-    // GPU-free choice `place_intent.rs`'s harness makes for `drive_placement`.
+    // `drive_mining`'s local block-edit prediction needs a mesh scheduler to
+    // re-mesh through; a `Demo` classifier is the same GPU-free choice
+    // `place_intent.rs`'s harness makes for `drive_placement`.
     world.insert_resource(TerrainMesh::new(MeshScheduler::new(
         1,
         lodestone::blocks::ShellClassifier::Demo(lodestone::blocks::DemoClassifier),
