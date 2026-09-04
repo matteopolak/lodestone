@@ -90,8 +90,8 @@ const EFFECTS_MEMO: usize = 4;
 /// `temperature` + `downfall` + `grass_modifier`). When that lookup was a linear
 /// `find` with a string compare per entry, one `water_tint_at` cost **6,263
 /// instructions, of which 97.8% was `biome_effects`** — 46% of `mesh_fluids`'s
-/// entire per-cell cost, and a term issue #542's own diagnosis did not name
-/// (`DESIGN.md` §12.124).
+/// entire per-cell cost, and a term separate from the per-cell virtual-call
+/// cost the fluid mesher otherwise pays (`DESIGN.md` §12.124).
 ///
 /// A blend box covers 25 columns and terrain has *one or two* biomes there, so
 /// the same handful of names is re-looked-up dozens of times. This memo keys on
@@ -258,8 +258,9 @@ pub const fn is_blended_kind(kind: TintKind) -> bool {
 ///
 /// # Why this exists
 ///
-/// After issue #542's three commits the biome tint was still ~63% of
-/// `mesh_fluids`'s per-cell cost (`DESIGN.md` §12.124), and almost all of that is
+/// Even with the per-cell virtual-call cost reduced elsewhere, the biome tint
+/// is still ~63% of `mesh_fluids`'s per-cell cost (`DESIGN.md` §12.124), and
+/// almost all of that is
 /// the 25 samples vanilla's radius-2 box takes per tinted quad. Adjacent cells
 /// share 20 of those 25 columns; [`lodestone_assets::tint::BlendRowCursor`] turns
 /// that into a sliding per-channel sum, and its docs carry the bit-exactness

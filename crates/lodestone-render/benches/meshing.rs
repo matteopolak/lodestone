@@ -1,14 +1,13 @@
-//! Meshing throughput for **both** meshers, plus frontier remesh cost
-//! (issues #90, #91, #92).
+//! Meshing throughput for **both** meshers, plus frontier remesh cost.
 //!
 //! # Which mesher each bench uses — read this before quoting any number
 //!
-//! The whole reason #90 and #91 are two issues is that this repo has already
-//! shipped the mistake of measuring one mesher and believing the answer covered
-//! the other (`CLAUDE.md`'s "world" species of vacuous test: a colour fix
-//! verified against `--headless`, which meshes through `mesh_simple`, while the
-//! constants under test lived in `mesh_models`, which live terrain uses). So
-//! every bench below names its mesher in its own function name and doc comment:
+//! Benching only one mesher and assuming the answer covers the other is a
+//! mistake this repo has already shipped once (`CLAUDE.md`'s "world" species
+//! of vacuous test: a colour fix verified against `--headless`, which meshes
+//! through `mesh_simple`, while the constants under test lived in
+//! `mesh_models`, which live terrain uses). So every bench below names its
+//! mesher in its own function name and doc comment:
 //!
 //! | bench fn | mesher called | who uses that mesher in production |
 //! |---|---|---|
@@ -17,9 +16,8 @@
 //! | `bench_mesh_models` | [`mesh_models`] (`src/models.rs:737`) | live terrain |
 //! | `bench_frontier_remesh` | `build_batch` → `mesh_greedy` | neither (harness path) |
 //!
-//! **A correction to issue #91's premise, verified in source rather than
-//! assumed.** #91 says `tests/world_mesher_bench.rs` is "confirmed to exercise
-//! the *other* mesher (`mesh_models`)". It is not. That test calls
+//! **`tests/world_mesher_bench.rs` exercises `mesh_greedy`, not `mesh_models`,
+//! verified in source rather than assumed.** That test calls
 //! `build_whole_world(.., greedy = true)` → `dirty_jobs` → `build_batch(jobs,
 //! &TerrainClassifier, true)` → `SectionSnapshot::build_mesh(.., greedy=true)`
 //! → **`mesh_greedy`** (`src/mesher.rs:303`). Nothing in `lodestone-render`'s
@@ -43,9 +41,9 @@
 //!   anti-vacuity control: a fixture that meshed to nothing would report an
 //!   impressive throughput while measuring nothing).
 //! * `dirty_jobs` for one arriving column enqueues the **same number** of
-//!   sections regardless of how large the already-loaded world is — the #92
-//!   gate, and the one that would catch "frontier cost scales with total
-//!   loaded sections instead of boundary size" without any timing at all.
+//!   sections regardless of how large the already-loaded world is — the gate
+//!   that would catch "frontier cost scales with total loaded sections
+//!   instead of boundary size" without any timing at all.
 //!
 //! Run with `cargo bench -p lodestone-render --bench meshing`, or
 //! `cargo bench -p lodestone-render --bench meshing -- --test` for a
@@ -214,8 +212,9 @@ fn cube_quads() -> Vec<BakedQuad> {
 }
 
 /// A [`ModelSectionView`] over the same fixture sections the packed benches
-/// use, so #90's and #91's numbers describe the *same terrain* (the issues ask
-/// for exactly that: "same input, different mesher, is the whole point").
+/// use, so the `mesh_simple` and `mesh_models` benches describe the *same
+/// terrain* — same input, different mesher, is the whole point of comparing
+/// them.
 ///
 /// Only the two required trait methods are implemented; the rest keep their
 /// defaults, which is what makes a hermetic `mesh_models` bench possible with
@@ -331,7 +330,7 @@ fn timed<T>(iters: usize, mut f: impl FnMut() -> T) -> (f64, T) {
     (median(&mut us), last)
 }
 
-/// **Issue #90** — `mesh_simple`, the mesher `--headless` and the demo world
+/// `mesh_simple`, the mesher `--headless` and the demo world
 /// use (`crates/lodestone-shell/src/mesher.rs:1349`'s `None` arm).
 ///
 /// Reports µs/section and quads/ms for the surface section and the buried
@@ -389,11 +388,11 @@ fn bench_mesh_simple(c: &mut Criterion) {
     });
 }
 
-/// **Issue #90/#91 boundary** — `mesh_greedy`, which nothing in
+/// `mesh_greedy`, which nothing in
 /// `lodestone-shell` calls today (verified: the shell's only two meshing arms
 /// are `mesh_models` and `mesh_simple`). It is benched because `build_batch`'s
-/// `greedy` flag is a real, tracked perf/geometry trade-off inside this crate
-/// and #91 asks for greedy and non-greedy to be reported separately rather than
+/// `greedy` flag is a real, tracked perf/geometry trade-off inside this crate,
+/// so greedy and non-greedy are reported separately rather than
 /// collapsed into one number.
 ///
 /// The quad-count comparison against `mesh_simple` is the load-immune gate:
@@ -459,7 +458,7 @@ fn bench_mesh_greedy(c: &mut Criterion) {
     });
 }
 
-/// **Issue #91** — `mesh_models`, the mesher **live terrain** uses
+/// `mesh_models`, the mesher **live terrain** uses
 /// (`crates/lodestone-shell/src/mesher.rs:1349`'s `Some(models)` arm). Same
 /// fixture terrain as `bench_mesh_simple`, so the two are comparable *as
 /// scenes*; they are deliberately **not** comparable as absolute quad counts,
@@ -567,14 +566,14 @@ fn insert_column(map: &mut HashMap<(i32, i32, i32), Arc<ChunkSection>>, cx: i32,
     }
 }
 
-/// **Issue #92** — the cost of the remesh triggered when one previously-absent
+/// The cost of the remesh triggered when one previously-absent
 /// neighbour column streams in at the edge of an already-loaded set.
 ///
 /// # The gate is a count, not a time
 ///
-/// #92 asks for "remeshing one boundary costs X% of a full cold build" and for
-/// an assertion that the remesh does not touch unaffected interior sections.
-/// Two corrections, both verified in source:
+/// This bench reports "remeshing one boundary costs X% of a full cold build"
+/// and, separately, two facts worth stating explicitly, both verified in
+/// source:
 ///
 /// 1. **`dirty_jobs` does not restrict itself to boundary sections.** Its own
 ///    doc (`src/mesher.rs:155`) says re-meshing only the boundary sections
@@ -586,12 +585,12 @@ fn insert_column(map: &mut HashMap<(i32, i32, i32), Arc<ChunkSection>>, cx: i32,
 ///    asserts a property the implementation deliberately does not have, and
 ///    writing it would report a defect where there is a design choice.
 /// 2. **The property that actually matters is still assertable, and as a
-///    count.** The failure #92 exists to catch is a per-arrival cost that
-///    scales with the *total loaded set* rather than with the neighbourhood. So
-///    this bench measures the enqueued job count for one arriving column at two
-///    very different world sizes and asserts they are **identical**. That is
-///    immune to machine load, and it fails loudly if a future change makes
-///    arrival cost a function of world size.
+///    count.** A per-arrival cost that scales with the *total loaded set*
+///    rather than with the neighbourhood is the failure this bench exists to
+///    catch. So this bench measures the enqueued job count for one arriving
+///    column at two very different world sizes and asserts they are
+///    **identical**. That is immune to machine load, and it fails loudly if a
+///    future change makes arrival cost a function of world size.
 fn bench_frontier_remesh(c: &mut Criterion) {
     const ROWS: std::ops::Range<i32> = 0..MODERN_SECTIONS as i32;
     let arriving = (3, 3);
@@ -612,7 +611,7 @@ fn bench_frontier_remesh(c: &mut Criterion) {
         jobs_small, jobs_large,
         "frontier remesh enqueued {jobs_small} sections in a 9x9-column world but {jobs_large} in \
          a 21x21-column world; per-arrival work must depend on the 9-column neighbourhood only, \
-         never on the size of the loaded set (issue #92's real failure mode)"
+         never on the size of the loaded set"
     );
 
     // Cost of the arrival itself, on the large world: the jobs are gathered and
@@ -624,7 +623,7 @@ fn bench_frontier_remesh(c: &mut Criterion) {
     let frontier_quads: usize = built.iter().map(|b| b.mesh.quad_count()).sum();
     assert!(frontier_quads > 0, "frontier remesh produced no geometry — nothing measured");
 
-    // Cold whole-world build over the same large world, for #92's ratio.
+    // Cold whole-world build over the same large world, for the boundary-vs-cold-build ratio.
     let cold_start = Instant::now();
     let mut cold_sections = 0usize;
     let mut cold_quads = 0usize;

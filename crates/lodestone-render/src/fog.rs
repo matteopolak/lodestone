@@ -42,10 +42,11 @@ pub struct FogSettings {
     /// Linear RGB colour at the **centre** of the sky disc, before the
     /// `SKY_COLOR` day/night track multiplies it.
     ///
-    /// Vanilla's `minecraft:visual/sky_color`: per-biome in the overworld
-    /// (issue #96), and every constructor here defaults it to `color`, which is
-    /// the pre-#96 behaviour — one flat colour for both ends of the gradient,
-    /// distinguished only by the two day/night tracks.
+    /// Vanilla's `minecraft:visual/sky_color`: per-biome in the overworld,
+    /// and every constructor here defaults it to `color` — one flat colour
+    /// for both ends of the gradient, distinguished only by the two
+    /// day/night tracks — unless a caller overrides it with the standing
+    /// biome's own declared value.
     pub sky_color: [f32; 3],
     /// Distance from the eye at which the **render-distance** fog term begins
     /// (factor 0). Measured **cylindrically** (`max(horizontal, |dy|)`,
@@ -88,7 +89,7 @@ impl FogSettings {
     }
 
     /// The same settings with a different sky-disc centre colour — the
-    /// per-biome `minecraft:visual/sky_color` (issue #96).
+    /// per-biome `minecraft:visual/sky_color`.
     ///
     /// The fog colour is deliberately left alone: the biome's own
     /// `visual/fog_color` is a separate attribute this client does not decode
@@ -104,11 +105,13 @@ impl FogSettings {
     /// one, and a **no-op** on `None`.
     ///
     /// `None` is the single meaning "the server has not told us" that every hop
-    /// in issue #96's chain uses — pre-login, a server that sent no biome
+    /// in this resolution chain uses — pre-login, a server that sent no biome
     /// registry, an unstreamed column, or one of the ten Nether/End biomes that
     /// declare no `sky_color`. Each falls back to whatever colour the caller
     /// already computed for the dimension, and never to a plausible-looking
-    /// overworld blue (the explicit-fallback shape issue #34 was filed over).
+    /// overworld blue (matching by name instead of by declared per-dimension
+    /// data is exactly the hardcoded-fallback shape that goes wrong for a
+    /// non-standard dimension).
     #[must_use]
     pub fn with_biome_sky_color(self, sky_color: Option<[f32; 3]>) -> Self {
         match sky_color {
@@ -120,7 +123,7 @@ impl FogSettings {
     /// A plain linear ramp over a `view_distance`-block range, beginning at
     /// `start_fraction` of it. `start_fraction` is clamped to `0.0..=1.0`.
     ///
-    /// This is the **generic** constructor, and after issue #388 it is the wrong
+    /// This is the **generic** constructor, and it is the wrong
     /// one for the render-distance edge fade — use
     /// [`for_render_distance`](Self::for_render_distance), which implements
     /// vanilla's actual span rather than a fraction. What is left here is
@@ -164,7 +167,7 @@ impl FogSettings {
     }
 
     /// Distance fog that fades the outer edge of the loaded world, on vanilla's
-    /// own curve (issue #388).
+    /// own curve.
     ///
     /// Vanilla does **not** start this fog at a fraction of the view distance.
     /// Vanilla's render-distance fog setup instead derives the fade span as a
@@ -226,7 +229,7 @@ impl FogSettings {
     /// fog-environment's fog-setup function
     /// reads those two attributes directly), so the haze is thick and close no
     /// matter how far the player can see. The colour is the `nether_wastes`
-    /// biome's `visual/fog_color` (`#330808`) — the dimension type itself
+    /// biome's `visual/fog_color` (`0x330808`) — the dimension type itself
     /// carries no `fog_color` override, only the per-biome attribute does, and
     /// every other Nether biome (crimson/warped forest, soul sand valley,
     /// basalt deltas) has its own distinct value the shell cannot yet reach
@@ -273,8 +276,8 @@ impl FogSettings {
     /// override, so vanilla's environmental-fog attributes fall back to their
     /// registered defaults, `0.0`/`1024.0`, and the visible darkening instead
     /// comes from
-    /// `visual/fog_color` (`#181318`) mixed with `visual/sky_color`
-    /// (`#000000`) at the render-distance edge, exactly the mechanism
+    /// `visual/fog_color` (`0x181318`) mixed with `visual/sky_color`
+    /// (`0x000000`) at the render-distance edge, exactly the mechanism
     /// [`FogSettings::for_render_distance`] models for the overworld.
     ///
     /// Those defaults are **not** inert, which an earlier version of this
@@ -599,8 +602,8 @@ pub fn apply_fog_gamma(color: [f32; 3], fog_color: [f32; 3], factor: f32) -> [f3
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable)]
 pub struct FogUniform {
-    /// `xyz` = eye world position; `w` = `environmental_start` (issue #401,
-    /// F2/F3 — the two lanes this struct did not grow to add, per
+    /// `xyz` = eye world position; `w` = `environmental_start` (gates F2/F3 —
+    /// the two lanes this struct did not grow to add, per
     /// `docs/fog.md`'s bind-group budget note).
     pub eye: [f32; 4],
     /// `rgb` = fog colour; `w` = the **render-distance** term's `start`
@@ -679,7 +682,7 @@ impl FogUniform {
 
 #[cfg(test)]
 mod ramp_gate {
-    //! Issue #388's discriminator: **where the render-distance ramp starts and
+    //! The discriminator that matters: **where the render-distance ramp starts and
     //! how wide it is**, sampled along a ray at known distances.
     //!
     //! Not "distant things are foggier" — the old 0.75-fraction model satisfies
@@ -957,10 +960,10 @@ mod ramp_gate {
         );
     }
 
-    /// **Gate C (F2/F3), formerly a pin on an open gap — now a pin that it is
-    /// closed.** Until this change, vanilla's render-distance term measured a
-    /// **cylindrical** distance (`max(length(pos.xz), abs(pos.y))`)
-    /// while every shader here measured a spherical one.
+    /// **Gate C (F2/F3), a pin that the gap is
+    /// closed.** Vanilla's render-distance term measures a
+    /// **cylindrical** distance (`max(length(pos.xz), abs(pos.y))`),
+    /// and every shader here now measures the same cylindrical distance too.
     /// Along a ray pitched down 36.87° the cylindrical distance is `0.8 ×` the
     /// spherical, so this client reached full fog while vanilla was barely
     /// into its ramp — this test's own history is the old assertion
@@ -1272,7 +1275,7 @@ mod tests {
     #[test]
     fn nether_fog_is_dense_red_and_clamped_to_render_distance() {
         // Vanilla: fixed 10..96 block *environmental* range (F2/F3),
-        // `nether_wastes`' `#330808` fog colour — red channel clearly
+        // `nether_wastes`' `0x330808` fog colour — red channel clearly
         // dominant, green/blue near black. The render-distance pair now
         // carries the real vanilla-exact edge fade instead of being
         // repurposed to hold this 10..96 range.
@@ -1310,12 +1313,12 @@ mod tests {
         assert_eq!(f.end, 256.0);
         // Vanilla's span, not the caller's fraction: `256 - clamp(25.6, 4, 64)`.
         // The End declares no `visual/fog_start_distance`, so its fog *is* the
-        // render-distance term and must fade on the overworld's curve (#388).
+        // render-distance term and must fade on the overworld's curve.
         assert_eq!(f.start, 230.4);
         // The fraction is only a floor, so a caller demanding a *later* onset
         // than vanilla's span still gets it.
         assert_eq!(FogSettings::the_end(16, 0.95).start, 243.2);
-        // `#181318` is dark and very slightly red/blue-leaning, but overall
+        // `0x181318` is dark and very slightly red/blue-leaning, but overall
         // near-black — nothing like the overworld's saturated sky blue.
         assert!(f.color.iter().all(|c| *c < 0.02), "expected near-black: {:?}", f.color);
         assert_eq!(f.color[0], f.color[2], "R and B channels match (#18__18)");

@@ -75,12 +75,12 @@ pub const DEPTH_COMPARE_NEARER_OR_EQUAL: wgpu::CompareFunction =
 /// `view_proj` plus the world-space origin of the section being drawn, in one
 /// non-dynamic uniform.
 ///
-/// **No longer the block shader's own group-0 layout** — issue #76 split that
-/// into [`shared_camera_buffer`] (per frame) plus a dynamic-offset
+/// **No longer the block shader's own group-0 layout** — that layout is
+/// split into [`shared_camera_buffer`] (per frame) plus a dynamic-offset
 /// [`SectionOriginUniform`](crate::model_pipeline::SectionOriginUniform) (per
-/// section, written once at upload), because holding both in one struct forced a
-/// whole-struct `queue.write_buffer` per section per frame just to re-aim the
-/// camera. Kept because it is still the first 80 bytes of
+/// section, written once at upload), because holding both in one struct would
+/// force a whole-struct `queue.write_buffer` per section per frame just to
+/// re-aim the camera. Kept because it is still the first 80 bytes of
 /// [`ModelCameraUniform`](crate::model_pipeline::ModelCameraUniform), which the
 /// crack-overlay pipeline uses (one mesh, one origin, so the split buys it
 /// nothing).
@@ -232,10 +232,10 @@ impl BlockPipeline {
         // (camera + atlas), well under wgpu's portable `max_bind_groups` floor
         // of 4.
         //
-        // This is issue #76: the packed path used to hold `view_proj` **and**
+        // The packed path used to hold `view_proj` **and**
         // the origin in one non-dynamic uniform, which forced a whole-struct
         // `queue.write_buffer` per section per frame just to re-aim the camera —
-        // the shape issue #75 measured at 52.9% of main-thread CPU on the model
+        // the same shape measured at 52.9% of main-thread CPU on the model
         // path. The origin is constant for a section's lifetime, so it belongs
         // behind a dynamic offset written once at upload. See
         // `docs/section-camera-uniform.md`.
@@ -247,9 +247,9 @@ impl BlockPipeline {
                     // Vertex reads the view-projection and the sky-darken lane;
                     // fragment reads the fog block (eye, colour, range), so both
                     // stages bind it — the same visibility `ModelPipeline`'s own
-                    // camera group uses. This was `VERTEX` only between issues
-                    // #76 and #400: the struct carried the fog lanes before the
-                    // shader read them.
+                    // camera group uses. This was `VERTEX` only before the
+                    // fragment stage read the fog block: the struct carried
+                    // the fog lanes before the shader read them.
                     visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
@@ -377,9 +377,8 @@ impl BlockPipeline {
     /// one `SectionOriginUniform` (16 bytes). A caller addressing many sections
     /// through one arena builds this bind group **once** and picks a section by
     /// the dynamic offset passed to `set_bind_group`, never by rebuilding the
-    /// bind group. That is the whole point of issue #76: one bind group and one
-    /// per-frame write for the whole packed table, however many sections are
-    /// resident.
+    /// bind group: one bind group and one per-frame write cover the whole
+    /// packed table, however many sections are resident.
     ///
     /// This is the same shape (and the same two backing types) as
     /// [`ModelPipeline::camera_bind_group`](crate::ModelPipeline::camera_bind_group).
@@ -470,10 +469,6 @@ pub fn sprite_uv_buffer(device: &wgpu::Device, rects: &[[f32; 4]]) -> wgpu::Buff
 /// crate's shaders warn about ("entities and terrain disagree about what time it
 /// is"); only the buffer label differs, so a capture names the path it came
 /// from.
-///
-/// Replaces the old `camera_buffer(device, CameraUniform)`, whose single
-/// non-dynamic `{ view_proj, section_origin }` uniform is what forced a
-/// whole-struct write per section per frame — issue #76.
 #[must_use]
 pub fn shared_camera_buffer(
     device: &wgpu::Device,
