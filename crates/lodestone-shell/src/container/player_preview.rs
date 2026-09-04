@@ -254,9 +254,6 @@ pub(super) struct PlayerPreview {
     /// share this with the world entity pass.
     cam_buffer: wgpu::Buffer,
     cam_bind_group: wgpu::BindGroup,
-    /// Kept for the public diagnostic gate. Process-global `skin.png` no longer
-    /// has authority to claim an account, so this is always false.
-    used_local_override: bool,
     /// `(account UUID, source key)` currently bound. The account is part of
     /// the identity: a renderer survives server/account changes, and a source
     /// key alone can otherwise retain the previous account's pixels.
@@ -325,7 +322,6 @@ impl PlayerPreview {
             sampler,
             cam_buffer,
             cam_bind_group,
-            used_local_override: false,
             applied_skin: None,
         })
     }
@@ -406,16 +402,6 @@ impl PlayerPreview {
         if self.set_skin(device, queue, model, Some(&image)) {
             self.applied_skin = Some((uuid, source));
         }
-    }
-
-    /// Compatibility diagnostic exposed through
-    /// [`super::ContainerRenderer::player_preview_used_local_override`] for
-    /// existing GPU gates. It is always false now: construction no longer
-    /// binds an unowned process-global override; UUID-scoped skin resolution
-    /// happens in [`Self::maybe_skin_for_uuid`].
-    #[must_use]
-    pub(super) fn used_local_override(&self) -> bool {
-        self.used_local_override
     }
 
     /// Bind a different skin: a declared rig and, optionally, a sheet to draw it
@@ -646,7 +632,6 @@ fn avatar_part_matrices(
 #[must_use]
 #[cfg(test)]
 fn uuid_default_model(
-    _used_local_override: bool,
     already_applied: bool,
     uuid: uuid::Uuid,
 ) -> Option<PlayerModelType> {
@@ -810,31 +795,20 @@ mod tests {
         let wide_uuid = uuid::Uuid::from_u64_pair(9, 0);
 
         assert_eq!(
-            uuid_default_model(false, false, slim_uuid),
+            uuid_default_model(false, slim_uuid),
             Some(PlayerModelType::Slim),
             "nil uuid, no override, not yet applied -> Slim"
         );
         assert_eq!(
-            uuid_default_model(false, false, wide_uuid),
+            uuid_default_model(false, wide_uuid),
             Some(PlayerModelType::Wide),
             "(9, 0) uuid, no override, not yet applied -> Wide"
         );
 
-        // A process-global cached override has no account identity attached to
-        // it, so it must never outrank the active account's UUID. With two
-        // accounts this was exactly how the inventory preview drew whichever
-        // account had signed in most recently while the world drew the active
-        // one.
-        assert_eq!(
-            uuid_default_model(true, false, slim_uuid),
-            Some(PlayerModelType::Slim),
-            "an unowned process-global override must not replace the active \
-             account's uuid-derived identity"
-        );
         // The one remaining gate a real caller must respect: resolution only
         // fires once, so a later fetched sheet is not clobbered by the guess.
         assert_eq!(
-            uuid_default_model(false, true, slim_uuid),
+            uuid_default_model(true, slim_uuid),
             None,
             "already applied must not re-resolve — a later real fetch must \
              not be clobbered back to the uuid guess on a subsequent frame"
@@ -856,7 +830,7 @@ mod tests {
             let expected =
                 lodestone_assets::skin::default_skin_for_uuid(hi as i64, lo as i64).model;
             assert_eq!(
-                uuid_default_model(false, false, uuid),
+                uuid_default_model(false, uuid),
                 Some(expected),
                 "uuid_default_model disagreed with default_skin_for_uuid for hi={hi:#x} lo={lo:#x}"
             );
