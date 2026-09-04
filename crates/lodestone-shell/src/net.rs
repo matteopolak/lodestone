@@ -967,16 +967,22 @@ pub enum NetUpdate {
     /// this issue asked for; a screen with no gate behind it would have
     /// nothing to show.
     Death {
-        /// The server's own death message (`ClientEvent::Death`'s `message`
-        /// field), flattened to plain text with `to_plain_string()` in
-        /// [`forward`] — **not** resolved through the language table.
-        /// Untranslated components (most death causes) render as their raw
-        /// key. [`Self::Disconnected`] used to flatten the same way and no
-        /// longer does; this variant is the one that still does,
-        /// named as a deliberate, separate follow-up in
-        /// `docs/death-screen.md`'s "What was deliberately left out" section
-        /// rather than fixed here.
-        message: String,
+        /// The server's own death message
+        /// ([`ClientEvent::Death`](lodestone_model::event::ClientEvent::Death)'s
+        /// `message` field), carried through **unflattened**: this thread has
+        /// no language table, so flattening here would throw one away before
+        /// [`Sim::poll_net`](crate::sim::Sim::poll_net) ever gets a chance to
+        /// resolve it. The death-message format keys this workspace's own
+        /// built-in fallback table lists (`death.attack.mob` and siblings)
+        /// are `"%1$s was slain by %2$s"`-shaped, and vanilla substitutes the
+        /// killer's *display name* component there, which for a player is
+        /// exactly the kind of name that carries a `hoverEvent`/`clickEvent`
+        /// in chat — so a flatten here would lose more than the wording.
+        /// `Sim::poll_net`'s `Death` arm resolves this against the real
+        /// language table (`Sim::resolve_text`) and flattens it through
+        /// [`lodestone_model::ResolvedText::to_interactive_spans`], so the
+        /// death screen keeps the same style/interactivity chat does.
+        message: lodestone_model::Text,
     },
     /// The server confirmed a respawn (post-death, dimension change, or
     /// `/respawn`). The fresh position arrives in the placement
@@ -4846,12 +4852,12 @@ fn forward(
             options,
         },
         ClientEvent::Disconnect { reason } => {
-            // Unlike `Death`'s `message` (flattened to plain text below, a
-            // known, separately-tracked gap — see `docs/death-screen.md`),
-            // `reason` is passed through unresolved: `Sim::poll_net` is the
-            // read boundary that owns translation for this class of event
-            //, so flattening here would throw the translation
-            // key away before it ever reaches `Sim::translator()`.
+            // The same rule as `Death`'s `message` (see
+            // `NetUpdate::Death::message`'s own doc): `reason` is passed
+            // through unresolved, because `Sim::poll_net` is the read
+            // boundary that owns translation for this class of event, so
+            // flattening here would throw the translation key away before it
+            // ever reaches `Sim::translator()`.
             let _ = tx.try_send(NetUpdate::Disconnected(Box::new(reason)));
             return Err(());
         }
@@ -4879,9 +4885,10 @@ fn forward(
         // `Vitals`/`Xp` components on the net thread, and forwarding them here as
         // well would put a second writer on the shell side. See `NetUpdate`'s note
         // where the two variants used to be.
-        ClientEvent::Death { message } => NetUpdate::Death {
-            message: message.to_plain_string(),
-        },
+        // Carried through unresolved: this thread has no language table (see
+        // `NetUpdate::Death::message`'s own doc), and `Sim::poll_net` is the
+        // first point downstream that does.
+        ClientEvent::Death { message } => NetUpdate::Death { message },
         // The dimension travels with the event rather than being read back off the
         // shared handle at the consumer — see `NetUpdate::Respawned::dimension`'s
         // doc for why a shared-state read there structurally cannot detect a
@@ -5711,8 +5718,10 @@ mod tests {
         );
         // …and the control that `forward` is genuinely running: an event that
         // *does* have a shell-side reaction still arrives, and carries its
-        // message flattened to plain text (death screen reads
-        // this straight off `NetUpdate::Death`, through `Sim::death_message`).
+        // message **unflattened**, matching `NetUpdate::Death::message`'s own
+        // doc. The assertion below is the control that a flatten landing back
+        // here fails loudly rather than merely losing colour and
+        // interactivity invisibly.
         forward(
             &tx,
             &weather,
@@ -5725,7 +5734,9 @@ mod tests {
         )
         .expect("forward does not stop the loop");
         match rx.try_recv().expect("Death still crosses") {
-            NetUpdate::Death { message } => assert_eq!(message, "you died"),
+            NetUpdate::Death { message } => {
+                assert_eq!(message, lodestone_client::Text::literal("you died"));
+            }
             other => panic!("expected NetUpdate::Death, got {other:?}"),
         }
     }
