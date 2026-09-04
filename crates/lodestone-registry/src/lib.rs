@@ -387,11 +387,14 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     #[cfg(feature = "v1-9")]
     ServerFamily {
         label: "v1-9",
-        // This host implements only protocol 340. The family adapter covers
-        // the preceding revisions too, but their server packet layouts have
-        // not been implemented.
-        supports: |protocol| protocol == lodestone_v1_9::PROTOCOL,
-        make: |_| Box::new(lodestone_v1_9::V340ServerProtocol),
+        // The two host implementations have distinct packet-id tables. The
+        // family adapter covers earlier revisions too, but their server packet
+        // layouts have not been implemented.
+        supports: |protocol| protocol == lodestone_v1_9::PROTOCOL || protocol == 316,
+        make: |protocol| match protocol {
+            316 => Box::new(lodestone_v1_9::V316ServerProtocol),
+            _ => Box::new(lodestone_v1_9::V340ServerProtocol),
+        },
     },
     #[cfg(feature = "v1-13")]
     ServerFamily {
@@ -597,10 +600,11 @@ mod tests {
 
     #[cfg(feature = "v1-9")]
     #[test]
-    fn resolves_only_protocol_340_for_the_legacy_server_family() {
+    fn resolves_the_hosted_1_9_family_protocols() {
         assert!(server_protocol_for_protocol(340).is_some());
         assert!(compiled_server_families().contains(&"v1-9"));
-        assert!(server_protocol_for_protocol(316).is_none());
+        assert!(server_protocol_for_protocol(316).is_some());
+        assert!(server_protocol_for_protocol(315).is_none());
         assert!(server_protocol_for_protocol(341).is_none());
     }
 

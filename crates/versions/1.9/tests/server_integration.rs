@@ -6,9 +6,8 @@ use std::time::Duration;
 use lodestone_client::{ClientBuilder, LoginProfile, PlayerLoadedPolicy, ServerAddress};
 use lodestone_model::{BlockActionKind, BlockFace, BlockPos, ClientAction, ClientEvent};
 use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
-use lodestone_v1_9::adapter;
+use lodestone_v1_9::adapter_for;
 
-const PROTOCOL: i32 = 340;
 const TARGET: BlockPos = BlockPos::new(8, 100, 8);
 
 struct LegacyFixtureSource {
@@ -64,13 +63,18 @@ fn address() -> ServerAddress {
     }
 }
 
-#[tokio::test]
-async fn registry_selected_legacy_server_reaches_play_and_confirms_a_block_break() {
-    let protocol = lodestone_registry::server_protocol_for_protocol(PROTOCOL)
-        .expect("protocol 340 must resolve to a hosted family");
+async fn assert_registry_selected_server_reaches_play_and_confirms_a_block_break(
+    protocol_version: i32,
+) {
+    let protocol = lodestone_registry::server_protocol_for_protocol(protocol_version)
+        .expect("selected legacy protocol must resolve to a hosted family");
     let source = Arc::new(LegacyFixtureSource::new());
     let (server, client_io) = IntegratedServer::open_in_memory(protocol, Arc::clone(&source), 0);
-    let (mut handle, mut events) = ClientBuilder::new(address(), profile(), Box::new(adapter()))
+    let (mut handle, mut events) = ClientBuilder::new(
+        address(),
+        profile(),
+        Box::new(adapter_for(protocol_version)),
+    )
         .player_loaded_policy(PlayerLoadedPolicy::Manual)
         .connect_with(client_io);
 
@@ -115,8 +119,18 @@ async fn registry_selected_legacy_server_reaches_play_and_confirms_a_block_break
     server.shutdown().await;
 }
 
+#[tokio::test]
+async fn registry_selected_protocol_340_reaches_play_and_confirms_a_block_break() {
+    assert_registry_selected_server_reaches_play_and_confirms_a_block_break(340).await;
+}
+
+#[tokio::test]
+async fn registry_selected_protocol_316_reaches_play_and_confirms_a_block_break() {
+    assert_registry_selected_server_reaches_play_and_confirms_a_block_break(316).await;
+}
+
 #[test]
 fn a_non_hosted_legacy_protocol_is_rejected_before_connection_setup() {
-    assert!(lodestone_registry::server_protocol_for_protocol(316).is_none());
+    assert!(lodestone_registry::server_protocol_for_protocol(315).is_none());
     assert!(lodestone_registry::server_protocol_for_protocol(341).is_none());
 }

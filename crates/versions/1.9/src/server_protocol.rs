@@ -17,13 +17,17 @@ use lodestone_server::{
 use uuid::Uuid;
 
 use crate::PROTOCOL;
+use crate::adapter::PROTOCOL_1_11_2;
 use crate::packet_ids::{handshaking, login, play};
 use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
 use crate::packets::position::{Position, pack_position};
 
-const CTX: Ctx = Ctx { version: PROTOCOL };
+const CTX_340: Ctx = Ctx { version: PROTOCOL };
+const CTX_316: Ctx = Ctx {
+    version: PROTOCOL_1_11_2,
+};
 const COMPRESSION_THRESHOLD: i32 = 256;
 const LEGACY_MIN_Y: i32 = 0;
 const LEGACY_HEIGHT: i32 = 256;
@@ -36,16 +40,58 @@ const PLAINS_BIOME_ID: u8 = 1;
 #[derive(Clone, Copy, Debug, Default)]
 pub struct V340ServerProtocol;
 
-fn send<T: Encode>(packet_id: i32, packet: &T) -> ServerDirective {
+/// Server implementation for protocol 316.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct V316ServerProtocol;
+
+#[derive(Clone, Copy)]
+struct ServerPacketIds {
+    handshake: i32,
+    login_start: i32,
+    compression: i32,
+    login_success: i32,
+    block_dig: i32,
+    join: i32,
+    position: i32,
+    map_chunk: i32,
+    block_change: i32,
+}
+
+const IDS_340: ServerPacketIds = ServerPacketIds {
+    handshake: handshaking::serverbound::SET_PROTOCOL,
+    login_start: login::serverbound::LOGIN_START,
+    compression: login::clientbound::COMPRESS,
+    login_success: login::clientbound::SUCCESS,
+    block_dig: play::serverbound::BLOCK_DIG,
+    join: play::clientbound::LOGIN,
+    position: play::clientbound::POSITION,
+    map_chunk: play::clientbound::MAP_CHUNK,
+    block_change: play::clientbound::BLOCK_CHANGE,
+};
+
+const IDS_316: ServerPacketIds = ServerPacketIds {
+    handshake: crate::packet_ids_316::handshaking::serverbound::SET_PROTOCOL,
+    login_start: crate::packet_ids_316::login::serverbound::LOGIN_START,
+    compression: crate::packet_ids_316::login::clientbound::COMPRESS,
+    login_success: crate::packet_ids_316::login::clientbound::SUCCESS,
+    block_dig: crate::packet_ids_316::play::serverbound::BLOCK_DIG,
+    join: crate::packet_ids_316::play::clientbound::LOGIN,
+    position: crate::packet_ids_316::play::clientbound::POSITION,
+    map_chunk: crate::packet_ids_316::play::clientbound::MAP_CHUNK,
+    block_change: crate::packet_ids_316::play::clientbound::BLOCK_CHANGE,
+};
+
+fn send<T: Encode>(packet_id: i32, packet: &T, ctx: Ctx, protocol: i32) -> ServerDirective {
     ServerDirective::Send {
         packet_id,
-        payload: encode_body(packet, CTX).expect("fixed protocol-340 packet must encode"),
+        payload: encode_body(packet, ctx)
+            .unwrap_or_else(|_| panic!("fixed protocol-{protocol} packet must encode")),
     }
 }
 
-fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
+fn decode_full<T: Decode>(payload: &[u8], ctx: Ctx) -> Option<T> {
     let mut reader = Reader::new(payload);
-    let value = T::decode(&mut reader, CTX).ok()?;
+    let value = T::decode(&mut reader, ctx).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
 }
@@ -91,17 +137,32 @@ fn pack_indices(values: &[u32], bits: u8) -> Vec<u64> {
     longs
 }
 
-fn encode_section(blob: &mut Writer, states: &[u32]) -> Result<(), ChunkEncodeError> {
+fn legacy_state(protocol: i32, state: u32) -> Result<u32, ChunkEncodeError> {
+    let legacy = inverse::resolve(state).map_err(|_| {
+        ChunkEncodeError::new(format!(
+            "canonical state {state} has no exact protocol-{protocol} representation"
+        ))
+    })?;
+    let block_id = legacy >> 4;
+    if protocol == PROTOCOL_1_11_2 && !(block_id <= 234 || block_id == 255) {
+        return Err(ChunkEncodeError::new(format!(
+            "canonical state {state} has no exact protocol-{protocol} representation"
+        )));
+    }
+    Ok(legacy)
+}
+
+fn encode_section(
+    protocol: i32,
+    blob: &mut Writer,
+    states: &[u32],
+) -> Result<(), ChunkEncodeError> {
     let mut palette = Vec::new();
     let mut indices = Vec::with_capacity(states.len());
     let mut palette_indices = BTreeMap::new();
 
     for &state in states {
-        let legacy = inverse::resolve(state).map_err(|_| {
-            ChunkEncodeError::new(format!(
-                "canonical state {state} has no exact protocol-340 representation"
-            ))
-        })?;
+        let legacy = legacy_state(protocol, state)?;
         let next = u32::try_from(palette.len()).expect("section palette cannot exceed u32");
         let index = *palette_indices.entry(legacy).or_insert_with(|| {
             palette.push(legacy);
@@ -129,7 +190,8 @@ fn encode_section(blob: &mut Writer, states: &[u32]) -> Result<(), ChunkEncodeEr
         let values: Vec<u32> = states
             .iter()
             .map(|&state| {
-                inverse::resolve(state).expect("states were validated while building palette")
+                legacy_state(protocol, state)
+                    .expect("states were validated while building palette")
             })
             .collect();
         let longs = pack_indices(&values, GLOBAL_BITS);
@@ -143,13 +205,20 @@ fn encode_section(blob: &mut Writer, states: &[u32]) -> Result<(), ChunkEncodeEr
     Ok(())
 }
 
-fn encode_chunk_body(cx: i32, cz: i32, column: &ChunkColumn) -> Result<Vec<u8>, ChunkEncodeError> {
+fn encode_chunk_body(
+    protocol: i32,
+    cx: i32,
+    cz: i32,
+    column: &ChunkColumn,
+) -> Result<Vec<u8>, ChunkEncodeError> {
     let Some(column_end) = column.min_y.checked_add(column.height) else {
-        return Err(ChunkEncodeError::new("protocol 340 column bounds overflow"));
+        return Err(ChunkEncodeError::new(format!(
+            "protocol {protocol} column bounds overflow"
+        )));
     };
     if column.min_y > LEGACY_MIN_Y || column_end < LEGACY_MIN_Y + LEGACY_HEIGHT {
         return Err(ChunkEncodeError::new(format!(
-            "protocol 340 requires columns covering y={LEGACY_MIN_Y} through y={}",
+            "protocol {protocol} requires columns covering y={LEGACY_MIN_Y} through y={}",
             LEGACY_MIN_Y + LEGACY_HEIGHT - 1
         )));
     }
@@ -170,7 +239,7 @@ fn encode_chunk_body(cx: i32, cz: i32, column: &ChunkColumn) -> Result<Vec<u8>, 
         if states.iter().all(|&state| state == air) {
             continue;
         }
-        encode_section(&mut blob, &states)?;
+        encode_section(protocol, &mut blob, &states)?;
         bitmask |= 1 << section;
     }
     blob.bytes(&[PLAINS_BIOME_ID; 256]);
@@ -200,29 +269,55 @@ impl V340ServerProtocol {
         let canonical = lodestone_data::block_states::state_id(state).ok_or_else(|| {
             ChunkEncodeError::new(format!("unknown canonical block state {state}"))
         })?;
-        let legacy = inverse::resolve(canonical).map_err(|_| {
-            ChunkEncodeError::new(format!(
-                "canonical state {canonical} has no exact protocol-340 representation"
-            ))
-        })?;
+        let legacy = legacy_state(PROTOCOL, canonical)?;
         let mut payload = Writer::default();
         payload.i64(pack_position(BlockPos::new(x, y, z)));
         payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
         Ok(ServerDirective::Send {
-            packet_id: play::clientbound::BLOCK_CHANGE,
+            packet_id: IDS_340.block_change,
             payload: payload.into_vec(),
         })
     }
 }
 
-impl ServerProtocol for V340ServerProtocol {
-    fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+impl V316ServerProtocol {
+    /// Converts and encodes a block update, preserving a failure when the
+    /// canonical state has no exact protocol-316 representation.
+    pub fn try_encode_block_update(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: &str,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        let canonical = lodestone_data::block_states::state_id(state).ok_or_else(|| {
+            ChunkEncodeError::new(format!("unknown canonical block state {state}"))
+        })?;
+        let legacy = legacy_state(PROTOCOL_1_11_2, canonical)?;
+        let mut payload = Writer::default();
+        payload.i64(pack_position(BlockPos::new(x, y, z)));
+        payload.var_i32(i32::try_from(legacy).expect("legacy state fits in i32"));
+        Ok(ServerDirective::Send {
+            packet_id: IDS_316.block_change,
+            payload: payload.into_vec(),
+        })
+    }
+}
+
+fn decode_packet(
+    protocol: i32,
+    ids: ServerPacketIds,
+    ctx: Ctx,
+    state: State,
+    packet_id: i32,
+    payload: &[u8],
+) -> ServerBound {
         match state {
-            State::Handshaking if packet_id == handshaking::serverbound::SET_PROTOCOL => {
-                let Some(handshake) = decode_full::<SetProtocol>(payload) else {
+            State::Handshaking if packet_id == ids.handshake => {
+                let Some(handshake) = decode_full::<SetProtocol>(payload, ctx) else {
                     return ServerBound::Ignored;
                 };
-                if handshake.protocol_version != PROTOCOL {
+                if handshake.protocol_version != protocol {
                     return ServerBound::Ignored;
                 }
                 let next_state = if handshake.next_state == 2 {
@@ -232,20 +327,20 @@ impl ServerProtocol for V340ServerProtocol {
                 };
                 ServerBound::Handshake { next_state }
             }
-            State::Login if packet_id == login::serverbound::LOGIN_START => {
-                decode_full::<LoginStart>(payload).map_or(ServerBound::Ignored, |start| {
+            State::Login if packet_id == ids.login_start => {
+                decode_full::<LoginStart>(payload, ctx).map_or(ServerBound::Ignored, |start| {
                     ServerBound::LoginStart {
                         username: start.username,
                         uuid: Uuid::nil(),
                     }
                 })
             }
-            State::Play if packet_id == play::serverbound::BLOCK_DIG => {
+            State::Play if packet_id == ids.block_dig => {
                 let Some(BlockDig {
                     status,
                     location: Position(pos),
                     face,
-                }) = decode_full(payload)
+                }) = decode_full(payload, ctx)
                 else {
                     return ServerBound::Ignored;
                 };
@@ -261,91 +356,154 @@ impl ServerProtocol for V340ServerProtocol {
             }
             _ => ServerBound::Ignored,
         }
-    }
+}
 
-    fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective> {
-        vec![
-            send(
-                login::clientbound::COMPRESS,
-                &SetCompression {
-                    threshold: COMPRESSION_THRESHOLD,
-                },
-            ),
-            ServerDirective::SetCompression(COMPRESSION_THRESHOLD),
-            send(
-                login::clientbound::SUCCESS,
-                &LoginSuccess {
-                    uuid: uuid.to_string(),
-                    username: username.to_owned(),
-                },
-            ),
-        ]
-    }
+fn login_success(
+    ids: ServerPacketIds,
+    ctx: Ctx,
+    protocol: i32,
+    username: &str,
+    uuid: Uuid,
+) -> Vec<ServerDirective> {
+    vec![
+        send(
+            ids.compression,
+            &SetCompression {
+                threshold: COMPRESSION_THRESHOLD,
+            },
+            ctx,
+            protocol,
+        ),
+        ServerDirective::SetCompression(COMPRESSION_THRESHOLD),
+        send(
+            ids.login_success,
+            &LoginSuccess {
+                uuid: uuid.to_string(),
+                username: username.to_owned(),
+            },
+            ctx,
+            protocol,
+        ),
+    ]
+}
 
-    fn has_configuration_phase(&self) -> bool {
-        false
-    }
+fn begin_play(ids: ServerPacketIds, ctx: Ctx, protocol: i32) -> Vec<ServerDirective> {
+    vec![
+        send(
+            ids.join,
+            &JoinGame {
+                entity_id: 1,
+                game_mode: 0,
+                dimension: 0,
+                difficulty: 2,
+                max_players: 20,
+                level_type: "default".to_owned(),
+                reduced_debug_info: false,
+            },
+            ctx,
+            protocol,
+        ),
+        send(
+            ids.position,
+            &ClientboundPositionLook {
+                x: 8.0,
+                y: 100.0,
+                z: 8.0,
+                yaw: 0.0,
+                pitch: 0.0,
+                flags: 0,
+                teleport_id: 0,
+            },
+            ctx,
+            protocol,
+        ),
+    ]
+}
 
-    fn begin_configuration(&self) -> Vec<ServerDirective> {
-        Vec::new()
-    }
+fn try_encode_chunk(
+    protocol: i32,
+    ids: ServerPacketIds,
+    cx: i32,
+    cz: i32,
+    column: &ChunkColumn,
+) -> Result<ServerDirective, ChunkEncodeError> {
+    Ok(ServerDirective::Send {
+        packet_id: ids.map_chunk,
+        payload: encode_chunk_body(protocol, cx, cz, column)?,
+    })
+}
 
-    fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
-        vec![
-            send(
-                play::clientbound::LOGIN,
-                &JoinGame {
-                    entity_id: 1,
-                    game_mode: 0,
-                    dimension: 0,
-                    difficulty: 2,
-                    max_players: 20,
-                    level_type: "default".to_owned(),
-                    reduced_debug_info: false,
-                },
-            ),
-            send(
-                play::clientbound::POSITION,
-                &ClientboundPositionLook {
-                    x: 8.0,
-                    y: 100.0,
-                    z: 8.0,
-                    yaw: 0.0,
-                    pitch: 0.0,
-                    flags: 0,
-                    teleport_id: 0,
-                },
-            ),
-        ]
-    }
+macro_rules! impl_server_protocol {
+    ($type:ty, $protocol:expr, $ids:expr, $ctx:expr) => {
+        impl ServerProtocol for $type {
+            fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+                decode_packet($protocol, $ids, $ctx, state, packet_id, payload)
+            }
 
-    fn begin_chunk_batch(&self) -> ServerDirective {
-        ServerDirective::None
-    }
+            fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective> {
+                login_success($ids, $ctx, $protocol, username, uuid)
+            }
 
-    fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective {
-        self.try_encode_chunk(cx, cz, column)
-            .expect("call try_encode_chunk to handle an unrepresentable protocol-340 column")
-    }
+            fn has_configuration_phase(&self) -> bool {
+                false
+            }
 
-    fn try_encode_chunk(
-        &self,
-        cx: i32,
-        cz: i32,
-        column: &ChunkColumn,
-    ) -> Result<ServerDirective, ChunkEncodeError> {
-        Ok(ServerDirective::Send {
-            packet_id: play::clientbound::MAP_CHUNK,
-            payload: encode_chunk_body(cx, cz, column)?,
-        })
-    }
+            fn begin_configuration(&self) -> Vec<ServerDirective> {
+                Vec::new()
+            }
 
-    fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
-        ServerDirective::None
-    }
+            fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+                begin_play($ids, $ctx, $protocol)
+            }
 
-    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
-        self.try_encode_block_update(x, y, z, state)
-            .expect("call try_encode_block_update to handle an unrepresentable protocol-340 state")
+            fn begin_chunk_batch(&self) -> ServerDirective {
+                ServerDirective::None
+            }
+
+            fn encode_chunk(
+                &self,
+                cx: i32,
+                cz: i32,
+                column: &ChunkColumn,
+            ) -> ServerDirective {
+                self.try_encode_chunk(cx, cz, column).unwrap_or_else(|_| {
+                    panic!(
+                        "call try_encode_chunk to handle an unrepresentable protocol-{} column",
+                        $protocol
+                    )
+                })
+            }
+
+            fn try_encode_chunk(
+                &self,
+                cx: i32,
+                cz: i32,
+                column: &ChunkColumn,
+            ) -> Result<ServerDirective, ChunkEncodeError> {
+                try_encode_chunk($protocol, $ids, cx, cz, column)
+            }
+
+            fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
+                ServerDirective::None
+            }
+
+            fn encode_block_update(
+                &self,
+                x: i32,
+                y: i32,
+                z: i32,
+                state: &str,
+            ) -> ServerDirective {
+                self.try_encode_block_update(x, y, z, state).unwrap_or_else(|_| {
+                    panic!(
+                        "call try_encode_block_update to handle an unrepresentable protocol-{} state",
+                        $protocol
+                    )
+                })
+            }
+        }
     }
 }
+
+impl_server_protocol!(V340ServerProtocol, PROTOCOL, IDS_340, CTX_340);
+impl_server_protocol!(V316ServerProtocol, PROTOCOL_1_11_2, IDS_316, CTX_316);
