@@ -1484,7 +1484,7 @@ async fn finish_ms_token(
     // client. Never fatal.
     //
     // Native-only for now: `crate::skin_fetch::fetch_own_skin` goes through
-    // `lodestone_auth::texture::fetch_texture` for authlib's host allow-list
+    // `lodestone_auth::texture::fetch_texture` for the texture-host allow-list
     // check, and that module stays native-only (no wasm32 caller has needed
     // it yet — porting it is a separate, purely cosmetic follow-up, not part
     // of closing the sign-in dead end this change fixes). A browser account

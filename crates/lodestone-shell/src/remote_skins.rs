@@ -50,8 +50,9 @@
 //!
 //! **The host allow list is not optional, and a remote URL is the least
 //! trustworthy input in this codebase.** It arrives from whatever server we
-//! joined. [`lodestone_auth::texture::fetch_texture`] applies authlib's
-//! `TextureUrlChecker` before opening a socket, including the two clauses that
+//! joined. [`lodestone_auth::texture::fetch_texture`] applies the vanilla
+//! client's own texture-host allow list before opening a socket, including the
+//! two clauses that
 //! only a bytecode read reveals: the host must **already** be lower-case
 //! (`HTTPS://TEXTURES.MINECRAFT.NET/…` is refused, not folded) and the
 //! allowed-domain test is exact-match on the whole host. **Do not add a laxer
@@ -636,8 +637,8 @@ fn spawn_fetch(url: String) {
 /// blocking `current_thread` runtime are both fatal on wasm32 —
 /// `std::thread::spawn` traps (measured: `RuntimeError: unreachable`) — so the
 /// browser shape is `spawn_local` plus `fetch`, not this function with a different
-/// executor. And `lodestone_auth::texture::fetch_texture` carries authlib's
-/// `TextureUrlChecker` host allow list, which is applied *before* a socket opens;
+/// executor. And `lodestone_auth::texture::fetch_texture` carries that same
+/// texture-host allow list, which is applied *before* a socket opens;
 /// it is `cfg(not(wasm32))` because it is built on `reqwest`. Reimplementing the
 /// GET over `web_sys::fetch` without porting that allow list would drop the one
 /// security check in this path, so the allow list has to move first.
@@ -650,7 +651,7 @@ fn spawn_fetch(url: String) {
     tracing::warn!(
         target: "assets",
         "not fetching a remote player's skin in a browser: this path needs \
-         lodestone_auth's TextureUrlChecker allow list, which is native-only \
+         lodestone_auth's texture-host allow list, which is native-only \
          (reqwest-based). Players draw with the default skin."
     );
     finish(&url, FetchState::Failed);
@@ -761,7 +762,8 @@ mod tests {
     /// **The `default`-not-`wide` trap**, asserted as a pair so a swapped or
     /// naive implementation cannot pass.
     ///
-    /// `metadata.model` holds authlib's `legacyServicesId`, so wide is spelled
+    /// `metadata.model` holds the profile service's own legacy model name, so
+    /// wide is spelled
     /// `default`. Reading it as `"wide"` matches nothing, and
     /// `by_legacy_services_name`'s fallback *is* wide — so every slim skin
     /// silently resolves wide, with no error and no blank texture. The third
