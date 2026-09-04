@@ -51,15 +51,25 @@
 //!   under `tick step`, and the world being frozen rather than paused does
 //!   not change that.
 //!
-//!   [`rcon::RconOracle::advance_tick`] therefore sleeps one real tick
-//!   interval ([`TICK_MILLIS`], 50 ms) and lets the server's own loop
-//!   advance. That bounds an RCON-side comparison to about ±1 tick of
-//!   alignment rather than an exact tick count, which is why
-//!   [`fluid::FluidModelOracle`] steps *exactly* — putting the whole error
-//!   budget on one side instead of two. Measured on the same rig, real-time
-//!   alignment was good to well under a tick: cell *N* first read as water at
-//!   249·*N* ms across two independent trials, against a 250·*N* ms
-//!   prediction.
+//!   [`rcon::RconOracle::advance_tick`] therefore lets the server's own loop
+//!   advance in real time and reads back **its own `time query gametime`
+//!   counter** to find out when a tick actually happened, rather than
+//!   assuming one elapsed after a fixed sleep. That used to be a fixed
+//!   `sleep(TICK_MILLIS)`, and the difference is measurable rather than
+//!   theoretical: under CPU contention elsewhere on the machine running the
+//!   harness, a fixed sleep undercounts real ticks (every `block_state`
+//!   probe round trip happens between two sleeps, and contention stretches
+//!   both), so the server's real tick count runs ahead of the harness's
+//!   assumed one — repeatably, in one direction, and by an amount that grows
+//!   with contention rather than with anything about the world being
+//!   compared. Reading the counter back removes the assumption instead of
+//!   tuning around it, at the cost of one extra RCON round trip per tick.
+//!   Measured on the fluid-spread rig by hand, outside this harness
+//!   entirely (a raw RCON probe with real timestamps, bypassing every
+//!   tick-counting assumption below): cell 1 read as water at 247 ms after
+//!   the source was placed, matching a 250 ms / 5-tick prediction, at a
+//!   moment when the machine was busy enough to make the sleep-based
+//!   harness itself report a spurious divergence on the same rig.
 //!
 //! ## What this module does not do yet
 //!
@@ -293,10 +303,23 @@ pub fn run_differential<L: WorldOracle, R: WorldOracle>(
     DifferentialOutcome::Agreed
 }
 
-/// One vanilla tick, for an oracle that aligns by sleeping rather than by a
-/// shared step command — see this module's doc for why there is no better
-/// mechanism today.
+/// One vanilla tick, in wall-clock terms — used only as the poll cadence
+/// while [`rcon::RconOracle`] waits for the server's own tick counter to
+/// advance (see that type's `advance_tick`), and by callers that need to
+/// sleep roughly one tick for reasons of their own. Not the thing that
+/// decides when a tick has happened; see this module's top-level doc for why
+/// there is no `/tick step`-based mechanism today.
 pub const TICK_MILLIS: Duration = Duration::from_millis(50);
+
+/// How long [`rcon::RconOracle::advance_tick`] waits for the server's own
+/// `time query gametime` counter to advance by one before giving up and
+/// reporting an oracle failure. Generous relative to [`TICK_MILLIS`]
+/// specifically so that CPU contention elsewhere on the machine — which
+/// slows the wait down without changing what it is waiting *for* — cannot
+/// turn into a false divergence; a world that is genuinely not ticking
+/// (frozen, paused, or `pause-when-empty-seconds` having fired) is the only
+/// thing this timeout is meant to catch.
+pub const MAX_TICK_WAIT: Duration = Duration::from_secs(20);
 
 #[cfg(feature = "rcon-oracle")]
 pub mod rcon {
@@ -319,25 +342,45 @@ pub mod rcon {
         /// clobbering the other's — see `docs/fuzzing.md`'s self-consistency
         /// proof, which does exactly this against one live oracle.
         origin: (i32, i32, i32),
-        /// When this oracle's *next* tick is due, on a fixed schedule
-        /// anchored at the first [`WorldOracle::advance_tick`] call.
+        /// The **nominal** tick count this oracle has reported reaching so
+        /// far via [`WorldOracle::advance_tick`] (or `None` before the first
+        /// call) — read from the server's own `time query gametime` counter,
+        /// but advanced by exactly one per call rather than jumped to
+        /// whatever the counter shows.
         ///
-        /// A fixed `sleep(TICK_MILLIS)` per tick is not the same thing, and
-        /// the difference is measurable rather than theoretical: every
+        /// That distinction is the whole fix. A fixed `sleep(TICK_MILLIS)`
+        /// assumes one sleep equals one tick, and under CPU contention
+        /// elsewhere on the machine that assumption is measurably wrong: a
         /// `block_state` probe is a round trip that happens *between* two
-        /// sleeps, so a comparison probing k positions runs slower than the
-        /// server and the server's tick count runs **ahead** of the
-        /// harness's, cumulatively. Measured on a three-position,
-        /// two-candidate region: a signal whose true arrival is game tick 10
-        /// was reported at harness tick 8 — a wrong tick label, and one that
-        /// reads exactly like a real timing divergence. Sleeping to a
-        /// schedule instead absorbs the probe cost into the same 50 ms
-        /// budget the server is using, so the drift does not accumulate.
-        next_tick_at: Option<Instant>,
-        /// How many ticks were already overdue when they came up — the
-        /// instrument's own error count. Non-zero means the probes for one
-        /// tick cost more than a tick, so nothing about *when* something
-        /// happened can be concluded from that run.
+        /// sleeps, so a slow probe (or a slow machine) lets the server's
+        /// real tick count run ahead of the harness's assumed one. Reading
+        /// the real counter fixes *that* — `advance_tick` never returns
+        /// before the tick it is waiting for has genuinely happened — but a
+        /// second failure mode remains if the counter's value is adopted
+        /// wholesale: a real tick that arrives late gets read alongside a
+        /// second real tick that has *also* already happened by the time
+        /// the read lands, and jumping straight to the observed value would
+        /// silently skip this oracle's own nominal tick forward by two,
+        /// desynchronising it from a peer oracle (like
+        /// [`fluid::FluidModelOracle`]) that steps exactly one nominal tick
+        /// per call and has no way to know a real tick was skipped. Banking
+        /// only `+1` here, and letting the surplus satisfy the *next* call's
+        /// wait immediately instead, keeps both oracles' nominal tick counts
+        /// in one-to-one lockstep regardless of how many real ticks a single
+        /// call happened to straddle.
+        baseline_gametime: Option<i64>,
+        /// How many *extra* real ticks had already elapsed by the time
+        /// `advance_tick` observed the counter it was waiting for — the
+        /// instrument's own error count, kept purely for diagnosis. It does
+        /// **not** indicate a wrong tick label: [`Self::advance_tick`] never
+        /// adopts an overshoot into its own nominal count (see
+        /// [`Self::baseline_gametime`]), so a divergence's tick number is
+        /// exact regardless of this value. A consistently non-zero count
+        /// here still means every step ran with less real-time headroom
+        /// than a quiet machine gives, and is worth checking before reading
+        /// too much into a *fine-grained timing* comparison from the same
+        /// run — a rerun once the machine quiets down has more of that
+        /// headroom to spend.
         missed_deadlines: u32,
     }
 
@@ -346,10 +389,23 @@ pub mod rcon {
         /// [`Action`]/`block_state` query names, so the same script can run
         /// at two disjoint locations in one shared world.
         pub fn connect<A: ToSocketAddrs>(addr: A, password: &str, origin: (i32, i32, i32)) -> std::io::Result<Self> {
+            let mut client = RconClient::connect(addr, password)?;
+            // Read the counter now, before the caller applies a single
+            // action, rather than lazily on the first `advance_tick` call.
+            // Capturing it late used to hide exactly the gap this oracle
+            // most needs to catch: the round trip that applies the script's
+            // first action is real wall-clock time too, and under
+            // contention it is long enough on its own to let several real
+            // ticks pass before anything reads the counter at all. Reading
+            // it here means that gap lands inside the very first
+            // `advance_tick`'s own wait, where `missed_deadlines` can see it,
+            // instead of being silently folded into what gets called "tick
+            // 0".
+            let baseline_gametime = Some(Self::query_gametime_over(&mut client)?);
             Ok(Self {
-                client: RconClient::connect(addr, password)?,
+                client,
                 origin,
-                next_tick_at: None,
+                baseline_gametime,
                 missed_deadlines: 0,
             })
         }
@@ -358,11 +414,53 @@ pub mod rcon {
             (self.origin.0 + pos.0, self.origin.1 + pos.1, self.origin.2 + pos.2)
         }
 
-        /// How many of this oracle's ticks were already overdue when they
-        /// came up. **Assert this is zero before believing any tick label
-        /// from a comparison this oracle took part in** — see
-        /// [`next_tick_at`](Self::next_tick_at) for the measurement that
-        /// motivates it.
+        /// Re-anchors the nominal tick ladder to the counter's *current*
+        /// value. For a caller that sends rig-building commands (a `/fill`
+        /// channel, a `forceload`) through this same oracle's connection
+        /// before starting the actual comparison: those commands are real
+        /// round trips too, and [`Self::connect`]'s own baseline was read
+        /// before any of them, not after. Left uncorrected, whatever real
+        /// time rig-building costs becomes a head start folded silently into
+        /// "tick 0" — invisible to [`Self::missed_deadlines`], which only
+        /// flags a real tick *overshooting* the nominal ladder, not the
+        /// ladder having started early. Call this once, right after
+        /// rig-building and right before the script's first action, so the
+        /// ladder starts at the same moment the comparison does.
+        pub fn reset_baseline(&mut self) -> std::io::Result<()> {
+            self.baseline_gametime = Some(self.query_gametime()?);
+            Ok(())
+        }
+
+        /// Reads the server's own tick counter via `time query gametime`.
+        /// Works identically against real vanilla (`"The game time is <N>
+        /// tick(s)"`) and against our own [`lodestone_server`] RCON handler
+        /// (`"The time is <N>"`, `crate::commands::time`'s wording) — both
+        /// answers carry exactly one integer token, which is all this reads.
+        fn query_gametime(&mut self) -> std::io::Result<i64> {
+            Self::query_gametime_over(&mut self.client)
+        }
+
+        /// Free-function form of [`Self::query_gametime`], for
+        /// [`Self::connect`] to call before `Self` exists to be borrowed.
+        fn query_gametime_over(client: &mut RconClient) -> std::io::Result<i64> {
+            let response = client.command("time query gametime")?;
+            response
+                .split_whitespace()
+                .filter_map(|token| token.parse::<i64>().ok())
+                .next_back()
+                .ok_or_else(|| {
+                    std::io::Error::other(format!(
+                        "`time query gametime` answered {response:?}, which has no parseable tick count"
+                    ))
+                })
+        }
+
+        /// How many extra real ticks had already elapsed when this oracle's
+        /// waited-for tick showed up. **A non-zero count here does not make a
+        /// tick label wrong** (see [`Self::baseline_gametime`]) but a large or
+        /// growing one is worth checking before trusting a *timing*
+        /// comparison's fine-grained shape, since it means this run had
+        /// little headroom.
         #[must_use]
         pub fn missed_deadlines(&self) -> u32 {
             self.missed_deadlines
@@ -387,21 +485,45 @@ pub mod rcon {
         }
 
         fn advance_tick(&mut self) -> Result<(), Self::Error> {
-            // Real time, deliberately never `/tick step` — see this module's
-            // top-level doc for why that command cannot be trusted to
-            // advance a scheduled block tick. Sleeping to a schedule rather
-            // than for a fixed interval, so probe round trips do not push the
-            // harness behind the server — see `next_tick_at`.
-            let now = Instant::now();
-            let due = self.next_tick_at.unwrap_or(now) + super::TICK_MILLIS;
-            if due > now {
-                std::thread::sleep(due - now);
-                self.next_tick_at = Some(due);
-            } else {
-                self.missed_deadlines += 1;
-                self.next_tick_at = Some(now);
+            // Real ticks, read back from the server's own counter rather
+            // than assumed from wall-clock sleep — deliberately never
+            // `/tick step`, per this module's top-level doc. `time query
+            // gametime` is the same read-back primitive used to confirm
+            // each manual step landed in `crate::redstone_diode_oracle_gate`
+            // over in `lodestone-server`.
+            let baseline = match self.baseline_gametime {
+                Some(value) => value,
+                None => self.query_gametime()?,
+            };
+            let target = baseline + 1;
+            let deadline = Instant::now() + super::MAX_TICK_WAIT;
+            loop {
+                let observed = self.query_gametime()?;
+                if observed >= target {
+                    // Advance the nominal counter by exactly one tick, not to
+                    // `observed` — see this field's own doc. If `observed`
+                    // overshot `target`, that real tick has already happened;
+                    // banking `target` (rather than `observed`) as the new
+                    // baseline means the *next* call's wait is satisfied
+                    // immediately by the same real tick, so the two sides'
+                    // nominal tick counts stay in one-to-one lockstep no
+                    // matter how much real time a single call took.
+                    if observed > target {
+                        self.missed_deadlines += u32::try_from(observed - target).unwrap_or(u32::MAX);
+                    }
+                    self.baseline_gametime = Some(target);
+                    return Ok(());
+                }
+                if Instant::now() >= deadline {
+                    return Err(std::io::Error::other(format!(
+                        "`time query gametime` did not advance past {baseline} within \
+                         {:?} — the world is not ticking (check \
+                         pause-when-empty-seconds=0) rather than merely slow",
+                        super::MAX_TICK_WAIT
+                    )));
+                }
+                std::thread::sleep(super::TICK_MILLIS / 4);
             }
-            Ok(())
         }
 
         fn block_state(&mut self, pos: (i32, i32, i32), candidates: &[String]) -> Result<Option<String>, Self::Error> {
@@ -636,7 +758,7 @@ pub mod fluid {
                     // schedules, so a script's `SetBlock` behaves like the
                     // set-block path it stands for rather than like a silent
                     // poke at the store.
-                    for pending in ticks_after_edit(BlockPos::new(x, y, z)) {
+                    for pending in ticks_after_edit(&self.rig, self.env, BlockPos::new(x, y, z)) {
                         self.queue.schedule(
                             pending.pos,
                             pending.kind,

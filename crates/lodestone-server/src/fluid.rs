@@ -1383,11 +1383,10 @@ fn write_block<S: ChunkSource + ?Sized>(
 /// the real should-spread-liquid check folded in front of it.
 ///
 /// A position holding no fluid is a **silent no-op**, and that is deliberate:
-/// [`ticks_after_edit`] over-schedules on purpose (it schedules the edited cell
-/// and all six neighbours without reading any of them), so most of what reaches
-/// this function is not a fluid at all. Filtering here rather than at schedule
-/// time is what lets the seeding work across a chunk border without loading the
-/// neighbour column.
+/// world state can change between a tick being scheduled and it coming due —
+/// [`ticks_after_edit`] only seeds a position that holds a fluid at edit time,
+/// but a later edit (or an earlier due tick in the same drain) can remove it
+/// before this one fires.
 ///
 /// Every block this writes is appended to `changes` *and* already written
 /// through `world`; the caller forwards `changes` to connected clients.
@@ -1550,9 +1549,10 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
     }
 }
 
-/// The fluid ticks one block edit owes — a cell and its six neighbours, at the
-/// **relative** delays [`crate::tick::run_tick_loop`] rebases onto its own
-/// counter.
+/// The fluid ticks one block edit owes — the edited cell and each of its six
+/// neighbours that already holds a fluid, each at that fluid's own
+/// [`FluidEnv::tick_delay`], as a **relative** delay [`crate::tick::run_tick_loop`]
+/// rebases onto its own counter.
 ///
 /// This is the seeding hook, and it stands in for the real liquid block's
 /// on-place, neighbor-changed and shape-update hooks, none of which this
@@ -1560,41 +1560,46 @@ pub fn run_scheduled_tick<S: ChunkSource + ?Sized>(
 /// floor, or beside a spring, is exactly the neighbor-changed case: the water
 /// itself did not change, so only a notification can start it moving.
 ///
-/// **It reads nothing and filters nothing**, which is the deliberate part.
-/// The real engine decides at schedule time whether the position holds a liquid;
-/// [`run_scheduled_tick`] decides at run time instead. That costs up to seven
-/// no-op drains per edit and buys a seeding path that works across a chunk
-/// border without loading the neighbouring column — and a no-op drain schedules
-/// nothing, so there is no runaway.
+/// It reads `world` at the edited cell and each neighbour to decide which of
+/// the seven hold a fluid at all — a dry cell is never scheduled, mirroring
+/// [`run_scheduled_tick`]'s own end-of-tick notify loop, whose "a neighbour is
+/// only scheduled when it already holds a fluid" rule this applies at edit
+/// time instead of at drain time.
 ///
-/// The delay is `1`, not the fluid's own tick delay. The real
-/// neighbor-changed hook passes the fluid's own tick delay; using `1` here
-/// makes the *first* reaction to a player's edit prompt and every subsequent
-/// step pay the real delay, because [`run_scheduled_tick`] reschedules with
-/// [`FluidEnv::tick_delay`]. The visible difference is one cell of flow starting
-/// four ticks early once.
+/// A fixed delay of `1` used to stand in here for the fluid's own tick delay.
+/// That made a newly placed source's first spread land one tick after the
+/// edit instead of five, and — because every neighbour was seeded at that
+/// same short delay regardless of what it held — a neighbour that received
+/// fluid from the edited cell's own spread could come due in the very same
+/// drain and spread again, advancing the front two cells on the first tick
+/// instead of one.
 #[must_use]
-pub fn ticks_after_edit(pos: BlockPos) -> Vec<ScheduledTick<String>> {
+pub fn ticks_after_edit<S: ChunkSource + ?Sized>(
+    world: &S,
+    env: FluidEnv,
+    pos: BlockPos,
+) -> Vec<ScheduledTick<String>> {
     // Built through a real queue rather than struct literals because
     // `ScheduledTick::sub_tick_order` is private — the same idiom
     // `server::propagate_placement` uses, and for the same reason.
     let mut pending: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-    pending.schedule((pos.x, pos.y, pos.z), TICK_FLUID.to_owned(), 1, TickPriority::Normal);
-    for direction in [
-        Direction::Down,
-        Direction::Up,
-        Direction::North,
-        Direction::South,
-        Direction::West,
-        Direction::East,
+    for candidate in [
+        pos,
+        Direction::Down.relative(pos),
+        Direction::Up.relative(pos),
+        Direction::North.relative(pos),
+        Direction::South.relative(pos),
+        Direction::West.relative(pos),
+        Direction::East.relative(pos),
     ] {
-        let neighbour = direction.relative(pos);
-        pending.schedule(
-            (neighbour.x, neighbour.y, neighbour.z),
-            TICK_FLUID.to_owned(),
-            1,
-            TickPriority::Normal,
-        );
+        if let Some(fluid) = fluid_state_of(&block_at(world, env, candidate)) {
+            pending.schedule(
+                (candidate.x, candidate.y, candidate.z),
+                TICK_FLUID.to_owned(),
+                env.tick_delay(fluid.kind),
+                TickPriority::Normal,
+            );
+        }
     }
     pending.drain_due(u64::MAX, usize::MAX)
 }
@@ -1695,7 +1700,7 @@ mod tests {
     /// the tick count consumed. The tick loop's own drain, reduced to one queue.
     fn settle(rig: &Rig, seed: BlockPos, max_ticks: u64) -> u64 {
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        for pending in ticks_after_edit(seed) {
+        for pending in ticks_after_edit(rig, FluidEnv::OVERWORLD, seed) {
             queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
         }
         let mut changes = Vec::new();
@@ -1723,7 +1728,7 @@ mod tests {
     /// number rather than a range.
     fn fall_depth_after(rig: &Rig, source: BlockPos, ticks: u64) -> i32 {
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
-        for pending in ticks_after_edit(source) {
+        for pending in ticks_after_edit(rig, FluidEnv::OVERWORLD, source) {
             queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
         }
         let mut changes = Vec::new();
@@ -1741,95 +1746,130 @@ mod tests {
         depth
     }
 
-    /// **Water falls one cell per `getTickDelay`, not two.**
+    /// The tick number at which `pos` first reads as holding a fluid, or
+    /// `None` if it never does within `max_ticks` — the horizontal
+    /// counterpart of [`fall_depth_after`], for a position one cell over
+    /// rather than one cell down.
+    fn first_wet_tick(rig: &Rig, seed: BlockPos, pos: BlockPos, max_ticks: u64) -> Option<u64> {
+        if fluid_state_of(&rig.block_state(pos.x, pos.y, pos.z)).is_some() {
+            return Some(0);
+        }
+        let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
+        for pending in ticks_after_edit(rig, FluidEnv::OVERWORLD, seed) {
+            queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
+        }
+        let mut changes = Vec::new();
+        for tick in 1..=max_ticks {
+            let due = queue.drain_due(tick, usize::MAX);
+            if due.is_empty() && queue.is_empty() {
+                return None;
+            }
+            for entry in due {
+                let entry_pos = BlockPos::new(entry.pos.0, entry.pos.1, entry.pos.2);
+                changes.clear();
+                run_scheduled_tick(rig, FluidEnv::OVERWORLD, entry_pos, &mut queue, tick, &mut changes);
+            }
+            if fluid_state_of(&rig.block_state(pos.x, pos.y, pos.z)).is_some() {
+                return Some(tick);
+            }
+        }
+        None
+    }
+
+    /// **The cell immediately beside a freshly placed water source wets on
+    /// water's own tick delay, not sooner** — the isolated half, checked
+    /// without a live oracle.
+    ///
+    /// # Where the expected value comes from
+    ///
+    /// A live 26.2 server, probed directly over RCON with real-time
+    /// timestamps (bypassing every tick-counting assumption this crate
+    /// makes): a water source's immediate neighbour first read as water at
+    /// 247 ms after placement, matching a 250 ms / 5-tick prediction from
+    /// water's own tick delay to within the measurement's own noise floor.
+    /// `FluidEnv::OVERWORLD.tick_delay(FluidKind::Water)` is that same `5`,
+    /// read from this crate's own constant rather than restated as a literal,
+    /// so a future change to the constant moves this test's expectation with
+    /// it instead of silently decorrelating the two.
+    ///
+    /// # Why this test exists next to the live differential harness
+    ///
+    /// `tests/differential_live_fluid_spread.rs` compares this crate against
+    /// a live server tick-for-tick, but its vanilla side is paced by a
+    /// wall-clock sleep per nominal tick — accurate under ordinary load, and
+    /// measurably not under heavy contention, where vanilla's independent
+    /// tick loop can outrun the harness's nominal count. This test has no
+    /// such dependency: both the seed and the read happen inside one
+    /// process's own deterministic tick loop, so it is exact under any load
+    /// and answers the question a flaky differential run cannot — whether
+    /// *this crate itself*, in isolation, reproduces the externally-measured
+    /// constant.
+    #[test]
+    fn a_water_source_s_neighbour_wets_on_water_s_own_tick_delay() {
+        let rig = Rig::flat();
+        let y = FLOOR_Y + 1;
+        let source = BlockPos::new(0, y, 0);
+        rig.set_block(source.x, source.y, source.z, "minecraft:water[level=0]");
+        let neighbour = BlockPos::new(1, y, 0);
+
+        let tick = first_wet_tick(&rig, source, neighbour, 50)
+            .expect("the neighbour never wets within 50 ticks");
+
+        assert_eq!(
+            tick,
+            FluidEnv::OVERWORLD.tick_delay(FluidKind::Water),
+            "a live 26.2 server wets a water source's immediate neighbour at water's own \
+             tick delay (measured 247ms, predicted 250ms/5 ticks) — this model must match \
+             that in isolation, independent of any live-oracle harness's own timing"
+        );
+    }
+
+    /// **Water falls one cell per [`FluidEnv::tick_delay`], starting at that
+    /// delay rather than sooner.**
     ///
     /// # Where the expected values come from
     ///
-    /// Arithmetic over the real implementation's own constant, not over our output.
-    /// The real water tick-delay is `5`. [`ticks_after_edit`] seeds the source
-    /// **and its six neighbours** at delay `1`, so tick 1 reaches depth **2**,
-    /// not 1: the source spreads into the cell below, and that cell already had a
-    /// tick due in the same pass, so it spreads once more. That is the seed
-    /// hook's own documented "one cell of flow starting four ticks early once",
-    /// independent of anything below it. Every cell after that pays a full delay:
-    /// depth at tick `T` is `2 + (T - 1) / 5`.
+    /// Arithmetic over [`FluidEnv::tick_delay`]'s own constant (`5` for water),
+    /// not over this crate's own output: a source's own first spread cannot
+    /// land before its own first scheduled tick comes due, so depth at tick
+    /// `T` is `T / 5` (integer division) — zero until `T` reaches `5`, then
+    /// one more cell every `5` ticks after that.
     ///
-    /// The `2` was measured, not assumed — the first version of this gate
-    /// predicted `1 + (T - 1) / 5` and failed at `T = 1` reporting depth 2. It is
-    /// recorded here because the plausible round number was wrong in the
-    /// direction that looks like a code bug.
+    /// # Why this discriminates the defect this pins
     ///
-    /// # Why these tick numbers
-    ///
-    /// Because the two hypotheses differ there. Scheduling the **air** cell below
-    /// a freshly written one — which is what this code did before, and which
-    /// the real engine never does, since the neighbor-changed hook is a method on
-    /// the liquid block
-    /// and air's default schedules nothing — let the front advance twice per
-    /// delay: `1 + 2 * (T - 1) / 5`. At `T = 1` both predict depth 1, so a gate
-    /// there would measure only that the code runs; from `T = 6` on they diverge
-    /// and keep diverging. Both columns are tabulated so a future reader can see
-    /// the discrimination rather than trust it:
-    ///
-    /// | tick | correct | doubled |
-    /// |---|---|---|
-    /// | 1 | 2 | 2 |
-    /// | 6 | 3 | 4 |
-    /// | 11 | 4 | 6 |
-    /// | 21 | 6 | 10 |
-    ///
-    /// The column is 40 cells tall so the floor never caps the count within the
-    /// range asserted — a capped depth would make the two hypotheses agree again
-    /// and silently turn this back into a vacuous gate.
+    /// [`ticks_after_edit`] used to seed the source's own first tick at a
+    /// fixed delay of `1` rather than its own tick delay, and seeded every
+    /// neighbour at that same short delay regardless of what it held. The air
+    /// cell below a freshly placed source therefore got its own premature
+    /// tick in the very same drain the source's first spread wrote water into
+    /// it, so the front reached depth **2** after a single elapsed tick
+    /// instead of staying at **0** until the fifth. `ticks in [1, 4]` below
+    /// pin exactly that difference; `[5, 6, 9, 10, 11, 20, 21]` cover the
+    /// steady cadence past the first cell.
     #[test]
     fn a_falling_column_advances_one_cell_per_tick_delay() {
         const DELAY: u64 = 5;
         let source_y = FLOOR_Y + 40;
-        // `1` is deliberately excluded: both hypotheses predict depth 2 there
-        // (the seed cell is common to both), so it would measure only that the
-        // code runs. It is asserted separately below as the seed's own premise.
-        for ticks in [6_u64, 11, 21] {
+        for ticks in [0_u64, 1, 4, 5, 6, 9, 10, 11, 20, 21] {
             let rig = Rig::flat();
             let source = BlockPos::new(0, source_y, 0);
             rig.set_block(source.x, source.y, source.z, "minecraft:water[level=0]");
 
             let depth = fall_depth_after(&rig, source, ticks);
 
-            let expected = 2 + i32::try_from((ticks - 1) / DELAY).expect("small");
-            let doubled = 2 + 2 * i32::try_from((ticks - 1) / DELAY).expect("small");
+            let expected = i32::try_from(ticks / DELAY).expect("small");
             assert_eq!(
                 depth, expected,
                 "after {ticks} ticks a falling water column must be {expected} cells \
-                 deep (one per getTickDelay={DELAY}); it is {depth}. The doubled \
-                 hypothesis — scheduling the air cell below each write, so the front \
-                 advances twice per delay — predicts {doubled} here."
-            );
-            assert_ne!(
-                expected, doubled,
-                "this tick count must discriminate the two hypotheses, or it is \
-                 measuring nothing"
+                 deep (one per tick_delay={DELAY}, first at tick {DELAY} itself); it \
+                 is {depth}"
             );
             assert!(
                 source_y - depth > FLOOR_Y,
-                "premise: the floor must not have capped the fall at {ticks} ticks, \
-                 or both hypotheses agree and this asserts nothing"
+                "premise: the floor must not have capped the fall at {ticks} ticks, or \
+                 this measures the floor rather than the spread"
             );
         }
-
-        // The seed's own contribution, asserted separately because the loop above
-        // deliberately skips tick 1: `ticks_after_edit` schedules the source AND
-        // its six neighbours at delay 1, so the very first pass reaches depth 2.
-        // Pinning it means a future change to the seed hook fails here rather than
-        // silently shifting every expectation above by one.
-        let rig = Rig::flat();
-        let source = BlockPos::new(0, source_y, 0);
-        rig.set_block(source.x, source.y, source.z, "minecraft:water[level=0]");
-        assert_eq!(
-            fall_depth_after(&rig, source, 1),
-            2,
-            "the seed hook schedules the source and the cell below it in the same \
-             pass, so tick 1 reaches depth 2 — the documented one-cell-early step"
-        );
     }
 
     /// Premise check for every gate below: the rig must reflect its own writes,
@@ -2133,7 +2173,7 @@ mod tests {
             let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
             let mut changes = Vec::new();
             for seed in [BlockPos::new(0, y, 0), BlockPos::new(2, y, 0)] {
-                for pending in ticks_after_edit(seed) {
+                for pending in ticks_after_edit(&rig, env, seed) {
                     queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
                 }
             }
@@ -2307,29 +2347,63 @@ mod tests {
         );
     }
 
-    /// The seeding hook's shape: seven positions, all at delay 1, deduped.
+    /// The seeding hook's shape: only a position that already holds a fluid is
+    /// scheduled, each at *that* fluid's own tick delay rather than a fixed
+    /// number — the delay for the lava neighbour must differ from the delay
+    /// for the water cell being edited, or the two are copying one delay
+    /// rather than reading each position.
     #[test]
-    fn ticks_after_edit_covers_the_cell_and_its_six_neighbours() {
-        let pending = ticks_after_edit(BlockPos::new(5, 60, -7));
-        assert_eq!(pending.len(), 7, "the cell plus six neighbours");
+    fn ticks_after_edit_schedules_only_positions_already_holding_a_fluid() {
+        let rig = Rig::flat();
+        let pos = BlockPos::new(5, 60, -7);
+        rig.set_block(pos.x, pos.y, pos.z, "minecraft:water[level=0]");
+        let lava_neighbour = BlockPos::new(5, 60, -8);
+        rig.set_block(
+            lava_neighbour.x,
+            lava_neighbour.y,
+            lava_neighbour.z,
+            "minecraft:lava[level=0]",
+        );
+        // The other five neighbours are left as the flat rig's own air, so
+        // they must not appear below at all.
+
+        let pending = ticks_after_edit(&rig, FluidEnv::OVERWORLD, pos);
+
         assert!(pending.iter().all(|t| t.kind == TICK_FLUID));
-        assert!(pending.iter().all(|t| t.trigger_tick == 1));
-        let mut positions: Vec<(i32, i32, i32)> = pending.iter().map(|t| t.pos).collect();
-        positions.sort_unstable();
-        positions.dedup();
-        assert_eq!(positions.len(), 7, "no duplicate positions");
-        assert!(positions.contains(&(5, 60, -7)));
-        assert!(positions.contains(&(5, 59, -7)));
-        assert!(positions.contains(&(5, 61, -7)));
-        assert!(positions.contains(&(4, 60, -7)));
-        assert!(positions.contains(&(6, 60, -7)));
-        assert!(positions.contains(&(5, 60, -8)));
-        assert!(positions.contains(&(5, 60, -6)));
+        let mut by_pos: Vec<((i32, i32, i32), u64)> =
+            pending.iter().map(|t| (t.pos, t.trigger_tick)).collect();
+        by_pos.sort_unstable();
+        assert_eq!(
+            by_pos,
+            vec![
+                ((5, 60, -8), FluidEnv::OVERWORLD.tick_delay(FluidKind::Lava)),
+                ((5, 60, -7), FluidEnv::OVERWORLD.tick_delay(FluidKind::Water)),
+            ],
+            "only the two fluid-holding positions are scheduled, each at its own \
+             fluid's delay — the five dry neighbours must be absent entirely"
+        );
+        assert_ne!(
+            FluidEnv::OVERWORLD.tick_delay(FluidKind::Lava),
+            FluidEnv::OVERWORLD.tick_delay(FluidKind::Water),
+            "premise: the two delays must differ, or this cannot tell a per-position \
+             delay from one copied off the edited cell"
+        );
     }
 
-    /// A position holding no fluid must be a silent no-op, since
-    /// [`ticks_after_edit`] deliberately over-schedules. A version that panicked
-    /// or wrote something here would make every player edit corrupt terrain.
+    /// An edit with no fluid anywhere in its blast radius schedules nothing at
+    /// all — the direct counterpart of the fixed defect, where every one of
+    /// the seven positions used to get a tick regardless of what it held.
+    #[test]
+    fn ticks_after_edit_on_an_entirely_dry_edit_schedules_nothing() {
+        let rig = Rig::flat();
+        let pending = ticks_after_edit(&rig, FluidEnv::OVERWORLD, BlockPos::new(0, FLOOR_Y + 5, 0));
+        assert!(pending.is_empty(), "no fluid anywhere near the edit: {pending:?}");
+    }
+
+    /// A position holding no fluid must be a silent no-op — world state can
+    /// change between a tick being scheduled and it coming due. A version that
+    /// panicked or wrote something here would make every player edit corrupt
+    /// terrain.
     #[test]
     fn a_fluid_tick_on_dry_land_changes_nothing() {
         let rig = Rig::flat();
@@ -2397,7 +2471,7 @@ mod tests {
     fn settle_footprint(rig: &Rig, seeds: &[BlockPos], max_ticks: u64) -> Vec<(i32, i32, i32)> {
         let mut queue: ScheduledTickQueue<String> = ScheduledTickQueue::new();
         for seed in seeds {
-            for pending in ticks_after_edit(*seed) {
+            for pending in ticks_after_edit(rig, FluidEnv::OVERWORLD, *seed) {
                 queue.schedule(pending.pos, pending.kind, pending.trigger_tick, pending.priority);
             }
         }
