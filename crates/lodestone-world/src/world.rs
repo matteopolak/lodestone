@@ -160,7 +160,7 @@ impl ColumnPatch {
         }
     }
 
-    /// The number of sections queued in this patch.
+    /// The number of queued section replacements.
     #[must_use]
     pub fn len(&self) -> usize {
         self.sections.len()
@@ -312,7 +312,7 @@ impl BiomePatch {
         }
     }
 
-    /// The number of sections queued in this patch.
+    /// The number of queued section replacements.
     #[must_use]
     pub fn len(&self) -> usize {
         self.sections.len()

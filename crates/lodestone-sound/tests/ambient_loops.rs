@@ -720,7 +720,8 @@ fn a_prediction_plus_its_server_echo_produces_exactly_one_sound() {
     let mut ledger = PredictionLedger::new();
     let pos = Vec3::new(10.0, 64.0, -3.0);
 
-    // We predict our own footstep at tick 100 and play it locally: that is sound #1.
+    // Recording a predicted footstep represents the initial local playback, so
+    // this is the first sound instance.
     ledger.record("block.stone.step", pos, 100);
     assert_eq!(ledger.pending(), 1);
 
