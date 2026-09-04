@@ -13,9 +13,11 @@ detail is in [`docs/`](./docs/README.md). Open work is in
 
 ## Protocol families
 
-Four client protocol families exist, each a workspace member under `crates/versions/` behind a
-`lodestone-registry` feature: `v1-8` (1.8.9), `v1-9` (1.9.4-1.12.2), `v1-14` (1.14.4-1.16.5),
-`v26-2` (protocol 776 / MC 26.2).
+Ten client protocol families exist, each a workspace member under `crates/versions/` behind a
+`lodestone-registry` feature: `v1-7` (1.7.6-1.7.10), `v1-8` (1.8.8-1.8.9), `v1-9` (1.9.4-1.12.2),
+`v1-13` (1.13.2), `v1-14` (1.14.4-1.16.5), `v1-17` (1.17.1-1.18.2), `v1-19` (1.19.4), `v1-20-6`
+(1.20.5-1.20.6), `v1-21-11` (1.21.11), `v26-2` (protocol 776 / MC 26.2). Together they cover every
+Minecraft release from 1.7.10 up, in the joining direction only.
 Each folder is named for the *era-start* Minecraft version it covers (e.g. `crates/versions/1.8`), which
 is neither its package/feature suffix (`lodestone-v1-8`, feature `v1-8`) nor a protocol number — ask
 `VersionAdapter::supports`, never the folder or the feature name.
