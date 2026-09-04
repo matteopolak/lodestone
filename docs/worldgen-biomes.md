@@ -76,6 +76,11 @@ effective temperature with altitude, and a frozen-ocean biome's `FROZEN` modifie
 patchy ice mask rather than freezing solid. Whether a block can hold a snow layer or freeze is not a
 data property; it comes from four jar-dumped per-block-state facts (`lodestone_data::snow_support`,
 `block_solidity::blocks_motion`), because collision/support geometry is code, not JSON.
+The five complete `snow_support` columns accept a validated
+`lodestone_data::block_states::StateId` and return plain booleans. World-loading
+and protocol boundaries validate raw ids once; downstream freeze, snow-support
+and default-state reads cannot confuse a state id with another numeric registry
+and need no repeated range fallback.
 
 ## How to change it, and the gotchas
 

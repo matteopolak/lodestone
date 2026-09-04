@@ -307,8 +307,8 @@ pub fn can_burn(state: &str) -> bool {
 #[must_use]
 pub fn face_sturdy_up(state: &str) -> bool {
     lodestone_data::block_states::state_id(state)
-        .and_then(lodestone_data::snow_support::face_full_up)
-        .unwrap_or(false)
+        .and_then(lodestone_data::block_states::StateId::new)
+        .is_some_and(lodestone_data::snow_support::face_full_up)
 }
 
 /// `BlockStateBase::blocksMotion`, for the sky scan.

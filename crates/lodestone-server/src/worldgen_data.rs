@@ -449,9 +449,13 @@ fn freeze_facts() -> &'static Value {
     FACTS.get_or_init(|| {
         use lodestone_data::{block_solidity, block_states, snow_support};
 
-        type Reader = fn(u32) -> Option<bool>;
+        type Reader = fn(lodestone_data::block_states::StateId) -> bool;
+        fn blocks_motion(id: lodestone_data::block_states::StateId) -> bool {
+            block_solidity::blocks_motion(id.raw())
+                .expect("validated state is present in the solidity census")
+        }
         const COLUMNS: [(&str, Reader); 5] = [
-            ("blocks_motion", block_solidity::blocks_motion),
+            ("blocks_motion", blocks_motion),
             ("has_fluid_state", snow_support::has_fluid_state),
             ("water_source", snow_support::is_water_source_liquid_block),
             ("face_full_up", snow_support::face_full_up),
@@ -469,11 +473,13 @@ fn freeze_facts() -> &'static Value {
         let mut default_answers: std::collections::HashMap<&'static str, [bool; COLUMNS.len()]> =
             std::collections::HashMap::new();
         for id in 0..snow_support::STATE_COUNT {
-            if snow_support::is_default_state(id) != Some(true) {
+            let state = block_states::StateId::new(id)
+                .expect("generated state-table index is valid");
+            if !state.is_default() {
                 continue;
             }
             let name = block_states::block_name(id).expect("every state has a block name");
-            let answers = std::array::from_fn(|c| COLUMNS[c].1(id) == Some(true));
+            let answers = std::array::from_fn(|c| COLUMNS[c].1(state));
             default_answers.insert(name, answers);
         }
 
@@ -488,12 +494,14 @@ fn freeze_facts() -> &'static Value {
             }
         }
         for id in 0..snow_support::STATE_COUNT {
+            let state = block_states::StateId::new(id)
+                .expect("generated state-table index is valid");
             let name = block_states::block_name(id).expect("every state has a block name");
             let default = default_answers
                 .get(name)
                 .unwrap_or_else(|| panic!("block {name} has no default state in the census"));
             for (c, &(_, read)) in COLUMNS.iter().enumerate() {
-                let answer = read(id) == Some(true);
+                let answer = read(state);
                 if answer != default[c] {
                     overrides[c].insert(canonical_state(id), Value::Bool(answer));
                 }

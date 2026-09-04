@@ -118,6 +118,11 @@ every recipe unlocked as an honest stand-in. The real per-session tracking is
 `RecipeDisplayId` directly — do not read `RecipeUnlockState`'s continued
 dormancy as evidence the feature itself is unfinished.
 
+The server folds inbound recipe-book open/filter changes into the connection's
+`PlayerInventory::recipe_book_settings` state. This state is separate from the
+crafting grid and is intentionally session-scoped until player-data persistence
+has an authoritative recipe-book representation.
+
 ## How to change it
 
 - Validation rules for plugin registration belong in

@@ -120,7 +120,10 @@ fn resolve_state_id_legacy(state: &str) -> u32 {
         }
         first_id.get_or_insert(id);
         last_id = Some(id);
-        if lodestone_data::snow_support::is_default_state(id) == Some(true) {
+        if lodestone_data::block_states::StateId::new(id)
+            .expect("generated state-table index is valid")
+            .is_default()
+        {
             default_id = Some(id);
         }
         let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();

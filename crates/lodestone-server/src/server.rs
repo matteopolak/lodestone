@@ -3890,6 +3890,7 @@ where
             | ServerBound::CarriedItemChanged { .. }
             | ServerBound::ContainerClicked { .. }
             | ServerBound::RecipePlaced { .. }
+            | ServerBound::RecipeBookSettingsChanged { .. }
             | ServerBound::ContainerClosed { .. }
             | ServerBound::Attack { .. }
             | ServerBound::InteractEntity { .. }
@@ -10636,6 +10637,13 @@ where
             ) {
                 apply(conn, state, correction).await?;
             }
+        }
+        ServerBound::RecipeBookSettingsChanged {
+            book_type,
+            open,
+            filtering,
+        } => {
+            inventory.set_recipe_book_settings(book_type, open, filtering);
         }
         ServerBound::ContainerClosed { window_id } => {
             // Closing returns carried items and virtual crafting/workstation

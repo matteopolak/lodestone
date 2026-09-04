@@ -29,9 +29,10 @@
 use std::collections::HashMap;
 
 use lodestone_entity::equipment::EquipmentSlot;
-use lodestone_model::ItemStack;
+use lodestone_model::{ItemStack, RecipeBookType};
 
 use crate::crafting::CraftingState;
+use lodestone_game::recipe::RecipeBookSettings;
 
 /// Native size of the player's own inventory: hotbar (`0..=8`) + main storage
 /// (`9..=35`) + armour (`36..=39`) + off-hand (`40`). The
@@ -106,6 +107,8 @@ pub struct PlayerInventory {
     /// `pending_rename`/`enchant_seed`: a new menu instance starts with
     /// nothing selected.
     selected_recipe_index: Option<i32>,
+    /// Per-player recipe-book tab settings received from the client.
+    recipe_book_settings: RecipeBookSettings,
     /// Menu-index → highlighted bundle-content index, from
     /// bundle-selection input (`crate::container_click`'s
     /// `SelectedBundleIndex`). This struct is the per-connection menu
@@ -129,6 +132,7 @@ impl Default for PlayerInventory {
             pending_rename: None,
             enchant_seed: 0,
             selected_recipe_index: None,
+            recipe_book_settings: RecipeBookSettings::default(),
             selected_bundle: HashMap::new(),
         }
     }
@@ -417,6 +421,32 @@ impl PlayerInventory {
         self.selected_recipe_index = index;
     }
 
+    /// Returns the recipe-book tab settings this connection most recently
+    /// supplied, including whether the client has reported any settings yet.
+    #[must_use]
+    pub fn recipe_book_settings(&self) -> RecipeBookSettings {
+        self.recipe_book_settings
+    }
+
+    /// Folds one inbound recipe-book settings update into this inventory's
+    /// per-player state. The protocol layer validates the wire ordinal before
+    /// calling this method, so the canonical enum is exhaustive here.
+    pub fn set_recipe_book_settings(
+        &mut self,
+        book_type: RecipeBookType,
+        open: bool,
+        filtering: bool,
+    ) {
+        let settings = lodestone_model::RecipeBookTypeSettings { open, filtering };
+        match book_type {
+            RecipeBookType::Crafting => self.recipe_book_settings.crafting = settings,
+            RecipeBookType::Furnace => self.recipe_book_settings.furnace = settings,
+            RecipeBookType::BlastFurnace => self.recipe_book_settings.blast_furnace = settings,
+            RecipeBookType::Smoker => self.recipe_book_settings.smoker = settings,
+        }
+        self.recipe_book_settings.reported = true;
+    }
+
     /// Closes the open workstation and returns whatever was in it, so the
     /// caller can give it back to the player — same "do not silently delete
     /// items on close" story as [`take_table_crafting`](Self::take_table_crafting).
@@ -686,6 +716,24 @@ mod tests {
         for i in 0..PLAYER_NATIVE_SIZE {
             assert!(inv.native(i).is_none(), "native {i} should start empty");
         }
+    }
+
+    #[test]
+    fn recipe_book_settings_fold_into_the_player_inventory() {
+        let mut inv = PlayerInventory::new();
+        assert!(!inv.recipe_book_settings().reported);
+
+        inv.set_recipe_book_settings(RecipeBookType::BlastFurnace, true, false);
+        let settings = inv.recipe_book_settings();
+        assert!(settings.reported);
+        assert!(settings.blast_furnace.open);
+        assert!(!settings.blast_furnace.filtering);
+        assert!(!settings.crafting.open);
+
+        inv.set_recipe_book_settings(RecipeBookType::BlastFurnace, false, true);
+        let settings = inv.recipe_book_settings();
+        assert!(!settings.blast_furnace.open);
+        assert!(settings.blast_furnace.filtering);
     }
 
     #[test]

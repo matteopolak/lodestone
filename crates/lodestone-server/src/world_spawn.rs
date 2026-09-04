@@ -187,11 +187,13 @@ fn spawn_state_tables() -> &'static (
         let mut exact = std::collections::HashMap::new();
         let mut defaults = std::collections::HashMap::new();
         for id in 0..snow_support::STATE_COUNT {
+            let state = block_states::StateId::new(id)
+                .expect("generated state-table index is valid");
             let Some(name) = block_states::block_name(id) else {
                 continue;
             };
             exact.insert(spawn_canonical_state(id), id);
-            if snow_support::is_default_state(id) == Some(true) {
+            if state.is_default() {
                 defaults.insert(name, id);
             }
         }
@@ -237,8 +239,8 @@ fn spawn_state_id(state: &str) -> Option<u32> {
 /// whole column.
 fn spawn_has_fluid_state(state: &str) -> bool {
     spawn_state_id(state)
-        .and_then(lodestone_data::snow_support::has_fluid_state)
-        .unwrap_or(false)
+        .and_then(lodestone_data::block_states::StateId::new)
+        .is_some_and(lodestone_data::snow_support::has_fluid_state)
 }
 
 /// Vanilla `Block.isFaceFull(state.getCollisionShape(…), UP)`
@@ -250,8 +252,8 @@ fn spawn_has_fluid_state(state: &str) -> bool {
 /// something it cannot prove is solid.
 fn spawn_face_full_up(state: &str) -> bool {
     spawn_state_id(state)
-        .and_then(lodestone_data::snow_support::face_full_up)
-        .unwrap_or(false)
+        .and_then(lodestone_data::block_states::StateId::new)
+        .is_some_and(lodestone_data::snow_support::face_full_up)
 }
 
 /// Scans one already-generated column's 256 block positions in vanilla's order
@@ -797,6 +799,8 @@ mod tests {
                 }
                 states += 1;
                 states_checked += 1;
+                let state = block_states::StateId::new(id)
+                    .expect("generated state-table index is valid");
                 let canonical = spawn_canonical_state(id);
                 assert_eq!(
                     spawn_state_id(&canonical),
@@ -805,12 +809,12 @@ mod tests {
                 );
                 assert_eq!(
                     spawn_face_full_up(&canonical),
-                    snow_support::face_full_up(id) == Some(true),
+                    snow_support::face_full_up(state),
                     "face_full_up disagrees with the census for {canonical}"
                 );
                 assert_eq!(
                     spawn_has_fluid_state(&canonical),
-                    snow_support::has_fluid_state(id) == Some(true),
+                    snow_support::has_fluid_state(state),
                     "has_fluid_state disagrees with the census for {canonical}"
                 );
             }

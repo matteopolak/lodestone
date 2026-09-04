@@ -73,33 +73,31 @@
 //! Five bitsets, 4,046 bytes each — pure rodata, no heap, O(1) by id. The fifth,
 //! [`is_default_state`], is not a "freeze top layer" predicate; see its own doc.
 
+use crate::block_states::StateId;
 use crate::generated_snow_support as table;
 
 pub use table::STATE_COUNT;
 
-/// Reads bit `id` out of a packed little-endian-within-byte bitset.
-fn bit(bits: &[u8], id: u32) -> Option<bool> {
-    if id >= STATE_COUNT {
-        return None;
-    }
-    let byte = *bits.get((id / 8) as usize)?;
-    Some(byte & (1u8 << (id % 8)) != 0)
+/// Reads `id` from a complete packed little-endian-within-byte bitset.
+fn bit(bits: &[u8], id: StateId) -> bool {
+    let raw = id.raw();
+    let byte = bits[(raw / 8) as usize];
+    byte & (1u8 << (raw % 8)) != 0
 }
 
 /// Vanilla's own "is face full" check against the state's collision shape and
-/// the up direction, for block-state `id`, or `None` if `id` is not in `0..`[`STATE_COUNT`].
+/// the up direction, for validated block-state `id`.
 ///
 /// This is the geometric half of the snow-layer block's own "can survive" check: a snow layer
 /// survives on a block whose collision shape presents a full 1×1 square at its
 /// top face. **Not** the same question as "is the collision shape a full block"
 /// — see the module doc.
 #[must_use]
-pub fn face_full_up(id: u32) -> Option<bool> {
+pub fn face_full_up(id: StateId) -> bool {
     bit(&table::FACE_FULL_UP, id)
 }
 
-/// Vanilla `!state.getFluidState().isEmpty()` for block-state `id`, or `None`
-/// if `id` is not in `0..`[`STATE_COUNT`].
+/// Vanilla `!state.getFluidState().isEmpty()` for validated block-state `id`.
 ///
 /// The second half of the motion-blocking heightmap predicate
 /// (`input.blocksMotion() || !input.getFluidState()
@@ -108,38 +106,36 @@ pub fn face_full_up(id: u32) -> Option<bool> {
 /// waterlogged state, which is why it is broader than
 /// [`is_water_source_liquid_block`].
 #[must_use]
-pub fn has_fluid_state(id: u32) -> Option<bool> {
+pub fn has_fluid_state(id: StateId) -> bool {
     bit(&table::HAS_FLUID_STATE, id)
 }
 
-/// Vanilla's own "is source water and a liquid block" check for block-state `id`, or `None` if `id` is not in
-/// `0..`[`STATE_COUNT`].
+/// Vanilla's own "is source water and a liquid block" check for validated
+/// block-state `id`.
 ///
 /// Exactly the condition vanilla's own biome "should freeze" check puts on a
 /// block before it becomes ice. True for **one** state in 26.2,
 /// `minecraft:water[level=0]` — see the module doc for why that is not a bug in
 /// the dump.
 #[must_use]
-pub fn is_water_source_liquid_block(id: u32) -> Option<bool> {
+pub fn is_water_source_liquid_block(id: StateId) -> bool {
     bit(&table::IS_WATER_SOURCE_LIQUID_BLOCK, id)
 }
 
-/// Vanilla's own "has snowy property" check for block-state
-/// `id`, or `None` if `id` is not in `0..`[`STATE_COUNT`].
+/// Vanilla's own "has snowy property" check for validated block-state `id`.
 ///
 /// Vanilla's own snow-and-freeze feature flips this property to `true` on the block it puts a
 /// snow layer on (in its own place step); a port that skips the flip
 /// leaves visibly wrong terrain (a green grass top under snow) even when the
 /// snow itself is placed correctly.
 #[must_use]
-pub fn has_snowy_property(id: u32) -> Option<bool> {
+pub fn has_snowy_property(id: StateId) -> bool {
     bit(&table::HAS_SNOWY_PROPERTY, id)
 }
 
-/// Vanilla `state == state.getBlock().defaultBlockState()` for block-state `id`,
-/// or `None` if `id` is not in `0..`[`STATE_COUNT`]. Exactly one state per block
-/// is set, so a single walk of `0..STATE_COUNT` recovers every block's default
-/// with no name lookup.
+/// Vanilla `state == state.getBlock().defaultBlockState()` for validated
+/// block-state `id`. Exactly one state per block is set, so a single walk of
+/// `0..STATE_COUNT` recovers every block's default with no name lookup.
 ///
 /// This is not a `freeze_top_layer` predicate — it is the key its consumer needs.
 /// `lodestone-worldgen` emits fluids without their `level` property
@@ -150,7 +146,7 @@ pub fn has_snowy_property(id: u32) -> Option<bool> {
 /// ever freezes. `blocks.json` does carry a `"default": true` flag per block, but
 /// [`crate::block_states`]' extraction did not retain it.
 #[must_use]
-pub fn is_default_state(id: u32) -> Option<bool> {
+pub fn is_default_state(id: StateId) -> bool {
     bit(&table::IS_DEFAULT_STATE, id)
 }
 
@@ -159,13 +155,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn out_of_range_ids_are_none() {
-        assert!(face_full_up(STATE_COUNT).is_none());
-        assert!(has_fluid_state(STATE_COUNT).is_none());
-        assert!(is_water_source_liquid_block(STATE_COUNT).is_none());
-        assert!(has_snowy_property(STATE_COUNT).is_none());
-        assert!(is_default_state(STATE_COUNT).is_none());
-        assert!(face_full_up(u32::MAX).is_none());
+    fn validated_state_lookups_are_total_and_invalid_raw_ids_stop_at_boundary() {
+        let state = StateId::new(0).expect("state zero is valid");
+        let lookups: [fn(StateId) -> bool; 5] = [
+            face_full_up,
+            has_fluid_state,
+            is_water_source_liquid_block,
+            has_snowy_property,
+            is_default_state,
+        ];
+        for lookup in lookups {
+            let _ = lookup(state);
+        }
+        assert!(StateId::new(STATE_COUNT).is_none());
+        assert!(StateId::new(u32::MAX).is_none());
     }
 
     /// Every column must be non-degenerate: neither all-zero nor all-one. A
@@ -176,7 +179,7 @@ mod tests {
     #[test]
     fn every_column_has_both_values() {
         for (name, f) in [
-            ("face_full_up", face_full_up as fn(u32) -> Option<bool>),
+            ("face_full_up", face_full_up as fn(StateId) -> bool),
             ("has_fluid_state", has_fluid_state),
             (
                 "is_water_source_liquid_block",
@@ -185,7 +188,10 @@ mod tests {
             ("has_snowy_property", has_snowy_property),
             ("is_default_state", is_default_state),
         ] {
-            let set = (0..STATE_COUNT).filter(|&id| f(id) == Some(true)).count();
+            let set = (0..STATE_COUNT)
+                .map(|raw| StateId::new(raw).expect("census range is valid"))
+                .filter(|&id| f(id))
+                .count();
             assert!(set > 0, "{name} is all-zero across {STATE_COUNT} states");
             assert!(
                 set < STATE_COUNT as usize,

@@ -72,7 +72,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use lodestone_data::{block_states, collision_shapes, snow_support};
+use lodestone_data::{
+    block_states::{self, StateId},
+    collision_shapes, snow_support,
+};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -293,7 +296,7 @@ fn committed_bits_match_the_dump() {
         "committed STATE_COUNT disagrees with the dump"
     );
 
-    let readers: [(char, fn(u32) -> Option<bool>); 5] = [
+    let readers: [(char, fn(StateId) -> bool); 5] = [
         ('U', snow_support::face_full_up),
         ('L', snow_support::has_fluid_state),
         ('W', snow_support::is_water_source_liquid_block),
@@ -304,14 +307,14 @@ fn committed_bits_match_the_dump() {
         let expected = dump.column(kind);
         let mut popcount = 0usize;
         for (id, &want) in expected.iter().enumerate() {
-            let got = read(id as u32).unwrap_or_else(|| {
-                panic!("column {kind}: committed table has no state id {id}")
-            });
+            let id = StateId::new(id as u32).expect("dump id is in the state census");
+            let got = read(id);
             assert_eq!(
                 got,
                 want,
-                "column {kind}, state id {id} ({}): committed {got}, dump {want}",
-                dump.block_of(id)
+                "column {kind}, state id {} ({}): committed {got}, dump {want}",
+                id.raw(),
+                dump.block_of(id.raw() as usize)
             );
             if got {
                 popcount += 1;
