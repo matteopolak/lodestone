@@ -319,7 +319,7 @@ mod tests {
     ///
     /// ```text
     /// seed = 0x5EED9ABC
-    /// next(31) #1 = 1468338872      next(31) #2 = 1165619973
+    /// first next(31) draw = 1468338872; second next(31) draw = 1165619973
     /// THUNDER_DURATION.sample = 3600 + (1468338872 % 12001) = 8121
     /// RAIN_DURATION.sample    = 12000 + (1165619973 % 12001) = 22847
     /// ```
