@@ -1,5 +1,6 @@
 [package]
 name = "lodestone-server"
+autobenches = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true

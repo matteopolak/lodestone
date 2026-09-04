@@ -1,5 +1,6 @@
 [package]
 name = "lodestone-world"
+autobenches = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -102,6 +102,14 @@ tracked with its source URL and a licence-clarity note (none carries an explicit
 public repositories whose own text describes the files as shared for reuse) and is gitignored
 rather than committed — used only for internal, non-redistributed benchmarking.
 
+### Explicit benchmark targets and shared helpers
+
+Each benchmark-bearing crate declares `autobenches = false` and lists every runnable benchmark
+with `[[bench]]` and `harness = false`. This keeps `benches/support.rs` as a module imported by
+the real benchmark binaries instead of letting Cargo discover it as an empty standalone target.
+When adding a benchmark, add its explicit manifest entry; when adding a helper, keep it as a
+module behind an existing target rather than creating a target with no benchmark body.
+
 ### The PGO experiment
 
 A single measured answer to "is profile-guided optimization worth adding to the release build":
