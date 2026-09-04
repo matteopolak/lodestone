@@ -39,13 +39,10 @@
 //!   *raining* world does on load is moot. Once that persistence lands, load
 //!   calls that snap and this struct gains fields from it; the cycle itself is
 //!   unchanged.
-//! * **The `advance_weather` game rule** is read as
-//!   [`crate::tick::advance_weather()`], a function returning vanilla's
-//!   default `true` — the same disclosed gap as
-//!   [`crate::tick::mob_griefing()`]: this crate has no world-level
-//!   `GameRules` registry yet (R1 of the world-state plan), and the
-//!   per-connection `WorldAdminState::game_rules` is the wrong side of the
-//!   world for a tick loop that runs with no connection at all.
+//! * **The weather-advance game rule** is represented by
+//!   [`crate::tick::advance_weather()`], which returns the default `true`.
+//!   The tick loop does not yet read this setting from the shared world-rule
+//!   store, so it uses the fallback instead.
 //! * **The dimension gate** (`Level.canHaveWeather`) is
 //!   unmodelled: this crate has only the overworld, which can have weather.
 //! * **The seed** is a fixed literal (see [`WEATHER_SEED`]): this crate has

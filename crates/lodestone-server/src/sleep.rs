@@ -56,14 +56,11 @@
 //!
 //! # What is deliberately not here
 //!
-//! * **The sleeping-percentage and time-advance game rules** are read
-//!   as [`crate::tick::players_sleeping_percentage()`]/
-//!   [`crate::tick::advance_time()`], functions returning the defaults
-//!   (`100` / `true`) — the same disclosed gap as
-//!   [`crate::tick::advance_weather()`]: this crate has no world-level
-//!   `GameRules` registry yet (R1 of the world-state plan), and the
-//!   per-connection `WorldAdminState::game_rules` is the wrong side of the
-//!   world for a tick loop that runs with no connection at all.
+//! * **The sleeping-percentage rule** still comes from
+//!   [`crate::tick::players_sleeping_percentage()`], which returns its default
+//!   of `100` until the tick loop reads that setting from the shared world-rule
+//!   store. Time advancement already reads
+//!   [`crate::world_state::WorldStateHandle::advance_time`].
 //! * **Bed-entry gates** are unmodelled. A bed that is not legally
 //!   enterable (blocked, out of reach, monsters within ±8/±5, daytime, the
 //!   player flying/creative) with per-reason messages. The monster check is
