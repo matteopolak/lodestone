@@ -354,9 +354,9 @@ pub fn placement_anchor(placement: PacksPlacement, width: f32, height: f32) -> (
     }
 }
 
-/// A row's top: its absolute offset minus the column's pixel scroll. Pixel
-/// scrolling (#445) — `scroll.floor()` is vanilla's `(int)scrollAmount`, and a
-/// row above the band simply resolves above it and is clipped by the draw.
+/// A row's top: its absolute offset minus the column's pixel scroll. Fractional
+/// scrolling is truncated by `scroll.floor()`, and a row above the band simply
+/// resolves above it and is clipped by the draw.
 fn row_y(row: u16, scroll: f32) -> f32 {
     first_entry_y() + f32::from(row) * ROW_H - scroll.floor()
 }
@@ -445,9 +445,7 @@ impl PacksNav {
     }
 
     /// Rescans the packs folder **without** discarding the screen's own
-    /// in-progress selection — the folder-watch half of issue #560 ("it would
-    /// be nice if it updated the texture pack list by watching the folder
-    /// changes"), wired to window-focus regain
+    /// in-progress selection. The refresh is wired to window-focus regain
     /// (`WindowApp::window_event`'s `WindowEvent::Focused(true)` arm) rather
     /// than a real filesystem watcher.
     ///
@@ -780,8 +778,8 @@ impl PacksNav {
         }
     }
 
-    /// Activates the control at index `row` — a click, resolved directly to the
-    /// row it hit rather than through Enter (#391's rule).
+    /// Activates the control at index `row` — a click resolves directly to the
+    /// row it hit instead of routing through keyboard activation.
     pub fn click_row(&mut self, row: usize) -> PacksOutcome {
         let Some(&control) = self.controls().get(row) else {
             return PacksOutcome::None;

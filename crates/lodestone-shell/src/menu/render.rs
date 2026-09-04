@@ -241,12 +241,12 @@ const EDITION_Y: f32 = LOGO_Y + 44.0 - 7.0;
 /// pause screen's 8 px gutter comes from, and why its full-width buttons start at
 /// `W/2 - 102` rather than the title screen's `W/2 - 100`.
 ///
-/// **This is the hand derivation, not the value the draw uses.** Since #394 the
-/// grid is really built and arranged (`pause_menu_grid_with`) and
+/// **This is the hand derivation, not the value the draw uses.** The
+/// grid is built and arranged (`pause_menu_grid_with`) and
 /// [`pause_grid_size`] is what [`Origin::PauseGrid`] reads; this constant is the
 /// independent expectation `the_pause_grid_size_is_the_arranged_layouts_own`
-/// checks it against. Per `CLAUDE.md`, an expected value has to originate outside
-/// the code under test — so do not "simplify" this into a call to the layout.
+/// checks it against. The expected value must remain independent of the code
+/// under test, so do not "simplify" this into a call to the layout.
 pub const PAUSE_GRID_W: f32 = 212.0;
 /// Height of the same grid: row 0 is `20 + paddingTop(50)` = 70
 /// and rows 1..4 are `20 + 4` = 24 each, for
