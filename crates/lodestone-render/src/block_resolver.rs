@@ -115,7 +115,6 @@ pub struct BlockAtlas {
     atlas: Atlas,
     uv_table: Vec<[f32; 4]>,
     classes: Vec<StateClass>,
-    missing: SpriteId,
     /// Forward index: a canonical `(block, sorted properties)` key → global state
     /// id, inverted from the reverse-only [`BlockStateRegistry`] so callers who
     /// hold a block-state *string* (e.g. a world generator emitting
@@ -337,7 +336,6 @@ impl BlockAtlas {
             atlas,
             uv_table,
             classes,
-            missing,
             name_to_id,
             models: None,
         })
