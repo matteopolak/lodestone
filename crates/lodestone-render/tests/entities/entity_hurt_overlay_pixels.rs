@@ -1,31 +1,28 @@
 //! Prove the per-entity hurt/death red overlay reaches pixels.
 //!
-//! Issue #98 asked for a "hurt flash" and separately named a "screen shake" for
-//! explosions. Both premises were checked against the decompiled 26.2
-//! `client-src` before writing any code, and neither held up:
+//! A full-screen "hurt flash" tint and a camera shake on explosions were both
+//! considered and checked against the decompiled 26.2 `client-src` before
+//! writing any code, and neither held up:
 //!
 //! - There is no full-screen, screen-space red tint anywhere in vanilla tied to
-//!   `hurtTime`. `ScreenEffectRenderer`'s own decompiled source (the underwater/fire overlay pass
-//!   this port already has, `crates/lodestone-render/src/screen_effects.rs`)
-//!   has zero `hurt` references. `Gui`'s own decompiled source, `LevelRenderer`'s own decompiled source and
-//!   `GameRenderer`'s own decompiled source were also grepped clean. The only two things vanilla
-//!   ties to a local player's own `hurtTime` are `bobHurt` (a camera *roll*,
-//!   `GameRenderer`'s own decompiled source, explicitly claimed by issue #58's own
-//!   checklist: "`bobHurt` — the damage tilt... This is the 'screen tilt
-//!   thing'") and the per-entity overlay below.
+//!   the hurt-time counter. The underwater/fire overlay pass this port
+//!   already has (`crates/lodestone-render/src/screen_effects.rs`) has no
+//!   vanilla analogue that reads hurt-time, and neither does the HUD, the
+//!   world renderer or the game renderer. The only two things vanilla ties to
+//!   a local player's own hurt-time counter are a camera *roll* (the damage
+//!   tilt — the "screen tilt thing") and the per-entity overlay below.
 //! - There is no camera-shake mechanism anywhere in `client-src` for
 //!   explosions (or anything else): a shake-keyword search over the whole
 //!   decompiled client source
-//!   turns up exactly the bow-draw item wobble
-//!   in `ItemInHandRenderer`'s own decompiled source, nothing camera-related.
-//!   `ClientExplosionTracker`'s own decompiled source only ever spawns particles.
+//!   turns up exactly the bow-draw item wobble, nothing camera-related.
+//!   Client-side explosion tracking only ever spawns particles.
 //!
 //! What vanilla **does** have, and this gate proves reaches pixels, is a
-//! per-entity model overlay: `LivingEntityRenderer`'s own decompiled source sets
-//! `state.hasRedOverlay = entity.hurtTime > 0 || entity.deathTime > 0`, sampled
-//! from `OverlayTexture`'s baked lookup — a flat `(255, 0, 0)` at alpha
-//! `178/255` for every entity whose `hurtTime` is nonzero (`OverlayTexture`'s own decompiled source:
-//! the `y < 8` row is the constant ARGB `-1291911168`, i.e. `(178, 255, 0, 0)`).
+//! per-entity model overlay: the entity renderer sets a red-overlay flag
+//! whenever the entity's hurt-time or death-time counter is nonzero, sampled
+//! from a baked lookup texture — a flat `(255, 0, 0)` at alpha
+//! `178/255` for every entity whose hurt-time is nonzero (the lookup's
+//! `y < 8` row is the constant ARGB `-1291911168`, i.e. `(178, 255, 0, 0)`).
 //! This is a **blend**, not a multiply — multiplying by red would crush the mob
 //! toward black — and it applies to *any* drawn living entity, not the local
 //! player's own screen.
@@ -454,7 +451,7 @@ fn hurt_overlay_reddens_the_mob_silhouette_and_nothing_else() {
     println!("determinism (hurt x2): {determinism} px differ (must be 0)");
     println!("reddened mob pixels: {reddened} / {area}");
     println!("background pixels changed by the overlay: {outside_silhouette_changed} (must be 0)");
-    println!("overlay alpha byte: {HURT_OVERLAY_ALPHA_BYTE} (vanilla OverlayTexture red row, vanilla's decompiled living-entity-renderer source)");
+    println!("overlay alpha byte: {HURT_OVERLAY_ALPHA_BYTE} (vanilla's baked overlay lookup, red row)");
 
     assert_eq!(
         off_vs_off, 0,

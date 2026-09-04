@@ -1,4 +1,7 @@
-//! Issue #21: the base entity pipeline's depth comparison, measured.
+//! The base entity pipeline's depth comparison, measured: it uses `Less`
+//! where vanilla's equivalent comparison is inclusive, so coincident geometry
+//! resolves to the first draw instead of the last — the armour pipeline
+//! already uses the inclusive comparison, so the two were inconsistent.
 //!
 //! # What vanilla actually says
 //!

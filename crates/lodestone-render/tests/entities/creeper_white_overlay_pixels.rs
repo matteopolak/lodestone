@@ -5,10 +5,10 @@
 //! *magnitude* vacuous test: a gate that asserted silhouette pixels "moved
 //! toward vanilla's overlay red" passed 3440/3440 while the shader was
 //! rendering ~70% red where vanilla renders ~30% — the mix arguments were
-//! swapped (issue #371), and a direction-only check could not see it. This
+//! swapped, and a direction-only check could not see it. This
 //! gate is written to not repeat that mistake: it predicts the **exact**
 //! output byte from constants that originate outside the code under test
-//! (vanilla's `OverlayTexture` alpha-derivation formula, transcribed in
+//! (vanilla's overlay alpha-derivation formula, transcribed in
 //! `entity_pipeline.rs`'s `creeper_overlay_alpha_from_progress`, plus this
 //! shader's own documented `srgb_to_linear` transfer function) and requires
 //! the measurement to land on that value, not merely move in its direction.
@@ -440,8 +440,8 @@ fn white_overlay_matches_the_predicted_byte_on_a_black_mob() {
 
     // The two hypotheses, both computed from constants outside the shader:
     // vanilla's `alpha` is the weight on the entity's own colour
-    // (`mix(white, colour, alpha)`); the swapped-argument bug (the hurt
-    // overlay's own issue #371, in white-overlay form) would compute
+    // (`mix(white, colour, alpha)`); the same swapped-mix-argument bug the hurt
+    // overlay guards against, here in white-overlay form, would compute
     // `mix(colour, white, alpha)` instead, the complementary value on this
     // black-textured rig.
     let alpha_frac = f32::from(alpha) / 255.0;
@@ -489,7 +489,7 @@ fn white_overlay_matches_the_predicted_byte_on_a_black_mob() {
     assert!(
         (measured - predicted_swapped).abs() > 8,
         "measured byte {measured} is suspiciously close to the SWAPPED-argument prediction \
-         {predicted_swapped} (mix(colour, white, alpha)) — this is issue #371's exact bug shape, \
-         reproduced for the white overlay"
+         {predicted_swapped} (mix(colour, white, alpha)) — this is the swapped-mix-argument bug \
+         shape, reproduced for the white overlay"
     );
 }

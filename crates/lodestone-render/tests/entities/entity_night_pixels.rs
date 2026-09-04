@@ -607,10 +607,10 @@ fn a_torch_lit_mob_is_identical_at_midnight_and_noon() {
 
 /// **No regression for callers that predate this term.** Every existing path
 /// builds the group-0 uniform from a `FogUniform` that leaves the sky-darken lane
-/// at `0.0`. That must render *byte-identically* to explicit noon, or this change
-/// silently renders every mob in the demo world and in a dozen other gates pure
-/// black — the old ramp's `0.2` floor at least left them dimly visible, so this
-/// sentinel matters more now than it did.
+/// at `0.0`. That must render *byte-identically* to explicit noon, or the
+/// sky-darken term silently renders every mob in the demo world and in a
+/// dozen other gates pure black — the old ramp's `0.2` floor at least left
+/// them dimly visible, so this sentinel matters.
 #[test]
 #[ignore = "requires a GPU adapter; run explicitly"]
 fn the_unset_lane_renders_identically_to_explicit_noon() {

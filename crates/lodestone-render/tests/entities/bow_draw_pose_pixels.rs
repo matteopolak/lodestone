@@ -1,8 +1,9 @@
 //! Prove a drawn bow reaches pixels: the **arms move**, at arm height, and only
-//! on a rig vanilla actually poses (issue #57).
+//! on a rig vanilla actually poses.
 //!
 //! Reported as "skeletons charging bows do not animate, and neither does the
-//! player". The state half of that (decoding `LivingEntity`'s using-item bit into
+//! player". The state half of that (decoding the living-entity metadata's
+//! using-item bit into
 //! an `ItemUse` component) is covered by hermetic tests in `lodestone-v26-2` and
 //! `lodestone-ecs`; this is the half that decides whether any of it counts, because
 //! a crate's own test suite is a closed loop and every piece of this could be green
@@ -500,9 +501,9 @@ fn a_drawn_bow_moves_a_skeletons_arms_and_leaves_a_zombies_alone() {
     assert_unclipped("rest", rest_box);
     assert_unclipped("bow", bow_box);
 
-    // (a) The pose must move pixels at all. This is the assertion that fails on
-    //     the build this change replaced, where nothing decoded the using-item bit
-    //     and `setup_anim` had no item-pose branch.
+    // (a) The pose must move pixels at all. This is the assertion that fails
+    //     whenever nothing decodes the using-item bit or `setup_anim` has no
+    //     item-pose branch.
     let moved = moved.unwrap_or_else(|| {
         panic!(
             "the bow pose changed ZERO pixels. rest silhouette {rest_box}, bow silhouette \
