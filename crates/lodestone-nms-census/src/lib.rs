@@ -3,33 +3,35 @@
 //! ## What it is
 //!
 //! A pure-Rust scanner that reads a `.jar`, walks every class file's constant
-//! pool, and reports every member of a target package — by default
-//! `net/minecraft/` — that the jar's bytecode references, with call counts.
+//! pool and static bytecode, and reports every member of a target package
+//! — by default `net/minecraft/` — that the jar actually uses.
 //! It is the measurement that makes the Java-plugin bridge estimable:
 //! `docs/java-plugin-bridge.md` explains what the number decides.
 //!
-//! No JVM, no `javap`, no decompiler. A class file's symbolic references all
-//! live in its constant pool, so a byte-format reader answers the question
-//! completely — the same reasoning that lets `lodestone-anvil` read a region
-//! file without a server. That matters practically as well as aesthetically:
-//! this host has no Java runtime, so a census that needed one could not be run
-//! here at all.
+//! No JVM, no `javap`, no decompiler. The constant pool retains symbolic
+//! references required for descriptors and bootstrap sites, while a bounds-
+//! checked bytecode walk counts member instructions. That matters practically
+//! as well as aesthetically: this host has no Java runtime, so a census that
+//! needed one could not be run here at all.
 //!
 //! ## How it works
 //!
 //! [`Census::scan_jar`] opens the archive and, for every `.class` entry,
-//! parses the constant pool ([`classfile`]) and records three populations:
+//! parses the constant pool and `Code` attributes ([`classfile`]) and records
+//! four populations:
 //!
 //! | population | source | what it answers |
 //! |---|---|---|
-//! | [`Census::members`] | `Fieldref`/`Methodref`/`InterfaceMethodref` | the methods and fields the bridge must actually back |
+//! | [`Census::members`] | `get*`, `put*`, and `invoke*` instruction sites | the statically encoded methods and field directions the bridge must back |
+//! | [`Census::symbolic_members`] | `Fieldref`/`Methodref`/`InterfaceMethodref` pool entries | references preserved for descriptor/bootstrap context, but not proof of a use |
 //! | [`Census::types`] | `CONSTANT_Class` | the classes that must *exist* — `new`, casts, `catch`, `instanceof` |
 //! | [`Census::descriptor_types`] | object types inside every descriptor | the classes that must exist to make a signature loadable |
 //!
-//! The three are separate because they are separate obligations. A class named
+//! The four are separate because they are separate obligations. A class named
 //! only in a descriptor still has to be loadable or the *referring* method
 //! fails verification, but it needs no method bodies; a class with 4,000 member
-//! references is where the work is.
+//! instruction sites is where the work is. The static-site table records field directions so
+//! a real field write cannot be mistaken for a read.
 //!
 //! ### Two traps that were measured, not guessed
 //!
@@ -39,8 +41,9 @@
 //! classes where recursion finds tens of thousands. Paper ships the same shape
 //! (a "paperclip" launcher wrapping the patched server), so recursion is a
 //! requirement for the real census, not a nicety. [`ScanOptions::recurse_jars`]
-//! controls it and defaults to on; `crates/lodestone-nms-census/tests/vanilla_jar.rs`
-//! asserts both arms against the real jar so the difference stays measured.
+//! controls it and defaults to on. `crates/lodestone-nms-census/tests/vanilla_jar.rs`
+//! records the pinned Paper server's static-site baseline; recursion is
+//! separately available to compare launcher-style nested archives.
 //!
 //! **Who refers matters more than what is referred to.** In a Paper jar,
 //! `net.minecraft` is present *and* referenced by `net.minecraft` itself. Those
@@ -82,7 +85,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read};
 use std::path::Path;
 
-use classfile::{ClassFile, RefKind};
+use classfile::{ClassFile, MemberUseKind, RefKind};
 
 /// How a scan treats packages and nesting.
 #[derive(Debug, Clone)]
@@ -121,7 +124,21 @@ pub struct MemberKey {
     pub name: String,
     /// JVM descriptor, e.g. `(Lnet/minecraft/core/BlockPos;)Lnet/minecraft/world/level/block/state/BlockState;`.
     pub descriptor: String,
-    /// Field, method or interface method.
+    /// Field direction or invocation opcode.
+    pub kind: MemberUseKind,
+}
+
+/// A member mentioned in a constant pool, regardless of whether an
+/// instruction uses it.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SymbolicMemberKey {
+    /// Owning class in internal form.
+    pub class: String,
+    /// Member name.
+    pub name: String,
+    /// Member descriptor.
+    pub descriptor: String,
+    /// Field, method, or interface-method pool-reference kind.
     pub kind: RefKind,
 }
 
@@ -146,8 +163,12 @@ impl MemberStat {
 /// The result of scanning one or more jars.
 #[derive(Debug, Clone, Default)]
 pub struct Census {
-    /// Member references into the target package.
+    /// Executable member uses into the target package.
     pub members: BTreeMap<MemberKey, MemberStat>,
+    /// Symbolic pool member references into the target package. A member here
+    /// but absent from [`Census::members`] can be bootstrap-only or otherwise
+    /// unexecuted by this class's methods.
+    pub symbolic_members: BTreeMap<SymbolicMemberKey, MemberStat>,
     /// `CONSTANT_Class` references into the target package — classes that must
     /// exist for a `new`, a cast, an `instanceof` or a `catch`.
     pub types: BTreeMap<String, MemberStat>,
@@ -202,6 +223,19 @@ impl Census {
     pub fn external_members(&self) -> Vec<(&MemberKey, MemberStat)> {
         let mut out: Vec<_> = self
             .members
+            .iter()
+            .filter(|(_, stat)| stat.external > 0)
+            .map(|(key, stat)| (key, *stat))
+            .collect();
+        out.sort_by(|a, b| b.1.external.cmp(&a.1.external).then_with(|| a.0.cmp(b.0)));
+        out
+    }
+
+    /// Symbolic members with at least one external referring class.
+    #[must_use]
+    pub fn external_symbolic_members(&self) -> Vec<(&SymbolicMemberKey, MemberStat)> {
+        let mut out: Vec<_> = self
+            .symbolic_members
             .iter()
             .filter(|(_, stat)| stat.external > 0)
             .map(|(key, stat)| (key, *stat))
@@ -319,13 +353,13 @@ impl Census {
                         continue;
                     };
                     if member.class.starts_with(options.target_prefix.as_str()) {
-                        let key = MemberKey {
+                        let key = SymbolicMemberKey {
                             class: member.class.to_owned(),
                             name: member.name.to_owned(),
                             descriptor: member.descriptor.to_owned(),
                             kind: member.kind,
                         };
-                        bump(self.members.entry(key).or_default());
+                        bump(self.symbolic_members.entry(key).or_default());
                     }
                     for named in descriptor_object_types(member.descriptor) {
                         if named.starts_with(options.target_prefix.as_str()) {
@@ -365,6 +399,24 @@ impl Census {
                     }
                 }
                 _ => {}
+            }
+        }
+
+        for use_ in class.member_uses() {
+            let Ok(member) = class.pool.member_ref(use_.pool_index) else {
+                // `ClassFile::parse` already validates every static instruction index.
+                // Keep this defensive guard for callers constructing a future
+                // class representation through another path.
+                continue;
+            };
+            if member.class.starts_with(options.target_prefix.as_str()) {
+                let key = MemberKey {
+                    class: member.class.to_owned(),
+                    name: member.name.to_owned(),
+                    descriptor: member.descriptor.to_owned(),
+                    kind: use_.kind,
+                };
+                bump(self.members.entry(key).or_default());
             }
         }
     }

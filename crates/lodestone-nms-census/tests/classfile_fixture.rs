@@ -31,7 +31,7 @@
 //! rule applied `utf8(9)` is a string and `this_class` resolves; without it,
 //! index 9 is a `Class` and the whole tail shifts by one.
 
-use lodestone_nms_census::classfile::{ClassFile, Entry, RefKind};
+use lodestone_nms_census::classfile::{ClassFile, Entry, MemberUseKind, RefKind};
 use lodestone_nms_census::{Census, ScanOptions, descriptor_object_types};
 
 /// Assemble a class file whose constant pool exercises the entries the census
@@ -51,6 +51,16 @@ use lodestone_nms_census::{Census, ScanOptions, descriptor_object_types};
 /// | 8 | `Methodref` → class 2, name-and-type 5 |
 /// | 9 | `Utf8` `org/example/Caller` |
 /// | 10 | `Class` → 9 |
+/// | 11 | `Utf8` `Code` |
+/// | 12–15 | a field reference |
+/// | 16–17 | the one method's name and descriptor |
+/// | 18–23 | an interface-method reference |
+/// | 24–26 | an `InvokeDynamic` call site |
+///
+/// Its sole method encodes one pool member more than once. It
+/// also carries an opcode-valued operand, a `tableswitch`, a `lookupswitch`,
+/// and `wide iinc`: a scanner that searches raw bytes for instruction values
+/// would overcount, while a fixed-width-only walker would lose alignment.
 fn fixture_class() -> Vec<u8> {
     const DESCRIPTOR: &str = "(Lnet/minecraft/core/BlockPos;)\
                               Lnet/minecraft/world/level/block/state/BlockState;";
@@ -60,8 +70,8 @@ fn fixture_class() -> Vec<u8> {
     out.extend_from_slice(&65u16.to_be_bytes()); // major: Java 21
 
     // constant_pool_count is one MORE than the number of usable entries, and the
-    // count includes the dead slot: 10 entries occupying slots 1..=10 means 11.
-    out.extend_from_slice(&11u16.to_be_bytes());
+    // count includes the dead slot: 26 entries occupying slots 1..=26 means 27.
+    out.extend_from_slice(&27u16.to_be_bytes());
 
     let utf8 = |out: &mut Vec<u8>, s: &str| {
         out.push(1);
@@ -85,15 +95,103 @@ fn fixture_class() -> Vec<u8> {
     utf8(&mut out, "org/example/Caller"); // 9
     out.push(7); // 10: Class
     out.extend_from_slice(&9u16.to_be_bytes());
+    utf8(&mut out, "Code"); // 11
+    utf8(&mut out, "isClientSide"); // 12
+    utf8(&mut out, "Z"); // 13
+    out.push(12); // 14: NameAndType
+    out.extend_from_slice(&12u16.to_be_bytes());
+    out.extend_from_slice(&13u16.to_be_bytes());
+    out.push(9); // 15: Fieldref
+    out.extend_from_slice(&2u16.to_be_bytes());
+    out.extend_from_slice(&14u16.to_be_bytes());
+    utf8(&mut out, "run"); // 16
+    utf8(&mut out, "()V"); // 17
+    utf8(&mut out, "net/minecraft/world/level/LevelAccessor"); // 18
+    out.push(7); // 19: Class
+    out.extend_from_slice(&18u16.to_be_bytes());
+    utf8(&mut out, "tick"); // 20
+    utf8(&mut out, "()V"); // 21
+    out.push(12); // 22: NameAndType
+    out.extend_from_slice(&20u16.to_be_bytes());
+    out.extend_from_slice(&21u16.to_be_bytes());
+    out.push(11); // 23: InterfaceMethodref
+    out.extend_from_slice(&19u16.to_be_bytes());
+    out.extend_from_slice(&22u16.to_be_bytes());
+    utf8(&mut out, "bootstrapCall"); // 24
+    out.push(12); // 25: NameAndType
+    out.extend_from_slice(&24u16.to_be_bytes());
+    out.extend_from_slice(&21u16.to_be_bytes());
+    out.push(18); // 26: InvokeDynamic
+    out.extend_from_slice(&0u16.to_be_bytes());
+    out.extend_from_slice(&25u16.to_be_bytes());
 
     out.extend_from_slice(&0x0021u16.to_be_bytes()); // access_flags: public super
     out.extend_from_slice(&10u16.to_be_bytes()); // this_class -> 10
     out.extend_from_slice(&0u16.to_be_bytes()); // super_class (unread)
     out.extend_from_slice(&0u16.to_be_bytes()); // interfaces_count
     out.extend_from_slice(&0u16.to_be_bytes()); // fields_count
-    out.extend_from_slice(&0u16.to_be_bytes()); // methods_count
+    out.extend_from_slice(&1u16.to_be_bytes()); // methods_count
+    out.extend_from_slice(&0x0009u16.to_be_bytes()); // public static
+    out.extend_from_slice(&16u16.to_be_bytes()); // name: run
+    out.extend_from_slice(&17u16.to_be_bytes()); // descriptor: ()V
+    out.extend_from_slice(&1u16.to_be_bytes()); // attributes_count
+    out.extend_from_slice(&11u16.to_be_bytes()); // attribute_name: Code
+    let code = [
+        0x10, 0xb6, // bipush 182: an operand that must not be treated as invokevirtual
+        0xb2, 0x00, 0x0f, // getstatic field
+        0xb2, 0x00, 0x0f, // same field, second static use
+        0xb3, 0x00, 0x0f, // putstatic field
+        0xb4, 0x00, 0x0f, // getfield field
+        0xb5, 0x00, 0x0f, // putfield field
+        0xb6, 0x00, 0x08, // invokevirtual method
+        0xb6, 0x00, 0x08, // same method, second static use
+        0xb9, 0x00, 0x17, 0x01, 0x00, // invokeinterface
+        0xba, 0x00, 0x1a, 0x00, 0x00, // invokedynamic: no member operation
+        // Offset 33 has two padding bytes, then default/low/high/one target.
+        0xaa,
+        0, 0, // padding
+        0, 0, 0, 0, // default
+        0, 0, 0, 0, // low
+        0, 0, 0, 0, // high
+        0, 0, 0, 0, // branch target
+        0xc4, 0x84, 0x00, 0xb6, 0x00, 0xb9, // wide iinc with opcode-like operands
+        // `lookupswitch` at offset 58 has one padding byte, default, one
+        // pair-count, then one match/target pair.
+        0xab,
+        0, // padding
+        0, 0, 0, 0, // default
+        0, 0, 0, 1, // pair count
+        0, 0, 0, 0xb6, // match: an opcode-looking payload byte
+        0, 0, 0, 0, // branch target
+        0xb7, 0x00, 0x08, // invokespecial after both variable-width controls
+        0xb8, 0x00, 0x08, // invokestatic after both variable-width controls
+        0xb1, // return
+    ];
+    let attribute_length = 2 + 2 + 4 + code.len() + 2 + 2;
+    out.extend_from_slice(
+        &u32::try_from(attribute_length)
+            .expect("fixture Code attribute fits")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(&2u16.to_be_bytes()); // max_stack
+    out.extend_from_slice(&2u16.to_be_bytes()); // max_locals
+    out.extend_from_slice(
+        &u32::try_from(code.len())
+            .expect("fixture code fits")
+            .to_be_bytes(),
+    );
+    out.extend_from_slice(&code);
+    out.extend_from_slice(&0u16.to_be_bytes()); // exception_table_length
+    out.extend_from_slice(&0u16.to_be_bytes()); // nested attributes_count
     out.extend_from_slice(&0u16.to_be_bytes()); // attributes_count
     out
+}
+
+fn code_start(bytes: &[u8]) -> usize {
+    bytes
+        .windows(5)
+        .position(|window| window == [0x10, 0xb6, 0xb2, 0x00, 0x0f])
+        .expect("fixture Code start")
 }
 
 #[test]
@@ -125,6 +223,33 @@ fn a_long_constant_consumes_two_pool_slots() {
     );
 }
 
+/// The largest legal `constant_pool_count` still has a finite final slot. A
+/// two-slot entry there used to increment the `u16` index past its range in a
+/// debug build; rejecting it before that increment is a format check, not a
+/// build-mode accident.
+#[test]
+fn a_two_slot_constant_at_the_maximum_pool_boundary_is_refused() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes());
+    bytes.extend_from_slice(&0u16.to_be_bytes());
+    bytes.extend_from_slice(&65u16.to_be_bytes());
+    bytes.extend_from_slice(&u16::MAX.to_be_bytes());
+    // Slots 1..=65,533 are valid one-slot integers. Slot 65,534 is the
+    // malformed terminal Long and must fail before reading a nonexistent
+    // second slot or overflowing the parser's 16-bit index.
+    for _ in 1..u16::MAX - 1 {
+        bytes.push(3);
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+    }
+    bytes.push(5);
+
+    let err = ClassFile::parse(&bytes).expect_err("terminal Long must fail");
+    assert!(
+        err.to_string().contains("no declared second slot"),
+        "unexpected error: {err}"
+    );
+}
+
 /// The three-link chase — `Methodref` → `Class` → `Utf8`, and `Methodref` →
 /// `NameAndType` → two `Utf8`s — resolved end to end.
 #[test]
@@ -144,6 +269,161 @@ fn a_method_reference_resolves_to_class_name_and_descriptor() {
     // distinct and non-adjacent: two same-typed adjacent fields transpose
     // without a trace, and equal values would make a transposition invisible.
     assert_ne!(member.class, member.name);
+}
+
+/// Pool membership is only a possible use. The static census must count
+/// the two call instructions, four field-operation directions, and nothing
+/// that merely resembles an opcode in an operand or switch payload.
+#[test]
+fn executable_bytecode_counts_each_instruction_and_field_direction() {
+    let class = ClassFile::parse(&fixture_class()).expect("fixture parses");
+    let uses = class.member_uses();
+
+    assert_eq!(uses.len(), 10, "five calls plus five field operations: {uses:?}");
+    assert_eq!(
+        uses.iter()
+            .filter(|use_| use_.kind == MemberUseKind::InvokeVirtual)
+            .count(),
+        2,
+        "the one Methodref is invoked twice"
+    );
+    for kind in [
+        MemberUseKind::InvokeSpecial,
+        MemberUseKind::InvokeStatic,
+        MemberUseKind::InvokeInterface,
+    ] {
+        assert_eq!(
+            uses.iter().filter(|use_| use_.kind == kind).count(),
+            1,
+            "{kind:?} remains aligned after five-byte and variable-width instructions"
+        );
+    }
+    for kind in [
+        MemberUseKind::GetField,
+        MemberUseKind::PutField,
+        MemberUseKind::GetStatic,
+        MemberUseKind::PutStatic,
+    ] {
+        let expected = usize::from(kind == MemberUseKind::GetStatic) + 1;
+        assert_eq!(
+            uses.iter().filter(|use_| use_.kind == kind).count(),
+            expected,
+            "{kind:?} count"
+        );
+    }
+}
+
+/// Reserved bytes are not instructions. A parser that treats unknown opcodes
+/// as one-byte no-ops can drift into their operand payload and manufacture a
+/// plausible but false member census.
+#[test]
+fn a_reserved_opcode_is_a_named_parse_failure() {
+    let mut bytes = fixture_class();
+    let at = code_start(&bytes);
+    bytes[at] = 0xcb;
+    let err = ClassFile::parse(&bytes).expect_err("reserved opcode must fail");
+    assert!(
+        err.to_string().contains("invalid bytecode opcode"),
+        "unexpected error: {err}"
+    );
+}
+
+/// A member-instruction opcode at the final code byte cannot borrow bytes from
+/// the following exception table. The Code length is the hard boundary.
+#[test]
+fn a_truncated_instruction_is_a_named_parse_failure() {
+    let mut bytes = fixture_class();
+    let return_at = bytes.iter().rposition(|&byte| byte == 0xb1).expect("return");
+    bytes[return_at] = 0xb6;
+    let err = ClassFile::parse(&bytes).expect_err("incomplete invocation must fail");
+    assert!(
+        err.to_string().contains("truncated bytecode instruction"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn a_tableswitch_with_high_below_low_is_a_named_parse_failure() {
+    let mut bytes = fixture_class();
+    let at = code_start(&bytes) + 33;
+    // At this fixture offset the switch has two padding bytes, then default,
+    // low, high. `low = 0`, `high = -1` is the smallest invalid range.
+    bytes[at + 11..at + 15].copy_from_slice(&(-1i32).to_be_bytes());
+    let err = ClassFile::parse(&bytes).expect_err("invalid table range must fail");
+    assert!(
+        err.to_string().contains("tableswitch high is below low"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn a_lookupswitch_with_negative_pair_count_is_a_named_parse_failure() {
+    let mut bytes = fixture_class();
+    let at = code_start(&bytes) + 58;
+    // One padding byte then default puts `npairs` at offset six.
+    bytes[at + 6..at + 10].copy_from_slice(&(-1i32).to_be_bytes());
+    let err = ClassFile::parse(&bytes).expect_err("negative pair count must fail");
+    assert!(
+        err.to_string().contains("lookupswitch pair count is negative"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn a_wide_prefix_on_an_invocation_is_a_named_parse_failure() {
+    let mut bytes = fixture_class();
+    let at = bytes
+        .windows(2)
+        .position(|window| window == [0xc4, 0x84])
+        .expect("wide iinc");
+    bytes[at + 1] = 0xb6;
+    let err = ClassFile::parse(&bytes).expect_err("wide invocation must fail");
+    assert!(
+        err.to_string().contains("cannot be widened"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn five_byte_invocations_validate_reserved_operands_and_pool_kind() {
+    let interface = [0xb9, 0x00, 0x17, 0x01, 0x00];
+    let dynamic = [0xba, 0x00, 0x1a, 0x00, 0x00];
+
+    let mut bad_interface = fixture_class();
+    let at = bad_interface
+        .windows(interface.len())
+        .position(|window| window == interface)
+        .expect("invokeinterface");
+    bad_interface[at + 4] = 1;
+    let err = ClassFile::parse(&bad_interface).expect_err("reserved byte must fail");
+    assert!(
+        err.to_string().contains("invokeinterface reserved byte"),
+        "unexpected error: {err}"
+    );
+
+    let mut bad_dynamic = fixture_class();
+    let at = bad_dynamic
+        .windows(dynamic.len())
+        .position(|window| window == dynamic)
+        .expect("invokedynamic");
+    bad_dynamic[at + 3] = 1;
+    let err = ClassFile::parse(&bad_dynamic).expect_err("reserved bytes must fail");
+    assert!(
+        err.to_string().contains("invokedynamic reserved bytes"),
+        "unexpected error: {err}"
+    );
+
+    let mut wrong_dynamic_kind = fixture_class();
+    let at = wrong_dynamic_kind
+        .windows(dynamic.len())
+        .position(|window| window == dynamic)
+        .expect("invokedynamic");
+    wrong_dynamic_kind[at + 2] = 8;
+    let err = ClassFile::parse(&wrong_dynamic_kind).expect_err("Methodref is not InvokeDynamic");
+    assert!(
+        err.to_string().contains("non-InvokeDynamic"),
+        "unexpected error: {err}"
+    );
 }
 
 /// The referrer is what splits "work the bridge must do" from "calls inside the
@@ -198,13 +478,13 @@ fn descriptor_types_are_found_where_no_class_constant_exists() {
     );
 }
 
-/// End to end through a real zip: a jar carrying the fixture must produce a
-/// census whose external count is 1, attributed to `org/example/Caller`.
+/// End to end through a real zip: the static census counts repeated uses,
+/// while the symbolic census retains one entry per pool reference.
 ///
 /// This is the seam the two halves meet at — a parser that works and an archive
 /// walk that never reaches it would leave both unit tests green.
 #[test]
-fn a_jar_containing_the_fixture_censuses_one_external_reference() {
+fn a_jar_containing_the_fixture_separates_executable_and_symbolic_references() {
     let dir = std::env::temp_dir().join(format!(
         "lodestone-nms-census-fixture-{}",
         std::process::id()
@@ -230,15 +510,29 @@ fn a_jar_containing_the_fixture_censuses_one_external_reference() {
     let external = census.external_members();
     assert_eq!(
         external.len(),
-        1,
-        "exactly one net.minecraft member is referenced; got {external:?}"
+        8,
+        "each field direction is a separate static surface; got {external:?}"
     );
-    let (key, stat) = external[0];
-    assert_eq!(key.class, "net/minecraft/world/level/Level");
-    assert_eq!(key.name, "getBlockState");
-    assert_eq!(stat.external, 1);
+    let invoke = external
+        .iter()
+        .find(|(key, _)| key.kind == MemberUseKind::InvokeVirtual)
+        .expect("virtual invocation is reported");
+    assert_eq!(invoke.0.class, "net/minecraft/world/level/Level");
+    assert_eq!(invoke.0.name, "getBlockState");
+    assert_eq!(invoke.1.external, 2, "two bytecode invocations");
+    let get_static = external
+        .iter()
+        .find(|(key, _)| key.kind == MemberUseKind::GetStatic)
+        .expect("static read is reported");
+    assert_eq!(get_static.1.external, 2, "two bytecode reads");
     assert_eq!(
-        stat.internal, 0,
+        census.external_symbolic_members().len(),
+        3,
+        "pool membership remains separately visible"
+    );
+    assert_eq!(
+        invoke.1.internal,
+        0,
         "the referrer is org/example/Caller, which is outside the replaced layer"
     );
 
@@ -259,8 +553,8 @@ fn a_jar_containing_the_fixture_censuses_one_external_reference() {
     );
     assert_eq!(
         census.members.values().map(|s| s.total()).sum::<u64>(),
-        1,
-        "the reference is still counted, just as internal"
+        10,
+        "the static uses are still counted, just as internal"
     );
 
     std::fs::remove_file(&jar_path).ok();

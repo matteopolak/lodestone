@@ -333,10 +333,11 @@ the bytecode census exists (the owner's own instruction).
 **Dispatchable now (and needed regardless of #341):** the #433 migration phases and #438. Those
 are the real next steps and are already queued.
 
-**Dispatchable for #341 itself, when wanted:** the bytecode census. Obtain a real Paper jar for
-the current line plus 3–5 real plugin jars (one protection, one economy, one kitchen-sink); scan
-constant pools and method refs for vanilla-internal members; rank by reference count; check the
-result against this document's seam table. First fact to verify: that Paper has a Mojang-mapped
+**Dispatchable for #341 itself, when wanted:** the bytecode-use census. Obtain a real Paper jar for
+the current line plus 3–5 real plugin jars (one protection, one economy, one kitchen-sink); walk
+each method's `Code` instructions for internal member operations, retain constant-pool symbols as
+separate descriptor/bootstrap context, and rank static instruction sites by count and field direction. Check
+the result against this document's seam table. First fact to verify: that Paper has a Mojang-mapped
 26.2 release at all — asserted by the issue, unverifiable from `.cache`.
 
 **The smallest end-to-end vertical slice, when prerequisites exist:** one real, unmodified
