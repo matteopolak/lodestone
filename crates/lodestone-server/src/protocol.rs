@@ -167,7 +167,7 @@ pub struct EntitySnapshot {
     /// travelling it.
     pub object_data: i32,
     /// The wire entity id this entity is leashed to, or `None` when it carries no
-    /// lead (issue #236) — the real leashable interface's own lead-data holder field, resolved to
+    /// lead — the leashable entity's lead-data holder field, resolved to
     /// an id by [`crate::mobs::MobSim::snapshots`] (a player uuid resolves through
     /// the connected-player list; a leashed mob resolves to its own already-wire
     /// id; a fence-knot holder has no entity to resolve to yet and stays `None` —
@@ -219,7 +219,7 @@ pub struct BossBarSnapshot {
     pub visible: bool,
 }
 
-/// One connected player as the tab list carries them (issue #438) — the
+/// One connected player as the tab list carries them — the
 /// version-free vocabulary
 /// [`ServerProtocol::encode_player_info_add`] takes a slice of.
 ///
@@ -249,7 +249,7 @@ pub struct PlayerListing {
 
 /// A server-initiated resource pack push (the real resource-pack-push
 /// packet) in version-free vocabulary — the
-/// server side of issue #334, fed by
+/// server-side representation of a push, fed by
 /// [`ServerProtocol::encode_resource_pack_push`].
 ///
 /// Mirrors the wire record exactly: a fresh per-push [`Uuid`] the client
@@ -297,8 +297,8 @@ pub struct ResourcePackPush {
 /// vocabulary type in this crate.
 /// # Why this enum is deliberately **not** `Copy`
 ///
-/// It derived `Copy` until issue #537, which is the first field whose value is
-/// an owned one ([`Item`](Self::Item) carries a [`ResourceKey`]). A version-free
+/// This enum is not `Copy` because [`Item`](Self::Item) carries an owned
+/// [`ResourceKey`]. A version-free
 /// vocabulary enum that derives `Copy` silently forbids every future field that
 /// carries an owned value, and the cost surfaces only at the first feature that
 /// needs one — here, the whole of "a dropped item draws at all". Keep it
@@ -413,7 +413,7 @@ pub enum MetadataField {
     /// (`crate::mobs::species_shape`); this variant is what lets the
     /// *client* apply the same shrink to what it draws.
     Baby(bool),
-    /// The real villager's own villager-data field (issue #243) — index **19**, serializer
+    /// The real villager's own villager-data field — index **19**, serializer
     /// `VILLAGER_DATA` (`18`): a villager type plus a villager profession
     /// plus a plain level int, which is the *whole* of what a client's
     /// villager-profession texture layer needs to pick a texture. Pushed
@@ -461,8 +461,8 @@ pub enum MetadataField {
     /// crate does not model that entity type).
     MinecartFuel(bool),
     /// The real abstract boat's own left/right paddle fields — purely
-    /// cosmetic: whether each paddle is currently animating. Issue #262's
-    /// `PADDLE_BOAT` remainder — a second connected player watching a rowed
+    /// cosmetic: whether each paddle is currently animating. This is the
+    /// remaining paddle-state data — a second connected player watching a rowed
     /// boat from outside is the only consumer, since the rider's own client
     /// always animates its paddles from local input regardless of what this
     /// crate streams back (`crate::mobs::vehicles::MobSim::apply_boat_paddle`'s
@@ -567,7 +567,7 @@ pub enum MetadataField {
     ///
     /// The raw `Pose` ordinal (vanilla's own pose-id getter), not a
     /// version-free enum — this crate has no general per-mob pose model yet
-    /// (issue #459's warden dig/emerge is the first producer), so the id is
+    /// (the warden dig/emerge behavior is the first producer), so the id is
     /// carried through verbatim rather than inventing a vocabulary for the
     /// other seventeen values nothing here produces. `13` (`EMERGING`) and
     /// `14` (`DIGGING`) are the two this crate currently ever sends; `0`
@@ -673,7 +673,7 @@ pub enum MetadataField {
     SnifferState(u8),
 }
 
-/// One generated trade offer, ready for the wire (issue #245) —
+/// One generated trade offer, ready for the wire —
 /// [`ServerProtocol::encode_merchant_offers`]'s per-offer payload.
 ///
 /// Items are [`ResourceKey`]s rather than a version's numeric registry id:
@@ -695,8 +695,8 @@ pub struct MerchantOfferOut {
     pub xp: i32,
 }
 
-/// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs (issue
-/// #407) — the version gate between the worldgen data this crate embeds and
+/// Which worldgen data bundle a [`ServerProtocol`]'s hosting needs — the
+/// version gate between the worldgen data this crate embeds and
 /// the protocol family being served.
 ///
 /// The only bundle `lodestone-server` embeds is 26.2 (protocol 776): the
@@ -774,7 +774,7 @@ pub enum ServerBound {
     /// `ServerboundLoginAcknowledgedPacket`.
     LoginAcknowledged,
     /// The client's answer to a [`ServerDirective`]-carried encryption
-    /// request (issue #273): the RSA-encrypted shared secret and the
+    /// request: the RSA-encrypted shared secret and the
     /// RSA-encrypted echo of the server's verify token, mirroring
     /// `ServerboundKeyPacket`. Both fields are still ciphertext here — this
     /// variant is produced by [`ServerProtocol::decode`] with no crypto of
@@ -807,12 +807,12 @@ pub enum ServerBound {
     /// `move_player_pos_rot` — the only two serverbound movement packets that
     /// carry a position). This drives chunk-cache-center/view-streaming
     /// updates (needs only `x`/`z`) and [`crate::fall::FallTracker`]
-    /// (issue #265, needs `y`/`on_ground`).
+    /// (needs `y`/`on_ground`).
     ///
     /// `rotation` is `Some` only for `move_player_pos_rot`, which is the
     /// packet a client sends whenever position *and* look both changed in a
     /// tick — i.e. the overwhelmingly common case of a player walking while
-    /// turning. It was decoded and discarded here until issue #262's wiring:
+    /// turning. The rotation is retained here because:
     /// a player who walks and turns never sends `move_player_rot` at all
     /// (vanilla's own client-side send-position routine picks exactly one of the four
     /// movement packets per tick), so handling only the rotation-*only*
@@ -836,10 +836,9 @@ pub enum ServerBound {
     /// (`move_player_rot`), the packet a player standing still and turning on
     /// the spot sends every tick.
     ///
-    /// Decoded-and-dropped until issue #262's wiring. It is the difference
-    /// between an avatar that tracks where its player is looking and one that
-    /// only ever re-aims when it also happens to be walking, so it is not
-    /// redundant with [`PlayerMoved`](Self::PlayerMoved)'s `rotation`.
+    /// This distinct variant lets a stationary avatar track where its player
+    /// is looking instead of re-aiming only when the player also walks, so it
+    /// is not redundant with [`PlayerMoved`](Self::PlayerMoved)'s `rotation`.
     PlayerRotated {
         /// New body/head yaw, in degrees.
         yaw: f32,
@@ -936,7 +935,7 @@ pub enum ServerBound {
         mode: GameMode,
     },
     /// The client sent a player-command packet
-    /// (`ServerboundPlayerCommandPacket`, issue #325). The packet's action
+    /// (`ServerboundPlayerCommandPacket`). The packet's action
     /// ordinal is carried raw — the same shape `BlockAction` uses for its
     /// consumed ordinals — and only the one this crate has a consumer for,
     /// `STOP_SLEEPING` (`0`, the "wake up" a client sends when the player
@@ -955,7 +954,7 @@ pub enum ServerBound {
         action: i32,
     },
     /// The client requested a difficulty change
-    /// (`ServerboundChangeDifficultyPacket`, issue #268). This crate has no
+    /// (`ServerboundChangeDifficultyPacket`). This crate has no
     /// permission/operator model, so `crate::server`'s consumer always
     /// accepts it — see that consumer's own doc comment for the vanilla
     /// permission check this replaces and why.
@@ -964,7 +963,7 @@ pub enum ServerBound {
         difficulty: Difficulty,
     },
     /// The client requested locking/unlocking difficulty
-    /// (`ServerboundLockDifficultyPacket`, issue #268).
+    /// (`ServerboundLockDifficultyPacket`).
     DifficultyLockChanged {
         /// Whether difficulty should now be locked (further
         /// [`DifficultyChanged`](Self::DifficultyChanged) requests still
@@ -974,7 +973,7 @@ pub enum ServerBound {
         locked: bool,
     },
     /// The client requested one or more game-rule value changes
-    /// (`ServerboundSetGameRulePacket`, issue #268). Each entry is `(rule
+    /// (`ServerboundSetGameRulePacket`). Each entry is `(rule
     /// key, raw string value)`, exactly as sent — this crate has no
     /// `GameRules` registry to validate a key or parse a value's real type
     /// against, so nothing here rejects an unknown key or a malformed value
@@ -1008,7 +1007,7 @@ pub enum ServerBound {
     /// — a hole through which any client could name any item in any slot.
     ///
     /// `changed_slots` and `carried_item` are still carried, because the wire
-    /// packet has them and they are the client's post-click prediction (issue #27,
+    /// packet has them and they are the client's post-click prediction (see
     /// `docs/container-clicks.md`): the consumer compares them against what it
     /// derived, purely to decide whether a correcting `container_set_content` is
     /// worth sending. Nothing is ever *stored* from them.
@@ -1041,8 +1040,7 @@ pub enum ServerBound {
         carried_item: Option<ItemStack>,
     },
     /// The client clicked a recipe in the recipe book, asking the server to lay it
-    /// out in the open crafting grid (`ServerboundPlaceRecipePacket`, issue #529
-    /// step 4).
+    /// out in the open crafting grid (`ServerboundPlaceRecipePacket`).
     ///
     /// **`recipe_index` is an opaque id the *server* assigns**, not a name: vanilla
     /// sends the whole book with `ClientboundRecipeBookAddPacket` and the client
@@ -1071,7 +1069,7 @@ pub enum ServerBound {
         window_id: i32,
     },
     /// The client attacked an entity with its currently held item
-    /// (`ServerboundAttackPacket`, issue #12). 26.2 split this out of the old
+    /// (`ServerboundAttackPacket`). 26.2 split this out of the old
     /// combined interact packet — the wire body carries only the target
     /// entity id, no hand/location/secondary-action data (see this variant's
     /// consumer, `crate::server::apply_attack`, for the damage/knockback
@@ -1279,7 +1277,7 @@ pub enum ServerBound {
         jump: bool,
     },
     /// A creative-mode inventory slot write predicted locally by the client
-    /// (`ServerboundSetCreativeModeSlotPacket`, issue #266). Uses the exact
+    /// (`ServerboundSetCreativeModeSlotPacket`). Uses the exact
     /// same menu-slot numbering [`ContainerClicked`](Self::ContainerClicked)
     /// does — see
     /// [`PlayerInventory::apply_menu_slot_change`](crate::inventory::PlayerInventory::apply_menu_slot_change)'s
@@ -1305,22 +1303,22 @@ pub enum ServerBound {
         item: Option<ItemStack>,
     },
     /// The client sent a `client_command`
-    /// (`ServerboundClientCommandPacket`, issue #270). `action` is vanilla's
+    /// (`ServerboundClientCommandPacket`). `action` is vanilla's
     /// `Action` ordinal, straight off the wire: `0` = perform respawn, `1` =
     /// request stats (no stats model exists in this crate — see
     /// `crate::server`'s consumer), `2` = request current game-rule values
     /// (mirrors `sendGameRuleValues`, answered from the same
-    /// [`WorldAdminState`](crate::server) issue #268 already built).
+    /// [`WorldAdminState`](crate::server) already built).
     ClientCommand {
         /// Action ordinal, straight off the wire.
         action: i32,
     },
     /// The client changed a setting after joining
-    /// (`ServerboundClientInformationPacket`, issue #270). Most fields are
+    /// (`ServerboundClientInformationPacket`). Most fields are
     /// cosmetic (locale, chat visibility, skin parts, main hand) and this
     /// crate has nothing that reads any of them; `view_distance` is the one
-    /// exception — the "server should honour view distance at minimum" case
-    /// this issue's own decode-arm comment flags. Matches
+    /// exception — the server uses `view_distance` to honour the client's
+    /// requested tracking radius, subject to its own configured cap. Matches
     /// [`PlayerInput`](Self::PlayerInput)'s "decode what the loop needs, not
     /// the whole packet" convention.
     ClientInformationChanged {
@@ -1331,14 +1329,13 @@ pub enum ServerBound {
         view_distance: i8,
     },
     /// The client acknowledged one chunk batch
-    /// (`ServerboundChunkBatchReceivedPacket`, issue #270) — vanilla's
+    /// (`ServerboundChunkBatchReceivedPacket`) — vanilla's
     /// `PlayerChunkSender` flow control, which allows at most one
     /// unacknowledged batch in flight at a time
     /// (`ServerProtocol`'s own trait doc comment already states this
-    /// contract for the *initial* join batch; this variant is what lets
+    /// contract for the *initial* join batch; this variant lets
     /// `crate::server` honour it for every later view-streaming batch too,
-    /// closing the gap this issue's body names: "the server ... never reads
-    /// this reply at all").
+    /// so each batch acknowledgement gates the next batch.
     ChunkBatchAcknowledged {
         /// The client's requested chunks-per-tick delivery rate. Decoded for
         /// parity with the wire packet but not yet used to pace *within* a
@@ -1347,8 +1344,7 @@ pub enum ServerBound {
         /// first is acked) and this field's own future scope.
         desired_chunks_per_tick: f32,
     },
-    /// The client ran a command (`ServerboundChatCommandPacket`, issues #48
-    /// and #464).
+    /// The client ran a command (`ServerboundChatCommandPacket`).
     ///
     /// `command` is the text **without** its leading `/` — that is the wire
     /// format, not a normalisation we apply: vanilla's own packet carries it
@@ -1380,7 +1376,7 @@ pub enum ServerBound {
         /// Command text without the leading `/`.
         command: String,
     },
-    /// A player typed an ordinary chat message (`minecraft:chat`, #469).
+    /// A player typed an ordinary chat message (`minecraft:chat`).
     ///
     /// The sibling of [`ChatCommand`](Self::ChatCommand), and the half that
     /// was missing entirely: the outbound direction
@@ -1457,7 +1453,7 @@ pub enum ServerBound {
         key_signature: Vec<u8>,
     },
     /// A tab-completion request (`ServerboundCommandSuggestionPacket`, the
-    /// wire half of issue #48 that `ChatCommand` alone does not cover).
+    /// wire half that `ChatCommand` alone does not cover).
     ///
     /// `command` is the **whole input line, including the leading `/`** — that
     /// is the wire format (`crates/protocol/v770/src/packets/game.rs`'s
@@ -1476,7 +1472,7 @@ pub enum ServerBound {
         command: String,
     },
     /// A custom plugin-message payload from the client
-    /// (`ServerboundCustomPayloadPacket`, issue #335) — the version-free
+    /// (`ServerboundCustomPayloadPacket`) — the version-free
     /// lowering of the packet, exactly as it crossed the wire: a namespaced
     /// channel identifier plus the channel's raw bytes.
     ///
@@ -1578,7 +1574,7 @@ pub enum ServerBound {
         new_state: bool,
     },
     /// The command-block GUI's "Done" button
-    /// (`ServerboundSetCommandBlockPacket`) — issue #48's remainder.
+    /// (`ServerboundSetCommandBlockPacket`) — the command-block GUI update.
     /// `crate::server`'s consumer is `ServerGamePacketListenerImpl
     /// .handleSetCommandBlock`: swap the block to the requested mode
     /// (preserving `FACING`), write `conditional`, then update the entity's
@@ -1604,8 +1600,8 @@ pub enum ServerBound {
         /// `COMMAND_BLOCK_FLAG_AUTOMATIC` — the "Always Active" toggle.
         automatic: bool,
     },
-    /// A sign's text-edit submission (`ServerboundSignUpdatePacket`, issue
-    /// #616's remainder). `crate::block_entities::apply_sign_update` is the
+    /// A sign's text-edit submission (`ServerboundSignUpdatePacket`).
+    /// `crate::block_entities::apply_sign_update` is the
     /// consumer: it re-checks vanilla's own sign-block-entity update-sign-text gate
     /// (not waxed, and `editor` is the uuid `openTextEdit` granted) before
     /// writing either side's four lines.
@@ -1623,7 +1619,7 @@ pub enum ServerBound {
         lines: [String; 4],
     },
     /// A beacon's power-selection submission (`ServerboundSetBeaconPacket`,
-    /// issue #616's remainder). `crate::server`'s consumer is
+    /// update). `crate::server`'s consumer is
     /// vanilla's own beacon-menu update-effects routine: re-derive the pyramid tier, validate the
     /// pair with `crate::beacon::validate_beacon_effects`, and on success
     /// consume one payment item and resync the menu's data slots.
@@ -1635,7 +1631,7 @@ pub enum ServerBound {
         secondary: Option<String>,
     },
     /// A book-and-quill draft save or signing submission
-    /// (`ServerboundEditBookPacket`, issue #616's remainder). Carries no
+    /// (`ServerboundEditBookPacket`). Carries no
     /// `ItemStack` — the packet only names a slot and the new text;
     /// `crate::server`'s consumer looks the carried book up in the tracked
     /// `PlayerInventory` itself, mirroring vanilla's own edit-book handler's own
@@ -1654,8 +1650,8 @@ pub enum ServerBound {
         /// `minecraft:written_book`); `None` for an ordinary draft save.
         title: Option<String>,
     },
-    /// A merchant trade-row selection (`ServerboundSelectTradePacket`, issue
-    /// #616's remainder). Carries no window id — vanilla's own consumer,
+    /// A merchant trade-row selection (`ServerboundSelectTradePacket`).
+    /// Carries no window id — vanilla's own consumer,
     /// its own select-trade handler, checks only that
     /// `player.containerMenu instanceof MerchantMenu`, so `crate::server`'s
     /// consumer resolves the villager from this connection's own tracked
@@ -1665,8 +1661,8 @@ pub enum ServerBound {
         /// (`crate::mobs::villager::trades::offers_up_to`'s own order).
         index: i32,
     },
-    /// A rider's paddle input (`ServerboundPaddleBoatPacket`, issue #262's
-    /// `PADDLE_BOAT` remainder). `crate::server`'s consumer resolves the
+    /// A rider's paddle input (`ServerboundPaddleBoatPacket`). `crate::server`'s
+    /// consumer resolves the
     /// vehicle from the reporting connection's own `player_entity_id`
     /// (`MobSim::apply_boat_paddle`), the same "the wire carries no window/
     /// vehicle id, the connection supplies it" shape [`SelectTrade`] already
@@ -1677,12 +1673,11 @@ pub enum ServerBound {
         /// Right paddle in use.
         right: bool,
     },
-    /// A bundle-tooltip highlight claim (`ServerboundSelectBundleItemPacket`,
-    /// issue #692). Wire-invisible on ordinary decode — vanilla's own
-    /// vanilla's own bundle-contents wire codec always reconstructs `selectedItem = -1`,
-    /// so this is the *only* place the value ever appears — but server-side
-    /// load-bearing: vanilla's own bundle-contents remove-one routine reads it to decide
-    /// which nested item a right-click extracts. `crate::server`'s consumer
+    /// A bundle-tooltip highlight claim sent by the client.
+    /// The ordinary bundle-contents decoder has no selected-item value and
+    /// reconstructs `-1`, so this is the *only* place the index appears. The
+    /// server-side extraction path reads it to decide which nested item a
+    /// right-click extracts. `crate::server`'s consumer
     /// stores it in the tracked `PlayerInventory` (`set_selected_bundle_item`)
     /// for `container_click::pickup`'s next click to read.
     SelectBundleItem {
@@ -1719,7 +1714,7 @@ pub enum ServerDirective {
     /// Enable or reconfigure zlib compression (negative disables).
     SetCompression(i32),
     /// Enable the AES-128-CFB8 stream cipher on this connection using the
-    /// given 16-byte shared secret (issue #273), mirroring
+    /// given 16-byte shared secret, mirroring
     /// `Connection::enable_encryption` on the client side of the same
     /// handshake. **Ordering is load-bearing, the same hazard
     /// `SetCompression` documents for itself**: the connection layer applies
@@ -1749,7 +1744,7 @@ pub enum ServerDirective {
 ///    [`begin_configuration`](ServerProtocol::begin_configuration) once the
 ///    resulting [`ServerBound::LoginAcknowledged`] arrives, to emit the
 ///    Configuration-phase registry stream followed by the finish signal
-///    (issue #275: the registries must precede `FINISH_CONFIGURATION`);
+///    (the registries must precede `FINISH_CONFIGURATION`);
 /// 4. [`begin_play`](ServerProtocol::begin_play) once
 ///    [`ServerBound::ConfigurationFinished`] arrives, to emit the join
 ///    sequence (join game, spawn position, initial teleport, chunk cache
@@ -1832,7 +1827,7 @@ pub trait ServerProtocol: Send + Sync {
     /// drives the transition to [`State::Configuration`].
     fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective>;
 
-    /// Emits the online-mode encryption request (issue #273), mirroring
+    /// Emits the online-mode encryption request, mirroring
     /// `ClientboundHelloPacket`: an empty server-id string, the DER-encoded
     /// RSA public key, the verify-token challenge, and a fixed
     /// `should_authenticate = true` (vanilla only ever constructs this packet
@@ -1863,7 +1858,7 @@ pub trait ServerProtocol: Send + Sync {
     /// Emits the Configuration-phase `registry_data` packets — one per
     /// synchronized registry, so the client can resolve the bare holder ids
     /// later packets carry (`login`'s `dimension_type` index, `set_time`'s
-    /// `world_clock` keys). **Issue #275.** Sent by the server loop **before**
+    /// `world_clock` keys). Sent by the server loop **before**
     /// [`begin_configuration`](ServerProtocol::begin_configuration)'s finish
     /// signal; a real client expects the registries to precede
     /// `FINISH_CONFIGURATION`.
@@ -1929,7 +1924,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a disconnect packet carrying `reason`, for the phase the
-    /// connection is currently in (issue #279).
+    /// connection is currently in.
     ///
     /// **The packet is phase-specific in both id *and* encoding**, which is the
     /// one thing to get right here:
@@ -1974,8 +1969,8 @@ pub trait ServerProtocol: Send + Sync {
     /// `overlay` flag, where `false` selects the normal chat history and
     /// `true` the action bar).
     ///
-    /// This is command feedback's only route back to the player (issues #48,
-    /// #464) — a refusal and a success are both delivered through it, which is
+    /// This is command feedback's only route back to the player — a refusal and
+    /// a success are both delivered through it, which is
     /// why the failure to implement it is silent rather than loud: the command
     /// still *runs*, the player just never learns what happened. A family that
     /// wants commands must implement this.
@@ -1989,7 +1984,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes a server→client plugin-message payload (vanilla
-    /// `ClientboundCustomPayloadPacket`, wire id `custom_payload`, issue #335).
+    /// `ClientboundCustomPayloadPacket`, wire id `custom_payload`).
     /// `channel` is the namespaced channel identifier; `data` is the
     /// channel-specific raw bytes, written verbatim — the same two-field shape
     /// [`ServerBound::CustomPayload`] lifts on the inbound side.
@@ -2015,8 +2010,8 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Like [`begin_play`](Self::begin_play), but derives the spawn teleport
     /// and default-spawn-position coordinates from `spawn` (world-space, feet
-    /// position) rather than from hardcoded version-specific literals — issue
-    /// #461: spawn Y is terrain-derived, and the server computes it; the
+    /// position) rather than from hardcoded version-specific literals.
+    /// Spawn Y is terrain-derived, and the server computes it; the
     /// protocol only needs to encode it. The chunk-cache center is also
     /// derived from `spawn` rather than assumed to be `(0, 0)`.
     ///
@@ -2358,7 +2353,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes `SET_ENTITY_LINK` — vanilla `ClientboundSetEntityLinkPacket`,
-    /// which draws the rope between a leashed mob and its holder (issue #236).
+    /// which draws the rope between a leashed mob and its holder.
     /// `source_id` is the leashed entity; `target_id` is `None` for a detach
     /// (vanilla's own sentinel: `write` sends the holder's id or `0` when there
     /// is none, vanilla's own leashable drop-leash/remove-leash routines'
@@ -2437,7 +2432,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the tab-list additions for players this connection has not been
-    /// told about yet (issue #438; vanilla `ClientboundPlayerInfoUpdatePacket`
+    /// told about yet (vanilla `ClientboundPlayerInfoUpdatePacket`
     /// with the `ADD_PLAYER` action, wire id `player_info_update`).
     ///
     /// **This is not cosmetic, and it is not optional for player entities.** A
@@ -2460,7 +2455,7 @@ pub trait ServerProtocol: Send + Sync {
         Vec::new()
     }
 
-    /// Encodes the tab-list removals for players that have left (issue #438;
+    /// Encodes the tab-list removals for players that have left (vanilla
     /// vanilla `ClientboundPlayerInfoRemovePacket`, wire id
     /// `player_info_remove`) — the counterpart to
     /// [`encode_player_info_add`](Self::encode_player_info_add), emitted by the
@@ -2495,14 +2490,14 @@ pub trait ServerProtocol: Send + Sync {
         Vec::new()
     }
 
-    /// Encodes a detonation (issue #425; vanilla `ClientboundExplodePacket`,
+    /// Encodes a detonation (vanilla `ClientboundExplodePacket`,
     /// wire id `explode`), fed from [`crate::mobs::MobSim::take_detonations`]
     /// via [`crate::tick::ExplosionFeed`] — the handoff that finally gives
-    /// [`crate::mobs::MobSim::explode`] (issue #213's own exposure/damage
-    /// maths) a wire-visible consequence: before this, a creeper's own fuse
-    /// completing removed the creeper and landed real damage on nearby mobs,
-    /// but no connected client ever saw a particle or heard a sound, because
-    /// nothing encoded this packet at all.
+    /// [`crate::mobs::MobSim::explode`] (the exposure/damage
+    /// maths) a wire-visible consequence. Without this encoder, a creeper's
+    /// fuse completion removed the creeper and landed real damage on nearby
+    /// mobs, but no connected client saw a particle or heard a sound because
+    /// no packet represented the detonation.
     ///
     /// `centre`/`radius` are the blast's own. This crate tracks no block-
     /// destruction model, so an implementor has nothing to report for
@@ -2517,7 +2512,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a positioned sound (issue #530; vanilla
+    /// Encodes a positioned sound (vanilla
     /// `ClientboundSoundPacket`, wire id `sound`).
     ///
     /// `sound` is a `minecraft:sound_event` registry id
@@ -2543,7 +2538,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes one of vanilla's numbered composite effects (issue #530;
+    /// Encodes one of vanilla's numbered composite effects (vanilla
     /// `ClientboundLevelEventPacket`, wire id `level_event`) — see
     /// [`crate::effects::PARTICLES_DESTROY_BLOCK`], which is a sound *and* a
     /// particle burst in one packet. The default emits nothing.
@@ -2552,7 +2547,7 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
-    /// Encodes a particle burst (issue #530; `ClientboundLevelParticlesPacket`,
+    /// Encodes a particle burst (`ClientboundLevelParticlesPacket`,
     /// wire id `level_particles`).
     ///
     /// `particle` is a `minecraft:particle_type` registry id. Only
@@ -2631,7 +2626,7 @@ pub trait ServerProtocol: Send + Sync {
                 block_entity_type,
                 nbt,
             } => self.encode_block_entity_data(*pos, block_entity_type, nbt),
-            // Issue #694, item 4: not a packet — see the variant's own doc
+            // This variant is not a packet — see its own doc
             // for why. `crate::server`'s world-effect drain intercepts it
             // before ever reaching this dispatcher in the one real consumer
             // that needs its payload; any caller that lets it fall through
@@ -2931,8 +2926,8 @@ pub trait ServerProtocol: Send + Sync {
     /// Encodes a difficulty confirmation (vanilla
     /// `ClientboundChangeDifficultyPacket`, wire id `change_difficulty`),
     /// sent back to the requesting connection after
-    /// [`ServerBound::DifficultyChanged`]/[`DifficultyLockChanged`](ServerBound::DifficultyLockChanged)
-    /// (issue #268). `locked` is always the connection's *current* lock
+    /// [`ServerBound::DifficultyChanged`]/[`DifficultyLockChanged`](ServerBound::DifficultyLockChanged).
+    /// `locked` is always the connection's *current* lock
     /// state, not necessarily what this particular request changed — see
     /// `crate::server`'s consumer, which always passes both fields together
     /// regardless of which of the two `ServerBound` variants triggered the
@@ -2945,7 +2940,7 @@ pub trait ServerProtocol: Send + Sync {
     /// Encodes a game-rule confirmation (vanilla
     /// `ClientboundGameRuleValuesPacket`, wire id `game_rule_values`) for
     /// exactly the entries a [`ServerBound::GameRuleChanged`] request just
-    /// set (issue #268) — not vanilla's full current-rule-table broadcast,
+    /// set — not vanilla's full current-rule-table broadcast,
     /// since this crate models no default rule set to broadcast the rest of;
     /// see `crate::server`'s consumer for the full scope note. The default
     /// emits nothing.
@@ -2988,8 +2983,8 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Encodes the clientbound `merchant_offers` packet (vanilla
     /// `ClientboundMerchantOffersPacket`) that a villager or wandering trader
-    /// interaction sends right after [`encode_open_screen`](Self::encode_open_screen)
-    /// (issue #245). `level`/`xp` are the villager's own
+    /// interaction sends right after [`encode_open_screen`](Self::encode_open_screen).
+    /// `level`/`xp` are the villager's own
     /// [`crate::mobs::SimMob::villager_level`]/[`villager_xp`](crate::mobs::SimMob::villager_xp);
     /// `show_progress` is whether the level/xp bar should be shown (`false`
     /// for a wandering trader, which has no level); `can_restock` is whether
@@ -3048,7 +3043,7 @@ pub trait ServerProtocol: Send + Sync {
     /// Encodes the clientbound `set_held_slot` packet (vanilla
     /// `ClientboundSetHeldSlotPacket`) — a single VarInt hotbar index. Vanilla
     /// sends this as the unconditional first half of
-    /// `ServerGamePacketListenerImpl::tryPickItem` (issue #558's pick-block),
+    /// `ServerGamePacketListenerImpl::tryPickItem` (the pick-block action),
     /// whether or not the pick actually moved anything, so the client's
     /// selection is always resynchronised to the server's own
     /// selected-slot value after a middle-click. The default emits nothing.
@@ -3179,7 +3174,7 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Encodes the clientbound `resource_pack_push` packet (vanilla
     /// `ClientboundResourcePackPushPacket`) — the server-initiated half of the
-    /// resource-pack lifecycle (issue #334). The body is the [`ResourcePackPush`]
+    /// resource-pack lifecycle. The body is the [`ResourcePackPush`]
     /// record verbatim: a raw 16-byte uuid, a VarInt-prefixed UTF-8 url, a
     /// VarInt-prefixed UTF-8 SHA-1 hash capped at 40 characters (vanilla's
     /// `MAX_HASH_LENGTH`), a bool `required` flag, then — only if present — an
@@ -3190,7 +3185,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the full `ClientboundUpdateAdvancementsPacket` (26.2) — the
-    /// advancement tree plus per-player progress (issue #338). The payload is
+    /// advancement tree plus per-player progress. The payload is
     /// [`crate::advancements::AdvancementUpdate`] verbatim, built by
     /// [`AdvancementManager::initial_update`](crate::advancements::AdvancementManager::initial_update)
     /// on join (`reset` true, the whole tree as `added`) and by
@@ -3207,7 +3202,7 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Encodes the `ClientboundAwardStatsPacket` (26.2): a batch of
     /// `(StatKey, count)` pairs, sent in reply to the client's
-    /// `ClientCommand(REQUEST_STATS)` (issue #338). Each `StatKey` is the
+    /// `ClientCommand(REQUEST_STATS)`. Each `StatKey` is the
     /// stat-type registry id (e.g. `minecraft:mined`) plus the value key
     /// (item/block/entity id, or the custom-stat id), exactly vanilla's own
     /// per-stat wire codec dispatch; an implementor maps those to registry
@@ -3218,7 +3213,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the `ClientboundRecipeBookAddPacket` (26.2) — the packet that
-    /// **hands out `RecipeDisplayId`s** (issue #547).
+    /// **hands out `RecipeDisplayId`s**.
     ///
     /// Without it `PLACE_RECIPE` is structurally unreachable rather than merely
     /// unimplemented: the id a client echoes back is a position in *this* list, so
@@ -3241,7 +3236,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Encodes the `ClientboundSelectAdvancementsTabPacket` (26.2), sent in
-    /// reply to the client's `select_advancements_tab` request (issue #338).
+    /// reply to the client's `select_advancements_tab` request.
     /// `tab` is the advancement id to open, or `None` to close the screen —
     /// vanilla answers the client's own request with the same id it was given.
     /// The default emits nothing.
@@ -3251,7 +3246,7 @@ pub trait ServerProtocol: Send + Sync {
     }
 
     /// Which worldgen data bundle this protocol's hosting needs, for the
-    /// [`crate::worldgen_data`] version gate (issue #407).
+    /// [`crate::worldgen_data`] version gate.
     ///
     /// The only bundle this crate embeds is 26.2
     /// ([`WorldgenScope::V26_2`]) — the `assets/worldgen/` data
@@ -3356,8 +3351,8 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).begin_play(view_radius)
     }
 
-    // **Issue #329's live bug was the absence of exactly this three-line
-    // forward.** `begin_play_at` has a default that discards `spawn` and calls
+    // **The forwarding contract requires exactly this three-line
+    // delegation.** `begin_play_at` has a default that discards `spawn` and calls
     // `begin_play`, so without this the box silently took that default: the
     // spiral search ran, `server.rs` passed its answer in, and the boxed
     // protocol threw it away and emitted `V770ServerProtocol::begin_play`'s
@@ -3803,8 +3798,8 @@ mod tests {
         /// "the box forwarded `begin_play_at`" and "the box took the default,
         /// which discards `spawn` and calls `begin_play`" are different values.
         /// Without this override both sides would answer `send(100 + radius)` and
-        /// the parity assertion would pass with the forward missing — which is
-        /// exactly how #329's bug survived this test file.
+        /// the parity assertion would pass with the forward missing. This test
+        /// uses a spawn value distinct from the default for that reason.
         fn begin_play_at(&self, view_radius: i32, spawn: Vec3, mode: GameMode) -> Vec<ServerDirective> {
             let mode = match mode {
                 GameMode::Survival => 0,
@@ -4019,8 +4014,8 @@ mod tests {
             direct.encode_registry_data()
         );
         assert_eq!(boxed.begin_play(7), direct.begin_play(7));
-        // The one this test was missing, and the reason #329's fix never reached
-        // a player: `begin_play_at`'s default discards its `spawn` argument, so
+        // This test covers the forwarding contract: `begin_play_at`'s default
+        // discards its `spawn` argument, so
         // an unforwarded box answers with the family's hardcoded literal instead.
         // `Numbered` overrides it, so the two sides differ unless the forward
         // exists.
