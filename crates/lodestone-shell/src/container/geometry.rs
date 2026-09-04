@@ -750,6 +750,14 @@ impl ContainerGeometry {
         // controls.
         draw_beacon_panel(&mut b, menu, frame, background, hovered_point, x, y);
 
+        // The stonecutter's recipe-button grid — `docs/container-screens.md`'s
+        // own "Neither grid draws icon-level recipe/pattern art" gap, closed
+        // for the stonecutter half (the loom's own hardcoded pattern table is
+        // untouched). A no-op for every other screen and for a stonecutter
+        // with no `frame.stonecutter_matches` (no input item, or the server
+        // hasn't sent `update_recipes` yet).
+        draw_stonecutter_grid(&mut b, menu, frame, assets, x, y);
+
         // Every well first, so the colour stream splits cleanly into "chrome"
         // and "what goes on top of an icon". The icons are drawn between the two
         // halves (they are a separate pass, and the 3-D ones need a depth
@@ -1422,6 +1430,42 @@ fn draw_beacon_panel(
                 [200.0 / 255.0, 80.0 / 255.0, 80.0 / 255.0, 1.0],
             );
         }
+    }
+}
+
+/// Draws the stonecutter's up-to-twelve visible recipe-button icons from
+/// `frame.stonecutter_matches` — the server's own authoritative result list
+/// (`super::stonecutter::server_matches`), not a locally re-derived guess. A
+/// no-op for every other screen (`menu.special_layout()` is not
+/// `Stonecutter`) and for an empty list (no input item held, or
+/// `update_recipes` has not arrived yet), which is what keeps every existing
+/// caller — the headless builds, the pixel gates, `tests/container_screen.rs`
+/// — unchanged.
+///
+/// `start_index` is pinned at `0`: the persisted scroll offset lives on
+/// `WindowApp` (`app/container_input.rs`), outside this crate, and is not
+/// threaded into `ContainerFrame` yet. Every one of the up-to-twelve visible
+/// cells still draws correctly at that offset; only scrolling past the first
+/// page is not yet reflected here — the same disclosed cut the wheel-scroll
+/// half of this screen already had before it was wired.
+fn draw_stonecutter_grid(
+    b: &mut Builder<'_>,
+    menu: &Menu,
+    frame: &ContainerFrame<'_>,
+    assets: &IconAssets<'_>,
+    x: f32,
+    y: f32,
+) {
+    if menu.special_layout() != Some(SpecialLayout::Stonecutter) {
+        return;
+    }
+    const START_INDEX: i32 = 0;
+    for (i, stack) in frame.stonecutter_matches.iter().enumerate() {
+        let Ok(index) = i32::try_from(i) else { break };
+        let Some(rect) = super::stonecutter::grid_rect(index, START_INDEX) else {
+            break;
+        };
+        b.draw_stack(assets, stack, x + rect.x, y + rect.y);
     }
 }
 

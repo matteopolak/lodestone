@@ -92,6 +92,41 @@ pub fn matches(book: &RecipeBook, input: &Identifier) -> Vec<ItemStack> {
     entries.into_iter().map(|(_, result)| result.clone()).collect()
 }
 
+/// Resolves one server-sent stonecutter recipe's raw result-item candidates
+/// (one entry of
+/// [`lodestone_game::recipe_sync::RecipeBookSync::stonecutter_results_for`]'s
+/// output) to a single drawable stack — the first id this build's item table
+/// can name, the same "pick one, do not guess a name" contract
+/// [`super::merchant::cost_item_stack`] and `app/recipe_panel.rs`'s
+/// `ghost_result_stack` both already keep. `None` when no candidate resolves,
+/// which draws nothing rather than a guessed icon.
+#[must_use]
+pub fn server_result_stack(result_items: &[i32]) -> Option<ItemStack> {
+    result_items.iter().find_map(|&id| {
+        let name = lodestone_data::items::item_name(id)?;
+        let identifier: Identifier = name.parse().ok()?;
+        Some(ItemStack::new(identifier, 1))
+    })
+}
+
+/// The server's own authoritative stonecutter result list for whatever the
+/// input slot currently holds, resolved to drawable stacks in the order the
+/// server sent them.
+///
+/// This is what [`super::geometry`]'s stonecutter grid draws, in place of
+/// [`matches`]'s local recipe-book re-derivation: the two agree whenever the
+/// world is running this build's own bundled recipe corpus, but only this
+/// one is correct against a server running a different datapack — the whole
+/// reason [`lodestone_game::recipe_sync::RecipeBookSync`] carries the wire
+/// data at all rather than leaving screens to guess from their own copy.
+/// Pass [`lodestone_game::recipe_sync::RecipeBookSync::stonecutter_results_for`]'s
+/// output straight through; a recipe whose every candidate id is unresolvable
+/// is dropped rather than drawn as a placeholder.
+#[must_use]
+pub fn server_matches<'a>(results_for_input: impl Iterator<Item = &'a [i32]>) -> Vec<ItemStack> {
+    results_for_input.filter_map(server_result_stack).collect()
+}
+
 /// One recipe button's local-widget-pixel rect, `index`-relative to
 /// `start_index` — `StonecutterScreen.extractButtons`'s `posX`/`posY`
 /// (`x + posIndex % 4 * 16`, `y + row * 18 + 2`).
@@ -241,6 +276,94 @@ mod tests {
         // "slab" < "stairs" lexicographically, so id order puts slab first.
         assert_eq!(results[0].item().path(), "stone_slab");
         assert_eq!(results[1].item().path(), "stone_stairs");
+    }
+
+    /// A resolvable id must produce a real stack — the positive half, so the
+    /// negative control below is not vacuously true of a function that
+    /// always returns `None`.
+    #[test]
+    fn server_result_stack_resolves_the_first_nameable_candidate() {
+        let stone_slab = lodestone_data::items::item_id("minecraft:stone_slab")
+            .expect("the generated table must know minecraft:stone_slab");
+        let stack =
+            server_result_stack(&[stone_slab]).expect("a real id must resolve");
+        assert_eq!(stack.item().to_string(), "minecraft:stone_slab");
+        assert_eq!(stack.count(), 1);
+    }
+
+    /// The executed negative control: an id outside the generated table
+    /// (i.e. no real item registered at it) resolves to nothing rather than
+    /// a guessed icon.
+    #[test]
+    fn server_result_stack_is_none_for_an_id_outside_the_table() {
+        assert!(server_result_stack(&[i32::MAX]).is_none());
+    }
+
+    /// A tag-shaped display can offer several candidate ids for the same
+    /// recipe; the first nameable one wins, matching
+    /// `app/recipe_panel.rs`'s `ghost_result_stack`.
+    #[test]
+    fn server_result_stack_skips_an_unresolvable_leading_candidate() {
+        let stone_slab = lodestone_data::items::item_id("minecraft:stone_slab")
+            .expect("the generated table must know minecraft:stone_slab");
+        let stack = server_result_stack(&[i32::MAX, stone_slab]).expect("the second id must resolve");
+        assert_eq!(stack.item().to_string(), "minecraft:stone_slab");
+    }
+
+    /// `server_matches` resolves one stack per matching entry, in order, and
+    /// drops an entry whose every candidate is unresolvable rather than
+    /// drawing a placeholder for it.
+    #[test]
+    fn server_matches_resolves_in_order_and_drops_unresolvable_entries() {
+        let stone_slab = lodestone_data::items::item_id("minecraft:stone_slab")
+            .expect("the generated table must know minecraft:stone_slab");
+        let stone_stairs = lodestone_data::items::item_id("minecraft:stone_stairs")
+            .expect("the generated table must know minecraft:stone_stairs");
+        let entries: Vec<Vec<i32>> = vec![vec![stone_slab], vec![i32::MAX], vec![stone_stairs]];
+        let results = server_matches(entries.iter().map(Vec::as_slice));
+        assert_eq!(results.len(), 2, "the unresolvable middle entry must be dropped, not placeholder-drawn");
+        assert_eq!(results[0].item().to_string(), "minecraft:stone_slab");
+        assert_eq!(results[1].item().to_string(), "minecraft:stone_stairs");
+    }
+
+    /// Ties `server_matches` to the real store, not just a hand-built slice —
+    /// `RecipeBookSync::stonecutter_results_for` is the actual production
+    /// input, and this is the seam most likely to disagree silently if the
+    /// two ever drift (e.g. one filters by input item and the other does not).
+    #[test]
+    fn server_matches_over_stonecutter_results_for_reads_only_the_matching_input() {
+        use lodestone_game::recipe_sync::RecipeBookSync;
+        use lodestone_model::event::ClientEvent;
+
+        let stone_slab = lodestone_data::items::item_id("minecraft:stone_slab")
+            .expect("the generated table must know minecraft:stone_slab");
+        let stone_stairs = lodestone_data::items::item_id("minecraft:stone_stairs")
+            .expect("the generated table must know minecraft:stone_stairs");
+        let stone = lodestone_data::items::item_id("minecraft:stone")
+            .expect("the generated table must know minecraft:stone");
+        let andesite = lodestone_data::items::item_id("minecraft:andesite")
+            .expect("the generated table must know minecraft:andesite");
+
+        let mut sync = RecipeBookSync::new();
+        sync.apply(&ClientEvent::RecipePropertySetsUpdated {
+            item_sets: Vec::new(),
+            stonecutter_results: vec![
+                (vec![stone], vec![stone_slab]),
+                (vec![stone], vec![stone_stairs]),
+                (vec![andesite], vec![stone_stairs]),
+            ],
+        });
+
+        let results = server_matches(sync.stonecutter_results_for(stone));
+        assert_eq!(results.len(), 2, "andesite's entry must not appear for a stone input");
+        assert_eq!(results[0].item().to_string(), "minecraft:stone_slab");
+        assert_eq!(results[1].item().to_string(), "minecraft:stone_stairs");
+
+        // Executed negative control: an input id that matches nothing must
+        // draw nothing, not fall back to every recipe.
+        let dirt = lodestone_data::items::item_id("minecraft:dirt")
+            .expect("the generated table must know minecraft:dirt");
+        assert!(server_matches(sync.stonecutter_results_for(dirt)).is_empty());
     }
 
     #[test]
