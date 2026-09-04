@@ -203,6 +203,19 @@ underneath this screen is that the client now uses a manual respawn policy inste
 this, a death packet triggered an unconditional respawn request with no screen and no player choice in
 between; now nothing sends a respawn until the Respawn button is pressed.
 
+The death message carries the server's component through unresolved as far as the point where the
+session applies the update (`NetUpdate::Death::message` is a `Text`, not a pre-flattened string), which
+is the first point downstream holding a language table; from there it is carried as styled, interactive
+runs, so a translation key, a click event and a hover payload all survive to pixels rather than
+flattening to plain text. The screen renders each run at its own colour rather than one flat line.
+Hover shows a `show_text` tooltip, resolved against the live language table at draw time — there is no
+per-frame cursor tracker to maintain, because the pointer position this screen needs is already recorded
+on every mouse-move regardless of which screen is open. Click is not yet wired to input: the run under
+the pointer and its `open_url`-restricted click action (vanilla's own restriction — `run_command`/
+`suggest_command`/`copy_to_clipboard` are inert on this screen in vanilla too, not merely unwired) are
+both available, but nothing yet calls them from a mouse-button handler.
+regardless of which screen is open.
+
 ### Loading
 
 Two different mechanisms depending on when it applies, not one screen. Before login, `Screen::Connecting`

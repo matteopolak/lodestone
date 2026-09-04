@@ -363,7 +363,7 @@ impl WindowApp {
                 // server's confirmation and `is_dead` is false.
                 self.sim.respawn();
             } else if !self.ui.is_death() {
-                self.ui.die(self.sim.death_message().map(str::to_string));
+                self.ui.die(self.sim.death_message().map(<[_]>::to_vec));
             }
         } else if self.ui.is_death() {
             self.ui.respawn_confirmed();

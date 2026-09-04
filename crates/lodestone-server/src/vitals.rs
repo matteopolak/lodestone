@@ -173,10 +173,10 @@ impl DeathCause {
     /// `translatable("death.attack.<id>", victimName)`.
     ///
     /// A **translatable** component, not a pre-rendered string, because that is
-    /// what vanilla puts on the wire and the client owns the language. Note the
-    /// client currently renders it with `to_plain_string()` and so shows the raw
-    /// key — a client-side gap tracked in `docs/death-screen.md`, and not a
-    /// reason to send the wrong thing from here.
+    /// what vanilla puts on the wire and the client owns the language. The
+    /// death screen resolves it against its own language table before it
+    /// reaches pixels, so a translation key sent here is not a reason to send
+    /// the wrong thing.
     #[must_use]
     pub fn death_message(self, victim: &str) -> lodestone_model::Text {
         use lodestone_model::Text;

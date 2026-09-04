@@ -6,8 +6,9 @@
 //! The client's death screen was complete and reached **zero pixels**.
 //! `Screen::Death`, `death_frame`, the Respawn button, the `Dead` marker
 //! component and the `client_command(perform_respawn)` encoder all existed and
-//! were all unit-tested; `docs/death-screen.md` describes the whole thing. What
-//! did not exist was any server that sent the packet that raises it. Our server
+//! were all unit-tested; `docs/menu-screens.md`'s "Death" section describes
+//! the whole thing. What did not exist was any server that sent the packet
+//! that raises it. Our server
 //! sent `set_health(0.0)` and stopped there, and **`set_health` does not open the
 //! death screen** — not here, and not in vanilla, whose own client-side
 //! set-health handler (confirmed against the decompiled 26.2 client source)

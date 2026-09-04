@@ -108,9 +108,15 @@ const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 /// exactly like [`pause_frame`] does for [`super::nav::MenuNav::pause_index`].
 ///
 /// `message` is the server's own death message
-/// (`net::NetUpdate::Death`/`Sim::death_message`, already flattened to plain
-/// text) — `None` draws no message line, matching vanilla's own `if
-/// (this.causeOfDeath != null)` guard.
+/// (`net::NetUpdate::Death`/`Sim::death_message`, resolved and flattened to
+/// interactive runs) — `None`, or a message whose every run is empty text,
+/// draws no message line, matching vanilla's own `if (this.causeOfDeath !=
+/// null)` guard. Each run becomes its own [`MenuLabel`], laid out by
+/// [`death_message_runs`] and coloured from the run's own style — the same
+/// per-run-`MenuLabel` shape [`book_view_frame`] already uses for a page's
+/// authored runs. `click`/`hover` are not drawn here: see
+/// [`death_message_runs`]'s own doc for where the interaction half of this
+/// line lives.
 ///
 /// Two simplifications named rather than silently taken:
 /// - **No hardcore variant.** This client has no hardcore mode (nothing
@@ -137,7 +143,10 @@ const DEATH_SCORE_UNTRACKED: &str = "Score: 0";
 /// [`super::DEATH_GRADIENT_BOTTOM`] for the decoded constants and
 /// [`Quads::rect_vgradient`] for the per-vertex quad that draws them.
 #[must_use]
-pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFrame<'static> {
+pub fn death_frame(
+    nav: &super::nav::MenuNav,
+    message: Option<&[lodestone_model::text::InteractiveTextSpan]>,
+) -> MenuFrame<'static> {
     use super::nav::DEATH_BUTTONS;
 
     let mut labels = vec![
@@ -155,21 +164,32 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
             scale: 2.0,
         },
     ];
-    if let Some(text) = message
-        && !text.is_empty()
-    {
-        // `output.accept(CENTER, middleLine, 85, this.causeOfDeath)`
-        // — `middleLine == width / 2`, i.e.
-        // `Origin::ScreenTop`, at normal (1.0) scale.
-        labels.push(MenuLabel {
-            text: text.to_string(),
-            origin: Origin::ScreenTop,
-            dx: 0.0,
-            dy: 85.0,
-            align: Align::Centre,
-            colour: LABEL,
-            scale: 1.0,
-        });
+    // `output.accept(CENTER, middleLine, 85, this.causeOfDeath)` —
+    // `middleLine == width / 2`, i.e. `Origin::ScreenTop`, at normal (1.0)
+    // scale. One `MenuLabel` per run rather than one for the whole line: a
+    // run's own colour must survive to the row exactly as
+    // `book_view_frame`'s page runs already do, and [`death_message_runs`]
+    // is what centres the group of them as one line rather than each run
+    // independently.
+    if message.is_some_and(|m| m.iter().any(|s| !s.text.is_empty())) {
+        for run in death_message_runs(message.expect("checked by is_some_and above")) {
+            if run.span.text.is_empty() {
+                continue;
+            }
+            labels.push(MenuLabel {
+                text: run.span.text,
+                origin: run.slot.origin,
+                dx: run.slot.dx,
+                dy: run.slot.dy,
+                align: Align::Left,
+                colour: run
+                    .span
+                    .style
+                    .color
+                    .map_or(LABEL, |colour| rgb_text_colour(colour.rgb())),
+                scale: 1.0,
+            });
+        }
     }
     // `output.accept(CENTER, middleLine, 100, this.deathScore)`
     // — always drawn, message or not.
@@ -203,6 +223,102 @@ pub fn death_frame(nav: &super::nav::MenuNav, message: Option<&str>) -> MenuFram
         labels,
         ..Default::default()
     }
+}
+
+/// Per-glyph horizontal advance for the death message — the same fixed
+/// approximation [`super::book_view::PAGE_GLYPH_W`] uses, and for the same
+/// reason: at the point this line is laid out there is no real font metric to
+/// measure against, only the menu overlay's own draw, and book pages already
+/// established that a fixed advance matches it closely enough to hit-test
+/// against. Not literally the same constant (the two lines belong to
+/// different screens and have no reason to be pinned together if one ever
+/// needs to change), but the same value today.
+const DEATH_GLYPH_W: f32 = 6.0;
+
+/// One authored run of the death message, with the rect it draws at — the
+/// death screen's own sibling of [`super::book_view::PageRun`], centred as a
+/// **group** rather than left-aligned: vanilla draws the whole cause-of-death
+/// line with `TextAlignment.CENTER`, on the one line `DeathScreen.visitText`
+/// gives it (no wrap), so centring each run independently would pull a
+/// multi-run message apart around the screen's centre instead of centring the
+/// line as a whole.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeathMessageRun {
+    /// This run's text, style, and whichever `click`/`hover` the server's
+    /// component tree put on it.
+    pub span: lodestone_model::text::InteractiveTextSpan,
+    /// Where it draws, resolvable against any canvas through [`Slot::resolve`].
+    pub slot: Slot,
+}
+
+/// Lays out the death message's runs on `DeathScreen.visitText`'s one line
+/// (`output.accept(CENTER, middleLine, 85, this.causeOfDeath)`), each run
+/// positioned left-to-right from a left edge computed so the **group**
+/// centres on [`Origin::ScreenTop`] — the same anchor the message line has
+/// always drawn at.
+///
+/// The one function [`death_frame`] (for its labels) and a click/hover
+/// hit-test both read, so a click cannot land somewhere the draw does not
+/// agree it drew — the same discipline
+/// [`super::book_view::BookViewState::page_runs`] documents for a book page.
+/// Not every death message is interactive (most carry no `click`/`hover` at
+/// all — only a killer's own decorated name can), but the geometry is the
+/// same either way, so there is exactly one definition of it regardless.
+#[must_use]
+pub fn death_message_runs(
+    message: &[lodestone_model::text::InteractiveTextSpan],
+) -> Vec<DeathMessageRun> {
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "a death message is far short of 2^24 characters, exactly representable"
+    )]
+    fn width(text: &str) -> f32 {
+        text.chars().count() as f32 * DEATH_GLYPH_W
+    }
+
+    let total_w: f32 = message.iter().map(|s| width(&s.text)).sum();
+    let mut dx = -total_w / 2.0;
+    let mut runs = Vec::with_capacity(message.len());
+    for span in message {
+        let w = width(&span.text);
+        runs.push(DeathMessageRun {
+            span: span.clone(),
+            slot: Slot {
+                origin: Origin::ScreenTop,
+                dx,
+                dy: 85.0,
+                w,
+                h: 9.0,
+            },
+        });
+        dx += w;
+    }
+    runs
+}
+
+/// The death-message run at logical canvas position `(x, y)`, or `None` when
+/// nothing sits there — [`death_message_runs`]'s own hit-test, read by both
+/// the hover-tooltip lookup ([`crate::app`]'s per-frame draw) and the click
+/// dispatch (`WindowApp::dispatch_death_click_under_cursor`), so neither can
+/// disagree with the other — or with [`death_frame`] — about where a run is.
+///
+/// A zero-area canvas is refused rather than divided by, matching
+/// [`super::book_view::BookViewState::run_under_cursor`]'s own guard.
+#[must_use]
+pub fn death_run_at(
+    message: &[lodestone_model::text::InteractiveTextSpan],
+    x: f32,
+    y: f32,
+    canvas_w: f32,
+    canvas_h: f32,
+) -> Option<DeathMessageRun> {
+    if canvas_w <= 0.0 || canvas_h <= 0.0 {
+        return None;
+    }
+    death_message_runs(message).into_iter().find(|run| {
+        let (rx, ry, rw, rh) = run.slot.resolve(canvas_w, canvas_h);
+        x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+    })
 }
 
 /// Builds the command block edit screen's overlay frame: vanilla's
@@ -1404,5 +1520,60 @@ pub(super) fn credits_frame() -> MenuFrame<'static> {
             colour: LABEL,
         }),
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod death_message_run_tests {
+    use lodestone_model::text::{ClickAction, ClickEvent, InteractiveTextSpan};
+
+    use super::{death_message_runs, death_run_at};
+
+    fn span(text: &str, click: Option<ClickEvent>) -> InteractiveTextSpan {
+        InteractiveTextSpan {
+            text: text.to_string(),
+            style: lodestone_model::TextStyle::default(),
+            click,
+            hover: None,
+            insertion: None,
+        }
+    }
+
+    #[test]
+    fn runs_lay_out_left_to_right_and_the_group_centres_on_screen_top() {
+        let message = [span("ab", None), span("cd", None)];
+        let runs = death_message_runs(&message);
+        assert_eq!(runs.len(), 2);
+        // Each run is 2 chars * DEATH_GLYPH_W (6.0) = 12.0 wide, so the pair
+        // is 24.0 wide and centres on `dx == -12.0..12.0`.
+        assert_eq!(runs[0].slot.dx, -12.0);
+        assert_eq!(runs[0].slot.w, 12.0);
+        assert_eq!(runs[1].slot.dx, 0.0);
+        assert_eq!(runs[1].slot.w, 12.0);
+        // Both runs share the message's one vertical position.
+        assert_eq!(runs[0].slot.dy, runs[1].slot.dy);
+    }
+
+    #[test]
+    fn a_zero_area_canvas_hits_nothing_rather_than_dividing_by_it() {
+        let message = [span("hi", None)];
+        assert_eq!(death_run_at(&message, 0.0, 0.0, 0.0, 0.0), None);
+    }
+
+    #[test]
+    fn the_run_under_the_point_is_the_one_returned_and_no_other() {
+        let click = ClickEvent {
+            action: ClickAction::OpenUrl,
+            value: "https://example.invalid".to_string(),
+        };
+        let message = [span("ab", None), span("cd", Some(click.clone()))];
+        let canvas_w = 200.0;
+        let canvas_h = 150.0;
+        let runs = death_message_runs(&message);
+        let (rx, ry, rw, rh) = runs[1].slot.resolve(canvas_w, canvas_h);
+        let hit = death_run_at(&message, rx + rw / 2.0, ry + rh / 2.0, canvas_w, canvas_h)
+            .expect("the second run's own centre point hits the second run");
+        assert_eq!(hit.span.text, "cd");
+        assert_eq!(hit.span.click, Some(click));
     }
 }
