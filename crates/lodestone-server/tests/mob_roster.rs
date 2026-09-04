@@ -1,14 +1,13 @@
 //! Does the per-species goal roster actually reach a mob in the running game?
 //!
-//! # What these gates are for
+//! # What these gates cover
 //!
 //! `lodestone_entity::ai::roster` is a pure lookup, so it is trivially easy to
 //! test in a way that proves nothing. `goals_for("cow", …)` returning the right
 //! priorities is a **closed loop**: it says the table is well-formed, not that any
-//! cow in the game ever consults it. That distinction is the whole subject of
-//! issue #441, where eight goals had green unit tests against a `ScriptMob` test
-//! fake that overrides every perception method, while their `can_use` was a
-//! compile-time constant `false` in production.
+//! cow in the game ever consults it. A test fake can also override every
+//! perception method while the production controller leaves the corresponding
+//! goals inactive.
 //!
 //! So every gate here goes through **`MobSim::spawn_species`** — the real spawn
 //! path, with a real `NavigatingMob` over a real `ChunkWorld` — never through
@@ -20,15 +19,12 @@
 //! roster wired to the wrong species, and would pass for goals that are installed
 //! but never scheduled.
 //!
-//! # What was actually broken
+//! # Production roster coverage
 //!
-//! Before the roster, `spawn_species` installed `RandomStrollGoal`,
-//! `RandomLookAroundGoal`, and — for a hostile species — `MeleeAttackGoal`.
-//! `FloatGoal`, `PanicGoal`, `BreedGoal`, `TemptGoal` and `FollowParentGoal` had
-//! **zero production call sites**: fully implemented, fully unit-tested, fed real
-//! perception by `MobSim::tick` since #441, and installed by nothing but tests.
-//! `a_cow_follows_food_because_the_roster_installed_temptgoal` is the gate that
-//! says that stopped being true.
+//! `spawn_species` installs the common movement and look goals, the hostile
+//! attack goal, and the species-specific goals exercised below. Those goals also
+//! receive perception through `MobSim::tick`; the tests verify that the complete
+//! path reaches a spawned mob rather than only a lookup table or test controller.
 
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{ChunkWorld, MobSim, PlayerPerception};
@@ -82,16 +78,14 @@ const TICKS: usize = 120;
 ///
 /// The margin form these used — "an untempted mob must not close by 3 blocks in
 /// 120 ticks" — is a *premise* about an unconstrained random walk, and it was true
-/// only by accident of the RNG seed. Issue #463 (`3b65cbf`) replaced
-/// `NavigatingMob`'s shared `SplitMix64(0x1234_5678_9ABC_DEF0)` with a per-mob seed
-/// of `id as u64`; for id 1 the first successful 1/120 stroll draw is draw **9**
-/// instead of draw 130, so a `RandomStrollGoal` now fires well inside the window
-/// and a ±10-block stroll can carry a mob 3+ blocks toward a player it has no
-/// interest in. Both negative controls failed, and neither was measuring anything
-/// about the roster: they were measuring a coin flip.
+/// only by accident of the RNG seed. Each mob now has its own stream seeded from
+/// its id; for id 1 the first successful 1/120 stroll draw is draw **9**, so a
+/// `RandomStrollGoal` can fire well inside the window and a ±10-block stroll can
+/// carry a mob 3+ blocks toward a player it has no interest in. A distance margin
+/// would therefore measure a random walk rather than the roster.
 ///
-/// The property actually under test is not "stayed far away" — vanilla mobs wander
-/// — it is **"its movement does not depend on what the player is holding."** So each
+/// The property actually under test is not "stayed far away" — mobs wander — it
+/// is **"its movement does not depend on what the player is holding."** So each
 /// negative arm runs the same species twice from a fresh sim, identical in every
 /// way except the held item, and requires the trajectories to be *bit-identical*.
 /// A mob with no `TemptGoal` never reads `held_item`, and `TemptGoal::can_use`
@@ -139,14 +133,10 @@ fn a_cow_follows_food_because_the_roster_installed_temptgoal() {
     // *precondition* on the measurement, not decoration — without it, "the cow
     // ended up closer" is satisfied by an unlucky random stroll.
     //
-    // Note the shape. The control used to assert its own `> before - 3.0` margin,
-    // and that margin held only by accident of the pre-#463 shared RNG seed (see
-    // `run_species`'s doc comment) — it is exactly the assertion that failed in the
-    // two negative arms below. It is **removed rather than loosened**: an untempted
-    // cow strolling 3 blocks toward the player is legitimate vanilla behaviour, so
-    // there was never a correct threshold. What replaces it is a *relative*
-    // comparison against the subject arm, whose only differing input is the held
-    // item — see the two assertions after the subject.
+    // The control establishes the no-food trajectory before the subject arm.
+    // An untempted cow may wander toward the player, so a fixed distance margin
+    // would not isolate the roster. The relative comparison below keeps the two
+    // simulations identical except for the held item.
     let mut control = MobSim::new(&world);
     let cid = control
         .spawn_species(rk("minecraft:cow"), Vec3::new(0.0, 0.0, 0.0))
@@ -200,7 +190,7 @@ fn a_cow_follows_food_because_the_roster_installed_temptgoal() {
 /// conditions.
 ///
 /// This is the "empty the roster entry" control, expressed without editing the
-/// roster: a llama is a real 26.2 species that no family claims, so it takes the
+/// roster: a llama is a supported species with no explicit entry, so it takes the
 /// fallback path by construction, and `llama_food` exists in the jar so the
 /// choice of item is not what makes it fail.
 ///
@@ -298,22 +288,19 @@ fn one_item_tempts_a_pig_and_not_a_cow_through_the_same_spawn_path() {
 /// the creeper gets `SwellGoal`, so only the creeper detonates when a target is
 /// inside its swell range.
 ///
-/// This is the one behaviour in the roster whose end-to-end path was already
-/// proven to reach a real client before the roster existed
-/// (`crates/protocol/v770/tests/server_creeper_metadata_and_explode.rs`), which
-/// is why it is the right second species to gate: a regression here is visible to
-/// a player, not only to a test.
+/// This behavior is observable through the complete server path: a player can
+/// see the creeper begin swelling while the cow remains unaffected. That makes
+/// it a useful second species gate in addition to the item-driven movement
+/// checks above.
 ///
-/// It also gates the priority *renumbering*. The baseline this replaced put
-/// `SwellGoal` at a private `-1` to outrank a `MeleeAttackGoal` at `2`; the
-/// roster uses vanilla's own `2` and `4` (its own creeper goal registration). If
-/// the two numbers were transcribed in the wrong order, melee would hold MOVE and
-/// the creeper would never swell.
+/// It also gates the priority ordering. `SwellGoal` must run before
+/// `MeleeAttackGoal` can hold MOVE; if the two priority numbers are transcribed
+/// in the wrong order, the creeper never swells.
 #[test]
 fn only_a_creeper_swells_and_vanillas_priority_order_is_preserved() {
     let world = pen();
     let mut sim = MobSim::new(&world);
-    // Within `SwellGoal`'s 9.0 squared proximity (vanilla's own `SwellGoal`).
+    // Within `SwellGoal`'s 9.0 squared proximity.
     let target = Vec3::new(2.0, 0.0, 0.0);
     let creeper = sim
         .spawn_species(rk("minecraft:creeper"), Vec3::new(0.0, 0.0, 0.0))

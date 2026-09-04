@@ -1,23 +1,18 @@
-//! Acceptance gate for the `no_action_time` idle throttle — the reason demo
-//! mobs reached a connected client and then never moved again
-//! (`crates/protocol/v770/tests/live_mob_sim.rs`).
+//! Acceptance coverage for the `no_action_time` idle throttle and the movement
+//! that remains possible while a player is near a mob.
 //!
-//! # What was broken
+//! # Idle counter semantics
 //!
-//! [`MobSim::tick`] increments every mob's `no_action_time` each tick, mirroring
-//! vanilla `Mob.serverAiStep`'s `noActionTime++`. Nothing in
-//! production ever *reset* it: the reset lived only in
-//! [`MobSim::despawn_pass`], which has zero production callers
-//! (`crate::tick::run_tick_loop` is handed no player position). So the counter
-//! was monotonic for a world's whole life and crossed `RandomStrollGoal`'s idle
-//! throttle of 100 (vanilla's own `RandomStrollGoal`) after five seconds,
-//! after which no mob could stroll again — ever.
+//! [`MobSim::tick`] computes each mob's nearest-player distance from the values
+//! supplied by [`MobSim::set_players`], resets `no_action_time` when that player
+//! is within the category's immune radius, and then increments the counter for
+//! the current tick. With no nearby player, no reset occurs: the counter is
+//! monotonic for a world's whole life and crosses `RandomStrollGoal`'s idle
+//! throttle of 100 after five seconds, after which no mob can stroll again.
 //!
-//! Vanilla clears it every tick from `Mob.checkDespawn`, which `ServerLevel`
-//! calls immediately before the entity's own tick
-//! (vanilla's own `ServerLevel`), for a persistent mob
-//! unconditionally and for any other mob within its category's immune radius of
-//! a player (vanilla's own `Mob`).
+//! A nearby player clears the counter immediately before the mob's own tick.
+//! Persistent status does not by itself clear the counter; proximity is the
+//! relevant input for the simulation's throttle.
 //!
 //! # Why the throttle was fatal rather than merely slow
 //!
@@ -28,34 +23,26 @@
 //! than a rare unlucky roll, which is what makes [`no_player_is_the_control`]
 //! able to assert a hard `None`.
 //!
-//! # CHANGED by issue #463: the seed is now the mob id, not a shared literal
+//! # RNG stream selection
 //!
-//! This file used to open with: *"every `NavigatingMob` shares one hardcoded seed
-//! (`SplitMix64(0x1234_5678_9ABC_DEF0)`; `with_seed` has no caller outside a
-//! test). For that one stream the first draw where `next_u64() % 120 == 0` is
-//! draw **130** — past the wall at 100."* True and evidenced when written.
-//! `3b65cbf` replaced it with a per-mob seed of `id as u64`
-//! (`MobSim::spawn_with_type`), and every mob in a fresh [`MobSim`] is id `1`, for
-//! which the first hit is draw **9** — *inside* the throttle. So all three gates
-//! here failed, and the control was not merely wrong but **structurally void**:
-//! with the stroll firing before tick 100, no outcome of the control can
-//! distinguish a working throttle from a missing one.
+//! Each mob's RNG stream is seeded from its id. A fresh simulation normally
+//! starts at id `1`, whose first draw satisfying `next_u64() % 120 == 0` is
+//! draw **9**, inside the throttle. A control using that subject is therefore
+//! **structurally void**: the stroll fires before tick 100, so its outcome
+//! cannot distinguish a working throttle from a missing one.
 //!
-//! The seed change is correct — the lockstep it removed is the "separate defect in
-//! a crate this module does not own" this file's own doc used to name. What the
-//! gates needed was a subject whose first hit is still past the throttle, so
-//! [`STROLL_MOB_ID`] picks one, and a compile-time assert now makes a void control
-//! a build failure instead of a silent pass.
+//! [`STROLL_MOB_ID`] selects a stream whose first successful draw is still past
+//! the throttle, and a compile-time assertion makes a void control a build
+//! failure instead of a silent pass.
 //!
 //! Every draw index below is computed **outside the code under test**, by a
 //! standalone program over the documented SplitMix64 recurrence
-//! (`navigating_mob.rs:116-123`). That program reproduces the pre-#463 shared
-//! seed's 130 exactly, which is what validates it as an oracle rather than a
-//! restatement of our own producer:
+//! (`navigating_mob.rs:116-123`). The calculation is independent of the
+//! producer and provides the expected first-hit positions below:
 //!
 //! | seed | first draw with `% 120 == 0` |
 //! |---|---|
-//! | `0x1234_5678_9ABC_DEF0` (pre-#463, shared) | 130 |
+//! | `0x1234_5678_9ABC_DEF0` (reference stream) | 130 |
 //! | `1` (the default first mob id) | **9** |
 //! | `2` | 48 |
 //! | `3` | **147** |
@@ -84,19 +71,18 @@ const STROLL_MOB_ID: i32 = 3;
 /// stroll, so the draw index *is* the tick number.
 const EXPECTED_FIRST_STROLL_TICK: usize = 147;
 
-/// `RandomStrollGoal`'s idle throttle: `goals.rs`'s `no_action_time() >= 100`
-/// early return, itself vanilla's own `RandomStrollGoal`. Restated
-/// here because it is the number the control's whole premise rests on.
+/// `RandomStrollGoal`'s idle throttle: `goals.rs` returns early when
+/// `no_action_time() >= 100`. Restated here because it is the number the
+/// control's whole premise rests on.
 const IDLE_THROTTLE_TICKS: usize = 100;
 
 /// **The control's premise, enforced at compile time.**
 ///
 /// A subject whose stroll fires *before* the throttle closes makes
-/// [`no_player_is_the_control`] vacuous while it still reads as rigorous — the
-/// exact failure that landed here when #463 moved the seed. A build failure is the
-/// only version of this check that cannot be skipped: whoever changes the seed
-/// scheme must pick a new [`STROLL_MOB_ID`] rather than transcribe whatever tick
-/// the run reports.
+/// [`no_player_is_the_control`] vacuous while it still reads as rigorous. A
+/// build failure is the only version of this check that cannot be skipped:
+/// whoever changes the seed scheme must pick a new [`STROLL_MOB_ID`] rather than
+/// transcribe whatever tick a run reports.
 const _: () = assert!(EXPECTED_FIRST_STROLL_TICK > IDLE_THROTTLE_TICKS);
 
 /// Long enough to pass `EXPECTED_FIRST_STROLL_TICK` with room to spare, and to
@@ -143,9 +129,9 @@ fn observe(persistent: bool, players: Vec<PlayerPerception>) -> Observed {
     assert!(!world.is_solid(8, 0, 8), "expected air at the y=0 surface");
 
     let mut sim = MobSim::new(&world);
-    // Issue #463: the mob's RNG seed *is* its id, so this call is what selects the
-    // stroll stream — see `STROLL_MOB_ID`. Not decoration: the default id `1`
-    // strolls at tick 9, inside the throttle, which voids the control.
+    // The mob's RNG seed is its id, so this call selects the stroll stream — see
+    // `STROLL_MOB_ID`. The default id `1` strolls at tick 9, inside the
+    // throttle, which would void the control.
     sim.set_next_id(STROLL_MOB_ID);
     let id = {
         let m = sim.spawn(Vec3::new(8.5, 0.0, 8.5), MobShape::land(0.6, 1.95), 0.23, 560);
@@ -188,12 +174,10 @@ fn player_at(pos: Vec3) -> Vec<PlayerPerception> {
 /// The headline gate: a mob standing next to a player strolls, and its idle
 /// counter never climbs past `1`.
 ///
-/// `1`, not `0`, is the exact vanilla reading and the whole point of the
-/// ordering: `ServerLevel` resets via `checkDespawn` and *then* ticks the
-/// entity, whose `serverAiStep` increments before the goals run. A gate
-/// asserting `0` would be asserting our own bug in the other direction, and one
-/// asserting merely `< 100` would pass with the reset firing once every 99
-/// ticks.
+/// `1`, not `0`, is the expected value for the ordering: the nearby-player reset
+/// runs and *then* the mob tick increments the counter before goals run. A gate
+/// asserting `0` would encode the opposite ordering, and one asserting merely
+/// `< 100` would pass with the reset firing once every 99 ticks.
 #[test]
 fn a_player_nearby_clears_the_idle_throttle_every_tick_and_the_mob_strolls() {
     let near = observe(false, player_at(Vec3::new(10.5, 0.0, 8.5)));
@@ -225,13 +209,12 @@ fn a_player_nearby_clears_the_idle_throttle_every_tick_and_the_mob_strolls() {
 }
 
 /// The control, and it must fail the arm above's assertions: with **no** player
-/// anywhere, vanilla's `checkDespawn` resets nothing (`getNearestPlayer`
-/// returns null and the whole block is skipped), so the counter climbs, the
+/// anywhere, the nearby-player pass resets nothing, so the counter climbs, the
 /// throttle closes at 100, and the mob never strolls.
 ///
-/// This is the pre-fix behaviour of *every* arm — which is what makes it a real
-/// control rather than a restatement: the fix had to change the first arm
-/// without changing this one, because this one is vanilla-correct.
+/// This is the no-player control: the counter remains monotonic and movement is
+/// suppressed after the threshold, while the nearby-player arm above exercises
+/// the reset path.
 #[test]
 fn no_player_is_the_control() {
     let alone = observe(false, Vec::new());
@@ -256,18 +239,13 @@ fn no_player_is_the_control() {
     );
 }
 
-/// **The `persistent` flag must not open the throttle**, even though vanilla's
-/// `checkDespawn` has a persistence branch that would
-/// (vanilla's own `checkDespawn`'s `else`, keyed on `isPersistenceRequired`).
+/// **The `persistent` flag must not open the throttle.** The nearby-player
+/// reset is independent of persistence in this simulation.
 ///
-/// This gate exists because the fix's first draft *did* include that branch, and
-/// it is a trap rather than an obvious error: the port looks faithful line for
-/// line. `SimMob::persistent` is simply a wider flag than vanilla's —
-/// `MobSim::spawn_species` sets it from `!hostile`, so every passive animal
-/// carries it, whereas a vanilla animal is despawn-exempt through
-/// `Animal.removeWhenFarAway() == false` (vanilla's own `Animal`) and is *not*
-/// `isPersistenceRequired`. Honouring the branch here would have handed every cow
-/// and sheep a permanently open idle throttle with no player in the world.
+/// `SimMob::persistent` is deliberately broader than the condition that clears
+/// the throttle: `MobSim::spawn_species` sets it from `!hostile`, so passive
+/// animals carry it even when no player is present. Treating the flag as a reset
+/// request would give every such mob a permanently open idle throttle.
 ///
 /// Same input as [`no_player_is_the_control`] except the flag, so a difference in
 /// outcome could only come from the flag — and there must be none.
