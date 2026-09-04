@@ -52,24 +52,35 @@ frame — roughly 4000 buffer writes and 4000 bind-group binds per frame where o
 sufficed. Median frame time 17.05 ms → 8.19 ms when it was fixed; main thread 94% of a
 core → 56%.
 
-That regression is **count-shaped**. The honest gate is "per-frame API calls and
-bind-group binds do not grow with resident section count", which is deterministic, and
-`bench-baselines/render_submit.json` holds exactly those numbers today:
-`terrain_per_draw_api_calls`, `terrain_mdi_api_calls` (1, independent of the 2178
-drawable sections beside it), `terrain_drawn_sections`, `terrain_drawable_sections`. A
-reintroduction moves `terrain_mdi_api_calls` from 1 to the section count and the gate
-fails naming that metric.
+That regression is **count-shaped**. The honest gate is "per-frame work does not grow
+with resident section count", which is deterministic, and
+`bench-baselines/render_submit.json` holds that pair at three render distances:
+`terrain_per_draw_api_calls` and `terrain_drawn_sections` against
+`terrain_drawable_sections` and `terrain_mdi_draw_slots`. At rd 16 that is 347 draws
+against 2178 drawable sections; a per-section-uniform reintroduction pushes the first
+number toward the second and the gate fails naming it.
 
 A *timing* gate would have needed a ceiling somewhere between 8.19 and 17.05 ms on one
 specific machine — the trap above. The count gate needs no such number.
 
-Two honest limits on that claim. The bind-group counter itself
-(`RenderStats::terrain_camera_bind_group_switches`) lives in `lodestone-shell`'s
-`benches/render_submit.rs`, which needs a GPU adapter and therefore does not run on the CI
-runner; what CI gates is the `lodestone-render` side, which counts the per-draw and
-multi-draw API calls through the same `WorldScene::plan_frame` a real frame builds its
-draw list from. And a regression that kept the counts identical while making each call
-more expensive would pass — that is what the advisory duration history is for.
+Three honest limits on that claim, none of them small.
+
+**The bind-group count itself is not gated, because it is not measured.**
+`RenderStats::terrain_camera_bind_group_switches` lives in `lodestone-shell`'s
+`benches/render_submit.rs`, which needs a GPU adapter and so does not run on a CI runner.
+What CI gates is the `lodestone-render` side: draw-list sizes read out of the same
+`WorldScene::plan_frame` a real frame builds its draw list from.
+
+**One entry had to be removed for being a literal.** `terrain_mdi_api_calls` was recorded
+as a constant `1` written in the bench source — "one multi-draw call per frame", read off
+the renderer rather than measured. It was briefly in the first cut of this baseline, which
+would have been a gate no code change could ever move: the vacuous shape dressed as a
+regression check. It is gone from both the bench and the baseline; the bench's own comment
+now says why.
+
+**A regression that kept every count identical while making each call more expensive
+passes.** That is what the advisory duration history is for, and it is the boundary of
+what a count gate can do.
 
 ## Baseline storage, and who is allowed to move a number
 
@@ -100,7 +111,8 @@ Three separate guards, each with a check in the control suite and a mutation pro
 check would notice its removal:
 
 1. **`--min-compared N`** — fewer than `N` metrics actually compared exits **2**, not 0.
-   An audit that checks nothing is unrun, not green. `just bench-gate` passes 12.
+   An audit that checks nothing is unrun, not green. `just bench-gate` passes 40,
+   against 50 comparable metrics on a machine with a GPU adapter and 42 without.
 2. **A bench whose log is absent or empty exits 2** with a `NORUN` line naming it,
    separately from `--min-compared`, so a never-invoked bench does not report as a
    regression in every metric it owns.
@@ -165,6 +177,26 @@ just bench-record && just bench-gate ; echo "exit=$?"     # expect 0 again
 The third step is not optional. A gate that goes red and stays red proves nothing about
 the gate.
 
+That sequence has been run, against a real production regression rather than a fixture.
+Dropping the reachability term from `WorldScene::plan_frame`'s visibility decision
+(`let visible = in_frustum && reached` → `let visible = in_frustum`) is a realistic
+over-draw bug: frustum culling still runs, so the bench's own `drawn < drawable`
+anti-vacuity assertion still holds and the run completes normally. Measured:
+
+| render distance | drawn sections, healthy | with the regression | ratio |
+|---|---|---|---|
+| rd 8 (867 sections) | 101 | 213 | 2.109 |
+| rd 12 (1875 sections) | 205 | 433 | 2.112 |
+| rd 16 (3267 sections) | 347 | 725 | 2.089 |
+
+`just bench-gate` exited **1**, naming exactly six metrics — `terrain_drawn_sections` and
+`terrain_per_draw_api_calls` at each of the three distances — with 44 others still inside
+their bands, so the failure pointed at the regression rather than smearing across the
+file. Reverting the one-line edit and re-running returned it to **0** with 50 metrics
+compared. Conditions: macbook.local, aarch64 macOS, `cargo bench` profile, sha `a0e24e6`,
+other agents building on the same machine (which is why the *counts* are the evidence and
+the durations from those runs are not quoted).
+
 ## Configuration
 
 | knob | where | effect |
@@ -223,6 +255,40 @@ Its own control that it measures anything is a population sweep: an empty world 
 with 48 mobs over a wider area must not do the same amount of chunk-source work. If they
 do, the counter is wired to something that is not the simulation, and the bench fails
 saying so rather than recording a tidy number.
+
+### First measured numbers
+
+| | empty world | 48 mobs |
+|---|---|---|
+| scene | flat in-memory world, mobs=0, area 3x3, view radius 2 | flat in-memory world, mobs=48, area 5x5, view radius 2 |
+| ticks | 200 | 200 |
+| `ChunkSource::column` calls | 9 | 27 |
+| `ChunkSource::block_state` reads | 0 | 0 |
+| wall per tick, outside the paused clock | **9.20 µs** | **28.56 µs** |
+| the loop's own `mspt_avg_ms` | 0.000 ms | 0.000 ms |
+
+Conditions: macbook.local, aarch64 macOS, `cargo bench` profile (`lto=thin`,
+`codegen-units=1`, `debug=2`), sha `2156c72`, with several other agents building on the
+same machine — so treat these as samples, which is exactly why the gate does not hold
+them.
+
+Three things worth carrying forward, and one caveat that is larger than all of them:
+
+- **A 48-mob tick costs about 29 µs against a 50 ms budget — under 0.1% of it.** That is
+  the number the regionised-ticking question needs first, and it argues for measuring a
+  realistic world before committing to a partition, not for partitioning.
+- **The population sweep moved by 3.10×** for a 48-mob, wider-area world versus an empty
+  one, which is what makes the figures above measurements rather than noise: the
+  instrument responds to the input it is supposed to respond to.
+- **`mspt_avg_ms` reads 0.000 in both arms**, which is the paused clock reporting itself
+  and not a cost. It is printed precisely so nobody quotes it.
+- **The caveat**: this is a *floor*, not a representative tick. The fixture is a flat
+  four-layer world with no terrain, no redstone, no block entities and no real chunk
+  churn — `block_state` is never called at all, and 200 ticks touch nine columns. A
+  production-shaped number needs a generator-backed or region-backed source, which would
+  fold column generation into the figure and needs its own design. Do not read 29 µs as
+  "the server tick is free"; read it as "the simulation skeleton is free, and whatever is
+  expensive is not in the skeleton".
 
 Not in the CI gated set: it builds `lodestone-server`, `lodestone-v26-2` and their graph
 for a job that would otherwise build only the render path, and its counts depend on
