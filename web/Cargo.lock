@@ -2606,6 +2606,7 @@ dependencies = [
  "lodestone-model",
  "lodestone-net",
  "lodestone-physics",
+ "lodestone-time",
  "lodestone-world",
  "lodestone-worldgen",
  "reqwest",
@@ -2616,7 +2617,6 @@ dependencies = [
  "uuid",
  "wasm-bindgen-futures",
  "web-sys",
- "web-time",
 ]
 
 [[package]]
