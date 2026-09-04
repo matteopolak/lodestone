@@ -444,6 +444,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                         self.nav.capture_binding(Binding::Mouse(button.into()));
                     } else if button == MouseButton::Left
                         && !self.dispatch_book_page_click()
+                        && !self.dispatch_death_click_under_cursor()
                     {
                         // A book page run gets first refusal, the same
                         // precedence the reading screen gives its own text
