@@ -64,6 +64,17 @@ The metadata gate is a real check rather than a comment: encoding an NBT metadat
 340 errors, and decoding type 13 below 340 errors instead of consuming the rest of the packet as
 a plausible NBT read.
 
+### Exact inversion of legacy block-state ids
+
+`lodestone-canonical::inverse` is the shared reverse lookup for a canonical 26.2 state that must
+be represented in pre-1.13 `(old_id << 4) | meta` form. It scans the forward
+`canonical::resolve` result once, keeps the minimum packed representative when aliases exist,
+and indexes the result with a `OnceLock` table spanning the canonical state registry. Only exact
+forward resolutions enter the table: missing legacy entries, context-dependent entries,
+out-of-bounds pairs, and bridge-unmapped states are excluded. A canonical state outside the
+resulting image returns `InverseError::Unsupported`; the reverse lookup never substitutes air or
+silently chooses a nearby state.
+
 ### Captures
 
 `tests/captures/join_{1_9_4,1_10_2,1_11_2}.txt` are clientbound bytes from real servers, and

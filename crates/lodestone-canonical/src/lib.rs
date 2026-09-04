@@ -17,6 +17,9 @@
 //!   and properties to a concrete canonical 26.2 block-state id, which is the
 //!   id space `lodestone_world::PalettedContainer` consumers (the mesher's
 //!   atlas, collision) are actually built from.
+//! - [`inverse`] — the exact reverse image of [`canonical::resolve`], selecting
+//!   the minimum packed legacy representative for each reachable canonical
+//!   state and rejecting states with no pre-1.13 representation.
 //!
 //! # Why a shared crate rather than a copy per family
 //!
@@ -62,3 +65,4 @@ pub(crate) mod generated_flattening;
 
 pub mod canonical;
 pub mod flattening;
+pub mod inverse;

@@ -24,7 +24,7 @@
 //! differently:
 //!
 //! - [`LegacyBlockState::NoTableEntry`] — this exact pair was never assigned
-//!   a target by vanilla's own flattening table (1695 of the 4095 valid
+//!   a target by vanilla's own flattening table (1663 of the 4095 valid
 //!   `(id, meta)` combinations *are* assigned; 2400 are not — see
 //!   `tests/flattening.rs`'s generator for the exact count derivation). Live
 //!   vanilla's own accessor silently substitutes air for every one of these;
