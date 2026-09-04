@@ -26,21 +26,6 @@ owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
 
 [[allow]]
-file = "crates/lodestone-worldgen-parity/examples/breakdown_by_block_pair.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-worldgen-parity/src/lib.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-worldgen-parity/tests/chunk_parity.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
 file = "crates/versions/26.2/src/generated/stat_debug_registries.rs"
 owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
