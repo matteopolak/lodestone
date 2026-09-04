@@ -263,12 +263,10 @@ impl MenuRenderer {
 
     /// Load and bind the GUI atlas on first use.
     ///
-    /// Lazy rather than an `attach_gui` call from `app.rs` for one reason: it
-    /// needs a `Queue`, which `MenuRenderer::new`'s call site has but does not
-    /// pass, and `app.rs` is not this change's to edit. Every draw path already
-    /// receives both a `Device` and a `Queue`, so this is the one place that has
-    /// what the upload needs. `attach_gui` stays public so `app.rs` can hand in a
-    /// shared atlas later and skip the second stitch.
+    /// Lazy initialization belongs here because each draw supplies the `Device`
+    /// and `Queue` needed to upload the atlas. `attach_gui` remains available
+    /// for callers that already have a compatible shared atlas, avoiding a
+    /// second stitch.
     fn ensure_gui(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
         if self.gui_attempted {
             return;
