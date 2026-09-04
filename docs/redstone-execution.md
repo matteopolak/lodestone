@@ -8,11 +8,10 @@ behaviour: the neighbour-notification cascade, the scheduled-tick drain, and
 the palette-derived reaction classification (`lodestone_server::redstone_graph`)
 that decides which family, if any, a notification dispatches to.
 
-Its headline result is a correction to the premise it was commissioned under.
-The model was believed to do a **per-tick neighbour scan**. It does not, and
-never did — it has been event-driven since it was written, and an idle
-contraption already costs literally zero. The real cost was a large **constant
-factor per notification**, and that is what got removed.
+The model is event-driven: it performs no **per-tick neighbour scan**, so an
+idle contraption costs literally zero. The relevant cost is the **constant
+factor per notification**; palette-derived classification keeps that decision
+to an array read and a branch for inert cells.
 
 ---
 
@@ -32,15 +31,15 @@ for redstone on a tick.**
 `propagate_and_react` hands each mutation to
 `lodestone_server::neighbor_update::NeighborPropagator::propagate`, a
 depth-first cascade over `UPDATE_ORDER` (west, east, down, up, north, south)
-with a chained-update cap — a port of vanilla's `CollectingNeighborUpdater`.
+with a chained-update cap.
 Each notification lands in `random_tick::react_to_notification`, which
 dispatches to one device family or to nothing.
 
-**The ordering machinery is the specification and is deliberately untouched by
-everything below.** `UPDATE_ORDER`, the depth-first interleave, the
+**The ordering machinery is the specification and must remain unchanged.**
+`UPDATE_ORDER`, the depth-first interleave, the
 scheduled-tick queue's `(trigger tick, priority, insertion)` drain order and its
 per-`(pos, kind)` dedup, and dust's deterministic 7-centre × 6-direction fan-out
-are all observable vanilla behaviour. A faster engine that reorders two updates
+are all observable compatibility behaviour. A faster engine that reorders two updates
 is a regression, not an optimisation.
 
 ---
@@ -72,7 +71,7 @@ Two facts come out of that pair, and they point in opposite directions from the
 premise:
 
 - **The steady-state row is a real zero, not a rounding.** Incrementality at
-  the tick level already exists. There is no per-tick scan to remove, and the
+  the tick level is event-driven. There is no per-tick scan to remove, and the
   "null contraption" control an execution-model rework would want passes by
   construction.
 - **The active row is genuinely large.** Two events cascade into 837
@@ -84,7 +83,8 @@ often the world is scanned.
 
 ### Where the per-event cost went
 
-Before this work, `react_to_notification` opened **every** notification by
+A direct string-dispatch implementation of `react_to_notification` opens
+**every** notification by
 
 1. cloning the cell's block-state string onto the heap
    (`column.block_state(..).to_string()`), then
@@ -108,25 +108,26 @@ canonical block-state string to its class, mirroring `react_to_notification`'s
 predicate chain **in the same order, first match wins**.
 
 The point of naming it is that it can then be computed **once per palette
-entry** rather than once per notification. `ChunkColumn` already carried two
-such tables for exactly this reason — `palette_ticking` (randomly-ticking
+entry** rather than once per notification. `ChunkColumn` carries two related
+tables — `palette_ticking` (randomly-ticking
 classification) and `palette_state_ids` (the string→id boundary that keeps the
 protocol encoder off strings). `palette_reaction` is the third, appended in
 `ChunkColumn::intern` and rebuilt in `ChunkColumn::recalc_ticking_counts`, and
 `ChunkColumn::reaction_class` answers "what reacts here" in two array indexes.
 
-`react_to_notification` now reads the class first and returns immediately for
+`react_to_notification` reads the class first and returns immediately for
 `Inert`; every family guard is a `class == ReactionClass::X` comparison instead
-of a string predicate. **No arm body changed.**
+of a string predicate. Classification selects an existing arm without changing
+that arm's body.
 
 ### Why this is the incremental structure, and what it is not
 
-The shape the design brief imagined is a reverse index of edges: "when this cell
-changes, wake these listeners". That was evaluated and deliberately not built.
+A reverse index of edges ("when this cell changes, wake these listeners") is
+deliberately not used.
 
 - A stale edge is **silently wrong**; rediscovery is self-healing on every
-  event. Every incident record in this repo about stale derived state argues for
-  buying an index only with evidence.
+  event. Introduce an index only with evidence that its additional invalidation
+  risk is worth its cost.
 - Skipping the *enumeration* of neighbours is not free of ordering risk.
   `NeighborPropagator::propagate` counts every notification it issues against
   its chained-update cap and returns the issued list; suppressing an inert
@@ -143,28 +144,28 @@ class. The palette is append-only (`ChunkColumn::intern` is the only writer and
 `palette` is private, so that is compiler-enforced), so a classification cannot
 outlive the state it classifies. The incrementality is by construction.
 
-A memo/incremental-computation crate (`comemo`, `salsa`) was also considered and
-rejected: both memoize pure functions over tracked immutable inputs, while this
-is a mutable spatial grid whose observable behaviour includes the *order* of
-recomputation. The hot cost was discovery and parsing, not recomputation of a
+Memo/incremental-computation crates such as `comemo` and `salsa` do not fit this
+model: they memoize pure functions over tracked immutable inputs, while this is
+a mutable spatial grid whose observable behaviour includes the *order* of
+recomputation. The hot cost is discovery and parsing, not recomputation of a
 pure value. A framework dependency shaping the whole subsystem would also have
 to earn its place in the wasm32 bundle this crate links into.
 
 ---
 
-## What the design handles, and what it does not
+## Scope and invariants
 
 Stated up front rather than discovered later.
 
 | case | handled how |
 |---|---|
-| **Update order** | Untouched. The classification changes what a notification costs, never which notification is issued, in what order, or how many are counted against the chained-update cap. |
-| **Quasi-connectivity** | Unaffected. QC is a property of a piston's *read* set (`piston::has_extend_signal` reads `pos.above()`, which vanilla never notifies it about); the classification only decides which arm runs, and the arm's reads are unchanged. Any future index built from *read* sets would destroy QC while looking more thorough — edges must mirror notification topology, never reads. |
-| **Repeater/comparator delay, tick scheduling** | Untouched. Scheduling happens inside the arms; the queue, its `DRAIN_ORDER` and its dedup are not involved. |
+| **Update order** | Preserved. Classification changes what a notification costs, never which notification is issued, in what order, or how many are counted against the chained-update cap. |
+| **Quasi-connectivity** | Preserved. QC is a property of a piston's *read* set (`piston::has_extend_signal` reads `pos.above()`, which the compatibility notification topology does not notify); classification only decides which arm runs, and the arm's reads are unchanged. Any future index built from *read* sets would destroy QC while looking more thorough — edges must mirror notification topology, never reads. |
+| **Repeater/comparator delay, tick scheduling** | Preserved. Scheduling happens inside the arms; the queue, its `DRAIN_ORDER` and its dedup are not involved. |
 | **Property-sensitive dispatch** | Works. A palette entry is a whole canonical state string, so a predicate reading `powered=true` classifies correctly per entry. |
 | **Neighbour-sensitive dispatch** | **Not supported, by design.** A predicate that reads any *other* cell cannot be a per-entry classification. Such a test must stay inside its arm's body. `redstone_graph`'s module doc states this as the rule for adding a family. |
 | **Chunk boundaries** | **Closed on every path a player action or the world tick can drive.** `lodestone_server::random_tick::RedstoneColumns` replaces the single `&ChunkColumn` the reaction dispatch, the placement arms and the tripwire arms read and write through: home stays a plain `&mut` borrow, and any neighbouring column a cascade actually reaches is fetched lazily via `ChunkSource::is_column_resident` (never generated) and cached for the rest of that one cascade. Every production entry point takes a `world: &dyn ChunkSource` and builds it over the real `ChunkStore` — `crate::tick`'s scheduled-tick drain (including the torch/repeater/comparator reads that precede a re-propagate), target-block hits, falling-block landings and `RandomTickScheduler::tick_chunk`'s notify fan-out, plus `random_tick::react_at_placement_with_entities` and `react_at_removal` under `crate::server`'s placement and break handlers. The single-column form is `#[cfg(test)]`: `propagate_and_react`, `propagate_and_react_with_entities` and the `NoNeighbors` source they build over do not exist outside a test build, which is what makes "no production cascade is bounded to one chunk column" a compiler-checked property rather than a comment. |
-| **Unloaded chunks** | Unchanged. The table is derived data: a column unloading drops it, a reload rebuilds it from the palette. Nothing is persisted, so there is no reload staleness. `RedstoneColumns`'s own neighbour cache is stricter than a full reload would need: it is scoped to one cascade and dropped at the end of the call, so nothing about cross-chunk reach is retained between notifications either. |
+| **Unloaded chunks** | The table is derived data: a column unloading drops it, and loading rebuilds it from the palette. Nothing is persisted, so there is no reload staleness. `RedstoneColumns`'s neighbour cache is scoped to one cascade and dropped at the end of the call, so nothing about cross-chunk reach is retained between notifications. |
 | **Piston/slime movability** | Out of scope. "Which blocks move when this piston fires" is a connected-component query over a different relation with different edges. It shares the caching *idea* and none of the topology. |
 
 ---
@@ -201,17 +202,16 @@ by the class of the cell it landed on, at the same hook as
 `notifications_issued`, so the two sum identically. Two derived figures come off
 it:
 
-- `chain_probes_avoided` — how many string family predicates the old chain would
-  have evaluated for the same notifications (each ran the chain from the top
+- `chain_probes_avoided` — how many string family predicates a direct string
+  chain would evaluate for the same notifications (each runs the chain from the top
   until its arm matched; an inert cell ran all fifteen).
 - `dispatch_state_clones_avoided` — how many heap-allocated block-state string
-  copies the old dispatch made and this one does not.
+  copies the direct string dispatch avoids.
 
-### What was measured after
+### Measured behaviour
 
-**Behavioural identity on the real contraption.** The same harness command,
-re-run against `raid_farm.litematic` with its two captured repeater rechecks
-re-injected, reads:
+**Behavioural identity on the real contraption.** Running the harness against
+`raid_farm.litematic` with its two captured repeater rechecks re-injected reads:
 
 ```
 notifications_issued=837  cell_reads=5899  state_parses=55
@@ -219,29 +219,21 @@ signal_queries=164  wire_recomputes=157
 schedules_requested=3  schedules_deduped=15  max_notifications_per_drain=726
 ```
 
-**Every one of those eight counters is identical to the baseline above**,
-reproduced across three independent runs including one under deliberate
-six-way CPU load. This is the differential that matters: it is the only
+**Those eight counters are reproduced across three independent runs**, including
+one under deliberate six-way CPU load. This is the differential that matters: it is the only
 measurement phase driven by a deterministic re-injection rather than by a
 wall-clock settle, and it is the one that exercises redstone.
 
-One caveat, recorded rather than smoothed over. `bee-and-crop-farm`'s
-*steady-state* row read `notifications_issued=153` at baseline and **159** in
-every after-run — stable, reproduced three times, and unmoved by CPU load, so
-not noise. It is nonetheless not attributable to this change: that phase
-reports `cell_reads=0` and `max_notifications_per_drain=6` in both runs, which
-means every notification in it returned an **empty cascade** and no family arm
-that reads anything ever ran. The total is therefore
-`6 × (independent mutations in the window)`, trimmed at column edges — a
-quantity determined by the random-tick pass over that fixture's crops, which
-this change cannot influence. Thirty-six commits and a good deal of other
-agents' uncommitted `lodestone-server` work landed in the shared checkout
-between the two measurements. The pre-change binary was not rebuilt to settle
-it further.
+`bee-and-crop-farm` is not a useful behavioural-identity fixture: its
+*steady-state* row has read `notifications_issued=153` and **159** in separate
+runs while `cell_reads=0` and `max_notifications_per_drain=6` throughout. Every
+notification returns an **empty cascade**, so no family arm that reads anything
+runs. The total is `6 × (independent mutations in the window)`, trimmed at
+column edges, and is determined by random ticks over the fixture's crops.
 
-**Behavioural identity on the hermetic fixture the previous cost-split pass
-used.** `redstone_counters::tests::measured_cost_split_for_a_fifteen_cell_dust_run`
-— a 15-long dust run lit from one end — reads, with the classification live:
+**Behavioural identity on a hermetic fixture.**
+`redstone_counters::tests::measured_cost_split_for_a_fifteen_cell_dust_run` — a
+15-long dust run lit from one end — reads:
 
 ```
 notifications_issued=659  cell_reads=3038  reactions_total=155
@@ -249,9 +241,8 @@ state_parses=0  signal_queries=152  wire_recomputes=152
 schedules_requested=0  schedules_deduped=0  max_notifications_per_drain=659
 ```
 
-Every one of those is **identical** to the reading taken before the
-classification existed. That is the point: the change is a constant-factor
-change, and a counter that moved would mean a behavioural change.
+These decision counters are the invariant for the fixture; classification is a
+constant-factor optimization and must not alter them.
 
 **The saving, on a fixture with five families populated.** The 15-cell run plus
 a non-interacting row carrying a repeater, an observer and a comparator
@@ -267,9 +258,9 @@ block-state string clones avoided = 519
 ```
 
 **Three quarters of the notifications in a live circuit land on a cell that
-reacts to nothing.** Each of those previously cost a heap-allocated copy of the
-cell's state string plus a full fifteen-predicate scan to establish exactly
-that; each now costs one array index and a branch. The 12.22 predicates per
+reacts to nothing.** A direct string dispatch costs each of those a
+heap-allocated copy of the cell's state string plus a full fifteen-predicate
+scan; classification costs one array index and a branch. The 12.22 predicates per
 notification is the whole-fixture average, inert and non-inert together.
 
 Both figures are for these fixtures' shapes, not universal constants — the
@@ -285,12 +276,10 @@ or the number is a hypothesis about contamination rather than about redstone.
 
 ## Crossing a chunk seam: the three entry points, and their evidence
 
-The reaction dispatch reached across a chunk seam before the placement, removal
-and random-tick entry points did, so a circuit was cross-chunk only if the edge
-that drove it arrived through the scheduled-tick drain. A block a *player*
-placed or broke, and any mutation the random-tick pass made, still truncated at
-the home column's own 16-wide footprint. Each of the three now takes a
-`world: &dyn ChunkSource`.
+The reaction dispatch, placement, removal, and random-tick entry points take a
+`world: &dyn ChunkSource`, so a cascade can cross a resident chunk seam. This
+keeps a player edit and a random-tick mutation from truncating at the home
+column's 16-wide footprint.
 
 ### Where the expected values come from
 
@@ -397,26 +386,26 @@ a model with no cross-column reach leaves every probed cell at power 0 for the
 whole trace; against the live server, the comparison is required to catch that
 model on tick 0 at cell 1, naming the tick and the position.
 
-The limit worth knowing before extending it: the vanilla read primitive can
+The limit worth knowing before extending it: the live-server read primitive can
 only answer for positions whose possible states the caller enumerates, so
 widening the contraption means predicting each new cell's states up front, not
 just adding blocks.
 
-## The lookup allocation removal
+## Lookup allocation behavior
 
-The classification above cut what a notification costs to decide whether to
-react at all. It left the read itself untouched: every `redstone::*`/
+Classification decides whether a notification reacts. The read path uses
+`WorldState`: every `redstone::*`/
 `redstone_wire::*`/`redstone_torch::*`/`redstone_diode::*`/
 `redstone_observer::*`/`redstone_rail::*`/`redstone_tripwire::*`/
 `redstone_openable::*`/`redstone_dispenser::*`/`piston::*`/`block_support::*`/
 `block_placement::*` query function takes a `lookup: F` closure, and every one
-of those closures used to return an owned `String` — a fresh heap allocation
-and byte copy on **every call**, even though `ChunkColumn::block_state` and
+of those closures returns a `WorldState`; an owned `String` would make a fresh
+heap allocation and byte copy on **every call**, even though `ChunkColumn::block_state` and
 `RedstoneColumns::state` were both already reading from data already sitting
 in memory.
 
-**The fix is a shared type, not a per-call-site rewrite.** `redstone::WorldState`
-is `std::sync::Arc<str>`, and it replaces `String` in every one of those
+**The shared representation is `redstone::WorldState`, not an owned value at
+every call site.** It is `std::sync::Arc<str>` and replaces `String` in every one of those
 closures' bound (`F: Fn(BlockPos) -> WorldState`) and in `redstone_dispenser`'s
 two `&dyn Fn(BlockPos) -> WorldState` parameters. `ChunkColumn` gains a fourth
 per-palette-entry derived table, `palette_arc: Vec<Arc<str>>`, built in the same
@@ -431,28 +420,25 @@ that gates it, changed. `chunk::air_state_arc()` is the equivalent for the
 "outside every reachable column" answer: a `LazyLock<Arc<str>>` built once per
 process and cloned, not allocated, on every out-of-bounds read.
 
-**Because `Arc<str>` derefs to `&str` exactly like `String` does**, almost
-every call site needed no body change at all — `&state`, `.starts_with(..)`,
-`base_name(&state)`, `is_wire(&state)` and every other read-only use kept
-compiling unchanged. The real edits were at the boundary: a handful of places
-that build a *new* owned `String` to write back to the world, store in a
-`RandomTickEvent`, or feed a `ScheduledTickQueue<String>` now call
-`.to_string()` once, at the point that actually needs ownership, rather than
-every closure call needing it up front. `redstone_tripwire::WireSource::state`
-became `WorldState` outright (the field is filled once, in
+**Because `Arc<str>` derefs to `&str` exactly like `String` does**, read-only
+uses such as `&state`, `.starts_with(..)`, `base_name(&state)`, and
+`is_wire(&state)` need no conversion. A boundary that writes to the world,
+stores a `RandomTickEvent`, or feeds a `ScheduledTickQueue<String>` calls
+`.to_string()` exactly where it needs ownership. `redstone_tripwire::WireSource::state`
+is `WorldState` outright (the field is filled once, in
 `find_controlling_hooks`, and read many times inside a 41-cell scan, the same
 "build once, clone cheaply" shape as the palette table).
 
 ### Correctness
 
-**Update order is untouched.** This is a return-type change on a query
+**Update order is preserved.** This is a return-type change on a query
 closure; it touches nothing that decides which notification fires, in what
 order, or how many count against the chained-update cap.
 
-**Byte-identical counters, re-run against the same real contraption.**
+**Counter invariant on the real contraption.**
 `redstone_contraptions_report` (the same production tick loop, the same
 `raid_farm.litematic` fixture, its own two captured repeater rechecks
-re-injected) reads, after this change:
+re-injected) reads:
 
 ```
 notifications_issued=837  cell_reads=5899  state_parses=55
@@ -460,9 +446,8 @@ signal_queries=164  wire_recomputes=157
 schedules_requested=3  schedules_deduped=15  max_notifications_per_drain=726
 ```
 
-— identical to every reading before it, including the one taken before the
-classification work landed. A pure allocation-strategy change cannot show up
-in a counter that only tracks decisions, and this run is the proof it does not.
+The counters track decisions rather than allocation strategy, so this run
+establishes the expected decision-level behavior.
 
 ### The measurement, and why it is not a wall-clock number
 
@@ -487,9 +472,9 @@ OLD (String::to_string() per read):  5899 allocations, 349224 bytes
 NEW (Arc<str>::clone() per read):       0 allocations,      0 bytes
 ```
 
-5899 heap allocations and 349 KB removed per active tick, at the real
+5899 heap allocations and 349 KB are avoided per active tick, at the real
 production read rate measured on a real downloaded contraption. This is a
-result about the operation this change actually replaces (a heap allocation
+result about the two strategies compared (a heap allocation
 plus byte copy vs. an atomic increment), scaled by a real, independently
 measured multiplier — not a claim about total tick time, which the harness's
 own wall-clock caveat above already rules out measuring honestly on this
@@ -527,8 +512,8 @@ Gotchas:
 
 ## What to do next, in order of value
 
-1. **A larger contraption in the live differential.** A first one has landed —
-   see "A live contraption, ticked against a real server" above — but it is one
+1. **A larger contraption in the live differential.** The current fixture —
+   described in "A live contraption, ticked against a real server" above — is one
    row with three repeaters, and everything it exercises is dust plus repeater
    delay. The families with the most room for an ordering divergence
    (comparators reading a container, observers, piston commit phases) are not
@@ -544,7 +529,8 @@ Gotchas:
    arms' bodies, so an inert cell adjacent to one still pays for the read.
    Worth measuring before touching: `notifications_by_class` already says how
    many notifications reach each family.
-3. **A listener index**, only if 1 and 2 land and counters still show
+3. **A listener index**, only if broader coverage and the remaining-read
+   measurements still show
    notification dispatch dominating. The bar is deliberately high: it is the one
    change here that introduces a defect class this subsystem currently cannot
    have.

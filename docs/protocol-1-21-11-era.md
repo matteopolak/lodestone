@@ -20,10 +20,11 @@ package suffix or the feature: `VersionAdapter::supports` answers for it, from
 
 ### The era is four protocols wide, and only one is implemented
 
-Measured, not assumed. The plan's own instrument — pairwise packet-shape
-identity from `minecraft-data`, with named types inlined recursively and
-primitive aliases kept, against its stated 85% threshold — puts 774's
-neighbours here:
+Measured, not assumed. The era-grouping criterion in
+[`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md)
+is pairwise packet-shape identity with named types inlined recursively and
+primitive aliases kept; this table applies that 85% threshold to 774's
+neighbours:
 
 | against 774 | Minecraft | identity | inside the era? |
 |---|---|---|---|
@@ -117,10 +118,8 @@ Two independent outside constants pin codecs that a round trip could not:
 ### The measured cost of founding it
 
 8,278 hand-written source lines (`cargo run -p xtask -- codegen-ratio`), plus
-31,691 generated and 2,362 of tests. That is the sixth reading of the founding
-cost recorded in
-[`multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md),
-and the largest yet.
+31,691 generated lines and 2,362 test lines. This is the largest measured
+founding cost among the implemented era crates.
 
 `cargo run -p xtask -- connectedness` reports **63/139 clientbound decoded, 62
 emitting, 0 decoded-but-stranded, 34/66 serverbound encoded, 63 arms examined**

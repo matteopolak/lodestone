@@ -2,10 +2,7 @@
 
 ## What it is
 
-The implementation plan for the villager-economy arc — issues #231 (villager Brain behaviours), #243
-(professions and POI claiming), #244 (gossip), #245 (trades), #246 (reputation), #247 (curing), #240
-(wandering trader) and #241 (raids and patrols) — planned as one architecture rather than eight
-features. Its central findings: the Brain substrate the issues assume is missing **already exists and
+The architecture plan for villager behaviour, professions and POI claims, gossip, trades, reputation, curing, wandering traders, patrols, and raids. It treats them as one system rather than isolated features. Its central findings: the Brain substrate the issues assume is missing **already exists and
 runs in production** (`lodestone_entity::brain`, driven through `BrainGoal` on the goal scheduler),
 so the substrate decision is to *extend* it, not to build it; the missing substrate is **POI state
 and the world-facts seam into `BrainMob`**; and the 26.2 jar ships trades, trade sets and the
@@ -21,18 +18,18 @@ no line numbers.
 
 ### 1.1 The Brain substrate — built, wired, and running villagers today
 
-`crates/lodestone-entity/src/brain/` (~2,300 lines) is a faithful port of vanilla's Brain:
+`crates/lodestone-entity/src/brain/` (~2,300 lines) is a faithful port of the reference implementation's Brain:
 
 - `Brain` (`brain/mod.rs`) — memories, sensors, priority-scheduled behaviours grouped into
-  activities, `Brain::tick` in vanilla's exact order (forget → sensors → start → tick).
+  activities, `Brain::tick` in the reference implementation's exact order (forget → sensors → start → tick).
   **`Brain::set_schedule` and `Brain::update_activity_from_schedule` already exist** — a
-  `(start_tick, activity)` timeline with vanilla's 20-tick re-evaluation gate, tested.
+  `(start_tick, activity)` timeline with the reference implementation's 20-tick re-evaluation gate, tested.
 - `Memories`/`MemoryModuleType` (`brain/memory.rs`) — expiring blackboard. Registered types today:
   `WALK_TARGET`, `LOOK_TARGET`, `ATTACK_TARGET`, `NEAREST_VISIBLE_PLAYER`,
   `NEAREST_VISIBLE_LIVING_ENTITIES`, `IS_PANICKING`, `HURT_BY`, `CANT_REACH_WALK_TARGET_SINCE`,
   `PATH`. **No `JOB_SITE`, `POTENTIAL_JOB_SITE`, `HOME`, `MEETING_POINT` yet.**
 - `Activity` (`brain/activity.rs`) — **`CORE`, `IDLE`, `WORK`, `PLAY`, `REST`, `MEET`, `PANIC`,
-  `FIGHT`, `AVOID`, `SWIM` are already declared.** The activity vocabulary for #231 exists.
+  `FIGHT`, `AVOID`, `SWIM` are already declared.** The villager activity vocabulary exists.
 - `GateBehavior` with `OrderPolicy::Shuffled` + weighted run-one — the weighted pick-one-of-many
   shape every villager activity package leans on.
 - `BrainGoal` (`brain/driver.rs`) — the production driver: a `Goal` at priority 0 holding
@@ -49,14 +46,14 @@ no line numbers.
   `nearest_visible_player`, `random_land_pos`. `NavigatingMob` implements it (and `MobController`
   beside it — note the documented same-name-method ambiguity tax, and that the two `move_to`s differ
   in float width). **No day-time, no POI query, no hurt signal, no nearby-villager census, no
-  bed/sleep interaction.** That gap, not the scheduler, is what blocks #231.
+  bed/sleep interaction.** That gap, not the scheduler, blocks richer villager behaviour.
 
 ### 1.2 The server side
 
 - `MobSim` / `SimMob` (`lodestone_server::mobs`) — the sim. `spawn_species` resolves attributes,
   shape, category, and installs `roster::goals_for` output. `SimMob::last_hurt_by` and
   `hurt_by_player_until` exist (fed by the damage path). Breeding, taming/ownership
-  (`Owner`-style state landed with the interact-packet dispatch), vocalisation effects
+  (`Owner`-style state implemented with the interact-packet dispatch), vocalisation effects
   (`take_vocalisations` → `crate::effects::WorldEffect`), item entities, projectiles, vehicles all
   live here. **`MobSim` holds its `ChunkWorld` immutably** — terrain reaches it via the
   `tick_with_terrain` block-state closure; it cannot see block edits except through what the host
@@ -113,7 +110,7 @@ No POI registry, no gossip, no reputation, no trade state, no raid or patrol log
 tree (`/usr/bin/grep -rn "Poi\|gossip\|Gossip"` across `lodestone-server`, `lodestone-entity`,
 `lodestone-world`: only false positives). This is genuinely greenfield.
 
-### 1.5 The data and oracles on disk — better than any issue knows
+### 1.5 The data and oracles on disk
 
 - **Trades are data files**: `.cache/mc/26.2/src/data/minecraft/villager_trade/<profession>/<1–5>/
   <name>.json` — plain `{gives, wants{id,count}, max_uses, xp, reputation_discount}` records — and
@@ -127,14 +124,14 @@ tree (`/usr/bin/grep -rn "Poi\|gossip\|Gossip"` across `lodestone-server`, `lode
   with environment-attribute timelines set directly on the brain at spawn time;
   **do not transcribe pre-26.2 schedule constants from memory or wiki** — our
   `Brain::set_schedule(Vec<(i32, Activity)>)` matches the keyframe shape exactly.
-- **Vanilla-authored POI region files**: `.cache/mc/survival/world/dimensions/minecraft/overworld/
-  poi/*.mca` (and nether) — vanilla's own answer to "which blocks in this chunk are POIs, with what
+- **reference-authored POI region files**: `.cache/mc/survival/world/dimensions/minecraft/overworld/
+  poi/*.mca` (and nether) — the reference implementation's answer to "which blocks in this chunk are POIs, with what
   type and how many free tickets", sitting beside the `region/*.mca` blocks that produced them.
-- **Vanilla-authored persistence fixtures**: `.cache/mc/survival/world/data/minecraft/
+- **reference-authored persistence fixtures**: `.cache/mc/survival/world/data/minecraft/
   wandering_trader.dat` (world-level spawner state — note 26.2 splits saved data into per-name
   `.dat` files, *not* `level.dat` fields) and `.cache/mc/survival/world/dimensions/minecraft/
-  overworld/data/minecraft/raids.dat`. Exact key names and NBT types for V8 and V10, written by the
-  other side.
+  overworld/data/minecraft/raids.dat`. Exact key names and NBT types for wandering-trader data and raid/village-hero-reward data, written by
+  the reference server.
 - 19 entity region files under `…/overworld/entities/` — whether they contain villagers with
   `Gossips`/`Offers` is unverified (§7).
 - Behaviour truth for goal packages, gossip weighting and decay, the block→POI-type table with
@@ -145,18 +142,18 @@ tree (`/usr/bin/grep -rn "Poi\|gossip\|Gossip"` across `lodestone-server`, `lode
 
 ---
 
-## 2. Issue-body verdicts
+## 2. Current feature status
 
-| issue | verdict |
+| feature | status and remaining boundary |
 |---|---|
-| #231 | **Half stale, and the other half has since landed.** Written as if the Brain behaviour system needs standing up; `Brain`, `BrainGoal`, activities, schedule support and the villager's production scaffold all landed with the Brain-driver commit ("the Brain AI system reaches a real mob on a real path"). What was actually missing — the villager *package* and the world-facts seam (§3.2) — is now built: `docs/villager-work-rest-schedule.md` is V2, landed close to this plan's own shape (schedule mode in `BrainGoal::tick`, `WalkToPoi` behaviours, `day_time`/POI-position feed into `NavigatingMob`, `BellClaims` as the third POI ledger). Golem-summon-on-hurt (§6's own "not built here") also landed separately, in `MobSim::tick_golem_summon`. Still open: piglin's own Brain package (bundled into #231, deliberately split out below), and V2's own disclosed cuts (no work-at-poi restocking/sleep pose/trade-UI-at-work, no baby schedule). |
-| #243 | Accurate. POI registry genuinely absent. The "shared POI-count query with the iron-golem issue" note stands — design `PoiIndex`'s query for both callers, but do not build the golem half (§6). |
-| #244 | Accurate — "no gossip propagation exists" re-verified true. |
-| #245 | **Right direction, stale mechanism.** "Pull from the 26.2 jar's registry data, not minecraft-data" is correct, but there is no extraction problem left: trades are plain JSONs on disk (§1.5). The body also doesn't know the client data half (`MERCHANT_OFFERS` decode → `SessionTrades`) already exists and that the merchant *screen* was deliberately excluded — the UI is the missing client piece, not the decode. |
-| #246 | Accurate. Its advice to keep Hero of the Village separately-triggered is honoured: HotV lands inside the raid unit (§6). |
-| #247 | Accurate on mechanics but **silent on a real dependency**: mobs cannot hold status effects, so "weakness + golden apple" has no way to apply the weakness. §5 V7 makes the mob-effects substrate part of the unit. |
-| #240 | Accurate. Two things it doesn't know: `spawn_wandering_traders` is already a modelled game rule, and vanilla persists the spawner in `data/minecraft/wandering_trader.dat` (we have a vanilla-written fixture). |
-| #241 | **Stale on raid mechanics.** "Bad-omen-effect-triggers-on-village-entry" is the pre-1.21 flow. In 26.2: Bad Omen (from an ominous bottle) is converted on village entry into the Raid Omen effect, and the raid starts when Raid Omen expires at the player's position. Also stale on patrols: "not covered by anything in `ai/goals.rs` today" predates the pillager landing in `roster/ranged.rs` — the *mob* exists; only the leader-follow shape and the spawner are missing. The split it suggests (patrol vs raid) is right and adopted. |
+| Brain and schedule | The production brain driver, activity schedule, POI memories, and villager commute path exist. Remaining work is work-at-site restocking, sleeping pose, trade UI at work, distant/unreachable claim handling, baby schedule, and the separate piglin package. |
+| POI claims and profession | Live workstation, bed, and bell ledgers exist. Keep the shared count query for future golem work, and add durable claim persistence rather than a second ownership model. |
+| Gossip and reputation | Propagation, decay, and price hooks exist; persistence and a complete future golem response remain separate work. |
+| Trading | Release data and merchant decoding/presentation exist. Bind mutable offer state to each villager and make uses, demand, restock, and purchase state durable. |
+| Village hero rewards | Rewards remain tied to the raid completion path, not a standalone trigger. |
+| Curing | Conversion mechanics require status effects, deterministic timer gates, and persisted state; delivered behaviour must affect a visible trade price. |
+| Wandering trader | The spawn rule and data fixture exist; trade wares, placement fidelity, despawn state, and persistence remain explicit gaps. |
+| Patrols and raids | Pillager fundamentals exist. Patrol formation/spawn ownership and complete raid waves remain separate feature work. |
 
 ---
 
@@ -175,24 +172,24 @@ answered in the tree, and the answer is the correct one:
   for the right reason: a subsystem whose only route to production is a call site somebody must
   remember to add is how this repo's islands get built. `BrainGoal` rides the already-wired
   `goals_for → spawn_species → MobSim::tick` path and cannot be silently dropped.
-- **Expressing villager behaviour as `Goal`s is rejected** on three grounds. (a) Vanilla's villager
+- **Expressing villager behaviour as `Goal`s is rejected** on three grounds. (a) the reference implementation's villager
   logic is memory-shaped: several small behaviours coordinate purely by writing and reading
   `JOB_SITE`/`POTENTIAL_JOB_SITE` memories with expiry — scanning nearby POIs, resolving competing
   claims, taking a job site, and assigning the resulting profession — and
   flags-and-priorities has no equivalent of memory erasure on activity switch, and a
-  translation layer would be a permanent divergence to maintain against every future vanilla port.
+  translation layer would be a permanent divergence to maintain against every future reference port.
   (b) The villager is already routed to a brain in production; a goal-based villager means
   un-routing one of 20 species and forking the roster convention. (c) Schedule-driven activity
   gating already exists on `Brain` and is tested; it has no goal-system analogue.
 - **What is genuinely missing is not the scheduler but its inputs.** This is the same shape as the
-  perception-starvation finding in `docs/plans/mob-ai-roster.md` §1.1: the machinery is fine, the
+  perception-starvation finding in [Mob AI roster: Current production ledger](./mob-ai-roster.md#current-production-ledger): the machinery is fine, the
   seam is starved. `BrainMob` needs day time, POI queries, a hurt signal, nearby-villager and
   wanted-item perception, and bed/job-site interaction; `MobSim` must feed them. Every new
   `BrainMob` method with a permissive default (`None`/`false`/`0`) is a behaviour that silently
   never fires — each unit's negative control below exists for exactly that.
 
 One driver change is required: `BrainGoal` re-evaluates a static candidate list each tick;
-vanilla's villager instead switches activity **by schedule**, re-checking it once per AI tick from
+the reference implementation's villager instead switches activity **by schedule**, re-checking it once per AI tick from
 its own top-level tick method, plus a fixed low-priority behaviour in every package whose only job
 is to keep the current activity in sync with the schedule. `BrainGoal` grows an optional schedule
 mode: when enabled, `tick` calls
@@ -200,23 +197,21 @@ mode: when enabled, `tick` calls
 becomes a `BrainMob` method fed from `WorldState` through `MobSim` (the same route
 `NaturalSpawner::set_day_time` already takes).
 
-### 3.2 POI substrate: a derived index with villager-held claims — not a port of vanilla's own POI manager
+### 3.2 POI substrate: a derived index with villager-held claims — not a port of the reference POI manager
 
 **Decision: a new `PoiIndex` in `lodestone-server` (`poi.rs`), maintained from block state, with
 claim *ownership* living on the claiming villager and persisted through the villager's NBT. The
-vanilla `poi/*.mca` files are a validation oracle, not our storage format.**
+reference `poi/*.mca` files are a validation oracle, not our storage format.**
 
-Requirements, from the consumers: workstation claiming (#243), bed and meeting-point claiming
-(#231), raid-center location (#241), and the POI-count query #243 says to share with iron-golem
-construction. All need: per-position type + capacity + occupancy, queries by type/predicate within a
+Requirements from the consumers are workstation, bed, and meeting-point claims; raid-centre location; and a shared POI-count query for later golem construction. All need: per-position type + capacity + occupancy, queries by type/predicate within a
 radius ("nearest unclaimed job site"), and invalidation when the block is broken or replaced.
 
-- **Why not port vanilla's own POI manager?** It is a persisted-section store with its own region
+- **Why not port the reference POI manager?** It is a persisted-section store with its own region
   persistence, ticket lifecycles, and a distance-ordered stream API — ~800 lines of machinery whose
   persistence half duplicates information that is a pure function of chunk blocks. POI *existence*
-  can always be rebuilt by scanning loaded chunks against the vanilla POI-type table (14 workstations +
+  can always be rebuilt by scanning loaded chunks against the reference POI-type table (14 workstations +
   `home` = beds + `meeting` = bell, capacities 1/1/32, per that table's own registration). Only
-  *claims* are real state, and vanilla itself stores the claim twice (a ticket in the POI region
+  *claims* are real state, and the reference implementation stores the claim twice (a ticket in the POI region
   file, a job-site memory slot on the villager). We store it once, on the villager, and rebuild
   occupancy from mobs at load. No new region format, no double bookkeeping, same observable
   semantics.
@@ -226,11 +221,11 @@ radius ("nearest unclaimed job site"), and invalidation when the block is broken
   `NavigatingMob` the way `tick_with_terrain` hands in `block_state`).
 - **Maintenance:** populate on chunk activation by scanning sections for POI blocks; update from the
   same block-mutation choke the block-entity registry uses. The block→POI-type table is generated
-  from vanilla's own POI-type registration under the `LODESTONE_REGEN=1` generate-or-assert pattern
+  from the reference implementation's POI-type registration under the `LODESTONE_REGEN=1` generate-or-assert pattern
   (it is a jar claim; hand lists have been wrong five times in this repo).
-- **The validation oracle:** parse a vanilla `poi/*.mca` region with an independent gzip+NBT script
+- **The validation oracle:** parse a reference-authored `poi/*.mca` region with an independent gzip+NBT script
   (the `players/data` XP-table precedent), scan the corresponding `region/*.mca` chunks with our
-  table, and require the derived POI set to match vanilla's records — chunks chosen for POI
+  table, and require the derived POI set to match the reference implementation's records — chunks chosen for POI
   *density*, not convenience, and committed as a fixture table with provenance so the gate does not
   depend on `.cache`.
 
@@ -254,7 +249,7 @@ conventions). Every unit ends on screen.
 
 ### Wave 1 — three units, fully parallel
 
-**V1 — POI index and professions (#243).**
+**POI index and professions.**
 *Primary cluster:* new `crates/lodestone-server/src/poi.rs`; new
 `crates/lodestone-server/src/villager.rs` (profession + villager-data state); a generated
 POI-type table in `crates/lodestone-data`.
@@ -263,21 +258,21 @@ POI-type table in `crates/lodestone-data`.
 `mobs.rs` window (villager state on `SimMob`, snapshot metadata); the block-mutation hook.
 *Screen:* spawn-egg an unemployed villager next to a placed lectern → it acquires the librarian
 profession and **its robe changes** (the client's variant-texture path is already live); break the
-lectern → robe reverts. The `AcquirePoi` walk itself is V2's; V1 may assign on proximity.
-*Unblocks:* V2 (claim memories), V10 (raid center), the golem issue's count query (not built here).
+lectern → robe reverts. The POI-acquisition walk itself is villager schedule, commute, and panic; POI index and professions may assign on proximity.
+*Unblocks:* villager schedule, commute, and panic (claim memories), raids and village hero rewards (raid center), the future golem consumer's count query (not built here).
 
-**V3 — merchant screen, client side (#245's UI half).**
+**Merchant screen.**
 *Primary cluster:* new `crates/lodestone-shell/src/container/merchant.rs`; wiring in
 `container/frame.rs` (its own doc names why merchant was excluded — it needs to compose trade-level
 text rather than simply relocate a fixed layout anchor); the `SELECT_TRADE` send on the shell's
 serverbound path.
 *Screen:* against any server that sends `MERCHANT_OFFERS` (a fixture-fed `SessionTrades` works for
-development; the real join once V4 lands), the trade list renders, arrows and prices draw, clicking
+development; the real join once trade generation and merchant session lands), the trade list renders, arrows and prices draw, clicking
 a row sends `SELECT_TRADE`. Zero server files — fully parallel with everything.
 
-**V9 — pillager patrols (#241a).**
-*Primary cluster:* new `crates/lodestone-server/src/patrol.rs` (the `PatrolSpawner` port — 92 lines
-of vanilla, spawn-interval/chance/group-size); the leader-follow goal in
+**Pillager patrols.**
+*Primary cluster:* new `crates/lodestone-server/src/patrol.rs` (a compact patrol-spawn state machine:
+spawn interval, chance, and group size); the leader-follow goal in
 `crates/lodestone-entity/src/ai/goals.rs` + pillager roster registration in `roster/ranged.rs`;
 banner equipment on the leader.
 *Brokered:* the `tick.rs` insertion beside `NaturalSpawner` (one call, same shape); `mobs.rs` only
@@ -286,30 +281,29 @@ if equipment needs a new seam.
 before tick 120000 — read the gate from the data file, not from the old wiki.
 *Screen:* a patrol of pillagers marches past a player in the wild, leader wearing the ominous
 banner.
-*Unblocks:* V10 (wave spawning reuses the group-spawn machinery; captains reuse the banner).
+*Unblocks:* raids and village hero rewards (wave spawning reuses the group-spawn machinery; captains reuse the banner).
 
 ### Wave 2 — two units, parallel with each other
 
-**V2 — schedule, commute, and panic: the villager Brain package (#231's villager half). Landed** —
-see `docs/villager-work-rest-schedule.md`; panic itself landed earlier (`docs/brain-target-acquisition.md`).
+**Villager schedule, commute, and panic — implemented.** See [`villagers.md`](../villagers.md); panic has its own behaviour coverage.
 *Primary cluster:* new `crates/lodestone-entity/src/brain/villager.rs` (the package builder:
-CORE/IDLE/WORK/MEET/REST/PANIC, matching vanilla's own villager package split); new behaviours beside
+CORE/IDLE/WORK/MEET/REST/PANIC, matching the reference implementation's villager package split); new behaviours beside
 `brain/behaviors.rs`; new memory consts in `brain/memory.rs`; the schedule mode in
 `brain/driver.rs`; `BrainMob` widening in `brain/mob.rs` + the `NavigatingMob` fields
 (`ai/navigating_mob.rs`, exclusive for the window).
 *Brokered:* a short `mobs.rs` window — `day_time` feed into the sim, the POI-query closure handed to
 `NavigatingMob`, `brain_for("villager")` switched from `scaffold` to the villager package.
-*Depends on:* V1's `PoiHandle` (can start immediately against a stub query trait; the seam is in the
+*Depends on:* the `PoiHandle` from POI index and professions (can start immediately against a stub query trait; the seam is in the
 entity crate, the impl in the server crate).
 *Scope:* schedule-driven activity switching (`work@2000 / meet@9000 / idle@11000 / rest@12000` from
-`timeline/villager_schedule.json`), `AcquirePoi` walks for job site / bed / bell, commute
+`timeline/villager_schedule.json`), POI-acquisition walks for job site / bed / bell, commute
 (`SetWalkTargetFromBlockMemory`), bed sleep with the sleeping pose at REST, PANIC on hurt
 (`HURT_BY` already exists; `VillagerPanicTrigger`). **Not** golem summoning (§6), **not**
 `HarvestFarmland`/`UseBonemeal` (§6).
 *Screen:* a village of spawned villagers visibly commutes — to workstations at dawn, to the bell at
 9000, to beds at nightfall, lying down; hit one and it flees.
 
-**V4 — trade generation and the merchant session, server side (#245's core).**
+**Trade generation and merchant session.**
 *Primary cluster:* generated trade + trade-set tables in `crates/lodestone-data` (from
 `villager_trade/**.json` and `trade_set/**.json`, generate-or-assert, committed);
 `crates/lodestone-server/src/villager.rs` (offer generation per profession/level, uses/demand
@@ -318,51 +312,51 @@ state); merchant menu slots in `container_click.rs`.
 send offers — the taming dispatch is the template); `encode_merchant_offers` + the merchant
 `OPEN_SCREEN` in `v26-2/src/server_protocol.rs`; routing the stranded `SelectTrade` decode into a
 real `ServerBound` variant (it currently decodes and discards — a two-file join, grep the packet id).
-*Depends on:* V1 (professions decide the table); V3 for pixels — V4 and V3 are the two halves of one
-on-screen outcome and should be co-scheduled, V3 first.
+*Depends on:* POI index and professions (professions decide the table); merchant screen for pixels — trade generation and merchant session are the two halves of one
+on-screen outcome and should be co-scheduled, merchant screen first.
 *Screen:* right-click an employed villager → the trade screen opens with that profession's real
 level-1 offers; executing a trade moves items and increments uses.
 
-### Wave 3 — three units; V5 → V6 sequential (same file), V8 parallel
+### Wave 3 — three units; gossip and reputation → restock, experience, and levelling sequential (same file), wandering trader parallel
 
-**V5 — gossip and reputation (#244 + #246's base).**
+**Gossip and reputation.**
 *Primary cluster:* new `crates/lodestone-server/src/gossip.rs` (the `GossipContainer` port: typed
-entries with per-type weight/max/decay from vanilla's own gossip-type table, daily decay, `transferFrom` with
+entries with per-type weight/max/decay from the reference implementation's gossip-type table, daily decay, value transfer with
 per-transfer decay and the discard threshold of 2, `getReputation` as the weighted sum); its
 integration in `villager.rs` (price adjustment via each trade's `reputation_discount` field —
 note the JSONs carry the discount factor per trade, not a global formula).
 *Brokered:* gossip exchange at MEET — either a sim-side proximity census in the `mobs.rs` window or
-a V2 behaviour hook; prefer the sim-side census (no new `BrainMob` surface).
-*Depends on:* V4 (prices are the screen); V2's MEET activity makes exchange observable but a
+a villager schedule, commute, and panic behaviour hook; prefer the sim-side census (no new `BrainMob` surface).
+*Depends on:* trade generation and merchant session (prices are the screen); the MEET activity from villager schedule, commute, and panic makes exchange observable but a
 proximity census works without it.
 *Screen:* punch a villager, its prices for you rise; trade repeatedly, they fall.
 
-**V6 — restock, XP, and levelling (#245's remainder).** Same owner as V5 or strictly after —
+**Restock, experience, and levelling.** Same owner as gossip and reputation or strictly after —
 both edit `villager.rs`.
 *Scope:* per-trade XP from the trade JSONs, level thresholds and the badge via the
-`VillagerData` level field (V1's metadata variant carries it), restock when working at the claimed
-POI (vanilla's own restock semantics: uses reset, demand recomputed), locked-out offers.
+`VillagerData` level field (the metadata variant from POI index and professions carries it), restock when working at the claimed
+POI (the reference implementation's restock semantics: uses reset, demand recomputed), locked-out offers.
 *Screen:* a sold-out trade shows the red X, the villager works at its site, the trade reopens; the
 badge upgrades on level-up.
 
-**V8 — wandering trader (#240).**
+**Wandering trader.**
 *Primary cluster:* new `crates/lodestone-server/src/wandering_trader.rs` (the
-`WanderingTraderSpawner` port: 1200-tick check, decaying `spawnDelay`, spawn-chance ramp 25→75,
+wandering-trader spawn cycle: 1200-tick check, decaying trader spawn timer, spawn-chance ramp 25→75,
 spawn near a random player, `DespawnDelay` 48000); llama-escort spawn; ware generation from the
-`trade_set/wandering_trader` tables (V4's generated data).
+`trade_set/wandering_trader` tables (generated data from trade generation and merchant session).
 *Brokered:* the `tick.rs` spawner insertion; new persisted fields in `world_state.rs` — match the
-key names and types in the vanilla-written `.cache/mc/survival/world/data/minecraft/
+key names and types in the reference-written `.cache/mc/survival/world/data/minecraft/
 wandering_trader.dat`, and note 26.2 stores this as its own `.dat`, not in `level.dat`.
-*Depends on:* V4 (the merchant session path is shared — vanilla's `AbstractVillager` split; make the
-trading arm take "a merchant", not "a villager"); V3 for pixels.
-*Scope cut:* llamas spawn as escorts but are not leashed (leashing is its own issue) and the
-drink-invisibility defence waits for V7's mob-effects substrate (§6).
+*Depends on:* trade generation and merchant session (the merchant session path is shared through one merchant abstraction; make the
+trading arm take "a merchant", not "a villager"); merchant screen for pixels.
+*Scope cut:* llamas spawn as escorts but are not leashed (leashing is separate work) and the
+drink-invisibility defence waits for the mob-effects substrate from mob effects and curing (§6).
 *Screen:* a trader and two llamas appear near a player on the announced cycle; right-click trades
 from the wandering-trader tables; both despawn later.
 
 ### Wave 4 — two units, parallel
 
-**V7 — mob status effects and curing (#247).**
+**Mob effects and curing.**
 *Primary cluster:* `crates/lodestone-server/src/villager.rs` (conversion state machine) and a
 dedicated **exclusive `mobs.rs` window** for the substrate: `ActiveEffects` on `SimMob` (the type in
 `mob_effects.rs` is already mob-agnostic — a string-keyed `BTreeMap`), ticked in `MobSim::tick`;
@@ -370,23 +364,23 @@ extend `commands/effect_command.rs` to target mobs (its doc already names the ga
 *Scope:* weakness + golden apple on a zombie villager (the interact arm exists from taming) starts
 the randomised 3600–6000-tick timer with the shaking cue (metadata converting flag — oracle first)
 and the sound; conversion spawns a villager **consuming the zombie's `VillagerData` NBT** so the
-profession survives; grants the cured-discount gossip (major-positive, feeding V5's prices). The
+profession survives; grants the cured-discount gossip (major-positive, feeding prices through gossip and reputation). The
 trigger is `/effect give <zv> minecraft:weakness` until splash potions exist (§6).
-*Depends on:* V1 (profession round-trip), V5 (the discount is the visible payoff).
+*Depends on:* POI index and professions (profession round-trip), gossip and reputation (the discount is the visible payoff).
 *Screen:* a shaking, red-swirling zombie villager becomes a villager with the same robes and
 markedly cheaper trades.
 
-**V10 — raids and Hero of the Village (#241b + the HotV slice of #246).**
+**Raids and village hero rewards.**
 *Primary cluster:* new `crates/lodestone-server/src/raid.rs` (`Raid` + `Raids`: omen absorption,
-wave counts by difficulty from vanilla's own wave-group formula and spawn tables, wave spawn placement, victory/
+wave counts by difficulty from the reference implementation's wave-group formula and spawn tables, wave spawn placement, victory/
 defeat, the bell); Bad Omen / Raid Omen as *player* effects (the existing player-effect path
-suffices — vanilla's own omen-absorption rule converts on village entry, raid starts on Raid-Omen
-expiry, **not** the pre-1.21 flow the issue describes); vindicator added to `roster/hostile_melee.rs` (a melee
+suffices — the reference implementation's omen-absorption rule converts on village entry, raid starts on Raid-Omen
+expiry, **not** the pre-1.21 flow an older flow describes); vindicator added to `roster/hostile_melee.rs` (a melee
 raider is cheap; see §6 for who is excluded).
 *Brokered:* `BOSS_EVENT` encode in `v26-2/src/server_protocol.rs` (client HUD already draws it);
-`tick.rs` raid-manager tick; persisted raid state matching the vanilla `raids.dat` fixture; the HotV
-price hook in `villager.rs` (small; sequence behind V6).
-*Depends on:* V9 (group spawn + captain banner), V1 (raid center = POI cluster), V5/V6 (HotV
+`tick.rs` raid-manager tick; persisted raid state matching the reference `raids.dat` fixture; the HotV
+price hook in `villager.rs` (small; sequence behind restock, experience, and levelling).
+*Depends on:* pillager patrols (group spawn + captain banner), POI index and professions (raid center = POI cluster), gossip and reputation, and restock, experience, and levelling (HotV
 discounts visible).
 *Screen:* drink an ominous bottle, enter the village: the boss bar fills, waves of pillagers and
 vindicators attack, the bell rings; win → fireworks, the HotV icon, and discounted trades.
@@ -394,17 +388,18 @@ vindicators attack, the bell rings; win → fireworks, the HotV icon, and discou
 ### Dependency graph
 
 ```
-V1 ──→ V2 ──────────────┐
- │                      ├─→ V7
- ├──→ V4 ──→ V5 ──→ V6 ─┤
-V3 ──┘        │         └─→ V10 ←── V9
-              └──→ V8
+POI index and professions ──→ villager schedule, commute, and panic ──────────────┐
+ │                      ├─→ mob effects and curing
+ ├──→ trade generation and merchant session ──→ gossip and reputation ──→ restock, experience, and levelling ─┤
+merchant screen ──┘        │         └─→ raids and village hero rewards ←── pillager patrols
+              └──→ wandering trader
 ```
 
-Concurrency summary: **V1 ∥ V3 ∥ V9**, then **V2 ∥ V4**, then **V5→V6 ∥ V8**, then **V7 ∥ V10**.
-`mobs.rs` windows, in order: V1 (short), V2 (short), V7 (the substrate window). `server.rs`
-windows: V4 only. `villager.rs` is the new contended file — V4, V5, V6, V7, V10 all touch it, which
-is why V5/V6 share an owner and V7/V10's patches there are small and late.
+Concurrency summary: **POI index and professions ∥ merchant screen ∥ pillager patrols**, then **villager schedule, commute, and panic ∥ trade generation and merchant session**, then **gossip and reputation→restock, experience, and levelling ∥ wandering trader**, then **mob effects and curing ∥ raids and village hero rewards**.
+`mobs.rs` windows, in order: POI index and professions (short), villager schedule, commute, and panic (short), mob effects and curing (the substrate window). `server.rs`
+windows: trade generation and merchant session only. `villager.rs` is the new contended file — trade generation and merchant session, gossip and reputation, restock, experience, and levelling, mob effects and curing, raids and village hero rewards all touch it, which
+is why gossip and reputation plus restock, experience, and levelling share an owner, while the
+patches there for mob effects and curing and for raids and village hero rewards are small and late.
 
 ---
 
@@ -412,26 +407,27 @@ is why V5/V6 share an owner and V7/V10's patches there are small and late.
 
 Shared, from `CLAUDE.md` — restated against these units:
 
-- **Metadata indices come from `EntityDataIndexOracle.java`**
+- **Metadata indices come from the generated entity-metadata index oracle**
   (`crates/versions/26.2/oracle-java/`, *not* `scripts/`), every time: the villager-data index is
   now settled at **19** (§7 item 4 — not the 17 a v26-2 test fixture used to guess; use 19 for the
   `MetadataField::VillagerData` encode arm), the
-  zombie-villager converting flag (V7), raider celebrating / pillager charging (V9, V10), the
-  trader's drinking flag if V8 ever grows it. Index 18 alone has 37 claimants, four of them `BYTE`,
+  zombie-villager converting flag (mob effects and curing), raider celebrating / pillager charging (pillager patrols, raids and village hero rewards), the
+  trader's drinking flag if wandering trader ever grows it. Index 18 alone has 37 claimants, four of them `BYTE`,
   with **no census column separating them** — expect to add a `MetadataClass` rather than reuse a
   guard, as the experience-orb precedent required.
 - **Never decide NBT carry-through from a name list.** `Offers`, `Gossips`, `VillagerData`, `Xp`,
   `ConversionTime`, `DespawnDelay` must be *consumed-or-passed-verbatim* through
   `SavedEntity::from_nbt`'s existing pattern. `Xp` on a villager is an `Int` that has nothing to do
   with a player's `XpTotal`; the type is part of the key.
-- **Port wire formats from `write`/`read`, never from the constructor or field order.** V4's
+- **Port wire formats from `write`/`read`, never from the constructor or field order.** The
+  trade generation and merchant session unit's
   `encode_merchant_offers` is the live instance: our own decode's doc records that five
   `MerchantOffer` fields are big-endian `i32`s, not VarInts — and a round trip through our own
   encode+decode is satisfied by two symmetric misunderstandings. Gate against a byte string derived
-  from vanilla's own merchant-offers packet writer, with pairwise-distinct field values so a
-  transposition cannot survive. Same rule for `BOSS_EVENT` (V10).
+  from the reference implementation's merchant-offers packet writer, with pairwise-distinct field values so a
+  transposition cannot survive. Same rule for `BOSS_EVENT` (raids and village hero rewards).
 - **Permissive `BrainMob` defaults are silent behaviour-killers** (the perception-starvation shape).
-  Every new seam method (V2: `day_time`, POI queries, hurt signal) needs a negative control: the
+  Every new seam method (villager schedule, commute, and panic: `day_time`, POI queries, hurt signal) needs a negative control: the
   behaviour asserted *not* to fire when the input is left at its default, against a real
   `NavigatingMob`, not a test double that overrides everything.
 - **Discriminating inputs.** The schedule gate must sample day times on *both* sides of each
@@ -440,11 +436,11 @@ Shared, from `CLAUDE.md` — restated against these units:
   `reputation_discount` ≠ 0.05 *and* one at 0.05, so a hardcoded factor cannot pass. And the fixture
   corpus must not share one spawn point: POI queries tested only from chunk (0,0) inherit the
   offset-vs-absolute blindness the join-ring bug proved.
-- **Two mutually exclusive requirements are two gates.** V4's "uses increment on trade" and "a
-  maxed-out trade rejects" need different offer states; V7's "conversion preserves profession" and
-  "conversion completes at all" need different timer positions. Don't fold them.
-- **Ends-on-screen is per-unit, not per-arc.** V1 without the metadata encode arm is a green-tested
-  island — the robe change *is* the deliverable. V4 without V3 is bytes into a client that draws
+- **Two mutually exclusive requirements are two gates.** The trade-generation-and-merchant-session requirements — "uses increment on trade" and "a
+  maxed-out trade rejects" — need different offer states; the mob-effects-and-curing requirements — "conversion preserves profession" and
+  "conversion completes at all" — need different timer positions. Don't fold them.
+- **Ends-on-screen is per-unit, not per-arc.** POI index and professions without the metadata encode arm are a green-tested
+  island — the robe change *is* the deliverable. Trade generation and merchant session without the merchant screen are bytes into a client that draws
   nothing — co-schedule them. The `SELECT_TRADE` handler must be greped for by **packet id** in
   `server_protocol.rs` and `server.rs` both — a variant decoding into an ignored arm is stranded
   exactly like a clientbound packet nothing routes.
@@ -454,28 +450,28 @@ Shared, from `CLAUDE.md` — restated against these units:
 
 Unit-specific:
 
-- **V1:** the POI table is a jar claim — generate-or-assert against vanilla's own POI-type registration, and remember
+- **POI index and professions:** the POI table is a jar claim — generate-or-assert against the reference implementation's POI-type registration, and remember
   `leatherworker` matches *cauldrons in any fill state* and `meeting` has capacity 32, not 1. The
   villager profession must **not** be assigned to babies or nitwits once those exist; encode the
   precondition now (profession assignment guarded on `profession == none && !baby`).
-- **V2:** 26.2's schedule is a **data-driven timeline**, not the old `Schedule` registry —
+- **villager schedule, commute, and panic:** 26.2's schedule is a **data-driven timeline**, not the old `Schedule` registry —
   transcribing remembered constants is the exact wrong-source trap; `work` really is 2000 but
   `meet` is 9000 (not the wiki's 10; verify each keyframe from the JSON). `Brain`'s schedule tick
   has a 20-tick evaluation gate — a gate asserting the switch on the exact boundary tick will flake;
   assert within the window.
-- **V4:** trade JSONs whose `gives` carries loot functions (enchanted books, maps, dyed items)
+- **trade generation and merchant session:** trade JSONs whose `gives` carries loot functions (enchanted books, maps, dyed items)
   cannot be built by our item model yet — **filter them out explicitly and count them in the
   generator output** ("N of M trades modelled") rather than silently skipping; a librarian with no
   book trades is a visible, named gap, not a bug report waiting to happen.
-- **V5:** `transferFrom` decays per transfer and discards below 2 — an equal-value fixture cannot
+- **gossip and reputation:** value transfer decays per transfer and discards below 2 — an equal-value fixture cannot
   distinguish merge-max from merge-sum; pick values where the two policies differ (a transfer merge
   keeps the max of the two values, an addition merge sums them with a cap).
-- **V7:** classify the *call site*: conversion must survive a chunk save/load mid-timer
+- **mob effects and curing:** classify the *call site*: conversion must survive a chunk save/load mid-timer
   (`ConversionTime` consumed, not name-listed), and the timer is randomised — the gate pins the rng.
-- **V8:** the spawner persists across restarts — assert against the vanilla
+- **wandering trader:** the spawner persists across restarts — assert against the reference implementation's
   `wandering_trader.dat` key names, and remember the biome exclusion tag
   (`WITHOUT_WANDERING_TRADER_SPAWNS`).
-- **V9/V10:** vanilla's own raid-join check requires an entity's idle time to stay at or under 2400
+- **pillager patrols/raids and village hero rewards:** the reference implementation's raid-join check requires an entity's idle time to stay at or under 2400
   ticks — a raider parked by a test for two minutes silently stops counting toward the wave; keep
   gates short or tick the mob.
 
@@ -483,64 +479,61 @@ Unit-specific:
 
 ## 6. Deliberately not built
 
-- **Piglin Brain packages** (bundled into #231): nether bartering shares only the scheduler with the
+- **Piglin Brain packages** (a separate follow-up): nether bartering shares only the scheduler with the
   villager economy — different sensors (wanted-item), different data (barter loot table), different
-  biome. It gets its own plan once this arc proves the package pattern. Splitting halves #231's
-  surface without orphaning anything.
+  biome. It gets its own plan once this arc proves the package pattern. Splitting narrows the behaviour surface without orphaning anything.
 - **Iron-golem summoning and construction**: the golem has no goal set (it falls to `FALLBACK`) and
   no combat roster; summoning one today produces a decorative wanderer. `PoiIndex`'s count query is
   *designed* for the golem issue's consumer but the consumer is not built here. Golem-summon-on-hurt
-  drops out of #231's scope with it.
-- **Splash/lingering potions**: the vanilla weakness-delivery mechanism is a thrown-projectile
-  system with its own arc. V7 uses `/effect` on mobs as the trigger; the potion projectile joins the
+  remains outside this plan's scope.
+- **Splash/lingering potions**: the reference weakness-delivery mechanism is a thrown-projectile
+  system with its own arc. The mob-effects-and-curing unit uses `/effect` on mobs as the trigger; the potion projectile joins the
   projectile track, not this one.
-- **Trader drink-invisibility and llama leashing** (#240 slices): the first needs V7's mob-effects
-  substrate (revisit after V7 as a small follow-up), the second is the leashing issue's
+- **Trader drink-invisibility and llama leashing** (separate trader slices): the first needs the mob-effects substrate from
+  mob effects and curing (revisit as a small follow-up), the second is the leashing issue's
   entity-attach packet. Neither blocks the trader being visibly alive and tradeable.
 - **Ravager, evoker, and witch raid waves**: raids spawn only implemented raiders (pillager,
-  vindicator). The wave tables are generated in full from vanilla's own raid-wave data with
-  unimplemented types **filtered and counted** — the same named-gap pattern as V4's loot-function
-  trades — so later mob work slots in without touching raid logic.
+  vindicator). The wave tables are generated in full from the reference implementation's raid-wave data with
+  unimplemented types **filtered and counted** — the same named-gap pattern as the loot-function
+  trades in trade generation and merchant session — so later mob work slots in without touching raid logic.
 - **`HarvestFarmland`/`UseBonemeal` work behaviours**: WORK is commute-and-restock here. Farmer
   agriculture needs crop-interaction seams the brain does not have and the economy does not require.
 - **Hero of the Village as a standalone unit**: it is raid-triggered; building it before raids means
-  building a trigger simulator nothing else uses. It lands inside V10 as the victory payoff, priced
-  through V5/V6's existing hooks — honouring #246's "separately-triggered, don't fold into the base
-  formula" in the opposite direction.
-- **A persistence layer faithful to vanilla's own POI manager** — §3.2.
+  building a trigger simulator nothing else uses. It lands inside raids and village hero rewards as the victory payoff, priced
+  through the existing hooks for gossip and reputation, and restock, experience, and levelling — keeping the reward trigger separate from the base reputation formula in the opposite direction.
+- **A persistence layer faithful to the reference POI manager** — §3.2.
 
 ---
 
 ## 7. Could not be settled without running code
 
 1. **Whether the survival oracle's `entities/*.mca` contain villagers with `Gossips`/`Offers`** —
-   the village census (1 village) makes it plausible. First task of V5: parse the entity regions
-   with an independent script; if villagers are there, their gossip NBT is a vanilla-written fixture
+   the village census (1 village) makes it plausible. The first task for gossip and reputation is to parse the entity regions
+   with an independent script; if villagers are there, their gossip NBT is a reference-written fixture
    and should be committed with provenance like the XP table was.
 2. **The exact merchant `OPEN_SCREEN` interplay** — whether our client opens the (not-yet-built)
-   merchant screen cleanly on the menu-type id alone, and what it does *today* (V3's first
+   merchant screen cleanly on the menu-type id alone, and what it does *today* (the first merchant-screen
    experiment; the container-screen plumbing suggests a generic fallback but nothing proves it).
 3. **Pillager combat fidelity for patrols/raids** — the ranged roster registers pillager, but the
    projectile *damage* path's history ("hit detection not implemented" in the roster plan) needs
-   re-verification at V9 dispatch; a patrol that cannot hurt anyone still satisfies V9's screen
+   re-verification when pillager patrols dispatch; a patrol that cannot hurt anyone still satisfies the pillager-patrols screen
    deliverable, a raid that cannot is not a raid.
 4. **The villager-data metadata index** — **settled: 19, not 17.** The existing v26-2 test fixture's
    `17` was an unverified guess; the committed `EntityDataIndexOracle` dump
    (`crates/versions/26.2/tests/support/entity_data_index_jvm.txt`) records
-   `19 Villager.DATA_VILLAGER_DATA 18 VILLAGER_DATA` — index **19**, serializer 18
-   (`VILLAGER_DATA`). `ZombieVillager.DATA_VILLAGER_DATA` sits at index **20** (its own
-   `DATA_CONVERTING_ID`/`DATA_VILLAGER_DATA_FINALIZED` occupy 19/21 instead — the two
+   the villager-data row at index 19 with serializer 18 — index **19**, serializer 18
+   (`VILLAGER_DATA`). The zombie-villager metadata accessor sits at index **20**; its neighbouring
+   converting/finalised accessors occupy 19/21 instead — the two
    species never share a concrete type, so this is the same mutual-exclusion shape as
    every other index-18-class collision in this file, not a real ambiguity).
    `crates/versions/26.2/src/packets/metadata.rs`'s decode is unaffected by the wrong
    guess — its `read_entity_metadata` matches `Value::Villager` by **serializer alone**,
    not by index (see that match arm's own comment), so the fixture's `17` decoded
-   correctly by coincidence. The **encode** side (this plan's `MetadataField::VillagerData`
-   variant, not yet built) must use **19**, or a real vanilla client receiving our
-   `SET_ENTITY_DATA` would apply the payload to whatever `AgeableMob.AGE_LOCKED`-adjacent
+   correctly by coincidence. The **encode** side uses **19**, or a real reference client receiving our
+   `SET_ENTITY_DATA` would apply the payload to whatever the incompatible adjacent
    accessor it has registered at 17 instead, which is a type mismatch on a real client.
    The fixture in `metadata.rs`'s `villager_data_raises_villager_variant` test now pushes
    `19` for this reason, with a comment explaining why the index was decorative for that
-   particular test but not for the encoder V1 will write.
-5. **How many trade JSONs carry loot functions** (V4's named gap) — a one-line `grep -rl` over
+   particular test but not for the production metadata encoder.
+5. **How many trade JSONs carry loot functions** (the named gap in trade generation and merchant session) — a one-line `grep -rl` over
    `villager_trade/` at dispatch time; the count goes in the generator's output either way.

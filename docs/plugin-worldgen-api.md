@@ -2,25 +2,22 @@
 
 ## What it is
 
-The plugin-facing seam that answers three issues Paper's own API covers — `ChunkGenerator`/
-`BiomeProvider` (#132), per-world dimension creation (#134), and structure-template pasting (#136) —
-scoped against what `lodestone-worldgen`/`lodestone-server` actually are today: a version-free,
-oracle-verified terrain interpreter (see `docs/worldgen.md`'s own parity discipline) called imperatively from plain
-functions, never installed as a bevy `System`.
+The plugin-facing seam covers custom chunk generators and biomes, primary-world dimension properties,
+and structure-template placement. It is scoped to `lodestone-worldgen` and `lodestone-server`: a
+version-free, oracle-verified terrain interpreter (see `docs/worldgen.md`'s parity discipline) called
+imperatively from plain functions, never installed as a bevy `System`.
 
-Three pieces, each landed:
+It has three pieces:
 
 * [`lodestone_worldgen::generator::ChunkGenerator`] — a `dyn`-dispatched trait a plugin implements
-  instead of the verified pipeline, carrying no correctness guarantee (exactly Bukkit's own
-  contract).
+  instead of the verified pipeline, carrying no terrain-parity guarantee.
 * [`lodestone_server::plugin_dimension::DimensionRegistry`] — a plugin registers a generator plus
   server-decided dimension properties under a key and gets back a real
   [`lodestone_server::ChunkSource`].
 * [`lodestone_server::structure_placement::place_structure_live`] — pastes a
-  `lodestone_worldgen::structure::template::StructureTemplate` into an already-generated,
-  live/persisted world; generation-time placement (a plugin generator calling
-  `StructureTemplate::place` on its own working grid) needed no new API at all, since that primitive
-  was already public.
+  `lodestone_worldgen::structure::template::StructureTemplate` into an existing,
+  live/persisted world; generation-time placement calls the public
+  `StructureTemplate::place` primitive on the generator's working grid.
 
 `crates/plugins/lodestone-void-world` is the reference plugin exercising all three together, and its
 `tests/drives_a_real_dimension_through_a_joined_client.rs` is the end-to-end proof: a real
@@ -28,54 +25,51 @@ Three pieces, each landed:
 the plugin's terrain and both structure placements — not a test calling the plugin's own functions
 directly.
 
-## Issue #132's decision
+## Generator dispatch
 
 **A plugin generator lives behind its own `dyn ChunkGenerator` trait, dispatched imperatively from
-plain functions — never installed as a bevy `System`.** This was already the shape a prior pass on
-this issue committed to (see the issue's own decision comment); what was missing was the trait itself
-and something to dispatch it into. Both now exist.
+plain functions — never installed as a bevy `System`.** This matches the worldgen execution model:
+generation is plain function dispatch rather than a Bevy schedule.
 
 The trait's output is [`lodestone_worldgen::dense_grid::DenseBlockGrid`] — this crate's own existing
-"dense block field over a box" vocabulary, already what every real generator's composition stage
-converges on internally — **not** [`lodestone_worldgen::overworld::GeneratedColumn`], which carries a
+"dense block field over a box" vocabulary used by every real generator's composition stage — **not**
+[`lodestone_worldgen::overworld::GeneratedColumn`], which carries a
 4×4×4 biome grid, generation-time block entities, a `MOTION_BLOCKING` heightmap snapshot and stage
 timings: fields a demo/plugin generator has no business answering honestly. Forcing a plugin to fill
 all of that would make the simplest possible generator (a flat floor, a checkerboard) carry
-placeholder data for fields nothing reads meaningfully.
+placeholder data for fields that nothing reads meaningfully.
 
 ```rust
 pub trait ChunkGenerator: Send + Sync {
     fn min_y(&self) -> i32;
     fn height(&self) -> i32;
     fn generate(&self, cx: i32, cz: i32) -> DenseBlockGrid;
-    fn biome(&self) -> &str { "minecraft:plains" } // default: vanilla's own FixedBiomeSource fallback
+    fn biome(&self) -> &str { "minecraft:plains" } // default for a uniform plains biome
 }
 ```
 
-**The native proof, not just a plugin-only trait:** `lodestone_worldgen::flat::FlatLevelSource` — a
-real, jar-verified generator already serving vanilla superflat/void worlds — implements
-`ChunkGenerator` too. This is one dispatch point serving both a verified native generator and an
-unverified plugin one, which is what makes the "seam the vanilla interpreter also implements" half of
-the original decision comment true rather than aspirational.
+**Native and plugin implementations share one dispatch point:**
+`lodestone_worldgen::flat::FlatLevelSource`, the jar-verified generator for superflat and void worlds,
+also implements `ChunkGenerator`. The trait therefore serves both a verified built-in generator and an
+unverified plugin generator.
 
 `OverworldGenerator`/`NetherGenerator`/`EndGenerator` do **not** implement this trait, and that is
 deliberate, not a gap: their own output types (`GeneratedColumn`/`NetherColumn`/`EndColumn`) carry data
 `DenseBlockGrid` cannot represent, and bridging them "lossily" into this trait would silently discard
 real, verified data (structure starts, generation-time block entities) at exactly the boundary a
 plugin author would reasonably expect that data to survive. If a future need arises for a plugin to
-*wrap* one of the verified generators (a "vanilla terrain plus one extra rule" generator), that is a
+*wrap* one of the verified generators (terrain plus one extra rule), that is a
 new, wider trait — not a reason to widen this one.
 
-## Issue #134's decision — and its honest boundary
+## Dimension registration boundary
 
 **`crate::dimension::Dimension` stays closed.** Its own doc says so explicitly: every variant needs a
 generator, a chunk store, a wire `dimension_type` holder id and a travel rule, and the holder id is
 published from a **fixed, compile-time NBT table** (`DIMENSION_TYPE_REGISTRY` in the v26-2 protocol
 family — four entries, `overworld`/`overworld_caves`/`the_end`/`the_nether`, each a literal NBT byte
 array). Making `Dimension` open-ended would mean either wiring a genuinely new wire `dimension_type`
-registry entry through the protocol family (a version-crate change: `crates/versions/26.2`, which sits
-outside both `lodestone-worldgen`'s and `lodestone-server`'s own seam and outside this issue's file
-ownership) or silently mis-describing a plugin dimension's real properties to a joining client — worse
+registry entry through the protocol family (a version-crate change in `crates/versions/26.2`, outside
+the worldgen and server seam) or silently mis-describing a plugin dimension's real properties to a joining client — worse
 than not offering it at all.
 
 So [`DimensionRegistry`] is a **separate, additive** mechanism, not a fourth `Dimension` variant:
@@ -103,10 +97,9 @@ impl DimensionRegistry {
 }
 ```
 
-**What this closes:** issue #132's decision comment named two blockers beyond the missing trait —
-"no per-world generator selection mechanism exists" and custom dimension registration itself being an
-open gap. Both are closed here with **zero changes** to `crate::integrated`:
-`IntegratedServer::open_in_memory_with_entities`/`open_persistent_with_mobs` are already generic over
+`DimensionRegistry` provides per-world generator selection and custom-dimension registration with
+**zero changes** to `crate::integrated`:
+`IntegratedServer::open_in_memory_with_entities`/`open_persistent_with_mobs` are generic over
 `S: ChunkSource + 'static`, and `DimensionRegistry::chunk_source(key)` hands back exactly that — pass
 it in place of `overworld_chunk_source(seed)` to open a **primary** world backed by a plugin's
 generator. `crates/plugins/lodestone-void-world`'s own integration test does exactly this.
@@ -115,8 +108,7 @@ generator. `crates/plugins/lodestone-void-world`'s own integration test does exa
 portal-travel dimension alongside a running Overworld the way the Nether/End are. That needs the wire
 `dimension_type` registry work described above — a real, scoped, future piece of work, not something
 silently half-built here. Until it lands, a plugin's custom dimension is a **primary-world** generator
-choice (the dominant real-world use anyway — Bukkit's `ChunkGenerator` is most commonly handed to
-`WorldCreator` for exactly this), not a Nether-style secondary destination.
+choice, not a Nether-style secondary destination.
 
 **Gotcha:** `DimensionProperties.min_y`/`height`/`logical_height` and the generator's own
 `min_y()`/`height()` have no compile-time link — `PluginChunkSource` reads vertical bounds from the
@@ -138,15 +130,15 @@ registry.register(PluginDimension {
 });
 ```
 
-`DimensionProperties::default()` is vanilla's own `minecraft:overworld` entry — the safest default for
-a plugin dimension that wants ordinary player rules and differs from vanilla only in its terrain.
+`DimensionProperties::default()` describes the standard `minecraft:overworld` player rules, making it
+the safest default for a plugin dimension that differs only in terrain.
 
-## Issue #136's decision
+## Structure placement
 
-Two separate placement moments, both now real:
+Two placement moments use different APIs:
 
-**Generation-time** needed no new API. `lodestone_worldgen::structure::template::StructureTemplate::place`
-was already public and already writes into a `DenseBlockGrid` — the exact type a `ChunkGenerator`
+**Generation-time** placement uses `lodestone_worldgen::structure::template::StructureTemplate::place`,
+which writes into a `DenseBlockGrid` — the exact type a `ChunkGenerator`
 implementation already holds while building its column. A plugin generator calls it directly:
 
 ```rust
@@ -156,10 +148,8 @@ if cx == 0 && cz == 0 {
 }
 ```
 
-**Live/post-generation** was the real gap CLAUDE.md's own context named: "`StructureTemplate::place`
-writes into a generation-time `DenseBlockGrid`, called only from chunk-generation code — there is
-still no runtime entry point a plugin (or anything else) can call outside generation." That entry
-point is [`lodestone_server::structure_placement::place_structure_live`]:
+**Live/post-generation** placement uses
+[`lodestone_server::structure_placement::place_structure_live`]:
 
 ```rust
 pub fn place_structure_live(
@@ -178,16 +168,15 @@ through `ChunkSource::set_block` — the same edit path a player's own block pla
 the paste persists and reports through `column()`/`block_state()` exactly like any other edit.
 
 **Building a template without an `.nbt` file:** `StructureTemplate::from_blocks(size, palette, blocks)`
-is a new, plain constructor (alongside the existing `parse`/`empty`) for a plugin building a structure
+is a plain constructor (alongside `parse`/`empty`) for a plugin building a structure
 programmatically rather than shipping a file — used by both `lodestone-void-world`'s generation-time
 landmark and its live-placed marker. A template that needs an attached NBT compound (a jigsaw block, a
 chest's loot-table reference) still needs `StructureTemplate::parse` — `from_blocks` gives every block
 `nbt: None`.
 
-**Where templates come from otherwise:** the 1212 bundled vanilla templates are already reachable via
+**Other template sources:** the 1212 bundled templates are reachable via
 `lodestone_server::embedded_structure_template(id)`/`embedded_structure_template_ids()`, and a
-plugin's own `.nbt` bytes go through `StructureTemplate::parse(bytes)` — both pre-existing, public, and
-untouched by this work.
+plugin's own `.nbt` bytes go through `StructureTemplate::parse(bytes)`.
 
 ## What consumes this
 
@@ -215,11 +204,11 @@ untouched by this work.
 
 * **Adding a field to `DimensionProperties`**: it is a plain struct with a `Default` impl reachable
   from one file (`crates/lodestone-server/src/plugin_dimension.rs`) — no wire encoding depends on it
-  today (see the honest-boundary note above), so a new field is free to add and does not need touching
+  (see the honest-boundary note above), so a new field is free to add and does not need touching
   anywhere else.
 * **A generator that wants per-column (not per-generator) biome variety**: `ChunkGenerator::biome`
-  takes `&self` with no `cx`/`cz` — this was a deliberate simplicity choice for a demo/plugin
-  generator, matching vanilla's own `FixedBiomeSource` fallback. A generator needing real per-column
+  takes `&self` with no `cx`/`cz` — this is an intentional simplicity choice for a demo/plugin
+  generator. A generator needing real per-column
   biome variety should widen the trait method's signature (a breaking change to the one impl,
   `FlatLevelSource`, and to every plugin) rather than adding a second, uniform-only method — the
   existing repo lesson about a defaulted trait method plus an unforwarding wrapper being an island
@@ -231,9 +220,9 @@ untouched by this work.
   dynamically-supplied entry instead of the fixed four, plus `crate::dimension::Dimension`'s travel
   machinery to accept a non-enum destination key. Both are real, scoped, future work — not attempted
   here, since both sit outside `lodestone-worldgen`/`lodestone-server`'s own seam.
-* **A plugin generator that wants to reuse verified vanilla terrain plus one extra rule** (a "vanilla
-  overworld but ores are diamond" generator): not served by `ChunkGenerator` today — see the note under
-  issue #132 above on why `OverworldGenerator` deliberately does not implement this trait. That needs
+* **A plugin generator that wants to reuse verified terrain plus one extra rule** (for example,
+  additional ore generation): not served by `ChunkGenerator`; `OverworldGenerator` deliberately does
+  not implement this trait because its output has data `DenseBlockGrid` cannot represent. That needs
   its own, wider seam, not a lossy bridge bolted onto this one.
 
 ## Configuration
@@ -246,7 +235,7 @@ populates — nothing reads an env var or a config file here.
 `lodestone_worldgen::generator` depends only on `lodestone_worldgen::dense_grid` and
 `lodestone_worldgen::flat` (for the native `ChunkGenerator` impl) — no `lodestone-server` dependency,
 keeping the trait itself version-free and server-free. `lodestone_server::plugin_worldgen`/
-`plugin_dimension`/`structure_placement` depend on `lodestone-worldgen` (already a normal dependency of
+`plugin_dimension`/`structure_placement` depend on `lodestone-worldgen` (a normal dependency of
 `lodestone-server`) and on `crate::chunk::{ChunkSource, ChunkColumn}`. `crates/plugins/lodestone-void-world`
 depends on both path-wise, plus `lodestone-client`/`lodestone-v26-2`/`lodestone-model`/`lodestone-data`/
 `uuid`/`tokio` as dev-dependencies for its end-to-end gate only — its own library has no dependency on
@@ -257,7 +246,7 @@ follows.
 
 - [`plugin-api.md`](plugin-api.md) — the bevy-`Plugin` client-side surface, including its
   "Registration (native tier)" section (how a plugin gets into the client's `App`). Worldgen is
-  deliberately **not** part of that surface (see issue #132's decision and `docs/worldgen.md`'s parity
+  deliberately **not** part of that surface (see `docs/worldgen.md`'s parity
   discipline): a `DimensionRegistry` is populated by plain function calls, not `App::add_plugins`, so
   this document is worldgen's own, separate plugin seam.
 - [`worldgen.md`](worldgen.md) — the verification/parity discipline this document's whole

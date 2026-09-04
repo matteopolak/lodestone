@@ -139,9 +139,9 @@ the same way a real Bukkit/Paper plugin does it too.
 
 | kind | examples | notes |
 |---|---|---|
-| non-player entity components | `Position`, `Rotation`, `Velocity`, `Health`, `EntityFlags`, `Equipment`, … | mobs, dropped items, projectiles; see [`entity-components.md`](./player-simulation.md) |
-| local player components | `PhysicsState`, `MovementIntent`, `LookIntent`, `SelectedSlot`, `Flying`, `Dead` | see [`local-player-components.md`](./player-simulation.md) |
-| session/HUD components | scoreboard, tab list, boss bar, health/food/experience, menu/phase | see [`session-components.md`](./player-simulation.md) |
+| non-player entity components | `Position`, `Rotation`, `Velocity`, `Health`, `EntityFlags`, `Equipment`, … | mobs, dropped items, projectiles; see [Player simulation](./player-simulation.md) |
+| local player components | `PhysicsState`, `MovementIntent`, `LookIntent`, `SelectedSlot`, `Flying`, `Dead` | see [Player simulation](./player-simulation.md) |
+| session/HUD components | scoreboard, tab list, boss bar, health/food/experience, menu/phase | see [Player simulation](./player-simulation.md) |
 | chunk world | `ChunkWorld` (read) / `ChunkWorldWrite` (the only write route) | a `Clone`-able handle over one shared `lodestone_world::World`; the read/write split means `Res<ChunkWorld>` compiles nowhere that mutates the store |
 | block read/write | `block_state_at`, `set_block_with_physics`, `fill_region`/`fill_region_capturing` | see "Bulk world edits" below |
 | outbound intent | `ActionQueue(pub Vec<ClientAction>)`, drained every tick | never push `BlockAction`/`UseItemOn` with a hand-fabricated prediction sequence — that number belongs to the mining/placement predictors, and forking it desyncs them |
@@ -412,11 +412,9 @@ a component itself, so no extra tool is required on a plugin author's `PATH`.
 
 ## See also
 
-- [`docs/entity-components.md`](./player-simulation.md) — the full non-player entity component set and
-  the three-state encoding that governs when a component should be absent versus present-with-`None`.
-- [`docs/local-player-components.md`](./player-simulation.md) — the local player's component set.
-- [`docs/session-components.md`](./player-simulation.md) — scoreboard/tab-list/boss-bar/health/food/
-  experience/menu state as components.
+- [Player simulation](./player-simulation.md) — the full entity, local-player, and session/HUD
+  component sets, including the three-state encoding that governs when a component should be absent
+  versus present-with-`None`.
 - [`docs/packet-wiring.md`](./packet-wiring.md) — `ActionVetoes` and `EgressFilters`, the pre-check veto
   and outbound-filter layers that answer "how does a plugin stop an action" without wire access.
 - [`docs/autonomous-navigation.md`](./autonomous-navigation.md) — `lodestone-autopilot`, the native

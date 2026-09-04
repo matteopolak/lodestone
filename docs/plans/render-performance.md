@@ -50,7 +50,8 @@ batching are the whole plan.
 
 **The recorded magnitude.** The deleted diagnostic's commit message (`45a93e4`) is the one
 measured figure: *"model pipeline draws 931 sections with 441k quads"* at the default
-render distance 8 (289–361 resident columns, per `docs/mesh-fill-rate.md`). That is
+render distance 8 (289–361 resident columns; the ignored `mesh_fill_rate` GPU harness keeps
+the fill-rate control observable). That is
 **~2.6–3.2 non-empty sections per column** (~474 quads/section) on default terrain — fully
 solid underground sections and all-air sky sections mesh to nothing and are never uploaded
 (`gpu/sections.rs`'s `upload_resident` drops empty geometry). Projections that matter:
@@ -66,7 +67,7 @@ conclusion — submission scales quadratically with rd and is the dominant term 
 unchanged. Terrain with caves/mountains raises the density, so treat 3/col as a floor, not
 a constant, and re-measure with the U1 counters before quoting any of these.
 
-**The mesher is not the bottleneck** (`docs/mesh-fill-rate.md`, unchanged at HEAD): 1.000
+**The mesher is not the bottleneck:** the ignored `mesh_fill_rate` GPU harness records 1.000
 mesh events per section, 0 of 26,168,839 frames with a full queue; post-`bdf93a28` fill is
 ~17 ms/column, linear. This plan does not touch meshing throughput.
 
@@ -474,12 +475,10 @@ not `HashMap` order anymore). The intra-section resort
 (`SortViewpoint`/`TranslucentMesh`) described next is still unwired, deliberately — see that
 commit's comment on why the cross-section half was judged the one producing the visible artefact.
 
-Verified current state as of 2026-08-07 (the cross-section half below is now stale, see above):
-`SortViewpoint`/`TranslucentMesh` are implemented and match
-vanilla's `TranslucencyPointOfView`, but production water never resorts (static index
-order from mesh time) and cross-section draw order is **HashMap iteration order**
-(in `render_inner`'s water loop) — both halves of vanilla's ordering are absent, which is a live visual
-parity bug at some camera angles today, independent of performance.
+**Current residual.** `SortViewpoint`/`TranslucentMesh` are implemented, but production water
+keeps mesh-time index order within each section. `render_inner` already sorts water sections
+back-to-front, so the remaining intra-section resort is a visual-parity gap at some camera
+angles, independent of performance.
 
 * **Cross-section order:** sort visible water sections back-to-front by section-center
   distance each frame. Cost is `O(visible_water · log)` — bounded *because* U1–U3 shrank
@@ -541,7 +540,7 @@ invalidation grid, frustum/walk
 decoupling, source-direction merge, frustum offset, and the >60-block ray-march;
 its own in-view-distance helper's exact expression; its own level renderer's translucent
 resort cadence; its own fog-setup routine's span/start/end (via `fog.rs`'s quoted source, cross-checked
-against `docs/fog.md`).
+against [Lighting and sky](../lighting-and-sky.md#fog)).
 
 **Assumed (marked hypotheses, to be measured by the units' own counters):** the ~3
 non-empty sections/column density generalizes beyond the one recorded fill (it is
@@ -570,9 +569,8 @@ anywhere above.
 4. **4,489 at rd 32 is the *streamed* square** (`view_radius = rd+1`); vanilla would draw at
    most the 3,461-column circle of U2 — the briefing's column count silently assumes the
    no-distance-cull status quo it is arguing against.
-5. **The mesher-not-bottleneck figures check out**, with the standing caveat already
-   recorded in `docs/mesh-fill-rate.md`: the old 761 ms / 15.2× numbers are wrong-multiplier
-   and must not be requoted (the briefing didn't; noting because this plan cites that doc).
+5. **The mesher-not-bottleneck figures check out**, with one standing caveat: the old
+   761 ms / 15.2× numbers use the wrong multiplier and must not be requoted.
 6. **`heap_bytes`**: still present at HEAD exactly as described; not planned around here.
 7. **Not in the briefing at all, and the biggest fact in this plan:** the culling/
    submission stack the briefing asks to be designed **already exists in
@@ -587,8 +585,8 @@ anywhere above.
 This plan says of its projected draw counts: *"re-measure with the U1 counters before quoting
 any of these"*. The submission term has now been measured **before** U1 exists, so each unit's
 expected win can be stated in instructions rather than only in section counts.
-`crates/lodestone-shell/tests/client_chunk_cycles.rs` (`d7b823f6`), method and controls in
-[`../client-chunk-cycles.md`](../chunk-lifecycle.md), record in `DESIGN.md` §12.120.
+`crates/lodestone-shell/tests/client_chunk_cycles.rs`, with method and controls in
+[Chunk lifecycle](../chunk-lifecycle.md).
 
 | quantity | measured |
 |---|---|
@@ -624,7 +622,7 @@ Three consequences for the units above:
 **The plan's biggest miss, from the same measurement:** this document scopes itself to
 submission and culling, which is correct for *frame* cost — but the client chunk path's
 one-off cost is **96.3% meshing** (112,245,079 instructions per column, of which `mesh_fluids`
-is 58.8% at 13,708 instructions per fluid cell). `docs/mesh-fill-rate.md`'s
-"the mesher is not the bottleneck" is a statement about the mesher not being the *rate limiter*
+is 58.8% at 13,708 instructions per fluid cell). The fill-rate control's
+"the mesher is not the bottleneck" result is a statement about the mesher not being the *rate limiter*
 for filling the view, and it is true; it does not mean meshing is not where the CPU work is.
 Both statements hold, and this plan should not be read as implying the second.

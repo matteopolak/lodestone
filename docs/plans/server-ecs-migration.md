@@ -1,25 +1,23 @@
-# Plan: migrating `lodestone-server` onto its own `bevy_ecs::World` (issue #433)
+# Plan: migrating `lodestone-server` onto its own `bevy_ecs::World`
 
 ## What it is
 
-The phased migration plan that turns [`docs/server-ecs.md`](../dedicated-server.md)'s decision record into
+The phased migration plan that turns [The integrated and dedicated server](../dedicated-server.md)'s decision record into
 dispatchable work: how today's `Arc<Mutex<_>>`-and-`tokio::spawn` server becomes a tick-thread-owned,
-unlocked `bevy_ecs::World` whose core subsystems are themselves bevy plugins. Written 2026-08-04
-against a re-verified tree; the state census in "The census" below is the core deliverable, and
+unlocked `bevy_ecs::World` whose core subsystems are themselves bevy plugins. The state census in
+"The census" below is the core deliverable, and
 every phase names its files, its choke-point patch, its gate, its negative control, its performance
 gate, and the downstream epic it unblocks.
 
-This plan does **not** redesign the architecture. Two `World`s, no lock on the server's, Fabric's
-client/server entrypoint split, and clause 4's inversion are settled by `docs/server-ecs.md` and
-issue [#433](https://github.com/matteopolak/lodestone/issues/433). Read that document first.
+This plan does **not** redesign the architecture. Two `World`s, no lock on the server's, the
+client/server entrypoint split, and clause 4's inversion are settled by
+[The integrated and dedicated server](../dedicated-server.md). Read that decision record first.
 
-## Verified current state (read this before trusting any phase below)
+## Current architectural constraints
 
-Everything here was re-checked against the tree for this pass, per CLAUDE.md rule 2. Line numbers
-drift under concurrent editing — treat them as "was here at 2026-08-04", and re-grep the symbol.
+Re-find symbols before editing; line numbers drift under concurrent changes.
 
-**Status note, 2026-08-15: Phase 0 has landed, Phase 1 has not — "nothing has landed" below is
-stale.** Re-verified against the tree: `crates/lodestone-server/Cargo.toml` now carries `bevy_app`
+`crates/lodestone-server/Cargo.toml` carries `bevy_app`
 and `bevy_ecs` as real dependencies (`workspace = true`, both), and
 `crates/lodestone-server/src/ecs/{mod,plugin,schedules,gate}.rs` exist. `ServerCorePlugin`
 (`ecs/plugin.rs`) matches this plan almost exactly — it installs `ServerTick`/`ServerTickWitness`
@@ -30,34 +28,20 @@ table, word-for-word what this plan's Phase 0 entry specifies), opens `ServerBoo
 `IntegratedServer::open_in_memory_with_mobs` and the LAN constructor both call
 `crate::ecs::ServerApp::bootstrap()` synchronously (`integrated.rs`), and each keeps the returned
 `ServerTickWitness` in `Self` (`server_tick: Option<ServerTickWitness>`), so `ServerBoot` provably
-runs once per server — issue #37's own witness-counter idea (see that plugin's doc comment,
-"the exact property issue #37 … lacks"), applied here on the server side before this plan's own
-Phase 0 gate description was written up.
+runs once per server. The witness is the production gate for one bootstrap per server.
 
-**Phase 1 (the tick loop actually driving the `World`) is still not landed**, and the code says so
-itself: the `World` `ServerApp::bootstrap()` returns is bound to `let _server_world = server_world;`
-inside the tick task and never threaded into `run_tick_loop`/`run_tick_loop_with_weather`
-(`tick.rs` — `grep -n run_schedule crates/lodestone-server/src/tick.rs` is empty). The comment right
-above that binding names its own successor: *"Phase 1 replaces this binding with a `&mut` argument
-to `run_tick_loop` and runs `GameTick` once per iteration."* So `GameTick` runs exactly once, at
-construction, and never again — Phase 0's own "deliberately an island for exactly one phase" is
-real and still true today, not merely a stated intention.
+The tick loop must own the `World` returned by `ServerApp::bootstrap()` and call
+`run_schedule(GameTick)` once per iteration. Constructing the schedules without executing them is
+an island: `ServerBoot` runs at construction but simulation resources do not advance.
 
-**One census-driven "island" this plan named is independently closed, for an unrelated reason.**
-"LAN hosting spawns no tick loop" (§"Three defects the census surfaced") is no longer true: issue
-#439 unified `bind`'s LAN path onto the same `tick::run_tick_loop_with_weather` call
-`open_in_memory_with_mobs` already used (`integrated.rs`'s own comment, "Issue #439 added
-`[tick::run_tick_loop]`, leaving a single call site"). Phase 3's broadcast-egress replacement of the
-single-consumer `BlockTickFeed`/`ExplosionFeed` (rows 7–8) is still open, but its stated *reason* —
-"LAN gets no tick loop at all" — no longer holds; both server entry points already share one loop
-and one `ServerApp::bootstrap()` call shape.
+The LAN and in-memory entry points share `tick::run_tick_loop_with_weather` and the
+`ServerApp::bootstrap()` call shape. Broadcast egress is still required because a
+single-consumer feed cannot replicate one simulation result to every connection.
 
-**Confirmed as the decision record describes, at the time this section was first written:**
+**The following constraints shape the migration:**
 
-- `crates/lodestone-server/Cargo.toml` had **no** `bevy_app`, `bevy_ecs`, or `lodestone-ecs`
-  dependency. That has since changed — see the status note above. `lodestone-world` appears only in
-  `Cargo.toml`, under `[dev-dependencies]` — so the migration adds it as a *real* dependency, which
-  is a genuine new graph edge, not a promotion of an existing one.
+- `bevy_app` and `bevy_ecs` are real server dependencies. `lodestone-world` must be a real
+  dependency wherever `World`-backed systems need it.
 - `ChunkSource::set_block` takes **`&self`** (`crates/lodestone-server/src/chunk.rs`), with
   interior mutability via `OverworldChunkSource.edits: Mutex<HashMap<(i32, i32), ChunkColumn>>`
   (`chunk.rs`). That `&self` is the mechanism that makes the shipped straddle possible: any
@@ -72,43 +56,31 @@ and one `ServerApp::bootstrap()` call shape.
   `World::run_schedule(...)` is a plain synchronous call on the calling thread and there is no
   second executor for tokio to reconcile with.
 
-**Staleness corrections — claims that were true when written and are not now:**
+**Documentation and coordination constraints:**
 
-- **`docs/server-tick-loop.md` needs no correction note; it already has one.** The dispatch brief for
-  this plan asked me to flag that document as still carrying the superseded "do not link an ECS into
-  the server" recommendation. It does not: §45 is a full, dated reversal
-  (`## Recommendation reversed: `lodestone-ecs` is now linked into the server`) that walks all three
-  original blocking legs and records which are void and which are preserved. **No edit is needed, and
-  a future agent should not add a second correction note on top of the existing one.** Recorded here
-  because a brief that says "flag the stale doc" is itself the stale claim — the exact shape rule 2
-  is about.
-- **`docs/server-ecs.md`'s `CorePlugin` citation in `plugin.rs` had a stale line range.** `CorePlugin`
+- [The integrated and dedicated server](../dedicated-server.md) records the decision to link ECS into the server; do not duplicate that
+  decision here.
+- `CorePlugin`
   inserts `FrameClock` via `init_resource`, and the `Update`
   `FrameSet::{Input, Interpolate, Camera, Terrain}` chain follows it. The *claim* is correct
-  and load-bearing; only the line range rotted. More importantly, `CorePlugin` also inserts
+  and load-bearing. More importantly, `CorePlugin` also inserts
   **`WorldTime`** and **`LockHolds`**, which the decision record's gotcha does not mention — see
   "The server's core plugin" below, because that changes what a server core plugin may reuse.
-- **`crates/lodestone-ecs/src/{events.rs,plugin.rs,sets.rs}` are uncommitted in-flight work by
-  another agent right now** (`events.rs` untracked; the other two modified). `EventPriority` and the
-  `GameEventBus` are part of that landing. Phases below depend on their *shape*, deliberately not on
-  their line numbers, and Phase 0 must re-read all three immediately before writing.
-- **`docs/plans/world-state.md` already exists and already found two of the straddles below**
-  (per-connection `WorldAdminState`, and wall-clock-since-join game time). This plan does not restate
+- `EventPriority` and `GameEventBus` define the event-ordering surface. Re-read their symbols before
+  adding Phase 8 integration.
+- `docs/plans/world-state.md` owns per-connection `WorldAdminState` and wall-clock-since-join game
+  time. This plan does not restate
   its 26.2 constant research and must not contradict its placement decisions; it owns the *migration
   mechanics*, that plan owns the *world-state features* built on top. Where the two touch, this plan
   defers.
 
-**Three defects the census surfaced, now filed — phases below reference them:**
+**The census identifies three defects the migration must close:**
 
 - **Players are never spawned as
   entities.** There is no player registry, no player-entity concept, and no broadcast path, so two
   LAN players cannot see each other. This is the single most consequential census finding, because it
   means Phase 4 must **create** the player-entity concept rather than migrate an existing one. Every
   "simulation"-classified per-connection scalar in the census below has nowhere to go until it exists.
-- **LAN hosting spawns no tick loop.** `IntegratedServer::bind` never calls `run_tick_loop`; its only
-  caller is `open_in_memory_with_mobs`. So over LAN, mobs do not tick, block entities do not tick,
-  and random ticks do not run. Anything the migration "moves into `GameTick`" is moved into a
-  schedule that, on the LAN path, **nothing runs** — the island risk named in "Islands" below.
 - **`ChunkSource` has two dangerous trait defaults.** `set_block`'s default body is
   `let _ = (x, y, z, name);` (`ChunkSource::set_block`, `chunk.rs`) — a **silent no-op**, so an implementor that forgets to
   override it discards every edit with no error, which is an island factory in the purest sense.
@@ -123,7 +95,7 @@ This is the deliverable a phase list is worthless without. Three axes per row:
 - **Target shape** — ECS `Resource`, component on an entity, or stays plain Rust.
 - **Class** — `simulation` (two connections must agree, or it must advance with none attached) or
   `replication` (per-connection cursor, reconstructible from authoritative state × cursor), per
-  `docs/server-ecs.md`'s never-straddle invariant.
+  [The integrated and dedicated server](../dedicated-server.md)'s never-straddle invariant.
 - **Plugin candidacy** — the owner's widened scope: core systems should *become* plugins where that
   makes sense. **(a)** becomes a plugin and is **omittable** (the deployment still works without it);
   **(b)** becomes a plugin but is **load-bearing** (omitting it breaks the server); **(c)** stays
@@ -165,11 +137,11 @@ for the earliest phases.
 | 13 | `fluid_ticks: ScheduledTickQueue<String>` | plain local | `Resource` | simulation | **(b)** same plugin |
 | 14 | `random_ticks: RandomTickScheduler` | plain local | `Resource` | simulation | **(a) omittable** — `random_tick_speed 0` is a legitimate config, so a server must work with the plugin absent |
 | 15 | `game_tick: u64` | plain local | `WorldTime` `Resource` (reuse `lodestone_ecs::WorldTime`) | simulation | **(c)** |
-| 16 | `next_tick_at`, `last_overload_warning_at` | plain locals | **stay in the driver loop, never in the `World`** | neither | **(c)** — clock policy, per `docs/server-ecs.md` reason (a) |
+| 16 | `next_tick_at`, `last_overload_warning_at` | plain locals | **stay in the driver loop, never in the `World`** | neither | **(c)** — clock policy, per [The integrated and dedicated server](../dedicated-server.md) reason (a) |
 | 17 | `tick_area: (RangeInclusive<i32>, RangeInclusive<i32>)` | argument | `Resource` | simulation | **(c)** |
 
 Row 16 is the one to get right: the accumulator and the overload-forgiveness branch **must not**
-become `World` state. `docs/server-ecs.md`'s whole reason (a) for two `World`s is that the server's
+become `World` state. [The integrated and dedicated server](../dedicated-server.md)'s whole reason (a) for two `World`s is that the server's
 catch-up policy differs from the client's, and putting the accumulator in the `World` invites a
 future agent to unify them.
 
@@ -177,7 +149,7 @@ future agent to unify them.
 
 Twenty-four pieces, all threaded as `&mut` into `dispatch_play_packet`. This is where the
 never-straddle invariant does real work, and it produces a much sharper result than the decision
-record's four-timer table: **twelve of the twenty-four are simulation state living in a connection
+record's simulation-versus-replication distinction: **twelve of the twenty-four are simulation state living in a connection
 task.**
 
 | state | site | class | target |
@@ -194,7 +166,7 @@ task.**
 | `awaiting_chunk_batch_ack` | `serve_play` local | replication | stays |
 | `pending_chunk_batches` | `serve_play` local | replication | stays |
 | `chunks_sent` | arg | replication | stays |
-| `next_window_id` | `serve_play` local | replication | stays — vanilla's counter is per-`ServerPlayer` |
+| `next_window_id` | `serve_play` local | replication | stays — the counter is per player session |
 | **`play_start`** | `serve_play` local | **simulation** | `WorldTime` `Resource` |
 | **`vitals: PlayerVitals`** | `serve_play` local | **simulation** | component on the player entity |
 | **`vitals_tick`** | `serve_play` local | **simulation** | folds into `GameTick` |
@@ -264,7 +236,7 @@ Proposal { connection: ConnectionId, body: ProposalBody }
 simulation-affecting packet — `BreakBlock`, `PlaceBlock`, `Attack`, `MoveTo`, `ContainerClick`,
 `SetGameRule`, `SetDifficulty`, `ClientCommand`. Unbounded deliberately: a bounded channel makes the
 connection task `.await` on the tick thread, which reintroduces cross-thread stall potential — the
-precise hazard class `docs/server-ecs.md` says the server design "gets to not pay." Backpressure, if
+precise hazard class [The integrated and dedicated server](../dedicated-server.md) says the server design "gets to not pay." Backpressure, if
 it is ever needed, belongs as a per-connection proposal budget enforced *in* the drain system, not as
 channel capacity.
 
@@ -417,7 +389,7 @@ Every conversion phase carries one. The rules, because the existing bench corpus
 
 ### Binary size, measured
 
-`docs/server-ecs.md` raises `bevy_app`/`bevy_ecs` wasm growth as a non-blocking cost. Measured rather
+[The integrated and dedicated server](../dedicated-server.md) raises `bevy_app`/`bevy_ecs` wasm growth as a non-blocking cost. Measured rather
 than repeated, in two throwaway `wasm32-unknown-unknown` crates outside the repo, both with `web/`'s
 exact release profile (`opt-level = "z"`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`,
 `strip = true`), the bevy one running a real `App` with two components, two systems, a custom
@@ -446,13 +418,13 @@ the actual gate; do not treat the table as the prediction.
 Each is independently landable and leaves `main` green. "Choke point" means a patch to a file brokered
 through the orchestrator — for `crates/lodestone-server/src/lib.rs`, always the exact `mod` line.
 
-### Phase 0 — dependency and `ServerCorePlugin`, wired to nothing
+### Phase 0 — `ServerCorePlugin` baseline
 
-**Owns:** `crates/lodestone-server/Cargo.toml`, new `crates/lodestone-server/src/ecs/mod.rs`,
+**Owns:** `crates/lodestone-server/Cargo.toml`, `crates/lodestone-server/src/ecs/mod.rs`,
 `src/ecs/plugin.rs`, `src/ecs/schedules.rs`.
-**Choke point:** `lib.rs` — add `mod ecs;` after `mod chunk;`. One line.
-**Content:** add `bevy_app`/`bevy_ecs` (`workspace = true`) and promote `lodestone-world` +
-`lodestone-game` out of `[dev-dependencies]`. Define `ServerCorePlugin`: `init_resource::<WorldTime>`,
+**Choke point:** `lib.rs` — the `mod ecs;` declaration.
+**Baseline:** `bevy_app`/`bevy_ecs` (`workspace = true`) and the required world/game dependencies
+support `ServerCorePlugin`: `init_resource::<WorldTime>`,
 `init_schedule(NetIngest)`, `init_schedule(GameTick)`, and the server's own set chains. **Do not
 install `CorePlugin`** — and note the decision record's gotcha is *incomplete*: `CorePlugin` inserts
 `WorldTime`, `FrameClock` **and `LockHolds`**. `WorldTime` is reusable; `FrameClock` is a lie
@@ -464,10 +436,9 @@ under `ambiguity_detection: LogLevel::Error`.
 **Negative control:** the same test with `CorePlugin` installed instead must **fail** the `FrameClock`
 assertion. Run it and watch it fail.
 **Perf gate:** `scripts/wasm-size.sh` — record the number, compare to the table above.
-**This phase is deliberately an island for exactly one phase.** Say so in the commit message.
+**This baseline is intentionally limited to construction; Phase 1 must make its schedules run.**
 **Unblocks:** everything.
-**Re-read before writing:** `crates/lodestone-ecs/src/{plugin.rs,sets.rs,events.rs}` — all three are
-another agent's uncommitted work.
+**Re-read before writing:** `crates/lodestone-ecs/src/{plugin.rs,sets.rs,events.rs}`.
 
 ### Phase 1 — the tick loop drives the `World`; tick-locals become `Resource`s
 
@@ -512,22 +483,20 @@ when handed a one-line fixture containing `source.set_block(`.
 count.
 **Unblocks:** the adjudication window, hence server plugins at all; the player-entity broadcast path.
 
-### Phase 3 — LAN gets a tick loop; the feeds become broadcast egress
+### Phase 3 — feeds become broadcast egress
 
 **Owns:** `src/integrated.rs`, `src/tick.rs`, new `src/ecs/egress.rs`.
 **Choke point:** none beyond `lib.rs` re-exports.
-**Content:** `IntegratedServer::bind` spawns `run_tick_loop`. `BlockTickFeed`/`ExplosionFeed` (rows 7,
-8) are replaced by `broadcast::Sender<Egress>` with a per-connection `Receiver`; `RecvError::Lagged` is
+**Content:** `BlockTickFeed`/`ExplosionFeed` (rows 7, 8) are replaced by
+`broadcast::Sender<Egress>` with a per-connection `Receiver`; `RecvError::Lagged` is
 handled as a resync signal, not swallowed.
 **Gate:** two LAN connections; a block change produced by the tick loop must reach **both**. The
 existing single-consumer shape fails this by construction, which makes it its own negative control —
 and that is the strongest gate in the plan, because it is a test that could not have passed before.
-**Negative control:** additionally, with the tick loop not spawned, the same test must report zero
-block updates on both connections.
+**Negative control:** preserve a one-consumer feed fixture; the second receiver must miss the update.
 **Perf gate:** `world_tick` within ±5%; plus fan-out cost at 1, 2 and 8 receivers, since broadcast
 clones per receiver.
-**Unblocks:** players seeing each other (needs a working broadcast path); all of
-`docs/plans/world-state.md`, which currently has nowhere to tick.
+**Unblocks:** players seeing each other (needs a working broadcast path) and world-state replication.
 
 ### Phase 4 — player entities
 
@@ -536,9 +505,8 @@ clones per receiver.
 **Choke point:** `lib.rs` — `pub use ecs::player::{PlayerId, PlayerEntity};`.
 **Content:** **creates** the player-entity concept. On reaching `State::Play`, a proposal spawns a
 server entity; census §C's twelve simulation rows become its components; `VITALS_TICK_INTERVAL`'s
-per-connection timer is deleted in favour of a `GameTick` system. This is the phase
-`docs/server-ecs.md`'s four-timer table was pointing at when it called `VITALS_TICK_INTERVAL` the
-exception.
+per-connection timer is deleted in favour of a `GameTick` system. This moves
+`VITALS_TICK_INTERVAL` from per-connection state to a player-entity component.
 **Gate:** two connections; player A's vitals must be readable from the server `World` while player B
 is connected, and A attacking B must reduce **the server's** copy of B's health.
 **Negative control:** with the spawn proposal removed, the same query must find zero player entities
@@ -571,7 +539,7 @@ divergent times.
 **Gate:** a furnace placed over LAN by one player, observed cooking by another.
 **Negative control:** with the tick system unregistered, the furnace must not advance.
 **Perf gate:** `world_tick` at 0, 16 and 256 block entities, within ±5% of Phase 1 per entity.
-**Unblocks:** container UI work; `docs/block-entities.md`'s remaining gap.
+**Unblocks:** container UI work.
 
 ### Phase 7 — mob sim becomes components, then `MobAiPlugin`
 
@@ -648,7 +616,7 @@ sign is known, which is the cheapest honest gate available here.
 ```
 Phase 0 ──┬─> Phase 1 ──┬─> Phase 2 ──┬─> Phase 3 ──┬─> Phase 4 ──> Phase 8
           │             │             │             │
-          │             └─> Phase 5   ├─> Phase 6   └─> (Phase 4 also gates #225 via 7)
+          │             └─> Phase 5   ├─> Phase 6   └─> (Phase 4 also gates mob AI via 7)
           │                (needs 1)  │
           │                           └─> Phase 7a ──> Phase 7b
           │
@@ -669,26 +637,25 @@ one `mod` line and two `pub use` lines, brokered. `src/server.rs` (110 KB) is to
 and 5: **serialise those three or assign them to one agent**, because it is the file most likely to be
 mid-keystroke. `src/tick.rs` is touched by Phases 1 and 3.
 
-## Downstream epics, per phase
+## Downstream work, per phase
 
 | phase | unblocks |
 |---|---|
 | 0 | everything (no epic directly) |
-| 1 | #307/#308 producers; chunk lifecycle #289/#292/#293/#297 |
-| 2 | #77 plugin framework (the adjudication window); #438's path |
-| 3 | #438; all of world state #340 (nothing ticks on LAN today) |
-| 4 | **#438**; mob AI roster #225 (mobs need a player entity to target) |
-| 5 | #323, #327, #328 (children of #340) |
-| 6 | container UI; `docs/block-entities.md`'s third gap |
-| 7 | **#225** |
-| 8 | **#77** |
+| 1 | scheduled-tick producers and chunk lifecycle |
+| 2 | plugin framework (the adjudication window) and the player-entity path |
+| 3 | player replication and world-state replication |
+| 4 | player entities and the mob AI roster (mobs need a player entity to target) |
+| 5 | time, rules, and difficulty world state |
+| 6 | container UI |
+| 7 | mob AI roster |
+| 8 | plugin framework |
 | P | headless bots; `lodestone-autopilot` |
 
 ## How to change it, and the gotchas
 
-- **Re-verify before routing around anything above.** This plan's own §"Verified current state" found
-  the dispatch brief's `server-tick-loop.md` claim already fixed and a decision-record line citation
-  rotted. Line numbers here will drift; symbols will not.
+- **Re-verify before routing around anything above.** Line numbers drift; symbols are the durable
+  references.
 - **Never build a control out of a shell pipeline**, and never let `rtk` near one. Count with a
   program that reads the file. A control that prints nothing is a failure to run, not a pass.
 - **A phase gate must run against a driver production spawns.** A hand-built `App` in a test cannot
@@ -697,7 +664,7 @@ mid-keystroke. `src/tick.rs` is touched by Phases 1 and 3.
 - **The `ambiguity_detection` gate goes vacuous if you run the app first.** Copy
   `lodestone-controller`'s comment along with its code.
 - **Do not put the tick accumulator in the `World`.** Census row 16. It is the mechanism of
-  `docs/server-ecs.md`'s reason (a) for two `World`s.
+  [The integrated and dedicated server](../dedicated-server.md)'s reason (a) for two `World`s.
 - **Do not add a second place where a connection task waits on the tick thread.** One oneshot, for
   container open, justified in "The tokio seam". A shared read lock on the server `World` is the
   client's documented wart and reintroduces the whole lock-discipline hazard class.
@@ -708,31 +675,26 @@ mid-keystroke. `src/tick.rs` is touched by Phases 1 and 3.
 
 None. No feature flag gates this migration: `bevy_app`/`bevy_ecs` become unconditional dependencies of
 `lodestone-server` on every target, matching `lodestone-ecs`. A `server-plugins` feature was
-considered and rejected — a feature-gated `World` would mean two server architectures to test, and
-CLAUDE.md's own record of `live-inventory` sitting broken behind a non-default feature for a session
-is the argument against.
+considered and rejected — a feature-gated `World` would mean two server architectures to test.
 
 ## Dependencies
 
 - `bevy_app`, `bevy_ecs` — root `Cargo.toml`, `0.19`, `default-features = false`,
   `features = ["std"]`, never `multi_threaded`. Measured wasm cost above.
-- `lodestone-world`, `lodestone-game` — promoted from `[dev-dependencies]` (root `Cargo.toml`) to real
-  dependencies. Both version-free; `cargo xtask check-isolation` is the standing enforcement.
+- `lodestone-world`, `lodestone-game` — version-free dependencies; `cargo xtask check-isolation` is
+  the standing enforcement.
 - `tokio::sync::{mpsc, broadcast, oneshot}` — all in the wasm-safe `sync` feature the crate's
   `wasm32` target block already selects, so the seam adds no new wasm surface.
-- **In-flight, not yet committed:** `crates/lodestone-ecs/src/{events.rs,plugin.rs,sets.rs}`.
-  `EventPriority` (Phase 8) and `GameEventBus` come from there. Re-read before writing.
+- `crates/lodestone-ecs/src/{events.rs,plugin.rs,sets.rs}` — `EventPriority` (Phase 8) and
+  `GameEventBus` define the ordering surface. Re-read before writing.
 
 ## See also
 
-- [`docs/server-ecs.md`](../dedicated-server.md) — the decision record this plan implements. Read first.
-- [`docs/server-tick-loop.md`](../dedicated-server.md) — the loop Phase 1 threads a schedule through.
-  Its §45 reversal is current; do not add a second correction note.
+- [The integrated and dedicated server](../dedicated-server.md) — the decision record this plan implements and the loop Phase 1 threads a schedule through. Read first.
 - [`docs/plans/world-state.md`](./world-state.md) — the sibling plan. Owns the world-state features
   Phase 5 provides storage for; owns the 26.2 constants this plan does not restate.
 - [`docs/plugin-api.md`](../plugin-api.md) — the five clauses, and clause 4's server-side inversion.
-- [`docs/world-unification.md`](../architecture.md) — the client's one-`World` migration, and the
+- [Architecture](../architecture.md) — the client's one-`World` migration, and the
   lock-discipline machinery the server deliberately does not build.
-- This migration's own tracking issue unblocks the no-player-entities defect, the plugin framework
-  epic, the world state epic, and the mob AI roster epic — see the downstream-epics table above for
-  the issue numbers.
+- The migration unblocks player entities, the plugin framework, world state, and the mob AI roster;
+  see the downstream-work table above.

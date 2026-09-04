@@ -3,25 +3,20 @@
 ## What it is
 
 The plan for rewriting `crates/lodestone-worldgen`'s generation engine from scratch for speed —
-targeting sub-millisecond steady-state serial chunk generation at bit-exact vanilla 26.2 parity —
+targeting sub-millisecond steady-state serial chunk generation at bit-exact 26.2 parity —
 plus the jar-derived inventory of everything full parity requires that the repo does not have yet
 (structures, Nether/End, ore veins, the missing decoration steps, 3-D biomes, world presets), each
-item blocker-classed. Owner-directed (2026-08-06/07). Planning artifact only; each unit below is a
-separately landable piece of work with its own evidence standard.
+item blocker-classed. Each unit below is a separately landable piece of work with its own evidence
+standard.
 
 ## Status and ground rules
 
-- `HEAD` at planning time: `4307b59`. The workspace is on **nightly**, moved by the owner
-  specifically so `#![feature(portable_simd)]` is available. There is **one** SIMD implementation —
+- The workspace uses **nightly** so `#![feature(portable_simd)]` is available. There is **one** SIMD implementation —
   no `#[cfg]` scalar fallback, ever: a dual path is two worlds from one seed waiting to happen.
-  **Settled (2026-08-07):** the toolchain is pinned to `channel = "nightly-2026-08-07"`
-  (rustc `84b36a78a`); renewing the pin is a deliberate, single-commit act. Trap for whoever
-  renews it: the dated channel is a **publish** date, and adjacent days are different compilers —
-  `nightly-2026-08-06` (rustc `7608eb7b0`) ICEs on tokio at `opt-level=3`, breaking release
-  benches. Release builds and benches are verified clean on the pinned compiler; verify the same
-  two things before landing any future pin bump.
-- **Implementation mandate (owner ruling, 2026-08-07): performance work may rewrite whatever it
-  needs, in any crate.** Units are *scoped* to the clusters below for scheduling, but the mandate
+  The toolchain pin is a deliberate compatibility boundary: renew it in one change, then verify
+  both release builds and benches before accepting the new compiler.
+- **Implementation mandate:** performance work may rewrite whatever it needs, in any crate. Units
+  are *scoped* to the clusters below for scheduling, but the mandate
   is not confined to `lodestone-worldgen`: encodings, data layout, the serve boundary
   (`GeneratedColumn`, `ChunkSource`, `ChunkColumn`), palette/section storage, bit-packing, and the
   protocol-side chunk encode are all fair game where measurement says the win is there. Wider
@@ -33,23 +28,21 @@ separately landable piece of work with its own evidence standard.
     403 ignored across 536 binaries** — each landing preserves 0 failed and explains any delta
     in the other counts.
   - A unit that touches wire-facing encoding needs evidence originating **outside our own
-    encoder** — captured server bytes or a real vanilla client, never a round-trip; the recorded
-    scar is hermetic self-encoded fixtures passing while a live gate produced 49 × "unexpected
-    end of input".
+    encoder** — captured server bytes or a real reference client, never a round-trip.
   - Cross-crate changes still land as one reviewable commit per coherent change, with the
     boundary change separable from the optimisation that motivated it.
-- **Architecture authority (owner grant, 2026-08-07):** structural change — splitting files,
+- **Architecture authority:** structural change — splitting files,
   extracting sub-crates — is explicitly authorized where it reduces contention or improves
   maintainability. In this plan that is not a nicety: `overworld.rs` is the single file that made
   the engine middle a pipeline, so decomposition is a scheduled unit (U16) placed ahead of the
   units it unblocks, with its own discipline — pure-move commits, gated exactly like logic
-  changes, never landed together with one. See [Decomposition](#decomposition-u16-detail).
-- Parity is **bit-exact**: the placement engine reproduces vanilla's depth-first `flatMap`
-  RNG-consumption order, and the existing gates (`lodestone-worldgen-parity`'s composed fixture,
+  changes, never combined with a logic change. See [Decomposition](#decomposition-u16-detail).
+- Parity is **bit-exact**: the placement engine preserves the reference depth-first feature
+  traversal and RNG-consumption order, and the existing gates (`lodestone-worldgen-parity`'s composed fixture,
   the per-stage `*_parity.rs` suites, `FeatureOracle`/`VegetationOracle`) are the definition of
   correct. Every unit says whether it can move an RNG draw, and the ones that cannot prove it.
 - Where the two goals genuinely conflict, this plan says so (see [the verdict](#q3-is-sub-ms-serial-generation-achievable-at-11-parity))
-  rather than quietly choosing. The owner has asked to revisit against real measurements.
+  rather than quietly choosing. Revisit it against real measurements.
 
 ## Q1: What is wrong with the current architecture
 
@@ -59,35 +52,33 @@ Measured or directly cited defects, not adjectives. Cites are to the tree at `43
   variants with `Box<Density>` children (`density/mod.rs`); `NoiseChunkSampler::eval`
   (`density/chunk.rs`) re-walks it for every query, and `fill_stage` (`overworld/fill.rs`)
   makes **98,304 `AquiferSystem::block_at` calls per chunk**, each walking `final_density` plus up
-  to 7 more trees. Cell interpolation exists and matches vanilla's 4×8×4 corner scheme, but it is
+  to 7 more trees. Cell interpolation exists and matches the reference 4×8×4 corner scheme, but it is
   implemented as memoised *point queries* (8 corner lookups through `RefCell`-guarded per-slot
-  caches per block) where vanilla prefills each cell once. **Corrected (`08f5d98a`, DESIGN.md
-  §12.101): the arithmetic was already right and this paragraph previously prescribed the wrong
-  fix.** Vanilla has *two* interpolation orders — a plain trilinear lerp (X-inner) under its
+  caches per block) where the reference fills each cell once. The arithmetic has two interpolation
+  orders — a plain trilinear lerp (X-inner) under its
   cell-filling mode, and
   an incremental per-axis-advance chain (Y-inner) — different IEEE 754 expressions,
-  and the block field only ever sees the first, because vanilla's own noise-chunk source wraps
-  `final_density` in a code-only `cache_all_in_cell` whose cache is prefilled under
-  cell-filling mode. `chunk.rs` implements exactly that; its module doc claimed the opposite
-  (now fixed, with a standing inverted guard). The defect here is the per-block *lookup cost*,
+  and the block field only ever sees the first, because its cell-filling mode precomputes the
+  density lattice. `chunk.rs` must implement that order and retain an inverted guard. The defect
+  here is the per-block *lookup cost*,
   not the nesting: branchy dispatch + pointer-chasing + hash-or-index lookups per block, where
-  vanilla pays a sliding lerp over a prefilled cell.
+  the reference pays a sliding lerp over a prefilled cell.
 - **D2 — `String` block states end-to-end.** `DenseBlockGrid` palette-interns but `get`/`set`
   traffic in `&str` with a `HashMap<String,u16>` probe per write (`dense_grid.rs`).
-  `stitch_region` (since removed — see "How to change it") copies all 9 sources' full 16×384×16 grids into a fresh
+  `stitch_region` (since removed) copies all 9 sources' full 16×384×16 grids into a fresh
   48×384×48 `RegionGrid` string-by-string — ~2.8M get/set pairs per `column()` **even when every
-  cache hits** — and `stitch_veg_region` (since removed — see "How to change it") calls `state.to_string()` per cell:
-  ~885k heap allocations per column, warm. Vanilla decorates in place and copies nothing.
+  cache hits** — and `stitch_veg_region` (since removed) calls `state.to_string()` per cell:
+  ~885k heap allocations per column, warm. The reference decorates in place and copies nothing.
 - **D3 — per-chunk reconstruction of per-seed state.** `build_aquifer` (`overworld/fill.rs`)
   deep-clones **eight full density trees** per chunk and rebuilds fresh slot caches; nothing is
   pooled or reused across chunks (fresh `Vec`s, grids, palettes, sparse-diff `HashMap`s per call).
 - **D4 — the 3×3-of-3×3 neighbourhood recursion, blunted by two global-mutex FIFO caches.**
   Vegetation needs 8 neighbours' *post-ore* worlds; each of those needs its own 3×3 pre-ore
   neighbourhood, so one cold `column()` touches a 5×5 = 25-chunk pre-ore region, 9 ore RNG walks,
-  and ~17 `pre_ore_stage` lookups (revert `4307b59`'s own numbers). The caches
+  and ~17 `pre_ore_stage` lookups. The caches
   (`PreOreCache`/`PostOreCache`, `overworld/store.rs`) are each one `Mutex<HashMap + VecDeque>`,
   FIFO-evicted at 512: a 289-column join burst produced ~5000 concurrent lock attempts on one
-  `Arc<Mutex>` and forced the per-ring barrier back in (`4307b59` reverting `5104adf`). A mutex
+  `Arc<Mutex>` and force a per-ring barrier. A mutex
   only excludes code that takes it — and then becomes the reason nobody restructures the thing it
   guards. The barrier is a workaround for the cache, and the cache is a workaround for the
   recomputation; the recomputation itself is the defect.
@@ -95,7 +86,7 @@ Measured or directly cited defects, not adjectives. Cites are to the tree at `43
   biome for each of a **17×17 = 289 source-chunk neighbourhood** per chunk
   (`carver/mod.rs`, `NEIGHBOURHOOD_RANGE = 8`), and each resolution is a brute-force
   nearest-neighbour scan over the ~7,594-row climate parameter table (`biome/mod.rs`'s `nearest_biome` explicitly
-  declines vanilla's RTree as "already fast"). That is ~2.2M squared-distance comparisons per
+  declines a spatial index as "already fast"). That is ~2.2M squared-distance comparisons per
   pre-ore chunk, ×25 on a cold column, with zero memoisation even between two adjacent chunks
   whose 289-source windows overlap almost entirely.
 - **D6 — no counters, so every past performance story here was a timing.** The stage-split bench
@@ -104,9 +95,9 @@ Measured or directly cited defects, not adjectives. Cites are to the tree at `43
   (`overworld.rs` module doc) instead of by an assertion.
 
 What is **not** wrong, and must be preserved: the parity method (per-stage JVM oracles + composed
-fixture + generate-or-assert), the `Resolver`/version-free data seam (DESIGN.md §12.30: worldgen is
-data), the RNG primitives (`WorldgenRandom`, generic not dyn, proven), and the depth-first placement
-engine's *semantics*.
+fixture + generate-or-assert), the `Resolver`/version-free data seam described by the
+[Worldgen engine overview](../worldgen.md), the RNG primitives (`WorldgenRandom`, generic not dyn,
+proven), and the depth-first placement engine's *semantics*.
 
 ### Target architecture
 
@@ -117,8 +108,8 @@ engine's *semantics*.
    `Vec` of components addressed by index — children are indices, not `Box`es — with per-chunk
    evaluation state (interpolator planes, flat-cache tables, cell caches) in reusable buffers owned
    by a per-chunk scratch object, not `RefCell`s inside the sampler. Evaluation fills each cell's
-   corner lattice once and interpolates in **vanilla's own plain-trilinear X-inner order — the order
-   `cache_all_in_cell` selects for the block field (`08f5d98a`, §12.101) — never the
+   corner lattice once and interpolates in **the reference plain-trilinear X-inner order — the order
+   cell-filling selects for the block field — never the
    incremental per-axis-advance chain**, which is a different IEEE 754 expression:
    measured, the two nestings differ on 60,300 of 393,216 blocks, and swapping them takes
    `chunk_parity` from 98,304/98,304 to 90,563/98,304. (PumpkinMC independently converged on the
@@ -136,8 +127,8 @@ engine's *semantics*.
    (or 5×5) chunks' dense grids directly, routing writes by coordinate — no `RegionGrid` stitch
    copies, no `VegGrid` re-seeding, no fold-back pass.
 5. **Biome resolution as a first-class cached layer**: per-source-chunk carver/ore biome memoised
-   in the store entry, and the climate search itself ported to vanilla's RTree (which is also the
-   gate for 3-D biome sampling, #405's deferred half).
+   in the store entry, and the climate search uses a data-derived spatial tree. The same tree is
+   the gate for 3-D biome sampling.
 6. **SIMD (`std::simd`) in the numeric kernels only** — lane-parallel across independent lattice
    positions, never across an accumulation chain. See [SIMD policy](#simd-policy).
 
@@ -156,11 +147,11 @@ both validates the D1–D3 diagnosis and means SIMD is headroom Pumpkin left on 
   `chunk_noise_router.rs`). Per-seed immutable proto router; per-chunk instantiation borrows
   the shared nodes by reference and allocates only the small mutable wrappers. This is
   target-architecture item 2.
-- **Vanilla's wrapper set, ported as real machinery**: `DensityInterpolator` (literal port of
-  vanilla's 8→4→2→1 trilinear reduction with start/end buffer swap per X-slice), `FlatCache`
-  (**eagerly pre-filled at construction** — no cache-miss branch in the hot loop), `Cache2D`,
-  `CacheOnce`, `CellCache`, with a batched `fill()` API — columnar evaluation, the seam SIMD
-  wants. `populate_noise` reproduces vanilla's **exact cell nesting and iteration order**
+- **The reference wrapper behaviours, implemented as real machinery**: an interpolator with
+  8→4→2→1 trilinear reduction and start/end buffer swaps per X-slice; an eagerly filled
+  flat cache (**eagerly pre-filled at construction** — no cache-miss branch in the hot loop),
+  one-shot and cell-local caches, with a batched `fill()` API — columnar evaluation, the seam SIMD
+  wants. `populate_noise` reproduces the reference **exact cell nesting and iteration order**
   (`sample_start_density → cell_x → cell_z → cell_y.rev() → local y/x/z lerps → swap_buffers`),
   with cell dims read from `NoiseSettings` data, not hardcoded.
 - **Thread-local buffer pools** (`F64_BUFFER_POOL` free-list) for interpolator scratch — the
@@ -169,18 +160,18 @@ both validates the D1–D3 diagnosis and means SIMD is headroom Pumpkin left on 
   flat_biome_map: Box<[u8]>, four [i16; 256] heightmaps, stage: StagedChunkEnum, carving_mask }`
   (`proto_chunk.rs`). Target items 1 and 3.
 - **Staged generation as an explicit dependency graph**: an 11-stage `StagedChunkEnum` mirroring
-  vanilla `ChunkStatus`, per-stage radius/dependency tables in one auditable place
+  the reference generation-status progression, per-stage radius/dependency tables in one auditable place
   (`get_direct_radius()` returns 1 for Features — the 3×3), a `slotmap`-backed DAG scheduler with
   in-degree tracking over a rayon pool, `dashmap` for the published chunk map, and a
   `WorldGenRegion`-analogue windowed `Cache` of `ProtoChunk`s for cross-chunk stages. Evidence
   the staged-store shape (target item 3) works in production Rust.
-- **Biome search: vanilla's tree, not a rewrite.** Pumpkin's `BiomeTree` is **generated from the
+- **Biome search: a data-derived tree, not a heuristic rewrite.** Pumpkin's `BiomeTree` is **generated from the
   real game data's node structure** (not re-derived by its own splitting heuristic), searched with
-  vanilla's exact branch-and-bound pruning plus a thread-local last-result node used to seed
-  `best_dist` — vanilla's own last-result-caching locality trick on its climate R-tree. Climate sampling is RNG-free and
+  reference branch-and-bound pruning plus a thread-local last-result node used to seed
+  `best_dist`. Climate sampling is RNG-free and
   pure, so search strategy is a pure-speed question. Direct blueprint for U9.
-- **Per-wrapper isolation fixtures**: Pumpkin tests individual wrapper types (`CellCache`-only,
-  interpolator-only) against captured vanilla chunk dumps, not just end-to-end output — a fixture
+- **Per-wrapper isolation fixtures**: Pumpkin tests individual cache and interpolator behaviours
+  against captured reference chunk dumps, not just end-to-end output — a fixture
   granularity worth copying in U4, since it localises a bit-mismatch to one wrapper.
 - **Existence proof for structures in Rust**: stronghold, jigsaw + jigsaw_placement, mansion,
   desert pyramid, jungle temple are implemented (~6k lines under `generation/structure/`).
@@ -190,20 +181,20 @@ both validates the D1–D3 diagnosis and means SIMD is headroom Pumpkin left on 
 
 - **Build-time codegen of worldgen data** (`pumpkin-data`'s generated noise router,
   `tools/pumpkin-codegen`). Fast, but it welds one data version into the binary — our `Resolver`
-  seam and version-free engine are deliberate (DESIGN.md §12.30, plan §3). We get the same win by
+  seam and version-free engine are deliberate ([Worldgen engine overview](../worldgen.md)). We get the same win by
   compiling JSON → flat typed IR **once per generator construction**, which we already half-do;
   the defect was never "JSON is parsed" but "the IR is a boxed tree walked per block".
 - **Any of its actual placement/feature behaviour as an oracle.** The confirmed divergence map,
-  from its own sources: coral (`coral_claw.rs` — vanilla's own shuffle skipped, a random
+  from its own sources: coral (`coral_claw.rs` — the reference shuffle is skipped, a random
   direction draw replaced by a constant), tree decorators (`attached_to_logs.rs` — positions
   unshuffled, direction hardcoded to `[0]`), and **surface rules knowingly ~1% off** — Pumpkin's
-  own test asserts `mismatches <= 1060` post-surface against a vanilla dump where raw noise
-  asserts `== 0` (`proto_chunk_test.rs`). Decoration and carvers have **no** vanilla-dump
+  own test asserts `mismatches <= 1060` post-surface against a reference dump where raw noise
+  asserts `== 0` (`proto_chunk_test.rs`). Decoration and carvers have **no** reference-dump
   gates there at all. So: raw-terrain machinery is trustworthy engineering; everything from
   surface rules outward keeps going to our JVM oracles exclusively. Terrain *blending* is
   unfinished in Pumpkin but irrelevant to fresh-world generation.
-- **Its stage reorder** (Biomes before StructureStart, vanilla runs StructureStarts first;
-  `chunk_state.rs`). Safe only because biome sampling is pure; adopt vanilla's order anyway in
+- **Its stage reorder** (biomes before structure starts; `chunk_state.rs`). Safe only because
+  biome sampling is pure; adopt the reference order anyway in
   U14 — cheap insurance against any structure predicate that turns out to be order-sensitive.
 
 ## Q3: Is sub-ms serial generation achievable at 1:1 parity?
@@ -222,7 +213,7 @@ both validates the D1–D3 diagnosis and means SIMD is headroom Pumpkin left on 
 > **C_cold (cold-region cost)** — wall time of the first `column()` in a fresh region (25 pre-ore
 > chunks, 9 ore walks from nothing).
 
-Target: **C_ss ≤ 1.0 ms**, C_cold ≤ 8 ms. **Goal, not gate** (owner ruling, 2026-08-06): sub-ms
+Target: **C_ss ≤ 1.0 ms**, C_cold ≤ 8 ms. **Goal, not gate**: sub-ms
 stays the direction of travel even if a checkpoint measures it unmet. The U2 (baseline) and U4
 (new density engine) checkpoints decide **how much further to push and where** — a missed target
 is a recorded number plus a named next lever, never a stop condition and never a licence to weaken
@@ -235,7 +226,7 @@ delete" vs "irreducible parity-bound work".**
 - The measured disaster figures are dominated by structural waste: the 144-chunk debug sweep at
   ~700.57s (≈4.9s/chunk debug) predates the memo caches and counts ~9× redundant pipelines; the
   ~2.2M-comparison-per-chunk biome scan (D5) and the ~2.8M-cell stitch copies (D2) are pure
-  overhead vanilla does not perform at all. Deleting waste does not move an RNG draw.
+  overhead the reference does not perform at all. Deleting waste does not move an RNG draw.
 - The irreducible floor at parity is: ~1,225 corner evaluations per interpolated slot per chunk
   (5×49×5 lattice) + flat-cache quart sampling + the surface-rule walk.
   **Be precise about what U4's corner win is: a lookup win, not arithmetic** — ~786,432 per-block
@@ -244,22 +235,22 @@ delete" vs "irreducible parity-bound work".**
   after U4 is this accounting showing itself, not a failed implementation. The remaining floor
   also includes the 289-source carver
   probability gates + the ore and vegetation RNG walks. The RNG walks are **sequential by
-  definition** — vanilla's draw order is the spec — so SIMD and parallelism cannot touch them.
+  definition** — the reference draw order is the spec — so SIMD and parallelism cannot touch them.
   But be precise about what that argument covers: the spec fixes **which numbers are drawn and in
   what order**, not **how expensively each draw's consequences are evaluated**. Draw count is
   spec-bound; cost per draw is ours. See
   [Vegetation: cost per draw](#vegetation-cost-per-draw) — that is where the remaining headroom
-  lives. U2's first release baseline now exists — recorded in **DESIGN.md §12.98**, provisional
-  while re-measured counters-off on the pinned toolchain. This plan cites the section rather than
-  restating the number, so the record has one home.
+  lives. U2's first release baseline is recorded in the
+  [full chunk-generation parity plan](./worldgen-parity.md), provisional while re-measured
+  counters-off on the pinned toolchain.
 - **Where the goals genuinely conflict:** if, *after* D2/D3 are dead and the per-draw costs of
   the vegetation walk are driven to O(1) (bitset predicates, precompiled placement programs,
   incremental column probes — the candidates below), the walk still measures ≥1 ms in release,
   then every remaining cost is spec-bound draw count and sub-ms C_ss at strict parity is out of
   reach. Sub-ms remains the goal (see above); the recourses are throughput-shaped (the parallel
   store, view-radius pipelining), not correctness-shaped. This plan proposes no approximation
-  anywhere; the checkpoint puts the number in front of the owner with the levers ranked.
-- Prior probability check, stated as opinion not evidence: vanilla itself spends single-digit
+  anywhere; the checkpoint records the number with the levers ranked.
+- Prior probability check, stated as opinion not evidence: the reference implementation spends single-digit
   milliseconds per chunk per thread on much of this in a JIT'd JVM; a Rust engine with flat ids,
   a flattened DAG, no copies, and no allocation in the hot path beating it by ~5–10× is a
   reasonable engineering bet. Sub-ms with vegetation included is the aggressive edge of that bet.
@@ -267,7 +258,7 @@ delete" vs "irreducible parity-bound work".**
 ### Vegetation: cost per draw
 
 The candidates for making the spec-bound RNG walk cheap per draw, each with a parity verdict.
-"No" is an acceptable outcome per the owner — but no candidate is refused on the sequentiality
+"No" is an acceptable outcome — but no candidate is refused on the sequentiality
 argument alone, because that argument is about order, not cost. Each candidate lands (or is
 refused with a measurement) inside U8 unless noted.
 
@@ -279,14 +270,15 @@ refused with a measurement) inside U8 unless noted.
 2. **Tag membership as bitsets over U3's numeric ids — parity-safe.** `supports_vegetation`,
    `replaceable_by_trees`, `logs`, `cannot_replace_below_tree_trunk` become fixed bitsets indexed
    by state id (≤8 KiB per tag): O(1) bit test, zero allocation, no RNG involvement. These
-   predicates run enormously often — `docs/worldgen-vegetation-census.md` counts **74,745 ground
-   rejections in one 136-chunk sweep**, every one of which is currently a string/hash operation.
+   predicates run enormously often — `lodestone_worldgen::feature::vegetation::ids` records
+   **74,745 ground rejections in one 136-chunk sweep**, every one of which is currently a
+   string/hash operation.
 3. **Per-column surface probes — parity-safe only if mutation-aware, and that is the trap.**
    Most scattered attempts (`random_offset` spreads ±7 xz / ±3 y) die on a heightmap/ground
-   probe whose answer is column-invariant — *between mutations*. Vanilla's heightmaps update
+   probe whose answer is column-invariant — *between mutations*. Reference heightmaps update
    incrementally as decoration places blocks (a tree placed earlier in the step changes later
    `MOTION_BLOCKING` queries), so a snapshot precomputed before the step answers **stale** and is
-   parity-unsafe. The safe form is vanilla's own: per-column tops maintained **incrementally on
+   parity-unsafe. The safe form is per-column tops maintained **incrementally on
    write** — O(1) probe, update only on the (rare) placements, never recomputed per attempt.
 4. **Precomputed foliage/trunk offset tables — partially safe; precompute enumeration, never
    outcomes.** For a given drawn parameter tuple (trunk height, radius, offset), the *candidate
@@ -295,7 +287,7 @@ refused with a measurement) inside U8 unless noted.
    skip chances etc.) are spec-bound and stay live, in order. So: table-drive the loop bounds
    and offset arithmetic; never cache anything downstream of a draw. Measure first whether the
    enumeration arithmetic is actually hot before building the tables.
-5. **Cheap rejection in vanilla's order — parity-safe.** The draw always happens first (spec);
+5. **Cheap rejection in reference order — parity-safe.** The draw always happens first (spec);
    the *test* that follows it becomes O(1) against candidates 2 and 3, and the per-position biome
    check rides U9's memoised per-quart biome instead of a climate search. Nothing about rejection
    order or count changes — only the price of each rejection.
@@ -322,7 +314,7 @@ propagate a shared misunderstanding; both gates run, always).
    production-seam vegetation gates in `worldgen_data.rs` — all green in the same commit.
 3. The old path for a stage is deleted **in the cutover commit**, not left as a fallback — two
    live paths is the two-worlds hazard again, and `cargo xtask connectedness` cannot see a
-   crate-internal island (CLAUDE.md §2).
+   crate-internal island; use the crate's own production-seam gates.
 4. `GeneratedColumn` and the `ChunkSource` seam stay stable **by default**, so the game keeps
    working at every intermediate sha — but stability is a scheduling default, not a boundary of
    the mandate (see Status): a unit with a measured reason may redesign the serve boundary,
@@ -337,11 +329,11 @@ propagate a shared misunderstanding; both gates run, always).
    engine is a bridge, not the spec — if investigation shows the *old* engine is the wrong one,
    that finding lands first as its own fix with its own JVM fixture, and the cutover rebases on
    it. Never allowed, under any schedule pressure: widening a tolerance, dropping a seed from the
-   gate set, reclassifying a mismatch as "expected" without a JVM fixture proving vanilla
+   gate set, reclassifying a mismatch as "expected" without a JVM fixture proving reference
    produces it, or landing the cutover with the investigation open.
 
-   **Worked example of why the tolerance rule is absolute** (measured, `08f5d98a` / §12.101):
-   implementing the wrong one of vanilla's two interpolation orders scores **90,563/98,304** on
+   **Worked example of why the tolerance rule is absolute** (measured by `chunk_parity`):
+   implementing the wrong interpolation order scores **90,563/98,304** on
    `chunk_parity` — 7,741 blocks per chunk, every one a last-place float difference, worst gap
    `1.78e-15`; across the field, 60,300 of 393,216 blocks. A 92% pass with float-dust residuals
    reads *exactly* like a "tighten the epsilon" discussion — which is how a wrong **algorithm**
@@ -379,7 +371,7 @@ it does not start over. What it adds:
   `[profile.release] debug = 2` + `threadCPUDelta` weighting (`scripts/profile-cost-table.py`),
   and records both that a plain `cargo build --release` already carries the DWARF `samply` needs
   (deliberately no separate profiling profile to keep in sync) and the precedent that profiling
-  has paid for itself here: #75 was found only because a `samply` session was run when no bench
+  has paid for itself here: a `samply` session found it only because no bench
   suite existed. `samply 0.13.1` is installed at `~/.cargo/bin/samply`. A different instrument
   for a different question: `lodestone-shell` carries `tracing-chrome` for span-timeline
   flamegraphs — a sampled profile says where CPU went; a span timeline says when stages ran and
@@ -407,10 +399,10 @@ Nightly + `portable_simd` is settled; one implementation, no scalar twin. Rules 
   this way cannot reassociate anything — parity-safe *by construction*, still gated bit-exact
   against the JVM fixtures like everything else.
 - **Never across an accumulation chain**: octave sums in Perlin/blended noise have a fixed
-  vanilla evaluation order; a horizontal-add tree is a different summation order and a different
+  reference evaluation order; a horizontal-add tree is a different summation order and a different
   world. Octave loops stay sequential per position.
 - **No `mul_add`** (or any FMA-introducing op) anywhere in ported numerics — fused rounding
-  differs from vanilla's separate multiply-then-add.
+  differs from the reference separate multiply-then-add.
 - **Ordering of effort**: D2/D3 (allocation, interning, copies) are attacked *before* SIMD.
   ~885k Strings and ~2.8M copied cells per warm column is not a vectorisation problem, and if
   U3+U6+U7 land the target, SIMD (U5) may legitimately shrink to "the noise kernels that still
@@ -418,7 +410,7 @@ Nightly + `portable_simd` is settled; one implementation, no scalar twin. Rules 
 
 ## Parallelism and allocation budget
 
-First-class goals (owner ruling, 2026-08-06), with the acceptance criteria in U1's counters.
+First-class goals, with the acceptance criteria in U1's counters.
 
 **Parallel model — single-writer chunks over a stage wavefront.** The dependency edges, explicitly:
 fill/surface/carve of a chunk depend on nothing but the seed (embarrassingly parallel);
@@ -458,16 +450,12 @@ implied.
 
 ## Decomposition (U16 detail)
 
-**Status: delivered.** Phases A and B are in-tree (`overworld/` and `feature/vegetation/` exist
-as directories), Phase C landed as `4aa7ac85` — extracting the *corrected* closed set including
-`counters` (see Phase C below, corrected in `4be59556`). The as-built ownership map, and the
-gotchas the split actually hit, are in
-[`../worldgen-module-layout.md`](../worldgen.md); this section remains as the
-design record. Older docs naming `overworld.rs`/`feature/vegetation.rs` read as the directory of
-the same name, deliberately not bulk-rewritten.
+The engine is organised in `overworld/` and `feature/vegetation/`; the extracted core includes
+`counters`. The ownership map and module-boundary gotchas are in
+[Worldgen engine overview](../worldgen.md). Treat older references to `overworld.rs` and
+`feature/vegetation.rs` as the corresponding directories.
 
-Enabled by the architecture grant above. Measured surface at planning time (counts drift while U3
-is live in this crate): `feature/vegetation.rs` 3,661 lines, `overworld.rs` 1,832,
+Enabled by the architecture grant above. The measured surface was `feature/vegetation.rs` 3,661 lines, `overworld.rs` 1,832,
 `feature/mod.rs` 1,100, `density/mod.rs` 1,052; crate total 16,335 across 44 workspace members
 (`cargo metadata`), so sub-crates are idiomatic here, not novel. `overworld.rs` sits in the
 cluster of six units — that one file is why the middle was scheduled as a pipeline. Decomposition
@@ -505,7 +493,7 @@ construction, and the parity suite proves it anyway.
   set — `math` imports nothing crate-internal, `rng` only `hash`, `noise` only `math`/`rng`,
   `density` only `math`/`noise`/`rng` — so the boundary exists today and the extraction is
   mechanical. 3,670 lines, ~22% of the crate. **Correction, measured in U16 (see
-  [`docs/worldgen-module-layout.md`](../worldgen.md)): this set is NOT closed, and
+  [Worldgen engine overview](../worldgen.md)): this set is NOT closed, and
   the module it misses is the one that matters.** Re-running the scan while separating *code*
   lines from *doc-comment* lines finds **8 real call sites into `crate::counters`** —
   `density/chunk.rs`'s `bump_density_eval`/`bump_corner_lookup`/`bump_slot_hit` and `rng`'s
@@ -540,7 +528,7 @@ construction, and the parity suite proves it anyway.
   `mod`/`use`/visibility plumbing are defects.
 - **The byte-identity gate and the full parity suite run against the moved tree in the same
   commit**, plus `just health`. A "pure move" that changes RNG order is the single worst outcome
-  available — landed bare, the failure would be attributed to whichever unit lands next.
+  available — without an isolated move, a failure would be attributed to the next unit.
 - **A split never shares a commit with a logic change.** If both are needed, the move lands
   first, green, alone.
 - Phase C additionally: **`just check-seam`** (the version seam), and **`cargo xtask
@@ -560,9 +548,9 @@ file split suggests, and worth stating exactly:
 - **Wave 1** (U16 lands): **U4 ∥ U6** — `fill.rs` + new `engine/` vs `mod.rs` + `store.rs`. The
   one shared point is the driver→fill call site, a one-line change brokered by the orchestrator.
   U13/U14 data extraction free-runs alongside, as ever.
-- **Wave 2** (U4 + U6 landed): **U5 ∥ U7 ∥ U9 ∥ U15** — engine kernels / `decorate.rs` + feature
+- **Wave 2** (after U4 and U6): **U5 ∥ U7 ∥ U9 ∥ U15** — engine kernels / `decorate.rs` + feature
   medium / `biome.rs` / `fill.rs` veins. Four units that were previously a queue.
-- **Wave 3** (U7 landed): **U8 ∥ U10 ∥ U12** — vegetation interior / server scheduler (different
+- **Wave 3** (after U7): **U8 ∥ U10 ∥ U12** — vegetation interior / server scheduler (different
   crate) / new decoration modules — and **U11** once U9 lands.
 - Net: the six-unit serial middle becomes width **2 → 4 → 4** around an unchanged five-unit
   critical path. Before U16, the same work was width 1 throughout. That is the whole payoff, and
@@ -570,29 +558,29 @@ file split suggests, and worth stating exactly:
 
 ## Unit list
 
-Costs: S ≲ 1 session, M ≈ 1–2, L ≈ 3+, XL = epic (own issue tree). "RNG" = can this unit change
+Costs: S ≲ 1 session, M ≈ 1–2, L ≈ 3+, XL = multi-unit group. "RNG" = can this unit change
 any RNG draw or consumption order? Every unit's baseline evidence: `just health` green plus the
 gates named in Q4 step 2; per-unit evidence listed is *additional*. A `samply` profile is the
-right way for a unit to *choose* its targets (see the harness section's profiling rules), but
+right way for a unit to *choose* its targets (see the benchmark definition's profiling rules), but
 acceptance is always counters and gates — never a profile, never a bare duration.
 
 | # | Unit | Cluster (files) | Depends | Cost | RNG order |
 |---|------|-----------------|---------|------|-----------|
-| U1 | Benchmark harness: counters + C_ss/C_cold + calibration | `benches/`, `src/` counter hooks, `docs/render-benchmarks.md` | — | M | none |
-| U2 | Release baseline + profile on embedded data; publish per-stage µs + counters; re-negotiate targets | bench-results, this doc, DESIGN §12 entry | U1 | S | none |
+| U1 | Benchmark harness: counters + C_ss/C_cold + calibration | `benches/`, `src/` counter hooks, [Oracles and benchmarks](../oracles-and-benchmarks.md) | — | M | none |
+| U2 | Release baseline + profile on embedded data; publish per-stage µs + counters; re-negotiate targets | bench-results, this doc, and the full chunk-generation parity plan | U1 | S | none |
 | U3 | Numeric ids: interned `u16` states through dense_grid/carver/ore/top-layer; `String` only at serve boundary | `dense_grid.rs`, `carver/`, `feature/mod.rs`, `feature/top_layer.rs`, `overworld.rs` | U1 | L | none (representation) |
-| U4 | Flattened density engine + vanilla cell-fill (its own plain-trilinear order — §12.101, **not** the incremental walk) + per-chunk scratch (kills D1, D3) — order fix landed `08f5d98a`; remainder re-scoped in **#490** | new `engine/` (in the U16 core crate), then `density/`, `aquifer/`, `overworld/fill.rs` cutover | U1, U16 | L | none (no RNG in density) |
+| U4 | Flattened density engine + reference cell-fill (plain-trilinear order, **not** the incremental walk) + per-chunk scratch (kills D1, D3) | new `engine/` (in the U16 core crate), then `density/`, `aquifer/`, `overworld/fill.rs` cutover | U1, U16 | L | none (no RNG in density) |
 | U5 | `std::simd` noise kernels behind U4's batched fill API | `noise/`, `src/engine/` | U4, U2 profile | M | none (position-lane only) |
-| U6 | Staged sharded store replacing both mutex caches; drivers unchanged — **landed** `34202a21` | `overworld/store.rs`, `overworld/mod.rs` | U3, U16 | L | **must not** — byte-identical gate (held) |
+| U6 | Staged sharded store replacing both mutex caches; drivers unchanged | `overworld/store.rs`, `overworld/mod.rs` | U3, U16 | L | **must not** — byte-identical gate |
 | U7 | In-place region decoration view; delete stitch copies + `RegionGrid`/`VegGrid` re-seeding | `feature/mod.rs`, `feature/vegetation.rs`, `overworld.rs` | U3, U6 | M | **must not** — same driver order |
 | U8 | Vegetation engine port to ids + region view (the 3.6k-line module) | `feature/vegetation.rs` | U3, U7 | L | **must not** — depth-first recursion untouched |
 | U9 | Biome layer: memoised per-source biome in store + RTree port | `biome.rs`, `src/engine/` | U6 | M | none, but **values must match brute force exactly** |
-| U10 | Server scheduler: dependency-edge generation, delete per-ring barrier — **landed** `7ba0176b`/`0a3ede8d` (#494), see [`../join-scheduler.md`](../accounts-and-join.md) | `lodestone-server/src/{server,chunk,join_scheduler}.rs` | U6, U7 | M | none |
-| U11 | 3-D biome sampling (4×4×4 quart cells) on the RTree | `biome.rs`, `overworld.rs`, serve boundary | U9 | M | **changes biome-dependent placement inputs** — vanilla-ward; needs fresh JVM fixtures |
+| U10 | Server scheduler: dependency-edge generation, delete per-ring barrier; see [Accounts, join, and chat](../accounts-and-join.md) | `lodestone-server/src/{server,chunk,join_scheduler}.rs` | U6, U7 | M | none |
+| U11 | 3-D biome sampling (4×4×4 quart cells) on the spatial tree | `biome.rs`, `overworld.rs`, serve boundary | U9 | M | **changes biome-dependent placement inputs**; needs fresh JVM fixtures |
 | U12 | Missing decoration steps: lakes, springs, geodes/icebergs, disks, dungeons/fossils | `feature/`, `compose.rs` | U7 | L | additive (per-feature `set_feature_seed` isolates streams; index-preservation already in place) |
-| U13 | Nether + End generation — **unit group NE**, own issue tree; see [inventory](#full-parity-inventory-jar-derived-262) | new engine instantiations + data + server dimension plumbing | U4–U9 | XL (group) | new content |
-| U14 | Structures — **unit group S**, own issue tree; see [inventory](#full-parity-inventory-jar-derived-262) | new `src/structure/`, data, beardifier hookup, ChunkStatus contract | U6, U7 | XL (group) | new content |
-| U15 | Ore-vein system (`OreVeinifier`): large copper/iron veins from the `vein_toggle`/`vein_ridged`/`vein_gap` router channels, applied during fill | `src/engine/`, `overworld/fill.rs` | U4 | M | none (positional RNG, per-block chooser) — **changes overworld terrain toward vanilla**; needs a vein-positive JVM fixture |
+| U13 | Nether + End generation — **unit group NE**; see [inventory](#full-parity-inventory-jar-derived-262) | new engine instantiations + data + server dimension plumbing | U4–U9 | XL (group) | new content |
+| U14 | Structures — **unit group S**; see [inventory](#full-parity-inventory-jar-derived-262) | new `src/structure/`, data, beardifier hookup, generation-status contract | U6, U7 | XL (group) | new content |
+| U15 | Ore-vein system: large copper/iron veins from the `vein_toggle`/`vein_ridged`/`vein_gap` router channels, applied during fill | `src/engine/`, `overworld/fill.rs` | U4 | M | none (positional RNG, per-block chooser); needs a vein-positive JVM fixture |
 | U16 | Decomposition: split `overworld.rs` and `vegetation.rs` on stage seams; extract `lodestone-worldgen-core` leaf crate — [detail](#decomposition-u16-detail) | `overworld.rs` → `overworld/`, `feature/vegetation.rs` → `feature/vegetation/`, new leaf crate | U3 | M | **must not** — pure moves only; byte-identity + full parity on the moved tree, same commit |
 
 **Scheduling note (shared checkout):** until U16 lands, `overworld.rs` remains the choke point
@@ -625,15 +613,14 @@ reproduce this otherwise.
 - **U4**: the semantic subtleties the interpreter hides — `Mul`'s `v1 == 0.0` short-circuit,
   `interpolated`-inside-corner transparency (`interpolate=false`), `flat_cache`'s forced `y=0`,
   `cache_once`/`cache_2d` scoping — and above all the interpolation order: the block field uses
-  vanilla's own plain-trilinear lerp under a code-only `cache_all_in_cell` (§12.101). Evidence adds:
+  the reference plain-trilinear lerp under cell filling. Evidence adds:
   `DensityChunkOracle` fixtures bit-exact **for component functions only — the oracle itself
   drives the incremental per-axis-advance chain (its own source), so it
   is *not* authoritative for the block field's interpolation order**; that gate is `chunk_parity`
-  (98,304/98,304) plus the standing inverted guard landed in `08f5d98a`. Whole chunks
+  (98,304/98,304) plus a standing inverted guard. Whole chunks
   byte-identical to old sampler at ≥3 seeds, corner-eval counter == predicted lattice.
-  **Status: partially delivered** — `08f5d98a` landed the order fix, the module doc and the
-  inverted guard; the flattened engine, the cutover, `legacy_random_source` (#486) and
-  `end_islands` are re-scoped in **#490**. Two measured structural constraints for the engine
+  The flattened engine, the cutover, `legacy_random_source`, and `end_islands` remain separate
+  implementation work. Two measured structural constraints for the engine
   design: `column_timed` pins all seven stage signatures and derives `StageTimes` from the
   `build_aquifer`/`fill_stage` boundary; and `AquiferTrees` pins **eight** `Density` fields by
   struct literal, so a compiled-graph cache has nowhere to live **unless `Builder::build`'s
@@ -643,83 +630,78 @@ reproduce this otherwise.
 - **U5**: FMA and reduction reassociation (see policy). Evidence: bit-identical to U4 output
   across the full fixture set — an internal refactor gate *plus* the JVM fixtures, because
   "identical to our own previous output" alone is `decode(encode(x))` in disguise.
-- **U6** (**landed**, `34202a21` + `9c4f0967`, doc `5814da19`): the aliasing trap —
+- **U6**: the aliasing trap —
   `pre_ore_stage`'s doc records a clamped-key cache aliasing two chunks and hanging a JVM oracle.
   Exact keys only; eviction is view-scoped, never capacity-FIFO. Evidence as delivered:
   stage-computation counter == each stage's closure count (256/196 on a 12×12 sweep — see the
-  corrected criterion in the harness section); sweep byte-identical to old engine; and the
+  corrected criterion in the benchmark definition); sweep byte-identical to old engine; and the
   289-column join burst as the *discriminating* gate, since the serial counter reads identically
   under old cache and new store (old burst: 452/452/448 varying; new: 441/441/441 exact).
 - **U7**: the **VegGrid absolute-vs-local precedent** — a coordinate-space bug produced zero
   vegetation in every served chunk with the unit suite green, and the gate that caught it was
   later deleted. Evidence adds: a boundary-write control (a feature known to spill across the
   seam, asserted present on both sides), plus the two live `worldgen_data.rs` gates.
-- **U8**: also owns the five [cost-per-draw candidates](#vegetation-cost-per-draw), each landed
+- **U8**: also owns the five [cost-per-draw candidates](#vegetation-cost-per-draw), each accepted
   or refused with a measurement. Its trap: breadth-first "optimisation" of the depth-first
   recursion — instant RNG desync;
   also `TrapezoidInt`-vs-`Uniform` (same support, different draw count) is the recorded shape of
   subtle stream desync. Evidence adds: `VegetationOracle` plains 30/30 + 57/57 exact, savanna
   fixtures re-run (two named residuals, 11/185 and 1/116, are pre-existing — do not absorb them).
-- **U9**: the tree must be **result-identical** to brute force — vanilla ships both and uses the
-  tree; any tie-breaking or pruning difference is a different biome at some coordinate. Follow
-  Pumpkin's shape (tree structure taken from the game data's own node ordering, vanilla's pruning
+- **U9**: the tree must be **result-identical** to brute force — any tie-breaking or pruning
+  difference is a different biome at some coordinate. Follow Pumpkin's shape (tree structure
+  taken from the game data's own node ordering, reference pruning
   search, thread-local last-result seeding — see Q2), but prove it locally. Evidence:
   exhaustive equality brute-vs-tree over a large sampled climate volume + `BiomeOracle` fixtures.
-  (This is also #405's "y = 0 trap" territory — sampling height conventions are per-consumer and
+  (Sampling height conventions are per-consumer and
   already divergent by design: carver/ore at y=0, vegetation at surface. Do not "unify" them.)
 - **U10**: "wait" must never mean a background monitor (harness marks the agent complete);
   scheduler determinism gate `parallel_generation_is_deterministic_and_matches_serial` already
   exists — keep it, plus a fresh-generator-per-arm rule (its own doc records the memo-cache
   self-agreement trap).
-- **U11**: this is the one engine unit that **intentionally changes output** (toward vanilla).
+- **U11**: this is the one engine unit that **intentionally changes output toward the reference**.
   It needs new `ComposedChunkOracle` fixtures with 3-D biome resolution before the diff, or every
   gate melts at once with no way to tell progress from regression.
 - **U12**: step-index preservation — `build_biome_ores` already skips-but-keeps-index; per-feature
   reseeding (`set_feature_seed`) means adding a feature cannot desync its neighbours' streams.
   The trap is assuming that and not proving it: each new feature type lands with its own
   `FeatureOracle`-shaped fixture, and the composed postfeatures gap must shrink monotonically.
-- **U13 (group NE)**: measured blocker inventory (2026-08-07 jar audit — better than previously
-  believed): the bundle already carries **all 66 biome documents and all 35 density-function
+- **U13 (group NE)**: the bundle carries **all 66 biome documents and all 35 density-function
   files byte-identical to the jar**, including `nether/`, `end/`, `overworld_amplified/` and
-  `overworld_large_biomes/`. **Corrected 2026-08-08 (re-measured): the data top-up has since
-  landed** — all 7 `noise_settings`, all 63 noises and `biome_parameters/nether.json` are
-  bundled (#485 `dd40b1f`/`a379f34` plus the corpus sibling `6c6c0e10`); no `[data]` item
-  remains for either dimension. Missing from the *engine*:
-  the `minecraft:end_islands` density type (the only DF type used anywhere in vanilla's worldgen
+  `overworld_large_biomes/`; it also contains all 7 `noise_settings`, all 63 noises, and
+  `biome_parameters/nether.json`. No `[data]` item remains for either dimension. Missing from the *engine*:
+  the `minecraft:end_islands` density type (the only DF type used anywhere in reference worldgen
   data that we do not implement — measured by full type census across all 7 noise_settings) and
   the three non-multi-noise biome sources. So: engine instantiation directly — no data top-up
-  remains — then server dimension plumbing (#330: only overworld is
+  remains — then server dimension plumbing (only overworld is
   hosted; portal/dimension-switch is **gameplay**, not worldgen — a Nether generator is testable
   against oracles without any portal existing). **The executable sequence is
   [`nether-and-end.md`](./nether-and-end.md).**
 - **U14 (group S)**: phased S0–S4 in the [inventory](#full-parity-inventory-jar-derived-262) —
-  S0 ChunkStatus contract, S1 placement/locate (pure math, no blocks), S2 templates (**data
-  extraction done — corrected 2026-08-08**: 188 template pools + 40 processor lists + 34
-  structures + 20 sets + 1,212 `.nbt` templates under `assets/structure/`, landed `6c6c0e10`
-  under #484, byte-identical to the jar), S3 beardifier (currently a constant-0 leaf in
+  S0 generation-status contract, S1 placement/locate (pure math, no blocks), S2 templates (188
+  template pools + 40 processor lists + 34 structures + 20 sets + 1,212 `.nbt` templates under
+  `assets/structure/`, byte-identical to the jar), S3 beardifier (currently a constant-0 leaf in
   `density/mod.rs` — a real engine seam, not free), S4 jigsaw. `structure_spawn_overrides` and
-  in-structure mob spawning (#221/#222) are **gameplay-blocked**, not worldgen-blocked. Wants
-  its own issue tree; do not execute group S from this document. **The executable sequence is
+  in-structure mob spawning are **gameplay-blocked**, not worldgen-blocked. Do not execute group
+  S from this document. **The executable sequence is
   [`structures.md`](./structures.md).**
 
 ## Full-parity inventory (jar-derived, 26.2)
 
-Everything full vanilla parity requires, present or absent, so nothing is discovered late.
-**Method**: every count below was measured on 2026-08-07 against
-`.cache/mc/26.2/versions/26.2/server-26.2.jar` (the real jar inside the bundler wrapper) and the
-de-obfuscated `src/` — not recalled from memory. Blocker classes: **[data]** absent from the
+Everything full reference parity requires, present or absent, so nothing is discovered late.
+**Method**: every count below was measured on 2026-08-07 from the locally inspected 26.2 runtime
+package — not recalled from memory. Blocker classes: **[data]** absent from the
 bundle, **[engine]** absent engine primitive, **[gameplay]** cannot finish even with perfect
 worldgen, **[unwritten]** nothing blocks it, **[out-of-scope]** deliberately excluded.
 
-**Caveat (learned the hard way — `08f5d98a`, §12.101): this census is authoritative about which
+**Caveat: this census is authoritative about which
 density-function *types* exist and silent about how they are *evaluated*.** It was built by
 walking the `noise_settings` JSON, and the marker that selects the block field's interpolation
-arithmetic — `cache_all_in_cell` — appears **nowhere in 26.2's worldgen JSON** (0 hits across
+arithmetic — cell filling — appears **nowhere in 26.2's worldgen JSON** (0 hits across
 both the bundled corpus and the jar's own `data/minecraft/worldgen/`, with a working detector:
-the `minecraft:interpolated` control hits 2 and 8). Vanilla applies it in code,
-in its own noise-chunk source. This is the same class as CLAUDE.md's `registries.json` trap: an
+the `minecraft:interpolated` control hits 2 and 8). The reference applies it in code,
+in its noise-chunk path. This is the same class as CLAUDE.md's `registries.json` trap: an
 authoritative source answering a *neighbouring* question. A data census cannot see evaluation
-order; only the decompiled call path can.
+order; only execution-path observation can.
 
 **Data completeness, bundle vs jar** (`assets/worldgen/` vs `data/minecraft/worldgen/`):
 
@@ -729,24 +711,24 @@ order; only the decompiled call path can.
 | placed_feature / configured_feature | 262 / 226 | 262 / 226 | complete |
 | density_function | 35 | 35 | complete, **byte-identical all 35** (diffed) |
 | configured_carver | 4 | 4 | complete |
-| noise | 63 | 63 | complete (was 61; the 2 nether noises landed `dd40b1f`) |
-| noise_settings | 7 | 7 | complete (was 1; `dd40b1f` + the corpus sibling) |
-| multi_noise parameter lists | 2 | nether + overworld (+`overworld_temperature`, provenance unverified — #485) | complete (nether landed `a379f34`) |
-| structure / structure_set | 34 / 20 | 34 / 20 | complete (was 0/0; `6c6c0e10`, #484) |
-| template_pool / processor_list | 188 / 40 | 188 / 40 | complete (was 0/0; `6c6c0e10` — plus 1,212 `.nbt` under `assets/structure/`, not `assets/worldgen/`) |
-| world_preset / flat presets | 7 / 9 | 7 / 9 | complete (was 0/0; `6c6c0e10`) |
+| noise | 63 | 63 | complete |
+| noise_settings | 7 | 7 | complete |
+| multi_noise parameter lists | 2 | nether + overworld + `overworld_temperature` | complete |
+| structure / structure_set | 34 / 20 | 34 / 20 | complete |
+| template_pool / processor_list | 188 / 40 | 188 / 40 | complete, plus 1,212 `.nbt` templates under `assets/structure/` |
+| world_preset / flat presets | 7 / 9 | 7 / 9 | complete |
 
 **The chunk-status pipeline — the scheduling contract, and a structures prerequisite.**
-Vanilla's progression (read from its own chunk-generation-status enum): `EMPTY → STRUCTURE_STARTS →
+The reference progression: `EMPTY → STRUCTURE_STARTS →
 STRUCTURE_REFERENCES → BIOMES → NOISE → SURFACE → CARVERS → FEATURES → INITIALIZE_LIGHT → LIGHT →
 SPAWN → FULL`. Structure starts run **before** noise so the beardifier can consult them during
 fill. U6's staged store is the natural home: its stage enum grows toward this contract, and doing
 so is a **prerequisite of group S**, not a detail inside it (phase S0 below). [engine]
 
-**Heightmaps as persisted artefacts.** Vanilla maintains six kinds:
+**Heightmaps as persisted artefacts.** The reference maintains six kinds:
 `WORLD_SURFACE_WG` / `OCEAN_FLOOR_WG` (worldgen-time) and `WORLD_SURFACE`, `OCEAN_FLOOR`,
 `MOTION_BLOCKING`, `MOTION_BLOCKING_NO_LEAVES` (persisted/sent). Our engine computes one ad-hoc
-solid-top array. Load-bearing twice already: #437's gate reads vanilla's own `WORLD_SURFACE`,
+solid-top array. The surface map is a load-bearing boundary,
 and vegetation cost candidate 3 *is* the incremental-update semantics of these maps. Becomes a
 named deliverable inside U6 (storage) + U8 (incremental updates). [engine]
 
@@ -756,7 +738,7 @@ the **only** DF type the engine lacks is `minecraft:end_islands` (one use, `end.
 `interval_select`, which we already implement; anyone porting from 1.21-era sources will look
 for a type that no longer exists. [engine, one type]
 
-**The ore-vein system (U15).** Vanilla's `OreVeinifier` generates the large copper/iron veins as
+**The ore-vein system (U15).** The reference generates large copper/iron veins as
 a block chooser during fill, driven by the `vein_toggle`/`vein_ridged`/`vein_gap` router
 channels — all three present in the bundled `overworld.json`, **entirely unimplemented in the
 engine** (grep: zero non-comment hits). This is an *overworld* parity gap in the current world,
@@ -764,24 +746,24 @@ not a new-dimension feature; it is invisible to the existing `(0,0)` composed fi
 because that chunk happens not to prove a vein, so U15's gate must include a vein-positive JVM
 fixture. [engine]
 
-**Biome sources.** Vanilla has four (`level/biome/`): `MultiNoiseBiomeSource` (ours),
-`TheEndBiomeSource`, `CheckerboardColumnBiomeSource`, `FixedBiomeSource`. The End is **not**
+**Biome sources.** The reference has four modes: multi-noise (ours), End-specific,
+checkerboard-column, and fixed. The End is **not**
 multi-noise; single-biome and debug presets need fixed/checkerboard. All three others: [engine,
 small — each is a page of logic].
 
 **Group NE — Nether.** Terrain: `nether.json` noise settings + nether parameter list + 2 noises
-[data — **landed**, #485 `dd40b1f`/`a379f34`; #485 also corrects the lava-sea claim below:
-`aquifers_enabled` is false and the Nether is *not* an aquifer with lava as second fluid],
-lava-sea aquifer behaviour (vanilla hardcodes the second fluid as lava — already
+[data complete; `aquifers_enabled` is false and the Nether is *not* an aquifer with lava as
+second fluid],
+lava-sea aquifer behaviour (the reference uses lava as the second fluid — already
 modelled) and per-dimension surface-rule coverage (the census shows nether/end settings use only
 condition types the overworld also uses, but per-dimension verification is part of the unit)
-[unwritten once data lands]. Biomes (basalt deltas, soul sand valley, crimson/warped forest,
+[unwritten]. Biomes (basalt deltas, soul sand valley, crimson/warped forest,
 nether wastes, warped forest) are **already bundled** — 66/66. Fortress and bastion are group S
-work, not terrain work. Server-side: dimension registry/travel is #330 [gameplay-adjacent; the
-generator itself is oracle-testable without it].
+work, not terrain work. Server-side dimension registry/travel is gameplay-adjacent; the
+generator itself is oracle-testable without it.
 
-**Group NE — End.** `TheEndBiomeSource` + `end_islands` DF type [engine]; `end.json` [data —
-**landed**, #485 `dd40b1f`];
+**Group NE — End.** End-specific biome source + `end_islands` density type [engine]; `end.json`
+[data complete];
 the obsidian pillars (`end_spike` configured feature) and chorus plants land via U12's
 step-census machinery [unwritten]; end cities + gateways are group S; the dragon fight and
 respawn mechanics are [gameplay], not worldgen.
@@ -795,62 +777,61 @@ template pools (188) + processor lists (40) + structure sets (20) with their pla
 (concentric-rings for stronghold, random-spread for the rest) [data + engine];
 `structure_spawn_overrides` — where a structure's mob spawn table lives — is parsed with the
 rest but **[gameplay]** to honour (the spawning system consumes it, not the generator).
-Phasing: **S0** ChunkStatus contract in the store (above) → **S1** placement/locate (structure
-sets + rings/spread math, `/locate`-answerable, zero blocks, oracle: vanilla `/locate` dumps) →
+Phasing: **S0** generation-status contract in the store (above) → **S1** placement/locate
+(structure sets + rings/spread math, `/locate`-answerable, zero blocks, oracle: reference `/locate` dumps) →
 **S2** template structures (NBT structure templates + processors; data extraction first) →
 **S3** beardifier (real terrain adaptation replacing the constant-0 leaf) → **S4** jigsaw
 (villages, ancient city, bastion, trial chambers — the XL tail). Group S is a **unit group with
-its own issue tree**; this plan fixes only its phase boundaries and evidence standards.
+its own implementation plan**; this plan fixes only its phase boundaries and evidence standards.
 
 **World presets and generator types** (7 presets + 9 flat presets, enumerated from the jar:
 normal, amplified, large_biomes, single_biome_surface, flat, flat_all_dimensions,
-debug_all_block_states) — **landed, issue #519, 2026-08-14**. All seven now have a real
+debug_all_block_states). All seven have a real
 generator: amplified/large_biomes are `worldgen_data::WorldType` over the existing engine;
 superflat is `lodestone_worldgen::flat::FlatLevelSource`, a standalone generator; debug is
 `lodestone_worldgen::debug::DebugLevelSource`, also standalone; single-biome turned out to need
 no new biome-source type at all — `OverworldGenerator`'s existing fixed-biome fallback path
-*is* `FixedBiomeSource`, selected deliberately via `worldgen_data::SingleBiomeResolver`
+is selected deliberately via `worldgen_data::SingleBiomeResolver`
 withholding `biome_parameters`. See
-[`worldgen-world-type-selection.md`](../worldgen.md) for the full
-preset-to-entry-point table. **Not landed**: a world-creation-screen surface to pick any of
+[Worldgen engine overview](../worldgen.md) for the full
+preset-to-entry-point table. A world-creation-screen surface to pick any of
 them — every entry point is reachable from `lodestone-server` but nothing outside it
 constructs one yet.
 
-**Blending / upgrade data (`BlendingData`) — explicitly [out-of-scope]**, stated so it reads as
+**Blending / upgrade data — explicitly [out-of-scope]**, stated so it reads as
 a decision rather than an omission: it exists to blend chunks generated by *older versions* into
 new terrain. We generate fresh worlds only; there is no old-version chunk data to blend against.
-The engine keeps vanilla's empty-blender constants (`blend_alpha`=1, `blend_offset`=0,
-`blend_density` transparent), which is exactly vanilla's behaviour on a fresh world. Revisit
+The engine keeps the reference empty-blender constants (`blend_alpha`=1, `blend_offset`=0,
+`blend_density` transparent), which is the required behaviour on a fresh world. Revisit
 only if importing pre-26.2 worlds ever becomes a goal.
 
 **Also checked, already covered elsewhere**: decoration-step census (U12), 3-D biomes (U11),
-lighting (different subsystem, excluded from C_ss by definition), mob spawn placement (#221/#222,
-[gameplay]).
+lighting (different subsystem, excluded from C_ss by definition), and mob spawn placement
+[gameplay].
 
-## Stale claims found while planning (reported, not edited)
+## Data and benchmark guidance
 
-- The task brief's "75 biome documents" — the bundle has **66** (`assets/worldgen/biome/`),
-  corroborated by DESIGN.md §12.30's own census. 262 placed / 226 configured are correct.
-- `benches/generation.rs`'s `bench_stage_split` — scene string `patch=7x7(49 chunks)` over a 3×3 sweep (see U1). Now fixed: the scene string is derived from `coords` rather than restated.
-- `biome/mod.rs`'s `nearest_biome`'s "brute force is already fast" — true in isolation, contradicted in composition
-  by the 289-source × 25-chunk multiplier (D5). The comment predates carver composition.
-- `overworld/mod.rs`'s module doc self-reports one stale sentence ("Vegetation … still-not-composed",
-  corrected in-place) — already flagged in the file, nothing to do.
+- The bundle contains **66** biome documents (`assets/worldgen/biome/`), 262 placed features,
+  and 226 configured features; retain these as the data-completeness baseline.
+- `bench_stage_split` must derive its scene label from `coords`; a hard-coded label can misstate
+  a 3×3 sweep as a 7×7 sweep and invalidate historical comparisons.
+- The biome search cost must be evaluated in composed generation: its 289-source × 25-chunk
+  multiplier makes an isolated brute-force timing non-representative.
 
 ## Unverified, needs follow-up
 
 - **PumpkinMC residue** (the divergence map itself is now verified — see Q2): whether its
-  generated `BiomeTree` preserves vanilla's node ordering exactly (asserted by construction there,
-  not spot-checked), and the provenance of its captured vanilla chunk dumps (no dump-generation
+  generated `BiomeTree` preserves reference node ordering exactly (asserted by construction there,
+  not spot-checked), and the provenance of its captured reference chunk dumps (no dump-generation
   tool is committed in that checkout). Neither blocks anything here — we build our own fixtures.
-- **Release-profile baseline** — now exists (U2 landed; DESIGN.md §12.98) but is **provisional**:
-  the counters-on figure is being re-measured counters-off on the pinned toolchain. Treat any
-  quoted C_ss as superseded by §12.98's latest entry. Every other performance number above from
-  the tree is debug-profile or partial.
+- **Release-profile baseline** — the [full chunk-generation parity plan](./worldgen-parity.md)
+  records a **provisional** counters-on figure that is being re-measured counters-off on the
+  pinned toolchain. Treat any quoted C_ss as superseded by the latest recorded release run.
+  Every other performance number above from the tree is debug-profile or partial.
 - **Vegetation walk cost in release with D2/D3 fixed** — the make-or-break number for the sub-ms
   verdict (Q3); measured at the U4 checkpoint.
-- **Vanilla's decoration-step census against the 26.2 jar** (exact step list our composition still
-  skips) — derive from `RegistryDataLoader`-adjacent code and the biome JSONs during U12, not
+- **The reference decoration-step census against the 26.2 jar** (exact step list our composition still
+  skips) — derive from the registry-loading path and biome JSONs during U12, not
   from memory.
 - The savanna vegetation residuals (11/185, 1/116) — pre-existing, mechanism unfound; they bound
   U8's "no new residuals" gate rather than being absorbed by it.

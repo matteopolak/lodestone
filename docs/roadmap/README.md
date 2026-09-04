@@ -3,11 +3,11 @@
 The plan to 1:1 parity with Minecraft 26.2 — **client and server** — with a plugin
 framework deep enough to host a port of any Java plugin.
 
-**Open work lives in [GitHub issues](https://github.com/matteopolak/lodestone/issues)**, organised
-by epic and collected in the [Lodestone project board](https://github.com/users/matteopolak/projects/7).
-This directory holds the *decomposition*: why the work splits the way it does, what
-unblocks what, and the traps attached to each area. The tracker answers *what is
-open*; these docs answer *what order, and what will go wrong when you start*.
+**Open work lives in the [project tracker](https://github.com/matteopolak/lodestone/issues)**,
+organised by epic and collected in the [Lodestone project board](https://github.com/users/matteopolak/projects/7).
+This directory holds the durable *decomposition*: why the work splits the way it does,
+what unblocks what, and the traps attached to each area. The tracker answers what is
+open; these docs answer what to build, in what order, and how to verify it.
 
 [`../backlog.md`](../backlog.md) remains the per-item trap record and the source of the
 tier definitions. When it and the tracker disagree, the tracker is newer.
@@ -20,10 +20,11 @@ Parity is a claim about **observable behaviour**, and it is only worth making if
 falsifiable. Three standards, all of which this repo already applies:
 
 1. **An expected value must originate outside the code under test.** `decode(encode(x)) == x`
-   is satisfied by two symmetric misunderstandings — hermetic chunk fixtures built with
-   our own encoder passed throughout, then a live gate produced 49 × "unexpected end of
-   input". Parity is measured against a JVM oracle, captured server bytes, Mojang's own
-   generated reports, or a hand-decoded spec example. Never against ourselves.
+   is satisfied by two symmetric misunderstandings. A fixture suite that uses the encoder
+   under test is insufficient: live decoding must reject incompatible bytes, including
+   truncation rather than accepting a self-consistent encoding. Parity is measured against
+   a JVM oracle, captured server bytes, generated
+   registry reports, or a hand-decoded spec example. Never against ourselves.
 2. **Nothing is done until something on screen changes** (or, server-side, until a real
    client observes it). The dominant defect class here is the **island**: built, tested,
    reaching zero pixels because nothing calls it. Eleven confirmed. A crate's green test
@@ -34,17 +35,17 @@ falsifiable. Three standards, all of which this repo already applies:
 
 ## The tracks
 
-| track | epic | what it covers |
-|---|---|---|
-| **Tier 1** | [#1](https://github.com/matteopolak/lodestone/issues/1) | before "a stranger could play survival for an hour" |
-| **Tier 1½** | [#2](https://github.com/matteopolak/lodestone/issues/2) | smaller, player-requested |
-| **Tier 2** | [#3](https://github.com/matteopolak/lodestone/issues/3) | expected by any real player |
-| **Tier 3** | [#4](https://github.com/matteopolak/lodestone/issues/4) | completeness — auth, chat signing, options, accessibility |
-| **Tier 4** | [#5](https://github.com/matteopolak/lodestone/issues/5) | **being a server**: the game simulation |
-| **Infrastructure** | [#6](https://github.com/matteopolak/lodestone/issues/6) | repo health, test integrity, the written record |
-| **Architecture** | [#7](https://github.com/matteopolak/lodestone/issues/7) | the bevy ECS substrate and plugin *API* |
-| **Plugin framework** | [#77](https://github.com/matteopolak/lodestone/issues/77) | plugin *capability* parity with Bukkit/Paper/Fabric |
-| **Benchmarks** | [#78](https://github.com/matteopolak/lodestone/issues/78) | measuring the expensive operations, and keeping them measured |
+| track | scope |
+|---|---|
+| **Tier 1** | before "a stranger could play survival for an hour" |
+| **Tier 1½** | smaller, player-requested |
+| **Tier 2** | expected by any real player |
+| **Tier 3** | completeness — auth, chat signing, options, accessibility |
+| **Tier 4** | **being a server**: the game simulation |
+| **Infrastructure** | repo health, test integrity, the written record |
+| **Architecture** | the bevy ECS substrate and plugin *API* |
+| **Plugin framework** | plugin *capability* parity with Bukkit/Paper/Fabric |
+| **Benchmarks** | measuring the expensive operations, and keeping them measured |
 
 Tiers 1–3 are the client. Tier 4 is the server and is **plausibly larger than Tiers 1–3
 combined** — a different axis, not a further step along the same one. The plugin
@@ -67,26 +68,23 @@ framework and benchmarks are orthogonal to both and can proceed in parallel.
 - [`benchmarks.md`](./benchmarks.md) — what is measured, the harness, and how a
   regression is caught without turning CI into a flake generator.
 
-## Invariants every issue inherits
+## Invariants every implementation inherits
 
-These are not style notes. Each one has cost real work, and they are recorded in
-[`../../CLAUDE.md`](../../CLAUDE.md) with the incident attached.
+These are correctness constraints, not style notes. Their full rationale is recorded in
+[`../../CLAUDE.md`](../../CLAUDE.md).
 
 - **`EcsHandle` is not reentrant.** Holding its write guard across a call that takes the
-  lock again deadlocks *silently* — no panic, no log line. That shipped once and
-  hard-froze the client on the first tick of the first block dig. For the plugin API in
-  particular, making that unrepresentable is a correctness requirement, not ergonomics.
+  lock again deadlocks *silently* — no panic, no log line. Every plugin-facing entry point
+  must make that state unrepresentable, so the first action cannot stall the client. This
+  is a correctness requirement, not ergonomics.
 - **The model shader is at wgpu's 4-bind-group floor.** A fifth group validates on an
   adapter reporting 8 and is a startup crash on any adapter reporting 4. Check the
   *limit*, not the adapter.
-- **Depth is reversed-Z `[0,1]`, the same sense as vanilla**, so a ported comparison and
+- **Depth is reversed-Z `[0,1]`**, so a ported comparison and
   bias transcribe with **no** sign flip and a depth attachment clears to
-  `lodestone_render::DEPTH_CLEAR` (`0.0`). **Vanilla is not colour-managed**, so tint and
-  shade multiply in *gamma* space.
-- **Staleness is the most common defect in the written record** — seven instances in one
-  session, and one stale sentence of mine was copied into four issues as their shared
-  root cause and misdirected all four. Grep for the producer across the whole tree, not
-  for the consumer in one named file.
+  `lodestone_render::DEPTH_CLEAR` (`0.0`). Tint and shade multiply in *gamma* space.
+- **Keep the written record current.** Grep for the producer across the whole tree, not
+  only for the consumer in one named file, before recording a missing capability.
 - **A shell pipeline will destroy the evidence you are about to reason from.** `| head`
   read as absence hid a real constant; `| grep | tail` reported success while cargo
   returned 101. Let cargo write its own output and check its real exit status.
@@ -106,4 +104,4 @@ The foundations that already exist are unusually strong for a project at this st
 they are the reason the estimate is a roadmap rather than a wish: worldgen (noise router,
 density, carvers, surface, aquifer, ore features), collision shapes for all 32,366 block
 states, hardness, entity dimensions, block physics constants, a `path_types.rs` dumped from
-vanilla's own pathfinding-node evaluator, and player movement — all **bit-exact against JVM oracles**.
+  the pathfinding-node evaluator, and player movement — all **bit-exact against JVM oracles**.

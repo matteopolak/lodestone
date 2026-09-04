@@ -1,4 +1,4 @@
-# Structures: the group S issue tree
+# Structures delivery plan
 
 ## What it is
 
@@ -6,38 +6,35 @@ The executable unit sequence for unit group **S** of
 [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its U14 row): the structure engine —
 placement, templates, beardifier, jigsaw and the coded piece generators — turned from the
 rewrite plan's phase sketch (S0–S4) into landable units, each with its gate, its control, its
-outside evidence source and its cost stated as a counter against the serve-path budget.
-Written 2026-08-08 against `HEAD` `5f37fb83`; refines and partially supersedes issue **#514**
-(see [Relationship to the parent issue](#relationship-to-the-parent-issue)).
+outside evidence source and its cost stated as a counter against the serve-path budget. It is the
+structure-specific companion to [`worldgen-rewrite.md`](./worldgen-rewrite.md).
 
-## What was verified vs assumed (2026-08-08)
+## Current evidence and assumptions
 
-Every load-bearing claim below was re-measured for this plan, because the rewrite plan's
-inventory was stale in exactly this area (corrected in the same commit as this file):
+The following census and constraints are the evidence base for the units below:
 
 - **The data phase (the old S2 extraction) is DONE.** Measured by `find … | wc -l`:
   34 structures, 20 structure sets, 188 template pools, 40 processor lists under
   `crates/lodestone-server/assets/worldgen/`, plus **1,212 `.nbt` templates under
   `crates/lodestone-server/assets/structure/`** — note *not* under `assets/worldgen/`, which
-  is where a scoped `find` measures zero. Landed `6c6c0e10`, byte-identical to the
-  jar (`worldgen-structure-corpus.md`). The only Rust reader is the drift gate
+  is where a scoped `find` measures zero. The corpus is byte-identical to the distribution archive.
+  The only Rust reader is the drift gate
   `crates/lodestone-server/tests/worldgen_structure_corpus.rs`.
-- **Vanilla's structure-set salted-seed derivation is absent**: `/usr/bin/grep -rn
-  "large_feature_with_salt" --include='*.rs' crates/` → 0 hits.
-  `lodestone-worldgen-core/src/rng/mod.rs` has `set_decoration_seed`,
-  `set_feature_seed`, `set_large_feature_seed` and nothing else. The record
-  definition, read from vanilla's own RNG-seeding source (not from a call
-  site): `result = x * 341873128712 + z * 132897987541 + seed + blend`, then the generator is
-  re-seeded with that value
-  — the fourth parameter is the structure set's `salt` (the decompiler names it `blend`).
-- **The beardifier is a constant-zero leaf**: `Density::Beardifier` parses in
-  `Builder::build_object` (`crates/lodestone-worldgen-core/src/density/mod.rs`) and evaluates `0.0` in `Density::compute` (same file).
+- **Structure-set salted seeding is implemented.**
+  `WorldgenRandom::set_large_feature_with_salt` in
+  `lodestone-worldgen-core/src/rng/mod.rs` uses
+  `x * 341873128712 + z * 132897987541 + seed + salt`, then reseeds the generator. The
+  random-spread placement calls it. Concentric-ring placement uses its own XOROSHIRO stream and
+  does not use the salted large-feature derivation.
+- **The beardifier is a production fill dependency.** The structure module's beardifier receives
+  adaptation-bearing starts from `structure_refs`; `OverworldGenerator::pre_ore_stage` consumes it
+  through `beardifier_for` before `fill_stage`. Structure-free chunks return an empty beardifier.
 - **Terrain adaptation is carried by 11 of 34 structures**, censused from the bundle
   (`python3` over `assets/worldgen/structure/*.json`): `beard_thin` — the 5 villages,
   `pillager_outpost`, `nether_fossil`; `beard_box` — `ancient_city`; `bury` — `stronghold`,
   `trail_ruins`; `encapsulate` — `trial_chambers`. **Every carrier is jigsaw except
   `stronghold` (coded) and `nether_fossil` (template, Nether-only).** This reorders the
-  S3/S4 dependency — see [S3](#s3--beardifier-the-engine-seam-then-the-composed-gate).
+  S3/S4 dependency — see [S3 — beardifier: production seam and composed gate](#s3--beardifier-production-seam-and-composed-gate-m).
 - **Structure families are three, not two.** Bundle `type` census: `minecraft:jigsaw` × 10
   (5 villages, bastion_remnant, pillager_outpost, ancient_city, trail_ruins,
   trial_chambers); template-driven coded types (`ruined_portal` × 7, `shipwreck` × 2,
@@ -52,15 +49,15 @@ inventory was stale in exactly this area (corrected in the same commit as this f
   `level.dat`) holds **14,499 generated overworld chunks in 29 region files**, written by the
   real vanilla 26.2 server. Its per-chunk NBT carries full `structures.starts` (piece lists
   with template names, positions, rotations, bounding boxes) and `structures.References`.
-  Start census, measured by scanning every region: mineshaft 29, ocean_ruin 14,
-  trial_chambers 8, ruined_portal 7, shipwreck 7, monument 1, village 1, trail_ruins 1,
-  buried_treasure 1. **Absent from the generated area**: stronghold, desert_pyramid, igloo,
+  Start census, measured by scanning every region: mineshaft 46, ocean_ruin 16,
+  trial_chambers 13, ruined_portal 9, shipwreck 11, monument 2, village 2, trail_ruins 1,
+  buried_treasure 2 (**102 total starts**). **Absent from the generated area**: stronghold, desert_pyramid, igloo,
   swamp_hut, jungle_temple, pillager_outpost, ancient_city, mansion. This census is the
   *world-species* precondition ledger for every gate below.
-- **The persistence path already ships an empty `structures` compound**:
-  `structures_to_nbt` (`crates/lodestone-server/src/chunk_nbt.rs`) writes
-  `structures{References:{}, starts:{}}` — the same "populated empty" shape as the empty
-  heightmap NBT (census §10). Filling it is S1's cheapest production consumer.
+- **The persistence path serializes structure starts and references.**
+  `structures_to_nbt` (`crates/lodestone-server/src/chunk_nbt.rs`) writes completed starts with
+  piece metadata and chunk references, while retaining empty compounds for chunks with no
+  structures.
 - **There are 13 parity binaries, not 11**: 11 `*_parity.rs` under
   `crates/lodestone-worldgen/tests/` plus `overworld_gen.rs` plus
   `crates/lodestone-worldgen-parity/tests/chunk_parity.rs`. Every unit below preserves all
@@ -72,8 +69,8 @@ inventory was stale in exactly this area (corrected in the same commit as this f
 
 ## The evidence position (read before writing any gate)
 
-There is **no JVM on this machine** (`java -version` fails; CLAUDE.md corrected at
-`789c6869`). But the constraint is narrower than "no new vanilla-origin evidence, ever":
+There is **no JVM on this machine** (`java -version` fails). The constraint is narrower than
+"no new vanilla-origin evidence, ever":
 
 1. **The survival world is vanilla-authored evidence that already exists** — produced by the
    real server in July, bind-mounted at `.cache/mc/survival`. Reading it produces no new
@@ -81,25 +78,23 @@ There is **no JVM on this machine** (`java -version` fails; CLAUDE.md corrected 
    `chunk_nbt_vanilla_oracle.rs` already does (`#[ignore]`d, "a real 26.2 world this repo
    did not write"). It is the primary oracle for this whole group.
 2. **The JVM-oracle path never needed a host JVM.** `scripts/worldgen-oracle/run.sh` runs
-   `eclipse-temurin:25-jdk` under Apple `container` (`docs/oracle-runtimes.md` — Docker is
+   `eclipse-temurin:25-jdk` under Apple `container` ([Oracles and benchmarks](../oracles-and-benchmarks.md) — Docker is
    gone from every oracle path). Measured while writing this plan: `container list` shows
    the runtime **up and `lodestone-survival` running**. So new fixtures and *extending the
    oracle world's generated area* (to obtain the 8 missing structure types) appear
    available whenever a unit wants them. Each unit below is designed to land without that
    (belt), and names the container-runtime strengthening explicitly (suspenders), so the
    plan survives the runtime being down again.
-3. **The decompiled 26.2 source** under `.cache/mc/26.2/src/` is the record definition for
-   every algorithm. Read the definition, not a call-site summary — this repo has shipped a
-   backwards transcription that way.
+3. **The cached 26.2 behavioral reference** is the record definition for every algorithm.
+   Read the definition rather than inferring its order from a call site.
 
-Two independent constructions of one physical rule is the worked precedent (DESIGN.md
-§12.117): here the two arms are *our placement engine* and *vanilla's own persisted output
-for the same seed* — authored by different implementations, sharing nothing.
+The placement engine and the persisted output for the same seed are independent constructions of
+one physical rule: they are authored by different implementations and share nothing.
 
 ## Where structures slot into the pipeline (the S0 answer)
 
-Vanilla's own generation-stage order is `… STRUCTURE_STARTS →
-STRUCTURE_REFERENCES → BIOMES → NOISE …`: starts precede noise **because the beardifier
+The reference generation-stage order is `… STRUCTURE_STARTS → STRUCTURE_REFERENCES → BIOMES →
+NOISE …`: starts precede noise **because the beardifier
 reads structure bounds during fill**. In our engine, fill lives inside
 `OverworldGenerator::pre_ore_stage`, memoised by the staged store
 (`overworld/store.rs`; slots declared in `overworld/mod.rs`, and the store's own rule is
@@ -107,20 +102,20 @@ reads structure bounds during fill**. In our engine, fill lives inside
 
 Concretely:
 
-- Two new `StageSlot`s on the store entry: `structure_starts` (topmost) and
-  `structure_refs`. `starts(C)` is a pure function of `(seed, C)` — placement math plus
+- The store has `structure_starts` (topmost) and `structure_refs` `StageSlot`s.
+  `starts(C)` is a pure function of `(seed, C)` — placement math plus
   climate-sampled biome checks plus piece generation, no chunk data — so it is
   embarrassingly parallel and safely memoised. `refs(C)` consults `starts` over the
-  **17×17** neighbourhood (`ChunkStatus` gives STRUCTURE_REFERENCES radius 8) and keeps the
+  **17×17** neighbourhood (the structure-reference stage has radius 8) and keeps the
   starts whose bounding boxes come within 12 blocks of `C` (the beardifier's own
   close-to-chunk reach, from its own per-chunk structure lookup).
-- `pre_ore_stage(C)` gains one upstream edge: it reads `refs(C)` to build the per-chunk
-  beardifier context before fill. This **inverts the terrain-first intuition** exactly as
-  the rewrite plan warns; the join scheduler (U10, `docs/join-scheduler.md`) grows one more
+- `pre_ore_stage(C)` reads `refs(C)` to build the per-chunk beardifier context before fill. This
+  **inverts the terrain-first intuition** exactly as
+  the rewrite plan warns; the join scheduler (U10, [Accounts, join, and chat](../accounts-and-join.md)) grows one more
   leading wavefront, serial depth +1 stage, halo +8 chunks of *starts only* (cheap — no
   block work in a start).
-- **What it costs, as counters, against C_ss (15.14 ms/column today vs the ≤1.0 ms goal —
-  do not mix in the 61 ms cold figure; the two are unreconciled):** `starts` runs exactly
+- **What it costs, as counters, against C_ss (the full pipeline's documented release baseline is
+  853.5 ms/chunk; this unit's contribution must be measured separately):** `starts` runs exactly
   once per chunk (the store's `OnceLock` invariant, already counter-gated at 256/196
   granularity for the existing stages); per chunk it is ~20 structure-set placement draws
   plus rare piece generation on candidate chunks. `refs` is ≤289 store probes, each an
@@ -128,10 +123,9 @@ Concretely:
   the headline invariant is **`beardifier_evals == 0` and zero added allocations for any
   chunk with no adaptation-bearing start** — exact, not approximate.
 
-The full vanilla ticket/status pipeline is **not** a prerequisite and is not
-scheduled here: the store's stage slots plus the scheduler's dependency edges already
-express the one ordering fact structures need. The chunk-lifecycle issue remains open for
-reasons unrelated to this group.
+The full ticket/status pipeline is **not** a prerequisite: the store's stage slots plus the
+scheduler's dependency edges already express the ordering fact structures need. Chunk lifecycle
+work is separate from this plan.
 
 ## Unit sequence
 
@@ -140,39 +134,39 @@ health` green, all 13 parity binaries green, composed fixture byte-identical (ex
 a unit says otherwise and proves why), and no unit lands as an island — its consumer is
 named in the unit.
 
-### S1 — placement, starts/refs stages, and the persisted `structures` compound (M)
+### S1 — implemented placement, starts/refs stages, and persisted `structures` (M)
 
-The old S0+S1 merged deliberately: stage plumbing alone, with empty products, is an island
-by construction.
+S1 is wired end-to-end: placement, staged starts/references, structure persistence, and the
+`crates/lodestone-worldgen/src/structure/` module all have production consumers.
 
-**Contents.** (a) `set_large_feature_with_salt` on `WorldgenRandom` — the five-line formula
-above. (b) `RandomSpreadStructurePlacement` (linear + triangular spread, salt,
+**Implemented behavior.** (a) `set_large_feature_with_salt` on `WorldgenRandom` — the five-line
+formula above. (b) random-spread placement (linear + triangular spread, salt,
 `frequency_reduction_method`, exclusion zones, per-set weighted structure selection) and
-`ConcentricRingsStructurePlacement` (stronghold rings). (c) Per-structure *start
+concentric-ring placement (stronghold rings). (c) Per-structure *start
 predicates* — the biome check via the climate sampler (pure) plus any structure-specific
-pre-piece draws (mineshaft's probability draw lives here) — behind a registry in a new
-`crates/lodestone-worldgen/src/structure/` module, where a structure whose generator has
-not landed yet yields **no start** and is *named* in a `collect_unsupported`-style ledger
-(the legible-silence pattern from `unsupported_placed_ref`, `feature/vegetation/config.rs`), never silently
-skipped. (d) The two store slots and the `pre_ore` edge, with the beardifier context built
-and handed to a still-constant-zero leaf — bit-identical output, proven. (e) The
-production consumers: `structures_to_nbt`'s (`chunk_nbt.rs`) empty compound becomes real
-`starts`/`References` NBT, and the singleplayer save path persists it.
+pre-piece draws (mineshaft's probability draw lives here) — behind the structure registry in
+`crates/lodestone-worldgen/src/structure/`, where an unsupported generator records an **incomplete
+start** with an empty piece list and its reason in `StructureRegistry::unsupported`
+(the legible-silence pattern from `unsupported_placed_ref`, `feature/vegetation/config.rs`). It
+remains visible through `OverworldGenerator::structure_starts_including_incomplete`, but is never
+persisted or block-placed. (d) The two store slots and the `pre_ore` edge, whose refs build the production
+beardifier context. (e) `structures_to_nbt` (`chunk_nbt.rs`) writes real `starts`/`References`
+NBT and the singleplayer save path persists it.
 
 **Gate.** For every chunk of the survival world's 29 regions: our computed start set for
 seed -195764831 equals vanilla's persisted `structures.starts` — structure id, start chunk,
-and (once S2+/S5 land pieces) bounding boxes — for each structure type on the
+and, for generators with complete pieces, bounding boxes — for each structure type on the
 **implemented ledger**; and our `References` equal vanilla's for those types.
 Expected values are vanilla-authored; nothing round-trips through our encoder.
 **World precondition, asserted not assumed**: the gate first counts starts per type in the
-oracle NBT and fails if any gated type has zero (the census above says mineshaft 29 …
-buried_treasure 1); a type with zero oracle instances may not sit on the ledger.
+oracle NBT and fails if any gated type has zero (the census above says mineshaft 46 …
+buried_treasure 2); a type with zero oracle instances may not sit on the ledger.
 
 **Control, observed failing.** Re-run one gated set with its salt perturbed by +1; the gate
 must report mismatches with a per-region bounding box of differing chunks. Run it, record
 the failure, then remove. This is the detector-works control for "our placement equals
 vanilla's" — without it, an accidentally-empty ledger passes vacuously (the
-assertion-species trap), so the gate also asserts a floor on total compared starts (≥69,
+assertion-species trap), so the gate also asserts a floor on total compared starts (≥102,
 the measured census total).
 
 **Cost counter.** `structure_start_draws` per chunk (predict: ~2–6 per set × 20 sets;
@@ -202,7 +196,7 @@ semantics (vanilla's own template-placement routine: rotation, mirror, pivot, `s
 transparency, water-loggable handling), processor lists (all 40 bundled documents must
 parse; `rule`, `block_rot`, `block_ignore`, `capped`, … — unknown types fail loudly), and
 the template-coded structures with oracle presence, in order of oracle richness:
-**shipwreck (7), ruined_portal (7), ocean_ruin (14)**. Igloo, end_city, nether_fossil wait
+**shipwreck (11), ruined_portal (9), ocean_ruin (16)**. Igloo, end_city, nether_fossil wait
 (zero overworld oracle instances; nether_fossil and end_city belong to NE-adjacent gates).
 
 **Gate.** For each oracle start of a gated type: piece metadata (template name, position,
@@ -231,22 +225,20 @@ per chunk, and **exactly 0** for chunks with no start — the serve-path invaria
 NBT parsing is per-generator-construction (interned), never per-chunk; counter:
 `template_parses` stops growing after warmup.
 
-### S3 — beardifier: the engine seam now, the composed gate after S4 (M)
+### S3 — beardifier: production seam and composed gate (M)
 
-Replace the constant-zero leaf with the real evaluator: the 24³ kernel
+The production evaluator uses the 24³ kernel
 (`BEARD_KERNEL_RADIUS = 12`), rigid pieces (RIGID projection only) with
 `groundLevelDelta`, jigsaw junctions, and the four `TerrainAdjustment` behaviours
 (`beard_thin`, `beard_box`, `bury`, `encapsulate`), fed from S1's `refs` product.
 
-**The dependency inversion found while planning (differs from #514's S3-before-S4
-reading):** every adaptation carrier is jigsaw except stronghold and nether_fossil, and
-none of S2's overworld family carries adaptation at all. So S3 can land its *seam and
-kernel* now, but its structure-positive composed gate — real vanilla terrain flattened
-under a real structure — is only satisfiable after S4 (village, trail_ruins,
-trial_chambers) or group NE (nether_fossil). The plan records that as an explicit deferred
-obligation inside S4's gate list rather than pretending S3 is fully proven at landing.
+**Production dependency:** adaptation-bearing jigsaw and coded pieces are generated through the
+same starts/references path as the beardifier, so S3 is not waiting on S4 or S5 for a production
+consumer. The residual proof work is broader: compare structure-positive terrain against an
+outside oracle and keep the incomplete-generator ledger explicit until every placed start has a
+complete piece list.
 
-**Gate at S3 landing.** (a) Kernel and contribution math against the record definition:
+**Gate.** (a) Kernel and contribution math against the record definition:
 vanilla's own beard-contribution formula, spot values hand-computed
 at ~10 lattice offsets (outside-origin arithmetic, no JVM needed), including both
 hypotheses at one point where dropping the ground-level-delta term gives a distinct value
@@ -271,16 +263,15 @@ adaptation is `none` before it ever reaches the density graph).
 whole serve-path budget story: the overworld C_ss sweep must be counter-identical to
 pre-S3); for affected chunks, evals ≤ pieces × interpolation cells, asserted.
 
-### S4 — jigsaw (L, the largest single piece)
+### S4 — jigsaw (implemented; extend its gates)
 
-Vanilla's own jigsaw-assembly semantics: start pool resolution, per-template jigsaw block
+The production jigsaw engine implements start-pool resolution, per-template jigsaw block
 entities as connectors (name/target/pool/final_state/joint — read from the 1,212 templates
 S2's loader already parses), weighted element selection with **vanilla's own shuffle
 draw order**, rotation draws, fallback pools, `max_depth`, `use_expansion_hack` (villages'
 terrain matching), `project_start_to_heightmap`, `dimension_padding` and **pool aliases**
-(trial_chambers binds aliases per start from its own seeded draw), plus emitted
-`JigsawJunction`s (which S3's beardifier consumes — landing S4 *activates* S3's deferred
-gate).
+(trial_chambers binds aliases per start from its own seeded draw), plus emitted jigsaw junction
+records consumed by S3's beardifier.
 
 **What the data requires, measured not recalled**: all 188 pools and 40 processor lists
 must resolve at load into typed programs with **zero unsupported element or processor
@@ -288,43 +279,48 @@ types** — gate: a loader-completeness test over the whole bundled corpus (the 
 gate proves the bytes; this proves the *reader*), with the `collect_unsupported` pattern
 so any residue is named. Element types to cover: `single_pool_element`,
 `legacy_single_pool_element`, `list_pool_element`, `feature_pool_element` (places a
-`placed_feature` — reuses the existing feature engine; note some referenced features may
-be among the 48/55 unimplemented types (the missing-feature-types issue), in which case the element places nothing
+`placed_feature` — reuses the existing feature engine; some referenced features may be
+among the 48/55 unimplemented types, in which case the element places nothing
 **and the ledger names it** — do not let that gap hide inside S4), `empty_pool_element`.
 
 **Gate — the gem of this group**: piece-list equality against vanilla start NBT, block-free.
-For the oracle world's village (1), trial_chambers (8) and trail_ruins (1): every expanded
+For the oracle world's villages (2), trial_chambers (13) and trail_ruins (1): every expanded
 piece's template name, position, rotation and depth equals vanilla's persisted list,
 exactly. This gates the *entire* expansion RNG walk — selection order, shuffles, alias
 draws — without comparing a single block. Then the block gate reuses S2's engine per
-piece, and **S3's deferred composed gate runs here**: terrain under the village
-(`beard_thin`) and around the trial chambers (`encapsulate`) compares against vanilla
+piece, and the **S3 composed terrain gate** compares terrain under the village
+(`beard_thin`) and around the trial chambers (`encapsulate`) against vanilla
 region blocks within the adaptation reach, mismatches reported by bounding box, with the
 magnitude of the no-beardifier hypothesis pre-computed (run once with the leaf forced back
 to 0.0 — the observed-failing control and the wrong-hypothesis prediction in one run;
 record both counts).
 
-**World precondition**: one village (plains, at one start chunk) is thin coverage —
+**World precondition**: two plains villages are still thin coverage —
 assert its presence, and name the other four village biomes + pillager_outpost +
 ancient_city as **not exercised by the oracle area** (extend the world under `container`
 to strengthen; a session teleporting to the relevant biomes suffices). Do not let a
-1-instance pass generalise silently: the gate output records per-type instance counts.
+small-sample pass generalise silently: the gate output records per-type instance counts.
 
 **Cost counter**: expansion runs at `starts` time, once per start chunk — counter
 `jigsaw_expansions == oracle start count` over the sweep, zero on other chunks; expansion
 draw count per start recorded (villages ~hundreds), no per-served-chunk cost beyond S1's.
 
-### S5 — coded piece generators, ordered by oracle presence (L, decomposable per structure)
+### S5 — coded piece generators (implemented; extend per-family gates)
 
-Each is a bespoke port gated like S4 (start piece-list equality, then S2-engine blocks
-where template-based, then coded-block comparison): **mineshaft (29 oracle starts — first,
-richest gate), buried_treasure (1), ocean_monument (1)**; then the zero-oracle tail —
-desert_pyramid, jungle_temple, swamp_hut, igloo, mansion, stronghold (+ its S1 ring
-obligation), fortress (zero starts even in the Nether oracle area) — each **blocked on
-evidence, not on code**: the unit rule is *no landing without an oracle-positive*, and the
-acquisition path (extend the survival world under `container`) is named per structure.
-Mineshaft's trap: its pieces are RNG-heavy corridor recursion where draw order is spec;
-its 29-instance oracle is exactly what makes it the right first port.
+**Oracle-backed coded families** use S4-style gates: start-piece-list equality, then
+template-engine blocks where applicable, then coded-block comparison. The survival-world fixture
+contains **mineshaft (46 starts — the richest gate), buried_treasure (2), and ocean_monument (2)**.
+
+**Zero-oracle structures** — desert_pyramid, jungle_temple, swamp_hut, igloo, mansion, stronghold
+(including its ring obligation), and fortress — cannot claim oracle piece-list equality until an
+outside fixture contains them. Their current gates must be record-derived arithmetic and deterministic
+self-consistency checks, with an explicit expected piece count or bounding box wherever the record
+supplies one. A structure with an incomplete piece list remains in
+`StructureRegistry::unsupported` and visible through
+`OverworldGenerator::structure_starts_including_incomplete`, but is never persisted or block-placed.
+The ledger, zero-oracle gates, and additional outside evidence are durable residuals. Mineshaft's
+trap is RNG-heavy corridor recursion where draw order is spec; its 46-instance oracle is exactly why
+it is the right first comparison family.
 
 ### Out of scope, said explicitly
 
@@ -338,15 +334,13 @@ its 29-instance oracle is exactly what makes it the right first port.
   `/locate`-shaped for tests only.
 - The Nether/End structures' *dimension hosting*: group NE.
 
-## Relationship to the parent issue
+## Plan boundaries
 
-This plan **refines** the parent issue (keep it as the group parent; file S1–S5 as sub-issues
-from these units): it keeps S0's contract but merges it into S1's landing (stage plumbing
-alone is an island); replaces its "/locate dumps" oracle with the survival world's
-persisted starts (no live server needed); corrects S2/S3/S4's implied independence with
-the measured adaptation census (S3's composed gate depends on S4); and adds S5 for the
-coded family its S2/S4 dichotomy has no home for. The parent issue's S1-blocker analysis
-(`setLargeFeatureWithSalt`) and its evidence-standard paragraphs stand.
+S1 absorbs the original stage-plumbing work because empty products would be an island. It uses the
+survival world's persisted starts instead of live command output, S3's composed gate depends on
+S4's adaptation-bearing jigsaw structures, and S5 covers the coded family omitted by a
+template-versus-jigsaw split. The salted placement-seed formula and oracle-first evidence standard
+apply to every unit.
 
 ## The biggest risk
 
@@ -364,8 +358,8 @@ None new at plan time. Units that add flags must record them here.
 
 `crates/lodestone-worldgen` (+ `-core` for the RNG addition), the staged store and join
 scheduler (U6/U10, landed), the bundled corpus in `crates/lodestone-server/assets/`,
-`.cache/mc/survival/world` as oracle, `.cache/mc/26.2/src/` as record definition,
+`.cache/mc/survival/world` as oracle, the cached 26.2 behavioral reference as record definition,
 `scripts/worldgen-oracle/` + Apple `container` for strengthening fixtures. Companion:
-[`worldgen-gap-census.md`](../worldgen.md) §7,
-[`worldgen-structure-corpus.md`](../worldgen-structures.md),
-[`plans/nether-and-end.md`](./nether-and-end.md).
+[Worldgen engine overview](../worldgen.md),
+[Structure generation](../worldgen-structures.md),
+[The Nether and the End](./nether-and-end.md).

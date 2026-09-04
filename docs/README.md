@@ -119,7 +119,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   datapack JSON (`recipe_json.rs`), the crafting-table menu layout, the plugin-facing
   recipe-registration API, and the recipe-book UI (browsing, auto-fill, unlock toast)
   layered on top. Our own server now computes crafting results too — see
-  [`docs/server-side-crafting.md`](./server-gameplay.md).
+  [Server-authoritative gameplay](./server-gameplay.md).
 - [F3 debug overlay](./debug-overlay.md) — The F3 instrument: two columns of engine
   and world stats drawn over the world in vanilla's own plate, pitch and font, plus
   two world-space overlays (F3+B entity hitboxes, F3+G chunk borders). The
@@ -263,14 +263,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   (length prefix, compression, the one frame that carries no packet) all four families
   share underneath `lodestone-net`.
 - [Oracle assets: what's on disk under `.cache/mc/`, and who reads it](./oracle-assets.md) —
-  A census of `.cache/mc/` — the vanilla server jars, client jars, and booted-server
-  world directories this repo has fetched — cross-referenced against `crates/`,
-  `xtask/` and `scripts/` to say, for each version, exactly what test or script
-  consumes it. It exists because `docs/plans/multi-version-protocol-dedup.md`'s Stage
-  0 found eight jars on disk that nothing in the tree reaches: fetched by `xtask
-  version-table`, unknown to the protocol work. This document is that finding turned
-  into a maintained table, so the next agent reads it instead of re-deriving it (or
-  worse, assuming a fetched jar is therefore a used one).
+  An audit procedure for `.cache/mc/`: server jars, client jars, and generated world
+  directories used as external test or generation inputs. It distinguishes an asset
+  that is present locally from one a test, script, or generator actually consumes.
 - [Oracles and benchmarks: runtimes, fuzzing, and real-workload measurement](./oracles-and-benchmarks.md) —
   Where this repo gets ground truth and cost measurements from outside its own code:
   the Apple `container` runtime every JVM/vanilla-server oracle now runs under, the
@@ -319,10 +314,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   it has to satisfy. It ends with a decomposition into sub-issues ordered by what
   unblocks the most.
 - [Plugin crafting-station hooks — anvil, grindstone, smithing table, loom, stonecutter](./plugin-crafting-hooks.md) —
-  The plugin-facing seam issue #150 asked for: a server-side mirror of Bukkit's
-  `PrepareAnvilEvent`/ `PrepareSmithingEvent`/`PrepareItemCraftEvent`, letting a
-  plugin allow, deny, or replace the result a crafting station is about to show a
-  player, before it ever reaches their screen.
+  The plugin-facing seam mirrors Bukkit's `PrepareAnvilEvent`/`PrepareSmithingEvent`/
+  `PrepareItemCraftEvent`: a plugin can allow, deny, or replace the result a crafting
+  station is about to show a player, before it reaches their screen.
 - [Plugin entity spawn/despawn/modify, and custom entity type registration](./plugin-entity-api.md) —
   Two independent halves, one per side of the client/server split, both giving a
   native plugin the Bukkit-class `World.spawnEntity(loc,
@@ -352,12 +346,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   make the pattern the crafting hooks already discovered available to everything else,
   instead of being reinvented per feature.
 - [Plugin worldgen API — custom generators, custom dimensions, structure placement](./plugin-worldgen-api.md) —
-  The plugin-facing seam that answers three issues Paper's own API covers —
-  `ChunkGenerator`/ `BiomeProvider` (#132), per-world dimension creation (#134), and
-  structure-template pasting (#136) — scoped against what
-  `lodestone-worldgen`/`lodestone-server` actually are today: a version-free,
-  oracle-verified terrain interpreter (see `docs/worldgen.md`'s own parity discipline)
-  called imperatively from plain functions, never installed as a bevy `System`.
+  The plugin-facing seam covers custom chunk generators and biomes, primary-world
+  dimension properties, and structure-template placement. It is scoped to
+  `lodestone-worldgen` and `lodestone-server`: a version-free, oracle-verified terrain
+  interpreter (see `docs/worldgen.md`'s parity discipline) called imperatively from
+  plain functions, never installed as a bevy `System`.
 - [Projectile and effect rendering](./projectile-and-effect-rendering.md) — The draw
   paths for entities that are neither an ordinary mob rig nor a plain billboard:
   velocity-aligned projectiles (arrow, spectral arrow, trident), firework rockets,
@@ -382,9 +375,9 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   packet-id tables, three generated block-state tables, three generated entity
   registries, and nine explicitly-carried shape deltas, rather than three copies of a
   family. It is the second era crate, after [`the 1.9 era`](./protocol-1-9-era.md),
-  and the stage of
+  and applies the range and era-sharing rules in
   [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md)
-  that closes the pre-1.17 legacy gap between 1.13 and 1.17.
+  to the pre-1.17 legacy gap between 1.13 and 1.17.
 - [The 1.17 era crate: one family, two protocols, a world that moved](./protocol-1-17-era.md) —
   `crates/versions/1.17` (package `lodestone-v1-17`) serves Minecraft 1.17.1 and
   1.18.2 — protocols **756** and **758** — from a single adapter, two generated
@@ -423,18 +416,15 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   `crates/versions/1.9` (package `lodestone-v1-9`) is the first *era* crate in this
   repo: one family serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 — protocols
   110, 210, 316 and 340 — from a single adapter, four generated packet-id tables,
-  and nine explicitly-carried shape deltas, rather than four copies of a family. It is
-  the calibration case for
-  [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md):
-  the same four versions cost ~336 hand-written source lines *each* under the
-  copy-forward scheme this replaces, and the marginal cost of the fourth is now about
-  twenty.
+  and nine explicitly-carried shape deltas, rather than four copies of a family. It
+  demonstrates the range and per-protocol-table rules in
+  [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md).
 - [Protocol packet ranges and data-driven dispatch](./protocol-dispatch.md) — Two
   additions that let one packet definition serve a range of protocol versions, and let
   a family's clientbound dispatch be checked at construction time instead of falling
-  through a silent `_ =>` arm. Landed as Stage 1 of the multi-version protocol dedup
-  plan (`docs/plans/multi-version-protocol-dedup.md`); `v1-8`, `v1-9` and `v1-14` now
-  all dispatch through it, and `v1-9` is a four-protocol era crate built on it (see
+  through a silent `_ =>` arm. The multi-version protocol-sharing design is documented
+  in `docs/plans/multi-version-protocol-dedup.md`; `v1-8`, `v1-9` and `v1-14` now all
+  dispatch through it, and `v1-9` is a four-protocol era crate built on it (see
   [`protocol-1-9-era.md`](./protocol-1-9-era.md)).
 - [Redstone execution model](./redstone-execution.md) — How a redstone change
   actually gets *executed* — what wakes up, what it costs, and why. This is the
@@ -651,62 +641,40 @@ every issue under it inherits.
   workspace benchmark architecture: the explicit targets that measure production
   subsystems, the per-crate Criterion harness they share, and the two kinds of
   regression comparison. It records the current target census rather than a work plan.
-- [Client rendering and UI: the remaining visual and audio surface](./roadmap/client-rendering.md) —
-  The decomposition of everything the player *sees or hears* that is not yet at 1:1
-  parity with vanilla 26.2: block entity renderers, sky and weather, smooth lighting,
-  particles, the remaining GUI screens, HUD elements, camera/post effects, item and
-  entity visuals, audio, and text rendering breadth. Client physics/prediction/input,
-  server-side anything, the plugin framework, and benchmarks are covered by the other
-  docs in this directory ([`../roadmap/README.md`](./README.md) lists them). This doc
-  does not repeat their scope.
-- [Client simulation, physics and input](./roadmap/client-simulation.md) — The
-  decomposition behind Tiers 1–3's simulation slice: the movement modes not yet
-  modelled, vitals and their movement/combat consequences, damage, prediction and
-  reconciliation, input, and the tick/frame seam. The individual items are filed as
-  sub-issues of epics [#1](https://github.com/matteopolak/lodestone/issues/1) (Tier
-  1), [#2](https://github.com/matteopolak/lodestone/issues/2) (Tier 1½),
-  [#3](https://github.com/matteopolak/lodestone/issues/3) (Tier 2) and
-  [#4](https://github.com/matteopolak/lodestone/issues/4) (Tier 3); this doc is the
-  ordering argument and the trap record, not a duplicate of any one issue.
-- [Plugin framework: the capability audit](./roadmap/plugin-framework.md) — The
-  decomposition behind epic [#77](https://github.com/matteopolak/lodestone/issues/77):
-  a capability-by-capability audit of what a real Bukkit/Paper/Fabric plugin does,
-  checked against what a native `bevy_app::Plugin` (and, where it exists only on paper
-  today, the WASM host) can do in this codebase *right now*, with a gap and an issue
-  number attached to every row that is not fully closed. Epic
-  [#7](https://github.com/matteopolak/lodestone/issues/7) owns the ECS substrate that
-  makes any of this possible ([`../bevy-migration.md`](../architecture.md),
-  [`../world-unification.md`](../architecture.md)); this doc and its 49 sub-issues own
-  whether that substrate adds up to **capability parity** with the Java ecosystem,
-  which is a different and harder question than "does the ECS exist."
-- [Protocol, networking and multi-version — roadmap](./roadmap/protocol.md) — 1:1
-  protocol parity for 26.2 (protocol 776) in both directions, on both the client *and*
-  the server side — a vanilla client must be able to connect to our server, and a
-  vanilla server to our client — plus the multi-version question. All 23 issues
-  below are filed as sub-issues of epic
-  [#5](https://github.com/matteopolak/lodestone/issues/5) (Tier 4, 13 issues,
-  server-side) or epic [#4](https://github.com/matteopolak/lodestone/issues/4) (Tier
-  3, 10 issues, completeness). A handful of pre-existing issues already covered part
-  of this domain and were commented on rather than duplicated — see ["What was
-  already filed"](#what-was-already-filed) below.
+- [Client rendering and UI: remaining visual and audio surface](./roadmap/client-rendering.md) —
+  This roadmap covers the player-visible 26.2 client work: scene rendering, GUI and
+  HUD surfaces, item and entity presentation, camera effects, audio, and text breadth.
+  Client physics and input, server simulation, protocol coverage, plugins, and
+  benchmarks have their own roadmaps; [`README.md`](./README.md) indexes them.
+- [Client simulation, physics and input](./roadmap/client-simulation.md) — This
+  roadmap covers client movement modes, vitals and their movement/combat effects,
+  prediction and reconciliation, input, and the tick/frame seam. Rendering, server
+  simulation, plugins, benchmarks, and wire coverage are covered elsewhere in the
+  roadmap directory.
+- [Plugin framework: the capability audit](./roadmap/plugin-framework.md) — This
+  roadmap records the capability contract for native `bevy_app::Plugin` extensions and
+  the sandboxed WASM tier. It distinguishes the ECS substrate from the harder
+  question: whether a real Bukkit, Paper, or Fabric extension can be ported with its
+  required behaviour intact. The supporting architecture is described by
+  [`../architecture.md`](../architecture.md) and
+  [`../plugin-api.md`](../plugin-api.md).
+- [Protocol, networking and multi-version roadmap](./roadmap/protocol.md) — This
+  roadmap covers wire compatibility for the 26.2 client and server, networking
+  robustness, and the decision framework for additional protocol families. It does not
+  cover the gameplay systems transported by the wire, GUI presentation, or command
+  execution.
 - [Server-side entities, AI and gameplay mechanics — roadmap](./roadmap/server-entities.md) —
-  Everything alive or mechanical on a Lodestone *server*: mobs and their AI, spawning,
-  living-entity behaviour (breeding, taming, villagers, golems, raids, bosses), the
-  item/economy mechanics (farming, furnaces, brewing, enchanting, XP, fishing,
-  hunger), and damage/health. All 57 issues below are filed as sub-issues of epic
-  [#5](https://github.com/matteopolak/lodestone/issues/5) (Tier 4 — the game
-  simulation).
+  This roadmap decomposes the server simulation for mobs, spawning, living-entity
+  behaviour, the item and economy mechanics, and damage and health. Chunk lifecycle,
+  world persistence, block simulation, redstone, world state, protocol coverage,
+  client rendering and prediction, commands, plugins, and benchmarks are separate
+  tracks.
 - [Server simulation — the roadmap](./roadmap/server-simulation.md) — **Scope:**
-  everything about *simulating the world* server-side — chunk lifecycle,
-  persistence, block behaviour, redstone, world state, the tick loop, and the rest of
-  server plumbing. Command execution (Brigadier, selectors, `/execute`,
-  functions/datapacks) is deliberately **not** re-decomposed here: it already has its
-  own issue, [#48](https://github.com/matteopolak/lodestone/issues/48), and a comment
-  on that issue lists the natural sub-scopes for whoever picks it up. Mob AI,
-  pathfinding, breeding, villagers, and raids belong to a sibling doc
-  (`server-entities.md`) and a different agent's audit — several of that audit's
-  findings are cited below only where they correct a claim this doc's own research
-  first got wrong (see [Corrections](#corrections-mid-audit)).
+  server-side world simulation: chunk lifecycle, persistence, block behaviour,
+  redstone, world state, the tick loop, and operational server plumbing. Command
+  execution is a separate subsystem. Mob AI, pathfinding, breeding, villagers, and
+  raids belong to [`server-entities.md`](./server-entities.md); this roadmap names
+  their dependencies only where they meet the world-simulation path.
 
 ---
 
@@ -719,14 +687,10 @@ diagnosis is worth keeping *after* the fix lands -- CLAUDE.md's standing claim i
 record of confidently-held false beliefs is the most valuable thing in this repo, and several
 of these caught the *brief* being wrong rather than the code.
 
-- [Plan: the chunk lifecycle — tickets, status, unloading, async generation (#289, #292, #293, #297)](./plans/chunk-lifecycle.md) —
-  The implementation plan for the four chunk-lifecycle issues (#289 ticket/status
-  pipeline, #292 unloading and the save-on-unload hook, #293 non-blocking generation,
-  #297 the spawn ticket), each decomposed into agent-sized units with explicit file
-  ownership, a named consumer, and a gate with a negative control. Written 2026-08-04
-  against a verified tree; two of the four issue bodies contain claims that are false
-  against 26.2 or against the current tree, and those corrections are the first
-  section rather than a footnote.
+- [Chunk lifecycle: tickets, status, unloading, and asynchronous generation](./plans/chunk-lifecycle.md) —
+  The design for server-side chunk residency. It defines how tickets determine which
+  chunks are retained or simulated, how generation is scheduled without stalling the
+  runtime, and how chunks leave memory safely.
 - [Plan: which files and crates to split, and which to leave alone](./plans/crate-and-file-splits.md) —
   A read-only architecture pass over the workspace's largest files and crates,
   deciding per candidate whether to split now, split later, or leave — judged on
@@ -747,45 +711,28 @@ of these caught the *brief* being wrong rather than the code.
   `docs/plans/progressive-chunk-generation.md` names and deliberately does not
   attempt: that plan is generation-side and honestly tops out at rd 64; this one
   answers whether 512 is reachable at all, and at what fidelity.
-- [Issue batching: ~250 open issues as agent-sized, file-disjoint dispatch batches](./plans/issue-batching.md) —
-  A dispatch plan that clusters the 255 open issues (surveyed 2026-08-04) into batches
-  one agent can close in one sitting, scheduled into waves whose file sets are
-  disjoint. Verified against `git log` and the current tree, not against issue bodies
-  — roughly 28 open issues already have their substance landed, and several
-  "blocked" labels are stale.
-- [Mob AI roster: per-species goal-sets and brains](./plans/mob-ai-roster.md) — The
-  implementation plan for GitHub epic
-  [#225](https://github.com/matteopolak/lodestone/issues/225) and its children
-  #226–#233 — assembling real per-species goal sets and Brain behaviour sets on
-  top of `lodestone-entity`'s existing `GoalSelector`/`Brain` infrastructure. Its
-  central finding is that the roster **cannot be built first**: eight of the thirteen
-  implemented goals are structurally incapable of firing in production today, so this
-  plan sequences a perception-and-driver spine ahead of every species unit.
-- [Multi-version protocol dedup: wire eras, a shared packet library, and version-ranged definitions](./plans/multi-version-protocol-dedup.md) —
-  A staged plan to stop paying the full per-family cost for each of the twelve
-  protocol versions still to come. Today every `crates/versions/<family>` crate is a
-  near-copy of its neighbour — measured here, at `16b72257`, as **0 byte-identical
-  files but 54–61 of ~80 packet structs identical, 65–70% of adapter dispatch-arm
-  lines identical or near-identical between adjacent legacy families, and 42% of
-  test-function lines near-duplicated** — while the mechanism that would let one
-  definition serve a range of protocols (`#[mc(since = N)]`/`#[mc(until = N)]` in
-  `lodestone-macros`) is implemented, tested, and used by **zero** production packets.
-  The recommended design is: one crate per *wire era* (grouped where adjacent versions
-  agree on ≥85% of packet shapes), a version-free `lodestone-protocol-common` crate
-  holding every era-stable packet **with its lift/lower function and its protocol
-  range**, per-protocol *generated* tables inside the era crate, and a data-driven
-  dispatch table with an enumerated ignore list replacing the `_ =>` island factory.
-  It keeps `cargo check -p lodestone-shell --no-default-features` green at every stage
-  and migrates the four existing families incrementally.
-- [Multi-version protocol: the dispatch plan for epic #343](./plans/multi-version-protocol.md) —
-  The implementation plan for epic #343 (every major version 1.7.10 through 26.2,
-  children #344–#358): family-per-wire-era with range extension inside an era, a
-  shared canonicalisation crate every legacy family maps through, a capture-once
-  oracle strategy, and the join-versus-host split stated per version with the hosting
-  blockers located in the tree. Re-verified 2026-08-05 at `d197d555`, and again the
-  same day at `e2508e3` — by which point **units U1, U2 and U3 had already landed**
-  (`3ba959a`, `02b8053`, `fa75f38`); every "X exists / X is missing" claim below was
-  re-checked rather than copied forward.
+- [Parallel dispatch: file-disjoint work batches](./plans/issue-batching.md) — This
+  is a durable coordination guide for dividing Lodestone work among concurrent agents.
+  A batch is a bounded outcome with a small, explicit file set, one integration path,
+  and a verification command that demonstrates a visible or connected result.
+- [Mob AI roster: species behavior and production wiring](./plans/mob-ai-roster.md) —
+  This document defines how species-specific behavior is assembled on top of
+  `lodestone-entity` goal and brain systems, then made observable through
+  `lodestone-server`. A roster is correct only when it is selected for a spawned
+  species, ticked by production simulation, and its state changes reach a connected
+  client when the behavior is visible.
+- [Multi-version protocol sharing: eras, ranges, and dispatch](./plans/multi-version-protocol-dedup.md) —
+  This document describes the version-independent protocol layer and the rules for
+  sharing packet definitions across protocol families. `lodestone-protocol-common`
+  owns packet shapes and adapter logic that are stable across a declared protocol
+  range; a crate under `crates/versions/` owns the wire-era-specific framing,
+  generated identifiers, and adapter dispatch for the protocols it serves.
+- [Multi-version protocol](./plans/multi-version-protocol.md) — The durable plan for
+  every supported release from 1.7.10 through 26.2: family-per-wire-era with range
+  extension inside an era, shared canonicalisation, capture-led evidence, and a strict
+  join-versus-host split. The canonical-state foundation, multi-protocol seam, and
+  legacy canonicalisation bridges are implemented; the feature ledger below records
+  extension work and acceptance gates rather than commit history.
 - [The Nether and the End: the group NE issue tree](./plans/nether-and-end.md) — The
   executable unit sequence for unit group **NE** of
   [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its U13 row): Nether and End terrain
@@ -797,14 +744,12 @@ of these caught the *brief* being wrong rather than the code.
   below), and portals/dimension travel are gameplay, out of scope — a Nether
   generator is oracle-testable with no portal existing.
 - [Backing Paper's NMS calls with Rust: census and feasibility](./plans/paper-nms-bridge.md) —
-  The feasibility census issue
-  [#341](https://github.com/matteopolak/lodestone/issues/341) asked for before any
-  design: what it would take to run real, unmodified Bukkit/Spigot/Paper plugin jars
-  against this server by supplying vanilla-internal-shaped classes backed by Rust. The
-  verdict is **viable only as the last plugin, not the first**: every seam the JVM
-  tier needs is a seam the public bevy-plugin API must expose anyway, none of those
-  seams is reachable today, and the JVM tier itself should not start until the
-  adjudication window and player registry exist.
+  This feasibility census establishes what it would take to run real, unmodified
+  Bukkit/Spigot/Paper plugin jars against this server through Rust-backed
+  compatibility classes. The verdict is **viable only as the last plugin, not the
+  first**: every seam the JVM tier needs is a seam the public bevy-plugin API must
+  expose anyway, none of those seams is reachable today, and the JVM tier itself
+  should not start until the adjudication window and player registry exist.
 - [Progressive chunk generation ("mip levels" for worldgen)](./plans/progressive-chunk-generation.md) —
   A design and staged implementation plan for serving distant chunk columns at a
   reduced generation stage — shaping, carving and structures but no ores, vegetation
@@ -812,26 +757,25 @@ of these caught the *brief* being wrong rather than the code.
   the server can stream a much larger view radius without paying full generation for
   columns the player can barely see. The owner's framing: mip levels for chunk
   generation. Two hard correctness constraints come with it, verbatim from the owner:
-- [Plan: incremental random-tick section counters (issue #507 follow-up)](./plans/random-tick-counter.md) —
-  The plan for replacing `random_tick.rs`'s per-tick section scan with vanilla's
-  incrementally maintained `tickingBlockCount` — a per-section counter kept correct
-  by every mutation path, so "does this section randomly tick" becomes an O(1) integer
-  compare instead of an O(blocks) scan per column per tick. Written 2026-08-07 against
-  `bdf93a28` (the interim palette-mask fix); every claim below was re-verified against
-  the tree and the 26.2 jar, not inherited from the briefing — see "Corrections to
-  the briefing" at the end.
+- [Plan: incremental random-tick section counters](./plans/random-tick-counter.md) —
+  The implemented replacement for `random_tick.rs`'s per-tick section scan uses an
+  incrementally maintained per-section counter — kept correct by every mutation
+  path, so "does this section randomly tick" becomes an O(1) integer compare instead
+  of an O(blocks) scan per column per tick. The implementation must preserve the
+  documented block-state and random-draw behaviour, including the independent
+  reference checks below.
 - [Redstone execution model: typed cells, kind-classified dispatch, and a bounded graph](./plans/redstone-execution-model.md) —
-  The plan for issue #548's rework of how redstone executes: replacing per-event
-  rediscovery (string-parsed block states, a fifteen-predicate dispatch chain, blind
-  neighbour visits) with a layered design — a typed cell representation,
-  palette-derived reaction classification, a cross-column world view, and, **only if
-  counters then justify it**, an incrementally-invalidated listener index. It is
-  written against the device set that landed first (`docs/redstone.md`'s "what each
-  device needs of the execution model" table) rather than against an imagined
-  redstone, and its first finding is that the issue's own premise needs correcting:
-  **there is no per-tick rescan to replace**. The expensive thing is the per-event
-  constant factor, and the correctness gap this plan closes is cross-chunk propagation
-  — not incrementality, which the model already has.
+  This plan defines how redstone execution avoids per-event rediscovery while
+  preserving observable ordering: it replaces (string-parsed block states, a
+  fifteen-predicate dispatch chain, blind neighbour visits) with a layered design —
+  a typed cell representation, palette-derived reaction classification, a cross-column
+  world view, and, **only if counters then justify it**, an incrementally-invalidated
+  listener index. It is written against the device set that landed first
+  (`docs/redstone.md`'s "what each device needs of the execution model" table) rather
+  than against an imagined redstone, and its first finding is that **there is no
+  per-tick rescan to replace**. The expensive thing is the per-event constant factor,
+  and the correctness gap this plan closes is cross-chunk propagation — not
+  incrementality, which the model already has.
 - [Plan: regionised server ticking](./plans/regionised-server-ticking.md) — A design
   document — not an implementation — for splitting the server's single-threaded
   world tick into independently-ticked regions (Folia's model: groups of nearby
@@ -851,50 +795,41 @@ of these caught the *brief* being wrong rather than the code.
   the tree, the recorded diagnostics, or the 26.2 decompiled client — not inherited
   from the briefing, whose errors are listed at the end.
 - [Plan: runtime plugin loading — wasm components, and the same plugin compiled in](./plans/runtime-plugin-loading.md) —
-  The design for loading plugins at runtime (Java-style, drop a file in a folder)
-  using WebAssembly components, while keeping the existing compiled-in bevy-plugin
-  path — including the milestone-zero refactor that makes the library expose the
-  composed `App` so a consumer can register plugins at all, and how one plugin can be
-  authored once and shipped either way. Read-only plan against the tree as of
-  2026-08-04; nothing here is implemented, and every `file:line` is a sample taken
-  that day, not a durable coordinate — several cited files were being edited by
-  other agents *while this was written*, and one citation went stale between two greps
-  minutes apart (noted inline where it happened).
-- [Plan: migrating `lodestone-server` onto its own `bevy_ecs::World` (issue #433)](./plans/server-ecs-migration.md) —
-  The phased migration plan that turns
-  [`docs/server-ecs.md`](../dedicated-server.md)'s decision record into dispatchable
-  work: how today's `Arc<Mutex<_>>`-and-`tokio::spawn` server becomes a
-  tick-thread-owned, unlocked `bevy_ecs::World` whose core subsystems are themselves
-  bevy plugins. Written 2026-08-04 against a re-verified tree; the state census in
-  "The census" below is the core deliverable, and every phase names its files, its
-  choke-point patch, its gate, its negative control, its performance gate, and the
-  downstream epic it unblocks.
-- [Structures: the group S issue tree](./plans/structures.md) — The executable unit
-  sequence for unit group **S** of [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its
-  U14 row): the structure engine — placement, templates, beardifier, jigsaw and the
+  This plan defines runtime plugin loading through WebAssembly components while
+  retaining compiled-in bevy plugins. It also requires the library to expose the
+  composed `App`, so a consumer can register a plugin before selecting a runner, and
+  it defines how one portable plugin source produces either a component or a
+  compiled-in artifact. File paths and symbols identify durable integration points;
+  re-find a symbol rather than relying on a line number.
+- [Plan: migrating `lodestone-server` onto its own `bevy_ecs::World`](./plans/server-ecs-migration.md) —
+  The phased migration plan that turns [The integrated and dedicated
+  server](../dedicated-server.md)'s decision record into dispatchable work: how
+  today's `Arc<Mutex<_>>`-and-`tokio::spawn` server becomes a tick-thread-owned,
+  unlocked `bevy_ecs::World` whose core subsystems are themselves bevy plugins. The
+  state census in "The census" below is the core deliverable, and every phase names
+  its files, its choke-point patch, its gate, its negative control, its performance
+  gate, and the downstream epic it unblocks.
+- [Structures delivery plan](./plans/structures.md) — The executable unit sequence
+  for unit group **S** of [`worldgen-rewrite.md`](./worldgen-rewrite.md) (its U14
+  row): the structure engine — placement, templates, beardifier, jigsaw and the
   coded piece generators — turned from the rewrite plan's phase sketch (S0–S4)
   into landable units, each with its gate, its control, its outside evidence source
-  and its cost stated as a counter against the serve-path budget. Written 2026-08-08
-  against `HEAD` `5f37fb83`; refines and partially supersedes issue **#514** (see
-  [Relationship to the parent issue](#relationship-to-the-parent-issue)).
+  and its cost stated as a counter against the serve-path budget. It is the
+  structure-specific companion to [`worldgen-rewrite.md`](./worldgen-rewrite.md).
 - [Villager economy and the Brain substrate](./plans/villager-economy.md) — The
-  implementation plan for the villager-economy arc — issues #231 (villager Brain
-  behaviours), #243 (professions and POI claiming), #244 (gossip), #245 (trades), #246
-  (reputation), #247 (curing), #240 (wandering trader) and #241 (raids and patrols)
-  — planned as one architecture rather than eight features. Its central findings:
-  the Brain substrate the issues assume is missing **already exists and runs in
-  production** (`lodestone_entity::brain`, driven through `BrainGoal` on the goal
-  scheduler), so the substrate decision is to *extend* it, not to build it; the
-  missing substrate is **POI state and the world-facts seam into `BrainMob`**; and the
-  26.2 jar ships trades, trade sets and the villager schedule as **plain data files
-  already on disk** under `.cache/mc/26.2/src/data/minecraft/`, which collapses what
-  the issues treat as the hardest extraction problem.
-- [Plan: world state — time, weather, sleeping, border, rules, difficulty, spawn, dimensions (epic #340)](./plans/world-state.md) —
-  The implementation plan for epic #340's eight children (#323–#330): the
-  server-authoritative world-state systems, each planned end-to-end from ECS placement
-  through the wire to a named client consumer. Written 2026-08-04 against a verified
-  tree; every "X doesn't exist" below was re-grepped tree-wide, and three children
-  turned out substantially landed since their issues were written.
+  architecture plan for villager behaviour, professions and POI claims, gossip,
+  trades, reputation, curing, wandering traders, patrols, and raids. It treats them as
+  one system rather than isolated features. Its central findings: the Brain substrate
+  the issues assume is missing **already exists and runs in production**
+  (`lodestone_entity::brain`, driven through `BrainGoal` on the goal scheduler), so
+  the substrate decision is to *extend* it, not to build it; the missing substrate is
+  **POI state and the world-facts seam into `BrainMob`**; and the 26.2 jar ships
+  trades, trade sets and the villager schedule as **plain data files already on disk**
+  under `.cache/mc/26.2/src/data/minecraft/`, which collapses what the issues treat as
+  the hardest extraction problem.
+- [World state — time, weather, sleeping, border, rules, difficulty, spawn, dimensions](./plans/world-state.md) —
+  The implementation plan for the server-authoritative world-state systems, each
+  planned end-to-end from ECS placement through the wire to a named client consumer.
 - [Worldgen cycle accounting](./plans/worldgen-cycle-accounting.md) — The
   measurement programme that follows the allocation drive: instruction-denominated,
   per-stage cost accounting for the worldgen pipeline, built on the task-level
@@ -913,9 +848,8 @@ of these caught the *brief* being wrong rather than the code.
   yet.
 - [Worldgen rewrite plan](./plans/worldgen-rewrite.md) — The plan for rewriting
   `crates/lodestone-worldgen`'s generation engine from scratch for speed — targeting
-  sub-millisecond steady-state serial chunk generation at bit-exact vanilla 26.2
-  parity — plus the jar-derived inventory of everything full parity requires that
-  the repo does not have yet (structures, Nether/End, ore veins, the missing
-  decoration steps, 3-D biomes, world presets), each item blocker-classed.
-  Owner-directed (2026-08-06/07). Planning artifact only; each unit below is a
-  separately landable piece of work with its own evidence standard.
+  sub-millisecond steady-state serial chunk generation at bit-exact 26.2 parity —
+  plus the jar-derived inventory of everything full parity requires that the repo does
+  not have yet (structures, Nether/End, ore veins, the missing decoration steps, 3-D
+  biomes, world presets), each item blocker-classed. Each unit below is a separately
+  landable piece of work with its own evidence standard.

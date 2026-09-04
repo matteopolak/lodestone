@@ -8,12 +8,12 @@ license.workspace = true
 workspace = true
 
 # Version-free by construction, and version-free by *path*: this crate lives
-# under `crates/`, not `crates/protocol/`, so `xtask`'s isolation lint
-# (`package_is_version_crate`, keyed on the `crates/protocol` path prefix)
+# under `crates/`, not `crates/versions/`, so `xtask`'s isolation lint
+# (`package_is_version_crate`, keyed on the `crates/versions/` path prefix)
 # never classifies it as a version crate. It must depend on no
-# `crates/protocol/*` family, and no family may depend on another family
-# through it -- see docs/plans/multi-version-protocol-dedup.md's "version
-# seam" section.
+# `crates/versions/*` family, and no family may depend on another family
+# through it -- see docs/plans/multi-version-protocol-dedup.md's dependency
+# direction.
 #
 # Holds packet definitions that are byte-identical (wire shape *and* codec)
 # across two or more of the legacy protocol families, each declaring its own

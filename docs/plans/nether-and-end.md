@@ -53,7 +53,7 @@ gameplay, out of scope — a Nether generator is oracle-testable with no portal 
   nether_fossil 22) belong to group S. **There are zero End region files in any cached
   world** — the End's composed gates need evidence acquisition (below).
 - **The oracle runtime is Apple `container`, not Docker, and it is currently up**
-  (`container list` shows `lodestone-survival` running; `docs/oracle-runtimes.md`). New
+  (`container list` shows `lodestone-survival` running; see [Oracles and benchmarks](../oracles-and-benchmarks.md)). New
   JVM fixtures (`scripts/worldgen-oracle/run.sh`, `eclipse-temurin:25-jdk`) and extending
   the survival world (including making the server generate End chunks) appear available.
   Units below land without that (belt) and name the strengthening (suspenders).
@@ -200,8 +200,8 @@ vanilla chunks. **Design, honouring the confounder:**
   fungus converts terrain cells); wrong-RNG hypothesis (NE1/NE2 wrong) — shape mismatch on
   the order of half the volume. Then run the wrong arm deliberately (force Xoroshiro) as
   the observed-failing control and record its measured count next to the real run's. That
-  pair of numbers is the unit's headline evidence — the §12.117 shape: two independent
-  constructions, differing-cell counts, bounding boxes, and a signed/classified verdict.
+  pair of numbers is the unit's headline evidence: two independent constructions,
+  differing-cell counts, bounding boxes, and a signed/classified verdict.
 - Failure output prints per-chunk mismatch counts and 3-D bounding boxes (location, not
   fraction — a uniform 2% and a localised blob must read differently).
 
@@ -291,6 +291,6 @@ its own doc.
 bundled data under `assets/worldgen/`, `.cache/mc/survival/world` (Nether oracle),
 `.cache/mc/26.2/src/` (record definitions), `scripts/worldgen-oracle/` + Apple `container`
 (strengthening). Companions: [`worldgen-dimensions.md`](../worldgen-dimensions.md) (the
-engine-gap report this plan sequences), [`worldgen-gap-census.md`](../worldgen.md)
-§1, and the worldgen-data-census, algorithm-switch, 3-D-biome-sampling, missing-feature-types
+engine-gap report this plan sequences), [Worldgen engine overview](../worldgen.md), and the
+worldgen-data-census, algorithm-switch, 3-D-biome-sampling, missing-feature-types
 and portal/dimension-travel issues named above.

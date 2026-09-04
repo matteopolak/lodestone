@@ -1,7 +1,7 @@
 //! Status-state packets, byte-identical across every protocol these three
 //! crates cover (47, 340, 754) -- server-list ping predates any of the
 //! discontinuities in `docs/plans/multi-version-protocol-dedup.md`'s "Where
-//! sharing genuinely breaks" table, so no `#[mc(protocols = ...)]` is
+//! sharing genuinely breaks" section, so no `#[mc(protocols = ...)]` is
 //! declared: these carry the derive's default `ProtocolRange::ALL`.
 //! Measured identical by `cargo xtask protocol-dup`'s struct-identity scan
 //! (same field list, same attrs) with no hand-written codec on either side

@@ -7,7 +7,7 @@ matching rules (`recipe.rs`), a loader for Mojang's own datapack JSON
 (`recipe_json.rs`), the crafting-table menu layout, the plugin-facing
 recipe-registration API, and the recipe-book UI (browsing, auto-fill, unlock
 toast) layered on top. Our own server now computes crafting results too — see
-[`docs/server-side-crafting.md`](./server-gameplay.md).
+[Server-authoritative gameplay](./server-gameplay.md).
 
 ## How it works
 
