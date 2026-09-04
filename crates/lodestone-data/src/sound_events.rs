@@ -8,12 +8,27 @@
 //! in `lodestone-v26-2` — it is a game-data census, not
 //! wire-format code.
 //!
-//! Each entry pairs the identifier with the sound's optional fixed audible
-//! range, which is a property of the registry entry rather than the wire and so
-//! must travel with the name for registry-referenced sounds.
+//! The canonical names live in one id-indexed table. Optional fixed audible
+//! ranges are registry-entry metadata rather than wire fields, and live in a
+//! sparse id-keyed table so the names are not stored twice.
 
 pub use crate::generated_sound_events::SOUND_EVENT_COUNT;
-use crate::generated_sound_events::{SOUND_EVENT_ENTRIES, SOUND_EVENT_NAMES};
+use crate::generated_sound_events::{SOUND_EVENT_FIXED_RANGES, SOUND_EVENT_NAMES};
+
+fn sound_event_from_tables<'name>(
+    id: i32,
+    names: &[&'name str],
+    fixed_ranges: &[(u32, f32)],
+) -> Option<(&'name str, Option<f32>)> {
+    let id = u32::try_from(id).ok()?;
+    let index = usize::try_from(id).ok()?;
+    let name = names.get(index).copied()?;
+    let fixed_range = fixed_ranges
+        .binary_search_by_key(&id, |&(candidate, _)| candidate)
+        .ok()
+        .map(|index| fixed_ranges[index].1);
+    Some((name, fixed_range))
+}
 
 /// Resolves a network sound-event registry id to its canonical `minecraft:*`
 /// identifier and optional fixed audible range.
@@ -23,9 +38,7 @@ use crate::generated_sound_events::{SOUND_EVENT_ENTRIES, SOUND_EVENT_NAMES};
 /// silently wrong sound.
 #[must_use]
 pub fn sound_event(id: i32) -> Option<(&'static str, Option<f32>)> {
-    usize::try_from(id)
-        .ok()
-        .and_then(|index| SOUND_EVENT_ENTRIES.get(index).copied())
+    sound_event_from_tables(id, &SOUND_EVENT_NAMES, &SOUND_EVENT_FIXED_RANGES)
 }
 
 /// Resolves a network sound-event registry id to just its canonical
@@ -37,4 +50,46 @@ pub fn sound_event_name(id: i32) -> Option<&'static str> {
     usize::try_from(id)
         .ok()
         .and_then(|index| SOUND_EVENT_NAMES.get(index).copied())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_lookup_rejects_negative_and_out_of_range_ids() {
+        let past_end = i32::try_from(SOUND_EVENT_COUNT).expect("sound-event count fits i32");
+
+        assert_eq!(sound_event(-1), None);
+        assert_eq!(sound_event_name(-1), None);
+        assert_eq!(sound_event(past_end), None);
+        assert_eq!(sound_event_name(past_end), None);
+    }
+
+    #[test]
+    fn registry_lookup_returns_the_canonical_name_and_range() {
+        assert_eq!(
+            sound_event(0),
+            Some(("minecraft:entity.allay.ambient_with_item", None))
+        );
+        assert_eq!(
+            sound_event_name(0),
+            Some("minecraft:entity.allay.ambient_with_item")
+        );
+    }
+
+    #[test]
+    fn sparse_range_lookup_joins_by_registry_id() {
+        let names = ["zero", "one", "two", "three", "four"];
+        let ranges = [(3, 16.0)];
+
+        assert_eq!(
+            sound_event_from_tables(3, &names, &ranges),
+            Some(("three", Some(16.0)))
+        );
+        assert_eq!(
+            sound_event_from_tables(2, &names, &ranges),
+            Some(("two", None))
+        );
+    }
 }
