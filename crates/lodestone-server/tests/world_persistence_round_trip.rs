@@ -1,13 +1,13 @@
-//! World persistence end to end, through the real production entry point
-//! (issue #437): [`IntegratedServer::open_persistent_with_mobs`] → mutate →
+//! World persistence end to end, through the real production entry point:
+//! [`IntegratedServer::open_persistent_with_mobs`] → mutate →
 //! shutdown → **reopen** → the mutation is still there.
 //!
 //! # What this gate can and cannot evidence
 //!
-//! Being honest about this is the whole point, because a save/load round trip
-//! through our own codec is exactly the vacuous shape this repo has already
-//! been burned by (hermetic chunk fixtures built with our own encoder passed
-//! throughout, then a live gate produced 49 × "unexpected end of input").
+//! A save/load round trip through our own codec establishes lifecycle behavior,
+//! but it cannot independently establish that the serialized bytes match the
+//! external format. The table below assigns each claim to the test that can
+//! actually check it.
 //!
 //! | claim | evidenced by |
 //! |---|---|
@@ -16,30 +16,24 @@
 //! | a mutation survives close/reopen through the production path | **here**, and this part is a round trip through our own code |
 //! | a real vanilla server can load what we write | `scripts/anvil-oracle/` — see this file's sibling gate |
 //!
-//! Row three is a round trip and is *not* dressed up as anything more. What
-//! keeps it from being vacuous is that the two codecs it composes are each
-//! externally pinned elsewhere, and that the controls below demonstrate the
-//! assertion actually fires when either half is broken.
+//! The third row represents lifecycle behavior only. The two codecs it composes
+//! are externally pinned elsewhere, and the controls below distinguish a
+//! broken save half from a broken load half.
 //!
-//! # The controls, and how to re-run them
+//! # The controls
 //!
-//! Both were run against this file and **observed failing**, not described.
-//! Each was a temporary early return in `region_source.rs`, applied in a
-//! throwaway worktree and reverted with an md5-verified `cp`:
+//! The two controls cover the save and load halves independently. Their
+//! expected failure sets are intentionally different, so a failure identifies
+//! which half of the lifecycle is broken:
 //!
-//! | control | edit | observed |
+//! | control | edit | expected result |
 //! |---|---|---|
 //! | save disabled | `WorldSaveHandle::save` returns `Ok(0)` before writing | **all three** fail; reopen reads `minecraft:air` where `minecraft:diamond_block` was placed, and the column count reads 0 of an expected 3 |
 //! | load disabled | `RegionChunkSource::load` returns `None` unconditionally | **two of three** fail — the same two read-back assertions, while `a_save_writes_one_column_per_mutated_chunk_and_nothing_else` still **passes**, because saving genuinely still works |
 //!
-//! The second row is the informative one and is why both controls were worth
-//! running rather than just one: the two defects produce *different* failure
-//! sets, so a red run here says which half broke. A control that merely made
-//! everything fail would not have shown that.
-//!
-//! To reproduce: add the early return, run this file, revert. Do not leave the
-//! hook in production code — an env-var-gated "break my save path" switch in a
-//! shipped binary is a worse defect than the one it detects.
+//! The save control leaves the read path untouched, while the load control
+//! leaves the write path untouched. This separation prevents a single broken
+//! stage from masking the behavior of the other stage.
 
 use std::path::Path;
 use std::time::Duration;
@@ -137,7 +131,8 @@ impl ChunkSource for LayeredWorld {
 
     // No storage: this fixture serves freshly generated columns and edits are
     // discarded by design (an edit a test needs to survive goes through a
-    // source with real retention). Explicit rather than inherited — issue #440.
+    // source with real retention). The no-op is explicit so the fixture's
+    // retention behavior is clear at the implementation boundary.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -330,32 +325,19 @@ async fn a_save_writes_one_column_per_mutated_chunk_and_nothing_else() {
 /// through to the generator would produce identical terrain everywhere except
 /// the edited cells.
 ///
-/// # Why the counters are read off a quiescent handle (issue #473)
+/// # Why the counters are read off a quiescent handle
 ///
-/// This gate was red **8 of 12 runs**, and the race was in the *gate*, not in
-/// the save path. [`lodestone_server::region_source::PersistenceStats`] are
-/// per-**world** accumulators, never per-call results, so reading one as a delta
-/// around a call measures that call only while nothing else touches the same
-/// world. A live [`lodestone_server::IntegratedServer`] always does:
-/// `open_in_memory_with_mobs` spawns a mob-seeding task *and* a tick loop that
-/// each read every column of `mob_area` through the shared `ChunkStore` — chunk
-/// (0,0) here, the same column this gate probes — so the server's own entirely
-/// correct disk load landed inside the observation window and the delta read
-/// **2**. Every one of those four failures read `left: 2`; none read 0, and none
-/// was a missing or wrong block.
+/// [`lodestone_server::region_source::PersistenceStats`] are per-**world**
+/// accumulators, never per-call results. A delta around a read is therefore
+/// meaningful only when no other task can read the same world concurrently.
+/// The live server owns background tasks that access resident columns, so its
+/// counters are not an exclusive measure of the read performed by this gate.
 ///
-/// That diagnosis is not an inference from the code alone. Moving `mob_area` to
-/// chunk (9,9) — where the server's own read cannot *be* a disk load, because
-/// nothing saved that column — took the identical assertion to **12 of 12**.
-/// The pollution moved with the server's reads, which is what a harness race
-/// does and what a save/load race would not.
-///
-/// So session two observes through a second [`RegionChunkSource`] over the same
-/// directory with **no server attached**, and therefore exactly one caller. Its
-/// counters start at zero and every increment is one this test caused, which is
-/// what lets the assertions below be absolute values rather than deltas — an
-/// exclusive observation instead of a sampled one. The production reopen is
-/// still exercised at the end, for the claim the counters cannot make.
+/// Session two instead constructs a second [`RegionChunkSource`] over the same
+/// directory with **no server attached**. Its counters start at zero and every
+/// increment is caused by the explicit read in this test, making the assertions
+/// absolute values rather than sampled deltas. The production reopen remains
+/// asserted separately for the lifecycle behavior that counters cannot prove.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_reopened_world_reads_from_disk_instead_of_regenerating() {
     let dir = tempdir("load_counter");

@@ -1,4 +1,4 @@
-//! **The gate for issue #619/#297**: a real join grants a chunk-residency
+//! **The ticket-residency gate**: a real join grants a chunk-residency
 //! ticket, a real move carries it, and a real disconnect withdraws it — all
 //! observed through [`IntegratedServer::tickets`], the same
 //! [`lodestone_server::TicketStoreHandle`] the connection itself grants
@@ -6,20 +6,17 @@
 //!
 //! # Why a saved, reopened world
 //!
-//! Every existing singleplayer gate in this crate opens a fresh world. That
-//! blind spot hid a total chunk blackout for a whole session (see
-//! `CLAUDE.md`'s "saved chunk carrying a pending tick" incident), so this file
-//! closes the world after granting a ticket, reopens it, and only then checks
-//! that a *fresh* connection into the *reopened* world still grants and moves
-//! a real ticket — proving the wiring survives a restart, not just a `Self`
-//! that has been alive since `open_persistent_with_mobs` returned.
+//! The fixture closes the world after its initial setup, reopens it, and only
+//! then checks that a *fresh* connection into the reopened world still grants
+//! and moves a real ticket. This keeps the residency assertions meaningful
+//! across the persistence boundary rather than limiting them to one live
+//! `IntegratedServer` instance.
 //!
 //! # What each step proves
 //!
 //! 1. Join grants a real `PLAYER_LOADING`/`PLAYER_SIMULATION` pair at the
 //!    join column, **and** a real world-spawn `PLAYER_SPAWN` ticket
-//!    (radius [`PLAYER_SPAWN_RADIUS`]) independent of it — issue #297's own
-//!    scope, not merely #619's.
+//!    (radius [`PLAYER_SPAWN_RADIUS`]) independent of the player's ticket.
 //! 2. A real `PlayerMoved` packet moves the player's own ticket pair off the
 //!    join column onto the new one, while the spawn ticket — a **separate**
 //!    ticket under a separate owner — stays exactly where it was.
@@ -381,7 +378,7 @@ async fn a_real_join_move_and_disconnect_drive_real_ticket_residency() {
     // Step 2: move far enough that a `view_radius: 0` player ticket at the
     // new column cannot also cover the spawn column (chebyshev distance must
     // exceed `PLAYER_SPAWN_RADIUS`), so if the spawn column is *still*
-    // resident afterwards, only the separate #297 spawn ticket explains it.
+    // resident afterwards, only the separate world-spawn ticket explains it.
     const MID: (f64, f64, f64) = (328.0, 70.0, 328.0); // chunk (20, 20)
     let mid_chunk = chunk_of(MID);
     assert!(
@@ -466,14 +463,11 @@ async fn a_real_join_move_and_disconnect_drive_real_ticket_residency() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **Issue #619's own stated verification**: "a chunk near two players stays
-/// resident when either one alone moves away." Two real connections (the
-/// first over the in-memory duplex `open_in_memory_with_mobs` returns, the
-/// second over a real TCP socket via [`IntegratedServer::publish`] — deliberately
-/// a *different* transport from the first, so nothing here could pass by
-/// accident because both connections happen to share one transport's
-/// internals) share one column; the column must survive either player alone
-/// leaving it, and only stop being resident once **both** have.
+/// Two real connections share one column; the column must survive either player
+/// alone leaving it, and only stop being resident once both have. The first
+/// connection uses the in-memory duplex returned by
+/// `open_in_memory_with_mobs`, while the second uses a real TCP socket via
+/// [`IntegratedServer::publish`] so both transport paths are exercised.
 #[tokio::test]
 async fn a_chunk_near_two_players_stays_resident_when_either_one_alone_moves_away() {
     let (mut server, client_a_end) = IntegratedServer::open_in_memory_with_mobs(
@@ -511,7 +505,7 @@ async fn a_chunk_near_two_players_stays_resident_when_either_one_alone_moves_awa
     // Both players start at the world spawn column on this fresh world (no
     // saved player data for either), so both must first move to a shared,
     // non-spawn column before "shares a column" is a claim about their own
-    // tickets rather than about the independent #297 spawn ticket.
+    // tickets rather than about the independent world-spawn ticket.
     const SHARED: (f64, f64, f64) = (328.0, 70.0, 328.0); // chunk (20, 20)
     let shared_chunk = chunk_of(SHARED);
     assert!(
@@ -532,7 +526,7 @@ async fn a_chunk_near_two_players_stays_resident_when_either_one_alone_moves_awa
     }
 
     // A alone leaves. B's own ticket still covers `shared_chunk`, so it must
-    // stay resident — the property #619 names explicitly.
+    // stay resident while B remains there.
     const FAR_A: (f64, f64, f64) = (808.0, 70.0, 8.0); // chunk (50, 0)
     send_player_moved(&mut client_a, FAR_A.0, FAR_A.1, FAR_A.2).await;
     ping_pong(&mut client_a, 3).await;
