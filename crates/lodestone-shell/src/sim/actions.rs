@@ -1168,8 +1168,41 @@ impl Sim {
     /// A mispredicted placement therefore costs exactly the round trip the hole
     /// used to cost, which is why every classification below is allowed to err
     /// toward *not* predicting but never toward predicting something wrong.
+    ///
+    /// # Cancellation boundary
+    ///
+    /// One [`VerbContext::PlayerInteract`] ask covers the entity, block, and air
+    /// branches. It runs before held-use or firework state, placement/equipment
+    /// prediction, sequence allocation, swings, sounds, and wire sends. A denial
+    /// is therefore a complete no-op. The entity-first target choice is captured
+    /// for the context and reused by the allowed branch so the ask and commit
+    /// cannot describe different targets.
     pub(crate) fn use_item_live(&mut self) {
         if self.is_dead() {
+            return;
+        }
+        // Snapshot the same entity-first target choice the commitment branches
+        // below use, then ask once before any local state or prediction changes.
+        // Reusing these snapshots also guarantees the context names the target
+        // this click actually commits if another system updates the ray later.
+        let entity_target = self.entity_target();
+        let block_target = if entity_target.is_some() {
+            None
+        } else {
+            self.target()
+        };
+        let context = VerbContext::PlayerInteract {
+            pos: block_target.map(|hit| {
+                BlockPos::new(hit.block[0], hit.block[1], hit.block[2])
+            }),
+            target_entity_id: entity_target,
+        };
+        let vetoed = self.read(|world| {
+            world
+                .get_resource::<ActionVetoes>()
+                .is_some_and(|vetoes| vetoes.allows(&context) == Verdict::Deny)
+        });
+        if vetoed {
             return;
         }
         // **Gated on the held item actually having a use, matching
@@ -1282,7 +1315,7 @@ impl Sim {
         // fallback there, and this does not, so an item held while boarding a
         // vehicle can also start its use. That is judged the smaller error
         // next to a shield/bow that could never fire at all.
-        if let Some(entity_id) = self.entity_target() {
+        if let Some(entity_id) = entity_target {
             self.interact_entity(entity_id);
             // `already_swung`: [`Self::interact_entity`] has just swung (see its
             // doc for why that is unconditional). Vanilla reaches at most one
@@ -1292,7 +1325,7 @@ impl Sim {
             self.use_item_generic(true);
             return;
         }
-        let Some(hit) = self.target() else {
+        let Some(hit) = block_target else {
             // Vanilla's own MISS/no-target path: a `null` `hitResult` skips
             // the whole `if (this.hitResult != null)` switch in
             // `startUseItem` and still reaches

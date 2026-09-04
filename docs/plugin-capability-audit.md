@@ -82,7 +82,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | capability | client, native | client, WASM | server |
 |---|---|---|---|
 | observe a typed event | **done** — `GameEvent(ClientEvent)` via `MessageReader`, off by default, installed for every shipped `App` by `ServerBrandChannelPlugin` in `lodestone_app::client_app` | partial — 3 event kinds of ~110 | **gap** — no event bus; `dispatch_play_packet` applies inline |
-| cancel an event (`setCancelled`) | partial — `ActionVetoes` for 6 verbs, 5 asked in production | **gap** — no verdict-shaped export | **gap** — `TickSet::Adjudicate` is declared and empty, and `GameTick` never runs after boot; `CraftingStationHooks` is the one Allow/Deny/Replace hook |
+| cancel an event (`setCancelled`) | **done** — `ActionVetoes` for all six declared verbs, all asked in production | **gap** — no verdict-shaped export | **gap** — `TickSet::Adjudicate` is declared and empty, and `GameTick` never runs after boot; `CraftingStationHooks` is the one Allow/Deny/Replace hook |
 | priority order across plugins | **done** — `EventPriority::{Lowest..Monitor}` chained into all four schedules | partial — manifest `priority` orders guests; nothing else | **gap** |
 | `MONITOR` read-only | **done** — checked against bevy's per-system access set; blind to deferred `Commands` | **gap** | **gap** |
 | sync delayed/repeating tasks | **done** — `TaskScheduler::{schedule_once, schedule_repeating, cancel}` | partial — a guest counts its own `on-tick` calls; no cancellation, no off-tick | **gap** — `run_tick_loop` has no registration point (no `dyn Fn` in it) |
@@ -123,13 +123,15 @@ registry — and gap in every row that needs a schedule to hang a system in.
 **Client, native.** Observation is `GameEvent`, and the one write site pushes every `ClientEvent`
 with no `match`, so a new variant cannot miss the bus. Cancellation is `ActionVetoes`: a plugin
 registers a `VetoFn` per `Verb`, priority-keyed; the engine asks *before* the effect is computed, so
-a `Deny` leaves the predictor untouched and nothing reaches the wire. Five verbs are asked in
+a `Deny` leaves the predictor untouched and nothing reaches the wire. All six verbs are asked in
 production, at the sites `crates/lodestone-ecs/tests/veto_coverage.rs` scans for:
 `VerbContext::BlockBreak` in `lodestone_shell::interact::drive_mining`, `VerbContext::BlockPlace`
 in `drive_placement`, `VerbContext::EntityDamage` in `Sim::attack_entity`, `VerbContext::PlayerMove`
 in `lodestone_controller::ecs::send_player_input`, and `VerbContext::InventoryClick` in
-`SharedState::menu_click`. `PlayerInteract` is defined, constructible, and documented as unasked —
-the coverage test asserts both halves, so a verb cannot silently lose or gain its wiring.
+`SharedState::menu_click`, plus `VerbContext::PlayerInteract` in `Sim::use_item_live`. The latter
+asks once before selecting any effect-producing interaction arm and reuses its entity-first/block-
+second/air-last target snapshot through the commit. The coverage test accounts for every declared
+verb, so one cannot silently lose its wiring or be added without an explicit status.
 
 One correction to `docs/plugin-api.md`'s intent-doctrine section, which says a plugin "has no way
 to veto a human's" dig because the human path never asks the intent seam: that is true of
@@ -477,25 +479,23 @@ plan, not a sprint.
 10. **WASM: commands, a tick scheduler with cancellation, `fs:write`, `Monitor` enforcement, and
     registering the host in the shipped shell** (`load_directory` from a plugins directory).
     Client, WASM. Medium, four small pieces.
-11. **Client native: ask the remaining deferred veto** (`PlayerInteract` at the three `Sim` use
-    sites). Client, native. Small.
-12. **Both: durable per-entity/per-chunk plugin data**, one opaque blob per namespaced key,
+11. **Both: durable per-entity/per-chunk plugin data**, one opaque blob per namespaced key,
     through the world save on the server and the plugin data directory on the client. Both sides,
     native (WASM follows via `fs:write`). Medium; the server half needs the save path to carry an
     opaque section it does not model.
-13. **Both: a reentrancy ledger for the other lock classes** — `MobHandle`, `ChunkWorld`, the chunk
+12. **Both: a reentrancy ledger for the other lock classes** — `MobHandle`, `ChunkWorld`, the chunk
     edit cache — or a type-level shape for `MobHandle::with` that cannot nest. Both sides, native.
     Small to medium.
-14. **Client native: `RawPacket`**, inbound, observation-only, off by default. Client, native.
+13. **Client native: `RawPacket`**, inbound, observation-only, off by default. Client, native.
     Small; no design decision blocks it.
-15. **Server: custom item data through save/load** — verify and, if missing, carry
+14. **Server: custom item data through save/load** — verify and, if missing, carry
     `custom_data` through `player_data::to_nbt`/`from_nbt`. Server, native. Small to medium.
-16. **Server: open a plugin menu on a remote player.** Needs the container-open packet family and
+15. **Server: open a plugin menu on a remote player.** Needs the container-open packet family and
     the click echo. Server, native. Large.
-17. **Both: document the `VersionAdapter` and `ServerProtocol` decorators as the version-locked
+16. **Both: document the `VersionAdapter` and `ServerProtocol` decorators as the version-locked
     packet escape hatch**, with one test each proving a wrapped protocol sees and can append
     traffic. Both sides, native. Small.
-18. **JVM tier: the JNI spike** — one shim class, one native method through `WorldPort`, one trivial
+17. **JVM tier: the JNI spike** — one shim class, one native method through `WorldPort`, one trivial
     plugin. Server, native. Medium, and only after 1, 2 and 5.
 
 ## See also
