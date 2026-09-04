@@ -132,7 +132,7 @@ pub const DEFAULT_WIDTH: f32 = 150.0;
 pub const BIG_WIDTH: f32 = 200.0;
 /// `Button.DEFAULT_HEIGHT` — every menu button's height.
 pub const DEFAULT_HEIGHT: f32 = 20.0;
-/// `Button.DEFAULT_SPACING`, for #394's layout containers.
+/// Default gap between adjacent menu buttons.
 pub const DEFAULT_SPACING: f32 = 8.0;
 
 /// `AbstractButton.TEXT_MARGIN`: the inset the label's
@@ -249,14 +249,12 @@ impl WidgetSprites {
     }
 }
 
-/// `AbstractButton.SPRITES`: the three
-/// `widget/button*` ids every menu button selects between, through vanilla's
-/// 3-argument collapse.
+/// The three `widget/button*` ids every menu button selects between.
 ///
 /// All three are `nine_slice` in the pack and their border widths are read from
 /// the sibling `.png.mcmeta` by [`lodestone_render::GuiAtlas`], **not** stated
 /// here — which matters, because `widget/button_disabled`'s border is **1**
-/// while the other two are **3** (measured in #66).
+/// while the other two are **3** (measured from the resource metadata).
 pub const BUTTON_SPRITES: WidgetSprites = WidgetSprites::with_disabled(
     "widget/button",
     "widget/button_disabled",
@@ -334,14 +332,11 @@ pub struct Widget {
     /// Whether the widget is drawn at all. `AbstractWidget.extractRenderState`
     /// wraps everything in `if (this.visible)`.
     pub visible: bool,
-    /// `AbstractWidget.focused` — **keyboard** focus alone.
+    /// Keyboard focus alone.
     ///
-    /// This used to carry `isHoveredOrFocused()`, because the shell had one row
-    /// cursor that both the keyboard and the mouse moved. #395 split them:
-    /// [`super::focus::FocusSet`] owns real focus, so hover is now a separate
-    /// fact and [`Self::hovered`] holds it. The sprite predicate joins the two
-    /// with `||` — see [`Self::is_hovered_or_focused`], which is the one place
-    /// that must not pick a side.
+    /// Hover is stored separately in [`Self::hovered`]. The sprite predicate
+    /// joins the two with `||` in [`Self::is_hovered_or_focused`], so a control
+    /// highlights for either pointer hover or keyboard focus.
     pub focused: bool,
     /// `AbstractWidget.isHovered`, set from **geometry alone** every frame
     /// and never consulted about `active` — which
@@ -406,17 +401,11 @@ impl Widget {
     /// [`SLIDER_SPRITES`]. Used by every numeric option on the settings tree
     /// (see [`super::options`]).
     ///
-    /// The **handle** is still not this type's business — vanilla draws it at
-    /// `x + value * (width - 8)` from the widget's own `value`
-    ///, and a `Widget` holds no value, so
-    /// the caller passes one to the draw. This used to say nothing drew a
-    /// handle at all, because every slider the settings tree rendered was
-    /// inactive; that stopped being true once issue #203 gave
-    /// `mouseWheelSensitivity` a real live value, and player report #<TBD>
-    /// (2026-08-04) is what caught the gap it left — see
+    /// The **handle** is still not this type's business: its position depends
+    /// on the current value, which a [`Widget`] does not store. The caller
+    /// passes that value to the draw; see
     /// [`super::render::MenuRow::slider_value`] and
-    /// [`Self::slider_handle_sprite`] for the handle this type still does not
-    /// draw itself.
+    /// [`Self::slider_handle_sprite`].
     #[must_use]
     pub fn slider(x: f32, y: f32, width: f32, height: f32, message: impl Into<String>) -> Self {
         Self {
@@ -425,61 +414,29 @@ impl Widget {
         }
     }
 
-    /// vanilla's own abstract slider button's get-sprite accessor:
-    /// `isActive() && isFocused() && !canChangeValue ? HIGHLIGHTED : SLIDER`.
-    ///
-    /// **Both** arguments differ from [`Self::background_sprite`]'s, in the same
-    /// two ways `EditBox`'s do (see [`super::edit_box`]): `isActive()` rather
-    /// than the raw `active` field, and `isFocused()` **alone** — so hovering a
-    /// slider does not highlight it, where hovering a button does. `canChangeValue`
-    /// is vanilla's "the keyboard has taken the slider over" latch, which nothing
-    /// here sets, so it is `false` and drops out.
-    ///
-    /// Written when every slider we drew was inactive, so `get(false, _)` was
-    /// `widget/slider` regardless of `focused` and the highlighted branch was
-    /// unobservable — noted at the time as "exactly the kind of claim that
-    /// goes stale the moment one goes live", which is what issue #203's
-    /// `mouseWheelSensitivity` then did: it is `is_active() == true`, so its
-    /// row keyboard-focused now genuinely shows `widget/slider_highlighted`
-    /// rather than the plain track.
+    /// The slider track sprite is selected from [`Self::is_active`] and
+    /// [`Self::focused`]. An inactive or unfocused slider uses the plain track;
+    /// an active, focused slider uses `widget/slider_highlighted`.
     #[must_use]
     pub fn slider_background_sprite(&self) -> Option<&'static str> {
         self.sprites.map(|s| s.get(self.is_active(), self.focused))
     }
 
-    /// vanilla's own abstract slider button's get-handle-sprite accessor
-    ///:
-    /// `!isActive() || (!isHovered && !canChangeValue) ? SLIDER_HANDLE :
-    /// SLIDER_HANDLE_HIGHLIGHTED`.
+    /// The slider handle highlights only while the control is active and
+    /// either hovered or focused.
     ///
-    /// # `canChangeValue` is **not** always false, and reading it that way was
-    /// the bug
+    /// # Keyboard adjustment is **not** always inactive
     ///
-    /// This used to collapse the condition to `isActive() && self.hovered`,
-    /// borrowing [`Self::slider_background_sprite`]'s claim that
-    /// `canChangeValue` is a latch nothing here sets. Read vanilla's own
-    /// focus setter instead of the summary: it always propagates the
-    /// superclass focus change, then on losing focus clears
-    /// `canChangeValue`, and on gaining it sets `canChangeValue` when the
-    /// last input type was mouse or keyboard-Tab.
+    /// A focused slider may be reached without pointer hover, so the predicate
+    /// must include both state fields rather than only [`Self::hovered`].
     ///
-    /// A slider focused by mouse or by Tab — i.e. every way a player focuses one
-    /// — has `canChangeValue == true`. So the honest collapse is
-    /// `isActive() && (hovered || focused)`, and the consequence the owner
-    /// reported is real: this screen never populates
-    /// [`super::render::MenuFrame::hovered`] (only `ServerEdit` and
-    /// `WorldSelect` do), so with `hovered` alone the knob could never highlight
-    /// at all, however the row was reached.
+    /// The resulting predicate is `is_active() && (hovered || focused)`, which
+    /// keeps the handle visible for keyboard navigation as well as the pointer.
     ///
     /// # The track's own predicate is left alone, and it is now the odd one
     ///
-    /// `getSprite()` is `isActive() && isFocused() && !canChangeValue`, so with
-    /// `canChangeValue` true for a focused slider the *track* highlights in
-    /// vanilla essentially never. [`Self::slider_background_sprite`] still
-    /// highlights on focus, which is a knowing divergence: a settings row that
-    /// gave no visual response to the cursor at all would be worse, and the
-    /// owner's report was about the knob. Recorded here rather than silently
-    /// harmonised.
+    /// The track and handle intentionally use different predicates: the track
+    /// responds to focus, while the handle responds to either focus or hover.
     #[must_use]
     pub fn slider_handle_sprite(&self) -> &'static str {
         if self.is_active() && (self.hovered || self.focused) {
@@ -538,15 +495,12 @@ impl Widget {
         self.is_active() && !self.focused
     }
 
-    /// vanilla's own abstract-widget base's is-hovered-or-focused accessor:
-    /// `isHovered() || isFocused()`.
+    /// Whether pointer hover or keyboard focus is active.
     ///
-    /// **The `||` is the whole point of this method existing.** #393 collapsed
-    /// hover and focus into one flag because the shell had a single row cursor;
-    /// #395 split them, and this is the exact join where picking one of the two
-    /// would silently change every button's highlight — a focused-but-unhovered
-    /// button would stop lighting up, or a hovered-but-unfocused one would.
-    /// Neither shows up in a `cargo check`.
+    /// **The `||` is the whole point of this method existing.** Both states
+    /// independently light a button, so omitting either branch changes the
+    /// focused-but-unhovered and hovered-but-unfocused cases without affecting
+    /// compilation.
     #[must_use]
     pub fn is_hovered_or_focused(&self) -> bool {
         self.hovered || self.focused
@@ -637,40 +591,33 @@ pub fn over_right_half(rel_x: f32, rel_y: f32, size: f32) -> bool {
     rel_x >= size * 0.5 && rel_x < size && rel_y >= 0.0 && rel_y < size
 }
 
-/// `SelectableEntry.mouseOverTopLeftQuarter` (`:24-26`) — the move-up quadrant.
+/// The move-up quadrant of a selectable entry.
 #[must_use]
 pub fn over_top_left_quarter(rel_x: f32, rel_y: f32, size: f32) -> bool {
     rel_x >= 0.0 && rel_x < size * 0.5 && rel_y >= 0.0 && rel_y < size * 0.5
 }
 
-/// `SelectableEntry.mouseOverBottomLeftQuarter` (`:28-30`) — the move-down
-/// quadrant.
+/// The move-down quadrant of a selectable entry.
 #[must_use]
 pub fn over_bottom_left_quarter(rel_x: f32, rel_y: f32, size: f32) -> bool {
     rel_x >= 0.0 && rel_x < size * 0.5 && rel_y >= size * 0.5 && rel_y < size
 }
 
-/// Vanilla's `LayoutElement` (vanilla's own layout-element interface's own source file), the interface
-/// every `AbstractLayout` arranges.
+/// The layout-element contract every [`super::layout`] container arranges.
 ///
-/// **The seam.** [`super::layout`] (#394) ports `LinearLayout`,
-/// `HeaderAndFooterLayout`, `FrameLayout` and `GridLayout`; all any of them needs
-/// of a child is to read its size, *write* its position, and hand its leaves to a
-/// screen — which is exactly this trait. `Debug` is a supertrait so a container
-/// holding `Box<dyn LayoutElement>` children can still derive it (the workspace
-/// warns on `missing_debug_implementations`); every implementor here is plain
-/// data, so it costs nothing.
+/// **The seam.** [`super::layout`] supplies linear, header/footer, frame and
+/// grid containers; all any of them needs of a child is to read its size,
+/// *write* its position, and hand its leaves to a screen — which is exactly
+/// this trait. `Debug` is a supertrait so a container holding
+/// `Box<dyn LayoutElement>` children can still derive it; every implementor
+/// here is plain data, so it costs nothing.
 ///
-/// Two methods are not where vanilla puts them, both deliberately:
+/// Two methods live here rather than on a container, both deliberately:
 ///
-/// - **`visitWidgets`** is here rather than only on `Layout`, as in vanilla
-///  , and it is **required** — vanilla makes it
-///   abstract too, which is why `SpacerElement` has to write an explicit empty
-///   body. A defaulted no-op would let a future
-///   element type silently never reach a screen.
-/// - **`arrange_elements`** is here with a no-op default, where vanilla has it on
-///   `Layout` and tests `child instanceof Layout` in the default body
-///  . Behaviourally identical, and it saves a downcast from
+/// - **`visit_widgets`** is required — an empty default would let a spacer
+///   silently never reach a screen.
+/// - **`arrange_elements`** is here with a no-op default. Behaviourally
+///   identical to the container-level fallback, and it saves a downcast from
 ///   `dyn LayoutElement`.
 pub trait LayoutElement: core::fmt::Debug {
     /// `getX()`.
@@ -686,28 +633,26 @@ pub trait LayoutElement: core::fmt::Debug {
     /// `setY(int)`.
     fn set_y(&mut self, y: f32);
 
-    /// `visitWidgets(Consumer<AbstractWidget>)`: hand every drawable leaf under
-    /// this element to `visitor`, in insertion order.
+    /// Hand every drawable leaf under this element to `visitor`, in insertion
+    /// order.
     ///
-    /// This is the only route from a layout tree to a draw — vanilla's screens
-    /// are literally `layout.visitWidgets(this::addRenderableWidget)`
-    /// — and the reason a `SpacerElement` is measured
-    /// but never drawn.
+    /// This is the only route from a layout tree to a draw, which is why a
+    /// spacer can be measured but never drawn.
     fn visit_widgets(&self, visitor: &mut dyn FnMut(&Widget));
 
-    /// `setPosition(int, int)` — a default, as in vanilla.
+    /// Set the element position; containers use this default.
     fn set_position(&mut self, x: f32, y: f32) {
         self.set_x(x);
         self.set_y(y);
     }
 
-    /// `getRectangle()` as `(x, y, width, height)` — a default, as in vanilla.
+    /// Return `(x, y, width, height)` for the element.
     fn rectangle(&self) -> (f32, f32, f32, f32) {
         (self.x(), self.y(), self.width(), self.height())
     }
 
-    /// vanilla's own layout interface's arrange-elements call: size this element from its children and place
-    /// them. A no-op for a leaf, which is what makes the recursion in
+    /// Size this element from its children and place them. A no-op for a leaf,
+    /// which is what makes the recursion in
     /// [`super::layout`]'s containers a plain `visit_children`.
     fn arrange_elements(&mut self) {}
 }
@@ -794,11 +739,8 @@ pub const TAB_SPRITES: WidgetSprites = WidgetSprites::new(
     "widget/tab_highlighted",
 );
 
-/// `MenuTabButton.extractWidgetRenderState`'s `underlineColor`
-///: vanilla's raw ARGB `-1` (white) while the tab is
-/// clickable, `-6250336` while it is present-and-inactive (issue #564's
-/// Items/Mobs tabs, which have no data to show yet — see `stats.rs`'s module
-/// docs).
+/// The underline colour is white while a tab is clickable and opaque grey
+/// while it is present but inactive.
 ///
 /// **Measured equal to [`ACTIVE_LABEL`]/[`INACTIVE_LABEL`]**:
 /// `argb_to_rgba(-6250336)` is `(160, 160, 160, 255)`, i.e. `0xFFA0A0A0`, the
@@ -1457,10 +1399,9 @@ impl ScrollList {
     /// The entry at `y`, ignoring hover state — what a click hit-tests against.
     ///
     /// Restricted to [`Self::visible_range`] *and* to the band, so a click can
-    /// never land on an entry that is not on screen. Before this primitive that
-    /// guarantee was absent: `render::row_rect` still answered for a row the draw
-    /// had skipped, so clicking empty space below a short list selected an
-    /// invisible entry (recorded against issue #402).
+    /// never land on an entry that is not on screen. The draw uses the same
+    /// visible range; a row below a short list therefore cannot answer a hit
+    /// test when it was not rendered.
     #[must_use]
     pub fn entry_at(&self, x: f32, y: f32, row_left: f32, row_w: f32) -> Option<usize> {
         if x < row_left || x >= row_left + row_w || y < self.top || y >= self.bottom() {
@@ -1721,9 +1662,8 @@ pub enum ListChrome {
 ///
 /// ## Why there are two
 ///
-/// [`Self::Centred`] alone was the whole of `ListSpec` until issue #445 reached
-/// Social Interactions, and it is `AbstractSelectionList`'s own model:
-/// `getRowLeft()` is `width / 2 - rowWidth / 2`, a fixed-width row centred on the
+/// [`Self::Centred`] alone is insufficient for full-width social interactions;
+/// a fixed-width row is centred on the
 /// canvas. Multiplayer (340), accounts (305), key binds (340), language (270) and
 /// statistics (300) are all that shape, and for them a single `row_w` constant
 /// answers both edges.
@@ -2173,8 +2113,8 @@ mod tests {
 
     #[test]
     fn the_sprite_predicate_is_hovered_or_focused_and_stays_an_or() {
-        // #395 split hover from focus. This is the join: `AbstractButton` passes
-        // `isHoveredOrFocused()`, so *either* alone must light the button up and
+        // The renderer passes the combined hover-or-focus predicate, so *either*
+        // state alone must light the button up and
         // the two must be independently observable — which is the thing a port
         // that quietly picks one side still compiles through.
         let mut w = Widget::button(0.0, 0.0, 200.0, 20.0, "Singleplayer");
@@ -2233,7 +2173,7 @@ mod tests {
 
     #[test]
     fn the_layout_seam_reads_size_and_writes_position() {
-        // #394's containers do exactly this and nothing more.
+        // Layout containers need exactly this and nothing more.
         let mut w = Widget::button(0.0, 0.0, BIG_WIDTH, DEFAULT_HEIGHT, "Options...");
         assert_eq!((w.width(), w.height()), (200.0, 20.0));
         w.set_position(140.0, 128.0);
@@ -2526,7 +2466,7 @@ mod tests {
         }
     }
 
-    // -- variable row heights (#445) ----------------------------------------
+    // -- variable row heights -----------------------------------------------
 
     /// The settings list's real shape: alternating 25 px control rows and 20 px
     /// header rows, which is why the primitive needed per-entry heights at all.
@@ -2902,7 +2842,7 @@ mod tests {
     fn hover_and_click_hit_test_the_same_rows_the_draw_shows() {
         // `getEntryAtPosition` restricted
         // to the band. The point is that a click can no longer land on an entry
-        // the draw skipped — the residual defect issue #402 recorded.
+        // the draw skipped — the hit-test must follow the visible range.
         let mut list = server_shaped();
         let (left, w) = (100.0, 305.0);
 
@@ -3062,8 +3002,7 @@ mod tests {
     ///
     /// `social.rs` carried a doc comment asserting that no constant `row_w` makes a
     /// centred row's right edge land in that screen's right margin at every canvas
-    /// width. That is the reason issue #445 listed the screen as blocked, and it
-    /// was prose. This is the arithmetic.
+    /// width. The arithmetic below makes that geometry explicit.
     ///
     /// Social's own geometry: the name sits at a flat `NAME_LEFT_INSET` (4) from
     /// the left edge and `report_button_x` is `width - RIGHT_MARGIN - REPORT_
