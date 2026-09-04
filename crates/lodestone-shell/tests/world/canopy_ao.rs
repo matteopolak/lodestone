@@ -331,15 +331,21 @@ fn a_leaf_canopy_interior_darkens_and_glass_does_not() {
          the two scenes is the AO predicate's answer"
     );
     assert_eq!(
-        lodestone_data::shade_brightness::occludes_ambient_light(leaves),
-        Some(true),
+        lodestone_data::shade_brightness::occludes_ambient_light(
+            lodestone_data::block_states::StateId::new(leaves)
+                .expect("registry leaf id is in the state census"),
+        ),
+        true,
         "premise: vanilla's getShadeBrightness is 0.2 for leaves (full collision cube, no \
          override) — anchored to the real 26.2 server in \
          crates/lodestone-data/tests/shade_brightness.rs"
     );
     assert_eq!(
-        lodestone_data::shade_brightness::occludes_ambient_light(glass),
-        Some(false),
+        lodestone_data::shade_brightness::occludes_ambient_light(
+            lodestone_data::block_states::StateId::new(glass)
+                .expect("registry glass id is in the state census"),
+        ),
+        false,
         "premise: TransparentBlock overrides getShadeBrightness to 1.0, so glass is exempt \
          *despite* being a full collision cube — this is what makes it a control against a \
          collision-shape-only derivation"

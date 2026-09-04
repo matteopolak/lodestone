@@ -55,6 +55,7 @@
 //! and the same reasoning as [`crate::block_solidity`].
 
 use crate::generated_shade_brightness as table;
+use crate::block_states::StateId;
 
 pub use table::STATE_COUNT;
 
@@ -66,18 +67,15 @@ pub const OCCLUDED_SHADE: f32 = 0.2;
 /// Vanilla's unoccluded ambient-occlusion shade sample.
 pub const OPEN_SHADE: f32 = 1.0;
 
-/// Reads bit `id` out of a packed little-endian-within-byte bitset.
-fn bit(bits: &[u8], id: u32) -> Option<bool> {
-    if id >= STATE_COUNT {
-        return None;
-    }
-    let byte = *bits.get((id / 8) as usize)?;
-    Some(byte & (1u8 << (id % 8)) != 0)
+/// Reads `state`'s bit out of a packed little-endian-within-byte bitset.
+fn bit(bits: &[u8], state: StateId) -> bool {
+    let raw = state.raw();
+    let byte = bits[(raw / 8) as usize];
+    byte & (1u8 << (raw % 8)) != 0
 }
 
-/// Whether block-state `id` darkens an adjacent ambient-occlusion corner —
-/// vanilla's own "get shade brightness" accessor `== 0.2F`. `None` if `id` is
-/// not in `0..`[`STATE_COUNT`].
+/// Whether block-state `state` darkens an adjacent ambient-occlusion corner —
+/// vanilla's own "get shade brightness" accessor `== 0.2F`.
 ///
 /// This is the predicate a smooth-lighting mesher wants for its AO term. It is
 /// **not** interchangeable with a face-culling occlusion test; see the module
@@ -86,21 +84,21 @@ fn bit(bits: &[u8], id: u32) -> Option<bool> {
 /// (its own "is view blocking" / "get light dampening" checks, via its own
 /// translucency step), so this table must not be substituted there either.
 #[must_use]
-pub fn occludes_ambient_light(id: u32) -> Option<bool> {
-    bit(&table::SHADE_OCCLUDES, id)
+pub fn occludes_ambient_light(state: StateId) -> bool {
+    bit(&table::SHADE_OCCLUDES, state)
 }
 
-/// Vanilla's own "get shade brightness" accessor for block-state `id` — the float
+/// Vanilla's own "get shade brightness" accessor for block-state `state` — the float
 /// itself, for a consumer that wants to multiply rather than branch.
 ///
 /// The dump this is generated from carries a histogram of every value the game
 /// actually returns across all 32,366 states, and it has exactly two entries
 /// ([`OCCLUDED_SHADE`] and [`OPEN_SHADE`]) — which is what makes the one-bit
-/// encoding lossless rather than merely convenient. Unknown ids fall back to
-/// [`OPEN_SHADE`], matching air.
+/// encoding lossless rather than merely convenient. [`StateId`] makes the state
+/// range valid before this total lookup.
 #[must_use]
-pub fn shade_brightness(id: u32) -> f32 {
-    if occludes_ambient_light(id) == Some(true) {
+pub fn shade_brightness(state: StateId) -> f32 {
+    if occludes_ambient_light(state) {
         OCCLUDED_SHADE
     } else {
         OPEN_SHADE

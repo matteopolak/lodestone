@@ -88,6 +88,12 @@ fn committed_path() -> PathBuf {
 /// The committed JVM dump — an external anchor, not gitignored.
 const DUMP: &str = include_str!("support/shade_brightness_jvm.txt");
 
+#[test]
+fn public_census_accessors_take_validated_state_ids_and_are_total() {
+    let _: fn(block_states::StateId) -> bool = shade_brightness::occludes_ambient_light;
+    let _: fn(block_states::StateId) -> f32 = shade_brightness::shade_brightness;
+}
+
 struct Dump {
     state_count: usize,
     block_count: usize,
@@ -409,13 +415,14 @@ fn every_leaf_state_occludes_ambient_light() {
         }
         leaf_states += 1;
         leaf_blocks.insert(name);
+        let state = block_states::StateId::new(id).expect("state-table range is valid");
         assert_eq!(
-            shade_brightness::occludes_ambient_light(id),
-            Some(true),
+            shade_brightness::occludes_ambient_light(state),
+            true,
             "{name} (state {id}) must darken an AO corner"
         );
         assert_eq!(
-            shade_brightness::shade_brightness(id).to_bits(),
+            shade_brightness::shade_brightness(state).to_bits(),
             shade_brightness::OCCLUDED_SHADE.to_bits(),
             "{name} (state {id}) shade brightness"
         );
@@ -477,9 +484,10 @@ fn the_divergence_population_matches_vanilla_by_name() {
             .collect();
         assert!(!ids.is_empty(), "{name} present in the block-state table");
         for id in ids {
+            let state = block_states::StateId::new(id).expect("state-table range is valid");
             assert_eq!(
-                shade_brightness::occludes_ambient_light(id),
-                Some(occludes),
+                shade_brightness::occludes_ambient_light(state),
+                occludes,
                 "{name} (state {id})"
             );
         }
@@ -501,27 +509,20 @@ fn snow_darkens_only_at_eight_layers() {
             .map(|(_, v)| *v)
             .unwrap_or_else(|| panic!("snow state {id} carries a `layers` property"));
         seen += 1;
+        let state = block_states::StateId::new(id).expect("state-table range is valid");
         assert_eq!(
-            shade_brightness::occludes_ambient_light(id),
-            Some(layers == "8"),
+            shade_brightness::occludes_ambient_light(state),
+            layers == "8",
             "minecraft:snow[layers={layers}] (state {id})"
         );
     }
     assert_eq!(seen, 8, "snow has eight layer states");
 }
 
-/// Out-of-range ids report `None` rather than a plausible-looking `false`, and
-/// the float accessor falls back to open. Mirrors `block_solidity`'s contract.
+/// Invalid raw ids are rejected before a caller can enter the total census API.
 #[test]
-fn unknown_ids_are_none_and_open() {
-    assert_eq!(
-        shade_brightness::occludes_ambient_light(shade_brightness::STATE_COUNT),
-        None
-    );
-    assert_eq!(
-        shade_brightness::shade_brightness(shade_brightness::STATE_COUNT).to_bits(),
-        shade_brightness::OPEN_SHADE.to_bits()
-    );
+fn state_id_rejects_unknown_ids_before_the_census() {
+    assert_eq!(block_states::StateId::new(shade_brightness::STATE_COUNT), None);
     assert_eq!(shade_brightness::STATE_COUNT, block_states::STATE_COUNT);
     assert_eq!(shade_brightness::STATE_COUNT, collision_shapes::STATE_COUNT);
 }
@@ -541,11 +542,12 @@ fn committed_bits_match_the_dump() {
     assert_eq!(dump.state_count as u32, shade_brightness::STATE_COUNT);
     assert_eq!(dump.block_count, dump.blocks.len());
 
-    let mut wrong: Vec<(usize, bool, Option<bool>)> = Vec::new();
+    let mut wrong: Vec<(usize, bool, bool)> = Vec::new();
     for id in 0..dump.state_count {
         let expected = dump.shade_occludes[id];
-        let actual = shade_brightness::occludes_ambient_light(id as u32);
-        if actual != Some(expected) {
+        let state = block_states::StateId::new(id as u32).expect("dump id is valid");
+        let actual = shade_brightness::occludes_ambient_light(state);
+        if actual != expected {
             wrong.push((id, expected, actual));
         }
     }

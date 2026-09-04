@@ -938,6 +938,16 @@ struct SnapshotModelView<'a> {
     cutout_leaves: bool,
 }
 
+/// Answers the AO census for a raw id stored in a section snapshot.
+///
+/// Snapshots preserve the wire's raw global state ids, so this is the one
+/// boundary that validates them before entering the total census API. An
+/// invalid id is conservatively open, matching the out-of-neighbourhood path.
+fn ao_occludes_raw_state(raw: u32) -> bool {
+    lodestone_data::block_states::StateId::new(raw)
+        .is_some_and(lodestone_data::shade_brightness::occludes_ambient_light)
+}
+
 /// Split a signed section coordinate into a neighbour offset (`dx ∈ {-1,0,1}`)
 /// and a section-local index (`0..16`). Used to resolve a `cullface` probe that
 /// steps one block past a section edge into the adjacent snapshot section.
@@ -1190,11 +1200,11 @@ impl ModelSectionView for SnapshotModelView<'_> {
     /// behaviour, so the mechanism was inert in the running game until the
     /// override existed.
     ///
-    /// `SectionSnapshot` stores **vanilla global block-state ids** (see
-    /// `quads_at`), which is exactly `lodestone_data::shade_brightness`'s key
-    /// space, so this is an O(1) bitset read with no allocation. An id past the
-    /// snapshotted 3×3×3 neighbourhood, or past the table, reads as open — the
-    /// same conservative answer `occludes_at` gives.
+    /// `SectionSnapshot` stores raw global block-state ids (see `quads_at`).
+    /// They are validated at this boundary before the O(1), allocation-free AO
+    /// census lookup. An id past the snapshotted 3×3×3 neighbourhood or outside
+    /// the state census reads as open — the same conservative answer
+    /// `occludes_at` gives.
     fn ao_occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
         let (dx, lx) = split16(x);
         let (dy, ly) = split16(y);
@@ -1203,7 +1213,7 @@ impl ModelSectionView for SnapshotModelView<'_> {
             return false;
         }
         let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
-        lodestone_data::shade_brightness::occludes_ambient_light(id) == Some(true)
+        ao_occludes_raw_state(id)
     }
 
     fn light_at(&self, x: usize, y: usize, z: usize) -> u8 {
@@ -3690,6 +3700,21 @@ mod tests {
         // Compile-time proof that snapshots can cross to worker threads.
         assert_send::<SectionSnapshot>();
         assert_send::<Meshed>();
+    }
+
+    #[test]
+    fn ao_occluder_census_accepts_a_leaf_and_rejects_state_count() {
+        let leaf = (0..lodestone_data::block_states::STATE_COUNT)
+            .find(|&raw| {
+                lodestone_data::block_states::block_name(raw)
+                    .is_some_and(|name| name.ends_with("_leaves"))
+            })
+            .expect("the block-state census contains a leaf state");
+
+        assert!(ao_occludes_raw_state(leaf));
+        assert!(!ao_occludes_raw_state(
+            lodestone_data::block_states::STATE_COUNT
+        ));
     }
 
     /// A dimension type as the server would send it, with only `has_skylight`
