@@ -55,6 +55,8 @@ with `0.5` on both axes, so it does not have a second convenience entry point to
 `set_min_height` methods; callers that need both set both explicitly.
 `LayoutSettings` keeps the general `align` builder and the live horizontal-centre shorthand;
 direction-specific forwarding aliases are omitted until a screen actually needs one.
+`SpacerElement` keeps its general two-axis constructor and its vertical-only shorthand; there is no
+horizontal-only forwarding constructor without a consumer.
 
 Using a hand-arithmetic layout instead of a container is legitimate vanilla, too — the title screen,
 for one, hand-centres rather than using any layout class. Whether a screen is layout-driven or

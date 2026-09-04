@@ -1372,9 +1372,8 @@ impl Layout for HeaderAndFooterLayout {
 /// renderable list never. That is the mechanism behind vanilla's empty grid
 /// cells; it is not a widget with no art.
 ///
-/// The constructors are `of_width`/`of_height` rather than vanilla's
-/// `width`/`height` because those names collide with
-/// [`LayoutElement::width`]/[`height`](LayoutElement::height) on the same type.
+/// The vertical-only constructor is `of_height` rather than `height` because
+/// that name collides with [`LayoutElement::height`] on the same type.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct SpacerElement {
     x: i32,
@@ -1393,12 +1392,6 @@ impl SpacerElement {
             width: ipx(width),
             height: ipx(height),
         }
-    }
-
-    /// `SpacerElement.width(int)`: horizontal only.
-    #[must_use]
-    pub fn of_width(width: f32) -> Self {
-        Self::new(width, 0.0)
     }
 
     /// `SpacerElement.height(int)`: vertical only.
