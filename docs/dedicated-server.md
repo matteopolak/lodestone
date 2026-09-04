@@ -81,6 +81,14 @@ scheduled system, rather than in-place, is the whole point.
 
 ### Login: compression, then encryption, then online-mode verification
 
+The login state machine is capability-gated at the protocol seam. Modern
+protocols keep the Configuration phase and wait for both client acknowledgements;
+legacy protocols return `false` from `ServerProtocol::has_configuration_phase`
+and the shared connection loop enters Play immediately after `login_success`,
+without trying to decode packets their wire cannot carry. Both paths reuse the
+same Play join sequence, so chunk streaming, saved-player restoration, and
+initial time synchronization do not diverge by protocol family.
+
 Ordering here is load-bearing. On a real join, `V770ServerProtocol::login_success` sends
 `LOGIN_COMPRESSION` (threshold 256, matching vanilla's default) uncompressed, flips the connection's
 codec to compressed framing, and only then sends `LOGIN_FINISHED` compressed — reversing that order

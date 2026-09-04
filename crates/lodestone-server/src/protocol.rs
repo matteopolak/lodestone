@@ -718,13 +718,12 @@ pub enum WorldgenScope {
 /// A server-bound packet, lifted into the version-free vocabulary the server
 /// loop understands.
 ///
-/// The variants mirror vanilla's ack-driven state machine: login success does
-/// **not** itself move the connection to [`State::Configuration`] — that only
-/// happens once the client's own [`LoginAcknowledged`](Self::LoginAcknowledged)
-/// arrives — and configuration does not hand off to [`State::Play`] until the
-/// client's [`ConfigurationFinished`](Self::ConfigurationFinished) arrives.
-/// This is the same handshake vanilla's server performs and the same one the
-/// client-side `VersionAdapter` walks from the other side.
+/// The variants mirror the capability-gated login state machine: protocols with
+/// a Configuration phase wait for the client's own
+/// [`LoginAcknowledged`](Self::LoginAcknowledged) and
+/// [`ConfigurationFinished`](Self::ConfigurationFinished) packets, while older
+/// protocols transition directly to Play after login success because those
+/// packets do not exist on their wire.
 // `PartialEq` only, not `Eq`: `PlayerMoved`'s `f64` fields have no total
 // order, so `f64: Eq` does not exist and a derived `Eq` cannot be added here.
 #[non_exhaustive]
@@ -1822,10 +1821,22 @@ pub trait ServerProtocol: Send + Sync {
     fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound;
 
     /// Emits the login-success reply for a freshly-presented username/uuid.
-    /// Does not itself request a state change; the client's own
-    /// acknowledgement (lifted to [`ServerBound::LoginAcknowledged`]) is what
-    /// drives the transition to [`State::Configuration`].
+    /// For protocols with a Configuration phase, the client's own
+    /// acknowledgement (lifted to [`ServerBound::LoginAcknowledged`]) drives
+    /// the transition to [`State::Configuration`]; legacy protocols use
+    /// [`has_configuration_phase`](Self::has_configuration_phase) to transition
+    /// directly to Play after these directives.
     fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective>;
+
+    /// Whether login success is followed by a Configuration phase before Play.
+    ///
+    /// Modern protocols return `true` (the default) and wait for the client's
+    /// login/configuration acknowledgements. Older protocols transition directly
+    /// to Play after [`login_success`](Self::login_success), because their wire
+    /// has no packets for those acknowledgements.
+    fn has_configuration_phase(&self) -> bool {
+        true
+    }
 
     /// Emits the online-mode encryption request, mirroring
     /// `ClientboundHelloPacket`: an empty server-id string, the DER-encoded
@@ -3300,6 +3311,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).login_success(username, uuid)
     }
 
+    fn has_configuration_phase(&self) -> bool {
+        (**self).has_configuration_phase()
+    }
+
     fn encode_encryption_request(
         &self,
         public_key_der: &[u8],
@@ -3785,6 +3800,9 @@ mod tests {
         fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
             vec![send(2)]
         }
+        fn has_configuration_phase(&self) -> bool {
+            false
+        }
         fn begin_configuration(&self) -> Vec<ServerDirective> {
             vec![send(3)]
         }
@@ -4007,6 +4025,10 @@ mod tests {
         assert_eq!(
             boxed.login_success("a", Uuid::nil()),
             direct.login_success("a", Uuid::nil())
+        );
+        assert_eq!(
+            boxed.has_configuration_phase(),
+            direct.has_configuration_phase()
         );
         assert_eq!(boxed.begin_configuration(), direct.begin_configuration());
         assert_eq!(

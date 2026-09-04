@@ -2061,17 +2061,21 @@ impl ResourcePackPushFeed {
 /// sequence, and the initial chunk view — then keeps serving until the client
 /// disconnects.
 ///
-/// The loop transitions Handshaking → Login → Configuration → Play driven
-/// entirely by the [`ServerProtocol`], acknowledgement by acknowledgement,
-/// exactly mirroring the client-side `VersionAdapter`'s choreography:
+/// The loop transitions Handshaking → Login → Configuration → Play according to
+/// the [`ServerProtocol`] capability. Protocols with a Configuration phase use
+/// the acknowledgement-driven choreography; legacy protocols enter Play after
+/// login success because their wire has no configuration acknowledgements:
 ///
 /// 1. [`ServerBound::LoginStart`] → [`ServerProtocol::login_success`] (no
 ///    state change yet).
-/// 2. [`ServerBound::LoginAcknowledged`] → state becomes
+/// 2. For a protocol with a Configuration phase, [`ServerBound::LoginAcknowledged`] → state becomes
 ///    [`State::Configuration`], then [`ServerProtocol::encode_registry_data`]
 ///    (the configuration phase requires registries before the finish signal), then
 ///    [`ServerProtocol::begin_configuration`].
-/// 3. [`ServerBound::ConfigurationFinished`] → state becomes [`State::Play`],
+/// 3. For a legacy protocol, the loop queues the same
+///    [`ServerBound::ConfigurationFinished`] transition immediately after
+///    [`ServerProtocol::login_success`]. Otherwise, the client's
+///    [`ServerBound::ConfigurationFinished`] → state becomes [`State::Play`],
 ///    then [`ServerProtocol::begin_play`], then every column in
 ///    `[-view_radius, view_radius]²` (chunk coordinates) from `source` as a
 ///    single flow-controlled chunk batch
@@ -3052,8 +3056,21 @@ where
     // `serve_play` takes ownership of it at the Play handoff.
     let game_mode = world.default_game_mode();
 
-    while let Some((packet_id, payload)) = conn.read_packet().await? {
-        match proto.decode(state, packet_id, &payload) {
+    // A legacy protocol can finish login without receiving the modern
+    // configuration acknowledgements. Queue the same play-transition event
+    // used by the wire path so both routes share the complete join sequence.
+    let mut pending_event: Option<ServerBound> = None;
+    loop {
+        let event = if let Some(event) = pending_event.take() {
+            event
+        } else {
+            let Some((packet_id, payload)) = conn.read_packet().await? else {
+                break;
+            };
+            proto.decode(state, packet_id, &payload)
+        };
+
+        match event {
             ServerBound::Handshake { next_state } => {
                 state = next_state;
             }
@@ -3153,6 +3170,10 @@ where
                     for directive in proto.login_success(&name, uuid) {
                         apply(conn, &mut state, directive).await?;
                     }
+                    if !proto.has_configuration_phase() {
+                        state = State::Configuration;
+                        pending_event = Some(ServerBound::ConfigurationFinished);
+                    }
                 }
             }
             // Handle the client's answer to the encryption challenge sent by
@@ -3194,6 +3215,10 @@ where
                         online_authenticated = true;
                         for directive in proto.login_success(&profile.name, profile.id) {
                             apply(conn, &mut state, directive).await?;
+                        }
+                        if !proto.has_configuration_phase() {
+                            state = State::Configuration;
+                            pending_event = Some(ServerBound::ConfigurationFinished);
                         }
                     }
                     Ok(None) => {
@@ -3372,12 +3397,14 @@ where
                 // server will refuse.
                 //
                 // `login_uuid` cannot be `None` here: reaching Play requires
-                // `ConfigurationFinished`, which requires `LoginAcknowledged`, which
-                // requires the `LoginStart` arm that sets it. The `unwrap_or_default`
-                // is a total fallback rather than a panic because a nil uuid resolves
-                // to no player and therefore no permissions — failing closed, not
-                // open. On `wasm32` there is no `AccessHandle` in this signature at
-                // all (the whole ops/whitelist/ban feature is native-only). The
+                // `ConfigurationFinished`, which follows a successful `LoginStart`
+                // (or its online-mode login completion) either through
+                // `LoginAcknowledged` for modern protocols or through the queued
+                // legacy transition. The `unwrap_or_default` is a total fallback
+                // rather than a panic because a nil uuid resolves to no player
+                // and therefore no permissions — failing closed, not open. On
+                // `wasm32` there is no `AccessHandle` in this signature at all
+                // (the whole ops/whitelist/ban feature is native-only). The
                 // browser build uses level 4 for its local world so the built-in
                 // game-mode command remains available there.
                 //
@@ -3555,12 +3582,13 @@ where
                     apply(conn, &mut state, directive).await?;
                 }
 
-                // `ConfigurationFinished` cannot be reached without an
-                // earlier `LoginStart` in any correct `ServerProtocol` (the
-                // documented ack-driven state machine above), so `username`
-                // is always `Some` here; falling back to an empty string
-                // rather than panicking keeps a protocol that violates that
-                // contract merely wrong, not a crash.
+                // `ConfigurationFinished` cannot be reached without a successful
+                // `LoginStart`/login completion in any correct `ServerProtocol`:
+                // modern protocols receive the two acknowledgements, while a
+                // legacy protocol queues this transition after login. `username`
+                // is therefore always `Some` here; falling back to an empty
+                // string rather than panicking keeps a protocol that violates
+                // that contract merely wrong, not a crash.
                 let username = username.clone().unwrap_or_default();
 
                 // Register this connection as a player entity before initial

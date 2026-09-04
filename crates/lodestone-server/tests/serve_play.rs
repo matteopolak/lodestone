@@ -30,6 +30,7 @@
 //! `read_packet_timeout_fires_when_peer_is_silent` test.
 
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use lodestone_core::{Reader, State, Writer};
@@ -37,12 +38,14 @@ use lodestone_entity::item_entity::ItemLifecycle;
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, ItemStack, ResourceKey, Vec3,
 };
-use lodestone_net::{Connection, NetError, Transport, memory_pair};
+use lodestone_net::{Connection, NetError, Transport, generate_shared_secret, memory_pair, rsa_encrypt};
 use lodestone_server::{
-    BlockEntityHandle, BlockTickFeed, ChunkColumn, ChunkSource, ChunkWorld, EntitySnapshot,
-    ExplosionFeed, MetadataField, MobHandle, MobSim, NoEntities, ServerBound, ServerDirective,
-    ServerError, ServerProtocol,
-    WeatherEvent, WeatherFeed, serve_connection, serve_connection_with_mob_events,
+    BlockEntityHandle, BlockTickFeed, ChunkColumn, ChunkSource, ChunkWorld, CommandDispatch,
+    EntitySnapshot, ExplosionFeed, MetadataField, MobHandle, MobSim, NoEntities,
+    OnlineModeConfig, PluginChannelRegistry, ResourcePackPushFeed, ServerBound, ServerDirective,
+    ServerError, ServerProtocol, TicketStoreHandle, WeatherEvent, WeatherFeed, access::AccessHandle,
+    serve_connection, serve_connection_with_mob_events, serve_connection_with_online_mode,
+    world_state::WorldStateHandle,
 };
 use std::str::FromStr;
 use tokio::io::DuplexStream;
@@ -56,6 +59,8 @@ const FINISH_CONFIGURATION: i32 = 3;
 const CHUNK_BATCH_START: i32 = 10;
 const CHUNK: i32 = 0x27;
 const CHUNK_BATCH_FINISHED: i32 = 11;
+const ENCRYPTION_REQUEST_S2C: i32 = 70;
+const ENCRYPTION_RESPONSE_C2S: i32 = 71;
 
 // Play-state wire ids this stand-in protocol adds on top of the join
 // sequence above — a private vocabulary distinct from any real protocol's,
@@ -639,6 +644,118 @@ impl ServerProtocol for FakeProtocol {
     }
 }
 
+/// A pre-configuration-phase protocol reusing the stand-in wire format. Its
+/// only distinction is the explicit capability used by the server handshake.
+struct LegacyProtocol;
+
+impl ServerProtocol for LegacyProtocol {
+    fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+        FakeProtocol.decode(state, packet_id, payload)
+    }
+
+    fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective> {
+        FakeProtocol.login_success(username, uuid)
+    }
+
+    fn has_configuration_phase(&self) -> bool {
+        false
+    }
+
+    fn begin_configuration(&self) -> Vec<ServerDirective> {
+        FakeProtocol.begin_configuration()
+    }
+
+    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
+        FakeProtocol.begin_play(view_radius)
+    }
+
+    fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {
+        FakeProtocol.encode_set_time(game_time, day_time)
+    }
+
+    fn begin_chunk_batch(&self) -> ServerDirective {
+        FakeProtocol.begin_chunk_batch()
+    }
+
+    fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective {
+        FakeProtocol.encode_chunk(cx, cz, column)
+    }
+
+    fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
+        FakeProtocol.end_chunk_batch(batch_size)
+    }
+}
+
+/// The same legacy wire with online-mode encryption enabled. The test keeps
+/// the packet layout private because it verifies the server state machine, not
+/// a particular release's encryption packet shape.
+struct OnlineLegacyProtocol;
+
+impl ServerProtocol for OnlineLegacyProtocol {
+    fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+        if state == State::Login && packet_id == ENCRYPTION_RESPONSE_C2S {
+            let mut reader = Reader::new(payload);
+            return ServerBound::EncryptionResponse {
+                shared_secret: reader
+                    .var_bytes(4096)
+                    .expect("encrypted shared secret")
+                    .to_vec(),
+                verify_token: reader
+                    .var_bytes(4096)
+                    .expect("encrypted verify token")
+                    .to_vec(),
+            };
+        }
+        LegacyProtocol.decode(state, packet_id, payload)
+    }
+
+    fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective> {
+        LegacyProtocol.login_success(username, uuid)
+    }
+
+    fn has_configuration_phase(&self) -> bool {
+        false
+    }
+
+    fn encode_encryption_request(
+        &self,
+        public_key_der: &[u8],
+        verify_token: &[u8],
+    ) -> ServerDirective {
+        let mut writer = Writer::default();
+        writer.var_bytes(public_key_der).expect("public key length");
+        writer.var_bytes(verify_token).expect("challenge length");
+        ServerDirective::Send {
+            packet_id: ENCRYPTION_REQUEST_S2C,
+            payload: writer.as_slice().to_vec(),
+        }
+    }
+
+    fn begin_configuration(&self) -> Vec<ServerDirective> {
+        LegacyProtocol.begin_configuration()
+    }
+
+    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
+        LegacyProtocol.begin_play(view_radius)
+    }
+
+    fn encode_set_time(&self, game_time: i64, day_time: Option<i64>) -> ServerDirective {
+        LegacyProtocol.encode_set_time(game_time, day_time)
+    }
+
+    fn begin_chunk_batch(&self) -> ServerDirective {
+        LegacyProtocol.begin_chunk_batch()
+    }
+
+    fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective {
+        LegacyProtocol.encode_chunk(cx, cz, column)
+    }
+
+    fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
+        LegacyProtocol.end_chunk_batch(batch_size)
+    }
+}
+
 /// Drives the client side of handshake → login → configuration → the
 /// initial chunk view, asserting the join-time full time sync arrives
 /// (`SET_TIME_S2C`, before any chunk) and that exactly `expected_chunks`
@@ -726,6 +843,202 @@ async fn drain_join_view<T: Transport>(
     assert_eq!(reported as usize, in_batch);
     batches.push(reported);
     batches
+}
+
+/// A protocol from before the Configuration phase enters Play immediately
+/// after login success. The server must use the capability rather than waiting
+/// for acknowledgements that this wire cannot carry.
+#[tokio::test]
+async fn legacy_protocol_enters_play_without_configuration_acknowledgements() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &LegacyProtocol,
+            &source,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    client.write_packet(HANDSHAKE, &[2]).await.expect("hs");
+    let mut w = Writer::default();
+    w.string("Legacy");
+    client
+        .write_packet(LOGIN_START, w.as_slice())
+        .await
+        .expect("login start");
+
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, LOGIN_SUCCESS);
+    assert_eq!(Reader::new(&payload).string(16).unwrap(), "Legacy");
+
+    let (id, _payload) = tokio::time::timeout(Duration::from_secs(1), client.read_packet())
+        .await
+        .expect("legacy login should enter Play without waiting for an ack")
+        .expect("read")
+        .expect("packet");
+    assert_eq!(
+        id, SET_TIME_S2C,
+        "the normal Play join sequence must begin after legacy login"
+    );
+    let batches = drain_join_view(&mut client, 1).await;
+    assert_eq!(batches, vec![1]);
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
+/// Online-mode legacy login applies encryption before login success, then
+/// enters the same single Play join sequence without configuration acks.
+#[tokio::test]
+async fn encrypted_legacy_protocol_enters_play_without_configuration_acknowledgements() {
+    let profile_id = Uuid::from_u128(77);
+    let online_mode = OnlineModeConfig::for_test(move |username, hash| {
+        assert_eq!(username, "EncryptedLegacy");
+        assert!(!hash.is_empty(), "the server must compute a session hash");
+        Ok(Some(lodestone_auth::HasJoinedProfile {
+            id: profile_id,
+            name: "VerifiedLegacy".to_owned(),
+            properties: Vec::new(),
+        }))
+    });
+    let (client_end, server_end) = memory_pair();
+    let source = Arc::new(AirSource);
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection_with_online_mode(
+            &mut conn,
+            &OnlineLegacyProtocol,
+            &source,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+            &TicketStoreHandle::default(),
+            &BlockTickFeed::default(),
+            &ExplosionFeed::default(),
+            &CommandDispatch::none(),
+            &ResourcePackPushFeed::default(),
+            &PluginChannelRegistry::default(),
+            &WorldStateHandle::default(),
+            &AccessHandle::default(),
+            None,
+            &online_mode,
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    client.write_packet(HANDSHAKE, &[2]).await.expect("hs");
+    let mut writer = Writer::default();
+    writer.string("EncryptedLegacy");
+    client
+        .write_packet(LOGIN_START, writer.as_slice())
+        .await
+        .expect("login start");
+
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, ENCRYPTION_REQUEST_S2C);
+    let mut reader = Reader::new(&payload);
+    let public_key = reader.var_bytes(4096).expect("public key").to_vec();
+    let challenge = reader.var_bytes(4096).expect("challenge").to_vec();
+    reader.ensure_empty().expect("encryption request payload");
+
+    let secret = generate_shared_secret();
+    let encrypted_secret = rsa_encrypt(&public_key, &secret).expect("encrypt shared secret");
+    let encrypted_challenge = rsa_encrypt(&public_key, &challenge).expect("encrypt challenge");
+    let mut writer = Writer::default();
+    writer
+        .var_bytes(&encrypted_secret)
+        .expect("encrypted shared secret length");
+    writer
+        .var_bytes(&encrypted_challenge)
+        .expect("encrypted challenge length");
+    client
+        .write_packet(ENCRYPTION_RESPONSE_C2S, writer.as_slice())
+        .await
+        .expect("encryption response");
+    client.enable_encryption(&secret).expect("enable client encryption");
+
+    let (id, payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, LOGIN_SUCCESS);
+    assert_eq!(Reader::new(&payload).string(16).unwrap(), "VerifiedLegacy");
+
+    let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, SET_TIME_S2C);
+    assert_eq!(drain_join_view(&mut client, 1).await, vec![1]);
+    assert!(
+        matches!(
+            client
+                .read_packet_timeout(Duration::from_millis(50))
+                .await,
+            Err(NetError::Timeout { .. })
+        ),
+        "legacy login must emit no configuration acknowledgements or duplicate join"
+    );
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
+}
+
+/// **Negative control**: the default capability keeps modern protocols in the
+/// acknowledgement-driven Configuration phase until both packets arrive.
+#[tokio::test(start_paused = true)]
+async fn configuration_protocol_still_waits_for_both_acknowledgements() {
+    let (client_end, server_end) = memory_pair();
+    let source = AirSource;
+    let server = tokio::spawn(async move {
+        let mut conn = Connection::new(server_end);
+        serve_connection(
+            &mut conn,
+            &FakeProtocol,
+            &source,
+            &NoEntities,
+            0,
+            &BlockEntityHandle::default(),
+            &MobHandle::default(),
+        )
+        .await
+    });
+
+    let mut client = Connection::new(client_end);
+    client.write_packet(HANDSHAKE, &[2]).await.expect("hs");
+    let mut w = Writer::default();
+    w.string("Modern");
+    client
+        .write_packet(LOGIN_START, w.as_slice())
+        .await
+        .expect("login start");
+    let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, LOGIN_SUCCESS);
+
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), client.read_packet())
+            .await
+            .is_err(),
+        "a default modern protocol must not enter Play before acknowledgements"
+    );
+    client
+        .write_packet(LOGIN_ACKNOWLEDGED, &[])
+        .await
+        .expect("login ack");
+    client
+        .write_packet(FINISH_CONFIGURATION, &[])
+        .await
+        .expect("finish configuration");
+    let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
+    assert_eq!(id, SET_TIME_S2C);
+    assert_eq!(drain_join_view(&mut client, 1).await, vec![1]);
+
+    drop(client);
+    let _ = server.await.expect("server task panicked");
 }
 
 /// Reads every packet already available (or that arrives within a short,
