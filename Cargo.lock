@@ -1917,6 +1917,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f22fb22f065b308be0d8724e3706c7fa3fc2a6c7d6899df4cad7860e7a75436"
 
 [[package]]
+name = "glob"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
+
+[[package]]
 name = "glow"
 version = "0.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2437,6 +2443,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "java-locator"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09c46c1fe465c59b1474e665e85e1256c3893dd00927b8d55f63b09044c1e64f"
+dependencies = [
+ "glob",
+]
+
+[[package]]
 name = "jni"
 version = "0.22.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2444,8 +2459,10 @@ checksum = "5efd9a482cf3a427f00d6b35f14332adc7902ce91efb778580e180ff90fa3498"
 dependencies = [
  "cfg-if",
  "combine",
+ "java-locator",
  "jni-macros",
  "jni-sys 0.4.1",
+ "libloading",
  "log",
  "simd_cesu8",
  "thiserror 2.0.19",
@@ -2967,6 +2984,7 @@ dependencies = [
 name = "lodestone-jvm-bridge"
 version = "0.1.0"
 dependencies = [
+ "jni",
  "lodestone-ecs",
  "lodestone-plugin-support",
 ]
@@ -3403,12 +3421,15 @@ dependencies = [
 name = "lodestone-v1-19"
 version = "0.1.0"
 dependencies = [
+ "lodestone-client",
  "lodestone-core",
  "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
  "lodestone-protocol-common",
+ "lodestone-registry",
+ "lodestone-server",
  "lodestone-testsupport",
  "lodestone-world",
  "serde_json",
