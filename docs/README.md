@@ -163,10 +163,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   *harness* against a real vanilla oracle, for the class of bug Track A structurally
   cannot see — wrong behaviour that never panics (the motivating example: breaking a
   waterlogged block used to destroy the water too, which is not the real mechanic).
-  Track B is a narrow slice rather than a finished fuzzer — one fixed action script,
-  one compared dimension, no generation and no shrinking — but it does run that
-  comparison end to end against a live vanilla server, and doing so found a real
-  divergence. Its own section below says exactly what is and is not there.
+  Track B is a narrow slice rather than a finished fuzzer: fixed scripts run end to
+  end against a live vanilla server, while bounded generated scripts and semantic
+  shrinking are proven only against fresh in-memory oracles. Generated live runs
+  remain deliberately unwired until their reset and tick-boundary semantics can be
+  made trustworthy. Its own section below says exactly what is and is not there.
 - [`gpu/` module layout and shader conventions](./gpu-module-layout.md) — How
   `crates/lodestone-shell`'s render coordinator (`RenderState`) is split across
   `gpu.rs` and a `gpu/` folder of submodules, plus the convention every WGSL shader in

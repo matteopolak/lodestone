@@ -73,9 +73,12 @@
 //!
 //! ## What this module does not do yet
 //!
-//! - **No generation or shrinking over the action alphabet.** [`Script`] is a
-//!   fixed, hand-written sequence. `arbitrary`'s derive is the intended
-//!   bridge; nothing here depends on it.
+//! - **Generated scripts are hermetic only.** The test-support layer in
+//!   `tests/support/differential_generation.rs` generates bounded
+//!   `SetBlock`-only scripts and semantically shrinks them against fresh
+//!   in-memory oracles. It is deliberately not wired to the live RCON oracle:
+//!   a replayable live candidate needs deterministic reset and tick-boundary
+//!   control before repeated shrink attempts can be trusted.
 //! - **No validation against a reverted historical fix** — revert a committed
 //!   fix in a scratch worktree and require the harness to rediscover it. That
 //!   needs an action corpus rich enough to reach the reverted code path,
@@ -116,8 +119,9 @@ pub struct ScriptStep {
     pub action: Action,
 }
 
-/// A fixed, ordered action sequence. Not yet `arbitrary`-generated — see this
-/// module's doc for why.
+/// An ordered action sequence. Fixed live comparisons construct this by hand;
+/// hermetic differential tests can generate it through their test-support
+/// layer without adding a property-test runtime to this library.
 #[derive(Debug, Clone, Default)]
 pub struct Script {
     pub steps: Vec<ScriptStep>,

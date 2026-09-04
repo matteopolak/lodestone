@@ -97,4 +97,5 @@ proptest = "1"
 # returning `Result` on structurally-malformed JSON. Dev-only because nothing
 # else in this crate touches worldgen.
 lodestone-worldgen-core = { path = "../lodestone-worldgen-core" }
+serde = { workspace = true }
 serde_json = { workspace = true }

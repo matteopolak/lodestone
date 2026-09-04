@@ -2928,6 +2928,7 @@ dependencies = [
  "lodestone-world",
  "lodestone-worldgen-core",
  "proptest",
+ "serde",
  "serde_json",
  "uuid",
 ]
