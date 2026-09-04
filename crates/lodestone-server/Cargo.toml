@@ -235,3 +235,19 @@ lodestone-testsupport = { workspace = true }
 # `[workspace.dependencies]` entry the OAuth PKCE path already builds against,
 # so no new version enters the graph.
 sha2 = { workspace = true }
+
+# criterion, `default-features = false` + only `cargo_bench_support`, matching
+# every other bench site in this workspace: that combination excludes
+# `plotters`, `rayon`, `itertools`, `regex` and `walkdir` entirely, so adding a
+# bench pulls no new code into any non-bench build. Dev-only, so it never
+# reaches this crate's wasm32 surface.
+criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
+
+# What a server tick costs and how it scales with the population being ticked
+# — the client-side benches measure everything but the simulation, and
+# deciding whether ticking should be partitioned needs the tick's own number
+# first. Drives a real `run_tick_loop` under a paused runtime clock, so the
+# waiting is virtual and the work is real.
+[[bench]]
+name = "server_tick"
+harness = false

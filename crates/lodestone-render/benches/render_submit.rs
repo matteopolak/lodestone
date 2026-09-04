@@ -178,7 +178,6 @@ fn bench_terrain_draw_calls(c: &mut Criterion) {
         Err(e) => println!("terrain draw strategy: unknown, no GPU adapter ({e})"),
     }
 
-    let mut mdi_calls_per_rd = Vec::new();
     for rd in [8i32, 12, 16] {
         let scene = flat_scene(rd);
         let plan = scene.plan_frame(&camera);
@@ -212,22 +211,20 @@ fn bench_terrain_draw_calls(c: &mut Criterion) {
 
         // Per-strategy API draw calls, from the measured list sizes.
         let per_draw_calls = drawn;
-        let mdi_calls = 1usize; // one multi_draw_* call for the whole frame
-        mdi_calls_per_rd.push(mdi_calls);
 
         let scene_label = format!("flat_world rd={rd} sections={loaded}");
         println!(
             "terrain draw list: rd={rd} loaded={loaded} drawable={drawable} drawn={drawn} \
              culled_frustum={} culled_occlusion={} -> PerDraw would issue {per_draw_calls} \
-             draw_indexed calls; MdiZeroInstance/MdiCount issue {mdi_calls} \
-             (with {drawable} GPU draw slots)",
+             draw_indexed calls; the indirect strategies issue one \
+             multi_draw_indexed_indirect for the whole frame, with {drawable} GPU draw \
+             slots behind it",
             plan.stats.culled_frustum, plan.stats.culled_occlusion,
         );
         for (metric, value, unit) in [
             ("terrain_drawable_sections", drawable as f64, "sections"),
             ("terrain_drawn_sections", drawn as f64, "sections"),
             ("terrain_per_draw_api_calls", per_draw_calls as f64, "calls"),
-            ("terrain_mdi_api_calls", mdi_calls as f64, "calls"),
             ("terrain_mdi_draw_slots", drawable as f64, "slots"),
         ] {
             support::record(support::Record {
@@ -240,17 +237,18 @@ fn bench_terrain_draw_calls(c: &mut Criterion) {
         }
     }
 
-    // NO assertion is made here that the indirect strategies' per-frame API
-    // call count is "flat in section count". It is flat — one
-    // `multi_draw_indexed_indirect` per frame, `src/strategy.rs:262` — but that
-    // figure is *read off the source*, not measured, so asserting it would be
-    // comparing a constant this file wrote to itself: the vacuous-gate shape
-    // `CLAUDE.md` warns about, dressed as a regression gate. #128 explicitly
-    // forbids substituting a code-reading argument for a measured count, and
-    // the honest position is that the measured part of this bench is the
-    // draw-list sizes above; the API-level count needs the shell-side counter
-    // named in this file's module docs.
-    let _ = mdi_calls_per_rd;
+    // The indirect strategies' per-frame API call count is NOT asserted and is
+    // NOT recorded, and that omission is the point. It is one
+    // `multi_draw_indexed_indirect` per frame (see
+    // [`lodestone_render::strategy`]'s encode path), but that figure is *read
+    // off the source*, not measured here, so both asserting it and recording it
+    // as a metric amount to comparing a literal against itself — the vacuous
+    // gate dressed as a regression gate. It used to be recorded as
+    // `terrain_mdi_api_calls`, a constant `1` that no code path could ever
+    // move, which is precisely the kind of number a baseline must not hold.
+    // The measured part of this bench is the draw-list sizes above; a real
+    // API-level count needs the shell-side counter named in this file's module
+    // docs.
 
     let scene = flat_scene(12);
     c.bench_function("render_submit/terrain_plan_frame_rd12", |b| {

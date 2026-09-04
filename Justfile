@@ -340,6 +340,41 @@ wasm-size:
 test-profile-table:
     python3 scripts/test-profile-cost-table.py
 
+# --- Benchmark baselines and regression detection -------------------------
+#
+# Three recipes, in the order you use them. `bench-record` runs the subset of
+# benches that produce deterministic COUNTS on any machine — no GPU adapter,
+# no vanilla jar, no wall-clock number in the baseline — writing them to the
+# gitignored bench-results/. `bench-gate` then compares those counts against
+# the committed bench-baselines/ and fails on drift in either direction.
+# `bench-baseline-update` is the sanctioned way to move a baseline when a
+# change moved a number on purpose: run it and commit the diff alongside the
+# change. See docs/benchmark-regression-gate.md.
+
+# Run the hermetic, count-producing benches once each (criterion --test mode:
+# one iteration per benchmark, since the recorded counts do not need samples).
+bench-record:
+    cargo bench {{jflag}} --target-dir {{tdir}} -p lodestone-render -p lodestone-world \
+      --bench meshing --bench render_submit --bench memory_footprint -- --test
+
+# Compare the recorded counts against bench-baselines/. --min-compared makes
+# "the benches did not write anything" red rather than a silent green: an
+# audit that checks nothing is unrun, not passing.
+bench-gate:
+    python3 scripts/bench-gate.py --min-compared 40
+
+# Move the committed baseline to what the last run recorded. Tolerances and
+# required-flags survive; only the values move. Commit the diff with the
+# change that moved them, so an improvement is recorded rather than absorbed.
+bench-baseline-update:
+    python3 scripts/bench-gate.py --update
+
+# Executable control for the gate itself: 25 checks over synthetic fixtures,
+# including a planted per-section-uniform regression the gate must catch and
+# a healthy control it must pass. Stdlib python3, no pytest.
+test-bench-gate:
+    python3 scripts/test-bench-gate.py
+
 # Region-level worldgen throughput/peak-RSS sweep. No args: the script's own
 # courteous default radii (8 16) apply. Pass radii to override, e.g.
 # `just worldgen-sweep 3 32` for the full RD-32 sweep — only on an otherwise
