@@ -1,51 +1,38 @@
-//! The **external oracle for the write path** (issue #437): a real Mojang 26.2
-//! server reading a region file *we* wrote.
+//! The **external oracle for the write path**: a reference 26.2 server reads a
+//! region file written through the production save path.
 //!
 //! # Why this exists at all
 //!
-//! `chunk_nbt_vanilla_oracle.rs` evidences the read direction against files
-//! vanilla wrote. `world_persistence_round_trip.rs` evidences the lifecycle,
-//! but it is a round trip through our own codec and says so. Neither can
-//! establish the claim that actually matters for a save format: **that what we
-//! write is loadable by the program that defines it.** `decode(encode(x)) == x`
-//! is satisfied by two symmetric misunderstandings, and this repo already paid
-//! for that lesson once — hermetic chunk fixtures built with our own encoder
-//! passed throughout, and then a live gate produced 49 × "unexpected end of
-//! input".
+//! `chunk_nbt_vanilla_oracle.rs` checks the read direction against files written
+//! by the reference server. `world_persistence_round_trip.rs` checks the
+//! lifecycle, but its round trip uses our own codec on both sides. Neither
+//! establishes the independent claim that matters for a save format: **that
+//! bytes written here are loadable by the defining program.** `decode(encode(x))
+//! == x` can hold when both operations share the same misunderstanding.
 //!
-//! So this gate writes a world through the production save path and hands the
-//! bytes to Mojang's code. Three separate things are checked by *their* classes,
-//! not ours (see `scripts/anvil-oracle/AnvilReadbackOracle.java`):
+//! This gate writes a world through the production save path and hands the
+//! bytes to an independent reader. Three separate concerns are checked by the
+//! external harness rather than by our codec (see
+//! `scripts/anvil-oracle/AnvilReadbackOracle.java`):
 //!
-//! | risk | vanilla class that adjudicates it |
+//! | risk | independent reader concern |
 //! |---|---|
-//! | sector table, header, compression | `RegionFile` |
-//! | `{Name, Properties}` palette entries | `BlockState.CODEC` |
-//! | non-spanning bit packing | `SimpleBitStorage` |
+//! | sector table, header, compression | region-container reader |
+//! | `{Name, Properties}` palette entries | block-state codec |
+//! | non-spanning bit packing | packed-section storage reader |
 //!
-//! The third is the one worth having: dense-vs-non-spanning packing is
-//! invisible for every palette of 16 or fewer entries, so the probes below
-//! deliberately include a chunk with a palette large enough to need 5 bits,
-//! where 64 is not divisible by the bit width and the two rules diverge.
+//! The packing probe is essential because dense-vs-non-spanning packing is
+//! invisible for every palette of 16 or fewer entries. The probes therefore
+//! include a chunk with a palette large enough to need 5 bits, where 64 is not
+//! divisible by the bit width and the two rules diverge.
 //!
-//! # The control, run and observed
+//! # The discriminating probe
 //!
-//! `chunk_nbt::pack_indices` was temporarily changed to pack **densely** (a
-//! continuous bit stream across long boundaries) and this gate re-run. Result:
-//!
-//! ```text
-//! 16 of 24 probes disagree — a real Mojang server does not read back what we wrote:
-//! (0,64,1): vanilla read "minecraft:deepslate[axis=y]", we wrote "minecraft:gold_ore"
-//! (3,67,1): vanilla read "minecraft:air",                we wrote "minecraft:oak_log[axis=x]"
-//! ...
-//! ```
-//!
-//! Two things about that output are worth keeping. It fails **loudly**, and it
-//! fails *by Mojang's adjudication* rather than ours. And exactly 8 of the 24
-//! probes still agreed — the ones in the 1-bit and small-palette regions where
-//! the two packing rules coincide — which is the quantitative demonstration
-//! that a gate built only from small palettes would have been green. That is
-//! why `WIDE_PALETTE` exists.
+//! Dense bit-stream packing and the required non-spanning packing produce the
+//! same result for palettes of 16 or fewer entries. `WIDE_PALETTE` therefore
+//! supplies 20 distinct states: its 5-bit indices make `64 % 5 != 0`, so a
+//! reader using the wrong rule must disagree at some probe positions. The
+//! external reader is the adjudicator for those positions.
 //!
 //! # Ignored by default
 //!
@@ -127,7 +114,8 @@ impl ChunkSource for EmptyWorld {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). The no-op is explicit so the fixture's retention behavior is
+    // clear at the implementation boundary.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -181,8 +169,8 @@ fn a_real_mojang_server_can_read_the_region_file_we_wrote() {
         .join("overworld")
         .join("region");
 
-    // Group probes by the region file that holds them, because the oracle
-    // opens one `.mca` per invocation (as `RegionFile` itself does).
+    // Group probes by the region file that holds them, because the oracle opens
+    // one `.mca` per invocation.
     let mut by_region: BTreeMap<(i32, i32), Vec<(i32, i32, i32)>> = BTreeMap::new();
     for &(x, y, z) in expected.keys() {
         let rx = x.div_euclid(16).div_euclid(32);
@@ -216,13 +204,11 @@ fn a_real_mojang_server_can_read_the_region_file_we_wrote() {
 
         let mut seen = 0usize;
         for line in stdout.lines() {
-            // `Bootstrap.bootStrap()` installs a logger that captures
-            // `System.out`, so every line arrives wrapped as
-            // `[09:12:40] [main/INFO]: [STDOUT]: RESULT ...`. Match the marker
-            // anywhere in the line rather than at its start — a prefix match
-            // silently found nothing and read as "the oracle returned no
-            // results", which is a failure mode worth naming here because it
-            // looks exactly like a broken write path.
+            // The oracle launcher prefixes captured output with a timestamp and
+            // logger marker such as `[09:12:40] [main/INFO]: [STDOUT]: RESULT`.
+            // Match the marker anywhere in the line rather than at its start;
+            // otherwise a harmless wrapper prefix would make the parser find
+            // no results and obscure a write-path failure.
             let Some(body) = line.split_once("RESULT ").map(|(_, rest)| rest) else {
                 continue;
             };
