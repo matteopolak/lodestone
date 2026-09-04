@@ -325,6 +325,18 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   Two independent halves, one per side of the client/server split, both giving a
   native plugin the Bukkit-class `World.spawnEntity(loc,
   type)`/`Entity.remove()`/free-modification surface:
+- [Packet decorators: the version-locked ProtocolLib-class escape hatch](./plugin-packet-decorators.md) —
+  A wrapper struct implementing `ServerProtocol` (server) or `VersionAdapter` (client)
+  around a concrete protocol family's own type, forwarding most calls unchanged and
+  intercepting the ones a plugin author cares about. This is the one route in this
+  codebase to ProtocolLib-class packet access — see, drop, rewrite, or append
+  traffic in either direction — at the cost of depending on a concrete version crate
+  directly instead of the version-free shared crates every other plugin surface
+  targets.
+  `crates/versions/26.2/tests/server/server_protocol_decorator_escape_hatch.rs` and
+  `crates/versions/26.2/tests/singleplayer_lan/client_adapter_decorator_escape_hatch.rs`
+  are executable proof, one test per verb per direction, each with a control showing
+  the undecorated protocol's own behaviour first.
 - [Server-side plugin capability parity](./plugin-server-capabilities.md) — A survey
   of what a server-side plugin can actually do today, set against the client's
   five-clause intent doctrine (`docs/plugin-api.md`), and a design for what a
