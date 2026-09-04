@@ -165,6 +165,34 @@ impl Family {
         }
     }
 
+    /// Returns every serverbound `(name, packet_id)` this family declares for
+    /// `state`, from the generated tables used by the production decoder.
+    /// Fuzz targets use this to spend mutations in real decode arms while
+    /// retaining the separate arbitrary-id target for unknown-id handling.
+    pub fn serverbound_entries(self, state: ConnectionState) -> &'static [(&'static str, i32)] {
+        macro_rules! table {
+            ($module:ident) => {
+                match state {
+                    ConnectionState::Handshaking => $module::packet_ids::handshaking::serverbound::ENTRIES,
+                    ConnectionState::Status => $module::packet_ids::status::serverbound::ENTRIES,
+                    ConnectionState::Login => $module::packet_ids::login::serverbound::ENTRIES,
+                    ConnectionState::Configuration => $module::packet_ids::configuration::serverbound::ENTRIES,
+                    ConnectionState::Play => $module::packet_ids::play::serverbound::ENTRIES,
+                }
+            };
+        }
+        match self {
+            #[cfg(feature = "v1-8")]
+            Family::V47 => table!(lodestone_v1_8),
+            #[cfg(feature = "v1-9")]
+            Family::V340 => table!(lodestone_v1_9),
+            #[cfg(feature = "v1-14")]
+            Family::V735 => table!(lodestone_v1_14),
+            #[cfg(feature = "v26-2")]
+            Family::V770 => table!(lodestone_v26_2),
+        }
+    }
+
     /// All five [`ConnectionState`] phases, for sweeping every state a
     /// family might see a decode call in.
     pub const STATES: [ConnectionState; 5] = [
