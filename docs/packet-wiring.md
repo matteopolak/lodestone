@@ -57,6 +57,22 @@ until it gets an arm, closing the same "compiles, tests green, reaches nothing" 
 serverbound gate closes from the other side. `ClientAction` (serverbound, outbound from us) has
 the mirror problem with no equivalent exhaustive table — check for a real producer by hand.
 
+### Raw inbound packet observation
+
+`RawPacketBusPlugin` installs the opt-in `Messages<RawPacket>` bus in the
+caller's ECS world. The connection driver publishes `RawPacket { state,
+packet_id, payload }` immediately after framing and before it calls the version
+adapter, so a `MessageReader<RawPacket>` can inspect an undecoded packet without
+taking a version-crate dependency. The payload excludes the packet id and outer
+length framing and is copied only when the marker resource is present.
+
+This surface is observation-only. A reader cannot replace the bytes, cancel the
+packet, or inject another packet; the adapter remains the sole decoder and
+directive producer. The bus is separate from `GameEventBusPlugin`, so a plugin
+that needs only decoded events does not pay to copy every inbound payload.
+Messages age at `TickSet::Send`; a reader that runs in another schedule must
+choose its own hand-off or accept that the normal tick is the retention boundary.
+
 ### The outbound action hook: `EgressFilters`
 
 `EgressFilters` (`crates/lodestone-ecs/src/egress.rs`) is where a plugin inspects, replaces, or
@@ -125,6 +141,11 @@ a special case of the egress hook.
   `serverbound_wiring.rs`.
 - **Adding a `ClientEvent` variant**: write the `route()` arm and update the island count in
   `docs/event-routing.md` in the same commit — see that doc for both gates.
+- **Observing raw inbound packets**: add `RawPacketBusPlugin` to the caller's
+  ECS `App` and read `RawPacket` with `MessageReader<RawPacket>`. Do not add
+  mutation or cancellation to this bus; those operations belong to a
+  version-typed adapter decorator and are intentionally outside the shared
+  plugin surface.
 - **Expected values for any wiring gate must come from outside the code under test** — a
   decompiled `STREAM_CODEC`, a registry report, or captured bytes, never `decode(encode(x))
   == x` against our own encoder.
@@ -142,6 +163,8 @@ a special case of the egress hook.
 
 - `EgressFilterPlugin` and `ActionVetoPlugin` are both opt-in bevy plugins; a client with
   neither installed pays only a `get_resource`/bitset-test lookup per tick/ask.
+- `RawPacketBusPlugin` is independently opt-in. Without it, the client does not
+  clone inbound payloads or write to an ECS message queue.
 - No environment variables gate any of this.
 
 ## Dependencies
@@ -152,5 +175,8 @@ a special case of the egress hook.
 - `lodestone-ecs/src/egress.rs` and `veto.rs`, both depending only on `bevy_app`/`bevy_ecs`/
   `lodestone-model`; ask/drain call sites live in `lodestone-client`, `lodestone-shell`, and
   `lodestone-controller`.
+- `lodestone-ecs/src/events.rs` (`RawPacket`, `RawPacketBusPlugin`) and
+  `lodestone-client/src/driver.rs`/`state.rs` for the pre-decode publication
+  point and the opt-in cache.
 - `cargo xtask connectedness` for the decoded/connected measurement this doc's gates
   complement.

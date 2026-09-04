@@ -188,7 +188,9 @@ pub use input::{
     KeyInterceptMode, PendingPluginKeyEvents, PhysicalKey, PluginKeyEvent, PluginKeybinds,
 };
 pub use plugin_draw::{PluginBillboard, PluginBillboards, PluginTexture, clear_plugin_billboards};
-pub use events::{GameEvent, GameEventBus, GameEventBusPlugin};
+pub use events::{
+    GameEvent, GameEventBus, GameEventBusPlugin, RawPacket, RawPacketBus, RawPacketBusPlugin,
+};
 pub use handle::{
     EcsHandle, HoldStats, LockHolds, hold_read, hold_write, new_handle, new_ingest_handle,
 };

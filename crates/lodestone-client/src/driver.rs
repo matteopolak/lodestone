@@ -508,6 +508,10 @@ impl<T: Transport> Driver<T> {
                             return SessionOutcome::Failed(ClientError::Transport(error));
                         }
                         Ok(Some((packet_id, payload))) => {
+                            // Publish the exact packet before version-specific
+                            // decoding can consume it.
+                            self.read_model
+                                .record_raw_packet(self.state, packet_id, &payload);
                             // Hand the adapter the client-owned world as a
                             // `WorldSink` so decoded chunks are applied in place
                             // and never travel the event channel. The write
