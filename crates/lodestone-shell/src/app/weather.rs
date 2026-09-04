@@ -402,16 +402,6 @@ impl ProbeMemo {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
-
-    /// How many `column_heightmap` fetches this memo has performed — the
-    /// height-side twin of [`Self::section_fetches`].
-    #[cfg(test)]
-    fn heightmap_fetches(&self) -> usize {
-        self.heightmaps
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .len()
-    }
 }
 
 /// The `(chunk, section index)` a block position resolves to, or `None` when it
