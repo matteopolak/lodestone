@@ -28,17 +28,19 @@
 //!   [`WORLD_TYPE_ROW`], [`CUSTOMIZE_ROW`], [`STRUCTURES_ROW`],
 //!   [`BONUS_CHEST_ROW`]. [`WORLD_TYPE_ROW`]
 //!   itself is real — cycles all seven bundled
-//!   presets and collects the choice — and
-//!   selecting `Normal`/`LargeBiomes`/`Amplified` reaches the served world;
-//!   the other four remain decorative. See [`WorldTypePreset`]'s own doc for
-//!   exactly which is which and why. [`CUSTOMIZE_ROW`] is vanilla's own
+//!   presets and collects the choice, and all seven reach the served world
+//!   (`Normal`/`LargeBiomes`/`Amplified` through
+//!   `WorldTypePreset::backend_world_type`, the other four through `net.rs`'s
+//!   `preset_chunk_source`). See [`WorldTypePreset`]'s own doc for exactly
+//!   which entry point each uses. [`CUSTOMIZE_ROW`] is vanilla's own
 //!   `selectWorld.customizeType` button — present on this tab always, like
 //!   vanilla's own copy, but only **active** while the selected world type is
 //!   [`WorldTypePreset::Flat`] or [`WorldTypePreset::SingleBiomeSurface`],
 //!   mirroring vanilla's own rule exactly (a preset editor exists for those
 //!   two and no others). See [`CustomizeEditor`]'s own doc for what it
 //!   collects and [`WorldCreationConfig::flat_layers`]/
-//!   [`WorldCreationConfig::single_biome`] for where the choice reaches disk.
+//!   [`WorldCreationConfig::single_biome`] for where the choice reaches disk
+//!   and, from there, the served world.
 //! - **More** (`createWorld.tab.more.title`): vanilla's own More tab is three
 //!   buttons, in this order — Game Rules, Experiments, Data Packs. All three
 //!   now have real models
@@ -556,20 +558,19 @@ pub struct WorldCreationConfig {
     /// `dimensions.minecraft:overworld.generator` compound through
     /// [`lodestone_anvil::world_gen_settings::WorldGenSettings::with_overworld_flat_generator`]
     /// — see that function's own doc for why this is a different file than
-    /// [`Self::experiments`]'s `level.dat`. **Not yet wired past the file**:
-    /// this client's own world-generation launch path (which is what makes
-    /// [`Self::world_type`]'s three noise-generator presets actually reach
-    /// the served world) does not read this back, so a freshly created flat
-    /// world from *this* client generates from the same fixed default it
-    /// always has — only a real vanilla server re-opening the same save
-    /// folder would see the customization. Real gameplay wiring across the
-    /// launch path and the generator itself, not a small follow-up.
+    /// [`Self::experiments`]'s `level.dat`. **Reaches the served world too**:
+    /// `net.rs`'s singleplayer/LAN open reads `world_gen_settings.dat` back
+    /// through `lodestone_server::overworld_chunk_source_override` before it
+    /// ever falls back to [`Self::world_type`]'s bundled generator, so a
+    /// freshly created flat world serves the chosen layer stack immediately,
+    /// not only once a vanilla server re-opens the save folder.
     pub flat_layers: Option<FlatLayerPreset>,
     /// The "Customize Type" screen's Single Biome half — mirrors
     /// [`Self::flat_layers`] exactly, one field short: a single biome id
     /// rather than a layer stack, reaching disk through
-    /// [`lodestone_anvil::world_gen_settings::WorldGenSettings::with_overworld_fixed_biome_generator`].
-    /// Same not-yet-wired-past-the-file gap.
+    /// [`lodestone_anvil::world_gen_settings::WorldGenSettings::with_overworld_fixed_biome_generator`],
+    /// and the served world the same way, through the same
+    /// `overworld_chunk_source_override` read-back.
     pub single_biome: Option<CustomizeBiome>,
 }
 
