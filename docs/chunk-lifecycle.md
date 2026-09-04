@@ -84,6 +84,14 @@ rather than removing it. The fix applies the encode inside the very worker that 
 column. Wire order is unaffected either way, since emission order is fixed at the moment a batch is
 *enqueued*, not by completion order.
 
+`ChunkEncoder::try_encode_chunk` and `ServerProtocol::try_encode_chunk` make that work fallible
+without coupling an encoder to a socket or a particular transport. Both default to the established
+infallible encoder, so an existing protocol produces the same bytes. A rejecting encoder returns an
+owned diagnostic through the scheduler in coordinate order; the connection closes after ending any
+chunk batch whose opening marker was already written. A view update that has only accumulated its
+batch locally writes neither batch marker before that disconnect, so the client never observes an
+unmatched batch.
+
 ### View streaming, and the latency defect that caused false keep-alive timeouts
 
 **The number of chunk columns processed inside one unserviced async arm is what determines whether
@@ -156,6 +164,9 @@ cycles-per-instruction, not in the raw instruction count.
   at the start of the arm body, mark its pass at the end) or it becomes invisible to keep-alive
   accounting — a missing entry silently attributes no stall time to a genuinely slow arm, and a
   missing exit leaves the timer open for whichever arm runs next.
+- **Keep chunk encoding errors transport-independent.** Implement a protocol's
+  `try_encode_chunk` only when it can report an owned failure; callers own the connection cleanup
+  and must end a batch only after its beginning marker reached the wire.
 
 ## Configuration
 

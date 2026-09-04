@@ -1992,7 +1992,7 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     source: Arc<S>,
     coords: Vec<(i32, i32)>,
     encoder: Option<Arc<dyn crate::protocol::ChunkEncoder>>,
-) -> Option<Vec<crate::protocol::ServerDirective>> {
+) -> Option<Result<Vec<crate::protocol::ServerDirective>, crate::protocol::ChunkEncodeError>> {
     let encoder = encoder?;
     // wasm32: `map_columns_yielding`, one column generated-and-encoded at a
     // time with a real browser yield between each — see
@@ -2007,10 +2007,12 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
             map_columns_yielding(
                 &*source,
                 &coords,
-                |(cx, cz), column| encoder.encode_chunk(cx, cz, &column),
+                |(cx, cz), column| encoder.try_encode_chunk(cx, cz, &column),
                 yield_to_browser,
             )
-            .await,
+            .await
+            .into_iter()
+            .collect(),
         )
     }
     // Native: `map_columns_parallel`, not `generate_columns_parallel`
@@ -2022,13 +2024,15 @@ pub(crate) async fn generate_and_encode_columns_offloaded<S: ChunkSource + 'stat
     {
         let encode = move || {
             map_columns_parallel(&*source, &coords, |(cx, cz), column| {
-                encoder.encode_chunk(cx, cz, &column)
+                encoder.try_encode_chunk(cx, cz, &column)
             })
         };
         Some(
             tokio::task::spawn_blocking(encode)
                 .await
-                .expect("worldgen blocking task panicked"),
+                .expect("worldgen blocking task panicked")
+                .into_iter()
+                .collect(),
         )
     }
 }

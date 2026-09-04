@@ -189,7 +189,11 @@ async fn window_arm(coords: &[(i32, i32)], stagger: Duration) -> ArmResult {
     let mut pipeline = ColumnPipeline::with_window(Arc::clone(&probe), coords.to_vec(), GATE_WINDOW);
     let mut emitted = Vec::with_capacity(coords.len());
     let mut completed_before_first_emit = usize::MAX;
-    while let Some((pos, _column)) = pipeline.next().await {
+    while let Some((pos, _column)) = pipeline
+        .next()
+        .await
+        .expect("a source without an encoder cannot fail")
+    {
         if emitted.is_empty() {
             completed_before_first_emit = probe.completed.load(Ordering::SeqCst);
         }

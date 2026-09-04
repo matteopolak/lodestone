@@ -99,7 +99,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
-use crate::protocol::{ChunkEncoder, ServerDirective};
+use crate::protocol::{ChunkEncodeError, ChunkEncoder, ServerDirective};
 use crate::server::SourceRef;
 
 /// What one pipeline slot hands back: either the wire bytes, already encoded on
@@ -597,7 +597,7 @@ pub struct ColumnPipeline<S> {
     /// order they finish in. Pairing them here (rather than indexing a `coords`
     /// vector) is what lets the spawn order itself be dynamic.
     #[cfg(not(target_arch = "wasm32"))]
-    inflight: VecDeque<((i32, i32), tokio::task::JoinHandle<ColumnPayload>)>,
+    inflight: VecDeque<((i32, i32), tokio::task::JoinHandle<Result<ColumnPayload, ChunkEncodeError>>)>,
     #[cfg(target_arch = "wasm32")]
     inflight: VecDeque<((i32, i32), ColumnPayload)>,
 }
@@ -784,9 +784,9 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
     /// the `JoinHandle` on cancellation and silently lost that column from the
     /// wire.
     #[cfg(not(target_arch = "wasm32"))]
-    pub async fn next(&mut self) -> Option<((i32, i32), ColumnPayload)> {
+    pub async fn next(&mut self) -> Result<Option<((i32, i32), ColumnPayload)>, ChunkEncodeError> {
         if self.remaining() == 0 {
-            return None;
+            return Ok(None);
         }
         // The first top-up is to 1, not to `window`: this is the
         // time-to-first-chunk fix. See the module doc.
@@ -807,8 +807,10 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
                 tokio::task::spawn_blocking(move || {
                     let column = source.column(cx, cz);
                     match encoder {
-                        Some(encoder) => ColumnPayload::Encoded(encoder.encode_chunk(cx, cz, &column)),
-                        None => ColumnPayload::Column(column),
+                        Some(encoder) => encoder
+                            .try_encode_chunk(cx, cz, &column)
+                            .map(ColumnPayload::Encoded),
+                        None => Ok(ColumnPayload::Column(column)),
                     }
                 }),
             ));
@@ -818,20 +820,22 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
             .front_mut()
             .expect("the top-up above spawns at least one column while any remain");
         let pos = *pos;
-        let payload = handle.await.expect("worldgen join burst panicked");
+        let payload = handle.await.expect("worldgen join burst panicked")?;
         self.inflight.pop_front();
         self.emitted += 1;
         self.primed = true;
-        Some((pos, payload))
+        Ok(Some((pos, payload)))
     }
 
     /// wasm32: no blocking pool, so this is the serial path. See the struct doc.
     #[cfg(target_arch = "wasm32")]
-    pub async fn next(&mut self) -> Option<((i32, i32), ColumnPayload)> {
+    pub async fn next(&mut self) -> Result<Option<((i32, i32), ColumnPayload)>, ChunkEncodeError> {
         if self.remaining() == 0 {
-            return None;
+            return Ok(None);
         }
-        let (cx, cz) = self.queue.pop()?;
+        let Some((cx, cz)) = self.queue.pop() else {
+            return Ok(None);
+        };
         let column = self.source.column(cx, cz);
         self.emitted += 1;
         self.primed = true;
@@ -839,7 +843,7 @@ impl<S: ChunkSource + 'static> ColumnPipeline<S> {
         // There is no worker to move the encode to, so the arm is the same one a
         // protocol without a `ChunkEncoder` takes: the caller encodes it. Using
         // `self.encoder` here would be a lie about where the work happened.
-        Some(((cx, cz), ColumnPayload::Column(column)))
+        Ok(Some(((cx, cz), ColumnPayload::Column(column))))
     }
 }
 
@@ -999,9 +1003,9 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
     pub(crate) async fn next(
         &mut self,
         source: SourceRef<'_, S>,
-    ) -> Option<((i32, i32), ColumnPayload)> {
+    ) -> Result<Option<((i32, i32), ColumnPayload)>, ChunkEncodeError> {
         match self {
-            Self::Drained => None,
+            Self::Drained => Ok(None),
             // **Not collapsed to `Drained` on exhaustion** — see
             // [`windowed`](Self::windowed). The pipeline has to survive so a later
             // [`enqueue`](Self::enqueue) can refill it.
@@ -1020,7 +1024,7 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
                     let Some(ring) = rings.front().cloned() else {
                         *remaining = 0;
                         *self = Self::Drained;
-                        return None;
+                        return Ok(None);
                     };
                     let columns = source.generate(ring.clone()).await;
                     for (coord, column) in ring.into_iter().zip(columns) {
@@ -1028,7 +1032,9 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
                     }
                     rings.pop_front();
                 }
-                let (coord, column) = ready.pop_front()?;
+                let Some((coord, column)) = ready.pop_front() else {
+                    return Ok(None);
+                };
                 *remaining = remaining.saturating_sub(1);
                 if *remaining == 0 {
                     *self = Self::Drained;
@@ -1036,7 +1042,7 @@ impl<S: ChunkSource + 'static> JoinChunkStream<S> {
                 // This arm's source is not `'static` (see the type doc), so there
                 // is no worker to encode on and never was: the caller encodes it,
                 // exactly as it did before `ColumnPayload` existed.
-                Some((coord, ColumnPayload::Column(column)))
+                Ok(Some((coord, ColumnPayload::Column(column))))
             }
         }
     }
@@ -1353,7 +1359,11 @@ mod tests {
 
         let mut pipeline = ColumnPipeline::with_window(source, coords.clone(), 8);
         let mut emitted = Vec::new();
-        while let Some((pos, _column)) = pipeline.next().await {
+        while let Some((pos, _column)) = pipeline
+            .next()
+            .await
+            .expect("a source without a fallible encoder cannot fail")
+        {
             emitted.push(pos);
         }
         assert_eq!(
@@ -1423,7 +1433,11 @@ mod tests {
         });
 
         let mut pipeline = ColumnPipeline::with_window(source, coords.clone(), 8);
-        let (first, _column) = pipeline.next().await.expect("a non-empty view emits");
+        let (first, _column) = pipeline
+            .next()
+            .await
+            .expect("a source without a fallible encoder cannot fail")
+            .expect("a non-empty view emits");
         let at_first = completed.load(Ordering::SeqCst);
         assert_eq!(first, coords[0]);
         assert_eq!(
@@ -1434,8 +1448,8 @@ mod tests {
 
         // …and the window really does open afterwards, or the line above would be
         // satisfied by a fully serial pipeline.
-        let _ = pipeline.next().await;
-        let _ = pipeline.next().await;
+        let _ = pipeline.next().await.expect("encoding cannot fail");
+        let _ = pipeline.next().await.expect("encoding cannot fail");
         assert!(
             completed.load(Ordering::SeqCst) > 3,
             "after priming, more columns must be in flight than have been emitted — \
@@ -1472,7 +1486,11 @@ mod tests {
         let mut pipeline = ColumnPipeline::with_window(source, coords, 2)
             .encoding_with(Some(Arc::new(CoordEncoder)));
 
-        let (pos, payload) = pipeline.next().await.expect("a non-empty view emits");
+        let (pos, payload) = pipeline
+            .next()
+            .await
+            .expect("the coordinate encoder cannot fail")
+            .expect("a non-empty view emits");
         assert_eq!(pos, (1, 0));
         assert!(
             payload.column().is_none(),
@@ -1487,6 +1505,60 @@ mod tests {
         }
     }
 
+    /// A worker-side encoding error belongs to the next coordinate in wire order;
+    /// a later ready worker must not pass it and create a hole in the stream.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_encoder_failure_stops_at_its_ordered_coordinate() {
+        struct RejectSecond;
+
+        impl ChunkEncoder for RejectSecond {
+            fn encode_chunk(&self, cx: i32, cz: i32, _column: &ChunkColumn) -> ServerDirective {
+                ServerDirective::Send {
+                    packet_id: 8,
+                    payload: vec![cx as u8, cz as u8],
+                }
+            }
+
+            fn try_encode_chunk(
+                &self,
+                cx: i32,
+                cz: i32,
+                column: &ChunkColumn,
+            ) -> Result<ServerDirective, ChunkEncodeError> {
+                if (cx, cz) == (2, 0) {
+                    Err(ChunkEncodeError::new("second coordinate rejected"))
+                } else {
+                    Ok(self.encode_chunk(cx, cz, column))
+                }
+            }
+        }
+
+        let coords = vec![(1, 0), (2, 0), (3, 0)];
+        let source = Arc::new(SkewedSource {
+            coords: coords.clone(),
+            delays: vec![Duration::ZERO; coords.len()],
+            completed: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut pipeline = ColumnPipeline::with_window(source, coords, 2)
+            .encoding_with(Some(Arc::new(RejectSecond)));
+
+        let first = pipeline
+            .next()
+            .await
+            .expect("the first coordinate must encode")
+            .expect("the first coordinate must be emitted");
+        assert_eq!(first.0, (1, 0));
+        let error = pipeline
+            .next()
+            .await
+            .expect_err("the second coordinate must stop the ordered stream");
+        assert_eq!(
+            error,
+            ChunkEncodeError::new("second coordinate rejected"),
+            "the error must be reported before any later coordinate can be emitted"
+        );
+    }
+
     /// A one-column view still works, and a zero-column view emits nothing rather
     /// than panicking on the `pop_front` above.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1499,7 +1571,11 @@ mod tests {
             completed: Arc::clone(&completed),
         });
         let mut pipeline = ColumnPipeline::with_window(source, empty, 8);
-        assert!(pipeline.next().await.is_none());
+        assert!(pipeline
+            .next()
+            .await
+            .expect("a source without an encoder cannot fail")
+            .is_none());
         assert_eq!(pipeline.remaining(), 0);
 
         let one = vec![(3, 4)];
@@ -1510,11 +1586,19 @@ mod tests {
         });
         let mut pipeline = ColumnPipeline::with_window(source, one, 8);
         assert_eq!(
-            pipeline.next().await.map(|(pos, _)| pos),
+            pipeline
+                .next()
+                .await
+                .expect("a source without an encoder cannot fail")
+                .map(|(pos, _)| pos),
             Some((3, 4)),
             "a single-column view emits it"
         );
-        assert!(pipeline.next().await.is_none());
+        assert!(pipeline
+            .next()
+            .await
+            .expect("a source without an encoder cannot fail")
+            .is_none());
     }
 
     /// [`ticket_level_for_ring`] must describe the same quantity a real

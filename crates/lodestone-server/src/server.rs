@@ -103,8 +103,8 @@ use crate::neighbor_update::Direction;
 use crate::players::{ChatLine, PlayerListStreamer, PlayerRegistry, PlayerTicket};
 use crate::plugin_channels::{ClientChannels, PluginChannelRegistry};
 use crate::protocol::{
-    Abilities, BossBarSnapshot, EntitySnapshot, MerchantOfferOut, ResourcePackPush, ServerBound,
-    ServerDirective, ServerProtocol,
+    Abilities, BossBarSnapshot, ChunkEncodeError, EntitySnapshot, MerchantOfferOut,
+    ResourcePackPush, ServerBound, ServerDirective, ServerProtocol,
 };
 use crate::redstone::{WorldState, COMPARATOR, OBSERVER, REPEATER};
 use crate::redstone_diode::{set_comparator, set_repeater};
@@ -206,6 +206,11 @@ fn is_valid_player_name(name: &str) -> bool {
 /// have had to invent.
 fn invalid_username_reason() -> Text {
     Text::literal("Invalid username")
+}
+
+/// The disconnect reason for a chunk column the selected protocol cannot encode.
+fn chunk_encode_failure_reason() -> Text {
+    Text::literal("Failed to encode terrain")
 }
 
 /// Vanilla's `multiplayer.disconnect.unverified_username` English text
@@ -1545,11 +1550,19 @@ where
         SourceRef::Borrowed(_) => None,
     };
     match offloaded {
-        Some(frames) => batch.extend(frames),
+        Some(Ok(frames)) => batch.extend(frames),
+        Some(Err(error)) => {
+            return return_chunk_encode_error(conn, proto, state, None, error).await;
+        }
         None => {
             let columns = source.generate(update.added.clone()).await;
             for (&(x, z), column) in update.added.iter().zip(columns.iter()) {
-                batch.push(proto.encode_chunk(x, z, column));
+                match proto.try_encode_chunk(x, z, column) {
+                    Ok(directive) => batch.push(directive),
+                    Err(error) => {
+                        return return_chunk_encode_error(conn, proto, state, None, error).await;
+                    }
+                }
             }
         }
     }
@@ -1590,6 +1603,9 @@ pub enum ServerError {
     /// The underlying transport/codec failed.
     #[error("network error: {0}")]
     Net(#[from] NetError),
+    /// The protocol could not encode a generated chunk column.
+    #[error("chunk encoding failed: {0}")]
+    ChunkEncode(#[from] ChunkEncodeError),
     /// The client disconnected before completing login.
     #[error("client closed before login completed")]
     ClosedBeforeLogin,
@@ -1834,6 +1850,34 @@ async fn apply<T: Transport>(
     Ok(())
 }
 
+/// Ends an already-written chunk batch before reporting an encoding failure.
+///
+/// Callers that only accumulated directives locally pass `None`, so the client
+/// never observes an unmatched batch marker. A batch beginning on the wire must
+/// always have its matching end marker before the connection is disconnected.
+async fn return_chunk_encode_error<T, P, R>(
+    conn: &mut Connection<T>,
+    proto: &P,
+    state: &mut State,
+    written_batch_size: Option<i32>,
+    error: ChunkEncodeError,
+) -> Result<R, ServerError>
+where
+    T: Transport,
+    P: ServerProtocol,
+{
+    if let Some(batch_size) = written_batch_size {
+        apply(conn, state, proto.end_chunk_batch(batch_size)).await?;
+    }
+    apply(
+        conn,
+        state,
+        proto.encode_disconnect(*state, &chunk_encode_failure_reason()),
+    )
+    .await?;
+    Err(ServerError::ChunkEncode(error))
+}
+
 /// This world's per-player `.dat` store, if it has one.
 ///
 /// One accessor rather than the same `world_registries().and_then(...)` chain at
@@ -2017,10 +2061,10 @@ fn encode_column<P: ServerProtocol>(
     cx: i32,
     cz: i32,
     payload: crate::join_scheduler::ColumnPayload,
-) -> ServerDirective {
+) -> Result<ServerDirective, ChunkEncodeError> {
     match payload {
-        crate::join_scheduler::ColumnPayload::Encoded(directive) => directive,
-        crate::join_scheduler::ColumnPayload::Column(column) => proto.encode_chunk(cx, cz, &column),
+        crate::join_scheduler::ColumnPayload::Encoded(directive) => Ok(directive),
+        crate::join_scheduler::ColumnPayload::Column(column) => proto.try_encode_chunk(cx, cz, &column),
     }
 }
 
@@ -3509,10 +3553,36 @@ where
                         )
                         .encoding_with(proto.chunk_encoder());
                         while batch_size < prestream {
-                            let Some(((cx, cz), payload)) = pipeline.next().await else {
+                            let next = match pipeline.next().await {
+                                Ok(next) => next,
+                                Err(error) => {
+                                    return return_chunk_encode_error(
+                                        conn,
+                                        proto,
+                                        &mut state,
+                                        Some(i32::try_from(batch_size).unwrap_or(i32::MAX)),
+                                        error,
+                                    )
+                                    .await;
+                                }
+                            };
+                            let Some(((cx, cz), payload)) = next else {
                                 break;
                             };
-                            apply(conn, &mut state, encode_column(proto, cx, cz, payload)).await?;
+                            let directive = match encode_column(proto, cx, cz, payload) {
+                                Ok(directive) => directive,
+                                Err(error) => {
+                                    return return_chunk_encode_error(
+                                        conn,
+                                        proto,
+                                        &mut state,
+                                        Some(i32::try_from(batch_size).unwrap_or(i32::MAX)),
+                                        error,
+                                    )
+                                    .await;
+                                }
+                            };
+                            apply(conn, &mut state, directive).await?;
                             batch_size += 1;
                         }
                         join_stream = crate::join_scheduler::JoinChunkStream::windowed(pipeline);
@@ -3549,7 +3619,20 @@ where
                         for ring in &rings {
                             let columns = source.generate(ring.clone()).await;
                             for (&(cx, cz), column) in ring.iter().zip(columns.iter()) {
-                                apply(conn, &mut state, proto.encode_chunk(cx, cz, column)).await?;
+                                let directive = match proto.try_encode_chunk(cx, cz, column) {
+                                    Ok(directive) => directive,
+                                    Err(error) => {
+                                        return return_chunk_encode_error(
+                                            conn,
+                                            proto,
+                                            &mut state,
+                                            Some(i32::try_from(batch_size).unwrap_or(i32::MAX)),
+                                            error,
+                                        )
+                                        .await;
+                                    }
+                                };
+                                apply(conn, &mut state, directive).await?;
                                 batch_size += 1;
                             }
                         }
@@ -5156,7 +5239,11 @@ where
     // module uses — vanilla's flow control counts batches, so a bare
     // `encode_chunk` outside one leaves the client's accounting short.
     apply(conn, state, proto.begin_chunk_batch()).await?;
-    apply(conn, state, proto.encode_chunk(cx, cz, &column)).await?;
+    let directive = match proto.try_encode_chunk(cx, cz, &column) {
+        Ok(directive) => directive,
+        Err(error) => return return_chunk_encode_error(conn, proto, state, Some(0), error).await,
+    };
+    apply(conn, state, directive).await?;
     apply(conn, state, proto.end_chunk_batch(1)).await?;
     Ok(())
 }
@@ -12330,13 +12417,39 @@ where
             // column must not silently leave a hole in the client's terrain.
             chunk = join_stream.next(source), if !join_stream.is_done() => {
                 watch.enter();
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        return return_chunk_encode_error(
+                            conn,
+                            proto,
+                            &mut state,
+                            if join_batch_open { Some(join_batch_size) } else { None },
+                            error,
+                        )
+                        .await;
+                    }
+                };
                 if let Some(((cx, cz), payload)) = chunk {
                     if !join_batch_open {
                         apply(conn, &mut state, proto.begin_chunk_batch()).await?;
                         join_batch_open = true;
                         join_batch_size = 0;
                     }
-                    apply(conn, &mut state, encode_column(proto, cx, cz, payload)).await?;
+                    let directive = match encode_column(proto, cx, cz, payload) {
+                        Ok(directive) => directive,
+                        Err(error) => {
+                            return return_chunk_encode_error(
+                                conn,
+                                proto,
+                                &mut state,
+                                if join_batch_open { Some(join_batch_size) } else { None },
+                                error,
+                            )
+                            .await;
+                        }
+                    };
+                    apply(conn, &mut state, directive).await?;
                     chunks_sent += 1;
                     join_batch_size += 1;
                     // Close on a full batch or on the last column, whichever comes
@@ -14656,8 +14769,37 @@ where
     if !join_stream.is_done() {
         apply(conn, &mut state, proto.begin_chunk_batch()).await?;
         let mut batch_size: i32 = 0;
-        while let Some(((cx, cz), payload)) = join_stream.next(source).await {
-            apply(conn, &mut state, encode_column(proto, cx, cz, payload)).await?;
+        loop {
+            let next = match join_stream.next(source).await {
+                Ok(next) => next,
+                Err(error) => {
+                    return return_chunk_encode_error(
+                        conn,
+                        proto,
+                        &mut state,
+                        Some(batch_size),
+                        error,
+                    )
+                    .await;
+                }
+            };
+            let Some(((cx, cz), payload)) = next else {
+                break;
+            };
+            let directive = match encode_column(proto, cx, cz, payload) {
+                Ok(directive) => directive,
+                Err(error) => {
+                    return return_chunk_encode_error(
+                        conn,
+                        proto,
+                        &mut state,
+                        Some(batch_size),
+                        error,
+                    )
+                    .await;
+                }
+            };
+            apply(conn, &mut state, directive).await?;
             chunks_sent += 1;
             batch_size += 1;
         }
@@ -14883,6 +15025,145 @@ mod tests {
     use crate::protocol::MetadataField;
     use lodestone_model::{Rotation, Vec3};
     use uuid::Uuid;
+
+    struct RefusingChunkProtocol;
+
+    impl ServerProtocol for RefusingChunkProtocol {
+        fn decode(&self, _state: State, _packet_id: i32, _payload: &[u8]) -> ServerBound {
+            unreachable!("these tests only write server directives")
+        }
+
+        fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+            unreachable!("these tests only write server directives")
+        }
+
+        fn begin_configuration(&self) -> Vec<ServerDirective> {
+            unreachable!("these tests only write server directives")
+        }
+
+        fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+            unreachable!("these tests only write server directives")
+        }
+
+        fn begin_chunk_batch(&self) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: 40,
+                payload: Vec::new(),
+            }
+        }
+
+        fn encode_chunk(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> ServerDirective {
+            unreachable!("the checked encoder must be used")
+        }
+
+        fn try_encode_chunk(
+            &self,
+            _cx: i32,
+            _cz: i32,
+            _column: &ChunkColumn,
+        ) -> Result<ServerDirective, ChunkEncodeError> {
+            Err(ChunkEncodeError::new("fixture rejected chunk"))
+        }
+
+        fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: 41,
+                payload: vec![batch_size as u8],
+            }
+        }
+
+        fn encode_disconnect(&self, _state: State, _reason: &Text) -> ServerDirective {
+            ServerDirective::Send {
+                packet_id: 42,
+                payload: Vec::new(),
+            }
+        }
+    }
+
+    struct OneColumnSource;
+
+    impl ChunkSource for OneColumnSource {
+        fn column(&self, _cx: i32, _cz: i32) -> ChunkColumn {
+            ChunkColumn::new(0, 256)
+        }
+
+        fn block_state(&self, _x: i32, _y: i32, _z: i32) -> String {
+            "minecraft:air".to_owned()
+        }
+
+        fn biome_state_at(&self, _x: i32, _y: i32, _z: i32) -> String {
+            crate::chunk::DEFAULT_BIOME.to_owned()
+        }
+
+        fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
+    }
+
+    #[tokio::test]
+    async fn a_local_failed_view_batch_writes_no_batch_markers() {
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut state = State::Play;
+        let source = OneColumnSource;
+        let mut awaiting_ack = false;
+        let mut pending = VecDeque::new();
+
+        let error = send_view_update(
+            &mut conn,
+            &RefusingChunkProtocol,
+            SourceRef::Borrowed(&source),
+            None,
+            &mut state,
+            ViewUpdate {
+                immediate: Vec::new(),
+                forgotten: HashSet::new(),
+                added: vec![(0, 0)],
+            },
+            &mut awaiting_ack,
+            &mut pending,
+        )
+        .await
+        .expect_err("a rejecting protocol must fail the view update");
+        assert!(matches!(error, ServerError::ChunkEncode(_)));
+
+        let mut peer = Connection::new(client_end);
+        assert_eq!(
+            peer.read_packet().await.expect("disconnect frame decodes"),
+            Some((42, Vec::new())),
+            "the locally accumulated batch must not write a start or end marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_written_chunk_batch_ends_before_its_encoding_disconnect() {
+        let (client_end, server_end) = lodestone_net::memory_pair();
+        let mut conn = Connection::new(server_end);
+        let mut state = State::Play;
+        let source = OneColumnSource;
+
+        let error = send_column_light(
+            &mut conn,
+            &RefusingChunkProtocol,
+            &source,
+            &mut state,
+            0,
+            0,
+        )
+        .await
+        .expect_err("a rejecting protocol must fail the column resend");
+        assert!(matches!(error, ServerError::ChunkEncode(_)));
+
+        let mut peer = Connection::new(client_end);
+        let frames = [
+            peer.read_packet().await.expect("batch start decodes"),
+            peer.read_packet().await.expect("batch end decodes"),
+            peer.read_packet().await.expect("disconnect decodes"),
+        ];
+        assert_eq!(
+            frames,
+            [Some((40, Vec::new())), Some((41, vec![0])), Some((42, Vec::new()))],
+            "an already-written batch must end before the encoding disconnect"
+        );
+    }
 
     /// An empty hand must resolve to the player's canonical attribute base,
     /// while the equipment fold can move off that base.

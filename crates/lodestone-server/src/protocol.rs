@@ -1808,10 +1808,66 @@ pub enum ServerDirective {
 /// stateless (`V770ServerProtocol` is a unit struct), have `encode_chunk`
 /// delegate to it, and return `Some(Arc::new(Self))` from
 /// [`ServerProtocol::chunk_encoder`]. One body, so the two cannot drift.
+/// An owned failure from encoding one terrain column.
+///
+/// This error deliberately contains no transport or connection state: chunk
+/// workers create it before a connection task chooses how to finish an open
+/// batch, send a disconnect, and return the failure to its caller.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{message}")]
+pub struct ChunkEncodeError {
+    message: String,
+}
+
+impl ChunkEncodeError {
+    /// Builds an encoding error with owned diagnostic text.
+    #[must_use]
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    /// The diagnostic text supplied by the encoder.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
 pub trait ChunkEncoder: Send + Sync + 'static {
     /// Encodes one terrain column into a client-bound packet — byte-identical to
     /// [`ServerProtocol::encode_chunk`] for the same arguments.
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective;
+
+    /// Fallible counterpart of [`encode_chunk`](Self::encode_chunk).
+    ///
+    /// The default preserves every existing encoder's successful bytes. An
+    /// encoder that can reject a column overrides this method and returns an
+    /// owned [`ChunkEncodeError`] without needing access to a connection.
+    fn try_encode_chunk(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        Ok(self.encode_chunk(cx, cz, column))
+    }
+}
+
+impl<E: ChunkEncoder + ?Sized> ChunkEncoder for Box<E> {
+    fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective {
+        (**self).encode_chunk(cx, cz, column)
+    }
+
+    fn try_encode_chunk(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        (**self).try_encode_chunk(cx, cz, column)
+    }
 }
 
 pub trait ServerProtocol: Send + Sync {
@@ -2065,6 +2121,20 @@ pub trait ServerProtocol: Send + Sync {
 
     /// Encodes one terrain column into a client-bound packet.
     fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective;
+
+    /// Fallible counterpart of [`encode_chunk`](Self::encode_chunk).
+    ///
+    /// The default preserves the legacy, infallible implementation. An
+    /// implementation that can reject a column returns an owned error so the
+    /// server can close a previously written chunk batch before disconnecting.
+    fn try_encode_chunk(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        Ok(self.encode_chunk(cx, cz, column))
+    }
 
     /// The same encoder as [`encode_chunk`](Self::encode_chunk), detached from
     /// `&self` so it can be **moved into the blocking worker that generated the
@@ -3398,6 +3468,15 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         (**self).encode_chunk(cx, cz, column)
     }
 
+    fn try_encode_chunk(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        (**self).try_encode_chunk(cx, cz, column)
+    }
+
     fn chunk_encoder(&self) -> Option<std::sync::Arc<dyn ChunkEncoder>> {
         (**self).chunk_encoder()
     }
@@ -3843,6 +3922,17 @@ mod tests {
         }
         fn encode_chunk(&self, cx: i32, cz: i32, _column: &ChunkColumn) -> ServerDirective {
             send(cx * 1000 + cz)
+        }
+        fn try_encode_chunk(
+            &self,
+            cx: i32,
+            cz: i32,
+            column: &ChunkColumn,
+        ) -> Result<ServerDirective, ChunkEncodeError> {
+            if (cx, cz) == (3, 4) {
+                return Err(ChunkEncodeError::new("numbered encoder rejected this column"));
+            }
+            Ok(self.encode_chunk(cx, cz, column))
         }
         fn end_chunk_batch(&self, batch_size: i32) -> ServerDirective {
             send(200 + batch_size)
@@ -4299,6 +4389,114 @@ mod tests {
             WorldgenScope::None,
             "worldgen_scope answered with the trait default through the box, so the \
              forward is missing and a boxed v770 would silently report 'no worldgen'"
+        );
+    }
+
+    #[test]
+    fn fallible_chunk_encoding_forwards_through_a_box() {
+        let direct = Numbered;
+        let boxed: Box<dyn ServerProtocol> = Box::new(Numbered);
+        let column = ChunkColumn::new(-64, 384);
+
+        assert_eq!(
+            direct.try_encode_chunk(5, 6, &column),
+            Ok(direct.encode_chunk(5, 6, &column)),
+            "the default success path must retain the protocol's exact directive"
+        );
+        assert_eq!(
+            boxed.try_encode_chunk(3, 4, &column),
+            direct.try_encode_chunk(3, 4, &column),
+            "a boxed protocol must preserve the fallible chunk-encode result"
+        );
+        assert_eq!(
+            boxed.try_encode_chunk(5, 6, &column),
+            direct.try_encode_chunk(5, 6, &column),
+            "a boxed protocol must preserve successful fallible chunk bytes too"
+        );
+    }
+
+    #[test]
+    fn a_boxed_chunk_encoder_forwards_a_failure() {
+        struct RefusingEncoder;
+
+        impl ChunkEncoder for RefusingEncoder {
+            fn encode_chunk(&self, _cx: i32, _cz: i32, _column: &ChunkColumn) -> ServerDirective {
+                send(91)
+            }
+
+            fn try_encode_chunk(
+                &self,
+                _cx: i32,
+                _cz: i32,
+                _column: &ChunkColumn,
+            ) -> Result<ServerDirective, ChunkEncodeError> {
+                Err(ChunkEncodeError::new("encoder failure"))
+            }
+        }
+
+        let encoder: Box<dyn ChunkEncoder> = Box::new(RefusingEncoder);
+        let column = ChunkColumn::new(-64, 384);
+        assert_eq!(
+            encoder.try_encode_chunk(0, 0, &column),
+            Err(ChunkEncodeError::new("encoder failure")),
+            "the boxed encoder must not silently call the infallible fallback"
+        );
+    }
+
+    #[test]
+    fn default_checked_encoders_keep_infallible_directives() {
+        struct LegacyEncoder;
+
+        impl ChunkEncoder for LegacyEncoder {
+            fn encode_chunk(&self, cx: i32, cz: i32, _column: &ChunkColumn) -> ServerDirective {
+                send(cx * 10 + cz)
+            }
+        }
+
+        struct LegacyProtocol;
+
+        impl ServerProtocol for LegacyProtocol {
+            fn decode(&self, _state: State, _packet_id: i32, _payload: &[u8]) -> ServerBound {
+                unreachable!("this fixture only encodes chunks")
+            }
+
+            fn login_success(&self, _username: &str, _uuid: Uuid) -> Vec<ServerDirective> {
+                unreachable!("this fixture only encodes chunks")
+            }
+
+            fn begin_configuration(&self) -> Vec<ServerDirective> {
+                unreachable!("this fixture only encodes chunks")
+            }
+
+            fn begin_play(&self, _view_radius: i32) -> Vec<ServerDirective> {
+                unreachable!("this fixture only encodes chunks")
+            }
+
+            fn begin_chunk_batch(&self) -> ServerDirective {
+                unreachable!("this fixture only encodes chunks")
+            }
+
+            fn encode_chunk(&self, cx: i32, cz: i32, _column: &ChunkColumn) -> ServerDirective {
+                send(cx * 100 + cz)
+            }
+
+            fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
+                unreachable!("this fixture only encodes chunks")
+            }
+        }
+
+        let column = ChunkColumn::new(-64, 384);
+        let encoder = LegacyEncoder;
+        let protocol = LegacyProtocol;
+        assert_eq!(
+            encoder.try_encode_chunk(2, 3, &column),
+            Ok(encoder.encode_chunk(2, 3, &column)),
+            "the encoder default must retain the original directive"
+        );
+        assert_eq!(
+            protocol.try_encode_chunk(2, 3, &column),
+            Ok(protocol.encode_chunk(2, 3, &column)),
+            "the protocol default must retain the original directive"
         );
     }
 
