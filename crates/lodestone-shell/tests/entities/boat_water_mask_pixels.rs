@@ -340,16 +340,6 @@ fn diff_outside(a: &[u8], b: &[u8], rect: Rect) -> usize {
         .count()
 }
 
-/// [`diff_count`], restricted to `rect`.
-fn diff_in(a: &[u8], b: &[u8], rect: Rect) -> usize {
-    a.chunks_exact(4)
-        .zip(b.chunks_exact(4))
-        .enumerate()
-        .filter(|(i, _)| rect.contains((*i as u32) % W, (*i as u32) / W))
-        .filter(|(_, (x, y))| differs(x, y))
-        .count()
-}
-
 /// Mesh and upload every section through the real live-vanilla path
 /// (`mesh_snapshot_models` for opaque, `mesh_snapshot_fluids` for the
 /// translucent water pass) — the same functions `mesh_one` calls in
