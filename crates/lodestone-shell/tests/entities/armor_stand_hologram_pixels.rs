@@ -1,4 +1,4 @@
-//! Pixel gate for issue #643's remaining half: an invisible entity's own
+//! Pixel gate for the remaining hologram invariant: an invisible entity's own
 //! body/rig contributes **zero** pixels while its nametag still contributes
 //! real ones — the "server hologram" trick (an invisible, custom-named
 //! armour stand). Driven through the real [`RenderState::render`] path, the

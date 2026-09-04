@@ -2,20 +2,19 @@
 //! reports it aggressive, and an otherwise-identical skeleton that never gets the
 //! flag must not move a pixel.
 //!
-//! # Why this cannot be a unit test, and why that fix's gate could not catch it
+//! # Why this cannot be a unit test, and why the direct-pose gate cannot catch it
 //!
-//! That fix landed the whole bow-draw *pose* — `Skeleton::pose_arms_for_item`, the
-//! `ArmPose` vocabulary, `AnimInput::arm_pose` — and proved it reaches pixels with
+//! The direct-pose gate covers the whole bow-draw *pose* — `Skeleton::pose_arms_for_item`,
+//! the `ArmPose` vocabulary, and `AnimInput::arm_pose` — and proves it reaches pixels with
 //! `lodestone-render`'s `bow_draw_pose_pixels.rs`. That gate sets `arm_pose`
 //! **directly on `AnimInput`** and renders. It is a good gate and it is
 //! structurally blind to this bug: it starts *downstream* of the decision about
 //! which mobs get the pose.
 //!
-//! The decision was wrong for every mob. That fix selected the pose from
-//! `LivingEntity`'s **using-item** bit, which is the mechanism a *player* uses.
-//! Vanilla's `AbstractSkeletonRenderer.getArmPose` reads `Mob.isAggressive()`
-//! instead (`AbstractSkeletonRenderer`'s own decompiled source), and a skeleton's ranged attack
-//! goal calls `performRangedAttack` without ever entering the item-use state — so
+//! The decision was wrong for every mob: it selected the pose from the
+//! **using-item** bit, which is the mechanism a *player* uses. The skeleton
+//! renderer instead reads its aggressive metadata, and a skeleton's ranged attack
+//! goal invokes the attack action without ever entering the item-use state — so
 //! the using-item bit is `false` for the entire life of every skeleton that has
 //! ever shot at anyone. Correct pose, correct plumbing, zero mobs.
 //!
@@ -41,14 +40,13 @@
 //! forward move almost entirely into the depth buffer and a *working* pose reads
 //! as a dead one.
 //!
-//! ## One bound that is deliberately not restated from that fix
+//! ## One bound that is deliberately not used here
 //!
-//! That fix's gate first asserted "nothing below the waist differs" and that assertion
-//! **failed on a working pose**: an arm is 12 texels long and hangs *downward*, so
-//! rotating it forward vacates every row it occupied, a full arm's length below
-//! the shoulder. The premise was false before the feature existed. Both vertical
-//! bounds here are derived from the measured silhouette rather than from a
-//! constant, for exactly that reason.
+//! A "nothing below the waist differs" bound is invalid: an arm is 12 texels
+//! long and hangs *downward*, so rotating it forward vacates every row it
+//! occupied, a full arm's length below the shoulder. Both vertical bounds here
+//! are therefore derived from the measured silhouette rather than from a
+//! constant.
 //!
 //! # Three controls, and what each one would catch
 //!
@@ -58,14 +56,14 @@
 //!    frames must be byte-identical. Without this, "the frames differ" is also
 //!    satisfied by a non-deterministic pipeline or by anything else that ticked.
 //! 2. **The aggressive zombie** (id 3) — same bow, same aggressive byte, and its
-//!    `arm_pose` must stay `Empty`, because `AbstractZombieRenderer` has no such
-//!    override and vanilla shows a bow-holding zombie the ordinary undead arms.
+//!    `arm_pose` must stay `Empty`, because the zombie renderer has no such
+//!    override and a bow-holding zombie keeps the ordinary undead arms.
 //!    This is the *specificity* control: a gate that fired on the zombie too would
 //!    be measuring "aggressive reached `AnimInput`", not "the skeleton override
 //!    ran".
 //! 3. **...and the same zombie must still move**, because `aggressive` is *also*
-//!    `animateZombieArms`' arm-drop parameter (`-PI/1.5` aggressive vs `-PI/2.25`
-//!    not — `AnimationUtils`'s own decompiled source), which was a second island: `AnimInput`
+//!    arm-drop parameter (`-PI/1.5` aggressive vs `-PI/2.25` not), which is a
+//!    second island: `AnimInput`
 //!    carried the field, `Skeleton::animate_zombie_arms` consumed it, and every
 //!    call site in the shell passed a hardcoded `false`. This half is what proves
 //!    control 1's byte-identity is caused by *pose selection* rather than by the
@@ -81,7 +79,7 @@
 //! asserts `RenderStats::entities_drawn == 1`, so a frame that lost the mob fails
 //! loudly instead of reading as "the pose changed nothing".
 //!
-//! No vanilla `client.jar` is needed: rigs come from `EntityModelSet::load()`'s
+//! No external `client.jar` is needed: rigs come from `EntityModelSet::load()`'s
 //! baked-in corpus (`RenderState::new(.., None)`), like `armour_pixels.rs`. The
 //! only `#[ignore]` reason is the GPU adapter, and once opted in a missing adapter
 //! is a **failure**, never a skip.
@@ -109,12 +107,12 @@ const H: u32 = 240;
 /// silhouette, so this constant is load-bearing rather than cosmetic.
 const BODY_YAW: f32 = 90.0;
 
-/// `Mob.DATA_MOB_FLAGS_ID`'s aggressive bit (`Mob`'s own decompiled source, `val | 4`).
+/// The fourth bit in the mob-flags metadata byte marks aggression.
 const AGGRESSIVE_BIT: u8 = 0x04;
 
 /// Minimum extra silhouette width the draw must add, in pixels.
 ///
-/// Sized the same way that fix's sibling gate sizes its own: two arms swinging from
+/// Sized to match the sibling render gate: two arms swinging from
 /// vertical to forward-horizontal each project about an arm's length (12 texels ≈
 /// 0.75 blocks), which at this camera is tens of pixels. Six is far above
 /// rasterisation jitter and far below the real effect — it separates "the pose
@@ -165,8 +163,8 @@ fn world_with_bow_carrying_mobs(feet: glam::Vec3) -> World {
                 rotation: Rotation::new(BODY_YAW, 0.0),
                 velocity: None,
             });
-        // The bow, through the real `SET_EQUIPMENT` ingest path (that fix:
-        // there is no `EntitySnapshot` any more to hand this to directly —
+        // The bow, through the real equipment ingest path (there is no
+        // `EntitySnapshot` to hand this to directly —
         // `resolve_entity_facts` reads the `Equipment` component ingest wrote,
         // so the fixture has to write it the same way ingest does).
         world
@@ -487,9 +485,8 @@ fn an_aggressive_skeleton_draws_its_bow_and_a_calm_one_does_not() {
     assert_unclipped("rest", rest_box);
     assert_unclipped("bow", angry_box);
 
-    // (a) The pose reached pixels at all. This is the assertion that fails on the
-    //     build this change replaced, where `arm_pose_for` had no aggressive input
-    //     and no mob could ever select the draw.
+    // (a) The pose reached pixels at all. This fails whenever `arm_pose_for`
+    //     has no aggressive input and no mob can select the draw.
     let moved = moved.unwrap_or_else(|| {
         panic!(
             "the aggressive bow pose changed ZERO pixels. rest {rest_box}, aggressive \
@@ -516,7 +513,7 @@ fn an_aggressive_skeleton_draws_its_bow_and_a_calm_one_does_not() {
 
     // (c) ...and it *begins* at the shoulders. Bounds derived from the measured
     //     silhouette, never from a restated waist constant — see the module docs
-    //     on that fix's false premise. Only the box's TOP is bounded: an arm hangs
+    //     on the direct-pose gate's false premise. Only the box's TOP is bounded: an arm hangs
     //     downward, so rotating it forward legitimately vacates rows a full arm's
     //     length below the shoulder.
     let midline = union_top + (union_bottom - union_top) / 2;

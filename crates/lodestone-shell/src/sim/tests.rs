@@ -620,11 +620,11 @@ fn the_registry_seam_feeds_the_same_numbers_the_unit_tests_assume() {
 /// survival oracle (`lodestone-survival`, game :25565, RCON :25566).
 ///
 /// The hermetic tests above prove the *arithmetic*. What they cannot prove is
-/// the thing that made retiring the old fixed hardness risky: feeding a real
+/// the reason the fixed-hardness baseline is unsafe: feeding a real
 /// hardness moves the client's `STOP_DESTROY` from ~5 ticks to the block's
 /// true completion tick, which is a change in **protocol interaction**, not
-/// just in a number. The server has two branches on `STOP` and this change
-/// swaps which one runs, so it has to be measured rather than reasoned about.
+/// just in a number. The server has two branches on `STOP` and the hardness
+/// value selects which one runs, so it has to be measured rather than reasoned about.
 ///
 /// Both regimes are driven back-to-back on the same connection and the same
 /// block, so the comparison is not across two runs of a shared server:
@@ -990,7 +990,7 @@ fn mouse_look_updates_view_and_clears_delta() {
     assert_eq!(sim.input().mouse_dx, 0.0);
 }
 
-/// Issue #203: `invertMouseX` must negate the yaw delta by the *exact*
+/// The horizontal inversion option must negate the yaw delta by the *exact*
 /// same magnitude `apply_look`'s curve would otherwise produce, not just
 /// change its sign in some direction. A test that only asserted
 /// `delta.signum() != plain.signum()` would also pass for a shader-style
@@ -1030,14 +1030,14 @@ fn invert_mouse_x_negates_the_yaw_delta_exactly() {
     );
 }
 
-/// Issue #443: a `sensitivity` change must take effect on the **next tick of
+/// A `sensitivity` update must take effect on the **next tick of
 /// the same `Sim`**, with no restart.
 ///
-/// This is the assertion the issue needs and the one a naive gate misses.
-/// Persistence already worked before this fix — `afba832` made the option
-/// write to disk — so a gate that asserts the *stored* value changed passes
-/// against the bug and proves nothing. It is the *precondition* species of
-/// vacuous test: the setup, not the assert, is what is wrong.
+/// This is the load-bearing assertion; a naive gate misses it.
+/// Persistence is a separate concern, so a gate that asserts only the *stored*
+/// value changed proves nothing about the live simulation. It is the
+/// *precondition* species of vacuous test: the setup, not the assert, is what
+/// is wrong.
 ///
 /// The defect was that [`Sim::apply_mouse`] read `self.config.sensitivity`,
 /// the **argv-derived** [`Config`] value, which is fixed for the process's
@@ -1046,10 +1046,10 @@ fn invert_mouse_x_negates_the_yaw_delta_exactly() {
 ///
 /// Both deltas are **predicted exactly** from
 /// [`lodestone_controller::sensitivity_factor`] rather than merely compared to
-/// each other, and the value the *unfixed* code would produce is computed
-/// alongside — without that third number, "the two deltas differ" is also
-/// satisfied by a fix that scales by the wrong amount (`CLAUDE.md`'s
-/// *magnitude* species). At vanilla's curve `(s·0.6 + 0.2)³ · 8 · 0.15`, a
+/// each other, and the stale implementation's value is computed alongside —
+/// without that third number, "the two deltas differ" is also satisfied by
+/// an implementation that scales by the wrong amount (`CLAUDE.md`'s
+/// *magnitude* species). At the reference curve `(s·0.6 + 0.2)³ · 8 · 0.15`, a
 /// 50-pixel drag gives 30.72° at slider 1.0, 1.05° at 0.1, and 7.5° at the
 /// fixture's own config value of 0.5 — three well-separated numbers.
 #[test]
@@ -1117,7 +1117,7 @@ fn invert_mouse_y_negates_the_pitch_delta_exactly() {
     assert_eq!(inverted_delta, -plain_delta, "invert_mouse_y must negate dy exactly");
 }
 
-/// Issue #202, end-to-end: `Sim::set_toggle_modes` (what `app.rs` calls
+/// End-to-end: `Sim::set_toggle_modes` (what `app.rs` calls
 /// from `nav.toggle_sneak()`/`toggle_sprint()`) has to actually reach the
 /// live `InputState` a key event drives — that push happens inside
 /// [`Sim::step`], not at the setter itself, so this proves the wiring
@@ -1361,7 +1361,7 @@ fn move_is_withheld_until_connected() {
     assert_eq!(sent, 0, "no movement should be sent before login");
 }
 
-/// Issue #23 (bell, `docs/block-entity-renderers.md`'s Bell section):
+/// The bell source accessor (`docs/block-entity-renderers.md`'s Bell section):
 /// `Sim::bell_source` is the accessor `app.rs`'s new per-frame install calls
 /// (`if let Some(f) = self.sim.bell_source() { render.set_bell_source(f); }`)
 /// — a plain island-detector for that one call site, not a pixel gate. A
@@ -1369,8 +1369,8 @@ fn move_is_withheld_until_connected() {
 /// chunk with a `minecraft:bell` state *and* a recorded block-entity entry),
 /// which no test double in this crate builds yet — every existing chest/
 /// skull/sign/bell pixel gate installs a hand-built closure on `RenderState`
-/// directly rather than going through `Sim::*_source`, so that gap predates
-/// this change and is shared by all four block-entity types, not bell alone.
+/// directly rather than going through `Sim::*_source`, so a through-the-wire
+/// proof is currently unavailable for all four block-entity types, not bell alone.
 /// This is the part that *is* checkable without one: the accessor must
 /// track connection state exactly like its skull/sign siblings (`None`
 /// before any net is attached, `Some` after), and the closure it returns
@@ -1399,7 +1399,7 @@ fn bell_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
-/// Issue #23 (mob spawner/trial spawner): [`Sim::spawner_source`]'s own
+/// [`Sim::spawner_source`]'s own
 /// island detector, matching
 /// [`bell_source_tracks_connection_state_and_is_safe_before_login`]'s shape
 /// and reasoning — the closure captures `Sim::spawner_spins` and the partial
@@ -1452,7 +1452,7 @@ fn beacon_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
-/// Issue #23 (vault): [`Sim::vault_source`]'s own island detector, matching
+/// [`Sim::vault_source`]'s own island detector, matching
 /// [`beacon_source_tracks_connection_state_and_is_safe_before_login`]'s shape
 /// exactly — both closures capture only `game_time`/`partial_tick` and a
 /// `SharedHandle`, no per-position tracker.
@@ -1477,8 +1477,8 @@ fn vault_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
-/// Issue #23 (brushable block): [`Sim::brushable_source`]'s own island
-/// detector, matching [`vault_source_tracks_connection_state_and_is_safe_before_login`]'s
+/// [`Sim::brushable_source`]'s own island detector, matching
+/// [`vault_source_tracks_connection_state_and_is_safe_before_login`]'s
 /// shape exactly — the closure captures only a `SharedHandle`, no clock at
 /// all.
 #[test]
@@ -1502,7 +1502,7 @@ fn brushable_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
-/// Issue #23 (copper golem statue): [`Sim::copper_golem_statue_source`]'s
+/// [`Sim::copper_golem_statue_source`]'s
 /// own island detector, matching
 /// [`shelf_source_tracks_connection_state_and_is_safe_before_login`]'s shape.
 #[test]
@@ -1526,7 +1526,7 @@ fn copper_golem_statue_source_tracks_connection_state_and_is_safe_before_login()
     );
 }
 
-/// Issue #23 (shelf): [`Sim::shelf_source`]'s own island detector, matching
+/// [`Sim::shelf_source`]'s own island detector, matching
 /// [`brushable_source_tracks_connection_state_and_is_safe_before_login`]'s
 /// shape exactly.
 #[test]
@@ -1550,8 +1550,8 @@ fn shelf_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
-/// Issue #23 (decorated pot): [`Sim::decorated_pot_source`]'s own island
-/// detector, matching [`bell_source_tracks_connection_state_and_is_safe_before_login`]'s
+/// [`Sim::decorated_pot_source`]'s own island detector, matching
+/// [`bell_source_tracks_connection_state_and_is_safe_before_login`]'s
 /// shape and reasoning — see that test's doc for why a plain accessor check
 /// is the honest scope here.
 #[test]
@@ -1575,7 +1575,7 @@ fn decorated_pot_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
-/// Issue #23 (conduit): [`Sim::conduit_source`]'s own island detector,
+/// [`Sim::conduit_source`]'s own island detector,
 /// matching the bell/pot siblings above.
 #[test]
 fn conduit_source_tracks_connection_state_and_is_safe_before_login() {
@@ -1598,10 +1598,10 @@ fn conduit_source_tracks_connection_state_and_is_safe_before_login() {
     );
 }
 
-/// Issue #23 (conduit): [`Sim::step`] must actually advance
+/// [`Sim::step`] must actually advance
 /// `Sim::conduit_ticks` once per tick while connected, not merely hold the
 /// field — the same "correct function fed a constant by its producer" trap
-/// this session's other four fixes hit. A tick where no conduit is anywhere
+/// the other per-tick block-entity folds hit. A tick where no conduit is anywhere
 /// near the player is still observable: `Sim::step` must run without
 /// panicking on the not-yet-published `ClientHandle`, matching every other
 /// per-tick block-entity fold's "empty rather than a panic" contract.
@@ -1657,41 +1657,38 @@ fn both_collision_sources_are_send_sync_and_static() {
     assert_resource_shaped::<LiveCollisionSource>();
 }
 
-// **Issue #38's three autopilot gates lived here.** They were
+// **These three autopilot gates are not shell gates.** They are
 // `autopilot_plugin_is_registered_and_its_systems_actually_run` (the island
 // gate: one tick with a goal set must move `AutopilotStatus` off `Idle`),
 // `goto_chat_command_drives_the_player_toward_the_goal_over_real_ticks` (real
 // displacement down a hand-carved corridor, with a sealed-corridor control),
 // and `goto_chat_command_never_reaches_the_outbound_action_queue`.
 //
-// **They went with the dependency, and none of them was weakened to do it.**
+// **The dependency boundary leaves no shell registration to test.**
 // `lodestone-autopilot` is a pre-implemented *external* plugin now, so
 // `lodestone-shell` does not depend on it at all — not optionally, not behind a
 // feature — and a test here cannot name `AutopilotStatus` any more than
-// production code can. The first two gates' subject moved rather than
-// disappearing: `crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`
-// installs `AutopilotPlugin` in a real `App`, drives a real `GameTick`
-// schedule, and asserts real arrival against **jar-derived** collision, with
-// unreachable-goal controls. That is strictly stronger evidence than the two
-// gates here were, because it does not depend on the shell registering
-// anything. What is genuinely gone is only the claim the shell ever registered
-// it — which is the decision, not a regression in the plugin.
+// production code can. The plugin's integration tests in
+// `crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs`
+// install `AutopilotPlugin` in a real `App`, drive a real `GameTick`
+// schedule, and assert real arrival against **jar-derived** collision, with
+// unreachable-goal controls. They do not depend on shell registration, so
+// the shell has no registration contract to test; its local namespace gate
+// remains the relevant shell behavior.
 //
-// The third gate's *surviving* half is directly below, and its `#goto`-specific
-// half is what issue #118 (plugin command registration) will restore.
+// The local-namespace gate is directly below. Plugin-specific command
+// registration is outside this crate's current dependency set.
 
 /// The `#` client-local namespace is still reserved by [`Sim::send_chat`] even
 /// though nothing fills it: a `#`-prefixed line must be consumed and refused,
 /// never composed into an outbound chat action where every other player on the
 /// server would read it.
 ///
-/// This is the surviving half of issue #38's
-/// `goto_chat_command_never_reaches_the_outbound_action_queue`. That test also
-/// asserted `#goto 3 4` returned `true` and reached
-/// `lodestone_autopilot::AutopilotGoal`; both are gone with the dependency (see
-/// `send_chat`'s doc and `sim/build.rs`), so the *interception* is what is left
-/// to pin — and it is worth pinning on its own, because deleting it would
-/// restore no capability and would start leaking `#` lines onto the wire.
+/// This gate covers the local interception half of
+/// `goto_chat_command_never_reaches_the_outbound_action_queue`. The command
+/// dispatch and goal execution are outside this crate; the *interception* is
+/// the shell behavior to pin, because deleting it would start leaking `#` lines
+/// onto the wire.
 ///
 /// # The control is the point
 ///
@@ -1867,8 +1864,7 @@ fn a_write_through_the_chunk_world_resource_is_what_the_sim_reads() {
     );
 
     // The write goes through the *write* resource handle, not through any `Sim`
-    // method — issue #423: the read handle `sim.chunk_world()` yields has no
-    // write path.
+    // method — the read handle `sim.chunk_world()` has no write path.
     {
         let store = sim.chunk_world_write();
         let mut world = store.write();
@@ -2064,7 +2060,7 @@ fn mob_effect_for_a_different_entity_is_not_applied_to_the_local_player() {
 /// `particles=0/0+0unres`, which cannot distinguish "the route works but
 /// nothing has fired" from "the route is missing" (`grep -rn
 /// "ClientEvent::Particles" crates/lodestone-shell/src/` returned zero
-/// hits before this change). So this feeds a live event and asserts the
+/// hits in the missing-route state). So this feeds a live event and asserts the
 /// *caused* output, not the idle baseline.
 #[test]
 fn net_particles_reaches_the_emitter_and_resolves() {
@@ -2926,8 +2922,8 @@ fn end_session_tears_down_and_a_fresh_connect_afterward_starts_clean() {
         },
     );
     // A shared-fold component that is *not* a vital, to pin the other half of
-    // the stale-note fix: before this change `end_session` left the previous
-    // server's sidebar standing.
+    // the teardown invariant: `end_session` must clear the previous server's
+    // sidebar as well as the vitals.
     ingest(
         &mut sim,
         lodestone_client::ClientEvent::DisplayObjective {
@@ -3088,10 +3084,9 @@ fn inbound_chat_is_logged_and_typed_lines_route_to_the_action_seam() {
     // can't pass — and neither can "nothing sends", guarded by the two above.
     assert!(!sim.send_chat("   "), "blank input must not send");
 
-    // Nothing is intercepted on the way out any more (#382). `/givedebug`
-    // used to be rewritten into `/give @s …` *here*, with a local echo
-    // pushed into the chat log and — when malformed — nothing sent at all.
-    // Both halves of that are now the server's business.
+    // Outbound routing does not rewrite `/givedebug`; the command and its
+    // validation belong to the server. The client forwards the typed line
+    // through the ordinary command path.
     let before = sim.recent_chat_spans(10).len();
     assert!(
         sim.send_chat("/givedebug minecraft:diamond_pickaxe 1"),
@@ -3448,7 +3443,7 @@ fn held_item_overlay_reaches_pixels_and_keys_on_identity_not_slot() {
     );
 }
 
-/// The seam this issue landed (#656): [`Sim::held_item_overlay_spans`] —
+/// The held-item span seam: [`Sim::held_item_overlay_spans`] —
 /// which `app/redraw.rs`'s `hud_frame.held_item_spans =
 /// self.sim.held_item_overlay_spans()` reads every frame, mirroring
 /// `hud_frame.held_item = self.sim.held_item_overlay()` right above it —
@@ -3716,10 +3711,10 @@ fn tab_overlay_rows_read_the_clients_one_folded_tab_list() {
     assert_eq!(rows(&sim), vec![("Bob".to_string(), "icon/ping_5", true)]);
 }
 
-/// Issue #410's missing hop: `crate::gpu::gather_crack_targets` and
+/// The missing production hop: `crate::gpu::gather_crack_targets` and
 /// `BlockDestructionOverlays::iter` were both proven in `gpu/outline.rs`'s
-/// own gate, but the issue was closed with nothing in production calling the
-/// gather — `app.rs` only ever passed `Sim::crack_target()`'s single local
+/// own gate, but production must call the gather — `app.rs` only ever passed
+/// `Sim::crack_target()`'s single local
 /// dig through. This proves `Sim::crack_targets()` actually walks
 /// `SessionBlockDestruction` for two *different* breaking entities, not just
 /// the local target the pipeline gate already covers in isolation.
@@ -4016,18 +4011,18 @@ fn tick_nearby_entities_keeps_a_boat_as_a_hard_collider_without_making_it_a_crow
 // -----------------------------------------------------------------------
 
 /// The state ids below are transcribed from
-/// `.cache/mc/26.2/generated/reports/blocks.json` — Mojang's own generator
-/// output, data source #1 — and **not** from this code's own resolution, so
+/// `.cache/mc/26.2/generated/reports/blocks.json` — the registry generator's
+/// output — and **not** from this code's own resolution, so
 /// they are an external oracle rather than a round trip through
-/// `state_for_placement`. Each is the state whose properties vanilla's
-/// `getStateForPlacement` produces for that block.
+/// `state_for_placement`. Each is the state whose properties the reference
+/// placement rules produce for that block.
 ///
 /// A 26.2 data bump shifts every id, and this failing is the point: it says
 /// the census moved under the resolver, which is exactly when the property
 /// rules deserve a re-read.
 mod placement_oracle {
     /// `chest[type=single,facing=north,waterlogged=false]` — the registered
-    /// default, and what `ChestBlock.getStateForPlacement` yields facing north.
+    /// default produced by the placement rules when facing north.
     pub const CHEST_NORTH: u32 = 3988;
     /// `chest[type=single,facing=south,waterlogged=false]`.
     pub const CHEST_SOUTH: u32 = 3994;
@@ -4788,10 +4783,10 @@ fn a_demo_world_break_swings_the_arm() {
     );
 }
 
-/// Issue #72: a demo-world left-click with **nothing** targeted must still
-/// swing — vanilla's `Minecraft.startAttack` reaches `player.swing(...)`
-/// unconditionally after the switch, `MISS` included. Before this fix
-/// `Sim::begin_attack` called `break_block()` alone on the demo world,
+/// A demo-world left-click with **nothing** targeted must still swing — the
+/// client attack dispatch swings unconditionally after target selection,
+/// `MISS` included. `Sim::begin_attack` must call the swing path in addition
+/// to `break_block()` on the demo world,
 /// which swings only on a *successful* break and produces nothing when
 /// there is no target.
 #[test]
@@ -4830,7 +4825,7 @@ fn begin_attack_still_breaks_a_targeted_demo_block() {
     );
 }
 
-/// Issue #72's live-path miss case: no block, no entity, and the arm still
+/// The live-path miss case: no block, no entity, and the arm still
 /// swings. Exercises `begin_attack_live` directly (no net connection is
 /// needed — the swing is client-side and does not require one, matching
 /// every other swing site's contract).
@@ -4980,8 +4975,8 @@ fn begin_attack_live_does_nothing_while_dead() {
     assert_eq!(peak, 0.0, "a dead player must not swing on attack");
 }
 
-/// Issue #613: `ClientAction::SpectatorAction` had zero producers anywhere.
-/// `Minecraft.startAttack`'s spectator branch is checked *before* any item or
+/// `ClientAction::SpectatorAction` must have a producer. The spectator branch is
+/// checked *before* any item or
 /// hit-result logic — [`begin_attack_live_prefers_an_entity_target_over_mining`]
 /// above proves the ordinary switch prefers an entity target; this proves a
 /// spectator's left-click on that same entity target takes a completely
@@ -5322,8 +5317,8 @@ fn give_main_hand_equippable_item(sim: &mut Sim, item: &str, slot: EquipmentSlot
     });
 }
 
-/// Issue #613: `ClientAction::Stab` had zero producers. `Minecraft.startAttack`
-/// checks the held item for `DataComponents.PIERCING_WEAPON` *before* the
+/// `ClientAction::Stab` action must have a producer. The attack dispatch checks
+/// the held item for the piercing-weapon component *before* the
 /// normal ENTITY/BLOCK/MISS switch and takes it unconditionally — proved here
 /// with an entity under the crosshair (the case the ordinary switch would
 /// otherwise prefer, per `begin_attack_live_prefers_an_entity_target_over_mining`)
@@ -6988,14 +6983,11 @@ fn the_pick_predicate_matches_the_vanilla_entity_census() {
     );
 }
 
-/// Issue #12's knockback half: a `ClientboundSetEntityMotionPacket`
-/// (`ClientEvent::EntityVelocity`) naming the local player's own server
-/// entity id must overwrite `PlayerState.velocity` outright — vanilla's
-/// `Entity.lerpMotion` is `setDeltaMovement(movement)`, an unconditional
-/// replace, and `LocalPlayer` declares no override.
-/// Before this fix the event fell into the generic `Velocity` component
-/// instead, which nothing reads for the local player, so a server-applied
-/// hit never moved the client at all.
+/// A server velocity event (`ClientEvent::EntityVelocity`) naming the local
+/// player's own server entity id must overwrite `PlayerState.velocity` outright:
+/// the reference behavior is an unconditional replacement, with no local-player
+/// override. The generic `Velocity` component is not read for the local player,
+/// so routing this event there would leave a server-applied hit motionless.
 #[test]
 fn server_sent_knockback_replaces_the_local_players_velocity() {
     let mut sim = Sim::new(test_config());
@@ -7346,14 +7338,14 @@ fn cannot_place_inside_the_player() {
     assert!(!sim.place_block(), "placing inside the player is refused");
 }
 
-/// Issue #58's precondition half: a real walking player must actually
-/// accumulate `walkDist` and ease the amplitude up, and **only the render
+/// A real walking player must actually accumulate walk distance and ease the
+/// amplitude up, and **only the render
 /// camera** may see the result.
 ///
 /// The corridor is not decoration. The offline world is real generated
 /// terrain (`lodestone-worldgen`), the player spawns on a slope, and walking
 /// north walls them out after ~0.2 blocks — `distance_walked_scales_with_the`
-/// speed test above learned that the hard way. A bob gate run against a
+/// speed test above demonstrated. A bob gate run against a
 /// walled-in player reads `walk_phase: -0.0, bob: 0.0` and asserts nothing,
 /// which is the *precondition* species of vacuous test.
 #[test]
@@ -7558,7 +7550,7 @@ fn a_local_player_hit_reaches_a_real_eye_space_matrix() {
     );
 }
 
-/// Issue #154, end-to-end: `Sim::spyglass_scoping`'s two halves
+/// End-to-end: `Sim::spyglass_scoping`'s two halves
 /// (`Self::using_item` and the held-item identity check) have to actually
 /// reach `Self::render_camera`'s FOV, not just exist. Predicts the *exact*
 /// FOV from `lodestone_render::spyglass_fov_modifier`'s tested `0.1`
@@ -7615,8 +7607,8 @@ fn spyglass_scoping_zooms_the_render_camera_by_exactly_a_tenth() {
     );
 }
 
-/// Issue #391's gate: the walk bob must reach the projection **at vanilla's
-/// own magnitude, on vanilla's own axes**, driven by a real walking `Sim`.
+/// The walk bob must reach the projection **at the reference magnitude and
+/// axes**, driven by a real walking `Sim`.
 ///
 /// # Why the existing gates could not have caught a wrong amplitude
 ///
@@ -8073,7 +8065,7 @@ fn closing_a_server_menu_clears_it_locally_without_waiting_for_the_server() {
 
 /// screen.
 ///
-/// Issue #36: there is no `EntitySnapshot` to hand `fold_entities` any more —
+/// The ingest path has no `EntitySnapshot` handoff —
 /// the ingest components it now reads directly are spawned through the real
 /// `ClientEvent::EntitySpawned` -> `IngestQueue` -> `NetIngest` path (the
 /// [`ingest`] helper), then `Sim::fold_entities` folds them, exactly like a
@@ -8753,13 +8745,13 @@ fn body_yaw_interpolates_between_ticks_rather_than_snapping() {
     );
 }
 
-/// Issue #649's real gate: a hex chat colour reaching a **drawn vertex**
+/// The real gate: a hex chat colour reaching a **drawn vertex**
 /// through the actual per-frame wiring, not through hand-authored spans.
 ///
 /// `hud.rs`'s own `chat_spans_carry_hex_named_and_inline_legacy_colour_to_distinct_vertices`
 /// proves `HudGeometry::build` draws a hex colour when handed a
 /// `Vec<TextSpan>` directly — it never touches `ChatLog`/`Sim` at all, so it
-/// could not have caught this issue: the bug was entirely upstream, in
+/// could not have caught a routing failure: the bug is entirely upstream, in
 /// `Session::recent_chat`/`app/redraw.rs` calling the *legacy*
 /// `String`-flattening accessor instead of the span-carrying one. This test
 /// drives the real production entry point instead: a `NetUpdate::Chat`
@@ -8774,7 +8766,7 @@ fn hex_chat_colour_reaches_a_vertex_through_the_real_session_and_redraw_wiring()
     use crate::hud::{DebugStats, HudFrame, HudGeometry};
     use lodestone_model::text::{Text, TextColor, TextContent, TextSpan, TextStyle};
 
-    // The discriminating fixture from issue #649: a hex `TextColor::Rgb`
+    // The discriminating fixture: a hex `TextColor::Rgb`
     // component style, a named component style, and a literal carrying an
     // *inline* `§c` code — the owner's own report was entirely the third
     // convention. A fixture using only named colours cannot tell "hex is
@@ -8880,12 +8872,12 @@ fn hex_chat_colour_reaches_a_vertex_through_the_real_session_and_redraw_wiring()
 
     // Control: the exact same stored line, flattened to a plain string and
     // fed into `HudFrame::chat` instead of `chat_spans` — this is the shape
-    // the deleted `Sim::recent_chat` legacy accessor used to hand back, and
-    // no production call site has built it since (`app/redraw.rs` fills
+    // the legacy string accessor would hand back, and no production call site
+    // builds it (`app/redraw.rs` fills
     // `chat_spans` only). Reproducing the flattening here, rather than
     // reaching for a production accessor that no longer exists, is what
     // proves the detector can actually fail, and localises the loss to the
-    // accessor seam this issue names rather than to `HudGeometry::build`
+    // accessor seam rather than to `HudGeometry::build`
     // itself (which is shared by both branches).
     let chat_owned = sim.recent_chat_spans(10);
     assert_eq!(chat_owned.len(), 1, "setup: same one line, legacy accessor");
@@ -8939,8 +8931,8 @@ fn app_rs_fills_hud_frame_chat_spans_not_the_legacy_chat_field() {
         "app/redraw.rs must fill `HudFrame::chat_spans` from the real \
          `Sim::recent_chat_spans` wiring — see issue #649"
     );
-    // The control: the detector must be able to report an absence. The old,
-    // hex-blind line this issue's fix replaced.
+    // The control: the detector must be able to report an absence. The
+    // hex-blind legacy line is intentionally reconstructed below.
     assert!(
         !src.contains("hud_frame.chat = &chat_lines"),
         "app/redraw.rs must not go back to filling the legacy, hex-blind \
@@ -8960,10 +8952,10 @@ fn app_rs_fills_hud_frame_chat_spans_not_the_legacy_chat_field() {
 /// step would pass against a `world_wait` that was simply always `Some`.
 ///
 /// The first assertion is the load-bearing control. It establishes that this
-/// fixture really is in the "would previously have been shown" state, so the
+/// fixture really is in the "presentable before the pack arrives" state, so the
 /// hold in the second step is attributable to the pack and not to the join being
-/// unready for some other reason. Before this change `Sim::world_wait`'s
-/// predecessor (`Sim::terrain_loading`) answered "presentable" at all three
+/// unready for some other reason. A predecessor implementation based only on
+/// `Sim::terrain_loading` answered "presentable" at all three
 /// steps.
 ///
 /// The guard is `crate::net::hold_pack_apply_for_test`, which hands out the

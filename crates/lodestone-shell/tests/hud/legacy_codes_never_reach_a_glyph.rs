@@ -3,11 +3,11 @@
 //! # What this gates, and why it is not a pixel test
 //!
 //! `Text::to_spans`' expansion is gated in `lodestone-model` against the
-//! `StringDecomposer` semantics, and the allowlist on the non-expanding flatten is
+//! legacy-formatting semantics, and the allowlist on the non-expanding flatten is
 //! gated by that crate's `legacy_expansion_guard`. Neither of those can tell you a
 //! **surface** changed: the model tests are a closed loop around one function, and
-//! the guard only proves nobody names the wrong one. The defect this whole change
-//! fixes lived in the *font layer* — `VanillaFont::draw` emitting `§` and `7` as
+//! the guard only proves nobody names the wrong one. The invariant under test
+//! lives in the *font layer* — `VanillaFont::draw` must not emit `§` and `7` as
 //! two glyphs — and a `String`-carrying surface never touches `to_spans` at all.
 //!
 //! So this drives `HudGeometry::build`, the real geometry builder, on two surfaces
@@ -15,7 +15,7 @@
 //! the emitted vertex buffer. No GPU, no `client.jar`: with no `VanillaFont`
 //! attached the builder falls back to the fixed-advance 5×7 debug font, whose draw
 //! (`hud::item_icon::ColourStream::text`) and measure (`text_w`) were fixed in the
-//! same change, so the fallback exercises the same rule the proportional path does.
+//! same pipeline, so the fallback exercises the same rule the proportional path does.
 //!
 //! # The discriminating input
 //!
@@ -35,20 +35,19 @@
 //! in this font, `coded == plain` would hold under **both** readings and the test
 //! would be measuring nothing.
 
-//! # What changed when these two surfaces started carrying spans
+//! # Why these two surfaces carry spans
 //!
-//! The title/subtitle overlay and the boss bar title used to be `String` fields
-//! and reached `Builder::text`, so "is the `§` consumed?" was a question about the
-//! *font* layer. Both now carry `Vec<TextSpan>`, because
+//! The title/subtitle overlay and the boss bar title carry `Vec<TextSpan>` into
+//! `Builder::text`, so "is the `§` consumed?" can be checked at the *font* layer.
+//! The span representation is required because
 //! `Text::to_legacy_string`/`to_plain_string` cannot express a hex colour and a
 //! server's hex title was arriving white — see `HudFrame::title`.
 //!
-//! The rule these tests exist for is unchanged and the input is the same coded
-//! string; what moved is *where* the code is consumed. A producer now calls
-//! `Text::to_spans`, which expands the pair into a coloured run, so the assertion
+//! The test input is a coded string. A producer calls `Text::to_spans`, which
+//! expands the pair into a coloured run, so the assertion
 //! gets **stronger**: the pair must contribute no glyph and no advance (positions
 //! byte-identical to the plain arm) *and* the colour it named must actually reach
-//! the vertex. The old buffer-equality assertion cannot be kept as written — a
+//! the vertex. Buffer equality alone is insufficient — a
 //! correctly *applied* `§c` changes every vertex's colour, which is the point.
 
 use lodestone::hud::{DebugStats, HudFrame, HudGeometry};
@@ -69,8 +68,8 @@ const LITERAL: &str = "chi";
 /// The visible text `CODED` must reduce to.
 const PLAIN: &str = "hi";
 
-/// Vanilla's `red`, `TextColor`'s own decompiled source's `named("red", 16733525)` — the colour `§c`
-/// names, hand-transcribed rather than read back from our own table.
+/// The RGB value for the colour `§c` names, hand-transcribed rather than read
+/// back from our own table.
 const RED: (u8, u8, u8) = (0xff, 0x55, 0x55);
 
 /// The spans a producer really hands over for a `§`-coded server component: the
@@ -109,9 +108,8 @@ fn a_coded_title_draws_exactly_the_visible_text() {
                 crosshair: false,
                 show_debug: false,
                 // Both a title and a subtitle: they are drawn at different pose
-                // scales through two separate call sites, and one being fixed
-                // while the other is not is exactly the per-call-site outcome
-                // this change exists to avoid.
+                // scales through two separate call sites; both must apply the
+                // same legacy-code rule.
                 title: Some((title, Some(subtitle), 1.0)),
                 ..HudFrame::new(&stats)
             },
@@ -146,8 +144,8 @@ fn a_coded_title_draws_exactly_the_visible_text() {
         plain.vertex_count(),
         literal.vertex_count(),
     );
-    // And the colour the code named must actually be applied, which the old
-    // `String` path could only do inside the font and this one has to do through
+    // And the colour the code named must actually be applied. The `String` path
+    // handled this inside the font; the span path carries it through
     // the span pipeline.
     assert!(
         has_colour(&coded, RED),
