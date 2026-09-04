@@ -66,7 +66,7 @@ pub enum MenuKey {
     Backspace,
     /// Delete the highlighted server (list only).
     Delete,
-    /// **F5** — refresh the multiplayer list (#396).
+    /// **F5** — refresh the multiplayer list.
     ///
     /// Its own variant rather than a reuse of `Char('r')`, because it is a
     /// *function* key: on [`Screen::ServerEdit`] a `Char` is text, and mapping F5
@@ -135,7 +135,7 @@ pub enum SingleplayerLaunch {
     ///
     /// The seed does travel here, and here it is honoured, because the directory
     /// is new and therefore has no `world_gen_settings.dat` yet — which is the
-    /// whole reason creating a fresh directory is the right fix for #468's wart
+    /// which is why creating a fresh directory is the right fix for stale directory metadata
     /// rather than forcing a seed onto an existing world.
     Created {
         /// The directory the menu created.
@@ -160,7 +160,7 @@ pub enum MenuAction {
     /// Nothing to do; the menu handled it internally.
     None,
     /// Enter a singleplayer world: start the integrated server in-process
-    /// against that world's directory and connect to it (issues #287, #468).
+    /// against that world's directory and connect to it.
     ///
     /// Two producers, and the payload says which: [`Screen::WorldSelect`]'s
     /// **Play Selected World** ([`SingleplayerLaunch::Open`]) and
@@ -173,10 +173,9 @@ pub enum MenuAction {
     /// is why Create New World could not create a second world; see
     /// [`crate::saves`]'s module doc.
     ///
-    /// Between #397 and #287 this variant had **no producer at all** and was
-    /// kept as the seam the integrated server would land on. It is worth naming
-    /// because "the variant exists and is matched" was true throughout and is
-    /// exactly what an island looks like from the inside.
+    /// The world-list path supplies an existing directory for `Open`; the world-creation
+    /// path supplies a fresh directory and configuration for `Created`. Keeping these
+    /// payloads in the action makes the app's launch hand-off explicit.
     ///
     /// **The leading [`Entitlement`] is the ownership gate**, and it is a type
     /// rather than a check on purpose: `Entitlement`'s fields are private and
@@ -201,7 +200,7 @@ pub enum MenuAction {
     /// [`MenuAction::Reprobe`] so the app does not start a probe for an address
     /// that is no longer in the list.
     Forget(ServerEntry),
-    /// The player asked for a **refresh** — F5 or the Refresh button (#396).
+    /// The player asked for a **refresh** — F5 or the Refresh button.
     ///
     /// Distinct from [`MenuAction::Reprobe`]`(None)`, and the distinction is
     /// load-bearing rather than tidy: `Reprobe(None)` means "make sure every row
@@ -248,10 +247,9 @@ pub enum MenuAction {
     /// worth naming here rather than leaving for someone to rediscover: there is
     /// no command-block block-entity NBT decode in the workspace and no
     /// `interact.rs` trigger, so the screen has no production producer even
-    /// though this variant now has a real consumer. Tracked as
-    /// [#442](https://github.com/matteopolak/lodestone/issues/442). What #47's
-    /// half fixes is the *submit* path, which was the island: the Done button
-    /// computed a fully-tested payload and dropped it on the floor.
+    /// though this variant now has a real consumer. The Done button computes a tested
+    /// payload, and the app consumes it at the action boundary; retaining that boundary
+    /// keeps command text from being collected and then dropped.
     SetCommandBlock(command_block::CommandBlockSubmit),
     /// The sign-editing screen closed — Done **or** Escape, both of which send
     /// (see [`Screen::SignEdit`]'s own doc): `app.rs` must submit the
@@ -308,8 +306,8 @@ pub enum MenuAction {
         /// `true` for Accept, `false` for Decline.
         accept: bool,
     },
-    /// The Spectator Menu's a player row was activated (issue #613's
-    /// `TeleportToEntity` remainder — see [`spectator_menu`]'s module doc):
+    /// The Spectator Menu reports a player-row activation (the teleport target is a
+    /// `TeleportToEntity` value — see [`spectator_menu`]'s module doc):
     /// the app must send `ClientAction::TeleportToEntity { target }`.
     /// `MenuNav` holds no `Sim`/`NetClient` to send it through, the same
     /// division of labour [`MenuAction::ResourcePackResponse`] has. The
@@ -457,12 +455,10 @@ pub enum FormOutcome {
 /// — it calls `clearFocus()`, so a rebuilt screen has no
 /// focus by construction.
 ///
-/// So this is the first menu state in the shell that is *widget* state rather
-/// than derived state, and #394's note that `OptionsSubScreen`'s
-/// build→reposition order "becomes the right one once a widget holds state" is
-/// where it lands. The cost is one clone of each box per frame, in
-/// [`super::render`]'s `draw_edit_box`, which is what stands in for the
-/// reposition a `&mut` frame hook would do in place.
+/// This is menu widget state rather than derived state. The layout's
+/// build→reposition order keeps each box's persistent state separate from the
+/// per-frame geometry; [`super::render`]'s `draw_edit_box` receives a clone so
+/// rendering cannot mutate the navigation state in place.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditForm {
     /// The two fields. Public so [`super::render`] can read a box's own
@@ -739,7 +735,7 @@ impl EditForm {
 /// `getHorizontalPosition(i, 3, 20)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MainButton {
-    /// Open the singleplayer world list ([`Screen::WorldSelect`], issue #397) —
+    /// Open the singleplayer world list ([`Screen::WorldSelect`]) —
     /// vanilla's own behaviour for this button. It used to return
     /// [`MenuAction::Singleplayer`] and launch directly, which vanilla never
     /// does; that action is now produced one screen in, by **Play Selected
@@ -756,22 +752,17 @@ pub enum MainButton {
     Friends,
     /// Vanilla's language icon button — vanilla's own title-screen rendering constructs
     /// `LanguageSelectScreen` directly with `lastScreen = this` (the title),
-    /// never through `OptionsScreen`. **Now live** (issue #415 built
-    /// [`super::options::SettingsPage::Language`]): this doc used to say the
-    /// shell had no language-selection screen at all, which stopped being
-    /// true once that issue landed and this button was never revisited.
+    /// never through the root options screen. **Live** through
+    /// [`super::options::SettingsPage::Language`]; the icon opens that page.
+    /// This keeps the title-screen entry point separate from the root-grid row.
     /// Opens the same page the root grid's "Language..." row does, but with
     /// an empty page stack (see
     /// [`super::options::SettingsNav::open_at`]) so Escape/Done returns
     /// straight to the title, matching vanilla's `lastScreen`.
     Language,
-    /// Vanilla's accessibility icon button —
-    /// vanilla's own title-screen rendering, same direct-construction shape as
-    /// [`MainButton::Language`]. **Now live** (the Accessibility Settings
-    /// page has existed since issue #55): this doc used to say there was no
-    /// accessibility options screen, which was already false by the time
-    /// anyone next read this comment. Same `open_at`-with-empty-stack
-    /// treatment as `Language`.
+    /// The accessibility icon opens [`super::options::SettingsPage::Accessibility`]
+    /// directly, using an empty page stack so Escape or Done returns to the title
+    /// screen just as it does for the language icon.
     Accessibility,
     /// Open the settings screen.
     Options,
@@ -963,15 +954,11 @@ pub enum PauseButton {
     /// present-and-disabled because nothing decoded `UPDATE_ADVANCEMENTS`, and
     /// both halves of that wire have since landed. See [`super::advancements`].
     Advancements,
-    /// Vanilla's `gui.stats` — opens [`super::Screen::Statistics`] (issue
-    /// #188). **Now live.** What used to be this button's whole disabled
-    /// reason ("nothing decodes the `award_stats` packet") is still true,
-    /// and still matters: it is why every value the screen shows reads zero.
-    /// It no longer has to keep the *button* off, because the screen behind
-    /// it is real and a zero-everywhere state is what it honestly shows —
-    /// see [`super::stats`]'s module docs for why that is not a
-    /// fabrication. If a decoder for that packet lands, this is the doc to
-    /// point at it, not a reason the button needed flipping again.
+    /// The Statistics entry — opens [`super::Screen::Statistics`]. **Live.**
+    /// `award_stats` is decoded into `lodestone_ecs::SessionStatistics`, and
+    /// `app::session` refreshes the snapshot through [`MenuNav::refresh_stats`]
+    /// once per frame.
+    /// The default snapshot remains zero-valued until the session supplies data.
     Statistics,
     /// Vanilla's `menu.reportBugs` icon button. Present and disabled: it opens
     /// an external Mojang bug tracker through a link-confirmation screen.
@@ -1016,8 +1003,8 @@ pub enum PauseButton {
     Options,
     /// Vanilla's `menu.multiplayerOptions.button`, whose `en_us` value really is
     /// **"Open to LAN"** — the half-width sibling of [`Self::Options`] that
-    /// `PauseScreen.createPauseMenu`'s `hasSingleplayerServer()` branch adds
-    ///. Issue #535's scope 1.
+    /// The pause grid includes this half-width action only when an integrated
+    /// server is available.
     ///
     /// **Conditionally present, since scope 2 — but not for the
     /// reason a first read of vanilla suggests.** `PauseScreen` in the 26.2
@@ -1113,16 +1100,16 @@ impl PauseButton {
             PauseButton::BackToGame
                 | PauseButton::Options
                 | PauseButton::QuitToTitle
-                // Issue #189: the screen behind this button is built. See the
+                // Player Reporting screen is built; see the
                 // variant's own doc for what is and is not wired inside it.
                 | PauseButton::PlayerReporting
-                // Issue #188: likewise.
+                // Statistics has a built screen as well.
                 | PauseButton::Statistics
-                // Issue #167: the Advancements screen exists, and since the
-                // `UPDATE_ADVANCEMENTS` decode landed it shows real progress —
+                // The Advancements screen exists, and its
+                // `UPDATE_ADVANCEMENTS` decode shows real progress —
                 // see `menu::advancements`' module docs.
                 | PauseButton::Advancements
-                // Issue #535: `IntegratedServer::open_to_lan` has a caller. Always
+                // hosted-world opener has a caller. Always
                 // enabled rather than session-aware, because `enabled` is a pure
                 // function of the variant at every call site — see the variant's
                 // own doc for what happens outside a hosted world.
@@ -1153,7 +1140,7 @@ impl PauseButton {
 /// `HeaderAndFooterLayout.addTitleHeader` centres in the header band.
 pub const SERVER_LIST_TITLE: &str = "Play Multiplayer";
 
-/// `JoinMultiplayerScreen`'s seven footer buttons (#396), in the order they are
+/// The multiplayer screen's seven footer buttons, in the order they are
 /// added to the two footer rows — which is
 /// also the order [`super::render::server_list_footer_slot`] reads out of the
 /// arranged layout, and the order the rows appear in after the server entries.
@@ -1318,7 +1305,7 @@ pub struct MenuNav {
     server: usize,
     /// Highlighted row on the pause menu ([`PAUSE_BUTTONS`]).
     paused: usize,
-    /// Highlighted row on the death screen ([`DEATH_BUTTONS`], issue #103).
+    /// Highlighted row on the death screen ([`DEATH_BUTTONS`]).
     death: usize,
     form: EditForm,
     list: ServerList,
@@ -1353,7 +1340,7 @@ pub struct MenuNav {
     /// for free and cannot forget to. See `crate::saves`'s module doc on why a
     /// `cfg!(test)` early return would have been the wrong shape.
     saves_root: std::path::PathBuf,
-    /// Which [`SERVER_LIST_BUTTONS`] entry the cursor is over, if any (#396).
+    /// Which [`SERVER_LIST_BUTTONS`] entry the cursor is over, if any.
     ///
     /// Separate from [`Self::server`] because the two are different cursors that
     /// are visible at once: the selected *server* keeps its outline while a footer
@@ -1363,8 +1350,8 @@ pub struct MenuNav {
     /// vanilla's `AbstractScrollArea.scrollAmount`, which is a `double` and is
     /// subtracted straight from a row's y.
     ///
-    /// **This was a `usize` row counter until issue #445**, and that was the
-    /// whole of the owner's bug report: one wheel notch is
+    /// **The offset is a `f32` pixel distance, not a `usize` row counter**: one wheel
+    /// notch advances by
     /// `scrollY * scrollRate()` where `scrollRate = defaultEntryHeight / 2`
     /// (vanilla's own abstract scroll-area base, `:141-142`, vanilla's own abstract selection-list base
     /// via `defaultSettings`), i.e. **18 px** for a 36 px row — a value a row
@@ -1372,9 +1359,8 @@ pub struct MenuNav {
     /// notch. See [`Self::scroll_server_list`], which now delegates to
     /// [`super::widget::ScrollList`] rather than reimplementing the clamp.
     ///
-    /// Row-quantization was not arbitrary when it landed: this pipeline had no
-    /// scissor, so a straddling row would have painted over the footer. It has
-    /// one now — `render.rs` wraps `draw_server_entry` in `Quads::with_clip`
+    /// The clip is required because a straddling row must not paint over the footer.
+    /// `render.rs` wraps `draw_server_entry` in `Quads::with_clip`
     /// against the same band this offset is clamped against — which is the
     /// precondition that makes a pixel offset safe to draw.
     ///
@@ -1383,7 +1369,7 @@ pub struct MenuNav {
     /// see [`Self::key_main`]'s `MainButton::Multiplayer` arm.
     server_scroll: f32,
     /// The last known mouse position in **logical** pixels, and the canvas it was
-    /// measured in (#396).
+    /// measured in.
     ///
     /// `app.rs` already resolves the cursor to a logical position inside
     /// `menu_row_at`; this is where it records it, so the *menu* can answer
@@ -1437,11 +1423,11 @@ pub struct MenuNav {
     /// Held here for the same reason [`Self::form`] is: it owns
     /// real [`EditBox`] state that cannot be rebuilt per frame.
     create_world: crate::menu::create_world::CreateWorldNav,
-    /// The live confirmation screen's own widgets, focus and request (issue
-    /// #540). Held here for [`Self::create_world`]'s reason — the widgets carry
-    /// focus state that cannot be rebuilt per frame — and **replaced** rather
-    /// than mutated every time a confirmation is opened, so a stale focus or a
-    /// stale target can never survive into the next one. A confirmation that
+    /// The live confirmation screen's own widgets, focus and request. Held here
+    /// because the widgets carry focus state that cannot be rebuilt per frame,
+    /// and are **replaced** rather than mutated every time a confirmation is opened;
+    /// this prevents stale focus or a stale target from surviving into the next one.
+    /// A confirmation that
     /// remembered the last answer is the failure mode this rules out.
     confirm: crate::menu::confirm::ConfirmNav,
     /// The live resource-pack prompt's own widgets, focus and pack id, held
@@ -1517,7 +1503,7 @@ pub struct MenuNav {
     /// is either writable or written, so this and [`Self::book_edit`] are
     /// never both `Some`.
     book_view: Option<book_view::BookViewState>,
-    /// The Spectator Menu's roster and expand/hover state (issue #613's
+    /// The Spectator Menu's roster and expand/hover state (the
     /// `TeleportToEntity` remainder). **Not** an `Option` like
     /// [`Self::book_edit`] above — this screen's roster is live-refreshed
     /// every frame while connected, the same shape [`Self::social`] uses for
@@ -1525,7 +1511,7 @@ pub struct MenuNav {
     /// roster) rather than "not constructed yet". See
     /// [`spectator_menu`]'s module doc.
     spectator_menu: spectator_menu::SpectatorMenuState,
-    /// The command tree the connected server sent (issue #471 step 2), pushed
+    /// The command tree the connected server sent, pushed
     /// down by `app`'s right-click handler off `net::CommandTreeCell` — this
     /// module is pure and holds no client handle, so it cannot pull it.
     ///
@@ -1534,8 +1520,8 @@ pub struct MenuNav {
     /// rather than as an empty tree. An `Arc` because a real 26.2 server's tree
     /// is ~2,000 nodes: this is a shared read, never a copy.
     command_tree: Option<std::sync::Arc<lodestone_model::command_tree::CommandTree>>,
-    /// Whether the hosted world is currently published to LAN (issue #535's
-    /// scope 2) — pushed in every frame from `Sim::is_lan_published` by
+    /// Whether the hosted world is currently published to LAN — pushed in every frame from
+    /// `Sim::is_lan_published` by
     /// `app::session::drive_ui_from_session`, the same shape
     /// [`Self::command_tree`] is pushed in from a live session. This module
     /// is pure and holds no `Sim`, so it cannot poll the real state itself.
@@ -2215,14 +2201,14 @@ impl MenuNav {
         self.server
     }
 
-    /// Which [`SERVER_LIST_BUTTONS`] entry the cursor is over, if any (#396).
+    /// Which [`SERVER_LIST_BUTTONS`] entry the cursor is over, if any.
     #[must_use]
     pub fn list_button(&self) -> Option<usize> {
         self.list_button
     }
 
     /// How far the multiplayer list is scrolled down, **in logical pixels**
-    /// (issues #402, #445). See [`Self::server_scroll`]'s field doc.
+    /// See [`Self::server_scroll`]'s field doc.
     #[must_use]
     pub fn server_scroll(&self) -> f32 {
         self.server_scroll
@@ -2289,13 +2275,13 @@ impl MenuNav {
                 let ws = self.world_select();
                 Some(super::render::world_list_spec(ws.shown_len(), ws.scroll()))
             }
-            // Issue #445's first adoption. Its offset is pixels, which is the
+            // Statistics uses a pixel offset, which is the
             // prerequisite this arm exists to assert — see `ListSpec`'s doc.
             super::Screen::Statistics => Some(super::stats::list_spec(
                 super::stats::GENERAL_STATS.len(),
                 self.stats.scroll(),
             )),
-            // Issue #445's second adoption. **Keyed on the settings *page*, not
+            // Key Binds uses a pixel offset. **Keyed on the settings *page*, not
             // just the screen**: `Screen::Settings` is one screen with a dozen
             // pages and only some of them are lists, so an arm on the bare screen
             // would hang a scrollbar beside the root page's two-column grid. The
@@ -2307,7 +2293,7 @@ impl MenuNav {
                     self.settings.key_binds().scroll(),
                 ))
             }
-            // Language (#445's third adoption). Its length is the **post-filter**
+            // Language uses a post-filter length. Its length is the **post-filter**
             // entry count, so typing in the search box shortens the bar instead of
             // leaving a thumb sized for the full list — `LanguageNav::model` is
             // the one expression that decides, and this arm calls the same
@@ -2336,14 +2322,14 @@ impl MenuNav {
                     packs.scroll(),
                 ))
             }
-            // Social Interactions (#445's fourth and last adoption, and the only
+            // Social Interactions is the only
             // user of `RowBand::Inset` — its rows are full-width, so no constant
             // `row_w` could place its scrollbar; see `social::list_spec`).
             super::Screen::Social => Some(super::social::list_spec(
                 self.social.entries().len(),
                 self.social.scroll(),
             )),
-            // Every other settings page (#445's last adoption). Its entry heights
+            // Every other settings page uses entry heights that
             // are **non-uniform** — a header is taller than a control row — so
             // this is the one arm that goes through `ListSpec::with_heights`.
             // Placed after the KeyBinds/Language arms, which are their own
@@ -2428,7 +2414,7 @@ impl MenuNav {
                 self.stats.scroll_by(notches, canvas_height);
                 self.stats.scroll() != before
             }
-            // Key Binds (#445). Same page guard as `active_list`'s arm — the two
+            // Key Binds. Same page guard as `active_list`'s arm — the two
             // sets must agree, or the wheel scrolls a screen with no bar or a bar
             // sits beside a screen the wheel does not reach.
             super::Screen::Settings
@@ -2439,7 +2425,7 @@ impl MenuNav {
                 binds.scroll_by(notches, canvas_height);
                 binds.scroll() != before
             }
-            // Language (#445). Same page guard as `active_list`'s arm.
+            // Language. Same page guard as `active_list`'s arm.
             super::Screen::Settings
                 if self.settings.page() == crate::menu::options::SettingsPage::Language =>
             {
@@ -2458,13 +2444,13 @@ impl MenuNav {
                 packs.scroll_by(notches, canvas_height);
                 packs.scroll() != before
             }
-            // Social Interactions (#445). Same screen as `active_list`'s arm.
+            // Social Interactions. Same screen as `active_list`'s arm.
             super::Screen::Social => {
                 let before = self.social.scroll();
                 self.social.scroll_by(notches, canvas_height);
                 self.social.scroll() != before
             }
-            // Every other settings page (#445). Same ordering as `active_list`.
+            // Every other settings page. Same ordering as `active_list`.
             super::Screen::Settings => {
                 let before = self.settings.scroll();
                 self.settings.scroll_by(notches, canvas_height);
@@ -2554,7 +2540,7 @@ impl MenuNav {
     }
 
     /// Records the mouse position in logical pixels, and the canvas it was
-    /// measured in (#396).
+    /// measured in.
     ///
     /// Called from `app.rs`'s `menu_row_at`, which already computes both — so it
     /// runs before every hover *and* every click, and needs no new plumbing at the
@@ -2671,7 +2657,7 @@ impl MenuNav {
         self.command_tree.as_deref()
     }
 
-    /// Push the server's command tree down from `app` (issue #471 step 2).
+    /// Push the server's command tree down from `app`.
     /// Idempotent and cheap — an `Arc` clone — so a caller that has one may
     /// call this every time it opens a screen rather than tracking whether the
     /// tree has changed. Passing `None` (no live session, or no
@@ -2958,7 +2944,7 @@ impl MenuNav {
         }
         match ui.screen() {
             Screen::MainMenu if row < MAIN_BUTTONS.len() => self.main = row,
-            // Two cursors on one screen (#396), and hover drives only one of
+            // Two cursors on one screen, and hover drives only one of
             // them: the seven rows above `list.len()` are footer buttons and move
             // a button highlight, while the server entries below it move
             // **nothing**. That is what lets a selected server stay outlined
@@ -2998,7 +2984,7 @@ impl MenuNav {
             // `render::frame_for`, so every canvas fact was present and only
             // `MenuFrame::hovered` stayed `None`, every frame.
             Screen::CreateWorld => self.create_world.hover_row(row),
-            // Statistics (issues #564/#567's audit): this screen's only real
+            // Statistics (the ordering audit): this screen's only real
             // control is Done, and this arm's own absence was exactly the
             // Create New World bug above, one screen over — `StatsNav::
             // hover_row` records nothing for anything but `DONE_ROW`, since
@@ -3007,7 +2993,7 @@ impl MenuNav {
             Screen::Statistics => self.stats.hover_row(row),
             Screen::ServerLinks => self.server_links.hover(row),
             // The settings tree now *has* a cursor, so hover moves
-            // it — this arm's absence is what let #391 happen, because a screen
+            // it — without this arm, a screen
             // with no hover arm had to route a click through `Enter`. Row indices
             // are indices into `SettingsNav::visible`, which is also what
             // `render::frame_for` builds its rows from.
@@ -3042,9 +3028,9 @@ impl MenuNav {
                 self.settings.packs_mut().hover_row(row);
             }
             Screen::Settings => self.settings.hover_row(row),
-            // Social Interactions (#189) — same reasoning as the Settings
+            // Social Interactions — the same direct-row rule as the Settings
             // arm above: without this, a click would have to route through
-            // `Enter`, which is #391's exact trap one screen further.
+            // `Enter`, which would activate whichever row was previously focused.
             Screen::Social => self.social.hover_row(row),
             // The command block edit screen — plain hover
             // tracking, like `Screen::Paused`/`Screen::Death` above: this
@@ -3091,33 +3077,18 @@ impl MenuNav {
     ///
     /// # Why this is not just `hover` then `Enter`
     ///
-    /// That *is* what it does for every screen with a row cursor, and it is what
-    /// `app.rs` used to inline. The **settings** screen is the exception, and it
-    /// is the exception that was issue #391.
+    /// That translation is correct for screens whose row cursor is the intended
+    /// target, but not for Settings: a click must resolve the row under the
+    /// pointer rather than reuse the keyboard meaning of `Enter`.
     ///
-    /// That screen used to have no cursor at all — each control owned its own
-    /// key instead — so [`MenuNav::hover`] had no `Screen::Settings` arm and a
-    /// click could not move a highlight even in principle. The old translation
-    /// therefore turned a click on *any* row into `MenuKey::Enter`, and on that
-    /// screen `Enter` meant "toggle View Bobbing" unconditionally. So clicking
-    /// the **GUI SCALE** row — row 0, the one `render.rs` marked `selected`, the
-    /// natural thing to click — silently turned View Bobbing off and persisted
-    /// it.
-    ///
-    /// That is the whole of #391: the reporter's `options.json` carried
-    /// `"view_bobbing": false`, written six minutes before the report, and every
-    /// hop of the render chain underneath it was working. The bug was never in
-    /// the bob; it was a mouse that did the opposite of the label under it.
-    ///
-    /// Issue #55 gave that screen 135 controls and a real cursor, which removes
-    /// the *cause* rather than patching the symptom: a click now resolves its row
-    /// to that row's own [`super::options::Control`] and acts on it, and there is
-    /// no shared per-screen meaning of `Enter` left to mis-apply.
+    /// Settings owns a cursor over its visible controls. A click updates that
+    /// cursor and activates the matching [`super::options::Control`], so GUI
+    /// Scale, View Bobbing and every other row receives only its own action.
     ///
     /// # The row indices are a coupling, and it is guarded
     ///
     /// A row index here means whatever `menu::render::frame_for` put in
-    /// `Screen::Settings`'s `rows`, which is a different file — and, since #55,
+    /// `Screen::Settings`'s `rows`, which is a different file, and
     /// depends on which page is showing and how far it is scrolled.
     /// `options::tests::the_settings_rows_are_in_the_order_click_assumes` walks
     /// every page at every scroll position and asserts the two agree, so a table
@@ -3172,10 +3143,10 @@ impl MenuNav {
             return self.click_ownership(ui, row);
         }
         // The edit form is the second screen where "hover then Enter" is wrong,
-        // and #395 is what makes it visible. `ContainerEventHandler.mouseClicked`
+        // and the widget dispatch is what makes it visible. The child click handler
         // focuses the child it hit and calls *its* `onClick`; it does not activate
         // the screen. Translating a click into `Enter` here meant **clicking
-        // either address field tried to save the form** — the same shape as #391,
+        // either address field tried to save the form** — the same shape as the settings
         // one screen over: with a valid address it closed the form the player was
         // still typing into, and without one it flashed "AN ADDRESS IS REQUIRED"
         // at someone who had just clicked the field to fix that.
@@ -3206,7 +3177,7 @@ impl MenuNav {
         // insists every cursorless screen gets its own arm: here a
         // click means "focus this field" *or* "press this button", never both,
         // and a click on one of the four disabled buttons means nothing at all.
-        // Play Selected World is the one that does something — it launches (#287).
+        // Play Selected World is the one that does something — it launches.
         if ui.screen() == Screen::WorldSelect {
             let outcome = self.world_select.click_row(row);
             return self.apply_world_select(ui, outcome);
@@ -3228,7 +3199,7 @@ impl MenuNav {
             let outcome = prompt.click_row(row);
             return self.apply_resource_pack_prompt(ui, outcome);
         }
-        // World Creation — #391's shape again: a click focuses a
+        // World Creation — the same shape again: a click focuses a
         // field or presses a button, never "hover then Enter".
         if ui.screen() == Screen::CreateWorld {
             let outcome = self.create_world.click_row(row);
@@ -3266,17 +3237,17 @@ impl MenuNav {
             // A click that hit-tested onto a row this page does not have does
             // nothing at all (`SettingsNav::click_row` returns `None` for an
             // out-of-range row), rather than falling through to the keyboard
-            // path — which is the other half of #391's fix.
+            // path — the other half of the direct-click rule.
             let outcome = self.settings.click_row(row);
             return self.apply_settings(ui, outcome);
         }
-        // Social Interactions (#189) — #391's fix, one screen further: a
+        // Social Interactions — direct row activation applies here too: a
         // click resolves directly to the row it hit, never through Enter.
         if ui.screen() == Screen::Social {
             let outcome = self.social.click_row(row);
             return self.apply_social(ui, outcome);
         }
-        // The fourth (#396). A click on a *row* here is
+        // The fourth. A click on a *row* here is
         // `AbstractSelectionList.mouseClicked` — it selects, and only the favicon's
         // quadrants act — while a click above the rows is one of seven buttons.
         // Routing it as `hover` + `Enter` would join a server on any click on its
@@ -3284,21 +3255,21 @@ impl MenuNav {
         if ui.screen() == Screen::ServerList {
             return self.click_list(ui, row);
         }
-        // The command block edit screen — #391's fix once more: a
+        // The command block edit screen — the same fix once more: a
         // click on `CommandBlockRow::Command` is caret placement (a no-op
         // here, see `activate_command_block_row`'s own doc), and a click on
         // any other row is a button press, never routed through `Enter`.
         if ui.screen() == Screen::CommandBlockEdit {
             return self.activate_command_block_row(ui, row);
         }
-        // The sign-editing screen — same #391 shape: a click on a line field
+        // The sign-editing screen follows the same direct-click rule: a click on a line field
         // is caret placement (`app.rs`'s to translate, like the command
         // block's own field), a click on Done is activation, never routed
         // through `Enter` (which this screen repurposes for line navigation).
         if ui.screen() == Screen::SignEdit {
             return self.activate_sign_edit_row(ui, row);
         }
-        // The book-editing screen — same #391 shape as `SignEdit` above: a
+        // The book-editing screen follows the same direct-click rule as `SignEdit`: a
         // click on the title field (while signing) is caret placement, a
         // click on any other row is a button press.
         if ui.screen() == Screen::BookEdit {
@@ -3310,24 +3281,24 @@ impl MenuNav {
             return self.activate_book_view_row(ui, row);
         }
         // The Spectator Menu (`TeleportToEntity` remainder) —
-        // same #391 shape: every row is a button (a team category, a
+        // Every row is a button (a team category, a
         // player, or Back), never a field.
         if ui.screen() == Screen::SpectatorMenu {
             return self.activate_spectator_menu_row(ui, row);
         }
-        // Statistics — the newest instance of #391's shape, and it
+        // Statistics — the newest instance of the same shape, and it
         // became *necessary* rather than merely tidy when Enter there stopped
         // being unconditional: see `click_statistics`.
         if ui.screen() == Screen::Statistics {
             return self.click_statistics(ui, row);
         }
         // Server Links — every row on both its views is a real button (a
-        // link row, Back, or Yes/No), never a field, so the same #391 shape
+        // link row, Back, or Yes/No), never a field, so direct row activation
         // applies: a click resolves directly to the row it hit.
         if ui.screen() == Screen::ServerLinks {
             return self.click_server_links(ui, row);
         }
-        // #391's shape once more, and only while the account screen's offline-name
+        // The same direct-row shape applies only while the account screen's offline-name
         // editor is open. The *list* screen still wants the `hover` + `Enter`
         // translation below (a click on an account row selects it — see
         // `AccountsNav::handle_key_with`'s `Enter` arm, which says so at length),
@@ -3407,7 +3378,7 @@ impl MenuNav {
         }
     }
 
-    /// [`Self::click`]'s multiplayer arm (#396).
+    /// [`Self::click`]'s multiplayer arm.
     ///
     /// The row half is `OnlineServerEntry.mouseClicked`
     /// in vanilla's own order: the join
@@ -3497,7 +3468,7 @@ impl MenuNav {
             return MenuAction::None;
         }
         self.server = to;
-        // #402: the swap can carry the selection to the edge of the scrolled
+        // A swap can carry the selection to the edge of the scrolled
         // window (repeated clicks on the move-up/down arrow), matching
         // vanilla's own `scrollToEntry` call right after the swap.
         self.scroll_server_to_show();
@@ -3605,7 +3576,7 @@ impl MenuNav {
                 ui.dismiss_error();
                 MenuAction::None
             }
-            // The credits/end-poem screen (#192) — also exactly one
+            // The credits/end-poem screen — also exactly one
             // affordance, its own arm for the same reason `Screen::Error`'s
             // is: routing through the catch-all below would call
             // `UiState::on_escape` on Escape, which is the wrong exit (this
@@ -3613,7 +3584,7 @@ impl MenuNav {
             // `PauseButton::QuitToTitle`/`DeathButton::TitleScreen`, not
             // through the ordinary menu-stack unwind).
             Screen::Credits => self.key_credits(ui, key),
-            // Social Interactions (#189) has a real cursor and a real
+            // Social Interactions has a real cursor and a real
             // "back", unlike `Screen::Credits` — its own arm rather than the
             // catch-all below for the same reason `Screen::Settings`'s is:
             // that catch-all's Escape goes through `UiState::on_escape`,
@@ -3622,7 +3593,7 @@ impl MenuNav {
             // keeps Up/Down/Enter and Escape's screen-specific meaning in one
             // place instead of splitting it across two functions.
             Screen::Social => self.key_social(ui, key),
-            // Statistics (#188) — its own arm for the same reason
+            // Statistics — its own arm for the same reason
             // `Screen::Social`'s is: routing Escape through the catch-all's
             // `UiState::on_escape` would also work (its `Screen::Statistics`
             // arm calls `close_statistics`), but keeping Up/Down/Escape in
@@ -3727,7 +3698,7 @@ impl MenuNav {
                         // pressed; `clamp_server` below then re-derives the
                         // window from wherever `self.server` already points,
                         // matching a fresh screen whose selection just happens
-                        // to already be scrolled to (#402).
+                        // to already be scrolled to.
                         self.server_scroll = 0.0;
                         self.clamp_server();
                         MenuAction::Reprobe(None)
@@ -3787,7 +3758,7 @@ impl MenuNav {
         match key {
             MenuKey::Up => {
                 self.server = wrap_prev(self.server, self.list.len());
-                // #402: without this, arrowing past the bottom of the visible
+                // Without this, arrowing past the bottom of the visible
                 // window moved the selection but drew nothing new — the
                 // outline vanished off-screen with no sign anything happened.
                 self.scroll_server_to_show();
@@ -3957,7 +3928,7 @@ impl MenuNav {
             // (`CommandSuggestions.SuggestionsList.keyPressed`). This comment
             // used to end "With no command tree ever reaching this client yet
             // … there is nothing to cycle" — true when written, stale since
-            // #470/#471: the tree the server sent is in `self.command_tree`,
+            // The tree the server sent is in `self.command_tree`,
             // so Tab now completes against it (see
             // `CommandBlockState::apply_completion`, including why it commits
             // rather than cycles). Up/Down stay no-ops: they move a popup
@@ -4359,7 +4330,7 @@ impl MenuNav {
         MenuAction::None
     }
 
-    /// What clicking a row on the Spectator Menu does (issue #613's
+    /// What clicking a row on the Spectator Menu does (the target is selected by
     /// `TeleportToEntity` remainder) — dispatched entirely by
     /// [`spectator_menu::SpectatorMenuState::activate`], which already knows
     /// whether `row` means "expand a category", "go back", or "teleport".
@@ -4432,13 +4403,13 @@ impl MenuNav {
                     }
                 }
             }
-            // Issue #190.
+            // World creation starts from a fresh navigation state.
             WorldSelectOutcome::CreateWorld => {
                 self.create_world = crate::menu::create_world::CreateWorldNav::new();
                 ui.open_create_world();
                 MenuAction::None
             }
-            // Issue #540. **Nothing is deleted here.** This arm only opens the
+            // **Nothing is deleted here.** This arm only opens the
             // confirmation, carrying the folder the player had selected — the
             // removal happens in [`Self::apply_confirm`]'s `Yes` arm and nowhere
             // else, which is the property that makes the Delete button safe to
@@ -4964,7 +4935,7 @@ impl MenuNav {
             PacksOutcome::None => MenuAction::None,
             PacksOutcome::Back => {
                 // **This is the call that makes the screen do anything** (issue
-                // #415): it installs the column's order into
+                // it installs the column's order into
                 // `resources::selected_packs` and persists it. It has to happen
                 // *before* `leave_packs`, which resets the nav — vanilla commits
                 // in `PackSelectionScreen.onClose` for the same reason, and
@@ -5085,7 +5056,7 @@ impl MenuNav {
                 self.toggle_chat_colors();
                 MenuAction::None
             }
-            // Issue #443's two migrated options. Both persist eagerly like
+            // The two migrated options persist eagerly like
             // every arm above; unlike the chat eight, neither takes effect in
             // the *current* session, because their consumers read
             // `config::Config` and `Config::resolve_persisted` folds
@@ -5755,7 +5726,7 @@ impl MenuNav {
                         ui.quit_to_title();
                         MenuAction::QuitToTitle
                     }
-                    // Issue #189: a fresh screen, not a resumed one — the
+                    // Player Reporting opens a fresh screen, not a resumed one — the
                     // same "reset on every entry" rule `PauseButton::Options`
                     // follows above, so re-opening it never resumes scrolled
                     // down onto a stale roster.
@@ -5764,7 +5735,7 @@ impl MenuNav {
                         ui.open_social_from_pause();
                         MenuAction::None
                     }
-                    // Issue #188 — same "reset on every entry" rule as
+                    // Statistics follows the same "reset on every entry" rule as
                     // `PauseButton::PlayerReporting` immediately above.
                     PauseButton::Statistics => {
                         self.stats.reset();
@@ -5780,7 +5751,7 @@ impl MenuNav {
                         ui.open_server_links_from_pause();
                         MenuAction::None
                     }
-                    // Issue #167 — same shape as the two above. `advancements`
+                    // Advancements follows the same shape as the two above. Its state
                     // is reset on entry so a reopened screen starts on the
                     // default tab with each tab freshly centred, matching
                     // vanilla's per-screen `AdvancementTab` lifetime.
@@ -5789,7 +5760,7 @@ impl MenuNav {
                         ui.open_advancements_from_pause();
                         MenuAction::None
                     }
-                    // Issue #535. `MenuNav` holds no `Sim` and no world path, so
+                    // `MenuNav` holds no `Sim` and no world path, so
                     // the publish itself is the app's — same division of labour
                     // as `Respawn` and `Singleplayer`.
                     PauseButton::OpenToLan => MenuAction::OpenToLan,
@@ -5951,7 +5922,7 @@ impl MenuNav {
     /// focus the child that was hit, *then* call its `onClick`.
     ///
     /// Its own arm rather than the shared `hover` + `Enter` fall-through, for
-    /// #391's reason one screen further: with Enter now gated on focus (see
+    /// the same reason one screen further: with Enter now gated on focus (see
     /// [`Self::key_statistics`]) that pair would need `hover` to grant focus,
     /// and hover granting focus is itself a bug this repo has already fixed
     /// once on the server list. So the click grants focus directly and hover
@@ -6168,7 +6139,7 @@ impl MenuNav {
     }
 
     /// Keeps the highlight inside the list after an add or a delete, and
-    /// (#402) keeps the scroll window consistent with wherever that leaves it —
+    /// keeps the scroll window consistent with wherever that leaves it —
     /// a delete can otherwise strand the scroll offset past the new, shorter
     /// list's end.
     fn clamp_server(&mut self) {
@@ -6254,7 +6225,7 @@ pub fn on_screen_frame<'a>(
     if let Some(frame) = server_links_overlay_frame(ui, nav) {
         return Some(frame);
     }
-    // The fourth overlay screen (#474), and the second instance of the exact
+    // The fourth overlay screen, and the second instance of the exact
     // shape above. `command_block_overlay_frame` is the *same call* the draw
     // path in `app/redraw.rs` makes — see its own doc for why it is a function
     // rather than a second construction here.
@@ -6544,20 +6515,18 @@ pub fn server_links_overlay_frame<'a>(
 /// not up — **one expression with two consumers**.
 ///
 /// [`on_screen_frame`] hit-tests a click against this, and `app/redraw.rs`'s
-/// overlay block draws it. That is the whole reason it is a function: issue
-/// #474's draw half (`0948f59`) put `render::command_block_frame(state,
-/// nav.command_tree())` inline in `redraw.rs`, and a *second* construction here
-/// would be free to disagree with it — which is a click landing on a row the
-/// draw put somewhere else, the failure mode that is invisible in a screenshot
-/// because both halves look individually correct.
+/// overlay block draws it. Keeping one frame builder for both consumers makes
+/// their geometry identical; separate constructions could place a click target
+/// on a different row from the one the renderer displays.
 ///
 /// The in-world Settings arm above still constructs `settings_frame` twice for
-/// historical reasons; this one does not, and is the shape to copy for the next
-/// overlay screen.
+/// compatibility with its existing frame flow; this overlay has one shared
+/// construction.
 ///
 /// `nav.command_tree()` rather than `None`: the suggestion popup is fed by the
-/// tree the server actually sent (#470 decodes it, #471 routes it here), and
-/// the popup is part of the frame the click has to hit-test against.
+/// tree the server actually sent (the packet decoder supplies it and the input
+/// path routes it here), and the popup is part of the frame the click has to
+/// hit-test against.
 #[must_use]
 pub fn command_block_overlay_frame<'a>(
     ui: &UiState,
@@ -6583,11 +6552,10 @@ pub fn command_block_overlay_frame<'a>(
 /// ui.is_death()` appeared literally in the hover guard, the click guard and
 /// the `KeyGate` construction, and a *fourth* copy appeared in
 /// `every_mouse_routable_screen_has_a_frame_to_hit_test` — which is precisely
-/// why that gate could not see issue #474. The gate re-derived the routing rule
-/// instead of calling it, so it asserted a self-consistent pair of its own
-/// making: `Screen::CommandBlockEdit` was not in the gate's copy either, and
-/// adding a frame for it would not have made the gate fail, nor would omitting
-/// one.
+/// why a copied predicate could miss this overlay. The gate now derives its
+/// result from the same production routing rule, so adding or omitting a
+/// routable screen changes both the predicate and this frame check, so they
+/// cannot silently diverge.
 ///
 /// With the rule named once, the gate's `routable` premise and the production
 /// guard are the same code, so a screen the driver routes to and
@@ -6621,7 +6589,7 @@ pub fn routes_menu_input(ui: &UiState) -> bool {
         // editor's row hit-test path. Without this arm arrow and Done clicks
         // fall through to gameplay before the book frame can receive them.
         || ui.is_book_view_open()
-        // Issue #167. Advancements is not `owns_frame` (it is an overlay drawn
+        // Advancements is not `owns_frame` (it is an overlay drawn
         // through `ContainerRenderer`), but Escape has to close it, and the
         // `_` arm of `MenuNav::key` routes exactly that through
         // `UiState::on_escape`.
@@ -6773,10 +6741,10 @@ mod tests {
         // identically. The test, not `MAIN_BUTTONS`, was wrong.
         let (mut nav, _) = nav("buttons");
         let mut ui = UiState::new();
-        // Issue #397: Singleplayer opens the world list — vanilla's own wiring —
+        // Singleplayer opens the world list through the menu's world-list route —
         // where it used to return `MenuAction::Singleplayer` and launch directly.
         // There is no action for the app to take at *this* button; the launch is
-        // Play Selected World, one screen in (#287).
+        // Play Selected World, one screen in.
         assert_eq!(nav.key(&mut ui, MenuKey::Enter), MenuAction::None);
         assert_eq!(ui.screen(), Screen::WorldSelect);
         ui.on_escape();
@@ -7142,7 +7110,7 @@ mod tests {
         assert_eq!(form.field(), FormField::Name);
     }
 
-    /// The ordering that is the whole of #395 at this screen: the focused field
+    /// The ordering at this screen is deliberate: the focused field
     /// is offered the key **first**, so the keys it wants never become
     /// navigation, and the keys it declines do.
     #[test]
@@ -7207,7 +7175,7 @@ mod tests {
     /// numbers, and `app.rs` reports a click as a row index — so if they ever
     /// diverge, clicking the address field would focus the name one. Same shape
     /// as `the_settings_rows_are_in_the_order_click_assumes`, and the same bug
-    /// (#391) it guards against.
+    /// it guards against.
     #[test]
     fn the_form_field_ids_are_the_row_indices_the_mouse_reports() {
         let (mut nav, _) = nav("form-ids");
@@ -7261,7 +7229,7 @@ mod tests {
             "Tab from Address must advance (wrapping back to Name)"
         );
         // A hover on the Done row must **not** steal focus from the name
-        // field — it is a different question, carried on `hovered` (#391's
+        // field — it is a different question, carried on `hovered` (the same
         // shape averted a second way: a button hover must not silently move
         // the caret).
         nav.hover(&ui, DONE_ROW);
@@ -7298,8 +7266,8 @@ mod tests {
     ///
     /// `MenuNav::click` translates a click into `hover` + `Enter` for every screen
     /// that has a row cursor, and on this screen `Enter` means *save* — so
-    /// clicking either field used to submit the form. That is #391's shape one
-    /// screen over, and #395's dispatch is what makes it visible:
+    /// clicking either field submitted the form. That is the same shape one
+    /// screen over, and the same dispatch is what makes it visible:
     /// `ContainerEventHandler.mouseClicked` focuses the child it hit and calls its
     /// `onClick`; it never activates the screen.
     #[test]
@@ -7459,17 +7427,9 @@ mod tests {
     }
 
     /// The title screen's Language/Accessibility icons (`MainButton::Language`/
-    /// `::Accessibility`) used to be present-and-disabled with a stale reason
-    /// ("no language-selection screen" / "no accessibility options screen") —
-    /// both destination pages have existed since #415 and #55 respectively,
-    /// and nothing ever revisited the button. This is the structural-liveness
-    /// finding this test pins: each icon must open `Screen::Settings` on
-    /// *its own* page directly (vanilla's own title-screen rendering
-    /// constructs `LanguageSelectScreen`/`AccessibilityOptionsScreen` with
-    /// `lastScreen = this`, never through `OptionsScreen`), and Escape from
-    /// there must leave in **one** step, straight back to the title — not
-    /// two, via the root grid — which is what an empty page stack
-    /// (`SettingsNav::open_at`) buys over the grid button's push-from-Root.
+    /// `::Accessibility`) must each open `Screen::Settings` on their own page.
+    /// The empty page stack supplied by `SettingsNav::open_at` makes Escape or
+    /// Done return directly to the title instead of traversing the root grid.
     /// **Quit Game** is present-and-greyed in a browser tab and live
     /// everywhere else, and the whole row set is otherwise identical between
     /// the two hosts.
@@ -7554,7 +7514,7 @@ mod tests {
     ///
     /// Deliberately not a shortcut into [`crate::menu::options::SettingsNav`]'s
     /// private fields: reaching a row by pressing Down is what proves the row is
-    /// reachable, which is the property issue #55 turns on (117 of 135 controls
+    /// reachable, which is the property this navigation test protects (117 of 135 controls
     /// are inactive, so a cursor that skipped them would leave most of the tree
     /// invisible).
     fn settings_row(
@@ -7611,7 +7571,7 @@ mod tests {
     /// drives `KeyBindsNav`'s own cursor with nothing but Down, the same
     /// "reaching it this way proves it is reachable" reasoning that method's
     /// own doc gives. `nav.key` already routes to the right cursor by itself
-    /// once `SettingsNav::page()` is `KeyBinds` — see `key_settings`'s guard
+    /// once `SettingsNav::page()` is `KeyBinds` — see `key_settings` guard
     /// — so this needs no separate key-sending path.
     fn key_binds_row(
         nav: &mut MenuNav,
@@ -8515,7 +8475,7 @@ mod tests {
         );
     }
 
-    /// Issue #391. A **click** on the settings screen must act on the row it
+    /// A **click** on the settings screen must act on the row it
     /// landed on, not on whatever `MenuKey::Enter` means there.
     ///
     /// This is the whole bug. `app.rs` translated every menu click into
@@ -8525,7 +8485,7 @@ mod tests {
     /// `selected` — turned the option off and wrote it to disk. Nothing about the
     /// bob itself was broken; the reporter's `options.json` simply said `false`.
     ///
-    /// #55 removed the cause rather than the symptom: the screen has a real
+    /// A real cursor removes the cause rather than the symptom: the screen has a
     /// cursor and every row resolves to its own control. The assertion that
     /// matters is still the **negative** one, so it is still paired with a
     /// control — clicking the scale's row must cycle it, or "the click did not
@@ -8581,7 +8541,7 @@ mod tests {
         assert_eq!(ui.screen(), Screen::Settings);
     }
 
-    /// #202/#444: clicking Sneak/Sprint's rows on the Controls page toggles
+    /// Clicking Sneak/Sprint's rows on the Controls page toggles
     /// their hold/toggle mode and persists immediately, isolated from each
     /// other and from an inactive neighbour — same shape as
     /// [`clicking_a_settings_row_acts_on_that_row_and_no_other`], scoped to
@@ -8613,7 +8573,7 @@ mod tests {
         assert!(nav.toggle_sneak(), "sprint's click must not un-flip sneak");
         assert!(!nav.toggle_attack());
 
-        // Attack/Destroy is now a live row too (#444): clicking it flips only
+        // Attack/Destroy is now a live row too: clicking it flips only
         // its own mode, leaving Sneak and Sprint untouched.
         let attack = settings_row(&mut nav, &mut ui, is_option("toggleAttack"));
         assert_eq!(nav.click(&mut ui, attack), MenuAction::None);
@@ -8623,7 +8583,7 @@ mod tests {
         assert!(crate::config::Options::load_from(&options_path).toggle_attack);
     }
 
-    /// #203: clicking the Mouse page's Scroll Sensitivity / Invert X / Invert
+    /// Clicking the Mouse page's Scroll Sensitivity / Invert X / Invert
     /// Y rows mutates and persists only the clicked one.
     #[test]
     fn clicking_a_mouse_row_touches_only_that_row() {
@@ -8680,10 +8640,9 @@ mod tests {
         assert!(nav.invert_mouse_y());
     }
 
-    /// Issue #15: the screen the rebindable layer has been sitting behind
-    /// with no way to reach it since it landed. Two hops, matching how a
-    /// player would actually navigate there — Controls is not a root-level
-    /// page, and Key Binds is nested one level under that.
+    /// The Key Binds screen is reachable through Controls, its parent page, and
+    /// Escape returns to Controls. This test exercises both navigation edges
+    /// with the same two-hop path a player uses from the root settings grid.
     #[test]
     fn the_key_binds_screen_is_reachable_from_controls_and_escape_returns_there() {
         let (mut nav, _path) = self::nav("key-binds-reachable");
@@ -8923,7 +8882,7 @@ mod tests {
         );
     }
 
-    /// Per-row Reset and the footer's Reset Keys (#15), both persisted
+    /// Per-row Reset and the footer's Reset Keys, both persisted
     /// immediately, both isolated from an untouched neighbour — the same
     /// shape every other live row in this tree already proves.
     #[test]
@@ -8981,7 +8940,7 @@ mod tests {
         );
     }
 
-    /// #203: the scroll-sensitivity click wraps at vanilla's own slider bounds
+    /// The scroll-sensitivity click wraps at the configured slider bounds
     /// rather than running away, and steps by exactly one increment at a time
     /// — predicted from the constants, not just "it changed".
     #[test]
@@ -9050,9 +9009,9 @@ mod tests {
 
     /// A settings row index is an index into a `rows` vector built in
     /// `menu::render`, a different file with no compile-time link to it — and
-    /// since #55 it also depends on which page is showing and how far it is
+    /// it also depends on which page is showing and how far it is
     /// scrolled. If the two disagree the mouse acts on the wrong control, which
-    /// is exactly the failure #391 was.
+    /// is exactly the failure this coupling would cause.
     ///
     /// `options::tests::the_settings_rows_are_in_the_order_click_assumes` sweeps
     /// every page at every scroll position against `settings_frame` directly;
@@ -9102,11 +9061,10 @@ mod tests {
         assert_eq!(frame.rows[scale].label, "GUI Scale: 1");
     }
 
-    /// Issue #397, and the same coupling `the_settings_rows_are_in_the_order_click_assumes`
-    /// guards: [`crate::menu::world_select`]'s focus ids are indices into a `rows`
-    /// vector built in `menu::render`, a different file with no compile-time link
-    /// to them. If that vector is reordered, the mouse acts on the wrong control
-    /// — which is what #391 was.
+    /// The coupling `the_settings_rows_are_in_the_order_click_assumes`
+    /// guards [`crate::menu::world_select`]'s focus ids, which are indices into a `rows`
+    /// vector built in `menu::render`. If that vector is reordered, the mouse
+    /// acts on a different control from the one under the pointer.
     #[test]
     fn the_world_select_rows_are_in_the_order_click_assumes() {
         use crate::menu::world_select::{SEARCH_FIELD, WORLD_SELECT_BUTTONS};
@@ -9179,19 +9137,11 @@ mod tests {
         assert!(!ui.quit_requested(), "Back is not a quit");
     }
 
-    /// **Pressing Create reaches the app with the typed seed** (issue #190's
-    /// queued patch).
-    ///
-    /// Before this, `apply_create_world` returned `MenuAction::None`
-    /// unconditionally — pressing Create updated `CreateWorldNav`'s own
-    /// in-memory config and nothing else happened, the same "collected but
-    /// read nowhere" shape `MenuAction::Singleplayer` itself was in between
-    /// #397 and #287 (see that variant's doc). This drives the real screen
-    /// flow — open World Creation, focus the Seed field the same way a click
-    /// would, type a seed, click Create — and checks the *action* the app
-    /// receives, not `CreateWorldNav::config()` a second time (already
-    /// covered by `create_world.rs`'s own
-    /// `create_carries_the_typed_name_and_seed`).
+    /// **Pressing Create reaches the app with the typed seed.** The world-list
+    /// and integrated-server paths are described in that variant's doc. This
+    /// drives the real screen flow — open World Creation, focus the Seed field,
+    /// type a seed, click Create — and checks the action the app receives rather
+    /// than reading `CreateWorldNav::config()` a second time.
     ///
     /// The screen must **not** change here, mirroring Play Selected World
     /// immediately below: `begin_singleplayer` is what moves to
@@ -9232,12 +9182,9 @@ mod tests {
             panic!("expected MenuAction::Singleplayer(Created {{ .. }}), got {action:?}");
         };
         assert_eq!(config.seed, "777", "the typed seed must reach the action's payload");
-        // Issue #468's reading (2): pressing Create really **creates**. Before
-        // this, the action carried a config and no directory, and
-        // `begin_singleplayer` opened `saves/world` — so a second Create reopened
-        // the first world and the typed seed was silently discarded by
-        // `resolve_world_seed`. The directory and its `level.dat` are the proof
-        // that stopped being possible.
+        // Pressing Create really **creates**. The action carries a new directory
+        // and the typed configuration, so each submission has an independent
+        // destination and seed rather than reusing an existing world's metadata.
         assert!(world_dir.is_dir(), "Create must have made a directory: {world_dir:?}");
         assert!(
             world_dir.starts_with(nav.saves_root()),
@@ -9571,7 +9518,7 @@ mod tests {
         }
     }
 
-    /// A **corrupt** world can be removed, which is the one #540 says you most
+    /// A **corrupt** world can be removed, which is the safety property this test
     /// need — and it stays non-playable throughout.
     ///
     /// The fixture is the point: a directory with a `level.dat` that is not gzip
@@ -9962,26 +9909,25 @@ mod tests {
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::BackToGame);
         nav.key(&mut ui, MenuKey::Down);
-        // Issue #167: Advancements is now live, so it is the first stop below
+        // Advancements is now live, so it is the first stop below
         // Back to Game.
         assert_eq!(nav.pause_button(), PauseButton::Advancements);
         nav.key(&mut ui, MenuKey::Down);
-        // Issue #188: Statistics is live too.
+        // Statistics is live too.
         assert_eq!(nav.pause_button(), PauseButton::Statistics);
         nav.key(&mut ui, MenuKey::Down);
-        // Issue #189: likewise, Player Reporting rather than Options.
+        // Player Reporting is live, so it appears before Options.
         assert_eq!(nav.pause_button(), PauseButton::PlayerReporting);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::Options);
         nav.key(&mut ui, MenuKey::Down);
-        // Issue #535: Options' half-width sibling, vanilla's own singleplayer
-        // branch of `createPauseMenu`.
+        // Options' half-width sibling is the singleplayer-only LAN control.
         assert_eq!(nav.pause_button(), PauseButton::OpenToLan);
         nav.key(&mut ui, MenuKey::Down);
         assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
     }
 
-    /// Issue #535's scope 2, the counterpart to
+    /// The published-world counterpart to
     /// `pause_menu_selection_wraps_both_ways` above: once
     /// `set_lan_published(true)` runs, Open to LAN is unreachable by keyboard
     /// (it is not merely skipped as a disabled row — it is not in the list at
@@ -10089,7 +10035,7 @@ mod tests {
         ui.enter_dev_world();
         ui.pause();
         // BackToGame -> Advancements -> Statistics -> Player Reporting -> Options
-        // (#167/#188/#189 made the three middle stops live).
+        // The three middle stops are live and therefore are included in the walk.
         for _ in 0..4 {
             nav.key(&mut ui, MenuKey::Down);
         }
@@ -10179,7 +10125,7 @@ mod tests {
         assert_eq!(nav.pause_button(), PauseButton::QuitToTitle);
 
         // Now click Report Bugs (index 3, disabled). This used to probe
-        // Advancements at index 1, which #167 made live — the subject has to be a
+        // Advancements at index 1 is live; the subject has to be a
         // button that is genuinely still disabled or the test proves nothing.
         nav.hover(&ui, 3);
         assert_eq!(
@@ -10206,7 +10152,7 @@ mod tests {
     fn keyboard_navigation_steps_over_every_disabled_button() {
         // Vanilla's own focus rule: arrow keys never land on a greyed-out
         // widget. Both screens carry several disabled rows (pause's own count
-        // dropped from six to five when issue #189 made Player Reporting
+        // contains five rows when Player Reporting is live;
         // live), so without this the arrow keys would walk through dead rows.
         let (mut nav, _) = nav("skip-disabled");
         let mut ui = UiState::new();
@@ -10243,9 +10189,9 @@ mod tests {
 
         // Pause screen: Back to Game, Advancements, Statistics, Player Reporting,
         // Options, Open to LAN, Disconnect — the three icon buttons in the middle
-        // are the disabled rows Down must step over (issues #188/#189 made
-        // Statistics and Player Reporting live, #167 Advancements, #535 Open to
-        // LAN).
+        // are the disabled rows Down must step over; the live entries are
+        // Advancements, Statistics and Player Reporting, while Open to LAN is
+        // session-gated.
         ui.enter_dev_world();
         ui.pause();
         // This walk visits `OpenToLan`, which only a singleplayer session
@@ -10391,7 +10337,7 @@ mod tests {
         assert!(!ui.quit_requested());
     }
 
-    // -- the credits/end-poem screen (#192) ------------------------------------
+    // -- the credits/end-poem screen ------------------------------------
 
     fn on_credits(nav_tag: &str) -> (MenuNav, UiState) {
         let (nav, _) = nav(nav_tag);
@@ -10446,7 +10392,7 @@ mod tests {
         assert_eq!(ui.screen(), Screen::MainMenu);
     }
 
-    // -- Social Interactions (#189) --------------------------------------------
+    // -- Social Interactions --------------------------------------------
 
     fn on_social(nav_tag: &str) -> (MenuNav, UiState) {
         let (mut nav, _) = self::nav(nav_tag);
@@ -10512,7 +10458,7 @@ mod tests {
         assert_eq!(ui.screen(), Screen::Error);
     }
 
-    // -- the multiplayer list's footer and row actions (#396) -----------------
+    // -- the multiplayer list's footer and row actions -----------------
 
     /// A nav on the multiplayer screen with `n` saved servers, and a canvas
     /// recorded so the position-dependent paths are reachable.
@@ -10548,7 +10494,7 @@ mod tests {
     /// The row indices `click_list` derives from `list.len()` are the ones
     /// `render::server_list_frame` builds, in the order it builds them. Same guard
     /// shape as `the_settings_rows_are_in_the_order_click_assumes`, and the same
-    /// #391 bug it protects against: nothing in the compiler links the two files.
+    /// The row-order bug it protects against: nothing in the compiler links the two files.
     #[test]
     fn the_server_list_rows_are_in_the_order_click_assumes() {
         let (nav, ui, _) = listing("list-row-order", 2);
@@ -10578,7 +10524,7 @@ mod tests {
         }
     }
 
-    /// #402: arrowing past the bottom of the scroll window scrolls to keep the
+    /// Arrowing past the bottom of the scroll window scrolls to keep the
     /// selection on screen, and — the hit-testing half the issue calls out by
     /// name — `row_rect` (the same function `app.rs`'s hit-test calls) refuses
     /// a row that has scrolled out of the band, rather than reporting a rect
@@ -10631,11 +10577,11 @@ mod tests {
         );
     }
 
-    /// #402: the mouse wheel scrolls the list too, independently of the
+    /// The mouse wheel scrolls the list too, independently of the
     /// keyboard path above, and clamps at both ends rather than running past
     /// the list.
     ///
-    /// **Sign convention (#445):** `notches` is winit's `scrollY` verbatim, so
+    /// **Sign convention:** `notches` is winit's `scrollY` verbatim, so
     /// **positive scrolls up** — the same sign vanilla's
     /// `setScrollAmount(scrollAmount() - scrollY * scrollRate())` uses
     ///. This is the *opposite* of the `rows`
@@ -10937,7 +10883,7 @@ mod tests {
 
     /// A click on a row **selects**; only the favicon's right half joins. That is
     /// `OnlineServerEntry.mouseClicked`'s order,
-    /// and it is also the `MenuNav::click` hazard #395 recorded from the other side:
+    /// and it is also the `MenuNav::click` hazard documented by the direct-click rule:
     /// translating a click into `Enter` here would connect on any click on any row.
     #[test]
     fn a_click_selects_a_row_and_only_the_join_icon_connects() {
@@ -11393,7 +11339,7 @@ mod tests {
     /// overlay screen has to be added here, and the report above is the argument
     /// for doing it.
     ///
-    /// # This gate was itself vacuous until #474
+    /// This gate must use the production routing rule.
     ///
     /// The `routable` premise below used to be a **hand-copy** of the driver's
     /// `owns_frame(..) || is_paused() || is_death()`, not a call to it. So it
@@ -11432,7 +11378,7 @@ mod tests {
                 ui.pause();
                 ui.open_statistics_from_pause();
             }),
-            // Issue #540's confirmation. Needs the `nav` half too: the frame is
+            // The confirmation needs the `nav` half too: the frame is
             // built from `MenuNav::confirm`, so this drives the world list's own
             // Delete button rather than calling `ui.open_confirm()` — which also
             // makes it an anti-island premise (if Delete no longer opens the
@@ -11452,7 +11398,7 @@ mod tests {
                     "premise: the world list's Delete button opens the confirmation"
                 );
             }),
-            // The one that was broken in #474. Needs the `nav` half too — the
+            // The command-block confirmation needs the `nav` half too — the
             // frame is built from `MenuNav::command_block`, so a `UiState` on
             // this screen with no widget state is not the production state.
             ("CommandBlockEdit", |ui, nav| {
@@ -11518,7 +11464,7 @@ mod tests {
             // The seventh overlay screen — `owns_frame == false`
             // unconditionally (see `Screen::ServerLinks`'s own doc), so
             // without `server_links_overlay_frame` in `on_screen_frame` every
-            // click on it would be dropped exactly as #474 dropped every
+            // click on it would otherwise be dropped exactly as an unframed overlay
             // click on the command block editor.
             ("ServerLinks", |ui, nav| {
                 ui.enter_dev_world();
@@ -11920,7 +11866,7 @@ mod tests {
     /// nothing about whether `MenuNav::click` ever calls it — without the arm,
     /// this file's fall-through translates a click into `hover` + `Enter`, and
     /// `Enter` on the open editor **commits**. So clicking the text field to fix
-    /// a typo saved the name, which is #391's shape on a sixth screen.
+    /// a typo saved the name, which is the same direct-click shape on a sixth screen.
     ///
     /// Driven through `click`, the function `app.rs`'s mouse handler calls, with
     /// the field row and the Done row measured separately: a gate that only

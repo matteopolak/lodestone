@@ -3,9 +3,10 @@
 //! every control present and the ones this client does not honour rendered
 //! **inactive**.
 //!
-//! This is issue #55, the settings branch of the menu-framework epic #392. The
-//! leaf is #393 ([`super::widget`]), the containers are #394
-//! ([`super::layout`]), and the plan of record is `docs/ui-framework.md`.
+//! This module owns the data-driven settings tree: every control is represented in
+//! a table, and inactive controls remain visible with disabled styling.
+//! Leaf widgets are implemented in [`super::widget`], containers in
+//! [`super::layout`], and the plan of record is `docs/ui-framework.md`.
 //! Per-screen detail is in `docs/settings-screen.md`.
 //!
 //! ## Why this is one mechanism and not thirteen screens
@@ -29,10 +30,10 @@
 //! - **25 option rows**, driving **22** distinct [`LiveOption`]s — three of them
 //!   (`textBackgroundOpacity`, `chatOpacity`, `chatLineSpacing`) are placed on
 //!   two pages each, which is vanilla's own shape and why the row count exceeds
-//!   the option count. The 22 are `guiScale`/`bobView` (#55),
+//!   the option count. The 22 are `guiScale`/`bobView`,
 //!   `toggleCrouch`/`toggleSprint`/`invertMouseX`/`invertMouseY`/
-//!   `mouseWheelSensitivity` (#200/#202/#203), the eight chat options
-//!   (`9eba2bb`), `sensitivity`/`renderDistance` (#443), and — #444 —
+//!   `mouseWheelSensitivity`, the eight chat options
+//!   (`9eba2bb`), `sensitivity`/`renderDistance`, and
 //!   `discreteMouseScroll` plus the four remaining Controls rows
 //!   (`toggleAttack`/`toggleUse`/`autoJump`/`sprintWindow`).
 //! - **9 `Done` buttons**, one per page, always live.
@@ -43,13 +44,9 @@
 //! **These numbers are asserted, not maintained by hand** —
 //! `the_disabled_majority_is_the_point_and_it_is_measured` and
 //! `the_root_online_button_is_the_one_row_that_changes_with_in_world` fail
-//! loudly on any change, so a stale count here is a build-time failure rather
-//! than a quiet drift. (This paragraph *was* stale for a while, claiming
-//! "twenty-four or twenty-five" and "seven real options", which is what the
-//! assertions are for.)
-//! That ratio is the point of the issue: a greyed row in vanilla's own
-//! position makes the gap between this client and vanilla *visible*, where a
-//! missing row silently changes the screen's shape.
+//! loudly on any change, so a count mismatch is a build-time failure rather
+//! than quiet drift. The inactive rows remain in their source positions, making
+//! unsupported settings visible without changing the screen's geometry.
 //!
 //! Vanilla disables its own controls for exactly this reason — the narrator
 //! button, the anisotropy slider
@@ -74,18 +71,11 @@
 //!    text. This is the one place where the absence of a component is the honest
 //!    render; it is not "disabled art", which
 //!    [`super::widget`] correctly forbids for this widget family.
-//! 3. **The keyboard's scroll-into-view runs against the shortest canvas.** This
-//!    departure used to read "the scroll snaps to whole entries and the visible
-//!    window is fixed at [`LIST_WINDOW_PX`] … this menu pipeline has no scissor,
-//!    so a row that overran the band would paint over the footer", and **both
-//!    halves went stale without looking it**. Issue #445 converted this screen to
-//!    a continuous pixel offset and gave the pipeline a real CPU scissor
-//!    ([`super::render`]'s `Quads::with_clip`), so neither the snapping nor the
-//!    fixed window survived — but the prose did, and it was still being cited as
-//!    the reason a limitation existed. That is `CLAUDE.md`'s staleness class in
-//!    its most expensive form: a *correct-when-written* explanation for a
-//!    behaviour that had already been fixed, standing in front of a behaviour
-//!    that had **not**.
+//! 3. **Keyboard scroll-into-view uses the shortest canvas.** The settings list
+//!    uses a continuous pixel offset and a CPU scissor, so partially visible rows
+//!    remain clipped to the content band (`Quads::with_clip`). The same rule keeps
+//!    keyboard navigation, mouse-wheel scrolling and rendering in one coordinate
+//!    system while fixed labels remain outside the scrolling list.
 //!
 //!    What is really left is narrower and still real: a keypress has no canvas,
 //!    so [`SettingsNav::scroll_to_cursor`] clamps against
@@ -114,16 +104,15 @@
 //! ## Dependencies
 //!
 //! - [`super::layout`] — `HeaderAndFooterLayout` is this module's **first
-//!   production consumer** (#394 landed it with arithmetic-only gates and a
-//!   note saying so). `GridLayout` and `LinearLayout` build
+//!   production consumer**. It supplies the header/footer bands and their
+//!   arithmetic gates; `GridLayout` and `LinearLayout` build
 //!   `OptionsScreen.init`'s own tree.
 //! - [`super::widget`] — `Widget`, `WidgetSprites`, the grey label.
 //! - [`super::render`] — [`Origin::Settings`] resolves a [`Placement`] to a
 //!   rect; `draw_widget` draws the row.
-//! - [`crate::config`] — the seven options that are real (see [`LiveOption`]).
-//!   Pre-existing staleness fixed in passing: this line said "the two options
-//!   that are real" since #55, unchanged through #200/#202/#203 adding five
-//!   more.
+//! - [`crate::config`] — the 22 distinct live options represented by
+//!   [`LiveOption`] across 25 rows; their persisted values are the source of
+//!   truth for the controls below.
 
 use super::layout::{self, HeaderAndFooterLayout, LayoutSettings, LinearLayout};
 use super::render::{Align, MenuFrame, MenuLabel, MenuRow, Origin, Slot};
@@ -237,7 +226,7 @@ pub enum OptionWidget {
 ///
 /// See [`crate::config::Options`], whose fields (besides `keybinds`, not a
 /// vanilla `OptionInstance`) this enum enumerates one-for-one. **`render_distance`
-/// and `sensitivity` are not here**, and the census in #55 and
+/// and `sensitivity` are not here**; both live outside this persisted option table.
 /// `docs/ui-framework.md` is wrong to list them: both live on
 /// [`crate::config::Config`], which is parsed from argv every run and *never
 /// written back* (`config.rs`'s own doc comment says so). A settings row that
@@ -281,7 +270,7 @@ pub enum LiveOption {
     /// `options.discreteMouseScroll` →
     /// [`crate::config::Options::discrete_mouse_scroll`].
     ///
-    /// The first row of #444's six, and the one that needed no new subsystem:
+    /// The first row in the Controls/Mouse group, and the one that needed no new subsystem:
     /// `MouseHandler.onScroll` applies it at the input boundary
     ///, which is `app/lifecycle.rs` here — so it
     /// affects **both** wheel consumers, the hotbar and every menu list, from one
@@ -327,10 +316,9 @@ pub enum LiveOption {
     /// `options.sensitivity` → [`crate::config::Options::sensitivity`]. A
     /// `UnitDouble`.
     ///
-    /// Live since issue #443 moved it off the argv-only
-    /// [`crate::config::Config`]. Before that a row for it would have been
-    /// fabricated persistence — the value reverted on restart — which is why
-    /// this enum's doc used to name it as explicitly *not* here.
+    /// This option is persisted in [`crate::config::Options`] rather than the
+    /// argv-only [`crate::config::Config`], so its row retains the value across
+    /// restarts and participates in the normal live-option path.
     Sensitivity,
     /// `options.renderDistance` → [`crate::config::Options::render_distance`].
     ///
@@ -581,11 +569,10 @@ impl LiveOption {
     /// on `OptionInstance.UnitDouble.INSTANCE`, or `None` for the ones that are
     /// not.
     ///
-    /// `UnitDouble.toSliderValue` is the **identity**
-    ///, so for these options the stored value
+    /// `UnitDouble.toSliderValue` is the **identity**, so for these options the stored value
     /// *is* the slider fraction and [`Cell::slider_fraction`] can return it
-    /// directly — no range to port, which is why this set was reachable
-    /// without first closing issue #424.
+    /// directly. No range conversion is needed for this set; integer-range
+    /// sliders use [`SliderRange`] below.
     #[must_use]
     fn unit_double(self, options: &crate::config::Options) -> Option<f32> {
         match self {
@@ -1336,9 +1323,8 @@ impl SliderRange {
 /// citations. It is not itself a citation, and must not be relabelled as one.
 pub const LARGE_DISTANCES_MAX: i32 = 32;
 
-/// Every settings-tree slider built on an `OptionInstance.IntRange` — the value
-/// set whose absence was issue #424 — paired with its bounds and the **integer
-/// pre-image** of vanilla's shipped default.
+/// Every settings-tree slider built on an integer range, paired with its bounds
+/// and the **integer pre-image** of the shipped default.
 ///
 /// Three columns, and the third is the subtle one. An `IntRange` slider may be
 /// `.xmap`'d to a non-integer displayed value,
@@ -2069,8 +2055,8 @@ const fn live_cycle(accessor: &'static str, caption: &'static str, live: LiveOpt
     })
 }
 
-/// As [`live_cycle`], for a slider-widget option — issues #200/#202/#203's
-/// `mouseWheelSensitivity` is the first slider to leave the "labels only"
+/// As [`live_cycle`], for a slider-widget option — `mouseWheelSensitivity` is the
+/// first slider to leave the "labels only"
 /// set. A click steps it by one increment, the same simplification
 /// `guiScale` already uses (`SettingsOutcome::Cycle` has one variant for both
 /// widget kinds — see that type's doc).
@@ -2184,10 +2170,9 @@ static VIDEO: &[Entry] = &[
         // `mesher`'s three view constructors handed it the frozen
         // `BLEND_RADIUS`. See `LiveOption::BiomeBlendRadius`.
         live_slider("biomeBlendRadius", "Biome Blend", LiveOption::BiomeBlendRadius),
-        // Live since issue #443 — see `LiveOption::RenderDistance`. Its
-        // neighbour `simulationDistance` below is deliberately *not*: this
-        // client has no simulation-distance consumer at all, so wiring it would
-        // be the fabrication #443 exists to undo, one row over.
+        // `renderDistance` is live; its neighbour `simulationDistance` below is
+        // deliberately inactive because this client has no simulation-distance
+        // consumer.
         live_slider(
             "renderDistance",
             "Render Distance",
@@ -2271,12 +2256,10 @@ static VIDEO: &[Entry] = &[
 /// `key.attack`, `key.use` — and their values are
 /// `options.key.toggle`/`options.key.hold` rather than ON/OFF.
 ///
-/// **All four toggles are live** — Sneak/Sprint since #202
-/// ([`crate::config::Options::toggle_sneak`]/`toggle_sprint`, read by
-/// `InputState::set_toggle_modes`), Attack/Use since #444
-/// (`toggle_attack`/`toggle_use`, carried by the same setter; the flags reach
-/// the model end to end, and `interact.rs` will hang its own consumers off
-/// them). **`autoJump` and `sprintWindow` are live since #444 too** — the
+/// **All four toggles are live** — Sneak/Sprint use
+/// [`crate::config::Options::toggle_sneak`]/`toggle_sprint`, read by
+/// `InputState::set_toggle_modes`; Attack/Use use `toggle_attack`/`toggle_use`,
+/// carried by the same setter. **`autoJump` and `sprintWindow` are live too** — the
 /// tick loop's auto-jump gate, and the double-tap-sprint window respectively.
 static CONTROLS: &[Entry] = &[
     pair(
@@ -2318,8 +2301,8 @@ static CONTROLS: &[Entry] = &[
 /// `allowCursorChanges` and `rawMouseInput` are also still inactive: none of
 /// the three has a consumer in this shell yet (there is no discrete-vs-continuous
 /// scroll distinction, no OS cursor swap, and no raw-input toggle), so wiring
-/// the label without the behaviour would be exactly the fabrication #203
-/// exists to fix, one row over.
+/// the label without the behaviour would be a fabricated setting with no consumer;
+/// the row therefore remains inactive.
 static MOUSE: &[Entry] = &[
     pair(
         live_slider("sensitivity", "Sensitivity", LiveOption::Sensitivity),
@@ -2618,43 +2601,37 @@ static ROOT_GRID: &[Cell] = &[
     nav("Music & Sounds...", SettingsPage::Sound),
     nav("Video Settings...", SettingsPage::Video),
     nav("Controls...", SettingsPage::Controls),
-    // Issue #415 — the first of the three unbuilt sub-screens to get its own
-    // list widget. See `SettingsPage::Language`'s own doc.
+    // Language is the first of the root grid's three list-backed sub-screens. Its list
+    // widget is described by `SettingsPage::Language`'s own doc.
     nav("Language...", SettingsPage::Language),
     nav("Chat Settings...", SettingsPage::Chat),
-    // Issue #415 — the third and last of the three unbuilt sub-screens. It
-    // *landed* as a deliberately reduced selection list (`2d9d3a18`) and this
-    // comment said so until well after the real two-column screen replaced it
-    // (`6bbc9940`): a folder scan, click-to-transfer between Available and
-    // Selected, per-row reordering, and vanilla's own pack rows. See
-    // `SettingsPage::ResourcePacks`'s own doc and `super::packs`'s.
+    // Resource Packs is the third and last of the root grid's three list-backed sub-screens.
+    // It scans `resourcepacks/`, transfers entries between Available and Selected,
+    // reorders rows, displays metadata and thumbnails, and feeds the selected order
+    // into resource loading. See `SettingsPage::ResourcePacks` and `super::packs`.
     nav("Resource Packs...", SettingsPage::ResourcePacks),
     nav("Accessibility Settings...", SettingsPage::Accessibility),
-    // Issue #415 — the second of the three unbuilt sub-screens to get its
-    // own page. See `SettingsPage::Telemetry`'s own doc.
+    // Telemetry is the second of the root grid's three list-backed sub-screens; see
+    // `SettingsPage::Telemetry`'s own doc.
     nav("Telemetry Data...", SettingsPage::Telemetry),
     unsupported("Credits & Attribution..."),
 ];
 
 /// One screen of the options tree.
 ///
-/// All thirteen of vanilla's, as of issue #415 — every root-grid nav button
-/// now opens something real, though "real" means a deliberately reduced
-/// shape for two of them (see [`SettingsPage::ResourcePacks`]'s and
-/// [`SettingsPage::Telemetry`]'s own docs). This table used to list the
-/// screens still absent; there are none left in it, so it is kept as a
-/// record of what each one needed rather than deleted:
+/// All thirteen root-grid navigation buttons have a concrete destination or an
+/// explicit inactive state. Two destinations intentionally expose reduced
+/// functionality (see [`SettingsPage::ResourcePacks`]'s and
+/// [`SettingsPage::Telemetry`]'s own docs). The table records each page's
+/// layout shape and the subsystem that supplies its content:
 ///
-/// | vanilla screen | what it needed |
+/// | page | implementation |
 /// |---|---|
-/// | `LanguageSelectScreen` | the third list-widget kind (`ObjectSelectionList`) — see [`SettingsPage::Language`]/[`super::language`]. |
-/// | `KeyBindsScreen` | a different list-widget kind again (`KeyBindsList`, not `OptionsList`) — see [`SettingsPage::KeyBinds`]/[`super::key_binds`]. |
-/// | `OnlineOptionsScreen` | no new widget at all — the root's own header button was permanently inactive; see [`SettingsPage::Online`]. |
-/// | `TelemetryInfoScreen` | no new widget either, once the event log and opt-in state this client structurally cannot have are recognised as *absent* rather than *unbuilt* — see [`SettingsPage::Telemetry`]/[`super::telemetry`]. |
-/// | `PackSelectionScreen` | two transferable `ObjectSelectionList`s over a filesystem-backed `PackRepository`. Landed first as a declared reduction (one always-empty list, one always-one-entry list, no transfer controls), then **built for real**: a `resourcepacks/` folder scan accepting directories and zips, click-to-transfer, per-row reordering, `pack.mcmeta` descriptions and `pack.png` thumbnails, and the order fed into `ResourceManager`'s stack. See [`SettingsPage::ResourcePacks`]/[`super::packs`]. |
-/// widget — `KeyBindsList`, not `OptionsList` — and got one: see
-/// [`SettingsPage::KeyBinds`] and [`super::key_binds`], the second list-widget
-/// kind #392's plan always said this tree would eventually need.
+/// | `Language` | A searchable list backed by [`super::language`]. |
+/// | `KeyBinds` | A key-binding list backed by [`super::key_binds`]. |
+/// | `Online` | An inactive root header button; no page is opened. |
+/// | `Telemetry` | A static information page backed by [`super::telemetry`]. |
+/// | `ResourcePacks` | Two filesystem-backed lists with transfer, reorder, metadata and thumbnail support, backed by [`super::packs`]. |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
     /// `OptionsScreen` — the root, and the only page that is **not** an
@@ -2852,7 +2829,7 @@ impl SettingsPage {
 /// [`Origin`]. That is why the scroll position is *in here*: a row's y depends
 /// on which entry is at the top of the window, and nothing downstream of
 /// `frame_for` knows that either.
-/// **`Eq` went with issue #445**: `ListCell`/`ListHeader` carry an `f32` pixel
+/// **`Eq`, not just `PartialEq`**: `ListCell`/`ListHeader` carry an `f32` pixel
 /// scroll offset instead of a `u16` entry index, for the reason
 /// [`super::key_binds::KeyPlacement`]'s doc gives. `PartialEq` + `Debug` is all
 /// `assert_eq!` needs, so nothing that compared two `Placement`s loses anything.
@@ -2899,7 +2876,7 @@ pub enum Placement {
 /// hover, `app.rs`'s hit-test and [`SettingsNav::activate`] all share, exactly
 /// as `MAIN_BUTTONS`' order is on the title screen.
 /// `the_settings_rows_are_in_the_order_click_assumes` is what stops it drifting
-/// from the frame `settings_frame` builds — the guard issue #391 exists for.
+/// from the frame `settings_frame` builds — the guard protects the shared row ordering.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Control {
     /// The widget.
@@ -2970,7 +2947,7 @@ pub fn controls(page: SettingsPage, scroll: f32, in_world: bool) -> Vec<Control>
         return out;
     }
 
-    // **Every** entry, not a `visible_entries(entries, first)` window (#445).
+    // **Every** entry, not a `visible_entries(entries, first)` window.
     // The slice had to exclude any entry that did not wholly fit; clipping to the
     // band is `render::draw`'s job now, so a half-scrolled row draws its visible
     // half. `visible_entries` survives only as `LIST_WINDOW_PX`'s own
@@ -3224,7 +3201,7 @@ pub fn list_cell_origin(
     height: f32,
 ) -> (f32, f32) {
     let entries = page.entries();
-    // Pixel scrolling (#445): the entry's **absolute** offset in the list, minus
+    // Pixel scrolling: the entry's **absolute** offset in the list, minus
     // the scroll. `entry_offset` used to sum from `first`, which made entry
     // `first` sit at offset 0 and skipped its own header padding; summing from 0
     // is vanilla's own absolute layout and the offset is subtracted once here.
@@ -3310,10 +3287,9 @@ fn button(w: f32) -> Box<dyn LayoutElement> {
 /// Returns `visitWidgets` order: title, FOV, Online/World Options, the ten grid
 /// cells row-major, Done — which is the index space [`Placement::Root`] uses.
 ///
-/// **This is `HeaderAndFooterLayout`'s first production consumer.** #394 landed
-/// it with arithmetic-only gates and a note saying no screen used it yet; this
-/// is that screen, and nothing here re-derives the band arithmetic — the layout
-/// is built and asked.
+/// **This is `HeaderAndFooterLayout`'s first production consumer.** It uses
+/// arithmetic-only gates; the layout builds the screen directly, and nothing
+/// here re-derives the band arithmetic.
 ///
 /// Built per resolution rather than cached like `render::pause_block`, because
 /// unlike the pause grid this tree's *content* position depends on the canvas
@@ -3473,7 +3449,7 @@ pub enum SettingsOutcome {
 /// and not a tree: Accessibility links to Controls, which the root also links
 /// to, so "where did I come from" is history and not structure.
 ///
-/// **`Eq`, not just `PartialEq`, since issue #415**: [`Self::language`] holds
+/// **`Eq`, not just `PartialEq`**: [`Self::language`] holds
 /// a real [`super::edit_box::EditBox`] (for the search box), and `EditBox`
 /// cannot derive `Eq` — it carries `f32` fields the same way
 /// [`super::key_binds::KeyBindsNav`]'s sibling fields do not. `assert_eq!`
@@ -3775,8 +3751,8 @@ impl SettingsNav {
     ///
     /// A visible row is resolved back to an index into [`all_controls`] by
     /// matching the *cell* **and** its entry: a cell alone is not unique across a
-    /// page in principle, and an index that drifted by one is precisely the #391
-    /// failure mode one screen over.
+    /// page in principle, and an index that drifts by one is precisely the direct-row
+    /// failure mode on this screen.
     pub fn hover_row(&mut self, row: usize) {
         let page = self.page;
         let visible = controls(page, self.scroll, self.in_world);
@@ -3798,7 +3774,7 @@ impl SettingsNav {
     /// Activates the control at visible row `row`.
     ///
     /// This is a click, and it must **not** be routed as "hover then Enter":
-    /// issue #391 is exactly that translation on this screen, where the shared
+    /// Direct-click routing is exactly that translation on this screen, where the shared
     /// `Enter` meaning was applied to whichever row was clicked. Here a click
     /// resolves the row to its own [`Control`] and acts on that one.
     pub fn click_row(&mut self, row: usize) -> SettingsOutcome {
@@ -3850,7 +3826,7 @@ impl SettingsNav {
     /// cursor.
     ///
     /// Resolves the row against [`Self::visible`] exactly as [`Self::click_row`]
-    /// does, rather than indexing `all_controls`, for the #391 reason recorded
+    /// does, rather than indexing `all_controls`, for the same row-identity reason recorded
     /// there.
     ///
     /// `None` for a row that is not a live slider — which is what makes the
@@ -4073,7 +4049,7 @@ pub fn settings_frame(
     // `OptionsList.HeaderEntry`'s `StringWidget`s.
     let entries = page.entries();
     let mut list_labels = Vec::new();
-    // Every header, clipped to the band by `render::draw` (#445). These go in
+    // Every header, clipped to the band by `render::draw`. These go in
     // `list_labels` and not `labels`: they scroll, and a free text label has
     // nowhere else to carry a clip rect, so in `labels` a scrolled-away header
     // would draw over the footer. The title above does not scroll and stays.
@@ -4145,14 +4121,14 @@ mod tests {
     /// does not care about the root's Online/World Options fork — every page
     /// but `Root` ignores it outright, and even on `Root` the *count* (not the
     /// liveness) is the same either way, so `false` (the title-screen entry,
-    /// matching #55's original, still-authoritative baseline) is the one to
+    /// matching the title-screen baseline) is the one to
     /// sweep with here.
     const OUTSIDE_A_WORLD: bool = false;
 
     #[test]
     fn the_per_screen_control_counts_are_the_censused_ones() {
         // The expected values originate **outside** this file: they are the
-        // `addBig`/`addSmall` call-site counts in #55's census comment and
+        // `addBig`/`addSmall` call-site counts in the settings-tree inventory and
         // `docs/ui-framework.md`, which were counted from the jar. A table edit
         // that drops or duplicates a control fails here and names the screen.
         //
@@ -4279,17 +4255,17 @@ mod tests {
                 LiveOption::ToggleSprint,
                 LiveOption::ToggleAttack,
                 LiveOption::ToggleUse,
-                // #444 completes the Controls page's toggle rows: Auto-Jump,
+                // The Controls page's toggle rows include Auto-Jump,
                 // then the Sprint Window slider (both declared after the four
                 // toggles in `CONTROLS`' third `pair`).
                 LiveOption::AutoJump,
                 LiveOption::SprintWindow,
-                // Mouse page: look Sensitivity is the #443 migration, and it
+                // On the Mouse page, look Sensitivity is persisted, and it
                 // is declared *before* Scroll Sensitivity in `MOUSE`'s first
                 // `pair`, which is why it sorts here.
                 LiveOption::Sensitivity,
                 LiveOption::MouseWheelSensitivity,
-                // Discrete Scrolling, issue #444 — the first item of `MOUSE`'s
+                // Discrete Scrolling is the first item of `MOUSE`'s
                 // second `pair`, so it sorts between Scroll Sensitivity and
                 // Invert Mouse X.
                 LiveOption::DiscreteMouseScroll,
@@ -4311,7 +4287,7 @@ mod tests {
                 LiveOption::SoundVolume(8),
                 LiveOption::SoundVolume(9),
                 LiveOption::SoundVolume(10),
-                // Still Sound: Closed Captions, issue #198. Vanilla places
+                // Still Sound: Closed Captions. The setting appears
                 // `showSubtitles` on *both* the Sound and Accessibility screens,
                 // so it appears twice below, like the three chat options do.
                 LiveOption::ShowSubtitles,
@@ -4363,8 +4339,8 @@ mod tests {
         // The control: an option we do not persist must report itself inactive,
         // and the detector must be able to tell the difference.
         //
-        // This used to use `renderDistance`, which issue #443 made live — so the
-        // control's *premise* expired, and it is worth naming that it would have
+        // This check must use an inactive option rather than `renderDistance`, which
+        // is live; otherwise the control's premise would be vacuous, and it would have
         // kept passing anyway: `slider()` builds a cell with `live: None`
         // regardless of what the real row on the page carries, so it was
         // asserting a property of the constructor rather than of the tree.
@@ -4677,7 +4653,7 @@ mod tests {
         let width = live_slider("chatWidth", "Width", LiveOption::ChatWidth);
 
         // `UnitDouble.toSliderValue` is the identity, so the fraction *is* the
-        // value — no range to port, which is why this needed no part of #424.
+        // value — no range is needed for a unit-double option.
         assert_eq!(width.slider_fraction(&o), Some(1.0), "the default, 1.0");
         o.chat_width = 0.3;
         assert_eq!(
@@ -4706,7 +4682,7 @@ mod tests {
         assert_eq!(width.slider_fraction(&o), Some(0.0));
     }
 
-    // -- issue #443: the migrated options reach the screen -------------------
+    // -- persisted options reach the screen ------------------------------------
 
     /// The two migrated rows draw their handle from the **persisted** value and
     /// their label from vanilla's own stringifier.
@@ -5056,7 +5032,7 @@ mod tests {
         assert!(!clouds.is_slider());
     }
 
-    // -- issue #424: the `IntRange` slider ranges ----------------------------
+    // -- `IntRange` slider ranges -----------------------------------------------
 
     /// The two rival formulas an `IntRange` fraction could plausibly use, kept
     /// **executable** so the assertions below are controls and not descriptions
@@ -5265,7 +5241,7 @@ mod tests {
     /// Coverage: every slider row the settings tree renders now reports a
     /// fraction, except the one documented non-slider-shaped leftover.
     ///
-    /// This is the island check for #424 — a range ported into
+    /// This is the coverage check for the integer slider ranges — a range ported into
     /// [`INT_RANGE_SLIDERS`] that no row's accessor matches would be dead data,
     /// and a row whose accessor is in neither table would silently draw no
     /// handle. Sweeping the real `PAGES` is what makes it a coverage claim
@@ -5387,14 +5363,13 @@ mod tests {
         LiveOption::ChatOpacity,
         LiveOption::TextBackgroundOpacity,
         LiveOption::ChatColors,
-        // Issue #443's migration: both were on argv-only `Config` and are
-        // now persisted `Options` fields with a real row.
+        // Sensitivity and Render Distance are persisted `Options` fields with
+        // live rows.
         LiveOption::Sensitivity,
         LiveOption::RenderDistance,
-        // Issue #444: the six Controls/Mouse rows. `discreteMouseScroll` was
-        // the first, whose consumer this shell already had — `app`'s wheel
-        // boundary; the other four landed with the toggles/auto-jump/sprint
-        // window. See the variants' own docs.
+        // The remaining three Controls/Mouse rows are listed next. Their
+        // consumers are the input boundary, auto-jump gate and sprint window;
+        // the four toggle-mode rows are listed above.
         LiveOption::DiscreteMouseScroll,
         LiveOption::AutoJump,
         LiveOption::SprintWindow,
@@ -5991,7 +5966,7 @@ mod tests {
             for first in 0..entries.len().max(1) {
                 // The pixel offset that puts entry `first` at the band's top —
                 // `entry_offset` is the conversion, so this asserts exactly the
-                // property it did before #445 (a window opening at entry `first`
+                // property required by the layout (a window opening at entry `first`
                 // never overruns the footer) in the new units.
                 let first_px = entry_offset(entries, first);
                 for entry in visible_entries(entries, first) {
@@ -6055,7 +6030,7 @@ mod tests {
 
     #[test]
     fn the_settings_rows_are_in_the_order_click_assumes() {
-        // Issue #391's guard, re-pointed. `app.rs` reports a **row index** into
+        // This guard mirrors the production click path. `app.rs` reports a **row index** into
         // the frame; `SettingsNav::click_row` indexes `visible()`. If the two
         // disagree, the mouse acts on a different control from the one under
         // it — which is exactly the bug where clicking GUI SCALE toggled View
@@ -6092,7 +6067,7 @@ mod tests {
 
     #[test]
     fn a_click_acts_on_the_row_it_landed_on_and_nothing_else() {
-        // The #391 shape directly: find the GUI Scale row and the row next to
+        // The direct-row shape: find the GUI Scale row and the row next to
         // it, click each, and assert the outcome names the control that was
         // under the cursor.
         let mut nav = SettingsNav::new();
@@ -6118,7 +6093,7 @@ mod tests {
         );
         // `fullscreen` is still inert: clicking it must do **nothing**, not
         // fall through to whatever Enter last meant. This is the assertion
-        // #391 would have failed. (`inactivityFpsLimit`, GUI Scale's former
+        // this would fail. (`inactivityFpsLimit`, GUI Scale's former
         // left-hand neighbour, went live alongside the rest of the video
         // settings and is exercised by its own gate now.)
         let neighbour = visible
@@ -6127,7 +6102,7 @@ mod tests {
             .expect("Video still carries an inert fullscreen row");
         assert_eq!(nav.click_row(neighbour), SettingsOutcome::None);
         // And a click past the end of the frame must be inert rather than
-        // reaching the keyboard path — the other half of #391's fix.
+        // reaching the keyboard path — the other half of the same fix.
         assert_eq!(nav.click_row(visible.len() + 5), SettingsOutcome::None);
     }
 
@@ -6167,7 +6142,7 @@ mod tests {
         );
         // A nav button to a screen we do not build must be inert. Language,
         // Telemetry and Resource Packs were this test's examples in turn —
-        // issue #415 built all three, so the root grid itself has no
+        // all three destinations are built, so the root grid itself has no
         // unbuilt `Cell::Nav` left at all. The one that remains is the
         // root's own header button *inside* a world, where it is the
         // inactive World Options placeholder rather than a link to Online
@@ -6274,7 +6249,7 @@ mod tests {
     fn hover_and_the_cursor_agree_on_every_visible_row() {
         // The mouse and the keyboard share one index space (see `Control`). If
         // `hover_row` resolved a row to the wrong control, a click after a
-        // hover would act one row off — the shape of both #391 and the
+        // hover would act one row off — the shape of both the direct-row rule and the
         // `ServerEdit` field bug.
         for page in PAGES {
             let mut nav = SettingsNav::new();
@@ -6385,13 +6360,10 @@ mod tests {
     /// sentinel in `placement_anchor`, so it fails here rather than drawing
     /// nothing and looking like a table that was never wired.
     ///
-    /// **The vertical bound changed with issue #445.** It used to require every
-    /// control to fit the canvas, which was true only because `controls` emitted a
-    /// window that excluded anything not wholly visible. Emitting every entry and
-    /// letting `render::draw` clip is the conversion, so a control below the band
-    /// now resolves below the canvas on purpose — asserting the canvas would be
-    /// asserting the old implementation. The x bound is unchanged and still
-    /// catches the sentinel, which is negative in **both** axes.
+    /// **The vertical bound is the content-band height.** Controls outside that
+    /// band remain in the list and are clipped by `render::draw`; the placement
+    /// resolver therefore allows their y coordinate to extend below the canvas.
+    /// The x bound still catches the sentinel, which is negative in **both** axes.
     #[test]
     fn every_placement_resolves_to_a_rect_on_screen() {
         let mut in_band = 0usize;
@@ -6581,8 +6553,8 @@ mod tests {
         let mut nav = SettingsNav::new();
         nav.page = SettingsPage::Video;
         let frame = settings_frame(&nav, &options, None);
-        // **The split changed with issue #445**: a header scrolls, so it now
-        // reaches `list_labels` — the vector `render::draw` clips to the band —
+        // **The split is between scrolling headers and fixed labels**: a header scrolls, so it
+        // reaches `list_labels`, whose vector `render::draw` clips to the band;
         // while the page title, which does not scroll, stays in `labels`. This
         // assertion is what pins the two apart.
         let titles: Vec<&str> = frame.labels.iter().map(|l| l.text.as_str()).collect();
