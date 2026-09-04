@@ -276,7 +276,7 @@ codegen-units = 1
 debug = 2
 
 # Dev/test profile: measured 2026-08-04, full numbers and the honest limits in
-# docs/build-caching.md. Backtraces keep file:line (that is what
+# docs/repo-tooling.md. Backtraces keep file:line (that is what
 # line-tables-only preserves); dep frames lose line info, which is the trade.
 [profile.dev]
 debug = "line-tables-only"
@@ -285,8 +285,8 @@ debug = "line-tables-only"
 # workspace crates keep line tables above while deps drop debuginfo entirely
 # and get light optimisation. Measured: −45% target-dir size and 1.39× faster
 # render-suite runtime, against a 2.07× one-time cold dep compile paid once
-# machine-wide and then served from sccache. `debug-assertions` is
-# deliberately untouched everywhere: correctness gates depend on it.
+# per private target directory. `debug-assertions` is deliberately untouched
+# everywhere: correctness gates depend on it.
 [profile.dev.package."*"]
 debug = false
 opt-level = 1
