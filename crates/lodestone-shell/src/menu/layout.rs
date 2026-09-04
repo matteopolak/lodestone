@@ -371,47 +371,10 @@ impl LayoutSettings {
         self
     }
 
-    /// `alignVertically(float)`.
-    #[must_use]
-    pub fn align_vertically(mut self, y_alignment: f32) -> Self {
-        self.y_alignment = y_alignment;
-        self
-    }
-
-    /// `alignHorizontallyLeft()`.
-    #[must_use]
-    pub fn align_horizontally_left(self) -> Self {
-        self.align_horizontally(0.0)
-    }
-
     /// `alignHorizontallyCenter()`.
     #[must_use]
     pub fn align_horizontally_center(self) -> Self {
         self.align_horizontally(0.5)
-    }
-
-    /// `alignHorizontallyRight()`.
-    #[must_use]
-    pub fn align_horizontally_right(self) -> Self {
-        self.align_horizontally(1.0)
-    }
-
-    /// `alignVerticallyTop()`.
-    #[must_use]
-    pub fn align_vertically_top(self) -> Self {
-        self.align_vertically(0.0)
-    }
-
-    /// `alignVerticallyMiddle()`.
-    #[must_use]
-    pub fn align_vertically_middle(self) -> Self {
-        self.align_vertically(0.5)
-    }
-
-    /// `alignVerticallyBottom()`.
-    #[must_use]
-    pub fn align_vertically_bottom(self) -> Self {
-        self.align_vertically(1.0)
     }
 }
 
