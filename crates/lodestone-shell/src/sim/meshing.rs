@@ -242,11 +242,10 @@ impl Sim {
             vanilla_atlas,
             language,
             banner: _,
-            // Deliberately not reloaded here — see the module-level note on
-            // why this reload's scope stops short of particles: `Particles`'
-            // own `(Sheet, frame) -> UV` table would need rebuilding in step
-            // with any new particle atlas, and drifting the two apart is
-            // exactly issue #45.
+            // Deliberately not reloaded here: `Particles`' own `(Sheet, frame) ->
+            // UV` table would need rebuilding with any new particle atlas, and
+            // the particle UV table and pixels must remain paired throughout a
+            // session.
             particle_atlas: _,
         } = resources;
         let Some(atlas) = vanilla_atlas else {
@@ -355,12 +354,10 @@ impl Sim {
     /// would reproduce the bug with a fix-shaped commit in front of it.
     pub(crate) fn on_column_unloaded(&mut self, cx: i32, cz: i32) {
         self.terrain_mut(|terrain| terrain.forget_column(cx, cz));
-        // The mirror of `on_column_arrived`'s second line, and #479's second
-        // half. An arrival re-drives the neighbours that baked their seam against
-        // air; a departure has to re-drive the neighbours that are still *waiting*
-        // on this column, because it is never coming back and a plain dirty signal
-        // would defer them again and drop the result. See
-        // `TerrainMesh::forced_columns`.
+        // An arrival re-drives neighbours that baked their seam against air; a
+        // departure must re-drive neighbours still *waiting* on this column,
+        // because it is not coming back and a plain dirty signal would defer them
+        // again and drop the result. See `TerrainMesh::forced_columns`.
         self.terrain_and_world(|store, terrain| {
             terrain.force_neighbours_of_departed(store, cx, cz)
         });
@@ -370,12 +367,11 @@ impl Sim {
     ///
     /// [`NetUpdate::SectionBlocks`] is the shell's view of `BLOCK_UPDATE` /
     /// `SECTION_BLOCKS_UPDATE`: the authoritative state has **already** been
-    /// applied to the one store by the adapter, which (since #374) already created
-    /// or removed the block entity with it. So this does not correct the world —
-    /// the world is corrected by construction, including a refused placement whose
-    /// bogus chest record is dropped by that arm's `sync_block_entity` — it only
-    /// clears the prediction from [`Placement`]'s ledger and asks whether the
-    /// server agreed.
+    /// applied to the one store by the adapter, together with any corresponding
+    /// block-entity update. So this does not correct the world — the world is
+    /// corrected by construction, including a refused placement whose bogus chest
+    /// record is dropped by that arm's `sync_block_entity` — it only clears the
+    /// prediction from [`Placement`]'s ledger and asks whether the server agreed.
     ///
     /// Both halves matter. Without the clear the ledger grows without bound for the
     /// whole session, one entry per right-click, because nothing else drains it (the

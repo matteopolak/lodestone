@@ -145,22 +145,20 @@ impl Sim {
             // because it asserts that plugin is present rather than adding it
             // itself, and `add_systems` does not deduplicate.
             InteractPlugin,
-            // Issue #148: the recipe corpus becomes a resource, so a plugin can
-            // register a recipe into the same book the container screen matches
-            // against. Installed here rather than in `lodestone_app::client_app`
-            // only because the *shell* is what loads `client.jar`'s corpus and
-            // adopts it (`WindowApp::adopt_recipe_corpus`); a headless consumer
-            // that registers a recipe gets the resource on demand from
-            // `RecipeRegistryExt::add_recipe`, so nothing depends on this line
-            // for correctness — it guarantees the shell can *read* the registry
-            // even when no plugin registered anything.
+            // The recipe corpus is a resource, so a plugin can register a recipe
+            // into the same book the container screen matches against. Installed
+            // here rather than in `lodestone_app::client_app` because the shell
+            // loads and adopts the corpus; a headless consumer that registers a
+            // recipe gets the resource on demand from `RecipeRegistryExt::add_recipe`.
+            // Nothing depends on this line for correctness: it guarantees the shell
+            // can read the registry even when no plugin registered anything.
             lodestone_ecs::RecipeRegistryPlugin,
-            // Issue #467: without this line the whole command path is an
-            // island. `CHAT_COMMAND` decodes (#464), crosses the host-installed
-            // `CommandSink` seam and reaches `dispatch` — but `dispatch` reads a
-            // `CommandRegistry` that only `PluginCommandsPlugin` inserts, so
-            // with **zero** production registrations no player could run a
-            // command however correct the wire was.
+            // The command plugin supplies the registry used by the
+            // `CommandSink` fallback. Built-in server commands run first; an
+            // unknown direct root or plugin terminal then reaches `dispatch`,
+            // which reads the `CommandRegistry` this plugin inserts. Without it,
+            // built-ins still work, but plugin-command fallback has no registry
+            // or handlers; an empty registry exposes no plugin commands.
             //
             // It goes in `client_app()` specifically, not at the `net.rs` call
             // site where a `World` and an `IntegratedServer` are both in scope:
@@ -234,8 +232,8 @@ impl Sim {
         let resources = BlockResources::load(!demo_world);
         let render_live = resources.vanilla_atlas.is_some();
         let mut terrain = TerrainMesh::new(MeshScheduler::new(workers, resources.classifier));
-        // Issue #423: build the write handle and derive the read handle from it,
-        // so the resource this session installs pairs two halves of one `Arc`.
+        // Build the write handle and derive the read handle from it, so the
+        // resources this session installs are two halves of one `Arc`.
         let write_handle = ChunkWorldWrite::new(world);
         let chunk_world = write_handle.read_handle();
 
@@ -283,7 +281,8 @@ impl Sim {
         // run instead of silently showing nothing.
         // The sheet stitch is *also* kept on `Sim` (see `Sim::particle_atlas`):
         // the emitter needs its UV rects and the GPU needs its pixels, and
-        // issue #45 is what happens when those two come from different images.
+        // Keeping the particle UV table and atlas pixels from the same resource
+        // load prevents them from drifting apart.
         let particle_atlas = resources.particle_atlas;
         let particles = match resources.vanilla_atlas.as_ref() {
             Some(atlas) => Particles::new(atlas.models()),
@@ -298,25 +297,17 @@ impl Sim {
         // second to perform it would not be.
         let version_data = lodestone_registry::adapter_for_protocol(config.protocol);
 
-        // Take the `World` and drop the `App` — azalea's own shape
-        // (`azalea-client/src/client.rs:143`), and why nothing here ever calls
-        // `App::update`. **This used to be where the plugin boundary closed**, and
-        // is not any more: composition moved up into [`Sim::client_app`], so every
-        // plugin is already built by the time this line runs and a caller who
-        // wants their own has already added it. `Sim` still stores only an
-        // `EcsHandle`, which is fine — the `App` was never the thing that needed
-        // to survive, only the thing that needed to be *reachable*.
+        // Take the `World` and drop the `App`: the composed application has
+        // already installed every plugin before this point, and callers that need
+        // additional plugins have added them before handing the app to `Sim`.
+        // `Sim` stores only an `EcsHandle` because the app is needed for
+        // composition, not for the session's lifetime.
         //
-        // **`lodestone_autopilot::AutopilotPlugin` used to be the last entry in
-        // that tuple and was removed on purpose** (issue #38, and #77's plugin
-        // boundary). The shipped client does not navigate itself: the autopilot is
-        // a pre-implemented *external* plugin, so the shell does not depend on it
-        // at all — not even optionally behind a feature. `Cargo.toml`'s own note
-        // where the dependency line was says the same thing, and
-        // `docs/autonomous-navigation.md`'s "Not wired into the shell" section
-        // carries the routes a user has to get it back — which now include
-        // `Sim::client_app()` + `add_plugins` + `Sim::from_app`, on the rendered
-        // client, rather than headless only.
+        // `lodestone_autopilot::AutopilotPlugin` remains an external opt-in
+        // plugin. The shipped client does not navigate itself, so the shell has
+        // no dependency on that plugin, even behind a feature. A caller that
+        // wants navigation can install it while composing `Sim::client_app`,
+        // then pass the resulting app to `Sim::from_app`.
         let mut ecs = std::mem::take(app.world_mut());
         // The physics profile is resolved from the same `config.protocol` the
         // adapter above was, through `lodestone_registry` — the one crate
@@ -389,9 +380,8 @@ impl Sim {
         // component nothing had.
         let local = lodestone_app::spawn_session_in(&mut ecs, player);
 
-        // Issue #443: read before the literal, because `config` moves into the
-        // `config` field below and struct-literal fields evaluate in written
-        // order.
+        // Read before the literal because `config` moves into the `config` field
+        // below and struct-literal fields evaluate in written order.
         let seed_sensitivity = config.sensitivity;
 
         let mut sim = Self {
@@ -452,14 +442,12 @@ impl Sim {
             // silently-toggling one.
             invert_mouse_x: false,
             invert_mouse_y: false,
-            // Issue #443: seeded from the argv-derived `Config` so a caller
-            // that never calls `set_sensitivity` — a headless bot, a test —
-            // behaves exactly as it did before the field existed. The menu
-            // layer overwrites it every frame once there is a menu.
+            // Seeded from the argv-derived `Config` so a caller that never calls
+            // `set_sensitivity` — a headless bot or a test — retains the configured
+            // value. The menu layer overwrites it every frame once there is a menu.
             sensitivity: seed_sensitivity,
-            // Issues #202/#444: hold-vs-toggle and auto-jump all default off
-            // in vanilla; the sprint window boots at vanilla's shipped 7
-            //, because a derived `0` would silently
+            // Hold-vs-toggle and auto-jump default off; the sprint window boots at
+            // seven ticks because a derived `0` would silently
             // disable double-tap sprint for any caller that never calls
             // `set_sprint_window_ticks`.
             toggle_sneak: false,
