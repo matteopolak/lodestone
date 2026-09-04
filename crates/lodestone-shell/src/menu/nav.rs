@@ -529,7 +529,7 @@ impl EditForm {
         };
         let mut focus = FocusSet::new();
         // `addRenderableWidget`, not `addWidget` or `addRenderableOnly`: these
-        // are drawn *and* interactive *and* narrated. Getting this wrong is the
+        // are drawn *and* interactive. Getting this wrong is the
         // island `super::focus`'s docs describe — a field that renders and never
         // takes a keystroke, with nothing failing loudly.
         focus.add_renderable_widget(NAME_FIELD);
