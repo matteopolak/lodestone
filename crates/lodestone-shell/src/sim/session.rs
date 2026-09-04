@@ -218,8 +218,8 @@ impl Sim {
     /// particle already expires within a couple of seconds on its own, and
     /// nothing drives its `tick`/`extract` once the title screen stops
     /// calling into the render path, so a leftover burst is inert rather
-    /// than a bug. See the report on this change for what is genuinely
-    /// unverified rather than merely reasoned about.
+    /// than a bug. This teardown therefore resets state that can affect the
+    /// next session while leaving presentation resources intact.
     pub fn end_session(&mut self) {
         // Drop first: `NetClient::drop` signals its net thread and joins it,
         // so nothing below can race a still-running poll against state this
@@ -296,10 +296,9 @@ impl Sim {
         // never adopted, so its terrain is not the live store and survives, which
         // is the behaviour `resident_after_connect`'s control asserts.
         if std::mem::take(&mut self.adopted_live_world) {
-            // Issue #423: the two halves are always replaced *together* with one
-            // fresh store — a write handle left pointing at the released server
-            // store while the read resource names a new empty one would be the
-            // two-worlds defect this resource design exists to delete.
+            // Replace both halves *together* with one fresh store. A write handle
+            // left pointing at the released server store while the read resource
+            // names a new empty one would create two sources of world state.
             let write_handle = ChunkWorldWrite::default();
             let chunk_world = write_handle.read_handle();
             self.write(|w| {
@@ -514,8 +513,8 @@ impl Sim {
     /// session or no declared view radius to divide by.
     ///
     /// The numerator is the client's own loaded-column count and the denominator
-    /// is the view square — both real, which is the whole constraint issue #449
-    /// puts on this feature. A missing denominator yields `None` so the screen
+    /// is the view square — both are measured from session state. A missing
+    /// denominator yields `None` so the screen
     /// draws a phase name with no bar, rather than a synthesised one.
     #[must_use]
     pub fn terrain_progress(&self) -> Option<crate::menu::loading::TerrainProgress> {
@@ -638,8 +637,8 @@ impl Sim {
         self.pending_book_open.take()
     }
 
-    /// Whether `NetUpdate::LanOpened` has arrived this session (issue #535's
-    /// scope 2) — the ground truth `app::session::drive_ui_from_session`
+    /// Whether `NetUpdate::LanOpened` has arrived this session — the ground truth
+    /// `app::session::drive_ui_from_session`
     /// reconciles into `MenuNav::set_lan_published`, the same shape
     /// [`Self::has_won`] is reconciled into the credits screen. See
     /// [`Self::lan_published`]'s own field doc.
@@ -975,8 +974,8 @@ impl Sim {
 
     /// The client's own folded team/objective state — the same
     /// `SessionScoreboard` read [`Self::sidebar`] does, exposed raw for a
-    /// caller (the Spectator Menu's "Team Teleport" grouping, issue #613's
-    /// `TeleportToEntity` remainder) that needs [`Scoreboard::team_of`]
+    /// caller such as the Spectator Menu's "Team Teleport" grouping that needs
+    /// [`Scoreboard::team_of`]
     /// rather than a rendered sidebar.
     #[must_use]
     pub fn scoreboard(&self) -> lodestone_game::scoreboard::Scoreboard {
@@ -988,10 +987,10 @@ impl Sim {
     }
 
     /// Whether the local player's server-authoritative game mode is
-    /// `Spectator` — vanilla's own is-spectator check. A public mirror of
+    /// `Spectator` — the server-authoritative game-mode check. A public mirror of
     /// `sim::actions::Sim::is_spectator` (private to that module): the
-    /// Spectator Menu's hotbar-key intercept (issue #613's
-    /// `TeleportToEntity` remainder) is gated from `app/input.rs`, which has
+    /// Spectator Menu's hotbar-key intercept for entity teleport is gated from
+    /// `app/input.rs`, which has
     /// no access to that module-private helper.
     #[must_use]
     pub fn is_spectator(&self) -> bool {
@@ -1311,8 +1310,8 @@ impl Sim {
     /// bug survived a fix to the key dispatch that reached this function correctly.
     pub fn close_open_menu(&mut self) {
         let Some(open) = self.open_menu() else { return };
-        // Issue #145: a plugin-opened local menu has no server-side container, so
-        // a `ContainerClose` naming its window id would be addressed to something
+        // A plugin-opened local menu has no server-side container, so a
+        // `ContainerClose` naming its window id would be addressed to something
         // the server has never heard of. Close it locally and send nothing.
         //
         // This branch is the reason `Menus::opened_is_local` exists rather than
@@ -1411,13 +1410,11 @@ impl Sim {
     /// A blank line sends nothing. No-op without a live connection. Returns
     /// whether anything was sent, so the caller can echo command feedback.
     ///
-    /// **Nothing server-bound is intercepted here.** A `/givedebug` wrapper
-    /// used to run ahead of [`compose_chat_action`] and rewrite itself into
-    /// the server's real `/give @s <item> <amount>`; issue #382 deleted it,
-    /// because typing `/give` does the same thing with no bespoke parser to
-    /// keep in step with the server's. Every `/` line still goes to the
-    /// server verbatim, and every command response — including "you are not
-    /// op" — arrives back over the ordinary inbound chat path.
+    /// **Nothing server-bound is intercepted here.** Every `/` line goes to the
+    /// server verbatim, and every command response — including "you are not op"
+    /// — arrives back over the ordinary inbound chat path. Keeping command
+    /// parsing server-side avoids a second parser that could drift from the
+    /// server's command rules.
     ///
     /// A leading `#`, unlike `/`, is a **client-local** command namespace and
     /// is intercepted before `compose_chat_action` ever sees it —
@@ -1428,22 +1425,16 @@ impl Sim {
     ///
     /// # Why the namespace is reserved but empty
     ///
-    /// It used to hold exactly one command, `#goto x z` (issue #38, M1), which
-    /// set `lodestone_autopilot::AutopilotGoal`. **Both the command and the
-    /// dependency were removed on purpose**: the autopilot is a
-    /// pre-implemented *external* plugin and the shipped client does not
-    /// navigate itself (see `sim/build.rs`'s note where the plugin was
-    /// registered, and `docs/autonomous-navigation.md`'s "Not wired into the
-    /// shell"). A chat command in the shell that reaches into a plugin's
-    /// resource is backwards for a plugin architecture — the plugin should
-    /// register its own commands, which is
-    /// [#118](https://github.com/matteopolak/lodestone/issues/118).
+    /// No built-in command occupies this namespace. `send_chat` currently has no
+    /// plugin command hook for `#`: every such line is consumed and refused
+    /// before any plugin dispatch. Navigation is provided by an external
+    /// `lodestone_autopilot::AutopilotPlugin`, when a caller opts into it, but
+    /// that plugin cannot claim this namespace through the chat path.
     ///
     /// **The reservation itself is kept, and is not autopilot-specific.**
-    /// Deleting it would not restore any capability; it would only start
-    /// leaking `#`-prefixed lines onto the wire as ordinary chat. So this arm
-    /// stays as the shell's own guarantee about the namespace, and #118 is
-    /// what will eventually give a plugin somewhere to hang a command off it.
+    /// Any `#`-prefixed line is currently consumed and refused rather than
+    /// leaking onto the wire as ordinary chat. A future explicit hook could
+    /// define plugin-owned handling, but no such hook exists today.
     pub fn send_chat(&mut self, line: &str) -> bool {
         if let Some(rest) = line.trim().strip_prefix('#') {
             tracing::debug!(
@@ -1861,15 +1852,11 @@ impl Sim {
         }
     }
 
-    /// Toggle a crafter slot's enabled/disabled state — vanilla's
-    /// `ServerboundContainerSlotStateChangedPacket`, sent from
-    /// `CrafterScreen.updateSlotState`/`CrafterMenu.setSlotState`. Issue
-    /// #613's `SetContainerSlotState` remainder; see
-    /// `app::container_input::WindowApp::maybe_toggle_crafter_slot` for the
-    /// click gate this is called from. Same "predict, don't validate here"
-    /// shape as [`Self::send_container_button_click`] — the server's own
-    /// `container_set_data` broadcast is the authority and corrects a wrong
-    /// send.
+    /// Toggle a crafter slot's enabled/disabled state through the corresponding
+    /// serverbound action. See `app::container_input::WindowApp::maybe_toggle_crafter_slot`
+    /// for the click gate this is called from. Same "predict, don't validate
+    /// here" shape as [`Self::send_container_button_click`] — the server's own
+    /// `container_set_data` broadcast is the authority and corrects a wrong send.
     pub fn send_set_container_slot_state(&self, slot_id: i32, container_id: i32, new_state: bool) {
         if let Some(net) = &self.net {
             net.send_action(ClientAction::SetContainerSlotState {
@@ -1881,10 +1868,8 @@ impl Sim {
     }
 
     /// Report which item inside a hovered bundle the scroll wheel just
-    /// highlighted — vanilla's `ServerboundSelectBundleItemPacket`
-    /// (`BundleMouseActions.toggleSelectedBundleItem`, issue #616's
-    /// `BUNDLE_ITEM_SELECTED` / #613's `SelectBundleItem` remainder). Purely
-    /// informational: the only server-side effect is which item a later
+    /// highlighted. This is purely informational: the only server-side effect
+    /// is which item a later
     /// right-click removal takes, and the component's own `selectedItem`
     /// never round-trips back to the client (see
     /// [`lodestone_model::ItemComponents::bundle_contents`]'s doc) — there is
@@ -1894,8 +1879,8 @@ impl Sim {
     /// protocol family with no shell caller anywhere — the same
     /// outbound-island shape `ClientAction::SetFlying` was caught in.
     /// Best-effort like [`Self::send_select_trade`] — a closed session drops
-    /// it. `selected_item_index` of `-1` is vanilla's own "unselect"
-    /// sentinel, sent on unhover; see
+    /// it. `selected_item_index` of `-1` is the "unselect" sentinel sent on
+    /// unhover; see
     /// `crate::container::bundle::bundle_slot_scrolled`, this send's caller.
     pub fn send_select_bundle_item(&self, slot_id: i32, selected_item_index: i32) {
         if let Some(net) = &self.net {
@@ -1926,9 +1911,8 @@ impl Sim {
         }
     }
 
-    /// Client-initiated round-trip latency probe — vanilla's
-    /// `ServerboundPingRequestPacket` (`PingDebugMonitor.tick`, issue #613's
-    /// `PingRequest` remainder). `time` is the caller's own clock reading in
+    /// Client-initiated round-trip latency probe. `time` is the caller's own
+    /// clock reading in
     /// milliseconds, echoed back on the `Pong` reply so round-trip time can
     /// be computed; see `app.rs`'s `redraw` for the F3-gated cadence this is
     /// called at. Best-effort like [`Self::send_select_trade`] — a closed
@@ -2215,7 +2199,7 @@ impl Sim {
     /// vanilla's own static-border-extent lerp speed is always `0.0`
     /// and the floor wins outright.
     /// The command block the crosshair is on, resolved into the edit screen's
-    /// opening state — missing trigger, tracked on #436.
+    /// opening state; the interaction trigger is not part of this accessor.
     ///
     /// `None` when the crosshair is on nothing, on a block that is not a
     /// command block, or when the chunk store has no data at that cell. Only
