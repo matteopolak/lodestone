@@ -8,7 +8,7 @@ impl WindowApp {
 
 
     pub(super) fn redraw(&mut self) {
-        // Issue #148: refresh the cached recipe corpus if a plugin registered
+        // Refresh the cached recipe corpus if a plugin registered
         // since the last frame. Revision-gated, so the ordinary frame pays one
         // `u64` comparison under a short read guard and nothing else.
         self.sync_recipe_book();
@@ -76,7 +76,7 @@ impl WindowApp {
         // module's doc for why finalisation lives here rather than in every
         // early `return` below.
         self.frame_profile.begin_frame(frame_start);
-        // Issue #613's `PingRequest` remainder — see `WindowApp::last_ping_request`'s
+        // The periodic ping request — see `WindowApp::last_ping_request`'s
         // own doc for why this is gated on F3 rather than sent every tick the
         // way vanilla's own ungated debug-overlay ping monitor is. `send_ping_request`
         // itself is best-effort (a closed session drops it silently), so this
@@ -89,8 +89,8 @@ impl WindowApp {
         let target_fps = self.current_target_fps(frame_start);
         let step = self.pacer.begin_frame(frame_start, target_fps);
         let dt = step.dt;
-        // Issues #202/#203/#443/#444: pushed down before `step`, not after
-        // like View Bobbing below — `step` is what actually reads them this
+        // Push frame input options down before `step`, not after like View
+        // Bobbing below — `step` is what actually reads them this
         // call (`apply_mouse`'s look-inversion, the toggle-mode and
         // sprint-window pushes into `InputState`, and the auto-jump gate in
         // the tick loop), so pushing them post-step would apply this frame's
@@ -399,7 +399,7 @@ impl WindowApp {
         let creative_open = self.creative_screen_open();
         let creative_title = self.creative_frame_title().unwrap_or_default();
         let creative_menu = creative_open.then(|| self.sim.player_menu());
-        // Advancements (#167). Same pre-split resolution, and the hover has to be
+        // Advancements use the same pre-split resolution, and the hover has to be
         // computed here too: `advancements_layout` centres a tab on first read, so
         // it needs `&mut self.nav` — which the geometry call below also needs, and
         // two `&mut` borrows in one expression will not do.
@@ -414,7 +414,7 @@ impl WindowApp {
             .flatten()
             .unwrap_or_default();
         // The live progress, read from `SessionAdvancements` and folded into the
-        // toast queue — the join that makes #167's frames, progress readouts and
+        // toast queue — the join that makes the frames, progress readouts and
         // hidden-widget reveals real.
         let advancement_progress = self.advancement_progress();
         let toasted = self.advancement_toast(recipe_toast_now_ms());
@@ -443,8 +443,8 @@ impl WindowApp {
         let device = gpu.device();
         let queue = gpu.queue();
 
-        // Removals first, then uploads — the order is load-bearing since issue
-        // #479 put chunk unloads on this path. The server's `ViewTracker`
+        // Removals first, then uploads — the order is load-bearing because the
+        // server's `ViewTracker`
         // recenter is a forget/**resend** cycle, so one poll can carry an unload
         // and a re-arrival for the same column, which puts the same `SectionKey`
         // in both drains. Uploading first would let the removal delete the mesh
@@ -1194,8 +1194,8 @@ impl WindowApp {
                 .unwrap_or_default();
             render.prepare_weather(device, queue, &columns, rain_columns, &camera);
         }
-        // The underwater/fire overlay pass's per-frame input (issues #108,
-        // #112). `eye_in_water` is the *same* `PhysicsState` predicate the
+        // The underwater/fire overlay pass's per-frame input. `eye_in_water` is
+        // the *same* `PhysicsState` predicate the
         // submerged fog and the air-bubble row already read
         // (`docs/sky-and-air-bubbles.md`) — not a second derivation. `on_fire`
         // now comes from `PlayerSnapshot::on_fire`, folded by
@@ -1236,7 +1236,7 @@ impl WindowApp {
             .is_some_and(|st| st.item().to_string() == "minecraft:carved_pumpkin");
         // The freeze overlay's per-frame input. `PlayerState::
         // percent_frozen` is real, tested physics state (`update_freezing`,
-        // issue #212, `lodestone-physics`) — not a stub. `Sim::player()`
+        // `lodestone-physics`) — not a stub. `Sim::player()`
         // already returns `PlayerState` by value, so this needs no new `Sim`
         // accessor. See `docs/screen-overlays.md`'s "Freeze" section.
         let freeze_percent = self.sim.player().percent_frozen();
@@ -1249,8 +1249,7 @@ impl WindowApp {
             freeze_percent,
             // Vanilla's own scoping check is "using an item" and "that item is a
             // spyglass". Both halves: `Sim::
-            // using_item()` (the two-line accessor issue #154 was waiting
-            // on) and `held_for_scoping`, the same item id already computed
+            // using_item()` and `held_for_scoping`, the same item id already
             // above for the first-person hand pass.
             scoping: self.sim.using_item()
                 && held_for_scoping
@@ -1278,9 +1277,8 @@ impl WindowApp {
         // accept any number of targets in one pass, and `Sim::crack_targets`
         // is the accessor that actually walks `SessionBlockDestruction`/
         // `BlockDestructionOverlays` via `crate::gpu::gather_crack_targets` —
-        // the hop that was still missing when #410 was closed: the gather and
-        // the pipeline were both proven in isolation, but nothing in
-        // production called the gather, so only the local target ever reached
+        // the production hop: the gather and pipeline must both run here, or
+        // only the local target reaches
         // this vec.
         let cracks: Vec<crate::gpu::CrackTarget> = self.sim.crack_targets();
         // Hand the world's three flat-colour text passes — nametags, sign text
@@ -1763,13 +1761,13 @@ impl WindowApp {
         // the legacy `&str` path (see `HudFrame::chat_spans`'s own doc), and is
         // the only one of the pair carrying a hex `TextColor::Rgb` past this
         // point. `chat_wrap_spans` is left `None` — no persisted spans cache
-        // exists yet, so the visible log is re-wrapped every frame on this path
-        // exactly as the legacy path was before issue #527 (a); `chat_wrap`
+        // exists yet, so the visible log is re-wrapped every frame on this path;
+        // `chat_wrap`
         // below still caches nothing for it since it caches `&str`, not spans.
         hud_frame.chat_spans = &chat_spans_lines;
         hud_frame.chat_trust = chat_trust_lines;
         hud_frame.sound_subtitles = &sound_subtitles;
-        // Persisted wrap results (issue #527 (a)): without this the whole
+        // Persisted wrap results: without this the whole
         // visible log is re-wrapped, quadratically, every frame. Retained for
         // the (now-dormant) legacy `chat` path; `chat_spans` above has no
         // persisted cache of its own yet.
@@ -1860,7 +1858,7 @@ impl WindowApp {
             .recipe_book
             .as_ref()
             .map(|book| (book.len(), book.tags().len()));
-        // Issue #436's `SessionWorldBorder`/`SessionSpawnPoint` folds reaching
+        // The `SessionWorldBorder`/`SessionSpawnPoint` folds reaching
         // the screen. Both were folded, reset on quit-to-title and gated
         // through the real `SharedState::apply` path with **no reader
         // anywhere in the shell**; these two lines are the first. See
@@ -1868,7 +1866,7 @@ impl WindowApp {
         // yet the vignette tint vanilla draws.
         hud_frame.border_debug = self.sim.world_border_warning();
         hud_frame.spawn_debug = self.sim.spawn_point().pos();
-        // Issue #184's `SessionMaps` fold reaching the screen. A diagnostic and
+        // The `SessionMaps` fold reaching the screen. A diagnostic and
         // not the map's own picture — see `HudFrame::map_debug` for what is still
         // missing and why it is a texture job rather than a wiring one.
         hud_frame.map_debug = map_debug_when_visible(self.show_debug, || self.sim.map_debug());
@@ -1912,7 +1910,7 @@ impl WindowApp {
             h,
         );
         self.frame_profile.mark_hud(HudSubphase::HudDraw, Instant::now());
-        // The container overlay draws **after** the HUD (issue #51/#61): vanilla's
+        // The container overlay draws **after** the HUD: the screen's
         // own HUD draw pass draws the HUD unconditionally behind any world-following
         // screen (`hud_follows_world` above), and the screen then paints its own
         // translucent background over it (vanilla's own in-game-UI check) — the dim is draw order, not a
@@ -2009,7 +2007,8 @@ impl WindowApp {
         };
         if container_menu.is_some() && !creative_open {
             // The player-inventory title through the same language table. A local
-            // constant here is not the #52 defect class repeating: vanilla reads
+            // constant here is not a duplicate of an inventory label: the client
+            // reads
             // it from its own inventory display-name accessor, itself the client-side
             // constant `translatable("container.inventory")`
             //, so there is no server component to resolve.
@@ -2150,7 +2149,7 @@ impl WindowApp {
                         self.sim.known_recipes().stonecutter_results_for(input_item_id),
                     )
                 });
-            // The live drag preview (issue #378 part 2). `drag_paint` is the
+            // The live drag preview. `drag_paint` is the
             // *same* paint set `MenuInput::release` will turn into the
             // QUICK_CRAFT sequence, and the counts drawn from it come out of
             // `Menu::quick_craft_plan`, which is what distributes them — so the
@@ -2236,8 +2235,7 @@ impl WindowApp {
                     self.beacon_selection.primary.as_ref(),
                     self.beacon_selection.secondary.as_ref(),
                 )
-                // The bundle scroll-selection highlight (issue #616's
-                // `BUNDLE_ITEM_SELECTED`/#613's `SelectBundleItem` remainder,
+                // The bundle scroll-selection highlight and its server action,
                 // the tooltip's own consumer half — see
                 // `crate::container::bundle`'s module doc). Filtered to the
                 // *currently open* window here rather than inside
@@ -2469,7 +2467,7 @@ impl WindowApp {
             menu_overlays_drawn += 1;
         }
 
-        // Issue #449's terrain half. `Screen::Connecting` covers the
+        // The terrain-loading half. `Screen::Connecting` covers the
         // handshake/configuration phase as a full frame (see `frame_for`); this
         // block covers the moments after login while the player's own chunk is
         // still streaming in. Drawn as an overlay over the still-rendering
@@ -2517,8 +2515,8 @@ impl WindowApp {
                 Some(progress) => crate::menu::render::loading_frame_with_progress_and_grid(
                     label,
                     progress,
-                    // Issue #568: vanilla's `LevelLoadingScreen` grid, one real
-                    // square per column in the current view. `None` until a
+                    // The loading grid uses one real square per column in the
+                    // current view. `None` until a
                     // view radius is declared — the same precondition
                     // `progress` above already gates on — so the grid can
                     // never draw ahead of the bar it sits beside.
@@ -2592,21 +2590,21 @@ impl WindowApp {
             menu_overlays_drawn += 1;
         }
 
-        // Issue #474: the command block edit screen was drawn **nowhere**.
+        // The command block edit screen is an overlay, not a full-frame screen.
         // `menu::render::frame_for` correctly has no arm — it is an overlay, not
         // a full screen — but neither did `on_screen_frame`, and neither did
         // this function, so `command_block_frame` had no production caller at
         // all and the screen's clicks never hit-tested. Right-clicking a command
         // block opened a screen that rendered nothing.
         //
-        // Exactly the shape of the in-world Settings block above, and of
-        // `0d0ae93`'s fix: a screen whose `frame_for` answers `None` for a
+        // It has the same shape as the in-world Settings block above: a screen
+        // whose `frame_for` answers `None` for a
         // correct reason still needs someone to draw it, or the `None` means
         // "invisible" rather than "overlay".
         //
         // `command_tree()` is passed rather than `None`: the suggestion popup on
-        // this screen is fed by the real server's tree now that #470 decodes it
-        // and #471 routes it to the shell. `None` draws no popup at all, which
+        // this screen is fed by the server's command tree when available. `None`
+        // draws no popup at all, which
         // is the honest fallback before a tree arrives.
         //
         // The frame comes from `nav::command_block_overlay_frame` rather than

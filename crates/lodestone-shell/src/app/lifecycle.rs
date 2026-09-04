@@ -284,10 +284,10 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
             // `routes_menu_input` and not the `owns_frame(..) || is_paused() ||
             // is_death()` this used to spell out: that expression was copied
             // here, into the click arm below, into `KeyGate::menu`, and a
-            // fourth time into the test that was supposed to police it, so
-            // `Screen::CommandBlockEdit` could be missing from all four at once
-            // and nothing failed (#474). See that function's doc.
-            // Advancements (#167) tracks the cursor for its hover *and* its
+            // fourth time into the test that polices it, so a screen could be
+            // missing from all four at once without the routing contract
+            // noticing. See that function's doc.
+            // Advancements tracks the cursor for its hover *and* its
             // viewport pan. Its own arm before the menu one below, which would
             // otherwise try to hover a menu row on a screen that has none.
             // The command-suggestion dropdown's pointer half — vanilla's
@@ -432,10 +432,9 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                 if crate::menu::nav::routes_menu_input(&self.ui) =>
             {
                 if state == ElementState::Pressed {
-                    // Issue #15's other capture half: a mouse-button rebind
-                    // (vanilla defaults `key.attack` to the left button,
-                    // `key.pickItem` to the middle one — real cases, not
-                    // hypothetical) needs *any* button, not only Left, and must
+                    // A mouse-button rebind needs *any* button, not only Left,
+                    // because the default attack and pick-item actions use
+                    // different buttons. It must
                     // run before the "click acts on the row under the cursor"
                     // branch below — otherwise a capture would immediately
                     // consume its own confirming click as a hover-row
@@ -461,12 +460,9 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                         // row cursor and a single meaning of Enter, and it was wrong
                         // on the settings screen, which had no cursor and gave each
                         // control its own key. There, a click on the GUI SCALE row
-                        // arrived as `Enter` and therefore as "toggle View Bobbing" —
-                        // issue #391, where the whole bob chain was working and the
-                        // option had been silently persisted off by a click on an
-                        // unrelated row. Issue #55 gave that screen 135 controls and
-                        // a real cursor, so a click now resolves its row to that
-                        // row's own control; `MenuNav::click`'s doc has the history.
+                        // arrived as `Enter` and therefore as "toggle View Bobbing";
+                        // a click now resolves its row to that row's own control.
+                        // `MenuNav::click`'s doc describes the routing contract.
                         if let Some(row) = self.menu_row_at(self.cursor.0, self.cursor.1) {
                             // A slider takes the drag path, and takes it on the
                             // *press*: vanilla's `onClick` calls
@@ -560,8 +556,8 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                         );
                         // `&menu` supplies the cursor stack and the slot rules
                         // vanilla's `shouldAddSlotToQuickCraft` gate needs — see
-                        // `MenuInput::dragged`, and issue #378 part 1 for what an
-                        // unfiltered paint set costs.
+                        // `MenuInput::dragged`; an unfiltered paint set can
+                        // include slots outside the quick-craft selection.
                         self.menu_input.dragged(hit, &menu);
                     }
                 }
@@ -697,8 +693,8 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                             self.cursor.1,
                             self.recipe_panel.open,
                         );
-                        // The crafter's slot-disable toggle (issue #613's
-                        // `SetContainerSlotState`) — a side effect alongside the
+                        // The crafter's slot-disable toggle — a side effect
+                        // alongside the
                         // ordinary click below, not part of the `consumed_by_*`
                         // chain above it; see `maybe_toggle_crafter_slot`'s own
                         // doc for why it must not consume. Gated on a plain
@@ -709,7 +705,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                         let ctx = MenuContext {
                             cursor_loaded: menu.carried().is_some(),
                             // No game-mode plumbing exists on `Sim` to source this
-                            // from yet — see the report on this change.
+                            // yet, so keep the conservative non-creative context.
                             creative: false,
                         };
                         let clicks = match state {
@@ -799,9 +795,8 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
             // uses, so sensitivity below 1.0 can take more than one notch to
             // move a slot.
             //
-            // **`accumulate_scroll`'s magnitude is not the slot count** (issue
-            // #597): `getNextScrollWheelSelection`
-            // collapses it to its sign, so the hotbar always advances exactly
+            // **`accumulate_scroll`'s magnitude is not the slot count**:
+            // hotbar selection collapses it to its sign, so the hotbar advances exactly
             // one slot per scroll event no matter how many whole notches that
             // event's accumulator crossed — see `hotbar_scroll_step`'s own
             // docs. Passing the raw magnitude through was the owner's "scroll
@@ -820,8 +815,7 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                 // which exists for the hotbar's discrete-slot quantization.
                 self.scroll_creative_screen(wheel_notches(delta) as f32);
             }
-            // A bundle's scroll-to-select highlight (issue #616's
-            // `BUNDLE_ITEM_SELECTED` / #613's `SelectBundleItem` remainder).
+            // A bundle's scroll-to-select highlight and server notification.
             // Gated the same way the container click arm above is
             // (`is_container_open`, not `active_container_menu().is_some()`
             // directly) so a bundle slot and a real click can never disagree
@@ -857,8 +851,8 @@ impl ApplicationHandler<ShellEvent> for WindowApp {
                     self.sim.cycle_slot(-step);
                 }
             }
-            // The multiplayer server list (issues #402, #445): the notch count
-            // goes through **verbatim**, as vanilla's own scroll delta, and
+            // The multiplayer server list keeps the notch count **verbatim**
+            // as its scroll delta, and
             // `MenuNav::scroll_server_list` turns it into
             // delta times a per-list scroll rate, in pixels — 18 px for a 36 px row
             // (vanilla's own scroll-area and selection-list scrolling).
@@ -1076,7 +1070,7 @@ impl WindowApp {
         // the bottom of this file). This match is only the effects half.
         let gate = KeyGate {
             // The same predicate the hover and click arms above use
-            // (#474). It was the same *expression* before, written out
+            // It was the same *expression* before, written out
             // three times; a screen missing from one copy is a screen
             // whose clicks or keys silently vanish, and that is what
             // happened to `Screen::CommandBlockEdit` — the command box
@@ -1107,7 +1101,7 @@ impl WindowApp {
             // invisible field.
             creative_search: self.creative_search_active(),
             anvil_rename_active: self.anvil_rename_active(),
-            // Issue #613's `TeleportToEntity` remainder — see
+            // Spectating changes the meaning of hotbar-number keys; see
             // `KeyGate::spectator`'s own doc.
             spectator: self.sim.is_spectator(),
         };
@@ -1115,7 +1109,7 @@ impl WindowApp {
             PhysicalKey::Code(code) => Some(code),
             _ => None,
         };
-        // Issue #162: a plugin's claim on this physical key, read
+        // A plugin's claim on this physical key, read
         // once through a short ECS guard before `resolve_key` (a pure
         // function of plain data — see its own doc) runs its
         // precedence chain. `None` on the overwhelmingly common path
@@ -1205,7 +1199,7 @@ impl WindowApp {
         match outcome {
             Some(KeyOutcome::Menu) => {
                 let key_event = raw.expect("KeyOutcome::Menu needs the raw KeyEvent");
-                // Issue #15's last hop: a bind button mid-capture needs the
+                // A bind button mid-capture needs the
                 // *next raw key*, not `menu_key_for`'s translation —
                 // `menu_key_for` silently drops any physical key with no
                 // printable `text` (F-keys, modifiers, arrows other than
@@ -1273,11 +1267,9 @@ impl WindowApp {
                 self.set_grab(self.ui.wants_cursor_grab());
             }
             Some(KeyOutcome::DebugModifier(down)) => {
-                // Issue #197. Vanilla's
-                // `keyDebugModifier.setDown(!didDebugAction)`
-                //: the overlay toggles
-                // on the **release**, and only if no chord consumed the
-                // hold. Without that, F3+B would both open the overlay
+                // The debug modifier toggles the overlay on the **release**,
+                // and only if no chord consumed the hold. Without that, F3+B
+                // would both open the overlay
                 // and toggle hitboxes on one keystroke.
                 self.debug_held = down;
                 if down {
@@ -1397,8 +1389,7 @@ impl WindowApp {
                 // also has a *responder*: vanilla calls `onNameChanged`
                 // after every edit (`EditBox::setResponder`), which is
                 // what actually produces `ClientAction::RenameItem` —
-                // this arm is whole fix, closing the send
-                // side of the island the issue names (`RenameItem` was
+                // this arm closes the send side of the island (`RenameItem` was
                 // modelled, encoded and consumed server-side with zero
                 // producers anywhere in `lodestone-shell`).
                 let mut changed = false;
@@ -1494,8 +1485,7 @@ impl WindowApp {
             // Vanilla's own third-/first-person toggle.
             Some(KeyOutcome::TogglePerspective) => self.sim.cycle_camera_type(),
             Some(KeyOutcome::SelectSlot(slot)) => self.sim.select_slot(slot),
-            // Issue #613's `TeleportToEntity` remainder — the
-            // Spectator Menu (`crate::menu::spectator_menu`), same
+            // The Spectator Menu (`crate::menu::spectator_menu`), same
             // release-and-open dance as `OpenContainer` above.
             Some(KeyOutcome::OpenSpectatorMenu) => {
                 self.sim.input_mut(InputState::release_all);
@@ -1512,7 +1502,7 @@ impl WindowApp {
             Some(KeyOutcome::ContainerPickItem) => self.send_container_pick_item(),
             Some(KeyOutcome::Drop { ctrl }) => self.send_drop_selected(ctrl),
             Some(KeyOutcome::PickItem { ctrl }) => self.sim.pick_block_or_entity(ctrl),
-            // The *other* off-hand route (#385): no screen, no slot, a
+            // The *other* off-hand route: no screen, no slot, a
             // bare `ServerboundPlayerAction`. Sent straight through
             // `NetClient` rather than queued into `ActionQueue`, which is
             // the sanctioned shape for a per-frame input-driven action —
@@ -1718,7 +1708,7 @@ impl WindowApp {
         // the container screen's ghost-preview draw and the debug-overlay
         // counter; a jar-less run leaves this `None` and neither draws.
         //
-        // Issue #148: the corpus is *adopted into* `lodestone_ecs::RecipeRegistry`
+        // The corpus is *adopted into* `lodestone_ecs::RecipeRegistry`
         // rather than assigned straight to the field, so every recipe a plugin
         // registered during `Plugin::build` — which ran long before this point —
         // is folded in before anything reads it. `self.recipe_book` is now a
@@ -2037,7 +2027,7 @@ impl WindowApp {
 
 /// The recipe-corpus seam between `lodestone_ecs::RecipeRegistry` — which
 /// plugins write to — and `WindowApp::recipe_book`, which the container screen
-/// reads. Issue #148.
+/// reads.
 ///
 /// Two functions rather than one because they answer different questions.
 /// [`WindowApp::adopt_recipe_corpus`] runs once, at GPU bring-up, and is the only
