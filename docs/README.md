@@ -89,6 +89,15 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   reach a real client on the wire as the `level_chunk_with_light` packet body, and how
   the one heightmap this server currently computes (`MOTION_BLOCKING`) is derived and
   sent alongside them.
+- [Continuous integration](./ci.md) — `.github/workflows/ci.yml` runs on every push
+  to `main` and every pull request, so an agent can push and let a GitHub-hosted
+  runner verify the codebase instead of every agent running heavy `cargo` builds on
+  the one shared dev machine. It is **not** a replacement for the live/GPU gates —
+  those still need a real GPU adapter, a fetched vanilla `client.jar`, or a running
+  Minecraft oracle, none of which exist on a hosted runner, and stay exactly as
+  `#[ignore]`d as they are locally. CI proves the hermetic majority of the suite on
+  every push; the rest stays a local, explicit, opt-in run
+  (`docs/oracles-and-benchmarks.md`).
 - [Colour and tint](./colour-and-tint.md) — The one rule that governs every colour
   operation in this renderer — vanilla is not colour-managed, so tint, shade, fog
   and text all multiply and blend in **gamma** (sRGB byte) space, never linear — and

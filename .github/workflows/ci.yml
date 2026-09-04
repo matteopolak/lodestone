@@ -94,8 +94,8 @@ env:
   # this repeatable regardless of what path `.cargo/config.toml` hardcodes: cargo's
   # config precedence has an environment variable win over a config-file value, so
   # this always resolves through PATH to whatever the action just installed. See
-  # docs/ci.md's "A pending coordination point: sccache" for the escape hatch
-  # (RUSTC_WRAPPER: "") if a future job or runner genuinely can't run the action.
+  # docs/ci.md's "sccache in CI, and what it is actually worth" for the escape
+  # hatch (RUSTC_WRAPPER: "") if a future job or runner genuinely can't run the action.
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
 
