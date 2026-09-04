@@ -439,6 +439,12 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
             _ => unreachable!("server family checked protocol before construction"),
         },
     },
+    #[cfg(feature = "v1-19")]
+    ServerFamily {
+        label: "v1-19",
+        supports: |protocol| protocol == lodestone_v1_19::PROTOCOL_1_19_4,
+        make: |_| Box::new(lodestone_v1_19::V762ServerProtocol),
+    },
 ];
 
 /// Returns a boxed **server** protocol for `protocol`, if a compiled-in family
@@ -668,6 +674,15 @@ mod tests {
         assert!(server_protocol_for_protocol(755).is_none());
         assert!(server_protocol_for_protocol(758).is_some());
         assert!(server_protocol_for_protocol(759).is_none());
+    }
+
+    #[cfg(feature = "v1-19")]
+    #[test]
+    fn resolves_the_hosted_1_19_protocol() {
+        assert!(server_protocol_for_protocol(762).is_some());
+        assert!(compiled_server_families().contains(&"v1-19"));
+        assert!(server_protocol_for_protocol(761).is_none());
+        assert!(server_protocol_for_protocol(763).is_none());
     }
 
     /// `v1-14` speaks protocol 754 (1.16.5) — the folder name is not the
