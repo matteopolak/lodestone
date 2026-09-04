@@ -2135,6 +2135,21 @@ impl WindowApp {
                 .ghost()
                 .filter(|ghost| ghost.window_id == ghost_window_id)
                 .and_then(recipe_panel::ghost_result_stack);
+            // The stonecutter grid's icons come from the **server's** result
+            // list for whatever the input slot holds, not from this build's
+            // bundled recipe corpus: only the wire data is correct against a
+            // server running a different datapack, which is why the recipe-sync
+            // store carries it at all. An empty vector is the honest answer off
+            // a non-stonecutter screen and for an input with no cuts, and the
+            // grid draws nothing in both cases.
+            let stonecutter_matches = container_menu
+                .and_then(|menu| menu.slot_item(crate::container::stonecutter::INPUT_SLOT))
+                .and_then(|input| lodestone_data::items::item_id(&input.item().to_string()))
+                .map_or_else(Vec::new, |input_item_id| {
+                    crate::container::stonecutter::server_matches(
+                        self.sim.known_recipes().stonecutter_results_for(input_item_id),
+                    )
+                });
             // The live drag preview (issue #378 part 2). `drag_paint` is the
             // *same* paint set `MenuInput::release` will turn into the
             // QUICK_CRAFT sequence, and the counts drawn from it come out of
@@ -2175,6 +2190,7 @@ impl WindowApp {
                 .with_menu_type(open_menu.as_ref().map(|open| &open.menu_type))
                 .with_recipe_book(self.recipe_book.as_ref())
                 .with_recipe_ghost(recipe_ghost_stack.as_ref())
+                .with_stonecutter_matches(&stonecutter_matches)
                 // The inventory avatar's **live pose**. Vanilla poses the real
                 // render state, so a player who opens their inventory during the
                 // tail of a swing sees that swing. Without this line
@@ -2397,12 +2413,42 @@ impl WindowApp {
         // player with no chunk stream until it respawns, so this must draw
         // over the still-rendering, still-ticking world rather than replace
         // it — see `Screen::Death`'s doc comment.
-        if self.ui.is_death()
-            && let Some(menu) = self.menu.as_mut()
-        {
-            let death_frame = crate::menu::render::death_frame(&self.nav, self.sim.death_message());
-            menu.render_overlay(device, queue, frame.view(), &death_frame, w, h);
-            menu_overlays_drawn += 1;
+        if self.ui.is_death() {
+            // Not routed through `WindowApp::death_hover_tooltip`: that
+            // method takes `&self` as a whole, and `render`/`target` are
+            // already live exclusive borrows for the rest of this function
+            // (bound above), the same reason the chat hover tooltip a little
+            // further down is computed inline off the already-borrowed
+            // locals rather than through `Self::chat_interaction`. `w`/`h`
+            // here are already `target.size()` — the same physical
+            // framebuffer `death_hover_tooltip`'s own logical-canvas
+            // conversion would have re-derived it from.
+            let death_tooltip = self.sim.death_message().and_then(|message| {
+                let gui_scale = self.nav.gui_scale();
+                let (cw, ch) = crate::menu::render::logical_canvas(gui_scale, w, h);
+                let scale = crate::config::calculate_gui_scale(gui_scale, w, h).max(1) as f32;
+                let run = crate::menu::render::death_run_at(
+                    message,
+                    self.cursor.0 / scale,
+                    self.cursor.1 / scale,
+                    cw,
+                    ch,
+                )?;
+                let hover = run.span.hover?;
+                let translate = self.sim.translator();
+                let text = hover
+                    .text_payload()?
+                    .resolve(translate.as_ref())
+                    .to_legacy_string();
+                Some(text.split('\n').map(str::to_owned).collect::<Vec<_>>())
+            });
+            if let Some(menu) = self.menu.as_mut() {
+                let mut death_frame =
+                    crate::menu::render::death_frame(&self.nav, self.sim.death_message());
+                death_frame.tooltip = death_tooltip;
+                menu.render_overlay(device, queue, frame.view(), &death_frame, w, h);
+                menu_overlays_drawn += 1;
+            }
         }
 
         // The resource-pack prompt (a server's own `ClientboundResourcePackPushPacket`,
