@@ -293,6 +293,15 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   world/entity/player state, expressing player-verb intent (break, place, move, look),
   commands, plugin messaging, persistent per-plugin data, task scheduling, off-tick
   async work, and bulk world edits.
+- [Plugin capability audit: what a Java plugin can do here, per side and per tier](./plugin-capability-audit.md) —
+  A capability-by-capability audit of the claim "any Bukkit/Paper/Fabric plugin is
+  portable to this framework", checked against the tree rather than against design
+  documents, with a verdict per capability for each of the three surfaces a plugin can
+  land on — the client's native `bevy_ecs` tier, the client's WASM host, and the
+  server — and, for every gap, what closing it costs and which of the two
+  constraints (both tiers must express the same feature; `EcsHandle` is not reentrant)
+  it has to satisfy. It ends with a decomposition into sub-issues ordered by what
+  unblocks the most.
 - [Plugin crafting-station hooks — anvil, grindstone, smithing table, loom, stonecutter](./plugin-crafting-hooks.md) —
   The plugin-facing seam issue #150 asked for: a server-side mirror of Bukkit's
   `PrepareAnvilEvent`/ `PrepareSmithingEvent`/`PrepareItemCraftEvent`, letting a
