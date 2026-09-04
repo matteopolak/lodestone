@@ -127,21 +127,16 @@ pub enum Screen {
     /// The add/edit form for one server entry. Reached from
     /// [`Screen::ServerList`]; Escape returns there **without** saving.
     ServerEdit,
-    /// The singleplayer world list: vanilla's `SelectWorldScreen`.
+    /// The singleplayer world list.
     /// Reached from [`Screen::MainMenu`] via [`nav::MainButton::Singleplayer`] —
-    /// which is vanilla's own wiring, where the title screen's Singleplayer button
-    /// opens this screen rather than launching anything; Escape (or the screen's
+    /// The title screen's Singleplayer button opens this screen rather than
+    /// launching anything; Escape (or the screen's
     /// own Back button) returns there.
     ///
-    /// **This doc used to say the list holds "exactly one" world** —
-    /// [`world_select::BUNDLED_WORLD`], a fixed seed regenerated every launch and
-    /// never written to disk — and that world creation was present and disabled.
-    /// Both were true when written and neither has been true since two later fixes: the
-    /// list is one row per directory in `saves/`, Create New World creates one, it
-    /// **scrolls** and Delete removes one through [`Screen::Confirm`]
-    /// Its **Play
-    /// Selected World** button is live and starts a real session; see
-    /// [`world_select`] for the row's geometry and the launch chain.
+    /// The list has one row per directory in `saves/`, supports scrolling, and
+    /// removes a selected world through [`Screen::Confirm`]. Create New World
+    /// and Play Selected World both start real session flows; see
+    /// [`world_select`] for the row geometry and launch chain.
     WorldSelect,
     /// The account list: saved Microsoft accounts plus the
     /// always-present offline entry, and the device-code sign-in flow that
@@ -198,15 +193,9 @@ pub enum Screen {
     /// too (`CommandBlock.useWithoutItem` → `LocalPlayer.openCommandBlock`,
     /// client-side, no packet).
     ///
-    /// This doc used to read "**Nothing yet calls `open_command_block`**:
-    /// there is no command-block-entity NBT decode anywhere in this
-    /// workspace, so there is no real right-click trigger for it". True when
-    /// written, and stale as of that fix's island sweep. The first half is
-    /// *still literally true* — there is no typed decode in `lodestone-model`
-    /// or `crates/protocol` — but the conclusion did not follow:
-    /// [`crate::command_block_source`] reads the payload straight off the
-    /// `lodestone_world::BlockEntity` the chunk already carries, exactly as
-    /// `SignText` does for signs. No protocol work was needed.
+    /// [`crate::command_block_source`] reads the payload straight from the
+    /// `lodestone_world::BlockEntity` already carried by the chunk, so the
+    /// right-click path does not require a separate typed protocol decode.
     ///
     /// Its tab-completion is still tree-less and honestly degraded — that half
     /// waits on the `COMMANDS` (16) decode, which does not exist in any
@@ -273,10 +262,10 @@ pub enum Screen {
     /// [`close_book_view`](Self::close_book_view).
     BookView,
     /// The Spectator Menu — vanilla's `SpectatorMenu`/`SpectatorGui`, opened
-    /// by a hotbar-number key while in spectator mode. Issue #613's
-    /// `TeleportToEntity` remainder — see
-    /// [`crate::menu::spectator_menu`]'s module doc for the real vanilla
-    /// trigger (there is no click handling anywhere on the tab list itself)
+    /// by a hotbar-number key while in spectator mode. The entity-teleport
+    /// action is handled by the
+    /// [`crate::menu::spectator_menu`] module (there is no click handling
+    /// anywhere on the tab list itself)
     /// and what this implementation deliberately simplifies. Same overlay
     /// shape as [`Screen::BookEdit`]: client-local, no server round trip to
     /// open, pointer released, world kept rendering (and ticking) behind it.
@@ -296,7 +285,7 @@ pub enum Screen {
     /// deliberately **not** an [`render::owns_frame`] screen, because that set
     /// clears the frame and would stop the world rendering behind it.
     Paused,
-    /// The local player died: vanilla's `DeathScreen` — the "You
+    /// The local player died: the "You
     /// Died!" title, the server's death message, a score line, and two
     /// buttons (Respawn / Title Screen). Reachable from every live gameplay
     /// screen (`Playing`, `Chat`, `Container`, `Paused` — vanilla replaces
@@ -319,32 +308,29 @@ pub enum Screen {
     /// A session failed to establish or ended unexpectedly. `error()` carries the
     /// human-readable reason; the only ways forward are back to the menu or quit.
     Error,
-    /// The end-poem/credits roll: vanilla's `WinScreen`, shown
+    /// The end-poem/credits roll, shown
     /// after the dragon fight and exiting the End through the exit portal.
     ///
-    /// **What this is not**: vanilla's `WinScreen` auto-scrolls a ~1500-word
-    /// poem plus a real Mojang employee credits roll, driven by elapsed time
-    /// (vanilla's own win-screen rendering's own tick counter). Two things rule that out here —
-    /// see [`render::credits_frame`] for the full reasoning:
+    /// **What this is not**: an elapsed-time auto-scrolling poem and employee
+    /// credits roll. See [`render::credits_frame`] for the full reasoning:
     /// 1. [`render::frame_for`] is a pure function of [`UiState`]/[`nav::MenuNav`]
     ///    with no elapsed-time input, so a real auto-scroll needs a per-frame
     ///    tick reaching this state machine, which nothing here provides yet
     ///    (`app.rs`'s `pano.advance(Instant::now())` is the one place this
     ///    codebase already does that, and it lives outside this crate's frame
     ///    model).
-    /// 2. Mojang's end-poem text and its own credited employee list are not
-    ///    this project's to reproduce or to relabel as Lodestone's own — see
-    ///    the module docs on [`render::credits_frame`].
+    /// 2. The source poem and employee list are not reproduced or relabelled
+    ///    as Lodestone-authored content — see the module docs on
+    ///    [`render::credits_frame`].
     ///
-    /// So this screen shows a short, Lodestone-authored placeholder message
-    /// instead of vanilla's real scroll, dismissed by Enter/Escape/its own
+    /// This screen therefore shows a short, Lodestone-authored placeholder
+    /// message, dismissed by Enter/Escape/its own
     /// Done button — reachable through [`Self::show_credits`].
     ///
-    /// **Wired since `86fbe0a`.** This doc used to say "which nothing calls
-    /// yet": `app.rs`'s `drive_ui_from_session` now reconciles `Sim::has_won()`
-    /// (latched from a real `NetUpdate::WinGame`) into `show_credits()` every
-    /// frame, the same way it already reconciles `Sim::is_dead()` into the
-    /// death screen. See `docs/credits-screen.md` for the full chain.
+    /// `app.rs`'s `drive_ui_from_session` reconciles `Sim::has_won()` (latched
+    /// from `NetUpdate::WinGame`) into `show_credits()` every frame, alongside
+    /// the death-screen reconciliation. See `docs/credits-screen.md` for the
+    /// full chain.
     Credits,
     /// The Social Interactions screen: vanilla's
     /// `SocialInteractionsScreen`, an online-player list with a per-player
@@ -370,11 +356,9 @@ pub enum Screen {
     /// see [`stats`]'s module docs for why vanilla's own screen would show
     /// exactly that given the same data.
     ///
-    /// **The General tab now shows real counters.** `award_stats` is decoded and
+    /// **The General tab shows real counters.** `award_stats` is decoded and
     /// folded into `lodestone_ecs::SessionStatistics`, and `app::session`
-    /// refreshes `MenuNav`'s snapshot from it once per frame. This doc used to
-    /// say every value read zero because nothing decoded the packet; that was
-    /// true and is not any more.
+    /// refreshes `MenuNav`'s snapshot from it once per frame.
     Statistics,
     /// The Server Links screen: vanilla surfaces this as a `Dialogs.SERVER_LINKS`
     /// dialog button on the pause menu, labelled `menu.server_links`
@@ -403,23 +387,26 @@ pub enum Screen {
     /// nothing decodes `UPDATE_ADVANCEMENTS`. Same trade [`Screen::Statistics`]
     /// made, and the same honest zero: see [`advancements`]'s module docs.
     Advancements,
-    /// The World Creation screen: vanilla's `CreateWorldScreen`,
-    /// reduced to one flat hand-placed list (see [`create_world`]'s module
-    /// docs for why). Reached from [`Screen::WorldSelect`]'s "Create New
-    /// World" button — That fix left it present-and-disabled for exactly
-    /// this issue; Escape or the screen's own Cancel button returns to
-    /// [`Screen::WorldSelect`].
+    /// The World Creation screen, reduced to a hand-placed set of tabs (see
+    /// [`create_world`]'s module docs). Reached from
+    /// [`Screen::WorldSelect`]'s "Create New World" button; Escape or the
+    /// screen's Cancel button returns to [`Screen::WorldSelect`].
     ///
-    /// Collecting a name/seed/game-mode/difficulty/structures/bonus-chest/
-    /// allow-cheats config is real. **The seed reaches the wire since
-    /// `72cb451`/`d65d593`**: the Create button produces
-    /// `MenuAction::Singleplayer(Some(config))`, and `app.rs`'s
-    /// `resolve_launch_seed` resolves `config.seed` (vanilla's own
-    /// `WorldOptions.parseSeed`/`randomSeed` rule) in place of
-    /// [`world_select::BUNDLED_WORLD`]'s fixed seed — this doc used to say
-    /// nothing downstream read it. Game mode/difficulty/structures/bonus-chest/
-    /// allow-cheats remain decorative (no session-setup wiring consumes them
-    /// yet). See [`create_world`]'s module docs for the current split.
+    /// Create is live. On native targets, [`crate::menu::nav::MenuNav`] creates
+    /// the save directory and returns [`crate::menu::nav::MenuAction::Singleplayer`]
+    /// with a [`crate::menu::nav::SingleplayerLaunch::Created`] payload. The
+    /// save records the typed name, selected `GameType`, experiments and any
+    /// selected generator settings; the launch applies the typed seed and
+    /// game rules, while native `online_mode` selects the LAN handshake mode.
+    ///
+    /// On browser targets, the same `Created` payload has no save directory:
+    /// the integrated server consumes its config for the in-memory seed, world
+    /// type and game-rule launch, while LAN/online mode is unavailable because
+    /// that path is native-only.
+    ///
+    /// The choices currently collected but not consumed by world setup are
+    /// difficulty, `generate_structures`, `bonus_chest`, `allow_cheats` and
+    /// `data_packs`. See [`create_world`]'s module docs for the wiring split.
     CreateWorld,
     /// Vanilla's `ConfirmScreen`: a question, a warning naming what
     /// is at risk, and two buttons. Reached from [`Screen::WorldSelect`]'s
@@ -530,11 +517,9 @@ impl Screen {
     ///
     /// Exists so a test that has to walk *all* screens iterates the enum instead
     /// of restating a count.
-    /// `render::tests::owns_frame_agrees_with_frame_for_on_every_screen` asserted
-    /// a literal `12` and went red the moment [`Screen::WorldSelect`] landed
-    /// — which is `CLAUDE.md`'s staleness class, in the one place it is
-    /// most annoying: a test that is *about* completeness, made incomplete by the
-    /// thing it was meant to notice.
+    /// `render::tests::owns_frame_agrees_with_frame_for_on_every_screen` walks
+    /// this list, so its length and contents must describe every screen the
+    /// renderer can own.
     ///
     /// **What keeps this complete.** The length is written next to the list, so
     /// adding an entry without bumping `13` (or bumping it without adding one) is
@@ -607,8 +592,8 @@ pub struct UiState {
     /// through [`lodestone_model::ResolvedText::to_interactive_spans`] before
     /// this ever sees it.
     death_message: Option<Vec<lodestone_model::text::InteractiveTextSpan>>,
-    /// Which step of establishing a session [`Screen::Connecting`] is naming —
-    /// That fix. Only read on that screen; reset by [`Self::begin`] so a
+    /// Which step of establishing a session [`Screen::Connecting`] is naming.
+    /// Only read on that screen; reset by [`Self::begin`] so a
     /// second session never inherits the previous one's last phase.
     connect_phase: loading::ConnectPhase,
     /// The window id of the server (or local-menu) window this frame last
@@ -798,8 +783,8 @@ impl UiState {
                 | Screen::WorldSelect
                 | Screen::Settings
                 | Screen::Accounts
-                // That fix. A confirmation opened from the world list is a
-                // pre-session menu screen exactly as the list it sits over is:
+                // A confirmation opened from the world list is a pre-session
+                // menu screen exactly as the list it sits over is:
                 // no world is loaded, and the menu renderer owns the frame.
                 | Screen::Confirm
         )
@@ -1362,44 +1347,14 @@ impl UiState {
     }
 
     /// Reconciles the container screen against the session's real open-window
-    /// id, closing the screen the moment a server (or local-menu) window that
-    /// was open goes away on its own — a **server-initiated** close, as
-    /// opposed to the player's own Escape/`E`/close-button, which already call
-    /// [`Self::close_container`] directly.
+    /// id. A transition from `Some` to `None` closes a server- or local-menu
+    /// window that disappeared without a direct UI action. The player's own
+    /// inventory has no window id, so a level-triggered `None` check would close
+    /// that screen immediately; tracking the previous id makes the distinction
+    /// explicit.
     ///
-    /// Vanilla's own close is three clauses, not one:
-    /// `ClientPacketListener.handleContainerClose` calls
-    /// `LocalPlayer.clientSideCloseContainer`, which (1) calls
-    /// `Player.closeContainer`, resetting `containerMenu` back to
-    /// `inventoryMenu` — a **model** fact, not a screen — and (2) separately,
-    /// unconditionally calls `Minecraft.gui.setScreen(null)`, which is the
-    /// actual "go back to gameplay with no screen at all" clause. Our
-    /// `ClientEvent::ScreenClosed` fold (`lodestone_game::menus::Menus::apply`,
-    /// reached through `lodestone-ecs`'s session ingest) already does clause
-    /// (1) correctly — it clears `SessionMenus`'s `opened` — but nothing did
-    /// clause (2): `WindowApp::redraw` only ever *opened*
-    /// [`Screen::Container`] when `Sim::open_menu()` went from `None` to
-    /// `Some` (see its own call to [`Self::open_container`]), and never the
-    /// reverse. With the screen left on `Container` and the model's `opened`
-    /// now `None`, `active_container_menu`'s player-inventory fallback (window
-    /// id 0, since the player inventory *is* window 0 in vanilla too) kept
-    /// drawing — the reported symptom, opening the player's own inventory
-    /// right after a server closed something else.
-    ///
-    /// This has to be edge-triggered on the window id transitioning from
-    /// `Some` to `None`, not level-triggered on "no window id right now":
-    /// the player's own `E` press opens [`Screen::Container`] with **no**
-    /// window id at all (vanilla never asks the server to open your own
-    /// inventory), so a level check would close it again the very next frame.
-    /// Tracking the last-seen window id here — rather than inside `Sim`,
-    /// which deliberately holds no wire edge-tracker of its own — is what
-    /// makes the two cases distinguishable.
-    ///
-    /// Called from `WindowApp::drive_ui_from_session`, ahead of that
-    /// function's own generic cursor-grab reconciliation — closing the
-    /// screen here is enough for `wants_cursor_grab` to pick the change up
-    /// the same way it already does for every other screen transition that
-    /// function makes.
+    /// Called from `WindowApp::drive_ui_from_session` before cursor-grab
+    /// reconciliation, so the screen transition is reflected in the same frame.
     pub(crate) fn reconcile_server_menu_window(&mut self, window_id: Option<i32>) {
         let closed = self.container_server_window.is_some() && window_id.is_none();
         self.container_server_window = window_id;
@@ -1698,18 +1653,16 @@ impl UiState {
         }
     }
 
-    /// Show the end-poem/credits screen: vanilla's `WinScreen`,
-    /// reached by exiting the End through the exit portal after the dragon
+    /// Show the end-poem/credits screen, reached by exiting the End through the
+    /// exit portal after the dragon
     /// fight. Valid from the same live-gameplay screens as [`Self::die`] —
     /// mirroring that guard rather than inventing a different one, since both
     /// are "the server just ended this session's world for a story reason"
     /// events.
     ///
-    /// **Called from production since `86fbe0a`.** `app.rs`'s
-    /// `drive_ui_from_session` calls this once `Sim::has_won()` latches a real
-    /// `NetUpdate::WinGame`, guarded on `screen() != Screen::Credits` so it
-    /// does not re-latch every frame the screen stays up — this doc used to
-    /// say the method was reachable only from a test; it no longer is. See
+    /// `app.rs`'s `drive_ui_from_session` calls this once `Sim::has_won()`
+    /// latches a `NetUpdate::WinGame`, guarded on `screen() != Screen::Credits`
+    /// so it does not re-latch every frame the screen stays up. See
     /// [`Screen::Credits`]'s own doc and `docs/credits-screen.md`.
     pub fn show_credits(&mut self) {
         if matches!(
@@ -1937,17 +1890,8 @@ mod tests {
 
         // Connecting -> cancel the dial, back to where it started.
         //
-        // This used to assert a no-op ("can't pause mid-connect"), which was
-        // true when it was written and stopped being true when Escape on the
-        // loading screen became a real cancel — see `UiState::cancel_connect`
-        // and the dedicated gate
-        // `escape_while_connecting_cancels_back_to_where_the_dial_started`,
-        // which asserts the *same* case the opposite way. The two disagreed and
-        // this one was the stale half.
-        //
-        // The `quit_requested` half survives the correction and is the part
-        // worth keeping here: whatever Escape does on the loading screen, it
-        // must not be the title screen's "quit the game".
+        // Escape cancels an in-progress connection and returns to its origin;
+        // it must not set the title screen's "quit the game" request.
         let mut ui = UiState::new();
         ui.begin(SessionKind::Singleplayer);
         ui.on_escape();
@@ -2020,13 +1964,12 @@ mod tests {
 
     #[test]
     fn focus_loss_leaves_an_open_screen_alone() {
-        // **The owner's report**: tabbing out while chat, an inventory, a
+        // Losing focus while chat, an inventory, a
         // chest (or any other container), a command block editor, a sign
         // editor or a book editor is open must not bury it under the pause
-        // overlay — vanilla's own `Gui.setPauseScreen` only ever acts when
-        // `this.screen == null`, matched here by `Screen::Playing` alone.
-        // Every one of these five used to be in `UiState::pause`'s own
-        // trigger set; this is the negative half for all five at once. Each
+        // overlay must leave that screen visible. The pause transition is
+        // valid only from `Screen::Playing`, so all five cases are covered by
+        // this negative check. Each
         // case's own name reaches the assertion message, so a failure names
         // which screen regressed rather than only "some screen did".
         let openers: [(&str, fn(&mut UiState)); 5] = [
@@ -2084,8 +2027,8 @@ mod tests {
 
     #[test]
     fn escape_unwinds_the_menu_one_level_at_a_time() {
-        // The bug this guards: Escape from the edit form falling through to
-        // MainMenu's "quit the game" arm and exiting mid-edit.
+        // Escape from the edit form returns to the server list rather than
+        // invoking the title-screen quit action.
         let mut ui = UiState::new();
         ui.open_server_list();
         ui.open_server_edit();
@@ -2182,7 +2125,7 @@ mod tests {
         }
     }
 
-    /// That fix. The world list opens only from the title and unwinds back to
+    /// The world list opens only from the title and unwinds back to
     /// it — one level, like every other menu screen.
     #[test]
     fn the_world_list_opens_from_the_title_and_unwinds_to_it() {
@@ -2377,8 +2320,8 @@ mod tests {
 
     #[test]
     /// Escape on the loading screen unwinds to wherever the dial started, and
-    /// forgets the session — the owner reported having to wait out the connect
-    /// timeout instead.
+    /// forgets the session, so the loading screen cannot leave a stale session
+    /// behind.
     ///
     /// The two arms are deliberately different session kinds because
     /// `cancel_connect` picks its destination from `kind`: a multiplayer dial
@@ -2597,11 +2540,8 @@ mod tests {
         );
     }
 
-    /// `quit_to_title` from the credits screen is the same teardown as from
-    /// pause/death — reused rather than a fourth copy of "clear session state
-    /// and go to the title", per that fix's own scope (the trigger is out
-    /// of this crate's ownership; the exit is not, and it should not need a
-    /// new mechanism).
+    /// `quit_to_title` from the credits screen shares the pause/death teardown:
+    /// it clears session state and returns to the title.
     #[test]
     fn quit_to_title_from_the_credits_screen_leaves_for_the_main_menu() {
         let mut ui = UiState::new();
