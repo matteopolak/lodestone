@@ -428,12 +428,12 @@ fn live_mesh_snapshot_models_resolves_biome_names_from_the_live_registry_not_the
          swamp's colour here instead"
     );
 
-    // The control, computed above (before `snap` was consumed) and checked
+    // The control, computed above before `snap` was consumed and checked
     // here: the SAME snapshot (same block ids, same biome-id grid), meshed
-    // with an EMPTY biome-names table — i.e. exactly what every caller got
-    // before this change — must give the exact opposite assignment. This is
-    // what proves the two assertions above are caused by `live_names`, not
-    // by some other difference between this test and the one above it.
+    // with an EMPTY biome-names table — the fallback mapping — must give the
+    // exact opposite assignment, proving that the two assertions above are
+    // caused by `live_names`, not by some other difference between this test
+    // and the one above it.
     let at_desert_id_fallback = tint_on_top_face(&fallback_mesh, 2.0, 2.0);
     let at_swamp_id_fallback = tint_on_top_face(&fallback_mesh, 13.0, 13.0);
     println!(

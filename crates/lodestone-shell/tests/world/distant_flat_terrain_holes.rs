@@ -96,9 +96,9 @@
 //! (`ColumnSource::Complete`, what [`snapshot_section`] always uses), so no
 //! neighbour is ever `Neighbour::Unloaded` and [`SnapshotOutcome::Deferred`]
 //! never fires. That structurally rules out the streaming-neighbour-arrival
-//! cause of missing geometry (issue #389/#479's mechanism) for whatever this
-//! gate finds — a hole here cannot be explained by "the neighbour had not
-//! arrived yet", because every neighbour already had.
+//! cause of missing geometry for whatever this gate finds — a hole here cannot
+//! be explained by "the neighbour had not arrived yet", because every
+//! neighbour was already present before meshing began.
 //!
 //! # The control
 //!

@@ -1,7 +1,6 @@
-//! Extends `distant_flat_terrain_holes.rs` to genuinely **uneven** terrain —
-//! issue #670's own most recent comment names this as the next harness,
-//! because the flat gate "cannot speak to genuinely uneven terrain —
-//! chunk-to-chunk elevation changes are exactly what it excludes."
+//! Extends `distant_flat_terrain_holes.rs` to genuinely **uneven** terrain.
+//! The flat gate cannot speak to chunk-to-chunk elevation changes because its
+//! single-height world deliberately excludes them.
 //!
 //! # The invariant, generalised rather than reinvented
 //!
