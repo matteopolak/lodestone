@@ -44,7 +44,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use lodestone_data::{block_blast, block_states};
+use lodestone_data::{block::Block, block_blast, block_states};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -116,10 +116,15 @@ fn parse_dump(text: &str) -> Vec<Row> {
 ///
 /// Deduplicates the four-tuple the way `hardness.rs`'s generator does: distinct
 /// tuples are numbered in ascending *registry id* order, independent of dump
-/// line order, so the output is deterministic. The name index is emitted
-/// separately, sorted by name, because the consumer looks up by name.
+/// line order, so the output is deterministic. The generated lookup table is
+/// indexed by the canonical `Block` registry id, so it does not repeat names.
 fn generate(rows: &[Row]) -> String {
     let count = rows.len();
+    let registry_count = usize::from(Block::COUNT);
+    assert_eq!(
+        count, registry_count,
+        "registry ids must be exactly 0..BLOCK_COUNT: got {count} rows for {registry_count} blocks"
+    );
 
     let mut entry_index: BTreeMap<(u32, u8, u8, bool), usize> = BTreeMap::new();
     let mut distinct: Vec<(u32, u8, u8, bool)> = Vec::new();
@@ -143,15 +148,38 @@ fn generate(rows: &[Row]) -> String {
         distinct.len()
     );
 
-    let mut by_name: Vec<(&str, usize)> = rows
-        .iter()
-        .zip(&per_row)
-        .map(|(row, &entry)| (row.name.as_str(), entry))
-        .collect();
-    by_name.sort_by_key(|(name, _)| *name);
-    for window in by_name.windows(2) {
-        assert_ne!(window[0].0, window[1].0, "duplicate block name {}", window[0].0);
+    let mut entry_by_registry_id = vec![None; registry_count];
+    for (row, &entry) in rows.iter().zip(&per_row) {
+        assert!(
+            row.id < registry_count,
+            "registry ids must be exactly 0..BLOCK_COUNT: id {} is outside 0..{registry_count}",
+            row.id
+        );
+        assert!(
+            entry_by_registry_id[row.id].replace(entry).is_none(),
+            "registry ids must be exactly 0..BLOCK_COUNT: duplicate id {}",
+            row.id
+        );
+        let block = Block::from_name(&row.name)
+            .unwrap_or_else(|| panic!("{} is not a built-in block", row.name));
+        assert_eq!(
+            usize::from(block.registry_id()),
+            row.id,
+            "registry ids must be exactly 0..BLOCK_COUNT: {} has registry id {} in the canonical block table, not {}",
+            row.name,
+            block.registry_id(),
+            row.id
+        );
     }
+    let entry_by_registry_id: Vec<usize> = entry_by_registry_id
+        .into_iter()
+        .enumerate()
+        .map(|(id, entry)| {
+            entry.unwrap_or_else(|| {
+                panic!("registry ids must be exactly 0..BLOCK_COUNT: missing id {id}")
+            })
+        })
+        .collect();
 
     let mut out = String::new();
     out.push_str(
@@ -188,18 +216,16 @@ fn generate(rows: &[Row]) -> String {
     out.push_str("];\n\n");
     let _ = writeln!(
         out,
-        "/// Every block name, **sorted ascending**, paired with its index into\n\
-         /// [`ENTRIES`]. Sorted rather than in registry order so the consumer can\n\
-         /// binary-search a name straight out of a canonical state string.\n\
-         pub static BY_NAME: [(&str, u16); {count}] = ["
+        "/// Entry index into [`ENTRIES`], indexed by `minecraft:block` registry id.\n\
+         /// The canonical names live only in `generated_block_registry`.\n\
+         pub static ENTRY_BY_REGISTRY_ID: [u16; {count}] = ["
     );
-    for (name, entry) in &by_name {
-        let _ = writeln!(out, "    ({name:?}, {entry}),");
+    for entry in &entry_by_registry_id {
+        let _ = writeln!(out, "    {entry},");
     }
     out.push_str("];\n\n");
 
     // ---- the flat per-block-state resistance table (the ray-walk hot path) ----
-    let by_name_map: BTreeMap<&str, usize> = by_name.iter().copied().collect();
     let mut value_index: BTreeMap<u32, usize> = BTreeMap::new();
     let mut values: Vec<u32> = Vec::new();
     let mut intern = |bits: u32| -> usize {
@@ -221,9 +247,9 @@ fn generate(rows: &[Row]) -> String {
             .expect("every state id has properties")
             .iter()
             .any(|(key, value)| *key == "waterlogged" && *value == "true");
-        let entry = *by_name_map
-            .get(name)
-            .unwrap_or_else(|| panic!("{name} is not in the dump"));
+        let block = Block::from_name(name)
+            .unwrap_or_else(|| panic!("{name} is not a built-in block"));
+        let entry = entry_by_registry_id[usize::from(block.registry_id())];
         let block_bits = distinct[entry].0;
         let is_air = matches!(
             name,
@@ -305,6 +331,42 @@ const EMPTY_RESISTANCE_BITS: u32 = 0xFFFF_FFFF;
 
 /// The resistance both vanilla fluids report, folded into the flat table.
 const FLUID_RESISTANCE: f32 = 100.0;
+
+#[test]
+fn generator_emits_registry_indexed_entries_without_duplicate_names() {
+    let rendered = generate(&parse_dump(DUMP));
+
+    assert!(rendered.contains("pub static ENTRY_BY_REGISTRY_ID: [u16; 1196]"));
+    assert!(!rendered.contains("BY_NAME"));
+    assert!(!rendered.contains("\"minecraft:"));
+}
+
+#[test]
+#[should_panic(expected = "registry ids must be exactly 0..BLOCK_COUNT")]
+fn generator_rejects_duplicate_registry_ids() {
+    let mut rows = parse_dump(DUMP);
+    rows[1].id = rows[0].id;
+
+    generate(&rows);
+}
+
+#[test]
+#[should_panic(expected = "registry ids must be exactly 0..BLOCK_COUNT")]
+fn generator_rejects_missing_registry_ids() {
+    let mut rows = parse_dump(DUMP);
+    rows.remove(1);
+
+    generate(&rows);
+}
+
+#[test]
+#[should_panic(expected = "registry ids must be exactly 0..BLOCK_COUNT")]
+fn generator_rejects_out_of_range_registry_ids() {
+    let mut rows = parse_dump(DUMP);
+    rows[1].id = rows.len();
+
+    generate(&rows);
+}
 
 /// The drift guard: regenerates the committed table from the dump and asserts
 /// byte-for-byte equality, or rewrites it under `LODESTONE_REGEN=1`.

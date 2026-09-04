@@ -147,6 +147,11 @@ protocol, which is not a second copy of the canonical census.
 - **Every generated file in this cluster is generated — never hand-edit one.** Regenerate
   with `LODESTONE_REGEN=1 cargo test -p <crate> --test <name> <fn> -- --ignored --nocapture`;
   each test file's own header carries the exact invocation.
+- **A generated census keyed by a built-in registry must reuse that registry's canonical
+  names.** For example, the blast/fire facts use a `Block` registry-id → fact-index
+  mapping; they do not repeat block names beside the facts. Its generator checks that
+  dump ids are the exact `0..BLOCK_COUNT` permutation and that each dump name joins to the
+  same `Block` id before emitting the table.
 - **Registry-report tables** use
   `cargo xtask gen-registries --version 26.2 --protocol 776`; run
   `cargo xtask gen-registries --version 26.2 --protocol 776 --check` to detect drift without
