@@ -356,7 +356,11 @@ fn run_arm(
             let mut pipeline =
                 ColumnPipeline::with_window(Arc::clone(&source), coords.to_vec(), window);
             let mut emitted = Vec::with_capacity(coords.len());
-            while let Some((pos, payload)) = pipeline.next().await {
+            while let Some((pos, payload)) = pipeline
+                .next()
+                .await
+                .expect("a source without an encoder cannot fail")
+            {
                 // This arm builds the pipeline with no `ChunkEncoder`, so the
                 // payload is always the column — `expect` rather than a
                 // `if let`, because silently skipping the `black_box` would let

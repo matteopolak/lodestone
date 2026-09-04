@@ -138,7 +138,11 @@ fn drive_shared(
     let emitted = runtime.block_on(async {
         let mut pipeline = ColumnPipeline::with_window(Arc::clone(&source), coords, window);
         let mut emitted = Vec::new();
-        while let Some((pos, _column)) = pipeline.next().await {
+        while let Some((pos, _column)) = pipeline
+            .next()
+            .await
+            .expect("a source without an encoder cannot fail")
+        {
             emitted.push(pos);
         }
         emitted
