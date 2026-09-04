@@ -387,11 +387,14 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     #[cfg(feature = "v1-9")]
     ServerFamily {
         label: "v1-9",
-        // The two host implementations have distinct packet-id tables. The
+        // The host implementations have distinct packet-id tables. The
         // family adapter covers earlier revisions too, but their server packet
         // layouts have not been implemented.
-        supports: |protocol| protocol == lodestone_v1_9::PROTOCOL || protocol == 316,
+        supports: |protocol| {
+            protocol == lodestone_v1_9::PROTOCOL || protocol == 210 || protocol == 316
+        },
         make: |protocol| match protocol {
+            210 => Box::new(lodestone_v1_9::V210ServerProtocol),
             316 => Box::new(lodestone_v1_9::V316ServerProtocol),
             _ => Box::new(lodestone_v1_9::V340ServerProtocol),
         },
@@ -603,7 +606,9 @@ mod tests {
     fn resolves_the_hosted_1_9_family_protocols() {
         assert!(server_protocol_for_protocol(340).is_some());
         assert!(compiled_server_families().contains(&"v1-9"));
+        assert!(server_protocol_for_protocol(210).is_some());
         assert!(server_protocol_for_protocol(316).is_some());
+        assert!(server_protocol_for_protocol(209).is_none());
         assert!(server_protocol_for_protocol(315).is_none());
         assert!(server_protocol_for_protocol(341).is_none());
     }

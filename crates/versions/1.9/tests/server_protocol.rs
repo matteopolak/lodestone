@@ -2,12 +2,97 @@ use lodestone_canonical::inverse;
 use lodestone_core::{Ctx, Reader, State, encode_body};
 use lodestone_data::block_states::{self, block_name, properties};
 use lodestone_server::{ChunkColumn, ServerBound, ServerDirective, ServerProtocol};
-use lodestone_v1_9::{V316ServerProtocol, V340ServerProtocol};
+use lodestone_v1_9::{V210ServerProtocol, V316ServerProtocol, V340ServerProtocol};
 use lodestone_v1_9::packet_ids::handshaking;
 use lodestone_v1_9::packets::handshake::SetProtocol;
 
 const CTX: Ctx = Ctx { version: 340 };
+const CTX_210: Ctx = Ctx { version: 210 };
 const CTX_316: Ctx = Ctx { version: 316 };
+
+#[test]
+fn protocol_210_uses_its_captured_ids_and_rejects_1_11_only_states() {
+    let protocol = V210ServerProtocol;
+    let captured_play_ids: Vec<i32> = include_str!("captures/join_1_10_2.txt")
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            if fields.next()? != "play" {
+                return None;
+            }
+            fields.next()?.parse().ok()
+        })
+        .collect();
+    for expected in [35, 46, 32] {
+        assert!(
+            captured_play_ids.contains(&expected),
+            "the committed 1.10.2 capture must contain play packet id {expected}"
+        );
+    }
+    let request = |protocol_version| {
+        encode_body(
+            &SetProtocol {
+                protocol_version,
+                server_host: "localhost".to_owned(),
+                server_port: 25565,
+                next_state: 2,
+            },
+            CTX_210,
+        )
+        .expect("handshake fixture encodes")
+    };
+
+    assert_eq!(
+        protocol.decode(
+            State::Handshaking,
+            lodestone_v1_9::packet_ids_210::handshaking::serverbound::SET_PROTOCOL,
+            &request(210),
+        ),
+        ServerBound::Handshake {
+            next_state: State::Login,
+        }
+    );
+    assert_eq!(
+        protocol.decode(
+            State::Handshaking,
+            lodestone_v1_9::packet_ids_210::handshaking::serverbound::SET_PROTOCOL,
+            &request(316),
+        ),
+        ServerBound::Ignored
+    );
+
+    let join = protocol.begin_play(8);
+    assert!(matches!(
+        join.first(),
+        Some(ServerDirective::Send { packet_id: 35, .. })
+    ));
+    assert!(matches!(
+        join.get(1),
+        Some(ServerDirective::Send { packet_id: 46, .. })
+    ));
+
+    let mut column = ChunkColumn::new(0, 256);
+    column.set_block(0, 0, 0, "minecraft:stone");
+    assert!(matches!(
+        protocol.try_encode_chunk(0, 0, &column),
+        Ok(ServerDirective::Send { packet_id: 32, .. })
+    ));
+    assert!(matches!(
+        protocol.try_encode_block_update(1, 64, -1, "minecraft:stone"),
+        Ok(ServerDirective::Send { packet_id: 11, .. })
+    ));
+
+    // The committed 1.10 registry has structure block at legacy id 255, but
+    // the 1.11-only magma-block range begins at 213.
+    assert!(protocol
+        .try_encode_block_update(0, 64, 0, "minecraft:structure_block[mode=save]")
+        .is_ok());
+    assert!(protocol
+        .try_encode_block_update(0, 64, 0, "minecraft:magma_block")
+        .is_err());
+    column.set_block(1, 0, 0, "minecraft:magma_block");
+    assert!(protocol.try_encode_chunk(0, 0, &column).is_err());
+}
 
 #[test]
 fn protocol_316_uses_its_captured_ids_and_rejects_1_12_only_states() {
