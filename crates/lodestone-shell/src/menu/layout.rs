@@ -952,17 +952,6 @@ pub fn align_in_rectangle(
     element.set_y(new_y);
 }
 
-/// `FrameLayout.centerInRectangle`.
-pub fn center_in_rectangle(
-    element: &mut dyn LayoutElement,
-    x: f32,
-    y: f32,
-    width: f32,
-    height: f32,
-) {
-    align_in_rectangle(element, x, y, width, height, 0.5, 0.5);
-}
-
 impl LayoutElement for FrameLayout {
     fn x(&self) -> f32 {
         self.x as f32

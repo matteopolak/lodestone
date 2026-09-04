@@ -49,7 +49,8 @@ leading and trailing padding. `x` truncates and `y` rounds — a real, asymmetri
 bug to "fix" — so a child centred in an odd-sized cell can land off by a pixel on one axis and not
 the other. A spanning grid cell splits its size with Mojang's integer `Divisor` (Bresenham-style, so
 the parts always sum back exactly) and only ever *grows* a row/column that is smaller than the span
-needs.
+needs. Whole-tree placement goes through `align_in_rectangle`; centred placement is the same call
+with `0.5` on both axes, so it does not have a second convenience entry point to keep in sync.
 
 Using a hand-arithmetic layout instead of a container is legitimate vanilla, too — the title screen,
 for one, hand-centres rather than using any layout class. Whether a screen is layout-driven or
