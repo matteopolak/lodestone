@@ -45,6 +45,23 @@ field (`PLAYER_ACTION`, `PLAYER_COMMAND`, `INTERACT`, `CUSTOM_CLICK_ACTION`), ch
 *ordinal* individually — a packet id can read as fully connected while one ordinal inside it
 still falls through to `Ignored`.
 
+### Operator block-entity queries
+
+The 26.2 `BLOCK_ENTITY_TAG_QUERY` decoder preserves the transaction id and packed
+position. `dispatch_play_packet` requires command permission level 2, reads the
+current dimension's `BlockEntityHandle`, and replies through
+`ServerProtocol::encode_tag_query`. Missing entities produce an explicit null NBT
+response; unauthorized requests receive no response. The reply echoes the id so
+the client's pending inspection request can complete.
+
+Serialization reuses `chunk_nbt::block_entity_to_nbt`, removing the persistence
+metadata `id`, `x`, `y`, `z`, and `keepPacked` from the copied compound. Other fields, including
+opaque block-entity data, survive. Extending a simulated block entity's save
+representation therefore also extends its inspection response. Queries only see
+entities present in the live registry; they do not load chunks from disk.
+Other hosting families retain the trait's unsupported default until they provide
+a response encoder. No new configuration or external dependency is required.
+
 ### Clientbound: `lodestone_model::event::route`, an exhaustive table
 
 The clientbound mirror of the serverbound problem above has its own document,

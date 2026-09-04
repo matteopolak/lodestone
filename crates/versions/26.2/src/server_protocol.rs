@@ -4446,8 +4446,13 @@ impl ServerProtocol for V770ServerProtocol {
                 ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::BLOCK_ENTITY_TAG_QUERY => {
-                let _ = decode_full::<BlockEntityTagQuery>(payload);
-                ServerBound::Ignored
+                match decode_full::<BlockEntityTagQuery>(payload) {
+                    Some(query) => ServerBound::BlockEntityTagQuery {
+                        transaction_id: query.transaction_id,
+                        pos: unpack_block_pos(query.pos),
+                    },
+                    None => ServerBound::Ignored,
+                }
             }
             // Deliberately left undecoded (fall through to the wildcard
             // below), unlike the rest of this issue's family:
@@ -5987,6 +5992,17 @@ impl ServerProtocol for V770ServerProtocol {
         ServerDirective::Send {
             packet_id: play::clientbound::PLAYER_POSITION,
             payload: encode_player_position_teleport(0, x, y, z, yaw, pitch),
+        }
+    }
+
+    fn encode_tag_query(&self, transaction_id: i32, tag: Option<&Nbt>) -> ServerDirective {
+        let mut w = Writer::default();
+        w.var_i32(transaction_id);
+        write_network_nbt(&mut w, tag.unwrap_or(&Nbt::End))
+            .expect("authoritative block-entity NBT encodes");
+        ServerDirective::Send {
+            packet_id: play::clientbound::TAG_QUERY,
+            payload: w.into_vec(),
         }
     }
 
