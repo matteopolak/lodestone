@@ -251,9 +251,10 @@ impl ModelSectionView for OneOccluderAoFlat {
 /// block-state census. Panics rather than skipping — a missing block would make
 /// the scenes below vacuous, which is the "precondition species" of vacuous test
 /// `CLAUDE.md` names.
-fn first_id_named(name: &str) -> u32 {
+fn first_id_named(name: &str) -> lodestone_data::block_states::StateId {
     (0..lodestone_data::block_states::STATE_COUNT)
         .find(|&id| lodestone_data::block_states::block_name(id) == Some(name))
+        .and_then(lodestone_data::block_states::StateId::new)
         .unwrap_or_else(|| panic!("{name} present in the block-state census"))
 }
 
@@ -269,7 +270,7 @@ fn first_id_named(name: &str) -> u32 {
 /// made the canopy bug invisible. So a scene that darkens here can only have
 /// consulted `ao_occludes_at`.
 struct CensusOccluder {
-    state_id: u32,
+    state_id: lodestone_data::block_states::StateId,
 }
 
 impl ModelSectionView for CensusOccluder {
@@ -287,7 +288,6 @@ impl ModelSectionView for CensusOccluder {
     fn ao_occludes_at(&self, x: i32, y: i32, z: i32) -> bool {
         [x, y, z] == OCCLUDER
             && lodestone_data::shade_brightness::occludes_ambient_light(self.state_id)
-                == Some(true)
     }
 }
 
@@ -637,13 +637,13 @@ fn ao_occluder_predicate_is_shade_brightness_not_face_culling() {
     let barrier = first_id_named("minecraft:barrier");
     assert_eq!(
         lodestone_data::shade_brightness::occludes_ambient_light(leaves),
-        Some(true),
+        true,
         "premise: oak_leaves darkens an AO corner in vanilla (full collision cube, no \
          shade-brightness override). Without this the leaves scene proves nothing"
     );
     assert_eq!(
         lodestone_data::shade_brightness::occludes_ambient_light(barrier),
-        Some(false),
+        false,
         "premise: barrier does NOT darken an AO corner (its shade-brightness override \
          is 1.0) even though its collision shape IS a full block — this is \
          what makes it a control against the naive collision derivation"

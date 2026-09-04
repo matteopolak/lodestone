@@ -35,9 +35,11 @@ block whose full collision shape doesn't occlude for culling — leaves, slime, 
 spawners, grates — which is invisible on glass/ice (where the two happen to agree)
 and shows up as a tree canopy that fails to darken underneath. The AO census this
 needs comes from a jar-dumped per-state table (`lodestone_data::shade_brightness`,
-one bit per state), not a hand-derived exception list layered on the collision-shape
-table — the exceptions move states in **both** directions and a hand list misses
-that.
+one bit per validated `StateId`), not a hand-derived exception list layered on the
+collision-shape table — the exceptions move states in **both** directions and a
+hand list misses that. `SectionSnapshot` still carries raw wire ids, so
+`SnapshotModelView` validates them at the meshing boundary; an invalid raw id is
+conservatively open rather than entering the total census API.
 
 Which cell a quad's light/AO ring is centred on is also a *per-quad* fork, not a
 per-block rule: a quad with a `cullface` samples the cell that face opens into
@@ -267,6 +269,9 @@ frames instead of stalling one.
   predicates answering different vanilla methods** — do not derive one from the
   other's exception list, and do not substitute a hand-written collision-shape table
   for the jar-dumped shade-brightness one; both directions of disagreement are real.
+- **Keep the AO census API keyed by `StateId`.** Raw ids belong at packet and
+  snapshot boundaries, where they must be validated; an invalid snapshot id is open
+  for AO rather than a candidate bitset index.
 - **Which cell an AO/light ring centres on is a per-quad fork** (cullface vs.
   unculled-and-on-boundary vs. unculled-off-boundary), not a per-block rule — a fix
   aimed at "the AO ring" that ignores the light-position fork will leave cross-plant
