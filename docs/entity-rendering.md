@@ -79,7 +79,7 @@ The ominous spawner needed no protocol work — metadata routes `ITEM_STACK` fie
 
 Two vanilla resolution rules, applied once:
 
-- **A player's tag is always its tab-list display name**, looked up by uuid — and must survive a tab-list entry that's since been removed (a server-spawned fake-player NPC commonly adds then removes one), via a per-uuid last-known-name cache, the name-side twin of the skin cache.
+- **A player's tag is always its tab-list display name.** UUID-keyed rows are looked up by the entity UUID. Protocol 5 instead preserves the profile name carried beside the UUID in `named_entity_spawn` as `PlayerProfileName`, then uses an exact match on that wire-authored name to find the name-keyed row. It never derives one identity from the other. A server can decorate or truncate the separate player-list name so the two names do not match; that case is unresolvable from protocol 5's wire data and draws no player tag rather than guessing. A resolved name must also survive a tab-list entry that's since been removed (a server-spawned fake-player NPC commonly adds then removes one), via a per-UUID last-known-name cache, the name-side twin of the skin cache.
 - **Every other entity's tag is `CUSTOM_NAME`, gated on `CUSTOM_NAME_VISIBLE`.** No fallback to a translated type name.
 
 Both resolve to one `NameTag { text, see_through }`, gated further by the target's team `name_tag_visibility` rule; `see_through` is sneaking, and suppresses the depth-testless pass.

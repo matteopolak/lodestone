@@ -105,14 +105,20 @@ impl SocialEntry {
 /// to feed [`SocialNav::refresh`] via `MenuNav::refresh_social` — see the
 /// module docs' "Wired since" note. Free-standing and pure so it is testable
 /// without a live session, the same shape [`crate::tablist::tab_list_view`]
-/// already is for the HUD overlay.
+/// already is for the HUD overlay. Rows without a wire-supplied UUID remain
+/// visible in that overlay but are omitted here because hide/report actions
+/// require a stable profile identity.
 #[must_use]
 pub fn entries_from_tablist(tab_list: &TabList, exclude: Option<Uuid>) -> Vec<SocialEntry> {
     tab_list
         .ordered()
         .into_iter()
-        .filter(|e: &&PlayerListEntry| Some(e.profile.id) != exclude)
-        .map(|e| SocialEntry::new(e.profile.id, e.profile.name.clone()))
+        .filter_map(|e: &PlayerListEntry| {
+            e.profile
+                .id
+                .filter(|id| Some(*id) != exclude)
+                .map(|id| SocialEntry::new(id, e.profile.name.clone()))
+        })
         .collect()
 }
 
@@ -718,6 +724,18 @@ mod tests {
         let mut tabs = TabList::new();
         tabs.insert(PlayerListEntry::new(GameProfile::new(uuid(1), "Alice")));
         assert_eq!(entries_from_tablist(&tabs, None).len(), 1);
+    }
+
+    #[test]
+    fn a_name_only_tab_row_is_not_exposed_as_a_social_action_target() {
+        let mut tabs = TabList::new();
+        tabs.insert(PlayerListEntry::new(GameProfile::new(None::<Uuid>, "Legacy")));
+        tabs.insert(PlayerListEntry::new(GameProfile::new(uuid(1), "Alice")));
+
+        assert_eq!(
+            entries_from_tablist(&tabs, None),
+            vec![SocialEntry::new(uuid(1), "Alice")]
+        );
     }
 
     // -- the singleplayer/multiplayer fork ----------------------------------

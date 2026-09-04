@@ -3658,7 +3658,7 @@ fn tab_overlay_rows_read_the_clients_one_folded_tab_list() {
         ClientEvent::PlayerListUpdate {
             entries: vec![
                 PlayerListEntry {
-                    uuid: bob,
+                    uuid: Some(bob),
                     name: Some("Bob".into()),
                     game_mode: Some(GameMode::Spectator),
                     latency: Some(30),
@@ -3670,7 +3670,7 @@ fn tab_overlay_rows_read_the_clients_one_folded_tab_list() {
                     hat_visible: None,
                 },
                 PlayerListEntry {
-                    uuid: alice,
+                    uuid: Some(alice),
                     name: Some("Alice".into()),
                     game_mode: Some(GameMode::Survival),
                     latency: Some(12),
@@ -3893,7 +3893,7 @@ fn tick_nearby_entities_resolves_a_neighbours_scoreboard_team() {
         ClientEvent::PlayerListUpdate {
             entries: vec![
                 PlayerListEntry {
-                    uuid: bob,
+                    uuid: Some(bob),
                     name: Some("Bob".into()),
                     game_mode: Some(GameMode::Survival),
                     latency: Some(20),
@@ -3905,7 +3905,7 @@ fn tick_nearby_entities_resolves_a_neighbours_scoreboard_team() {
                     hat_visible: None,
                 },
                 PlayerListEntry {
-                    uuid: carol,
+                    uuid: Some(carol),
                     name: Some("Carol".into()),
                     game_mode: Some(GameMode::Survival),
                     latency: Some(20),

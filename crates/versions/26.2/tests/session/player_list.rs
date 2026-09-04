@@ -134,6 +134,7 @@ fn player_info_update_carries_the_chat_session_into_the_model_event() {
         panic!("expected one PlayerListUpdate directive, got {directives:?}");
     };
     assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].uuid, Some(sender));
     let session = entries[0]
         .chat_session
         .as_ref()

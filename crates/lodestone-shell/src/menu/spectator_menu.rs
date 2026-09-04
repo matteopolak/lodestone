@@ -108,7 +108,8 @@ pub enum SpectatorMenuEntry {
 /// A team with fewer than two currently-listed members does not become a
 /// category — its lone member (if any) folds into the flat player list
 /// instead, matching the module doc's "What is deliberately simplified"
-/// note.
+/// note. A row without a wire-supplied UUID is not a teleport target because
+/// the serverbound action can only identify its destination by UUID.
 #[must_use]
 pub fn spectator_menu_entries(
     tab_list: &TabList,
@@ -122,11 +123,14 @@ pub fn spectator_menu_entries(
 
     for entry in tab_list.ordered() {
         let e: &PlayerListEntry = entry;
-        if Some(e.profile.id) == exclude {
+        let Some(id) = e.profile.id else {
+            continue;
+        };
+        if Some(id) == exclude {
             continue;
         }
         let player = SpectatorMenuPlayer {
-            id: e.profile.id,
+            id,
             name: e.profile.name.clone(),
         };
         match scoreboard.team_of(&e.profile.name) {
@@ -401,6 +405,22 @@ mod tests {
             id: a,
             name: "Alice".to_string(),
         })]);
+    }
+
+    #[test]
+    fn a_name_only_tab_row_is_not_exposed_as_a_teleport_target() {
+        let a = Uuid::from_u128(1);
+        let mut tab_list = TabList::default();
+        tab_list.insert(PlayerListEntry::new(GameProfile::new(None::<Uuid>, "Legacy")));
+        tab_list.insert(entry(a, "Alice"));
+
+        assert_eq!(
+            spectator_menu_entries(&tab_list, &Scoreboard::new(), None),
+            vec![SpectatorMenuEntry::Player(SpectatorMenuPlayer {
+                id: a,
+                name: "Alice".to_owned(),
+            })]
+        );
     }
 
     /// Selecting a team category expands it without sending anything;

@@ -3449,7 +3449,6 @@ dependencies = [
  "lodestone-protocol-common",
  "lodestone-testsupport",
  "lodestone-world",
- "md-5",
  "serde_json",
  "tokio",
  "tracing",

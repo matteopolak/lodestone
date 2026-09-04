@@ -100,7 +100,7 @@ impl V770Adapter {
                 .entries
                 .into_iter()
                 .map(|entry| PlayerListEntry {
-                    uuid: entry.uuid,
+                    uuid: Some(entry.uuid),
                     name: entry.name,
                     game_mode: entry.game_mode.and_then(tab_game_mode),
                     latency: entry.latency,
@@ -466,4 +466,3 @@ fn tab_game_mode(id: i32) -> Option<GameMode> {
         _ => None,
     }
 }
-

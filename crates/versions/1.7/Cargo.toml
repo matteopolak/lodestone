@@ -30,11 +30,6 @@ lodestone-world = { workspace = true }
 # compression-threshold packet at all), so the inflate is per chunk packet and
 # belongs to the chunk decoder rather than to the framing layer.
 flate2 = { workspace = true }
-# The player-list packet carries no UUID, and the only value that can stand
-# in for one is the offline-mode derivation a server computes itself: a
-# version-3 UUID over the *bare* bytes of `OfflinePlayer:<name>`. The `uuid`
-# crate's own v3 constructor prepends a namespace and so cannot express it.
-md-5 = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 

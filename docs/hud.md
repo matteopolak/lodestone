@@ -112,6 +112,18 @@ common one in practice (a server that colors names by team rarely also sends an 
 component). Only *listed* players appear here; chat's tab-completion reads the full online-player set,
 which is a different, unfiltered projection over the same underlying roster.
 
+Player-list identity is optional all the way through the public model and folded `GameProfile`.
+Protocols with a wire UUID use it as the row key; protocol 5 has only a display name, so its rows live
+in a separate name-keyed map and expose `profile.id = None`. The split permits allocation-free
+borrowed-name lookup on the render path. This does not hide the row: name rendering,
+latency, ordering, scoreboard decoration and name-based chat completion continue to work, and a
+name-keyed removal deletes it. Features whose action protocol genuinely requires a UUID degrade
+instead of guessing: name-only rows are absent from the social-interactions and spectator-teleport
+menus, and cannot select a UUID-derived fallback skin. Protocol 5 supplies no profile texture either,
+so those rows render with the ordinary default player material. `ClientHandle::players` preserves the
+same absence for headless consumers; callers that key bookkeeping by authenticated identity must
+handle `None` rather than treating a name-derived value as authoritative.
+
 ### Scoreboard sidebar
 
 The right-edge panel listing an objective's per-player scores, folded from the server's scoreboard state

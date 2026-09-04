@@ -1,6 +1,6 @@
 //! [`VersionAdapter`] implementation driving the protocol 5 join flow.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use lodestone_canonical::canonical::{self, CanonicalBlockState};
@@ -137,16 +137,13 @@ const DIG_RELEASE_USE: i8 = 5;
 ///
 /// # Why this adapter is stateful
 ///
-/// Four pieces of per-connection state, each because a packet in this era
+/// Three pieces of per-connection state, each because a packet in this era
 /// carries strictly less than the canonical event it has to produce:
 ///
 /// - **`shape`** — a chunk packet cannot tell from its own bytes whether sky
 ///   light is present; that depends on the dimension the join announced.
 /// - **`dimension`** — the spawn-position packet names no dimension, and the
 ///   canonical event requires one.
-/// - **`listed_players`** — the player-list packet carries no UUID (see
-///   [`crate::packets::player_info`]), so a removal has to be matched to the
-///   identity an earlier addition was given.
 /// - **`movement`** — the canonical move action is one message, but this era
 ///   has four movement packets and expects the client to pick the narrowest
 ///   one that carries the change.
@@ -155,9 +152,6 @@ pub struct V5Adapter {
     shape: Arc<Mutex<ChunkShape>>,
     /// The raw dimension byte from the most recent join or respawn.
     dimension: Arc<Mutex<i8>>,
-    /// Player name to the UUID this adapter derived for it, so a removal can
-    /// name the same identity the addition did.
-    listed_players: Arc<Mutex<HashMap<String, uuid::Uuid>>>,
     movement: Arc<Mutex<MovementState>>,
 }
 
@@ -198,7 +192,6 @@ impl V5Adapter {
         Self {
             shape: Arc::new(Mutex::new(ChunkShape::overworld())),
             dimension: Arc::new(Mutex::new(0)),
-            listed_players: Arc::new(Mutex::new(HashMap::new())),
             movement: Arc::new(Mutex::new(MovementState::default())),
         }
     }
@@ -427,52 +420,6 @@ fn velocity_vec(x: i16, y: i16, z: i16) -> Vec3 {
         f64::from(y) / VELOCITY_SCALE,
         f64::from(z) / VELOCITY_SCALE,
     )
-}
-
-/// The offline-mode UUID a server derives for a bare username.
-///
-/// # This is the era's one invented value, and this is exactly what it is
-///
-/// The player-list packet carries no UUID and the canonical
-/// [`PlayerListEntry`] requires one (see [`crate::packets::player_info`]).
-/// Something has to be supplied, and there are three options: a nil UUID,
-/// which collides every entry onto one key; no event at all, which leaves the
-/// tab list permanently empty; or the derivation a server itself uses in
-/// offline mode — a version-3 UUID over the bytes of `OfflinePlayer:<name>`.
-///
-/// This takes the third, and it is checkable rather than asserted: a real
-/// server's own login-success response is the oracle, since that is the server
-/// computing the same value for the same name. `tests/capture_join.rs` pins it
-/// against a recorded join, comparing this function's output for a name the
-/// *server* chose against the UUID the *server* sent in a different packet of
-/// the same recording — so neither side of that comparison comes from here.
-///
-/// # Why the MD5 is spelled out rather than taken from `Uuid::new_v3`
-///
-/// A version-3 UUID is normally `md5(namespace_bytes ++ name)`, and the `uuid`
-/// crate's constructor has no way to express an *absent* namespace. The
-/// derivation a server uses hashes the bare string bytes with no namespace at
-/// all, so `Uuid::new_v3` with any namespace — the nil UUID included, which
-/// prepends sixteen zero bytes — produces a different, silently wrong value.
-/// The version and variant bits are then stamped exactly as version 3 requires.
-///
-/// **It is wrong against an online-mode server**, where the real UUID is
-/// assigned centrally and unrelated to the name. It is right for the only kind
-/// of server this family can currently join, because online-mode login is not
-/// implemented for any legacy era here. A caller must therefore treat a UUID
-/// from this era's player list as a stable *key*, not as a profile identity.
-///
-/// One further limit: the wire field is a *display* name capped at 16
-/// characters, so two players differing only past that cap derive the same
-/// UUID.
-#[must_use]
-pub fn offline_player_uuid(name: &str) -> uuid::Uuid {
-    use md5::Digest as _;
-
-    let mut digest: [u8; 16] = md5::Md5::digest(format!("OfflinePlayer:{name}").as_bytes()).into();
-    digest[6] = (digest[6] & 0x0f) | 0x30;
-    digest[8] = (digest[8] & 0x3f) | 0x80;
-    uuid::Uuid::from_bytes(digest)
 }
 
 /// Applies one decoded column to the world and returns its notification.
@@ -883,14 +830,10 @@ impl V5Adapter {
         payload: &[u8],
     ) -> Result<Vec<Directive>, AdapterError> {
         let body: PlayerInfo = decode_body_exact(payload)?;
-        let derived = offline_player_uuid(&body.player_name);
         if body.online {
-            if let Ok(mut guard) = self.listed_players.lock() {
-                guard.insert(body.player_name.clone(), derived);
-            }
             Ok(vec![Directive::Emit(ClientEvent::PlayerListUpdate {
                 entries: vec![PlayerListEntry {
-                    uuid: derived,
+                    uuid: None,
                     name: Some(body.player_name),
                     // The wire carries neither a game mode nor a listed flag
                     // per entry; presence in the packet is the whole message.
@@ -911,13 +854,8 @@ impl V5Adapter {
                 }],
             })])
         } else {
-            let known = self
-                .listed_players
-                .lock()
-                .ok()
-                .and_then(|mut guard| guard.remove(&body.player_name));
-            Ok(vec![Directive::Emit(ClientEvent::PlayerListRemove {
-                profile_ids: vec![known.unwrap_or(derived)],
+            Ok(vec![Directive::Emit(ClientEvent::PlayerListRemoveByName {
+                profile_names: vec![body.player_name],
             })])
         }
     }
@@ -1236,6 +1174,10 @@ impl V5Adapter {
                     pitch: unpack_degrees(body.pitch),
                 },
                 velocity: None,
+            }),
+            Directive::Emit(ClientEvent::PlayerProfileNamed {
+                entity_id: body.entity_id,
+                profile_name: body.player_name,
             }),
             Directive::Emit(ClientEvent::EntityMetadataUpdated {
                 entity_id: body.entity_id,

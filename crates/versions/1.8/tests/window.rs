@@ -323,7 +323,7 @@ fn player_info_add_player_carries_gamemode_ping_name_and_skin_properties() {
         ] => {
             assert_eq!(entries.len(), 1);
             let e = &entries[0];
-            assert_eq!(e.uuid, uuid);
+            assert_eq!(e.uuid, Some(uuid));
             assert_eq!(e.name.as_deref(), Some("Notch"));
             assert_eq!(e.game_mode, Some(GameMode::Creative));
             assert_eq!(e.latency, Some(42));

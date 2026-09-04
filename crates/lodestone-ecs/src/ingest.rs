@@ -55,7 +55,7 @@ use crate::entity::{
     DisplayTranslation,
     EntityFlags, EntityIndex, EntityKind, EntityUuid, Equipment, ExperienceOrbValue,
     FallingBlockState, HeadYaw, Health, HurtTime, ItemFrameRotation, Leashed, MinecraftEntityId,
-    FireworkFlags, PaintingVariant,
+    FireworkFlags, PaintingVariant, PlayerProfileName,
     MobState, OnGround,
     Passengers, Pose, Position, ProjectileOwner, Rotation, Tamed, Variant, Vehicle, VehicleHurt,
     Velocity,
@@ -271,6 +271,34 @@ pub fn apply_entity_spawn(
         }
         let entity = spawned.id();
         index.insert(*entity_id, entity);
+    }
+}
+
+/// `IngestSet::Apply`: a wire-supplied player profile name → the matching
+/// spawned entity.
+///
+/// Protocol 5 supplies this name beside the UUID in its named player spawn,
+/// while its tab-list packet supplies only that same name. Preserving both
+/// facts gives consumers an honest correlation seam without deriving a UUID.
+pub fn apply_player_profile_name(
+    batch: Res<IngestBatch>,
+    index: Res<EntityIndex>,
+    mut commands: Commands,
+) {
+    for event in batch.events() {
+        let ClientEvent::PlayerProfileNamed {
+            entity_id,
+            profile_name,
+        } = event
+        else {
+            continue;
+        };
+        let Some(entity) = index.get(*entity_id) else {
+            continue;
+        };
+        commands
+            .entity(entity)
+            .insert(PlayerProfileName(profile_name.clone()));
     }
 }
 
@@ -1460,7 +1488,7 @@ impl Plugin for IngestPlugin {
                 // in one batch must still resolve. Same mechanism as the
                 // spawn-then-move test.
                 apply_local_player_login,
-                apply_entity_spawn,
+                (apply_entity_spawn, apply_player_profile_name).chain(),
                 apply_entity_removal,
                 apply_entity_movement,
                 apply_entity_velocity,
@@ -1659,6 +1687,27 @@ mod tests {
     // `lodestone-shell/src/entities.rs`'s
     // `a_snapshot_silent_about_the_item_keeps_the_known_one` and
     // `an_explicitly_empty_stack_clears_the_known_one` assert one layer up.
+
+    #[test]
+    fn a_player_profile_name_in_the_spawn_batch_reaches_the_spawned_entity() {
+        let mut world = ingest_world();
+        {
+            let mut queue = world.resource_mut::<IngestQueue>();
+            queue.push(spawn_event(9, "minecraft:player"));
+            queue.push(ClientEvent::PlayerProfileNamed {
+                entity_id: 9,
+                profile_name: "Legacy".into(),
+            });
+        }
+        world.run_schedule(NetIngest);
+
+        assert_eq!(
+            entity_for(&world, 9)
+                .get::<PlayerProfileName>()
+                .map(|name| name.0.as_str()),
+            Some("Legacy")
+        );
+    }
 
     #[test]
     fn a_fresh_spawn_has_no_display_item_component_at_all() {
@@ -3614,6 +3663,10 @@ mod tests {
         // entity's state actually changed, so the claim and the systems cannot
         // drift apart unnoticed.
         assert!(handles_event(&spawn_event(1, "minecraft:pig")));
+        assert!(handles_event(&ClientEvent::PlayerProfileNamed {
+            entity_id: 1,
+            profile_name: "Player".into(),
+        }));
         assert!(handles_event(&login_event(1)));
         // `EntityDamaged`/`EntityHurtAnimation` were decoded islands before
         // this fix — real `ClientEvent`s with no `matches!` arm here, so

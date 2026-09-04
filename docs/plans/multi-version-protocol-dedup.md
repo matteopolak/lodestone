@@ -698,9 +698,9 @@ whole-stream boundary statement is stronger than any per-packet one, and it is
 the same statement the login handshake makes at 762.
 
 See [`docs/protocol-1-7-era.md`](../protocol-1-7-era.md) for that era crate's
-own documentation, including the one concept protocol 5 has that has no
-canonical equivalent — its player list carries no profile UUID at all — and
-what this crate does about it.
+own documentation, including how the optional canonical UUID preserves
+protocol 5's name-only player-list identity and how name-keyed removal reaches
+the same row.
 
 `cargo xtask connectedness` currently reports v1-7 50/65, v1-8 59/74, v1-9 62/80,
 v1-13 51/86, v1-14 54/92, v1-17 65/103, v1-19 67/111, v1-20-6 61/122, v26-2 141/141

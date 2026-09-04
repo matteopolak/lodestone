@@ -108,24 +108,33 @@ the spawn point on logout, having discarded all 1,600 movement packets.
 `tests/movement.rs` pins both field orders at **byte offsets**, because a
 struct compared against itself cannot see a transposition.
 
-### The one concept with no canonical equivalent
+### The name-only player list
 
-`PlayerListEntry.uuid` is required by the version-free model, and **protocol
-5's player list carries no UUID, no profile and no skin** — just
-`(name, online, i16 ping)`.
+Protocol 5's player list carries no UUID, profile or skin — just `(name,
+online, i16 ping)`. The canonical `PlayerListEntry.uuid` therefore remains
+`None`; the adapter does not turn an offline-mode name derivation into a
+plausible but incorrect online-mode identity, and it does not perform a network
+lookup. This rule is the same for online- and offline-mode servers because the
+packet shape is the same in both. A login response can identify the local
+account, but it cannot identify every remote name in later player-list packets.
 
-Three options existed. A nil UUID collides every entry. Dropping the packet
-makes the player list an island. What this crate does instead is derive the
-**offline-mode UUID**: a version-3 UUID over the *bare* bytes of
-`OfflinePlayer:<name>`, with no namespace — which `Uuid::new_v3` cannot express,
-since it always prepends one, hence the direct `md-5` dependency.
+The `online = false` form is name-keyed for the same reason and becomes
+`ClientEvent::PlayerListRemoveByName`. `lodestone_game::tablist::TabList` keeps
+UUID-backed and name-backed rows in distinct internal key spaces, so a
+name-only add/update remains visible and its matching removal reaches that row
+without exposing a fabricated UUID. `tests/capture_join.rs` pins the UUID
+absence against a complete recorded packet, while `tests/player_list.rs` pins
+both the add and removal event shapes from literal wire bodies.
 
-That choice is checkable, and is checked: a real server sends the same
-derivation in its own `login_success`, and `tests/capture_join.rs` asserts the
-two agree. **It is wrong against an online-mode server**, where the real
-profile UUID is unrelated to the name. Nothing in this era's wire can fix that;
-resolving it needs either a profile lookup the client does not do or a decision
-to leave the field empty.
+Remote player entity spawns are the one place this era supplies both a profile
+UUID and profile name. The adapter preserves that pair as `EntitySpawned` plus
+`PlayerProfileNamed`; ECS stores the latter as `PlayerProfileName`. Visible
+entity consumers can therefore find the name-keyed tab row when its name
+exactly matches the supplied profile name, while retaining the independently
+supplied UUID for UUID-only entity behavior. A server may decorate or truncate
+the player-list name independently; when the two wire names differ, there is
+no honest fallback between the key spaces and the entity cannot recover that
+row's display name.
 
 ## How to change it
 
