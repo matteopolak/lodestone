@@ -211,11 +211,6 @@ owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
 
 [[allow]]
-file = "crates/lodestone-shell/src/container/player_preview.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
 file = "crates/lodestone-shell/src/container/tests.rs"
 owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
@@ -522,11 +517,6 @@ reason = "pre-existing comment-voice debt as of the guard's introduction; not ye
 
 [[allow]]
 file = "crates/lodestone-shell/tests/session/offline_identity_is_stable.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-shell/tests/session/paperdoll_skin_resolver.rs"
 owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
 
