@@ -52,8 +52,8 @@ stamps a real community contraption onto a flat world, runs the **real**
 `IntegratedServer` tick loop, and reads `lodestone_server::redstone_counters`.
 Counters rather than durations: wall clock reproduces at ~10.8% on this machine
 against 0.16–0.21% for structural counts, and the quantities in question are
-counts by nature. See `docs/redstone-benchmark-harness.md` for the fixtures and
-their provenance.
+counts by nature. See `docs/oracles-and-benchmarks.md` for the benchmark's
+setup and measurement method.
 
 ```
 cargo test -p lodestone-anvil --test redstone_benchmark -- --ignored --nocapture

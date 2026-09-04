@@ -56,8 +56,9 @@
 //!    from outside `lodestone-server`.
 //!
 //! So a contraption loaded this way starts from its captured **steady
-//! state** with nothing scheduled to perturb it — see "Findings" in
-//! `docs/redstone-benchmark-harness.md` for what this measures in practice,
+//! state** with nothing scheduled to perturb it — see the redstone benchmark
+//! section of `docs/oracles-and-benchmarks.md` for what this measures in
+//! practice,
 //! and why a near-zero `redstone_counters` reading on a real contraption is
 //! the expected, reproduced result of loading it this way, not evidence the
 //! contraption is inert.
@@ -68,9 +69,8 @@
 //! committed — see `docs/legal-notices.md`). A fresh clone has none, so
 //! every `#[ignore]`d test here checks for files first and **skips with a
 //! printed message** rather than failing when the directory is empty or
-//! missing; see `docs/redstone-benchmark-harness.md` for the exact `curl`
-//! commands and full provenance (source URL, credited author, licence
-//! clarity) for every file this was written against.
+//! missing; place the named fixtures in `.cache/redstone-benchmarks/` before
+//! rerunning this test.
 //!
 //! # Re-injection (landed)
 //!
@@ -83,9 +83,9 @@
 //! unwritten rather than guessed unchecked), and `run_one` below reinjects
 //! every entry naming a block this crate schedules a recheck for (repeater,
 //! comparator, torch, observer) as a **second measurement phase**, after the
-//! steady-state one — see "Findings" in `docs/redstone-benchmark-harness.md`
-//! for the real numbers this produced and what they settle for the
-//! dependency-graph work.
+//! steady-state one — see the redstone benchmark section of
+//! `docs/oracles-and-benchmarks.md` for the real numbers this produced and
+//! what they settle for the dependency-graph work.
 //!
 //! `TickPhase`/`PhaseStats`/`WorstPhaseWindow`/`TICK_PHASE_NAMES` remain
 //! unexported: `redstone_counters` already isolates the redstone-specific
@@ -235,10 +235,9 @@ fn fixtures_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.cache/redstone-benchmarks")
 }
 
-/// Every fixture file this harness knows how to name — see
-/// `docs/redstone-benchmark-harness.md` for the `curl` commands and full
-/// provenance for each. Listed explicitly (not a directory scan) so a
-/// missing file's *name* appears in the skip message, not just a count.
+/// Every fixture file this harness knows how to name. Listed explicitly (not
+/// a directory scan) so a missing file's *name* appears in the skip message,
+/// not just a count.
 const FIXTURE_FILES: &[&str] = &[
     "raid_farm.litematic",
     "Raid_Farm_Schematic_2.litematic",
@@ -510,7 +509,7 @@ async fn run_one(fixture: &LoadedFixture) {
     // Phase 2: resume this contraption's own captured mid-cycle scheduled
     // ticks against the now-settled world, and measure again — see this
     // module's own doc, "Brokered hunks" (now landed in `lodestone-server`),
-    // and `docs/redstone-benchmark-harness.md`'s findings for why the
+    // and the benchmark's measurement notes for why the
     // steady-state numbers above are a genuine floor, not the number the
     // dependency-graph work needs: an inert contraption cannot exercise the
     // neighbour-scan cost a dependency graph would actually replace.
@@ -585,7 +584,7 @@ async fn run_one(fixture: &LoadedFixture) {
 /// fixtures a fresh clone does not have, and it runs the real tick loop for
 /// several real seconds per contraption. Run explicitly:
 /// `cargo test -p lodestone-anvil --test redstone_benchmark -- --ignored --nocapture`
-/// after fetching fixtures per `docs/redstone-benchmark-harness.md`.
+/// after placing the named fixtures in `.cache/redstone-benchmarks/`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn redstone_contraptions_report() {
@@ -593,8 +592,8 @@ async fn redstone_contraptions_report() {
     if fixtures.is_empty() {
         println!(
             "redstone_benchmark: no fixtures found under {} — this is expected on a fresh \
-             clone (`.cache/` is gitignored); see docs/redstone-benchmark-harness.md for the \
-             curl commands to fetch them, then re-run this test",
+             clone (`.cache/` is gitignored); place the named fixtures there, \
+             then re-run this test",
             fixtures_dir().display()
         );
         return;
