@@ -302,7 +302,7 @@ impl WindowApp {
     /// server logs us in, and flips to Error the moment the session ends.
     pub(super) fn drive_ui_from_session(&mut self) {
         use crate::sim::SessionPhase;
-        // Issue #449: the loading screen's *label* comes from here, not from the
+        // The loading screen's *label* comes from here, not from the
         // coarse `SessionPhase` below — see `crate::menu::loading::ConnectPhase`
         // for why they are two different questions. Pushed every frame rather
         // than on transition, because `Sim` is the only thing the net thread
@@ -313,7 +313,7 @@ impl WindowApp {
             SessionPhase::LocalOnly | SessionPhase::Connecting => {}
             SessionPhase::Connected => {
                 self.ui.session_ready();
-                // Issue #592's Game Rules half: the integrated server only
+                // Game-rule delivery: the integrated server only
                 // starts inside `begin_singleplayer`, so there was nothing to
                 // send the overrides to any earlier than the session's own
                 // first `Connected` frame. `take()` means a later frame
@@ -330,8 +330,8 @@ impl WindowApp {
                 //
                 // The whole `SessionEnd` crosses, not a formatted string: its
                 // `kind` is what picks the screen's title (a server disconnect
-                // and a failure to reach the server are different screens in
-                // vanilla) and its `reason` is still a styled `Text`, so the
+                // and a failure to reach the server are different screens) and
+                // its `reason` is still a styled `Text`, so the
                 // server's own colours survive to the draw.
                 if self.ui.screen() != crate::menu::Screen::Error {
                     self.ui.session_failed(*end);
@@ -347,7 +347,7 @@ impl WindowApp {
         // message every frame the screen stays up; the `respawn_confirmed`
         // side needs no such guard — it is already a no-op off `Screen::Death`.
         //
-        // `doImmediateRespawn` (`SessionGameRules` island) forks
+        // The immediate-respawn rule forks
         // this: vanilla's own respawn-packet handling never puts the
         // death screen up at all when the rule is on, it respawns on the spot.
         // That is the rule's entire user-visible meaning, and it is the reason
@@ -435,7 +435,7 @@ impl WindowApp {
             self.nav
                 .open_lectern_book_view(&mut self.ui, window_id, book, page);
         }
-        // Issue #535's scope 2: the pause menu stops offering Open to LAN
+        // The pause menu stops offering Open to LAN
         // once there is nothing left for it to do. `Sim::is_lan_published`
         // is the ground truth (set from the real `NetUpdate::LanOpened`, not
         // from `hosted_world` — a multiplayer session is never published
@@ -443,7 +443,7 @@ impl WindowApp {
         // `is_dead` are above, so a menu already open catches up the instant
         // the server confirms the bind rather than needing to be reopened.
         self.nav.set_lan_published(self.sim.is_lan_published());
-        // Vanilla's other half of the same gate, `hasSingleplayerServer()` —
+        // The other half of the same gate, singleplayer-server availability —
         // without this a multiplayer session read the same `false` an
         // unpublished singleplayer world does and showed Open to LAN with
         // nothing local to publish. `MenuNav` holds no `Sim`/`UiState` of its
@@ -460,7 +460,7 @@ impl WindowApp {
         // folded through `lodestone-ecs`'s session ingest) the instant the
         // server sends `CONTAINER_CLOSE`, but nothing reset the *screen* —
         // see `UiState::reconcile_server_menu_window`'s own doc for the full
-        // vanilla chain (`clientSideCloseContainer`'s two clauses) and why
+        // client-side close handling's two clauses and why
         // this has to be edge-triggered on the window id rather than a level
         // check on "no window right now", which would also fire for the
         // player's own `E`-opened inventory.
@@ -509,7 +509,7 @@ impl WindowApp {
             self.set_grab(want);
         }
 
-        // Issue #189: keep the Social Interactions roster live.
+        // Keep the Social Interactions roster live.
         // `social::entries_from_tablist` was pure and tested with **no
         // production caller** — this is the queued call
         // `docs/social-interactions.md`'s "How to change it" names. Only
@@ -540,7 +540,7 @@ impl WindowApp {
             );
             self.nav.refresh_spectator_menu(spectator_entries);
 
-            // The Statistics screen (#188), for exactly the same reason and in
+            // The Statistics screen, for exactly the same reason and in
             // exactly the same shape. `award_stats` is decoded and folded into
             // `lodestone_ecs::SessionStatistics`, and `menu::render::dispatch`
             // passed `StatsSnapshot::default()` — a literal — into the frame, so
@@ -680,15 +680,15 @@ impl WindowApp {
 
     /// Report vanilla's "seen recipe" signal for every highlighted, unseen
     /// recipe currently placed on the recipe-book panel's visible page —
-    /// vanilla's `RecipeButton::init` → `RecipeBookPage::recipeShown` →
-    /// `RecipeBookComponent::recipeShown` → `LocalPlayer::removeRecipeHighlight`
+    /// recipe-button initialization → recipe-page display notification →
+    /// recipe-book notification handling → local-player highlight removal
     /// chain, which fires the instant a highlighted recipe's button is
     /// populated onto a page the player can see, not on a click.
     ///
     /// Walked every frame the panel is open, the same shape as
     /// [`Self::sync_recipe_toasts`] and [`Self::restore_recipe_book_settings`]:
     /// only while `recipe_panel.open`, because vanilla only ever populates
-    /// `RecipeButton`s — and therefore only ever fires this — for a page
+    /// recipe buttons — and therefore only ever fires this — for a page
     /// actually on screen, never for the whole corpus at once.
     ///
     /// [`Self::recipe_book_seen`] is this method's own "already reported" set,
@@ -797,7 +797,7 @@ impl WindowApp {
             return;
         };
         let ecs = self.sim.ecs().clone();
-        // Issue #197's two F3 sub-modes ride this same channel rather than
+        // The two F3 sub-modes ride this same channel rather than
         // getting a pass of their own: they are world-space coloured segments,
         // which is exactly what `DebugLineRenderer` already draws, and it draws
         // last in the world pass so they read over everything real.
@@ -916,7 +916,7 @@ impl WindowApp {
         });
     }
 
-    /// Install the plugin-billboard source: the render half of issue #161's
+    /// Install the plugin-billboard source: the render half of the
     /// `ExtractSet::Debug` billboard channel (`docs/plugin-api.md`), the
     /// channel a plugin (a waypoint, a hologram, a minimap overlay) uses to
     /// push textured/billboard world-space geometry onto screen via
@@ -997,7 +997,7 @@ impl WindowApp {
         // ring can never be meshed, so asking for exactly `render_distance`
         // loses the last visible ring.
         //
-        // # Raising it mid-session works, since #545
+        // Raising it mid-session is supported.
         //
         // This used to be capped: `dispatch_play_packet`'s
         // `ClientInformationChanged` arm clamped against *this connection's own*
@@ -1015,7 +1015,7 @@ impl WindowApp {
             ));
         }
         // Deliberately **not** `Sim::set_view_radius`: that is the loading
-        // screen's progress denominator (#449), not the streaming radius, and
+        // screen's progress denominator, not the streaming radius, and
         // re-declaring it mid-session would re-baseline a bar for a load that
         // already finished. Nothing client-side gates chunk *retention* on the
         // radius — the camera's far plane and the fog do the work, and both read
@@ -1025,7 +1025,7 @@ impl WindowApp {
     /// The pause menu's **Open to LAN** (scope 1): publish the
     /// world this process is hosting on a TCP port, so other machines can join it.
     ///
-    /// # Publishes the live handle in place — issue #562
+    /// # Publishes the live handle in place
     ///
     /// This used to call `Sim::end_session` and reopen the same launch through
     /// `NetClient::open_to_lan`, which **rebuilt** the world: a fresh
@@ -1078,7 +1078,7 @@ impl WindowApp {
         net.publish_to_lan(0);
     }
 
-    /// Vanilla's `key.debug.spectate` (F3+N): drop into spectator, or come back
+    /// The spectate debug binding (F3+N): drop into spectator, or come back
     /// out of it.
     ///
     /// **The first producer of `ClientAction::ChangeGameMode` anywhere outside
@@ -1109,7 +1109,7 @@ impl WindowApp {
         net.send_action(lodestone_model::action::ClientAction::ChangeGameMode { mode: wanted });
     }
 
-    /// Vanilla's `key.debug.switchGameMode` (F3+F4), cycling instead of opening a
+    /// The game-mode debug binding (F3+F4), cycling instead of opening a
     /// radial picker.
     ///
     /// Vanilla's own debug-key handling shows a game-mode switcher screen — a
@@ -1119,8 +1119,8 @@ impl WindowApp {
     /// same four modes the picker offers. Whoever wants the picker adds a
     /// `Screen` variant; the action this sends does not change.
     ///
-    /// **No permission gate.** Vanilla checks `canSwitchGameMode()` and
-    /// `GameModeCommand.PERMISSION_CHECK`; this client tracks no op level, and the
+    /// **No permission gate.** The reference client checks permission predicates;
+    /// this client tracks no op level, and the
     /// server rejects an unauthorised request as it rejects every other
     /// optimistic action — see `targeted_command_block`'s doc for the same call.
     pub(super) fn cycle_game_mode(&self) {
@@ -1143,7 +1143,7 @@ impl WindowApp {
     /// [`lodestone_model::action::ClientAction::SetClientSettings`] in the
     /// workspace — the variant was encoded by four adapters and sent by nothing,
     /// which is `CLAUDE.md`'s outbound-island shape. Everything but
-    /// `view_distance` and `chat_colors` is vanilla's `ClientInformation`
+    /// `view_distance` and `chat_colors` is the client-information payload
     /// default, because this client has no option for it yet; a fabricated value
     /// would be worse than the default it would replace.
     fn client_settings(&self, radius: u32) -> lodestone_model::action::ClientSettings {
@@ -1152,7 +1152,7 @@ impl WindowApp {
         };
         ClientSettings {
             locale: "en_us".to_string(),
-            // `ServerboundClientInformationPacket` carries a byte; vanilla clamps
+            // The client-information payload carries a byte; the server clamps
             // to `2..=32` before sending. Saturating rather than wrapping, or a
             // radius past 127 would arrive as a negative distance.
             view_distance: i8::try_from(radius.clamp(2, 32)).unwrap_or(i8::MAX),
@@ -1194,7 +1194,7 @@ impl WindowApp {
         use crate::menu::nav::SingleplayerLaunch;
         let launch_for_lan = launch.clone();
         self.ui.begin(crate::menu::SessionKind::Singleplayer);
-        // Issue #468's reading (2): the world is a **directory the menu chose**,
+        // The world is a **directory the menu chose**,
         // and the two arms differ only in whether a typed seed is honoured.
         //
         // `Open` resolves through `resolve_launch_seed(None)` and the value is then
@@ -1219,7 +1219,7 @@ impl WindowApp {
             SingleplayerLaunch::Open(_) => resolve_launch_seed(None),
             SingleplayerLaunch::Created { config, .. } => resolve_launch_seed(Some(config)),
         };
-        // Issue #592's items 1 and 2, same rule as `seed` immediately above:
+        // World-type selection follows the same rule as `seed` immediately above:
         // only `Created` carries a `WorldCreationConfig` to read a chosen
         // preset from, and only a **new** world's generator is ever built
         // from this — an existing `Open`ed world has no stored world-type
@@ -1240,7 +1240,7 @@ impl WindowApp {
             SingleplayerLaunch::Open(_) => crate::menu::create_world::WorldTypePreset::Normal,
             SingleplayerLaunch::Created { config, .. } => config.world_type,
         };
-        // Issue #592's Game Rules half, same rule as `world_type` immediately
+        // Game-rule selection follows the same rule as `world_type` immediately
         // above: only a **new** world carries a `WorldCreationConfig` to read
         // overrides from, and an empty `Vec` (nothing touched) is left as
         // `None` so `drive_ui_from_session` has nothing to send.
@@ -1251,7 +1251,7 @@ impl WindowApp {
             }
             SingleplayerLaunch::Created { .. } => None,
         };
-        // Issue #273's shell-side control: only `SingleplayerLaunch::Created`
+        // The shell-side control: only `SingleplayerLaunch::Created`
         // carries a `WorldCreationConfig` to hold this on — `Open` (Play
         // Selected World) has none, so an existing world always takes the
         // ordinary offline path below. See
@@ -1262,13 +1262,13 @@ impl WindowApp {
             SingleplayerLaunch::Created { config, .. } if config.online_mode
         );
         let session = Some((self.sim.ecs().clone(), self.sim.local_player()));
-        // Vanilla streams `simulationDistance`/`viewDistance` chunks around the
+        // The server streams simulation- and view-distance chunks around the
         // player; ours is the same number the camera's far plane and the mesher
         // already use, so the server never sends a column the renderer would
         // discard and never withholds one it wants.
         //
         // **Plus one, and the `+ 1` is not slack — it is the buffer ring the
-        // mesher's invariant requires.** Vanilla's own server tracks
+        // mesher's invariant requires.** The server tracks
         // the view distance plus one ring around the center, and it has
         // to: a section is only meshed once all its neighbours are resident, so the
         // outermost ring of a radius-`n` stream permanently lacks a neighbour and
@@ -1313,7 +1313,7 @@ impl WindowApp {
         match launch_result {
             Ok(net) => {
                 self.sim.attach_net(net);
-                // Issue #449: the loading screen's denominator. Declared only
+                // The loading screen's denominator is declared only
                 // for singleplayer, because here we *asked* for this view radius
                 // and the integrated server streams exactly the square it
                 // implies. A multiplayer server clamps our requested view
@@ -1344,7 +1344,7 @@ impl WindowApp {
     /// installed at connect time, not after login (see the long note at the
     /// `resumed` call site for why).
     pub(super) fn connect_to(&mut self, host: String, port: u16) {
-        // Issue #449: leave the menu for the `Connecting` screen *before*
+        // Leave the menu for the `Connecting` screen *before*
         // dialing, mirroring `begin_singleplayer`. Without this, multiplayer
         // never shows a loading screen for the handshake/configuration phase —
         // the screen stays on the server list until `session_ready()` flips it
@@ -1363,8 +1363,8 @@ impl WindowApp {
     /// kind: the fog/sky clock, the entity light sampler, the sky pass and the
     /// screen-effect overlays, plus the outline and debug-line sources.
     ///
-    /// Shared by [`Self::connect_to`] and [`Self::begin_singleplayer`] (issue
-    /// #287) rather than duplicated, because a source installed for one session
+    /// Shared by [`Self::connect_to`] and [`Self::begin_singleplayer`] rather
+    /// than duplicated, because a source installed for one session
     /// kind and not the other is invisible until someone plays the other one —
     /// and the two differ *only* in transport (see `net.rs`'s `Origin`). A no-op
     /// when there is no session or no GPU yet, so it is safe to call from either
@@ -1495,7 +1495,7 @@ impl WindowApp {
             {
                 render.install_sky(sky);
             }
-            // The underwater/fire overlay pass (issues #108, #112): same
+            // The underwater/fire overlay pass: same
             // shape and same reason as the sky install just above (needs GPU
             // handles immediately, so it is loaded here rather than folded
             // into a `set_*_source` closure). `has_screen_effects` guards a

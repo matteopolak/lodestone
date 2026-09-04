@@ -2,7 +2,7 @@
 //!
 //! Kept as a single file on purpose: splitting it would rename every test
 //! path (`app::tests::foo` -> `app::tests::input::foo`), and those names are
-//! cited in issues and commit messages across the repo.
+//! used by diagnostics and documentation across the repo.
 
 use super::*;
 
@@ -66,7 +66,7 @@ fn java_string_hash_code_matches_the_known_constant() {
     assert_eq!(java_string_hash_code(""), 0);
 }
 
-/// **Issue #47's queued patch, exercised through production code.**
+/// **Command-block submission, exercised through production code.**
 ///
 /// The command-block screen's Done button computed a fully-tested payload
 /// and **dropped it on the floor** — `activate_command_block_row`'s `Done`
@@ -86,13 +86,13 @@ fn java_string_hash_code_matches_the_known_constant() {
 /// **Negative control, executed:** deleting the
 /// `MenuAction::SetCommandBlock` arm from `apply_menu_action` (replacing it
 /// with `{}`) makes this fail at `try_recv`, `Err(Empty)` — nothing reaches
-/// the socket. That is the island this patch closes, and it is invisible to
+/// the socket. That is the island this test closes, and it is invisible to
 /// `cargo check`: an arm that matches and does nothing compiles perfectly.
 ///
 /// Reachability is a **separate** and still-open matter: nothing opens this
 /// screen from a real interaction (no command-block block-entity NBT decode,
-/// no `interact.rs` trigger), which is issue #442. This test opens it
-/// directly, exactly as `MenuNav::open_command_block` is written to allow.
+/// no `interact.rs` trigger). This test opens it directly, exactly as
+/// `MenuNav::open_command_block` is written to allow.
 #[test]
 fn the_command_block_done_button_sends_a_real_set_command_block_action() {
     use crate::menu::command_block::{CommandBlockOpen, CommandBlockRow, COMMAND_BLOCK_ROWS};
@@ -582,7 +582,7 @@ fn resolved_seeds_from_different_world_creation_configs_generate_different_terra
 }
 
 /// `None` (`Screen::WorldSelect`'s Play Selected World) must still resolve
-/// to the bundled world's own seed — the pre-#190 behaviour, unchanged.
+/// to the bundled world's own seed — the default behavior remains unchanged.
 #[test]
 fn no_config_resolves_to_the_bundled_worlds_seed() {
     assert_eq!(
@@ -610,7 +610,7 @@ fn ticks_for(sim: &mut Sim, dt: f64) -> u64 {
     sim.tick_count() - before
 }
 
-/// Issue #444, `discreteMouseScroll`: the delta collapses to its **sign**, and the
+/// Discrete scrolling collapses the delta to its **sign**, and the
 /// sensitivity multiply happens **after**.
 ///
 /// The order is the whole content of this gate, because both orders "work" on the
@@ -654,7 +654,8 @@ fn discrete_scrolling_takes_the_sign_before_sensitivity_scales_it() {
     assert_eq!(scale_scroll(-7.5, true, 1.0), -1.0);
     assert_eq!(scale_scroll(7.5, true, 1.0), 1.0);
 
-    // `Math.signum(0.0)` is **0.0**, not 1.0. `f64::signum` disagrees, so this is the
+    // The external floating-point sign rule yields **0.0** for `0.0`, not 1.0.
+    // `f64::signum` disagrees, so this is the
     // one place the Java and Rust primitives are not interchangeable — without the
     // explicit zero case a stationary wheel would emit a notch per event.
     assert_eq!(scale_scroll(0.0, true, 1.0), 0.0, "a zero delta must stay zero");
@@ -671,9 +672,9 @@ fn discrete_scrolling_takes_the_sign_before_sensitivity_scales_it() {
     assert_eq!(accumulate_scroll(&mut accum, scale_scroll(0.1, true, 0.5)), 1);
 }
 
-/// Issue #203: at the vanilla default sensitivity (`1.0`), one wheel
+/// At the default sensitivity (`1.0`), one wheel
 /// notch (`LineDelta` magnitude `1.0`) must move exactly one hotbar slot
-/// — the pre-#203 behaviour — so the sensitivity feature is provably a
+/// — the default behavior — so the sensitivity feature is provably a
 /// pure addition, not a regression of the common case.
 #[test]
 fn accumulate_scroll_moves_one_slot_per_notch_at_default_sensitivity() {
@@ -736,13 +737,13 @@ fn accumulate_scroll_resets_the_carry_on_direction_reversal() {
     );
 }
 
-/// Issue #597: vanilla's `getNextScrollWheelSelection` collapses the whole-notch
-/// count to its **sign** before it becomes a hotbar-slot step, discarding any
+/// Large scroll events collapse the whole-notch count to its **sign** before it
+/// becomes a hotbar-slot step, discarding any
 /// magnitude beyond one rather than queuing it for a later event.
 ///
 /// A single large delta cannot by itself prove this — six notches producing a
 /// step of six (the wrong hypothesis) and six notches producing a step of one
-/// (vanilla) are the two things this test exists to tell apart, so the
+/// (reference behavior) are the two things this test exists to tell apart, so the
 /// assertion has to compare against the actual six, not merely check the step
 /// is "smaller than something". Six is not a rounded-up guess: it is what a
 /// real macOS trackpad flick produces through this shell's own pipeline —
@@ -777,7 +778,7 @@ fn hotbar_scroll_step_collapses_accumulated_magnitude_to_sign() {
     assert_eq!(hotbar_scroll_step(0), 0, "no whole notch, no step");
 }
 
-/// Issue #61: the hotbar belongs to the world, not to active play.
+/// The hotbar belongs to the world, not to active play.
 ///
 /// Oracle is vanilla, not our own reasoning — see `hud_follows_world`'s docs
 /// for the four source lines. The regression was one boolean
@@ -804,7 +805,7 @@ fn the_hotbar_survives_every_screen_drawn_over_the_world() {
     // -- negative control ------------------------------------------------
     // The predicate has to be able to say no, or the loop above is vacuous.
     // `Connecting` has no world yet; the menu screens never get here at all
-    // because `draw_menu` returns first. Since issue #449 `Connecting` is an
+    // because `draw_menu` returns first. Since `Connecting` is an
     // `owns_frame` screen, so it is one of the `draw_menu`-returns-first set —
     // asserted anyway, because the world-path hotbar gate must never come true
     // for a screen that draws no world.
@@ -870,8 +871,8 @@ fn a_long_stall_is_clamped_not_replayed() {
     // Measured: **10**. It used to be 5, because `Sim::step` applied its own,
     // tighter `dt.clamp(0.0, 0.25)` to the accumulator before the tick loop and
     // so silently halved this pacer's budget. That assertion said as much out
-    // loud ("if this changed, reconcile the two caps") and this is the change
-    // that reconciled them: §4.1(c) left one accumulator
+    // loud ("if the value changes, reconcile the two caps"). This test
+    // documents that reconciliation: §4.1(c) left one accumulator
     // (`lodestone_ecs::FrameClock`) on one policy
     // (`lodestone_ecs::MAX_CATCH_UP_SECS`), and the surviving number is
     // vanilla's ten — the only one of the two candidates with an external
@@ -1273,14 +1274,14 @@ fn effective_target_fps_matches_vanillas_framerate_limit_tracker() {
         effective_target_fps(260, InactivityFpsLimit::Afk, 90.0),
         Some(30)
     );
-    // LONG_AFK: flatly 10 past 600 s, vanilla's own `LONG_AFK_LIMIT`
+    // LONG_AFK: flatly 10 past 600 s, matching the long-idle limit
     //, regardless of the raw limit.
     assert_eq!(
         effective_target_fps(120, InactivityFpsLimit::Afk, 700.0),
         Some(10)
     );
     // Right at the boundary must not have crossed it yet (`>`, not `>=`,
-    // mirroring vanilla's own `afkTimeMillis > 60000L`).
+    // mirroring the strict greater-than threshold at 60 seconds.
     assert_eq!(
         effective_target_fps(120, InactivityFpsLimit::Afk, 60.0),
         Some(120)
@@ -1314,7 +1315,7 @@ fn resolve_ctrl(gate: KeyGate, code: KeyCode, pressed: bool) -> Option<KeyOutcom
     resolve_key(&Keybinds::new(), gate, Some(code), pressed, true, None)
 }
 
-/// Issue #162: a plugin's `Consume` claim on a physical key wins over
+/// A plugin's `Consume` claim on a physical key wins over
 /// gameplay when nothing else has first claim on the keyboard — the
 /// positive half of the precedence-rank doc on `resolve_key`.
 #[test]
@@ -1416,12 +1417,12 @@ fn an_open_container_still_outranks_a_plugin_consume_claim() {
     assert_eq!(outcome, Some(KeyOutcome::CloseContainer));
 }
 
-/// Issue #15's last hop: an F-key has no printable `text`, so it is
+/// The function-key path: an F-key has no printable `text`, so it is
 /// exactly the case `menu_key_for` drops and `capture_key_for` must not.
 /// `F1` (not `F5`, which `resolve_key`'s own default table already binds
 /// to `TogglePerspective` — picking a bound key here would prove nothing
 /// about the *unbound*, no-text case a real Controls-menu rebind targets)
-/// persists as vanilla's own `"key.keyboard.f1"`.
+/// persists as the standard function-key identifier.
 #[test]
 fn capture_key_for_forwards_a_function_key() {
     assert_eq!(
@@ -1482,7 +1483,7 @@ mod menu_key_shortcut_conversion {
     /// **The macOS mapping specifically.** `shortcut_modifier_held` takes
     /// `is_macos` as a parameter rather than reading `cfg!(target_os =
     /// "macos")` inline precisely so this is assertable on any machine the
-    /// suite happens to run on — the bug the issue reports is invisible on
+    /// suite happens to run on — the bug this test targets is invisible on
     /// Linux/Windows by construction (Ctrl already worked there), so a test
     /// that only ever exercised whichever OS runs CI would not have caught
     /// it.
@@ -1637,7 +1638,7 @@ mod menu_key_shortcut_conversion {
     /// An unrecognised chord (the modifier held, but not one of A/C/X/V) must
     /// still suppress the letter rather than falling through to it — the
     /// "shipping only modifier tracking turns 'types a v' into 'does
-    /// nothing', which reads as a new bug" case the issue calls out, but for
+    /// nothing', which reads as a new bug" case the test guards against, but for
     /// a key with no dedicated shortcut this *is* the correct behaviour:
     /// vanilla does not type `b` while Cmd is held either.
     #[test]
@@ -1702,7 +1703,7 @@ fn default_playing_expectations() -> Vec<(KeyCode, KeyOutcome)> {
         (KeyCode::Slash, KeyOutcome::OpenChat { command: true }),
         (KeyCode::Tab, KeyOutcome::PlayerList(true)),
         (KeyCode::F5, KeyOutcome::TogglePerspective),
-        // Issue #197: F3 is now the debug *modifier*, reporting both edges; the
+        // F3 is the debug *modifier*, reporting both edges; the
         // overlay toggle happens on the release when no chord fired (see
         // `resolve_key`, and vanilla's own keyboard handling).
         (KeyCode::F3, KeyOutcome::DebugModifier(true)),
@@ -1776,7 +1777,7 @@ fn slash_opens_chat_with_the_command_prefix_and_t_opens_it_without() {
         Some(KeyOutcome::OpenChat { command: false })
     );
 
-    // …and the prefix follows the *`key.command` binding*, not the physical
+    // …and the prefix follows the *command binding*, not the physical
     // slash key. Rebinding chat and command to other keys must carry the
     // distinction with them.
     let mut binds = Keybinds::new();
@@ -1824,7 +1825,7 @@ fn an_open_container_swallows_every_gameplay_key() {
     ] {
         for (code, would_have) in default_playing_expectations() {
             // Escape and the inventory key have their own jobs on this screen,
-            // and since #378 part 3 so do the nine number keys — they issue a
+            // The nine number keys also issue a
             // `SWAP` against the hovered slot rather than being swallowed.
             // Their own test is `the_number_keys_swap_with_the_hovered_slot`
             // below; excluding them here is not weakening this test, because
@@ -1874,12 +1875,12 @@ fn the_inventory_key_closes_a_container_and_escape_pauses_instead() {
     assert_eq!(resolve(gate, KeyCode::KeyW, false), None);
 }
 
-/// Issue #378 part 3. Vanilla's `1`–`9` **do not** change the selected hotbar
+/// The number keys `1`–`9` **do not** change the selected hotbar
 /// slot while a container screen is open; they issue a `ContainerInput::SWAP`
 /// with that hotbar index against the hovered slot
-/// (vanilla's own container-screen hotbar-swap key handling,
+/// (the container-screen hotbar-swap key handling,
 /// and the number keys are handled in
-/// vanilla's client-side key handling only when no screen is open).
+/// the client-side key handling only when no screen is open).
 ///
 /// Before this they fell into the container arm's swallow: they neither
 /// selected a slot — correct — nor swapped, which is the gap.
@@ -1902,7 +1903,7 @@ fn the_number_keys_swap_with_the_hovered_slot_instead_of_selecting_one() {
     ];
     for (i, code) in digits.into_iter().enumerate() {
         // The button number is the hotbar index, `0..=8` — vanilla passes the
-        // loop counter straight through as `buttonNum`.
+        // loop counter straight through as the button index.
         assert_eq!(
             resolve(gate, code, true),
             Some(KeyOutcome::ContainerSwap { button: i as i32 }),
@@ -1918,7 +1919,7 @@ fn the_number_keys_swap_with_the_hovered_slot_instead_of_selecting_one() {
             "control failed: {code:?} no longer selects a hotbar slot in the \
              world either, so this is not a container-specific route"
         );
-        // 2. A key *release* is not a swap. Vanilla acts on `keyPressed`
+        // 2. A key *release* is not a swap. The input handler acts on presses
         //    only, and a swap on both edges would fire every action twice.
         assert_eq!(
             resolve(gate, code, false),
@@ -1937,11 +1938,10 @@ fn the_number_keys_swap_with_the_hovered_slot_instead_of_selecting_one() {
     }
 }
 
-/// The off-hand key's container half (issues #378 part 3 / #382).
+/// The off-hand key's container half.
 ///
-/// `key.swapOffhand` defaults to `F` (vanilla's own default keymap, GLFW keysym 70).
-/// It could not be added while `key.lodestone.toggleFly` squatted on `F`;
-/// #382 deleted that binding, and this is the assertion that the freed key
+/// The off-hand binding defaults to `F`. It must remain distinct from the
+/// container's other bindings, and this assertion checks that the key
 /// actually reaches `Click::offhand_swap` rather than merely existing in
 /// the table.
 #[test]
@@ -1966,12 +1966,10 @@ fn the_offhand_key_swaps_with_slot_forty_while_a_container_is_open() {
         "control failed: 40 overlaps the hotbar range, so the assertion \
          above cannot distinguish the two routes"
     );
-    // 2. A release is not a swap — vanilla acts on `keyPressed` only.
+    // 2. A release is not a swap — the input handler acts on presses only.
     assert_eq!(resolve(gate, KeyCode::KeyF, false), None);
     // 3. **The gameplay half is a different outcome, not the same one.**
-    //    This line used to assert `None` with a note saying that landing
-    //    #378's gameplay half should come here and change it on purpose.
-    //    Issue #385 is that landing, and this is the change: with no screen
+    //    This line intentionally exercises the gameplay half: with no screen
     //    open the key must resolve to the *bare action*, never to a
     //    `ContainerSwap` — a resolver that reused `ContainerSwap` here would
     //    hit-test a slot that does not exist and silently do nothing.
@@ -1989,7 +1987,7 @@ fn the_offhand_key_swaps_with_slot_forty_while_a_container_is_open() {
     );
 }
 
-/// Issue #385, the gameplay half: `F` in the world **reaches the wire** as
+/// The gameplay half: `F` in the world **reaches the wire** as
 /// `ClientAction::SwapItemWithOffhand`.
 ///
 /// Two hops, both asserted, because either alone is satisfiable by a dead
@@ -2040,8 +2038,8 @@ fn the_offhand_key_in_the_world_sends_the_swap_action_to_the_wire() {
 ///
 /// The other three modes are the positive control. Without them this passes
 /// just as well against a function that returns `None` unconditionally — i.e.
-/// against the feature not existing at all, which is the state this issue
-/// found.
+/// against the feature not existing at all, which is the state an absent
+/// feature would produce.
 #[test]
 fn a_spectator_does_not_send_the_offhand_swap_and_everyone_else_does() {
     use lodestone_client::GameMode;
@@ -2074,11 +2072,11 @@ fn a_spectator_does_not_send_the_offhand_swap_and_everyone_else_does() {
 
 // -- the drop key (`Q`), the two proven islands ------------------------
 //
-// `Click::drop_one`/`drop_stack`/`do_throw` (`lodestone-game`, #27) and
+// `Click::drop_one`/`drop_stack`/`do_throw` (`lodestone-game`) and
 // `ClientAction::DropSelectedItem`/`DropSelectedItemStack` were each built,
 // encoded and round-trip tested with zero producers before this. One
 // binding closes both — see `InputAction::Drop`'s and `KeyOutcome::
-// ContainerDrop`/`Drop`'s docs for the vanilla source this mirrors.
+// ContainerDrop`/`Drop`'s docs for the source behavior this mirrors.
 
 /// The gameplay half, mirroring `the_offhand_key_swaps_with_slot_forty_
 /// while_a_container_is_open`'s shape: both resolve to a *different*
@@ -2126,10 +2124,9 @@ fn q_issues_a_container_drop_while_a_container_is_open() {
     );
 }
 
-/// `key.drop` must not have been swallowed as an unrecognised key behind
-/// an open container before this landed — the negative control for the
-/// island itself, run against the pre-fix shape by simulating what an
-/// unbound `InputAction::Drop` would have produced.
+/// The drop action must not be swallowed as an unrecognised key behind an open
+/// container. This negative control simulates an unbound `InputAction::Drop`
+/// and verifies the corresponding gameplay path remains distinct.
 #[test]
 fn an_unbound_drop_key_is_swallowed_behind_a_container_and_dead_in_the_world() {
     let mut binds = Keybinds::new();
@@ -2344,7 +2341,7 @@ fn held_bindings_report_both_edges_and_one_shot_bindings_only_the_press() {
 }
 
 /// F3+B and F3+G resolve to their sub-modes only while the modifier is held, and
-/// a plain B or G is untouched — issue #197.
+/// a plain B or G is untouched.
 ///
 /// The negative half is the point: `B` and `G` are unbound in the default table,
 /// so if the chord arms ignored `debug_held` they would fire on every press and
@@ -2395,7 +2392,7 @@ fn the_profiler_chart_chords_need_the_modifier_held() {
         Some(KeyOutcome::ToggleProfilerChart)
     );
     // Release is not a chord, matching every other F3 chord — unlike B/G
-    // (unbound by default), Shift is also `key.sneak`, so its release still
+    // (unbound by default), Shift is also the sneak binding, so its release still
     // falls through to an ordinary (harmless, since sneak was never pressed
     // through this path) `Movement` release rather than to `None`.
     assert_ne!(
@@ -2427,7 +2424,7 @@ fn the_profiler_chart_chords_need_the_modifier_held() {
     );
 
     // Without the modifier, Shift is sneak (`Movement`) and the digits select
-    // hotbar slots — both untouched by this change.
+    // hotbar slots — both remain ordinary gameplay bindings.
     assert_ne!(
         resolve(playing(), KeyCode::ShiftLeft, true),
         Some(KeyOutcome::ToggleProfilerChart)
@@ -2440,7 +2437,7 @@ fn the_profiler_chart_chords_need_the_modifier_held() {
 
 /// F3+P (pause on lost focus) and F3+C (copy location) — the same
 /// modifier-gated shape [`the_debug_chords_need_the_modifier_held`] checks
-/// for F3+B/F3+G, extended to the two chords this change adds. `P` and `C`
+/// for F3+B/F3+G, extended to the two chords covered here. `P` and `C`
 /// are unbound in the default table (like `B`/`G`), so the negative half is
 /// real: a chord that ignored `debug_held` would fire on every plain press.
 #[test]
@@ -2663,7 +2660,7 @@ fn f3_b_and_f3_g_flip_their_atomic_and_push_chat_through_the_real_key_path() {
 
 /// F3+P's toggle+persist half, through the real `MenuNav` — the same shape
 /// `toggle_advanced_item_tooltips` already has no dedicated test for, closed
-/// here since this change adds the option. Persistence itself (writing no
+/// here because it exercises the option's in-memory toggle. Persistence (writing no
 /// key when untouched, degrading a garbled value to vanilla's `true`) is
 /// covered by `config.rs`'s
 /// `pause_on_lost_focus_defaults_on_and_only_writes_a_key_when_turned_off`;
@@ -2772,7 +2769,7 @@ fn the_mouse_path_resolves_the_default_attack_and_use_buttons() {
         mouse_action_for(&binds, MouseButton::Right),
         Some(InputAction::Use)
     );
-    // Middle **is** a gameplay binding now: `key.pickItem` defaults to
+    // Middle **is** a gameplay binding now: the pick-item action defaults to
     // the middle mouse button, so it is the primary route for
     // pick-item rather than a rebound one. This assertion previously read
     // `None`, which was correct only while pick-item did not exist — the
@@ -2849,7 +2846,7 @@ fn pressing_play_reaches_a_running_integrated_server() {
     let protocol = Config::default().protocol;
     let seed = crate::menu::world_select::BUNDLED_WORLD.seed;
     // `None` world dir: this gate is about the seam reaching a running server,
-    // not about persistence (issue #468 gates that in
+    // not about persistence (that is covered in
     // `tests/singleplayer_persistence.rs`), and an in-memory world leaves
     // nothing in the developer's real data directory.
     let net = match launch_singleplayer(
@@ -2993,7 +2990,7 @@ fn physics_profile_defaults_to_the_modern_profile_for_the_default_protocol() {
     );
 }
 
-/// **Issue #189's queued patch, exercised through production code.**
+/// **Social-roster synchronization, exercised through production code.**
 ///
 /// `crate::menu::social::entries_from_tablist` was pure and unit-tested
 /// with **no caller anywhere in the shell** — `docs/social-interactions.md`'s
@@ -3084,7 +3081,7 @@ fn drive_ui_from_session_refreshes_the_social_roster_from_the_real_tab_list() {
     );
 }
 
-/// Issue #192's last hop, exercised through production code exactly like
+/// The credits-screen handoff, exercised through production code exactly like
 /// the social-roster test above: `menu::UiState::show_credits` and
 /// `net::NetUpdate::WinGame` both already existed, individually tested,
 /// with **nothing calling either from the other** — the credits screen was
@@ -3256,10 +3253,10 @@ fn accepting_a_resource_pack_prompt_does_not_reopen_it_before_the_net_thread_cat
     );
 }
 
-/// Live gate for issue #25: `ShellWeatherProbe::precipitation` must reach
+/// Live gate: `ShellWeatherProbe::precipitation` must reach
 /// a real per-column snow/rain decision now that the biome-climate lane
 /// is wired, not the `Rain` it answered unconditionally before this
-/// session (`app.rs`'s own history — see the #25 report).
+/// session (the shell's session path must not substitute an unconditional value).
 ///
 /// Connects directly through `ClientBuilder`, bypassing `NetClient`'s
 /// background thread so the raw event stream can be read here: the real
@@ -3471,8 +3468,7 @@ async fn live_precipitation_matches_vanillas_own_threshold_for_real_biomes() {
     drain.abort();
 }
 
-/// **Issue #436's `SessionRecipeBookSettings` island, closed through
-/// production code.**
+/// **Recipe-book settings synchronization, exercised through production code.**
 ///
 /// `RECIPE_BOOK_SETTINGS` (76) decoded and folded as of `fd53995` and
 /// **nothing read it**: the recipe-book panel started closed and unfiltered
@@ -3766,7 +3762,7 @@ fn a_non_notifying_unlock_never_toasts() {
     );
 }
 
-/// `RecipeBookSeenRecipe`: the encoder existed in every protocol
+/// The recipe-seen packet: its encoder existed in every protocol
 /// family and nothing anywhere called it. Drives the real chain: a real
 /// `WindowApp`, a real `ClientEvent::RecipeBookAdded` folded through the same
 /// `NetIngest` schedule the net thread runs, a recipe corpus loaded so the
@@ -3775,7 +3771,7 @@ fn a_non_notifying_unlock_never_toasts() {
 /// now lives.
 ///
 /// Two properties: the recipe must actually be **on the open page** (vanilla
-/// only fires this for a `RecipeButton` that was populated, not for the whole
+/// only fires this for a populated recipe button, not for the whole
 /// corpus), and reporting it once must not report it again next frame — the
 /// dedup [`WindowApp::recipe_book_seen`] exists for.
 #[test]
@@ -3860,7 +3856,7 @@ fn drive_ui_from_session_reports_a_visible_highlighted_recipe_as_seen_exactly_on
 
 /// The control for the gate above: a highlighted recipe that is **not** on
 /// the currently open page (the panel is closed) must never be reported —
-/// vanilla only fires this for a populated `RecipeButton`.
+/// the client only fires this for a populated recipe button.
 #[test]
 fn a_highlighted_recipe_is_not_reported_while_the_panel_is_closed() {
     use crate::net::NetUpdate;
@@ -4000,7 +3996,7 @@ fn server_initiated_container_close_returns_to_gameplay_not_the_player_inventory
          menu before it closes"
     );
 
-    // The server closes window 5 — `ClientboundContainerClosePacket` decoded
+    // The server closes window 5 — the container-close packet is decoded
     // into `ClientEvent::ScreenClosed`.
     ingest(&app, ClientEvent::ScreenClosed { window_id: 5 });
     assert_eq!(
@@ -4068,10 +4064,11 @@ fn opening_the_local_inventory_with_no_server_window_is_not_closed_by_the_server
     );
 }
 
-/// **Issue #436's `SessionGameRules` island, closed through production code.**
+/// **Game-rule synchronization, exercised through production code.**
 ///
-/// `doImmediateRespawn` is the most user-visible game rule there is: vanilla
-/// never puts the death screen up at all when it is on. `SessionGameRules`
+/// The immediate-respawn rule is the most user-visible game rule there is: the
+/// reference client never puts the death screen up at all when it is on.
+/// `SessionGameRules`
 /// was folded, reset on quit-to-title and gated through the real
 /// `SharedState::apply` path with **no reader anywhere in the shell**, so the
 /// rule did nothing.
@@ -4181,14 +4178,12 @@ fn without_the_rule_the_same_death_still_raises_the_death_screen() {
     );
 }
 
-/// **Issue #47's last hop, closed: a real right-click opens the command block
-/// edit screen.**
+/// **Command-block interaction: a real right-click opens the edit screen.**
 ///
 /// `Screen::CommandBlockEdit`, `command_block::CommandBlockState` and
 /// `render::command_block_frame` landed in `c76510b` real and unit-tested, and
 /// `UiState::open_command_block`/`MenuNav::open_command_block` had **zero
-/// production callers** — the screen was reachable only from a test. Issue
-/// #436's ledger entry.
+/// production callers** — the screen was reachable only from a test.
 ///
 /// This drives the production path: a real `WindowApp`, a real command block
 /// written into the real `ChunkWorld`, a real `RayTarget` (what the crosshair
@@ -4229,7 +4224,7 @@ fn right_clicking_a_command_block_opens_the_edit_screen() {
         // `write_predicted_block`'s `sync_block_entity` just created — the
         // shape a server sends for a command block whose command has been set.
         // Without it the screen opens through the "fail open" default (empty
-        // command), and the issue's gate — "opens populated with the block's
+        // command), and the test's gate — "opens populated with the block's
         // actual command text" — would be untested.
         w.set_block_entity(
             block[0],
@@ -4355,8 +4350,7 @@ fn right_clicking_a_normal_block_does_not_open_the_command_block_screen() {
 const CB_FB_W: u32 = 640;
 const CB_FB_H: u32 = 400;
 
-/// **Issue #474's second half: a click on the command block screen reaches a
-/// row.**
+/// **Command-block interaction: a click on the edit screen reaches a row.**
 ///
 /// `0948f59` made the screen *draw*. It still could not be clicked:
 /// `app/lifecycle.rs` guarded its `CursorMoved` and `MouseInput` arms on
@@ -4562,7 +4556,7 @@ fn no_command_block_row_hit_tests_off_the_rows_or_off_the_screen() {
 }
 
 /// F3+F4's cycle visits all four modes and returns, and F3+N's fallback is
-/// vanilla's `firstNonNull(previous, CREATIVE)`.
+/// falling back to Creative when no previous mode is available.
 ///
 /// The cycle is the whole decidable part of the first `ClientAction::ChangeGameMode`
 /// producer in the workspace — the variant was encoded by two protocol families
@@ -4792,7 +4786,7 @@ fn the_derived_join_server_rect_is_the_one_the_layout_arranges() {
 /// # Why the expected value is not round-tripped
 ///
 /// The probe point comes from [`join_server_rect`], hand-derived from
-/// `JoinMultiplayerScreen`'s own layout constants, and the expected answer is the
+/// screen layout constants, and the expected answer is the
 /// row index `SERVER_LIST_BUTTONS`' order fixes — `n + 0`, since Join Server is
 /// its first entry and the footer follows the entries in one flat index space.
 /// Asking `row_rect` where the button is and clicking there would pass for any
@@ -4933,9 +4927,9 @@ fn a_cursor_inside_the_band_still_resolves_to_the_list_row_under_it() {
     const N: usize = 16;
     let mut app = app_with_servers("band-control", N);
 
-    // Row 0's centre at scroll 0, from vanilla's own arithmetic:
-    // `getFirstEntryY() + index * itemHeight` below the content band's top, and
-    // `getRowLeft() = width/2 - getRowWidth()/2` with `getRowWidth() == 305`.
+    // Row 0's centre at scroll 0, from the layout arithmetic:
+    // the first-entry offset plus the row index times row height below the
+    // content band's top, with the fixed 305 px row width centred horizontally.
     let row_top = SERVER_LIST_HEADER_H_VANILLA + SERVER_LIST_FIRST_ENTRY_Y_VANILLA;
     let probe_y = row_top + SERVER_LIST_ITEM_H_VANILLA * 0.5;
     let row_w: f32 = 305.0;
@@ -5284,7 +5278,7 @@ fn a_rebound_f3_chord_fires_on_its_new_key_and_stops_on_its_old_one() {
     seed_owning_account(&dir);
     app.nav = MenuNav::with_path(dir.join("servers.json"));
 
-    // Vanilla's `key.debug.showChunkBorders`, GLFW 71.
+    // The default debug binding for chunk borders uses key code 71.
     assert_eq!(
         app.keybinds()
             .binding(InputAction::DebugShowChunkBorders),
