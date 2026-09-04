@@ -1,4 +1,5 @@
-//! Issue #107's actual claim, as an enforceable check rather than a comment.
+//! The cross-plugin-messaging dependency-direction claim, as an enforceable
+//! check rather than a comment.
 //!
 //! `cross_plugin_message.rs` proves a message *arrives*. That is only
 //! interesting if the subscriber has no compile-time dependency on the
@@ -93,7 +94,7 @@ fn the_subscriber_does_not_depend_on_the_publisher() {
     assert!(
         !found.contains(&Section::Dependencies),
         "lodestone-shop-stats must not have lodestone-shop in [dependencies] -- \
-         the whole point of issue #107 is that a subscriber needs no compile-time \
+         the whole point of this pattern is that a subscriber needs no compile-time \
          dependency on the publisher. Found in: {found:?}"
     );
     assert!(

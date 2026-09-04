@@ -1,6 +1,6 @@
-//! Issue #107's end-to-end proof: two toy plugins in separate crates exchange a
-//! custom message, and the subscriber has **no compile-time dependency on the
-//! publisher**.
+//! The end-to-end proof for cross-plugin custom event messages: two toy
+//! plugins in separate crates exchange a custom message, and the subscriber
+//! has **no compile-time dependency on the publisher**.
 //!
 //! This test is the only place the two halves meet, which is why
 //! `lodestone-shop` is a `[dev-dependencies]` entry here and not a
