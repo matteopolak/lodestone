@@ -1175,8 +1175,8 @@ fn registries_report_blocks() -> Option<Vec<String>> {
 /// `generated/reports/registries.json` rather than from our JVM dump.
 ///
 /// This is the test that would have caught the original defect: `block_type_name`
-/// used to index the *alphabetical* `BLOCK_NAMES` (from name-keyed `blocks.json`)
-/// with a `minecraft:block` registry id, so every id resolved to an unrelated
+/// used to treat the *alphabetical* block index from name-keyed `blocks.json`
+/// as a `minecraft:block` registry id, so every id resolved to an unrelated
 /// block — `air` is registry 0 but alphabetical 19, `stone` is registry 1 but
 /// alphabetical 975. Nothing in the tree disagreed, because the one consumer
 /// (`block_event`) was tested with an alphabetical id too.

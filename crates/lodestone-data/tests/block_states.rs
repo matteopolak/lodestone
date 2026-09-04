@@ -16,6 +16,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use lodestone_model::BlockStateRegistry;
+use lodestone_data::block::Block;
 use lodestone_data::block_states::{self, BlockStateTable};
 
 fn manifest_dir() -> PathBuf {
@@ -59,15 +60,47 @@ fn props_of(state: &serde_json::Value) -> Vec<(String, String)> {
     pairs
 }
 
+/// Names in the order `STATES` uses for its block-index field.
+fn alphabetical_block_names<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut names: Vec<&str> = names.into_iter().collect();
+    names.sort_unstable();
+    names
+}
+
 /// Renders the committed `block_states.rs` source from the parsed report.
 ///
-/// Deterministic: blocks come out in the report's sorted key order
-/// (`serde_json::Map` is a `BTreeMap` without `preserve_order`), and property
-/// sets are de-duplicated and indexed in sorted order.
+/// Deterministic: block names are explicitly sorted before their positions
+/// become state-table indices, and property sets are de-duplicated and indexed
+/// in sorted order.
 fn generate(doc: &serde_json::Value) -> String {
     let object = doc.as_object().expect("blocks.json is a JSON object");
 
-    let block_names: Vec<&str> = object.keys().map(String::as_str).collect();
+    let block_names = alphabetical_block_names(object.keys().map(String::as_str));
+    let mut registry_ids = Vec::with_capacity(block_names.len());
+    for &name in &block_names {
+        let block = Block::from_name(name).unwrap_or_else(|| {
+            panic!("state report block `{name}` is absent from the generated block registry")
+        });
+        assert_eq!(
+            block.name(),
+            name,
+            "state report block `{name}` mismatches the generated canonical block registry"
+        );
+        registry_ids.push(block.registry_id());
+    }
+    assert_eq!(
+        block_names.len(),
+        Block::COUNT as usize,
+        "block-state report has {} block names; generated block registry has {}",
+        block_names.len(),
+        Block::COUNT
+    );
+    registry_ids.sort_unstable();
+    assert_eq!(
+        registry_ids,
+        (0..Block::COUNT).collect::<Vec<_>>(),
+        "block-state report names do not cover each generated registry id exactly once"
+    );
     let block_index: BTreeMap<&str, usize> = block_names
         .iter()
         .enumerate()
@@ -137,20 +170,6 @@ fn generate(doc: &serde_json::Value) -> String {
 
     let _ = writeln!(
         out,
-        "/// Interned block identifiers, indexed by block index."
-    );
-    let _ = writeln!(
-        out,
-        "pub static BLOCK_NAMES: [&str; {}] = [",
-        block_names.len()
-    );
-    for name in &block_names {
-        let _ = writeln!(out, "    {name:?},");
-    }
-    out.push_str("];\n\n");
-
-    let _ = writeln!(
-        out,
         "/// De-duplicated property sets (sorted `(name, value)` pairs), indexed by set index."
     );
     let _ = writeln!(
@@ -176,7 +195,11 @@ fn generate(doc: &serde_json::Value) -> String {
 
     let _ = writeln!(
         out,
-        "/// Per-state `(block index, property-set index)`, indexed by block-state id."
+        "/// Per-state `(alphabetical block-name index, property-set index)`, indexed by\n\
+         /// block-state id. Resolve the first field through\n\
+         /// [`crate::generated_block_enum::REGISTRY_IDS_BY_NAME`] into\n\
+         /// [`crate::generated_block_registry::BLOCK_REGISTRY_NAMES`]; it is not a\n\
+         /// `minecraft:block` registration id."
     );
     let _ = writeln!(out, "pub static STATES: [(u16, u16); {count}] = [");
     for chunk in states.chunks(12) {
@@ -190,6 +213,38 @@ fn generate(doc: &serde_json::Value) -> String {
     out.push_str("];\n");
 
     out
+}
+
+fn one_block_report(name: &str) -> serde_json::Value {
+    serde_json::json!({
+        name: {
+            "states": [{ "id": 0 }]
+        }
+    })
+}
+
+/// A name-keyed report may preserve insertion order. The reverse-order input
+/// makes the alphabetical-index contract observable rather than inheriting the
+/// JSON map implementation's current iteration behavior.
+#[test]
+fn generator_explicitly_sorts_block_names_before_assigning_state_indices() {
+    assert_eq!(
+        alphabetical_block_names(["minecraft:stone", "minecraft:air"]),
+        ["minecraft:air", "minecraft:stone"],
+        "report insertion order must not become a STATES block index"
+    );
+}
+
+#[test]
+#[should_panic(expected = "is absent from the generated block registry")]
+fn generator_rejects_a_state_block_unknown_to_the_canonical_registry() {
+    let _ = generate(&one_block_report("minecraft:not_a_block"));
+}
+
+#[test]
+#[should_panic(expected = "block-state report has 1 block names; generated block registry has 1196")]
+fn generator_requires_exact_canonical_block_coverage() {
+    let _ = generate(&one_block_report("minecraft:air"));
 }
 
 // ---------------------------------------------------------------------------

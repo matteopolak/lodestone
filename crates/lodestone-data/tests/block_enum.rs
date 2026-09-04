@@ -128,6 +128,39 @@ fn names_and_paths_round_trip_through_from_name() {
     );
 }
 
+/// The state table's block cell is an alphabetical index, while `Block` is a
+/// registration id. The public state lookup must join the former through the
+/// generated name permutation before returning a canonical name or typed block.
+///
+/// Air and stone make this discriminating: their registration ids are 0/1 but
+/// their alphabetical indices are 19/975. An implementation that treats either
+/// order as the other returns a plausible block for every state, but not the
+/// right one.
+#[test]
+fn state_block_names_join_alphabetical_indices_to_registry_ids() {
+    let mut alphabetical: Vec<Block> = Block::all().collect();
+    alphabetical.sort_unstable_by_key(|block| block.name());
+    assert_eq!(alphabetical.len(), 1_196, "canonical block coverage changed");
+    assert_eq!(Block::COUNT, 1_196, "Block count drifted from the census");
+
+    assert_eq!(Block::Air.registry_id(), 0);
+    assert_eq!(alphabetical[19], Block::Air, "air alphabetical index");
+    assert_eq!(Block::Stone.registry_id(), 1);
+    assert_eq!(alphabetical[975], Block::Stone, "stone alphabetical index");
+    assert_ne!(Block::Air.registry_id() as usize, 19);
+    assert_ne!(Block::Stone.registry_id() as usize, 975);
+
+    let air = StateId::new(0).expect("air state id is in range");
+    assert_eq!(air.block(), Block::Air);
+    assert_eq!(block_states::block_name(air.raw()), Some(Block::Air.name()));
+    let stone = StateId::new(1).expect("stone state id is in range");
+    assert_eq!(stone.block(), Block::Stone);
+    assert_eq!(
+        block_states::block_name(stone.raw()),
+        Some(Block::Stone.name())
+    );
+}
+
 /// Negative arms. A name from another namespace is never a built-in block even
 /// when its path is one — a plugin's `mypack:stone` must not resolve to
 /// `Block::Stone`, which is the whole reason `from_name` inspects the namespace
