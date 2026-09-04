@@ -380,9 +380,8 @@ pub fn parse_minecraft_data_report(
 /// against Mojang's own report requires either a Mojang `--reports` run
 /// against that old server jar, or a captured-bytes comparison against a
 /// modern client -- real oracle work this stage deliberately does not
-/// fabricate (see `docs/plans/multi-version-protocol-dedup.md`'s namespace
-/// problem: v735 and v770 agree on only 7 of 88 `ENTRIES` names as plain
-/// strings, so nothing here can be guessed from spelling). Each verified
+/// fabricate: v735 and v770 agree on only 7 of 88 `ENTRIES` names as plain
+/// strings, so nothing here can be guessed from spelling. Each verified
 /// pair is a one-line addition to this table; nothing else in the generator
 /// needs to change to pick it up -- see [`minecraft_data_canonical_alias`]
 /// and [`resolve_canonical_alias`].
@@ -1003,9 +1002,9 @@ pub enum CliCommand {
     CheckCommentVoice {
         allowlist: PathBuf,
     },
-    /// The four `docs/plans/multi-version-protocol-dedup.md` duplication
-    /// measurements (file, struct, dispatch-arm, function) plus the
-    /// minecraft-data adjacency table (`protocol_dup`).
+    /// The five `docs/plans/multi-version-protocol-dedup.md` report sections:
+    /// four duplication measures (file, struct, legacy dispatch, function)
+    /// plus packet-shape adjacency (`protocol_dup`).
     ProtocolDup,
 
     Planned {

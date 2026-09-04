@@ -5,10 +5,9 @@
 `crates/versions/1.9` (package `lodestone-v1-9`) is the first *era* crate in this repo: one
 family serving Minecraft 1.9.4, 1.10.2, 1.11.2 and 1.12.2 — protocols 110, 210, 316 and 340 —
 from a single adapter, four generated packet-id tables, and nine explicitly-carried shape
-deltas, rather than four copies of a family. It is the calibration case for
-[`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md): the
-same four versions cost ~336 hand-written source lines *each* under the copy-forward scheme this
-replaces, and the marginal cost of the fourth is now about twenty.
+deltas, rather than four copies of a family. It demonstrates the range and
+per-protocol-table rules in
+[`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md).
 
 ## How it works
 

@@ -110,8 +110,8 @@ never fires against a real server.
 
 Per-state outline (`getShape`, what block **selection** uses) and interaction
 (`getInteractionShape`, refines the hit *face* only, never adds a hit) shapes,
-dumped and committed the same way as collision shapes — see
-`docs/lodestone-data-crate.md`. The outline shape is a **third** thing,
+dumped and committed the same way as collision shapes — see [Registries](./registries.md). The
+outline shape is a **third** thing,
 neither collision nor fluid presence: 50.9% of all 32,366 states have an
 outline differing from their collision shape, and only 3,328 states are a
 true full cube. Cobweb is the cleanest proof the two censuses are not
@@ -428,7 +428,7 @@ sound_types, block_entity_types}` for every generated per-state census;
 `crate::loot`/`block_drops` for the support cascade's drops; `lodestone-anvil`
 for the region container, gzip NBT, and the version gate; all persistence
 paths are target-gated off `wasm32` (a browser world has no filesystem). See
-[`docs/lodestone-data-crate.md`](./registries.md) for how each
+[Registries](./registries.md) for how each
 generated table is dumped and regenerated, and
-[`docs/world-save-load.md`](./world-persistence.md) for terrain/scheduled-tick
+[World persistence](./world-persistence.md) for terrain/scheduled-tick
 persistence, which this doc's entity/player half sits beside.

@@ -7,9 +7,9 @@
 generated packet-id tables, three generated block-state tables, three
 generated entity registries, and nine explicitly-carried shape deltas, rather
 than three copies of a family. It is the second era crate, after
-[`the 1.9 era`](./protocol-1-9-era.md), and the stage of
-[`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md)
-that closes the pre-1.17 legacy gap between 1.13 and 1.17.
+[`the 1.9 era`](./protocol-1-9-era.md), and applies the range and era-sharing
+rules in [`docs/plans/multi-version-protocol-dedup.md`](./plans/multi-version-protocol-dedup.md)
+to the pre-1.17 legacy gap between 1.13 and 1.17.
 
 The folder is named `1.14` for the era's opening release. It has never been a
 protocol number, and now it is not even a single protocol — ask

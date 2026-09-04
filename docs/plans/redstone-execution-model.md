@@ -2,14 +2,15 @@
 
 ## What it is
 
-The plan for issue #548's rework of how redstone executes: replacing per-event rediscovery
+This plan defines how redstone execution avoids per-event rediscovery while preserving observable
+ordering: it replaces
 (string-parsed block states, a fifteen-predicate dispatch chain, blind neighbour visits) with a
 layered design — a typed cell representation, palette-derived reaction classification, a
 cross-column world view, and, **only if counters then justify it**, an incrementally-invalidated
 listener index. It is written against the device set that landed first (`docs/redstone.md`'s
 "what each device needs of the execution model" table) rather than against an imagined redstone,
-and its first finding is that the issue's own premise needs correcting: **there is no per-tick
-rescan to replace**. The expensive thing is the per-event constant factor, and the correctness gap
+and its first finding is that **there is no per-tick rescan to replace**. The expensive thing is
+the per-event constant factor, and the correctness gap
 this plan closes is cross-chunk propagation — not incrementality, which the model already has.
 
 ## Status
@@ -24,7 +25,7 @@ block-state `String` clone are both gone. `redstone_counters::Snapshot::notifica
 is the instrument. Landed behaviour, measurements and the design's fallback cases are in
 [`../redstone-execution.md`](../redstone-execution.md).
 
-**Layer A's second half and Layer C have both landed since.** `redstone::WorldState`
+**The remaining Layer A work and Layer C use** `redstone::WorldState`
 (`std::sync::Arc<str>`) replaced `String` in every world-lookup closure across the redstone
 family, so a read is a refcount bump rather than a heap allocation and byte copy.
 `random_tick::RedstoneColumns` is Layer C's multi-column view — the home column the caller
@@ -70,7 +71,7 @@ rather than the 15-cell proxy.
 ## 1. What the current model actually is
 
 Measured by reading `random_tick.rs`, `tick.rs`, `scheduled_tick.rs`, `neighbor_update.rs` and
-`redstone*.rs` as they are today, not by restating the issue.
+`redstone*.rs` as they are today.
 
 ### 1.1 It is already event-driven; an idle circuit costs zero
 
@@ -87,10 +88,10 @@ Redstone work runs from exactly three production entry points, all event-shaped:
 Nothing scans the world for redstone per tick. The random-tick pass classifies sections by a
 palette mask compared as integers (`ChunkColumn`'s randomly-ticking classification), and the
 drains touch only due entries. **A lit contraption at rest therefore already recomputes nothing**
-— issue #548's proposed "null contraption" control passes today by construction. That control is
+— the null-contraption control passes today by construction. That control is
 still worth building (§6), but as a regression tripwire, not as the win.
 
-"Per-tick rescan" in the issue is really **per-event rediscovery**: every reaction re-derives who
+"Per-tick rescan" is really **per-event rediscovery**: every reaction re-derives who
 it is, what its neighbours are, and what signal touches it, from scratch, through strings.
 
 ### 1.2 The per-event cost anatomy
@@ -109,8 +110,8 @@ For one neighbour notification reaching `random_tick::react_to_notification`:
   = 42 notifications, duplicates included (vanilla-faithful), each paying the full dispatch and
   read cost above. A cascading run of N changed cells is O(N × 42) notifications.
 
-The issue's own suspicion — "if string parsing is the bulk of the cost, the graph is optimising
-the wrong layer" — is almost certainly right, and §6's counters exist to confirm it with a number
+If string parsing is the bulk of the cost, a graph optimises the wrong layer. Section 6's counters
+exist to confirm that with a number
 before anything structural is built.
 
 ### 1.3 The whole family is confined to one chunk column, silently
@@ -128,19 +129,18 @@ designed against a 16×16 toy world — which is why the cross-column seam is a 
 ### 1.4 The ordering machinery is already the specification, and it is good
 
 - `neighbor_update::UPDATE_ORDER` (west, east, down, up, north, south) and
-  `NeighborPropagator::propagate`'s depth-first cascade are direct ports of vanilla's
-  `CollectingNeighborUpdater`, with the chained-update cap.
+  `NeighborPropagator::propagate` preserve the reference game's depth-first cascade and
+  chained-update cap.
 - `scheduled_tick::ScheduledTickQueue` reproduces `DRAIN_ORDER` (trigger tick, then priority,
   then insertion order) and the per-`(pos, kind)` dedup, as the documented single-container
-  reduction of vanilla's per-chunk `LevelChunkTicks` — its own doc names the promotion path if a
+  reduction of the reference game's per-chunk tick queues — its own doc names the promotion path if a
   per-chunk registry ever exists.
 - Dust's 42-notification set is ordered deterministically (centres in `[pos] ++ UPDATE_ORDER`,
   directions in `UPDATE_ORDER` within each) precisely because vanilla's own iteration order there
   is unspecified.
 
-None of this changes. **The graph decides who to enqueue, never in what order to run** — the
-issue's own seam ("memoize the strength lattice, keep the update queue's ordering semantics
-untouched") is correct and this plan keeps it.
+**The graph decides who to enqueue, never in what order to run.** Strength memoization must
+preserve the update queue's ordering semantics.
 
 ### 1.5 The dispatch shape, and where it already broke
 
@@ -152,13 +152,11 @@ entry points: the piston's two-phase `begin_move` plan (moving cells + cleared c
 the dispatch is provably too narrow for multi-cell writes. §3.3 makes the plan-shaped return the
 norm rather than the exception.
 
-### 1.6 One stale claim corrected before it misleads
+### 1.6 Client state resolution preserves dust power
 
-`docs/redstone.md` still says every dust change is delivered to the client as `power=0`
-(`resolve_state_id` exact-property-set matching). **That is fixed**: `resolve_state_id` now
-delegates to `lodestone_data::block_states::state_id`, which has a subset tier plus a
-default-state-overlay fallback, and `the_powered_run_reaches_the_client` is a live, passing gate.
-The rework does not sit on top of a wire carrying wrong values.
+`resolve_state_id` delegates to `lodestone_data::block_states::state_id`, which has a subset tier
+plus a default-state-overlay fallback. `the_powered_run_reaches_the_client` verifies that dust
+power reaches the client rather than defaulting to `power=0`.
 
 ---
 
@@ -169,7 +167,7 @@ Distilled from `docs/redstone.md`'s per-device table, which is the requirements 
 | requirement | evidence |
 |---|---|
 | **Multi-cell atomic write plans** | piston `begin_move`; tripwire `CalculatedState` (two hooks plus every wire cell between, up to 41 cells) |
-| **Triggers that are not neighbour notifications** | tripwire has *no* `neighborChanged` at all (placement + self-scheduled 10-tick poll); rails owe themselves a placement reaction; target fires from an external projectile-hit event |
+| **Triggers that are not neighbour notifications** | tripwire reacts only to placement and its self-scheduled 10-tick poll; rails owe themselves a placement reaction; target fires from an external projectile-hit event |
 | **Non-uniform propagation shapes** | rails notify `pos.below()` always and `pos.above()` only on a slope — not a six-direction fan-out; dust's 7-centre set; lever's two-layer `updateNeighbours` |
 | **Cross-device state reads at range** | rail chains read up to 8 cells through *other rails'* `POWERED`; tripwire hook scans 41 cells live per recheck |
 | **Read set ≠ notify set** | piston quasi-connectivity: `has_extend_signal` reads `pos.above()` but vanilla never *notifies* the piston when that cell changes — the difference **is** the BUD quirk |
@@ -221,7 +219,7 @@ all within 41 blocks of the origin, and reactions triggered near a border reach 
 column over). Writes landing in a neighbouring column go through the same `ChunkSource::set_block`
 path; the drain already fetches columns per due entry. This also forces the `ScheduledTickQueue`
 question its own doc anticipates: with reactions crossing columns, promote to per-chunk tick
-containers plus the `LevelTicks` cross-container merge, or document why the single container's
+  containers plus an ordering-preserving cross-container merge, or document why the single container's
 `DRAIN_ORDER` is still faithful. Layer C is a correctness feature the devices need regardless of
 any performance work, and it is the prerequisite that makes contraption-scale benchmarks
 *possible* — today no community contraption can even exist in this world.
@@ -243,7 +241,7 @@ compares every index-driven enqueue set against the rediscovery answer.
 
 Every reaction's output becomes one shape — a `WritePlan`: an ordered list of `(pos, new_state)`
 writes, a list of scheduled ticks `(pos, kind, delay, priority)`, and a fan-out policy per write
-(none / single `updateNeighborsAt` / dust's 7-centre set / rail's conditional extras). The
+(none / one neighbour-notification pass / dust's 7-centre set / rail's conditional extras). The
 executor — today `propagate_and_react` plus the drain arms, unchanged in ordering — applies
 writes in plan order, publishes events, schedules ticks, and fans out per policy. This:
 
@@ -268,8 +266,8 @@ cascade). Revisit only with an oracle-gated order-sensitive circuit corpus in pl
 the whole design. A piston *reads* `pos.above()` (quasi-connectivity) but vanilla never
 *notifies* it when that cell changes — the difference between the read set and the notify set is
 precisely the BUD quirk, so an index built from "what does this node read" destroys
-quasi-connectivity while looking more thorough. The issue's directionality insight (a repeater
-pointing away is not invalidated by downstream changes) lands soundly one level up: the repeater
+quasi-connectivity while looking more thorough. A repeater pointing away is not invalidated by
+downstream changes; that directionality belongs one level up: the repeater
 *is* notified in vanilla (it is a neighbour), and its reaction then reads only input/side/support
 faces and schedules nothing. Face-sensitivity is therefore a per-kind pruning of *reactions*
 (the observer's `n.from == watch` check is the existing example), not of notifications — safe to
@@ -285,8 +283,7 @@ cheap) but discovery and parsing, which Layers A–B remove without a dependency
 dependency that shapes the whole subsystem would also have to earn its place in the wasm32
 bundle `lodestone-server` links into, under this repo's clock/thread confinement rules. A
 hand-rolled dirty-set over an explicit adjacency index (Layer D's shape) is strictly simpler and
-keeps ordering in this crate's hands. This answers the issue's "evaluate, do not assume" with:
-evaluated against the access pattern, and no.
+keeps ordering in this crate's hands. The access pattern rules out this dependency.
 
 ### 3.6 Scope: per-column, per-dimension by ownership; global rejected
 
@@ -405,11 +402,11 @@ ratio is machine-independent. A counter run and a timing run are two runs, never
 ## 7. What this deliberately does not build
 
 - **A memo/incremental-computation dependency** (`comemo`, `salsa`) — §3.5.
-- **Wire-run supernodes / circuit compilation** — the issue's "index a whole contraption so it
-  knows after tick 1 to enable xyz" is a redstone compiler (MCHPRS territory). It abandons
+- **Wire-run supernodes / circuit compilation** — indexing a whole contraption after its first
+  tick is a redstone compiler (MCHPRS territory). It abandons
   observational order equivalence by design; not in this codebase's contract.
-- **The piston/slime movability index** — a different graph over a different relation, named by
-  the issue itself as separate. `piston::resolve` computes runs per event; slime/honey are not
+- **The piston/slime movability index** — a different graph over a different relation.
+  `piston::resolve` computes runs per event; slime/honey are not
   modelled yet; nothing to index.
 - **Persisting any index or cell table** — derived data only; persistence adds a staleness class
   for zero measured need.
@@ -423,8 +420,8 @@ ratio is machine-independent. A counter run and a timing run are two runs, never
 
 ## 8. The risk of the rework being a net loss, honestly
 
-**The full dependency graph, as imagined in the issue, is probably not worth building — and the
-plan is shaped so that finding this out costs one instrumentation unit, not a rework.**
+**A full dependency graph is probably not worth building; this plan uses one instrumentation unit
+to establish that conclusion before a rework.**
 
 - The headline motivation is partially moot: incrementality at the tick level already exists;
   idle cost is already zero (§1.1).
@@ -445,21 +442,19 @@ plan is shaped so that finding this out costs one instrumentation unit, not a re
 ~10% of the redstone share of a tick on the largest scene that fits the ticked area, U7 is not
 built, and this plan's record is amended to say so with the numbers. If dust-network settle cost
 (wire_recomputes) dominates instead, the next candidate is wire-run batching *behind the oracle
-corpus*, not a listener index — a different follow-up than #548 imagines, which is exactly why
-the counters come first.
+  corpus*, not a listener index. That is why the counters come first.
 
 The layers that are unconditionally worth it: A (removes a per-event tax every future device
 also pays), B (asymptotic dispatch win, correct by construction, precedented in this very file),
 C (a correctness feature the device set needs regardless), U0 (evidence the whole family is
-currently missing). That is the recommended #548: **less graph, more floor.**
+currently missing). The recommended direction is **less graph, more floor.**
 
 ---
 
 ## 9. Open questions that need running code or the oracle
 
 - ~~The actual cost split (parse vs. read vs. enumerate vs. queue)~~ — **answered, partially.**
-  U1's counters (`redstone_counters.rs`) were already landed by an earlier session; this pass
-  used them for the first time against a "large" fixture rather than the single-cell one —
+  U1's counters (`redstone_counters.rs`) record a "large" fixture rather than the single-cell one:
   `measured_cost_split_for_a_fifteen_cell_dust_run`, a 15-long dust run lit from one end
   (`MAX_PUSH_DEPTH`-scale, chosen as the largest single number this family already names, until
   U6's real contraption corpus exists). Isolated reading (see the concurrency caveat below):
@@ -498,7 +493,7 @@ currently missing). That is the recommended #548: **less graph, more floor.**
   torch/repeater/comparator/observer hook points — a coincidence of *which* test happened to run
   concurrently, not a property of the guard.
 
-  **`TickClock` (`tick.rs`, issue #548's other named instrument) was checked and found
+  **`TickClock` (`tick.rs`) is not suitable
   unusable for this without editing off-limits files.** Its `ScheduledAndPhysics` phase bucket
   sits outside `scheduled.with`'s closure by construction (see its own doc), so it times fire,
   fluid, random ticks, falling blocks, vehicles, TNT, minecarts and dragons in the same bucket as
@@ -509,8 +504,8 @@ currently missing). That is the recommended #548: **less graph, more floor.**
   off-limits to this pass. The U1 counters above were the reachable instrument and are also the
   more precise one (structural counts, not coarse wall-clock time sharing a bucket with five other
   systems) — consistent with §6's own preference for counters over durations.
-- Vanilla's exact behaviour when a neighbour update crosses into an unloaded chunk (drop?
-  defer?) — read `CollectingNeighborUpdater`/chunk-ticket sources, then gate at a real border
+- The reference game's exact behaviour when a neighbour update crosses into an unloaded chunk (drop?
+  defer?) — inspect the neighbour-update and chunk-ticket behaviour, then gate at a real border
   with the live oracle before freezing Layer C's border semantics.
 - Whether cross-column drains require per-chunk tick containers to keep `DRAIN_ORDER` faithful
   when two columns' due ticks interleave — `scheduled_tick.rs`'s own doc names the promotion;

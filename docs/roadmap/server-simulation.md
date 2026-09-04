@@ -1,244 +1,192 @@
 # Server simulation — the roadmap
 
-**Scope:** everything about *simulating the world* server-side — chunk lifecycle, persistence, block
-behaviour, redstone, world state, the tick loop, and the rest of server plumbing. Command execution
-(Brigadier, selectors, `/execute`, functions/datapacks) is deliberately **not** re-decomposed here: it
-already has its own issue, [#48](https://github.com/matteopolak/lodestone/issues/48), and a comment on
-that issue lists the natural sub-scopes for whoever picks it up. Mob AI, pathfinding, breeding,
-villagers, and raids belong to a sibling doc (`server-entities.md`) and a different agent's audit —
-several of that audit's findings are cited below only where they correct a claim this doc's own research
-first got wrong (see [Corrections](#corrections-mid-audit)).
-
-This file is the *why this order*; the 46 issues below are the units. See
-[epic #5](https://github.com/matteopolak/lodestone/issues/5) for the tracker itself, and the note under
-[Epic capacity](#epic-capacity-a-real-constraint) for why not all 46 are attached to it directly.
+**Scope:** server-side world simulation: chunk lifecycle, persistence, block behaviour, redstone,
+world state, the tick loop, and operational server plumbing. Command execution is a separate
+subsystem. Mob AI, pathfinding, breeding, villagers, and raids belong to
+[`server-entities.md`](./server-entities.md); this roadmap names their dependencies only where they
+meet the world-simulation path.
 
 ## Foundations already in place
 
-Worth internalising before estimating any of this: worldgen (noise router, density, carvers, surface,
-aquifer, ore features) is bit-exact against JVM oracles; so are collision shapes (32,366 states),
-hardness, entity dimensions, and block physics constants. A generated `path_types.rs` dumped from
-vanilla's own pathfinding-node evaluator exists as groundwork for pathfinding (not this doc's concern, but it means the
-mob-AI side isn't starting from zero either). `lodestone-server` exists as a real crate with a working
-tokio target-split, an in-memory *and* TCP transport behind the same connection loop
-(`crates/lodestone-server/src/integrated.rs`), and a real (if currently unwired) v26-2 server protocol
-implementation (`V770ServerProtocol` in `crates/versions/26.2/src/server_protocol.rs`). NBT has a complete, tested
-reader/writer in `crates/lodestone-core/src/lib.rs`. None of this is a green-field project.
+World generation, collision shapes, hardness, entity dimensions, and block-physics constants have
+independent reference gates. The server has a transport-neutral connection loop, in-memory and TCP
+transports, a registered 26.2 server protocol, an NBT reader/writer, and a 20 Hz tick loop with
+MSPT/TPS accounting. A feature described below must reuse those owners rather than recreate them.
 
-What is *not* in place, confirmed by whole-tree search rather than assumed: Anvil region-file
-persistence, any tick loop independent of client traffic, redstone (any component), fluid/growth/fire/
-gravity/explosion block simulation, and every item in the World State phase below except difficulty
-(which the client already decodes and displays, just doesn't own).
-
-## Phase ordering and dependency edges
+## Dependency edges
 
 ```
-Phase 0 (server plumbing core)
-  │
-  ├──> Phase 1 (chunk lifecycle) ──────────────┐
-  │                                             │
-  ├──> Phase 2 (persistence) <──────────────────┘  (unloading needs somewhere to save to)
-  │
-  ├──> Phase 3 (block behaviour ticks) ──> Phase 4 (redstone family)
-  │         │
-  │         └──> gravity blocks, fire, fluid flow all consume Phase 3's
-  │              scheduled-tick queue directly
-  │
-  ├──> Phase 5 (world state simulation)
-  │         │  (time needs Phase 0's tick loop; sleep needs time + weather + gamerules;
-  │         │   spawn-chunk-keep-loaded in Phase 1 needs world-spawn-point from here)
-  │
-  └──> Phase 6 (server plumbing, the rest)
-            (autosave needs Phase 0 + Phase 2; RCON/query/ping/resource-pack-push/
-             plugin-messaging are independent leaves — parallelizable with everything)
+tick and protocol core
+  ├── chunk residency ────────────────┐
+  ├── persistence ◀───────────────────┘  (unload hands state to storage)
+  ├── scheduled/block ticks ──→ redstone components
+  ├── world state ──→ sleep, spawn location, dimension transfer
+  └── operational services
 ```
 
-**Phase 0 is the one true prerequisite.** Three issues — a real tick loop, MSPT/TPS accounting, and
-wiring the already-built `V770ServerProtocol` into the shell's singleplayer path — block nearly
-everything downstream, either because there is no clock to schedule against yet, or because every other
-feature in this epic needs a real client observing a real server to be verified against anything beyond
-a closed-loop unit test. **File and land these first**, ahead of anything else in this document, even
-though they read as unglamorous.
+Tick ownership and a served-client path are the common prerequisites. Chunk unloading and persistence
+are coupled at their handoff; scheduled neighbour propagation is the shared primitive for block
+reactions and redstone. World-state features are mostly independent, except that sleep consumes time,
+weather, and rules, while spawn residency consumes the world spawn point.
 
-**Phase 1 and Phase 2 are mutually entangled at one edge, not fully ordered.** Chunk unloading (Phase 1)
-is inert without persistence (Phase 2) to hand data to; conversely persistence's autosave (Phase 2) only
-matters once there's a tick loop and a reason to save proactively rather than only on unload. Build the
-region-file container and the ticket/status pipeline roughly together; sequence unloading and autosave
-after both exist.
+The implementation order is therefore explicit: establish the server core first; develop chunk
+residency and persistence together, but enable unload/autosave only after both handoffs exist; land
+scheduled ticks and neighbour propagation before any redstone component; then add world-state
+features, with sleep after time/weather/rules and spawn residency after world spawn. Remote console,
+query, status, resource-pack, plugin-channel, and access work are parallel leaves once the host path
+exists. Multi-dimension work is an exception: estimate it as a combined generation, storage, tick,
+transfer, and stream feature rather than a small portal patch.
 
-**Phase 3 before Phase 4 is not optional.** Every redstone component reads a power level that Phase 3's
-neighbour-update-propagation issue establishes, and reacts to notifications that same issue defines the
-shape of. Building any redstone component against ad-hoc, component-specific update logic (rather than
-the shared propagation primitive) is exactly the kind of thing that "looks done" in isolation and then
-needs a rewrite once the real primitive lands — see the piston sub-issue's own trap note, which is the
-sharpest version of this risk in the whole epic.
+## Work inventory
 
-**Phase 5 has the weakest internal ordering of any phase** — most of its eight issues are close to
-independent of each other (time, weather, world border, gamerules, difficulty), with two real edges:
-sleeping depends on time + weather + gamerules all landing first (a sleep skip is a coordinated jump in
-all three), and the chunk-lifecycle spawn-chunk-keep-loaded issue (Phase 1) depends on world-spawn-point
-(Phase 5) to know *where* to keep loaded. Multi-dimension support is the one issue in this phase that may
-be much larger than it looks — see its own issue body for why (Nether/End worldgen may not exist yet at
-all, which is a second large project hiding behind what reads like a plumbing issue).
+### Server core
 
-**Phase 6 is the most parallelizable phase in the epic.** RCON, query, server-list-ping, resource-pack
-push, and plugin-messaging channels share no state with each other or with anything upstream except
-Phase 0's protocol wiring (they all need a real server connection to test against, nothing more).
-Autosave and permission-storage are the two exceptions with real upstream dependencies (Phase 0+2, and
-issue #48's command dispatcher, respectively).
-
-## The issues, by phase
-
-Each issue's number links to its GitHub page; the summary here is deliberately shorter than the issue
-body, which carries the file:line evidence, the vanilla class/method citation, the traps, and the
-verification method.
-
-### Phase 0 — server plumbing core (build first)
-
-| # | Issue | One-line reason it's first |
-|---|---|---|
-| [#284](https://github.com/matteopolak/lodestone/issues/284) | Real server tick loop (20 Hz) | Nothing else in this epic has a clock to run on without it |
-| [#285](https://github.com/matteopolak/lodestone/issues/285) | MSPT/TPS accounting | Needs #284's loop to measure |
-| [#287](https://github.com/matteopolak/lodestone/issues/287) | Wire `V770ServerProtocol` into the shell's singleplayer path — **island** | Every feature below needs a real client to verify against; `V770ServerProtocol` is built, tested, and has zero consumers today |
-
-### Phase 1 — chunk lifecycle
-
-| # | Issue |
+| feature | acceptance path |
 |---|---|
-| [#289](https://github.com/matteopolak/lodestone/issues/289) | Ticket/loading-priority system and the empty-to-full status pipeline |
-| [#290](https://github.com/matteopolak/lodestone/issues/290) | View/simulation distance and re-streaming as a player moves |
-| [#292](https://github.com/matteopolak/lodestone/issues/292) | Unloading and the save-on-unload hook |
-| [#293](https://github.com/matteopolak/lodestone/issues/293) | Async, non-blocking chunk generation on the server connection loop |
-| [#295](https://github.com/matteopolak/lodestone/issues/295) | Wire carver and ore-feature placement into the served chunk pipeline — **island**, and the cheapest high-visual-impact win in the whole epic (the math is already JVM-parity-tested; the whole gap is a wiring seam) |
-| [#297](https://github.com/matteopolak/lodestone/issues/297) | Spawn-chunk keep-loaded ticket |
+| Unified server tick loop | A real server advances at 20 Hz and publishes observable time, mob, block-entity, and effect updates. |
+| MSPT/TPS accounting | The tick owner reports work and overrun; a local timer cannot hide from the budget. |
+| Shell singleplayer protocol wiring | The integrated server, server protocol, and shell form one join-to-render path, not a crate-test island. |
 
-### Phase 2 — persistence
+### Chunk lifecycle
 
-| # | Issue |
+| feature | acceptance path |
 |---|---|
-| [#298](https://github.com/matteopolak/lodestone/issues/298) | Anvil region file (.mca) reader/writer — reuses the existing NBT codec in `lodestone-core`, not starting from zero |
-| [#300](https://github.com/matteopolak/lodestone/issues/300) | level.dat world metadata read/write |
-| [#302](https://github.com/matteopolak/lodestone/issues/302) | Player data (.dat) read/write |
-| [#303](https://github.com/matteopolak/lodestone/issues/303) | Per-chunk entity and point-of-interest (POI) storage |
-| [#305](https://github.com/matteopolak/lodestone/issues/305) | Autosave scheduling and world upgrade / DataVersion handling |
+| Ticket and loading-priority system | Residency moves through the complete empty-to-full status pipeline. |
+| View and simulation distance | Player movement changes the streamed and simulated areas. |
+| Unload and save-on-unload | An unloaded column saves, reloads, and retains authoritative state. |
+| Asynchronous generation | Generation never blocks the connection loop and its completed column reaches the stream. |
+| Served carvers and ore features | A generated served chunk visibly contains the generated terrain features. |
+| Spawn-area residency | The configured spawn area stays resident at the world spawn point. |
 
-### Phase 3 — block behaviour simulation
+### Persistence
 
-| # | Issue |
+| feature | acceptance path |
 |---|---|
-| [#307](https://github.com/matteopolak/lodestone/issues/307) | Random tick scheduler |
-| [#308](https://github.com/matteopolak/lodestone/issues/308) | Scheduled-tick queue and neighbour-update propagation — **the load-bearing issue of Phases 3–4** |
-| [#309](https://github.com/matteopolak/lodestone/issues/309) | Fluid flow simulation (water and lava spread) |
-| [#310](https://github.com/matteopolak/lodestone/issues/310) | Crop growth, sapling growth, and leaf decay |
-| [#311](https://github.com/matteopolak/lodestone/issues/311) | Gravity blocks (sand, gravel, anvils, concrete powder) |
-| [#312](https://github.com/matteopolak/lodestone/issues/312) | Fire spread and burnout |
-| [#313](https://github.com/matteopolak/lodestone/issues/313) | Explosion block-destruction and blast resistance — complements [#213](https://github.com/matteopolak/lodestone/issues/213) (entity-exposure/damage, a different crate, already built) rather than duplicating it |
+| Region-file storage | A complete column, including relevant NBT, survives an independent read and server reload. |
+| World metadata | World-level state loads and saves through the same owner the tick loop reads. |
+| Player data | Per-player state returns through login and is never confused with world data. |
+| Entity and point-of-interest storage | Per-chunk entities and POI occupancy survive the real persistence boundary. |
+| Autosave and data-version handling | Periodic saves coordinate with tick ownership and preserve upgrade metadata. |
 
-### Phase 4 — redstone family (8 sub-issues, nested under one parent)
+### Block behaviour
 
-| # | Issue |
+| feature | acceptance path |
 |---|---|
-| [#314](https://github.com/matteopolak/lodestone/issues/314) | **Parent.** Signal propagation for dust and torches |
-| [#315](https://github.com/matteopolak/lodestone/issues/315) | Repeaters and comparators |
-| [#316](https://github.com/matteopolak/lodestone/issues/316) | Pistons, including vanilla's update-order quirks — the highest-risk single issue in this phase |
-| [#317](https://github.com/matteopolak/lodestone/issues/317) | Observers |
-| [#318](https://github.com/matteopolak/lodestone/issues/318) | Powered and detector rails |
-| [#319](https://github.com/matteopolak/lodestone/issues/319) | Redstone-openable blocks: doors, trapdoors, fence gates |
-| [#320](https://github.com/matteopolak/lodestone/issues/320) | Dispensers and droppers |
-| [#321](https://github.com/matteopolak/lodestone/issues/321) | Hoppers |
-| [#322](https://github.com/matteopolak/lodestone/issues/322) | Note blocks, tripwire hooks, and target blocks |
+| Random ticks | The tick loop selects and runs bounded random work under the world rule. |
+| Scheduled ticks and neighbour propagation | A mutation queues due work and delivers bounded notifications in the shared order. |
+| Fluid simulation | A fluid update changes authoritative block state and streams to the client. |
+| Crop, sapling, and leaf behaviour | Growth and decay are driven by the common tick mechanisms. |
+| Gravity blocks | Unsupported blocks become falling entities or settle through the live path. |
+| Fire | Spread, burnout, and rule/range gates run from the shared scheduling path. |
+| Block destruction from explosions | Blast resistance and destroyed blocks join entity exposure to one observable explosion. |
 
-### Phase 5 — world state simulation
+### Redstone
 
-| # | Issue |
+| feature | acceptance path |
 |---|---|
-| [#323](https://github.com/matteopolak/lodestone/issues/323) | Time simulation and the daylight cycle |
-| [#324](https://github.com/matteopolak/lodestone/issues/324) | Weather simulation (rain and thunder state machine) |
-| [#325](https://github.com/matteopolak/lodestone/issues/325) | Sleeping and the night-skip vote |
-| [#326](https://github.com/matteopolak/lodestone/issues/326) | World border: server-authoritative state and enforcement |
-| [#327](https://github.com/matteopolak/lodestone/issues/327) | Game rule storage and enforcement — **island**: `GameRulesChanged` already decodes client-side and has zero consumers |
-| [#328](https://github.com/matteopolak/lodestone/issues/328) | Difficulty storage and enforcement |
-| [#329](https://github.com/matteopolak/lodestone/issues/329) | World spawn point and per-player respawn points |
-| [#330](https://github.com/matteopolak/lodestone/issues/330) | Multi-dimension support and server-driven portal travel — possibly much larger than it reads; check Nether/End worldgen exists before estimating |
+| Dust and torch propagation | A source change propagates through the shared signal and neighbour model. |
+| Repeaters and comparators | Delayed and analogue behaviour uses scheduled ticks, not a private clock. |
+| Pistons | Movement preserves update ordering and streams its block changes. |
+| Observers | A neighbour change schedules the one-shot observation response. |
+| Powered and detector rails | Rail power follows the shared signal query. |
+| Doors, trapdoors, and fence gates | Passive consumers update when their shared power input changes. |
+| Dispensers and droppers | Inventory action is wired to redstone activation and the block-tick owner. |
+| Hoppers | Transfers obey enabled state and the common tick budget. |
+| Note blocks, tripwire, and targets | Each uses the common signal/notification path and exposes its visible effect. |
 
-### Phase 6 — server plumbing (the rest)
+### World state
 
-| # | Issue |
+| feature | acceptance path |
 |---|---|
-| [#331](https://github.com/matteopolak/lodestone/issues/331) | RCON listener (our server hosting one; the existing `RconClient` is the opposite direction — a test tool that drives *vanilla* oracles) |
-| [#332](https://github.com/matteopolak/lodestone/issues/332) | Query protocol (GameSpy4/UT3) — lowest player-facing value in the epic; fine to defer |
-| [#333](https://github.com/matteopolak/lodestone/issues/333) | Server list ping responder (existing `ping.rs` only pings *other* servers) |
-| [#334](https://github.com/matteopolak/lodestone/issues/334) | Server-initiated resource pack push |
-| [#335](https://github.com/matteopolak/lodestone/issues/335) | Plugin messaging channel registry and dispatch |
-| [#336](https://github.com/matteopolak/lodestone/issues/336) | Ops, whitelist, bans, and permission levels |
-| [#337](https://github.com/matteopolak/lodestone/issues/337) | Loot table loading and rolling |
-| [#338](https://github.com/matteopolak/lodestone/issues/338) | Advancements and statistics: server-side tracking |
+| Time and daylight | The server advances and broadcasts time from the tick owner. |
+| Weather | Rain and thunder state are server-authoritative and visible to clients. |
+| Sleeping | A vote changes time and weather through their shared owners. |
+| World border | The server enforces and publishes border state. |
+| Game rules | Typed rules are stored, changed, broadcast, and read at their decision sites. |
+| Difficulty | The server owns and applies difficulty rather than merely decoding it client-side. |
+| Spawn and respawn points | Residency, joining, and respawning read the same world/player locations. |
+| Dimensions and portal travel | A destination has a source, tick owner, storage, transfer path, and streamed view. |
 
-## Islands found
+### Operational services
 
-Confirmed built-and-tested-but-zero-consumer code, labelled `island` on the relevant issue:
+| feature | acceptance path |
+|---|---|
+| Remote console | A listener executes against authoritative server state. |
+| Query and status responses | A remote request receives state from the real host, not a client-side probe. |
+| Resource-pack delivery | A server request reaches the connection state in which the client consumes it. |
+| Plugin channels | Registered channels dispatch through the real connection path. |
+| Access control | Operator, whitelist, and ban policy is enforced at connection admission. |
+| Loot tables | Rolling feeds the same item/entity path players observe. |
+| Advancements and statistics | Server-owned progress changes from real gameplay and reaches the client. |
 
-- **`V770ServerProtocol`** (`crates/versions/26.2/src/server_protocol.rs`) — a real protocol-776
-  server implementation, exercised only by its own crate's tests. [#287](https://github.com/matteopolak/lodestone/issues/287).
-- **Carvers and ore-feature placement** (`crates/lodestone-worldgen/src/carver/`, `src/feature/mod.rs`) —
-  JVM-parity-tested, never composed into `OverworldGenerator`. [#295](https://github.com/matteopolak/lodestone/issues/295).
-- **`GameRulesChanged`** (decoded from `GAME_RULE_VALUES` in the v26-2 adapter) — decoded, lowered, and
-  dropped with no consumer; the serverbound `SET_GAME_RULE` is unhandled entirely.
-  [#327](https://github.com/matteopolak/lodestone/issues/327).
+## Island audit and corrections
 
-Two more were found but belong to the mob-AI/entity domain, not this one, and are filed by that audit
-rather than here — noted for completeness since this doc's own research tripped over them:
+The recurring audit question is “what consumes this?” Server protocol implementation, terrain
+generation, decoded rule data, entity exposure, and time representations each require a production
+consumer. Search the capability across workspace crates before declaring it absent: explosion exposure
+can exist separately from block destruction, and a client-side time representation does not establish
+server-side ownership. Keep these distinctions in feature reports and do not duplicate a neighbouring
+subsystem merely because a narrow search missed it.
 
-- `crates/lodestone-entity/src/explosion.rs` (entity-exposure/knockback math for a blast, zero
-  consumers) — [#213](https://github.com/matteopolak/lodestone/issues/213).
-- `MobSim`'s `!Send` `Goal` trait blocking it from the real entity-streaming path
-  (`SharedSnapshotSource`'s own doc comment in
-  `crates/versions/26.2/tests/entity_streaming_live.rs` documents this explicitly) —
-  [#217](https://github.com/matteopolak/lodestone/issues/217) covers the consequence (mob positions
-  never reach a client); the root cause is a `Send` bound on `lodestone_entity::ai::Goal`, flagged
-  separately as a background task rather than filed here since fixing it means touching entity-AI code
-  this epic does not own.
+A capability is not connected until the chain is complete:
 
-## Corrections mid-audit
+```
+action or server event → authoritative state → tick/mutation owner
+    → protocol directive → client state → pixels
+```
 
-Two claims in this doc's own first-draft research turned out to be wrong, caught by cross-referencing a
-concurrent mob-AI/entity audit that happened to touch the same files from a different angle — worth
-recording per this repo's own standing rule about stale claims being the most expensive defect class
-here:
+The three original audit subjects remain mandatory end-to-end checks, with their current distinction
+between closed wiring and residual feature work:
 
-1. **"Explosions are entirely absent" was wrong.** A scoped grep for `Explosion\b` missed
-   `crates/lodestone-entity/src/explosion.rs` because it lives in a crate outside the paths that grep
-   covered. The entity-exposure/damage half of explosions is built and tested (see
-   [#213](https://github.com/matteopolak/lodestone/issues/213) above); what is actually absent is the
-   *block-destruction* half — which blocks a blast destroys, and the blast-resistance data that decides
-   it. [#313](https://github.com/matteopolak/lodestone/issues/313) is scoped to that corrected, narrower
-   gap.
-2. **"No time concept exists anywhere" was wrong.** A `WorldTime` bevy resource is real, tested, and
-   actively used throughout `lodestone-client` and `lodestone-ecs`. What is actually absent is any
-   *server-side* ownership of it — `lodestone-server` has zero dependency on `lodestone-ecs` at all, so
-   it cannot be advancing, reading, or broadcasting that resource. [#323](https://github.com/matteopolak/lodestone/issues/323)
-   is scoped to that corrected claim, and should reuse `WorldTime`'s shape as its wire-facing model
-   rather than invent a second one.
+- **26.2 server protocol:** the host protocol is registered and the integrated server consumes it.
+  The continuing gate is a real join that receives chunks and state updates; protocol crate tests alone
+  are not sufficient.
+- **Carvers and ore-feature placement:** generation data must be composed into the served chunk source,
+  then verified from a streamed chunk rather than a generator-only test.
+- **Game-rule values:** decoded rule values and server-side rule storage must meet at the decision
+  sites that enforce them and at the broadcast path that makes them visible to a client.
 
-The general lesson, consistent with this repo's own recorded experience elsewhere: a grep scoped to the
-crates you *expect* an answer to live in is not evidence of absence — the producer can be one crate over
-from where you looked. Both corrections above were made before filing, not after; had they shipped as
-written, they would have duplicated already-built work in one direction (explosions) and asserted a
-false absence in the other (time).
+Two corrections constrain future scope. Explosion work has separate entity-exposure/damage and
+block-destruction halves; never implement the latter as if the former were absent. Time representation
+also has separate client and server owners: a client time value does not advance, persist, or broadcast
+server time. Search across crate boundaries before asserting either absence.
 
-## Epic capacity — a real constraint
+## Capacity and parallelism
 
-GitHub caps a parent issue at **100 sub-issues**. [Epic #5](https://github.com/matteopolak/lodestone/issues/5)
-is shared across every Tier-4 audit running concurrently in this repo (mob AI/pathfinding, entities,
-this doc's own scope, and others), and it hit that cap partway through filing this doc's own 46 issues.
-The redstone family's 8 sub-issues were nested under their own parent
-([#314](https://github.com/matteopolak/lodestone/issues/314)) rather than flatly under #5, which both
-matches what each sub-issue's body already claimed and freed 7 slots — used to attach 7 more issues
-before the cap closed again. **Nine issues from this doc remain without a GitHub parent link**: #330
-(multi-dimension) and all of Phase 6 except none — specifically #331–#338. They are still fully labelled
-(`feature`/`tier-4`/`area/server`/`roadmap`), auto-added to the project board, and referenced correctly
-by number in this document and in each other's bodies; they are simply not in the sub-issue graph under
-#5. If the epic's sub-issue count needs to come down further, the natural fix is what was done for
-redstone here: promote one issue per remaining phase (persistence, world state, server plumbing) to a
-phase-level parent and nest its siblings under that instead of under #5 directly — but that is a
-repo-organisation decision, not one this doc makes unilaterally.
+Work inside a phase is parallel only when it does not share a chokepoint. The connection dispatcher,
+tick loop, world state, chunk store, and protocol encoder are shared surfaces; keep primary feature
+state in its own module and broker small wiring patches. Region persistence and ticket residency can
+advance together, but unload/autosave wait for both. Redstone components are parallel only after the
+shared propagation primitive is stable. Operational listeners and queries are independent leaves once
+the host path exists.
+
+Repository tracking capacity is not a design constraint. If work items need grouping, group by the
+feature boundaries above; do not let tracker nesting determine server ownership.
+
+## Verification rules
+
+- Use reference-world files, captured independent-server bytes, or independent arithmetic. A
+  `decode(encode(x))` loop does not prove compatibility.
+- Prove absence detectors with a known negative control.
+- Exercise save/reload, unload/reload, and tick-boundary behaviour separately.
+- Measure pixels by known location and print a bounding box on failure.
+- Test scheduled work both for its required execution and for non-occurrence when cancelled, blocked,
+  or out of range.
+- Run `cargo xtask connectedness` for a clientbound route, and trace serverbound work through its
+  connection consumer.
+
+## How to change it
+
+Add simulation state near its authoritative owner, wire it through the production tick or mutation
+choke immediately, and document its persistence and visible consumer. Add semantic operations to
+`ServerProtocol`, implement them in the hosting family, and retain the boxed-protocol forward. Keep
+native filesystem/network service policy at the boundary.
+
+Detailed contracts live in [tick scheduling](../tick-scheduling.md),
+[chunk storage](../chunk-storage.md), [world propagation](../world-propagation.md), and
+[redstone](../redstone.md).
+
+## Dependencies
+
+This roadmap depends on `lodestone-server`, `lodestone-worldgen`, `lodestone-entity`,
+`lodestone-net`, the version registry/protocol seam, and the shell as the visual consumer.

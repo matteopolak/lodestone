@@ -2,34 +2,22 @@
 
 ## What it is
 
-The design for loading plugins at runtime (Java-style, drop a file in a folder) using WebAssembly
-components, while keeping the existing compiled-in bevy-plugin path — including the milestone-zero
-refactor that makes the library expose the composed `App` so a consumer can register plugins at all,
-and how one plugin can be authored once and shipped either way. Read-only plan against the tree as
-of 2026-08-04; nothing here is implemented, and every `file:line` is a sample taken that day, not a
-durable coordinate — several cited files were being edited by other agents *while this was written*,
-and one citation went stale between two greps minutes apart (noted inline where it happened).
+This plan defines runtime plugin loading through WebAssembly components while retaining compiled-in
+bevy plugins. It also requires the library to expose the composed `App`, so a consumer can register
+a plugin before selecting a runner, and it defines how one portable plugin source produces either
+a component or a compiled-in artifact. File paths and symbols identify durable integration points;
+re-find a symbol rather than relying on a line number.
 
-**The owner's ask, verbatim:** *"some kind of way to include plugins at runtime (like java does)
-using wasm or dynamic libraries or something … maybe wasm so theyre platform-independent, with a way
-to still build them into the binary (like we do now) for users who know what theyre doing."* Plus a
-second, upstream requirement added during this plan's drafting: *"the library should expose the app
-— lodestone-shell should just be the full rendering thing on top of it and it should reuse the app"*,
-and, on `lodestone-autopilot`: *"users can clone the repo and add it if they want it (or use the
-library and register the plugin)."*
-
-This plan builds on, rather than replaces, the four wasm-tier issues
-(host scaffold, capability ABI, manifest, sandbox gates — see the table below) and the four
-native-tier design issues (load order, panic isolation, hot reload, ABI versioning — same table).
-Their claims were
-re-verified against the tree: `grep -rli 'wasmtime\|wasmer\|wasmi' crates/` is still empty, so
-the host-scaffold issue's "what we have today: nothing" is still true, which for this repo's issue tracker is worth
-stating explicitly.
+The runtime host, capability ABI, manifest, sandbox, native load-order, failure-isolation,
+hot-reload, and ABI-versioning requirements are resolved below. `lodestone-wasm-host` implements
+component loading, manifest parsing, capability gating, fuel preemption, and the conductor-to-
+`ActionQueue` integration. Remaining work extends that shipped core without widening the default
+capability surface.
 
 ## The decided architecture this designs within
 
 Settled by the owner, not reopened here: client and server are both bevy ECS
-(`docs/server-ecs.md`); plugins are ordinary bevy plugins; core systems become plugins where it
+([The integrated and dedicated server](../dedicated-server.md)); plugins are ordinary bevy plugins; core systems become plugins where it
 makes sense (physics as a client plugin a headless bot omits); the Paper compat layer is itself an
 external plugin on the same public API (`docs/plans/paper-nms-bridge.md`); and there is **no
 separate internal API and plugin API** — one surface, with exactly two privileged internals
@@ -45,119 +33,86 @@ problem is:
 
 ## Milestone zero: the library exposes the app
 
-> **Status: landed.** `lodestone-app` exists, `client_app()` is the registration point, and `Sim`
-> adopts a pre-built `App` — see [`docs/plugin-registration.md`](../plugin-api.md) for the
-> shipped shape and the measured gates. Two predictions below were wrong and are corrected there
-> rather than edited out of this plan: **the three shell plugins did not move down** (the "no `wgpu`
-> type in the file" evidence is real but is about the wrong axis — `interact.rs` imports fourteen
-> items from `crate::sim`, a cycle with the type that adopts the `App`), and the **wasm headroom is
-> 47%, not 10–13%** (gzip 844,527 B against the 1,600,000 B ceiling, measured after repairing the
-> two `web/` breaks; the 1.21–1.24 MiB baseline this plan cites is stale). The rest of the section
-> stands as written and is left as the record of what was reasoned before it was built.
->
-> **A follow-up gap, also closed:** `Sim::from_app` accepting a plugin did not by itself mean the
-> shipped *binary* could take one — `WindowApp::new` (and therefore `run_windowed`/`run`, i.e.
-> `Mode::Window`, the actual on-screen client) still called `Sim::new` directly with no parameter
-> for a caller's `App`. `WindowApp::new_with_app` and the `run_with_app` wrapper (`app::run_with_app`,
-> `lodestone_shell::run_with_app`) are the rendered-binary entry point this created; see
-> `docs/plugin-api.md`'s "Registration" section for the shape and its gate.
+> **Implemented baseline.** `lodestone-app::client_app()` provides the renderer-free composition;
+> rendered consumers start from `Sim::client_app()`, which adds the shell-coupled plugins before
+> `Sim::from_app`, `WindowApp::new_with_app`, `app::run_with_app`, or
+> `lodestone_shell::run_with_app` takes ownership. The shell-coupled plugins stay there because
+> they depend on shell-internal simulation types. [The plugin API](../plugin-api.md)
+> records the integration shape and its measured gates. The browser-size guard currently fails;
+> its script is the source of truth for the current measurement.
 
-**This refactor is upstream of every other milestone in this plan, and it is not about wasm at
-all.** A runtime-loaded wasm plugin and a compiled-in one must arrive at the same registration
-point — `add_plugins` on the one `App` — and today that point is unreachable from outside the
-shell. Until it is reachable, "use the library and register the plugin" is not a real option, so
-nothing downstream of it is either.
+**This baseline is upstream of every other milestone and is not about wasm.** A runtime-loaded
+component and a compiled-in plugin arrive at the same registration point: `add_plugins` on one
+`App`. The public library seam must remain available before any runner finalizes that `App`.
 
-**Verified current state (2026-08-04, working tree):**
+**Current composition constraints:**
 
-- The `App` type already lives below the shell: `lodestone_ecs::app::App`. The *composition* does
-  not — `Sim::build` (`crates/lodestone-shell/src/sim/build.rs`) calls `App::new()` and `add_plugins` on
-  a fixed tuple (`CorePlugin`, `LocalPlayerPlugin`, `ControllerPlugin`, `SessionHudPlugin`,
-  `IngestPlugin`, `SessionPlugin`, `EntityInterpPlugin`, `TerrainPlugin`, `InteractPlugin`), then
-  **takes the `World` and drops the `App`** (`sim/build.rs`), storing only an `EcsHandle`. The
-  crate's own comment there states the consequence outright: *"the shell's plugin set
-  is closed at compile time: no downstream crate holding a `Sim` can add one afterwards"* —
-  `Plugin::build` needs `&mut App`, and the `App` no longer exists.
-- The headless half of the seam **already exists**: `ClientBuilder::ecs(world: EcsHandle, session:
-  Entity)` (`crates/lodestone-client/src/builder.rs`) lets a bot consumer build its own `App`
-  on `lodestone-ecs`, add any plugins, and hand the `World` in. So "register a plugin from
-  outside" is possible today *headless only*; the rendered client is the gap.
-- `lodestone-autopilot`'s removal from the shell **landed while this plan was being written** — a
-  first grep found `lodestone-autopilot = { workspace = true }` in
-  `crates/lodestone-shell/Cargo.toml`; a second, minutes later, found the comment nearby
-  saying the dependency is deliberately absent, and `sim/build.rs`'s note that `AutopilotPlugin`
-  "used to be the last entry in that tuple and was removed on purpose." Not feature-gated —
-  removed entirely, per the owner. The autopilot is now exactly the plugin a consumer would want
-  to register from outside, and cannot, on the rendered path.
-- The `#goto` chat command went with it (`crates/lodestone-shell/src/sim.rs`,
-  `sim/session.rs`): the shell keeps the `#` command namespace reserved-but-empty, and both
-  removal comments point at the plugin-command-registration issue (see the table below) as where a
-  plugin will register commands properly. See the worked example below.
+- `lodestone-app::client_app()` composes the reusable renderer-free plugin set. A headless consumer
+  registers additional plugins before passing the resulting `App` to a runner.
+- `ClientBuilder::ecs(world: EcsHandle, session: Entity)` remains the headless handoff. The rendered
+  handoff starts from `Sim::client_app()` and continues through `Sim::from_app` or
+  `WindowApp::new_with_app`; it includes the shell-coupled plugins required by a rendered client.
+- `lodestone-autopilot` is not a shell dependency or feature. It is a consumer plugin that must
+  register through the library seam on both headless and rendered routes.
+- The former `#goto` chat command is absent with the shell dependency: the shell keeps the `#`
+  command namespace reserved-but-empty, and command registration belongs to the plugin-owned
+  registry described in the worked example below.
 
-**Where composition belongs: a new crate, `lodestone-app`, between `lodestone-controller` and
-`lodestone-shell`** — not growing `lodestone-controller`, whose charter is deliberately narrow
-("the wasm-safe player-controller core," its own `Cargo.toml` package description). `lodestone-app` owns the plugin
-tuple above plus the three plugins currently defined in the shell (`TerrainPlugin` in
-`mesher.rs`, `InteractPlugin` in `interact.rs`, `EntityInterpPlugin` in
-`entities.rs`), which move with it. The evidence they can: none of the three files contains a
-`wgpu` type or a `crate::gpu` code reference (grep finds only two prose comments in `mesher.rs`) —
-the mesher produces CPU-side data the GPU layer *pulls* (`sim/render_sources.rs` is precisely
-"what the renderer pulls out of `Sim` each frame", its own module doc), so the dependency arrow
-already points render→sim, never back. **The acceptance test for the answer, stated as the gate:
+**Composition is split between `lodestone-app` and the rendering shell.** `lodestone-app` remains
+below `lodestone-shell`; `lodestone-controller` stays the wasm-safe player-controller core.
+`TerrainPlugin`, `InteractPlugin`, and `EntityInterpPlugin` remain shell plugins because
+`interact.rs` depends on `crate::sim`. The mesher produces CPU-side data that the GPU layer pulls,
+so the render dependency remains render→simulation. **The acceptance gate is:
 a headless consumer crate depending on `lodestone-app` must have no `wgpu` and no `winit`
 anywhere in `cargo tree`** — run it, and run the negative control (the same check against
 `lodestone-shell`, which must fail it).
 
-**How a consumer registers a plugin: hand them the `App` before it is finalised.**
-`lodestone-app` exposes roughly
-`pub fn client_app(config: &AppConfig) -> App` — core plugin set installed, nothing render-shaped
-— and the consumer calls `.add_plugins(TheirPlugin)` on the result, then hands it to a runner:
+**How a consumer registers a plugin: take the `App` before it is finalised.**
+`lodestone-app::client_app() -> App` installs the renderer-free core. `Sim::client_app() -> App`
+adds the shell-coupled plugins required for rendering. The consumer calls `.add_plugins(TheirPlugin)`
+on the composition for its runner, then hands it to that runner:
 
 - headless: the existing `ClientBuilder::ecs` route (unchanged, just fed from `client_app()`), or
   `lodestone_ecs::runner`'s headless accumulator for offline simulation;
-- rendered: `Sim` gains an entry point that **adopts** a pre-built `App` instead of building its
-  own, and `Sim::new` becomes a thin wrapper: `client_app()` + adopt. The shell inserts its
+- rendered: start from `Sim::client_app()`, add plugins, then call `Sim::from_app` or
+  `lodestone_shell::run_with_app`. `Sim::new` is the thin `Sim::client_app()` + adopt wrapper. The
+  shell inserts its
   render-scoped resources (`ParticleSim`, `AudioEngine`, the session's `ChunkWorld`/`TerrainMesh`)
   *after* adoption, which needs only the `World`, not the `App` — resources need no
   `Plugin::build`.
 
-This satisfies the no-two-APIs principle by construction: the shell registers `CorePlugin` and
-friends through the identical `client_app()` a consumer calls, so there is no private composition
-path left to drift. A `Vec<Box<dyn Plugin>>` constructor argument (shape (b)) was considered and
+This satisfies the no-two-APIs principle by construction: `Sim::client_app()` begins with
+`lodestone_app::client_app()` and adds only the shell-coupled plugins, so there is no private
+composition path left to drift. A `Vec<Box<dyn Plugin>>` constructor argument (shape (b)) was considered and
 rejected: it is a second registration vocabulary with less power (no plugin groups, no
 `is_plugin_added` interrogation between additions), existing only to avoid exposing a type that is
 already public one crate down.
 
 **The conformance test for milestone zero is `lodestone-autopilot`, built both native routes:**
-in-repo (a consumer workspace member adding it to `client_app()`'s result) and out-of-repo (a
+in-repo (a consumer workspace member adding it to `Sim::client_app()`'s result) and out-of-repo (a
 scratch crate depending on the published-path library, doing the same). The gate is behavioural,
 not compile-only — `crates/plugins/lodestone-autopilot/tests/drives_to_goal.rs` already drives a
 real `GameTick` schedule to a commanded block; the M0 gate is that same walk succeeding through a
-`client_app()`-composed `App` on both routes, with a negative control: the identical harness
+runner-appropriate composed `App` on both routes, with a negative control: the identical harness
 *without* `AutopilotPlugin` added must fail to arrive. Note this is the conformance test for
 **milestone zero's native dual route**, not for the wasm/native dual path — the distinction
 matters and is argued in the compiled-in section below.
 
 **The worked example of the boundary: `#goto`, and what a plugin needs to contribute a command.**
-The shell used to parse `#goto x z` itself and write `lodestone_autopilot::AutopilotGoal` — a chat
-command in the shell reaching into a plugin's resource, backwards for a plugin architecture, and
-now deleted. For the plugin to own it, the plugin-command-registration issue's shape is what is needed: a `CommandRegistry`
-resource a plugin populates in `Plugin::build` (root literal, argument tree via the existing
+`#goto` illustrates the boundary: a native plugin owns the command through a `CommandRegistry`
+resource that it populates in `Plugin::build` (root literal, argument tree via the existing
 `lodestone-command` crate, permission node), with chat input routed registry-first before the `#`
-namespace falls through. **Is that inside the portable capability surface? Yes, deliberately:**
-command registration is a one-shot init-time declaration (name + argument tree — plain data,
-WIT-expressible) and command invocation is one more event variant in the stream a guest already
-polls. A wasm `#goto` plugin is therefore fully expressible: declare the command in the manifest
-or at init, receive `command-invoked` events, submit movement intents. The *native* autopilot
-registers against the same `CommandRegistry` resource directly. One vocabulary, two power levels —
-the same shape-3 relationship as everything else in this plan, which is the evidence the shape
-generalises.
+namespace falls through. The portable WASM surface does **not** yet expose command declaration or
+invocation. Its WIT world currently exports only `init` (plugin metadata) and `on-tick` (subscribed
+events in, allowed actions out). Adding portable commands requires a versioned WIT declaration
+shape, a command-invoked event, and host-side routing; movement intents also remain outside the
+shipped action vocabulary. The native autopilot registers directly against `CommandRegistry` today.
 
 ## The dual-path tension: three candidate shapes, one verdict
 
 | shape | what it is | what it costs |
 |---|---|---|
-| 1. One capability API, two backends | every plugin written against a narrow capability surface; native backend implements it with direct access, wasm backend over the ABI | compiled-in plugins lose `&mut World` — contradicts "plugins are ordinary bevy plugins" and would force `lodestone-autopilot` through a keyhole it demonstrably does not fit (`docs/plugin-api.md` §"Native versus WASM" cost analysis) |
+| 1. One capability API, two backends | every plugin written against a narrow capability surface; native backend implements it with direct access, wasm backend over the ABI | compiled-in plugins lose `&mut World` — contradicts "plugins are ordinary bevy plugins" and would force `lodestone-autopilot` through a keyhole it demonstrably does not fit ([The plugin API: Two tiers](../plugin-api.md#two-tiers)) |
 | 2. Two tiers, honestly separate | native gets full bevy; wasm gets a capability subset; different authoring experiences | two APIs is the exact thing the no-two-APIs principle exists to prevent, *if* the subset is a second vocabulary. It is not automatically that — see below |
 | 3. Wasm hosts a *restricted* plugin; native is a superset | the wasm surface is the **intersection**; a plugin that stays inside it is portable (buildable both ways); a plugin that needs more is native-only, honestly | only works if the intersection is genuinely useful |
 
@@ -187,8 +142,8 @@ So the relationship between the tiers is:
   byte same logic, two artifacts.
 - **Native plugin**: everything `crates/plugins/` is today — full bevy API, `&mut World`-capable
   systems, real schedule ordering. `lodestone-autopilot` stays here and is the proof this tier must
-  survive: `docs/plugin-api.md`'s own analysis (owned `Arc<ChunkSection>` snapshots, ~15k `Arc`
-  clones per snapshot, thousands of collider queries per search step) concludes "Baritone targets
+  survive: `docs/plugin-api.md`'s own analysis (owned `Arc<ChunkSection>` snapshots, substantial
+  `Arc` cloning, and many collider queries per search step) concludes "Baritone targets
   the native tier," and nothing about runtime loading changes that arithmetic.
 
 What shape 2's objection reduces to under this framing: there are still two *power levels*, but
@@ -215,38 +170,30 @@ Stated plainly, checked against the five clauses, so nobody discovers these at i
 3. **Define component types visible to other plugins.** No shared Rust type identity. Cross-plugin
    state is host-defined vocabulary only (plus, if ever needed, an opaque per-plugin key-value
    store — deliberately left open below).
-4. **Block the tick.** The host enforces preemption (wasmtime epoch interruption or fuel), which is
+4. **Block the tick.** The host enforces fuel-based preemption, which is
    a capability the native tier structurally cannot offer — a native plugin that loops forever
-   hangs the game, full stop (the panic-isolation issue's honest answer for the native tier). Failure isolation
+   hangs the game, full stop. Failure isolation
    *belongs* to the wasm tier: a trapping, panicking, or runaway guest is unloaded and reported,
    process intact. This is the strongest positive argument for wasm beyond portability.
 5. **Touch the two privileged internals** — which native plugins cannot touch either, so this row
    costs nothing.
 
-Clause check: (1) wishes-in-observation-vocabulary survives verbatim — the ABI *is* that
-vocabulary; (2) survives via the conductor, above; (3) refusal-observable requires the ABI to carry
-outcomes back — every intent-install call is paired with an outcome poll (or an outcome push in the
-guest's next tick callback), and `PlaceOutcome::generation` crosses the boundary unchanged so a
-late-polling guest keeps the same race-free read the native tier has; (4) human-outranks is
-enforced host-side in `drive_mining`/`drive_placement` and needs nothing from the guest; (5)
-lifecycle-encodes-verb-shape maps to paired install/remove ABI calls the host mirrors into real
-component insert/remove.
+Clause check: the shipped ABI is the current, narrow vocabulary: `init`, `on-tick`, and three
+event variants plus three action variants. It preserves one conductor as the `ActionQueue` writer but does
+not yet carry intent installs/removals, outcomes such as `PlaceOutcome`, or component mirroring.
+Those operations require a future, versioned ABI extension with paired install/remove calls,
+outcome delivery, and host-side component mapping. That extension must preserve the existing
+host-side priority and corrective-action rules rather than letting a guest write them directly.
 
 ## Runtime choice: wasmtime, with the component model and WIT
 
 **Recommendation: wasmtime + the component model, WIT-defined ABI, `wit-bindgen` for Rust guests.**
 
-- **Wasmtime** is actively maintained (v1-8.0.3, released 2026-07-31 —
-  [releases](https://github.com/bytecodealliance/wasmtime/releases)), is the reference
-  implementation of the component model
-  ([component-model.bytecodealliance.org](https://component-model.bytecodealliance.org/running-components/wasmtime.html)),
-  and already ships WASI 0.3 / preview-3 support (Wasmtime 43+,
-  [eunomia status survey](https://eunomia.dev/blog/2025/02/16/wasi-and-the-webassembly-component-model-current-status/)).
-  Host-call overhead is on the order of **10 ns** for a trivial call after the 2023 trampoline
-  overhaul ([Bytecode Alliance, "Wasmtime and Cranelift in 2023"](https://bytecodealliance.org/articles/wasmtime-and-cranelift-in-2023)),
-  which sets the floor for the cost model below. Epoch interruption and fuel give the preemption
-  the panic-isolation issue wants. Security posture is serious (the same releases page shows coordinated point releases
-  across three supported branches for a single CVE).
+- **Wasmtime 47** is pinned with `default-features = false` and the `runtime`, `cranelift`,
+  `component-model`, and `std` features. `wasmtime-wasi` is intentionally absent: guests receive
+  only the imports the host's `Linker` grants. The host uses the component model and WIT-generated
+  bindings, and fuel bounds each guest callback; epoch interruption remains a future option because
+  it requires a watchdog that increments the engine epoch.
 - **Wasmer** is optimized for a different bet — WASIX, a POSIX-flavored fork of WASI preview 1 for
   running existing applications ([docs.wasmer.io](https://docs.wasmer.io/runtime/runners/wasix));
   component-model alignment is planned, not shipped
@@ -265,67 +212,53 @@ component insert/remove.
 
 **Why the component model rather than hand-rolled core-wasm imports:** the ABI is a typed surface
 of records, variants, lists and resources — exactly what WIT expresses and `wit-bindgen` generates
-ergonomic Rust guest bindings for. Hand-rolling means inventing our own lifting/lowering for a
-~110-variant `ClientEvent` (`crates/lodestone-model/src/event.rs`) and maintaining it by hand
-forever; that is the staleness factory this repo's §2 exists to warn about. The WIT world is also
-the natural unit of ABI versioning, which gives the ABI-versioning issue its second axis for free (a world is named and
+ergonomic Rust guest bindings for. Hand-rolling means inventing our own lifting/lowering for the
+large `ClientEvent` variant (`crates/lodestone-model/src/event.rs`) and maintaining it by hand
+forever; that is a staleness factory. The WIT world is also
+the natural unit of ABI versioning: a world is named and
 versioned; a guest built against `lodestone:plugin@0.2.0` is rejected loudly by a host that only
-speaks `0.1.x`).
+speaks `0.1.x`.
 
 One honest cost: WIT/component tooling is younger than core wasm. `cargo-component`/`wit-bindgen`
 are actively maintained and used in production hosts, but expect toolchain churn; pin versions in
 the host crate and vendor the `.wit` files in-repo as the single source of truth.
 
-## Per-tick cost: prediction first, then what must be measured
+## Per-tick cost: measure the implemented boundary
 
-The risk case named in the brief: a plugin observing block/entity events at 20 Hz over thousands of
-entities. Predictions below are derived from the 10 ns call floor plus copy costs at memory
-bandwidth (~10 GB/s conservative for `memcpy` into linear memory); they are *predictions to be
-measured against*, not results.
-
-| pattern | arithmetic | per-second cost | verdict |
-|---|---|---|---|
-| chatty: per-event call, 1,000 events/tick × 5 guests | 100k crossings/s × ~300 ns (call + lift/lower of one record with a string) | ~30 ms/s ≈ 3% of a core | tolerable but wasteful — and it scales linearly with event rate |
-| chatty: per-entity poll, 5,000 entities, per-entity call returning a record | 100k calls/s/guest × 0.3–1 µs | 30–100 ms/s **per guest** | the failure mode; forbidden by ABI design, not by advice |
-| batched: one `events-since-last-tick` call per guest per tick returning `list<event>` | 20 crossings/s/guest + 1,000 events × ~64 B = 64 KB/tick ≈ 1.3 MB/s memcpy | ~0.1 ms/s | fine |
-| batched: one `entity-snapshot` call, 5,000 entities × ~64 B | 320 KB/tick ≈ 6.4 MB/s memcpy | ~1 ms/s | fine |
-
-So the design rule, which is the capability-ABI issue's open decision (1) resolved: **the ABI exposes batched,
-tick-granular calls only** — `poll-events() -> list<event>`, `snapshot-entities(filter) ->
-list<entity-snapshot>`, `submit-actions(list<action>)` — never per-item calls in the hot vocabulary.
-This mirrors the native tier's own owned-snapshot pattern, and it is also the capability-ABI issue's decision (2)
-resolved: **the guest owns its own state across calls** (it is a live instance with linear memory,
-not stateless request/response), which is what makes a resumable computation inside a guest viable
-without the host running it.
+The shipped ABI calls each guest once per tick with a `list<event>` and receives a `list<action>`.
+That batching avoids a per-event crossing in the hot path; it does not establish a timing budget.
+Guests retain their own linear-memory state across callbacks, so resumable work stays guest-owned
+rather than becoming host request/response state.
 
 **What must be measured before M2 ships, on an idle machine** (per the standing rule: a figure
 taken while other agents build is a sample, and a sequential-duration ratio is not protected either
 — prefer counts, and record the machine state alongside the number):
 
-1. Round-trip cost of one representative WIT call with a `ClientEvent`-shaped variant argument,
-   host→guest and guest→host, wasmtime pinned version, M-series host.
+1. Round-trip cost of one representative `on-tick` WIT call with a `ClientEvent`-shaped list and
+   returned action list, using the pinned Wasmtime 47 host on an M-series machine.
 2. The batched entity-snapshot call at 1k / 5k / 20k entities — confirm it is memcpy-bound.
-3. Fixed per-guest per-tick overhead (store access, epoch check, conductor dispatch) at 1 / 5 / 20
+3. Fixed per-guest per-tick overhead (store access, fuel accounting, conductor dispatch) at 1 / 5 / 20
    loaded guests.
 4. Per-`Store` memory overhead and whether the pooling allocator matters at our guest counts.
 
 ## wasm-in-wasm: the browser answer
 
 The client already targets `wasm32-unknown-unknown` for the browser (`web/`,
-`crates/lodestone-server/Cargo.toml`'s wasm32 target block), with an enforced bundle ceiling of
-**1,600,000 B gzip** and a recorded baseline of 1.21–1.24 MiB — roughly 10–12% headroom after the
-bevy adoption (`scripts/wasm-size.sh`; `docs/plans/server-ecs-migration.md` §"Binary size,
-measured").
+`crates/lodestone-server/Cargo.toml`'s wasm32 target block). `scripts/wasm-size.sh` enforces a
+**1,600,000 B gzip** ceiling. The current `just wasm-size` snapshot is **17,732,637 B raw**,
+**6,005,332 B gzip**, and **4,875,099 B brotli**. The overage is generated data and static tables
+in the shipped client, not the WASM host: the browser dependency graph does not reach
+`lodestone-wasm-host`. Do not treat older bundle measurements as a current headroom budget.
 
 **Wasmtime cannot run inside a wasm32 guest** — it is a JIT that maps executable pages; there is no
 wasmtime-as-guest story. So the desktop design does not carry to the browser as-is. Two structural
 outs exist, neither cheap:
 
 - **wasmi compiled to wasm** (proven pattern: Substrate runs wasmi inside its own wasm runtime —
-  [wasmi README](https://github.com/wasmi-labs/wasmi)). Costs: an interpreter (order 10–100×
-  slower), a second runtime backend to maintain, no component model (hand-lowering of the WIT
-  world), and bundle bytes we mostly do not have — against ~170–380 KiB of remaining gzip headroom,
-  an embedded interpreter plus lowered bindings is plausibly most of it.
+  [wasmi README](https://github.com/wasmi-labs/wasmi)). Costs: an interpreter, a second runtime
+  backend to maintain, no component model (hand-lowering of the WIT
+  world), and additional bundle bytes whose cost must be measured against the current browser
+  bundle rather than assumed from an older baseline.
 - **jco transpilation**: the Bytecode Alliance's component-to-JS+core-wasm transpiler runs
   components in browsers ([component model docs](https://component-model.bytecodealliance.org/running-components/wasmtime.html)
   ecosystem; jco is the browser-side runner). The plugin would run as a sibling JS+wasm module
@@ -345,17 +278,15 @@ compiler releases ([Rust Reference, type layout](https://doc.rust-lang.org/refer
 A `cdylib` plugin therefore only works when built by the **exact same rustc, same std, same
 dependency versions** as the host — which as a distribution story is "we mail you a toolchain," not
 "drop a file in a folder." Worse, and specific to us: bevy's storage is `TypeId`-keyed, and the
-hot-reload issue's analysis already records that a reloaded `.so` from a different build gets different `TypeId`s for
+reloading a `.so` from a different build gets different `TypeId`s for
 the "same" component, silently breaking every `Query` — the worst failure shape, wrong rather than
 loud. `abi_stable`-style C-shaped boundaries exist, but a C ABI boundary *is* a capability ABI with
 none of wasm's sandbox, portability, or preemption — all of the restriction, none of the payoff.
 
 **When dylibs are the right answer: essentially never, for this project.** The one candidate niche
 — trusted, local, same-machine dev iteration — is served better by (a) the compiled-in path with
-incremental builds, and (b) wasm hot reload, which is *cheap and safe* precisely because guest and
-host never share type identity (the hot-reload issue's own conclusion: hot reload is an argument **for** the wasm
-host). This plan recommends closing the dylib option explicitly in that issue's decision record rather
-than leaving it half-open.
+incremental builds, and potentially (b) WASM component replacement, which can avoid shared type
+identity but is not implemented. This plan closes the dylib option rather than leaving it half-open.
 
 ## The compiled-in path: how it generalises, and the conformance plugin
 
@@ -382,7 +313,7 @@ autopilot, built compiled-in and runtime-loaded, as the dual-path proof. Half ri
   the plugin the owner named, and its existing goal-arrival gate is behavioural.
 - **M4's wasm/native dual path**: autopilot is the **wrong** first conformance test, and the
   record already says why — it is the native tier's stress case (owned `Arc<ChunkSection>`
-  snapshots, ~15k `Arc` clones per snapshot, thousands of collider queries per search step), and
+  snapshots, substantial `Arc` cloning, and many collider queries per search step), and
   `docs/plugin-api.md`'s own cost analysis concludes it does not fit through a call-shaped ABI.
   Forcing it through one would prove the wrong point at maximum cost. The right first conformance
   plugin for M4 is small and lives entirely inside the portable vocabulary:
@@ -395,19 +326,19 @@ autopilot, built compiled-in and runtime-loaded, as the dual-path proof. Half ri
   cheap enough that a *simplified* navigator fits the portable surface, porting autopilot becomes
   a stretch goal — but it is not the gate.
 
-## Impact on the existing issues
+## Requirements resolved by this plan
 
-| issue | verdict under this plan |
+| concern | durable decision |
 |---|---|
-| #172 (host scaffold) | proceed; record the runtime decision (wasmtime + component model) in it; the scaffold's "load a module, call an export, prove fs/socket denial" stays exactly as scoped |
-| #173 (capability ABI) | its three open decisions resolve here: (1) batched/snapshot calls only in the hot path; (2) guests are stateful instances; (3) actions submitted batched, mirroring `ActionQueue`. The ABI *content* is the intent-doctrine vocabulary, defined as a versioned WIT world vendored in-repo |
-| #175 (manifest) | still needed — the component model types the surface but does not carry capability *policy*. Keep the TOML manifest as scoped there, adding: the WIT world version targeted, and the declared `EventPriority` tier for conductor ordering |
-| #176 (sandbox gates) | unchanged and load-bearing; add a preemption gate (a guest that loops forever must be interrupted, with a negative control where epochs are disabled and the loop is observed to hang a sacrificial thread) |
-| #166 (native load order) | unchanged for native; the wasm host adds runtime load order = manifest-declared dependencies, topologically sorted, which is Bukkit's shape and should be specified in #175 rather than a new issue |
-| #168 (panic isolation) | resolves as: native panics stay fatal by design (trusted code); the wasm tier is where isolation lives — trap/unload/report, plus preemption. Its "documentation paragraph, not a mechanism" instinct for the native tier is confirmed |
-| #169 (hot reload) | resolves as: native hot reload rejected (no stable ABI, `TypeId` breakage); wasm hot reload accepted as a real deliverable — drop-in replace of a component file, guest state lost unless the plugin opts into a serialize/restore hook (left open below) |
-| #170 (ABI versioning) | gains the WIT world version as a second, machine-checked axis alongside the ordering-anchor enum policy |
-| [#118](https://github.com/matteopolak/lodestone/issues/118) (plugin command registration) | promoted in priority by the `#goto` removal (the milestone-zero section's worked example): the `CommandRegistry` it specifies is the thing that lets a plugin own the command the shell just gave up, and command registration/invocation belongs in the portable capability surface from day one |
+| Runtime host | `lodestone-wasm-host` uses Wasmtime 47 and the component model to load a component or encode a core module, then invokes it through a WIT world vendored in-repo. |
+| Capability ABI | The host supplies capability-gated events to each guest's `on-tick` callback and accepts its returned actions through one conductor, preserving `ActionQueue` as the single writer. |
+| Manifest | TOML expresses capability policy, the targeted WIT world version, and the `EventPriority` tier used by the conductor. |
+| Sandbox and preemption | The `Linker` omits ungranted imports; fuel interrupts an endlessly looping guest and marks it permanently failed. Epoch preemption requires a watchdog and is not enabled. |
+| Native load order | Native plugins retain their existing ordering rules. Runtime plugins load in manifest priority-then-name order; dependency declarations remain a future extension. |
+| Failure isolation | Trusted native-plugin panics remain fatal. The wasm tier traps, unloads, and reports failing guests while keeping the process alive. |
+| Hot reload | Native hot reload is rejected because Rust has no stable ABI and `TypeId` identity breaks across builds. WASM component replacement and state carry-over are not implemented. |
+| ABI versioning | The WIT world version is machine-checked alongside the ordering-anchor enum policy. |
+| Plugin commands | Native plugins use `CommandRegistry`. Portable command declaration and invocation require a future WIT extension and host routing; the current `init`/`on-tick` ABI does not expose them. |
 
 Server-side: the wasm host lands **client-first**. The client `World` has the full surface today
 (bus, intents, outcomes, `ActionQueue`); the server has no plugin registration point at all —
@@ -424,34 +355,29 @@ Ordered so that the first thing that exists is a real plugin doing something obs
 dominant defect class here is the island (built, tested, reaches nothing), and "a plugin host with
 no plugin loaded through it" is its textbook form.
 
-- **M0 — the library exposes the app** (the milestone-zero section above, in full): `lodestone-app`
-  with `client_app()`, the three shell plugins moved down, `Sim` adopting a pre-built `App`, the
-  no-`wgpu`/`winit` `cargo tree` gate with its negative control, and autopilot registered from
-  outside on both native routes as the behavioural gate. Everything below arrives through the seam
-  this creates. Bundle-size caveat: this moves code down the stack and must add **no** new
-  dependency edges to the headless graph; re-run `scripts/wasm-size.sh` before and after — noting
-  the report, received during this plan's drafting and not independently verified here, that
-  `just wasm-size` is **currently unrunnable on `main`** from two pre-existing committed `web/`
-  breaks. If true, the 1.6 MB gzip ceiling is presently *unenforced*, and a layering refactor is
-  exactly the kind of change that would blow it silently. Repairing the gate is part of M0's
-  definition of done, not optional.
-- **M1 — one real plugin, loaded at runtime, observably acting.** A `plugins/` directory scanned at
-  startup; the chat auto-responder above compiled to a wasm component; loaded by a minimal
-  `lodestone-wasm-host` embedding wasmtime; its observed→acted round trip lands in the client's
-  chat, on screen. Gate: an integration test over the real client `World` asserting the action
-  reaches `ActionQueue`; **negative control**: with the `.wasm` file absent, the same test must
-  observe zero actions — run it and watch it fail the positive assertion. The WIT world at M1 is
-  deliberately tiny: `poll-events`, `submit-actions`, nothing else.
-- **M2 — the batched query surface + the cost measurements** (the four measurements above), sized
-  against the predictions table; any pattern that misses its prediction by more than ~3× is a
-  design signal, not a tuning problem.
-- **M3 — sandbox + preemption gates** (the sandbox-gates issue as scoped, plus the epoch gate), each with its working
-  negative control.
+- **M0 — library and rendered composition: implemented.** `lodestone-app::client_app()` supplies the
+  renderer-free baseline; `Sim::client_app()` extends it with shell-coupled plugins; `Sim::from_app`
+  and `run_with_app` preserve a caller's plugin through real window construction. The headless graph
+  remains free of `wgpu` and `winit`; use `scripts/wasm-size.sh` for the current browser-size result.
+- **M1 — runtime host: implemented, with application wiring remaining.** `lodestone-wasm-host` scans
+  plugin directories, parses manifests, loads a component or core module, gates capabilities, drives
+  `on-tick`, and routes returned actions through the real `ActionQueue`. Its integration tests use
+  the real `lodestone_app::client_app()` and include absent-plugin and denied-capability controls.
+  No shipped client currently calls `load_directory`, so selecting and loading a plugin directory is
+  the remaining on-screen integration step.
+- **M2 — the batched query surface + the cost measurements** (the four measurements above). A
+  measurement that materially conflicts with the intended batching model is a design signal, not a
+  tuning problem.
+- **M3 — sandbox + preemption gates: implemented.** Import capabilities are denied by an absent
+  `Linker` interface; event/action capabilities are enforced by the conductor; a spinning guest is
+  fuel-preempted and permanently failed by the tested negative control.
 - **M4 — the dual path.** `lodestone-plugin-api` + `NativeHost` shim; the conformance plugin built
   both ways; the equivalence gate above. This is the milestone that discharges the owner's dual
   requirement, and it is deliberately *after* the runtime path is real — the shim without a working
   host would be an island with extra steps.
-- **M5 — manifest, load order, versioning, hot reload** (resolutions above, per the table).
+- **M5 — manifest, dependency ordering, versioning, and hot reload.** Manifest parsing, priority-
+  then-name ordering, and ABI-world validation are implemented. Dependency declarations, component
+  replacement, and any serialize/restore policy remain future work.
 - **M6 — server-side conductor**, blocked on server-ecs Phase 2, not before.
 
 ## Deliberately left open for the owner
@@ -480,11 +406,12 @@ no plugin loaded through it" is its textbook form.
 
 ## See also
 
-- `docs/plugin-api.md` — the doctrine this ABI serializes; its "Native versus WASM" table is the
-  ancestor of this plan's shape 3.
-- `docs/server-ecs.md`, `docs/plans/server-ecs-migration.md` — the server `World` and the Phase 2
+- [The plugin API: Two tiers](../plugin-api.md#two-tiers) — the doctrine this ABI serializes and
+  the ancestor of this plan's shape 3.
+- [The integrated and dedicated server](../dedicated-server.md) and
+  [`server-ecs-migration.md`](./server-ecs-migration.md) — the server `World` and the Phase 2
   registration point M6 waits for.
 - `docs/plans/paper-nms-bridge.md` — the census proving the server has no reachable seam yet; the
   JVM tier is a future *native* plugin and is unaffected by the wasm tier except that both consume
   the same public surface.
-- See the "Impact on the existing issues" table above for the full set of issues this plan touches.
+- The requirements table above is the complete record of decisions this plan establishes.

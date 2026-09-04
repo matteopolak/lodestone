@@ -4,8 +4,8 @@
 
 Two additions that let one packet definition serve a range of protocol versions,
 and let a family's clientbound dispatch be checked at construction time instead
-of falling through a silent `_ =>` arm. Landed as Stage 1 of the multi-version
-protocol dedup plan (`docs/plans/multi-version-protocol-dedup.md`); `v1-8`,
+of falling through a silent `_ =>` arm. The multi-version protocol-sharing design
+is documented in `docs/plans/multi-version-protocol-dedup.md`; `v1-8`,
 `v1-9` and `v1-14` now all dispatch through it, and `v1-9` is a four-protocol
 era crate built on it (see [`protocol-1-9-era.md`](./protocol-1-9-era.md)).
 

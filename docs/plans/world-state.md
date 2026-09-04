@@ -1,105 +1,85 @@
-# Plan: world state — time, weather, sleeping, border, rules, difficulty, spawn, dimensions (epic #340)
+# World state — time, weather, sleeping, border, rules, difficulty, spawn, dimensions
 
 ## What it is
 
-The implementation plan for epic #340's eight children (#323–#330): the server-authoritative
-world-state systems, each planned end-to-end from ECS placement through the wire to a named client
-consumer. Written 2026-08-04 against a verified tree; every "X doesn't exist" below was re-grepped
-tree-wide, and three children turned out substantially landed since their issues were written.
+The implementation plan for the server-authoritative world-state systems, each planned end-to-end
+from ECS placement through the wire to a named client consumer.
 
-## Verified current state (read this before trusting any issue body)
+## Verified current state
 
-**Rewritten 2026-08-14 against the tree at `386889f9`.** The section below as written on
-2026-08-04 had gone stale in the *opposite* direction of the usual failure mode here: it understated
-five of the eight children (T1, R1, R2, W1, B1, S1, P1, P2, D1 all moved substantially since), because
-each landed as a byproduct of other work and nobody came back to re-verdict this plan. `docs/world-state.md`
-now exists as the landed-state doc for the R1/R2/T1 trio (`3d9e9fd9`) and is the one to read for their
-internals; what follows is this plan's own re-verdict of every unit, so a reader trusting this file does
-not inherit the old picture.
+This plan is the detailed implementation reference for the rule registry, shared world state, and
+clock synchronization. The remaining statements here identify production consumers and gaps that
+still need a gate.
 
-- **R1 (typed game-rule registry) is landed and consumed, not merely stored.** `game_rules.rs`
+- **R1 (typed game-rule registry) is implemented and consumed, not merely stored.** `game_rules.rs`
   (896 lines) is a real typed registry — every 26.2 rule, jar-checked defaults, dozens of typed
   accessors (`GameRules::advance_time`, `::mob_griefing`, `::random_tick_speed`, etc.) — reachable
-  through `crate::commands::gamerule` (`crates/lodestone-server/src/commands/gamerule.rs`). It replaced
-  the old unvalidated per-connection `HashMap<String, String>` this plan was written against.
-- **R2's straddle is fixed.** `WorldAdminState` no longer exists (`grep -rn "struct WorldAdminState"
-  crates/lodestone-server/src` is empty). It was replaced by `WorldStateHandle`
+  through `crate::commands::gamerule` (`crates/lodestone-server/src/commands/gamerule.rs`) instead of
+  an unvalidated per-connection `HashMap<String, String>`.
+- **R2 uses one world-level state handle.** `WorldStateHandle`
   (`crate::world_state::WorldStateHandle`, `world_state.rs`, 893 lines) — a cheap-clone shared handle,
   the same shape as `BlockEntityHandle`, with **no per-connection copy**: `open_in_memory_with_mobs_using`
   constructs one `WorldStateHandle` and clones it into the connection task, the tick loop, and the host.
   Two LAN clients now share one difficulty and one game-rule set.
-- **T1's remaining island is closed.** The periodic broadcast sends
+- **T1's periodic broadcast** sends
   `encode_set_time(game_time, Some(day_time))` reading `WorldStateHandle::tick_time`'s real counters,
   not wall-clock-since-join. `day_time` advances only when `advance_time` is on, `game_time`
-  unconditionally — the vanilla asymmetry the old text called out as missing is implemented
+  unconditionally — the reference asymmetry is implemented
   (`WorldStateHandle::tick_time`, `world_state.rs`).
-- **`IntegratedServer::bind` (LAN) spawns a tick loop now.** Issue #439 fixed exactly the gap this
-  section used to name: `bind` delegates to `open_to_lan` (`integrated.rs`), which spawns the same
-  single `run_tick_loop` singleplayer uses (see that function's own comment, in the past tense: *"LAN
-  worlds had no world tick at all"*). Also landed since: `IntegratedServer::open_to_lan` lets a running
-  singleplayer world publish in place (issue #535) instead of restarting, which is what the pause
-  menu's Open to LAN item calls.
-- **W1 (weather) is landed with a real consumer.** `weather.rs` (539 lines) ports vanilla's exact
+- **`IntegratedServer::bind` (LAN) spawns a tick loop.** `bind` delegates to `open_to_lan`
+  (`integrated.rs`), which starts the same `run_tick_loop` used by singleplayer. A running
+  singleplayer world can be published in place, which is the pause menu's Open to LAN path.
+- **W1 (weather) has a real consumer.** `weather.rs` (539 lines) implements the reference
   four bounded-random delay/duration ranges and ±0.01/tick interpolation, and a `WeatherFeed` carries
   transitions into `serve_play`'s sync arm exactly like `BlockTickFeed`. Client side, `WeatherChanged`
-  still folds into `WeatherCell` (`net.rs`, read in `app.rs::WindowApp::redraw`) — that part of the
-  2026-08-04 note was accurate and remains so.
-- **B1 (world border, server half) is landed for state and enforcement, still static for resize.**
+  folds into `WeatherCell` (`net.rs`, read in `app.rs::WindowApp::redraw`).
+- **B1 (world border, server half) implements state, enforcement, and timed resize.**
   `border.rs` (742 lines) is a faithful `WorldBorder` port — centre, lerp, damage, warning fields — sent
   on join via `encode_initialize_border` and enforced via `PlayerVitals::apply_border_damage`
   (`max(1, floor(-dist * damage_per_block))`, matching vanilla's per-tick border-damage rule).
-  **What is still true from the old note:** `border.rs`'s own doc comment says the tick-loop's
-  `WorldBorder` is "a static default today because nothing calls `WorldBorder::lerp_size_between` yet" —
-  every call site of that method today is inside `border.rs`'s own test module (`grep -n lerp_size_between
-  crates/lodestone-server/src/border.rs`), and there is no `/worldborder` command
-  (`ls crates/lodestone-server/src/commands/` has no `worldborder.rs`). So B1's *state and enforcement*
-  landed; the *resize* entry point is real code with zero production callers — an island by this repo's
-  own definition, not a landing, until a command or plugin surface calls it.
-- **B2 (border client consumer) is partially landed**, exactly as the file's own "stale as of a recent
-  island sweep" callout already said — that callout in the unit section below is itself still accurate
-  and was re-verified: the six border events route to SESSION (`event.rs`'s `route()`), fold into
-  `SessionWorldBorder`, and reach the debug overlay (`sim::session::border_warning`,
-  commit `090d00de`). The vignette pixel consumer (`misc/vignette.png` + a multiply blend state) is
+  `commands/worldborder.rs` registers `/worldborder set` and `add`; their optional duration calls
+  `WorldBorder::lerp_size_between` through the shared `BorderFeed`. The tick loop calls
+  `border.with(WorldBorder::tick)` before the remaining world tick, so a timed resize advances in
+  production and reaches every client using that feed.
+- **B2 (border client consumer) has its state path wired:** the six border events route to SESSION
+  (`event.rs`'s `route()`), fold into
+  `SessionWorldBorder`, and reach the debug overlay (`sim::session::border_warning`). The vignette
+  pixel consumer (`misc/vignette.png` + a multiply blend state) is
   still unbuilt.
-- **S1 (sleep) is landed, including the wake packet this plan flagged as discarded.** `sleep.rs`
+- **S1 (sleep) includes the wake packet.** `sleep.rs`
   (479 lines) implements the world-global vote (`SleepVote`) and the tick-owned skip arithmetic
   (`SleepState`), and `ServerBound::PlayerCommand`'s `STOP_SLEEPING` arm (action 0) is handled, not
-  `Ignored` — see that arm's own comment citing issue #325.
-- **P1 (world spawn) is landed.** `world_spawn.rs` (1290 lines) replaces the hardcoded `(8, y, 8)` this
-  plan was written against with vanilla's real 121-iteration spiral search
+  `Ignored`; the handler is the production consumer of the wake action.
+- **P1 (world spawn) uses `world_spawn.rs` (1290 lines).** It replaces a hardcoded `(8, y, 8)`
+  position with the reference 121-iteration spiral search
   (`find_initial_spawn`, mirroring the vanilla server's initial-spawn search), stored in
   `WorldStateHandle` and persisted to `level.dat`'s `spawn` compound, not re-derived per connection.
-  `SpawnPositionChanged` routes to SESSION and reaches the debug overlay alongside the border fold
-  (commit `090d00de`).
-- **P2 (per-player respawn) is landed for the read half this plan called out as blocking.** Commit
-  `869774eb` added `resolve_bed_respawn` (vanilla's bed-respawn branch, walking the twelve bed
-  stand-up offsets in vanilla's order) — `PERFORM_RESPAWN` now consults the stored `RespawnPoint`
+  `SpawnPositionChanged` routes to SESSION and reaches the debug overlay alongside the border fold.
+- **P2 (per-player respawn) implements the read half.** `resolve_bed_respawn` implements the
+  bed-respawn branch, walking the twelve bed
+  stand-up offsets in the reference order — `PERFORM_RESPAWN` consults the stored `RespawnPoint`
   instead of using the world spawn unconditionally. The `respawn_radius` scatter and the async
-  chunk-ticket search remain open, same as before, and still need shape B.
-- **D1's blockers are mostly cleared; the End is the one still genuinely missing.** The server now
-  sends real Configuration-phase registry data — all 29 of the registries the vanilla server
-  synchronizes at Configuration phase (`docs/registry-data-ingest.md`), not zero. `lodestone-worldgen`
+  chunk-ticket search remain open and need shape B.
+- **D1 includes production End terrain selection.** The server
+  sends Configuration-phase registry data — all 29 of the registries the vanilla server
+  synchronizes at Configuration phase ([Registries](../registries.md)), not zero. `lodestone-worldgen`
   has a real Nether generator (`crates/lodestone-worldgen/src/nether/`) wired into the server
   (`worldgen_data::nether_generator`, consumed by `chunk.rs`'s Nether column adoption), and
   `crates/lodestone-server/src/dimension.rs` plus `portal.rs` (1585 lines) implement multi-dimension
-  chunk sources, 8:1 coordinate scaling, and portal travel — commit `dc98cb9a`. `encode_respawn` now
-  exists server-side (`crates/lodestone-server/src/protocol.rs`, `crates/versions/26.2/src/server_protocol.rs`),
-  so that blocker is also gone. **What is still an island:** `lodestone-worldgen` has a real `end/`
-  module (`EndBiomeSource`, `EndGenerator`) but `dimension.rs`'s own doc comment says adding the End is
-  still future work — `grep -rn "worldgen::end" crates/lodestone-server/src` has zero production hits.
-  The End generator exists and the dimension plumbing that would consume it exists; nothing connects
-  them yet.
-- **Client-side wire coverage has changed since the old audit.** The old claim that all six
-  world-border events, `GameRulesChanged`, and `SpawnPositionChanged` decode to nowhere is stale: all
-  of them route to SESSION today (`event.rs`'s `route()`) and fold into `SessionWorldBorder`/
+  chunk sources, 8:1 coordinate scaling, and portal travel. `encode_respawn` now
+  exists server-side (`crates/lodestone-server/src/protocol.rs`, `crates/versions/26.2/src/server_protocol.rs`).
+  `with_nether`'s sibling factory selects `worldgen_data::end_chunk_source(seed)` for
+  `Dimension::End`; the resulting `EndChunkSource` is memoized as the dimensional sibling and
+  receives its own tick loop on first use. The completed End portal frame triggers the travel path
+  to this production source.
+- **Client-side wire coverage:** all six world-border events, `GameRulesChanged`, and
+  `SpawnPositionChanged` route to SESSION (`event.rs`'s `route()`) and fold into `SessionWorldBorder`/
   `SessionGameRules`/`SessionSpawnPoint`, reaching the debug overlay and (for `doImmediateRespawn`) real
-  behaviour — `drive_ui_from_session` now skips the death screen entirely when the rule is off, per
-  commit `090d00de`. `DESIGN.md` §12.88's write-only-events list was already noted stale for
-  `WeatherChanged` on 2026-08-04; that note still holds.
+  behaviour — `drive_ui_from_session` skips the death screen entirely when the rule is off.
 
-## The 26.2 rework: constants and mechanics (behavior verified against the 26.2 vanilla server; naming below is descriptive, not a source citation)
+## 26.2 constants and mechanics (behavior verified against the 26.2 vanilla server; naming below is descriptive, not a source citation)
 
-**26.2 restructured time and game rules wholesale. A plan written from 1.21 memory is wrong.**
+**26.2 uses a clock registry and snake_case game rules. A plan written from 1.21 memory is wrong.**
 
 ### Time
 
@@ -190,7 +170,8 @@ not inherit the old picture.
 - **The game-rule-values packet is request/response, not broadcast.** It is sent only in reply to an
   explicit client request for current rule values, part of the generic client-command packet. Nothing
   pushes rule changes to clients proactively — not even back to whoever changed the rule. Our current
-  confirm-on-set (`apply_game_rule_changed` in `server.rs`) diverges from vanilla; see #327 below.
+  confirm-on-set (`apply_game_rule_changed` in `server.rs`) diverges from the reference behavior and
+  must remain an explicit compatibility decision.
 - Serverbound rule-set values arrive as strings, parsed server-side; gated on gamemaster-level
   permission; unknown keys are logged and skipped, and parse failures are silently dropped.
 
@@ -221,37 +202,35 @@ not inherit the old picture.
   default), and decays by 4/tick once the entity leaves the portal. The nether's coordinate scale is
   8.0 (blocks travelled in the overworld per block in the nether); the general teleport coordinate
   scale between any two dimensions is `old_dimension_scale / new_dimension_scale`.
-- **Dimension-change packet sequence** — what #330 must reproduce: `RESPAWN` (data-to-keep byte 3) →
+- **Dimension-change packet sequence:** `RESPAWN` (data-to-keep byte 3) →
   `CHANGE_DIFFICULTY` → `PLAYER_ABILITIES` → then, as part of the same join-info sequence used for
   joining a level: `INITIALIZE_BORDER` → full clock sync → `SET_DEFAULT_SPAWN_POSITION` → weather
   game events if raining → `GAME_EVENT(13)` (chunks-load-start) → tick rate → player info/effects.
   Same-dimension teleport is a fast path with **no** respawn packet.
 
-## ECS placement (per `docs/server-ecs.md`, referencing `docs/plans/server-ecs-migration.md`)
+## ECS placement (per [The integrated and dedicated server](../dedicated-server.md), referencing `server-ecs-migration.md`)
 
-The server-ECS decision is final (`f0d22a1`) and **unimplemented** — no
-`bevy_ecs`/`lodestone-ecs` in `crates/lodestone-server/Cargo.toml`, and no phase issues exist on
-GitHub yet; the migration plan is being written concurrently to
-`docs/plans/server-ecs-migration.md`. This plan therefore names the migration **shape** each
-child needs, not a phase number:
+This plan names the ECS migration **shape** each subsystem needs. The migration plan is
+[`server-ecs-migration.md`](./server-ecs-migration.md); use it to verify current implementation
+status before moving state into an ECS schedule:
 
 - **Shape A — "the tick thread runs a schedule over a server `World` with `Resource`s."** The
   minimum: a `World` owned by the tick task, no lock, `GameTick` schedule.
 - **Shape B — "connected players are server-`World` entities"** (the same shape that migrates
-  `VITALS_TICK_INTERVAL`, per `docs/server-ecs.md`'s simulation-vs-replication table).
+  `VITALS_TICK_INTERVAL`, per [The integrated and dedicated server](../dedicated-server.md)'s simulation-vs-replication table).
 - **Shape C — "packet-apply runs as `GameTick` systems behind an `Adjudicate` set"** (the plugin
   veto window).
 
-| child | state | ECS shape | schedule position (mirrors vanilla's per-tick order: border → weather → sleep → time) |
+| subsystem | state | ECS shape | schedule position (reference per-tick order: border → weather → sleep → time) |
 |---|---|---|---|
-| #323 time | a clock-registry resource (map of clock id → per-clock state: total ticks, fractional carry, rate, paused) + per-level `game_time: u64` | `Resource` (A) | `GameTick`, after sleep check |
-| #324 weather | `WeatherState{raining, thundering, clear/rain/thunder timers, rain_level, thunder_level, rng}` (already exists as a plain struct in `weather.rs`) — server-global like vanilla | `Resource` (A) | `GameTick`, after border, before sleep |
-| #325 sleep | `Sleeping{bed_pos, since_tick}` **component** on player entities; vote derived per tick | Component (B) | `GameTick`, after weather, before time |
-| #326 border | `WorldBorder{center, size, lerp{from,to,duration,start}, warning_blocks, warning_time, damage_per_block, safe_zone}` | `Resource` (A); damage system needs player positions (B, or interim per-connection) | `GameTick`, first |
-| #327 rules | `GameRules` typed registry resource | `Resource` (A) | no system of its own; read by others |
-| #328 difficulty | `Difficulty{value, locked}` | `Resource` (A) | no system of its own |
-| #329 spawn | `LevelSpawn{pos, yaw}` resource; `RespawnPosition{dim, pos, yaw, forced}` **component** per player | `Resource` + component (A for world spawn, B for per-player) | event-driven, not per-tick |
-| #330 dimensions | `Dimensions` registry resource + per-dimension chunk sources; player dimension as component | `Resource` + component (A + B) | portal systems in `GameTick` |
+| time | a clock-registry resource (map of clock id → per-clock state: total ticks, fractional carry, rate, paused) + per-level `game_time: u64` | `Resource` (A) | `GameTick`, after sleep check |
+| weather | `WeatherState{raining, thundering, clear/rain/thunder timers, rain_level, thunder_level, rng}` (already exists as a plain struct in `weather.rs`) — server-global like the reference | `Resource` (A) | `GameTick`, after border, before sleep |
+| sleep | `Sleeping{bed_pos, since_tick}` **component** on player entities; vote derived per tick | Component (B) | `GameTick`, after weather, before time |
+| border | `WorldBorder{center, size, lerp{from,to,duration,start}, warning_blocks, warning_time, damage_per_block, safe_zone}` | `Resource` (A); damage system needs player positions (B, or interim per-connection) | `GameTick`, first |
+| rules | `GameRules` typed registry resource | `Resource` (A) | no system of its own; read by others |
+| difficulty | `Difficulty{value, locked}` | `Resource` (A) | no system of its own |
+| spawn | `LevelSpawn{pos, yaw}` resource; `RespawnPosition{dim, pos, yaw, forced}` **component** per player | `Resource` + component (A for world spawn, B for per-player) | event-driven, not per-tick |
+| dimensions | `Dimensions` registry resource + per-dimension chunk sources; player dimension as component | `Resource` + component (A + B) | portal systems in `GameTick` |
 
 **Blocked-on-shape summary:** S1 and P2 (the per-player respawn half) hard-require shape B. B1's
 damage system wants B but has an honest interim (per-connection player position is where vitals
@@ -292,12 +271,9 @@ T1/W1/B1/R1/R2's state **plugin-visible by construction** for native server plug
 
 ## Units
 
-**Read "Verified current state" above first.** The per-unit sections below are the original
-2026-08-04 plan text and describe R1, T1, W1, R2, B1, B2, S1, P1, P2 and D1 as work to be started;
-all ten have since landed to varying degrees (R1/R2/T1/W1/S1/P1/P2 substantially, B1's state and
-enforcement but not its resize, B2 partially, D1 for the Nether but not the End). The sections below
-still carry accurate 26.2 mechanics, file-touch lists and gate designs for whatever remains — do not
-delete them — but their framing of "not yet built" is superseded by the corrected section above.
+Use "Verified current state" to identify which unit requirements remain. Each unit names a
+production consumer, an exact gate, and a negative control; keep only requirements whose consumer
+or gate is still absent.
 
 Conventions: every unit names its consumer and its gate's negative control. New server modules
 each need exactly one `mod` line in `crates/lodestone-server/src/lib.rs` (choke point — broker
@@ -305,18 +281,18 @@ through the orchestrator; the patch is the single stated line). `server.rs`, `ti
 `protocol.rs`, `event.rs`, `net.rs`, `app.rs` are contended: re-read before writing, stage hunks,
 pathspec commits.
 
-| unit | child issue |
+| unit | scope |
 |---|---|
-| R1 | #327 |
-| T1 | #323 |
-| W1 | #324 |
-| R2 | #327 + #328 |
-| B1 | #326 (server half) |
-| B2 | #326 (client half) |
-| S1 | #325 |
-| P1 | #329 (minus per-player respawn) |
-| P2 | #329 (per-player respawn half) |
-| D1 | #330 |
+| R1 | typed game rules |
+| T1 | clocks and time synchronization |
+| W1 | weather |
+| R2 | shared rules and difficulty |
+| B1 | border server half |
+| B2 | border client half |
+| S1 | sleep |
+| P1 | world spawn |
+| P2 | per-player respawn |
+| D1 | dimensions and portals |
 
 ### R1 — typed game-rule registry (start immediately)
 
@@ -365,8 +341,8 @@ pathspec commits.
   (`crates/lodestone-client/src/state.rs`) → `WorldTime` → sky already works end-to-end.
 - **Persistence hook:** world age and clock states load/save via the persistence-wiring dependency
   (`world_clocks` state shape); until then tick 0 = process start, documented.
-- **Suggested issue hygiene:** per the owner's triage comment on T1's issue, close it and let the
-  persistence-wiring dependency, R1's issue, and this unit carry the remainder.
+- **Persistence boundary:** the persistence-wiring dependency owns durable clock state; until it
+  lands, tick 0 is process start.
 
 ### W1 — weather state machine + `encode_game_event`
 
@@ -377,8 +353,8 @@ pathspec commits.
   drained transitions.
 - **Mechanics:** exactly the vanilla weather cycle described above — the four bounded-random
   delay/duration ranges, ±0.01/tick interpolation clamped [0,1], gated on `advance_weather` (reads
-  R1). Keep the interpolated levels — the issue's own trap warning stands, and the client's
-  `WeatherCell` consumes the ramp.
+  R1). Keep the interpolated levels — abrupt state changes break the client ramp consumed by
+  `WeatherCell`.
 - **Consumer (already wired):** client decodes GAME_EVENT → `WeatherChanged` → `forward`'s
   `WeatherChanged` arm in `net.rs` fold → `WeatherCell` → `app.rs::WindowApp::redraw`. Rain
   *particles/overlay rendering* is the Tier-1 backlog client item, explicitly not this unit.
@@ -389,33 +365,23 @@ pathspec commits.
   (magnitude), then id 1/2 on flips. Negative control: with `advance_weather` off the state must
   not change over N ticks — and flipping the rule on must make that same assert fail.
 
-### R2 — world-level admin state (the straddle fix, joining R1's game rules with the difficulty state)
+### R2 — shared rules and difficulty
 
-- **What:** move `WorldAdminState` (difficulty, lock, game rules) from per-connection (each
-  `serve_connection*` wrapper in `server.rs`) to tick-thread-owned world state, broadcast changes
-  to **all** connections. This is the natural **pilot for migration shape A** — coordinate with
-  `docs/plans/server-ecs-migration.md` before starting; if shape A is imminent, land this as the
-  first real `Resource` instead of a plain struct, and do not build it twice.
-- **Files:** `server.rs` (state relocation + broadcast), `tick.rs` or the new `World` (owner
-  decided by migration timing). Difficulty extras: hardcore→HARD pin has no server-side hardcore
-  flag yet — note in code, cite the anvil-persistence wiring dependency for where the flag will
-  come from.
-- **Gate:** two-connection test — connection A sets difficulty, connection B receives the
-  `CHANGE_DIFFICULTY` broadcast. **This gate fails against today's tree by construction** (B has
-  its own `WorldAdminState`), which is the negative control demonstrating the straddle is real:
-  run it before the fix, watch it fail, land the fix, watch it pass. Same for a game-rule set
-  observed by B's behaviour (not by a confirm packet — B never gets one, matching vanilla).
-- **Permissions:** still no permission model. Record vanilla's lock-difficulty silent-drop
-  asymmetry in the doc comment when the permission-model work lands the check.
-- **Client:** none — `HudState::apply` (`crates/lodestone-game/src/player_state.rs`)
-  already consumes difficulty.
+- **Invariant:** `WorldStateHandle` owns one difficulty, lock flag, and typed rule registry for
+  the world; connection tasks, the tick loop, and the host clone the same handle. Never introduce
+  a per-connection copy while moving this state into ECS shape A.
+- **Gate:** in a two-connection test, changing difficulty or a rule through connection A must be
+  observable through connection B's shared world state and the appropriate wire behavior. A
+  confirm packet alone is not a consumer. `HudState::apply` already consumes difficulty.
+- **Permissions:** the future permission model must preserve the silent rejection of unauthorized
+  difficulty-lock attempts.
 
-### B1 — world border state + wire (server half)
+### B1 — world border state + wire (implemented)
 
-- **Files:** new `crates/lodestone-server/src/border.rs`; `lib.rs` `mod border;`; `tick.rs`
-  (tick first, per the vanilla per-tick order above); `protocol.rs` + `v26-2/server_protocol.rs`:
-  encoders for `INITIALIZE_BORDER` (sent in `begin_play`'s join sequence, mirroring vanilla's
-  join-info sequence) and the five `SET_BORDER_*` deltas; `server.rs` forwards a `BorderFeed`.
+- **Production path:** `commands/worldborder.rs` registers the command surface; `set` and `add`
+  select immediate `set_size` or timed `lerp_size_between` on the shared `BorderFeed`. `tick.rs`
+  advances that feed with `WorldBorder::tick`; `protocol.rs` and `v26-2/server_protocol.rs` encode
+  the join state and five deltas, and `server.rs` forwards the feed.
 - **State/defaults:** the resource row in the table above with 26.2 defaults — size
   5.999997E7, damage 0.2, safe zone 5.0, warning blocks 5, warning time **300** (the real
   effective default; the field-initializer value of 15 is dead — discrepancy recorded above so
@@ -431,36 +397,19 @@ pathspec commits.
   and the control proving the 0-detector works: move the same player outside and the 0-assert
   must fail.
 
-### B2 — border client consumer (client half; pairs with B1, same PR train)
+### B2 — border client consumer
 
-> **Stale as of a recent island sweep — re-verify before following this bullet.** The
-> border events did **not** route to SHELL and there is no `BorderCell`. They route
-> `session` (`event.rs`'s own table, `ClientEvent::WorldBorder* => SESSION`) and fold into
-> `lodestone_ecs::session::SessionWorldBorder` via `apply_world_border`, stamped off
-> `FrameClock`. So the "route flip" this section's *Rule respected* line turns on **already
-> happened, differently**, and no `net.rs` change is needed at all.
->
-> What is genuinely still open is only the consumer, and it is bigger than "tint the screen
-> edge red": vanilla's warning is a **cyan tint** applied to the vignette overlay during HUD
-> rendering, needing `misc/vignette.png` plus a **multiply** blend state that
-> `lodestone-render/src/screen_effects.rs` does not have. The formula itself is ported and
-> gated (`sim::session::border_warning`) and reaches the debug overlay today. See
-> `docs/screen-overlays.md`'s "The world-border warning" section for the exact remaining list.
-
-- **Files:** `event.rs`'s `route()` route table (six border events → SHELL — world state, so
-  neither `ingest` nor `session`, per the established fork); `net.rs` fold into a new `BorderCell`
-  (mirror `WeatherCell`, `forward`'s `WeatherChanged` arm in `net.rs`); consumer: warning vignette
-  — when
-  `distance_to_border < max(warning_blocks, speed * warning_time_ticks)` tint the screen edge
-  red (`hud.rs`/`gpu.rs` — exact anchor chosen by the implementing agent with the orchestrator,
-  since both files are contended). The animated wall render is a follow-up render feature, filed
-  separately — the vignette is the pixel-reaching minimum that keeps this off the island list.
-- **Rule respected:** the route flip and the `BorderCell` consumer land in the same commit —
-  `event.rs`'s own warning.
-- **Gate:** pixel gate — with a border 10 blocks away and warning_blocks 5, no vignette; at 4
-  blocks, red coverage inside the screen-edge rect above a threshold **with a bounding-box
-  failure report** (location, never frame average); negative control: route flip reverted →
-  the same gate must fail. Vacuous-risk: asserting the cell updated (state) without the draw.
+- **Current state:** border events already route to `session` and fold into
+  `lodestone_ecs::session::SessionWorldBorder` via `apply_world_border`, stamped from
+  `FrameClock`. The formula is gated by `sim::session::border_warning` and appears in the debug
+  overlay; no event-route or `net.rs` change is required.
+- **Remaining consumer:** apply the warning's cyan tint to the HUD vignette when
+  `distance_to_border < max(warning_blocks, speed * warning_time_ticks)`. This needs
+  `misc/vignette.png` and a multiply blend state in `lodestone-render/src/screen_effects.rs`.
+  The animated wall is separate rendering work.
+- **Gate:** with a border 10 blocks away and `warning_blocks` 5, assert no vignette; at 4 blocks,
+  assert cyan coverage in the screen-edge rectangle above a threshold and print a bounding box on
+  failure. Disable the vignette input once and observe that the same pixel gate fails.
 
 ### S1 — sleep and the night-skip vote (blocked on shape B + T1 + W1 + R1)
 
@@ -477,13 +426,13 @@ pathspec commits.
 - **Client gap, flagged not planned:** `EntityPose::Sleeping` has zero readers in the renderer
   and there is no sleep overlay UI — file as a client follow-up when this lands; without it the
   *other* players' sleeping is invisible (metadata already decodes).
-- **Gate:** the issue's own scripted scenario, sharpened: N connections, exactly one fewer than
+- **Gate:** N connections, exactly one fewer than
   the sleepers-needed count sleep → no skip after 200 ticks (and this no-skip assert's control:
   add the Nth sleeper and the same assert must fail); Nth sleeps → skip fires only after the
   100-tick deep-sleep threshold, to exactly `ceil(t/24000)*24000`. Use
   `lodestone-testsupport::unique_username` per connection (offline-mode UUID trap).
 
-### P1 — world spawn point (minus per-player respawn)
+### P1 — world spawn point
 
 - **Files:** new `crates/lodestone-server/src/world_spawn.rs` (the vanilla spiral search: 121
   iterations, ±5-chunk box, heightmap-based); `lib.rs`
@@ -492,12 +441,10 @@ pathspec commits.
   deleting the `(8,100,8)` literal in `V770ServerProtocol::begin_play`
   (`crates/versions/26.2/src/server_protocol.rs`); `server.rs` threads the chosen spawn through;
   new `SET_DEFAULT_SPAWN_POSITION` encoder in the join sequence.
-- **Client half (same-commit pairing):** `SpawnPositionChanged` currently routes NOWHERE. Route
-  → SHELL, fold into the session cell the death/respawn screen will read; the concrete consumer
-  today is the shell's respawn-position display (and the F3-style debug row if the screen isn't
-  built) — implementing agent names the exact anchor before flipping the route, same rule as B2.
+- **Client half:** `SpawnPositionChanged` routes to SESSION and reaches the debug overlay. Any new
+  respawn screen must consume that session state rather than adding a second route.
 - **Gate:** fixed-seed spawn search vs a real 26.2 server's chosen spawn for the same seed,
-  exact match (the issue's own oracle; run against `scripts/live-oracles/terrain.sh`'s world or
+  exact match (run against `scripts/live-oracles/terrain.sh`'s world or
   a fresh vanilla boot). Negative control: a seed whose origin column is ocean must move the
   spawn (asserting the search actually searched); vacuous if the test seed's spawn happens to be
   the origin.
@@ -514,27 +461,19 @@ pathspec commits.
   persistence-wiring dependency's job. Blocked additionally on a death→respawn server flow (the
   death screen sends a client command our server must answer with respawn) — verify the
   serverbound CLIENT_COMMAND decode before scoping, per rule 2.
-- **Gate:** legal/illegal bed placements from captured scenarios (issue's own verification),
+- **Gate:** legal/illegal bed placements from captured scenarios,
   plus: destroy the bed, die → respawn falls back to world spawn with the vanilla message.
 
-### D1 — multi-dimension plumbing + portal travel (last, and honestly blocked)
+### D1 — multi-dimension plumbing and portal travel (implemented)
 
-- **Blocked on, cited plainly:** the zero-registry-data gap (server sends zero registry data —
-  clients cannot even be told a second dimension exists), Nether/End worldgen (**does not exist**
-  in `lodestone-worldgen`; a second large worldgen project, explicitly not planned here), and a
-  `RESPAWN` encoder (none exists server-side).
-- **Thin slice that is real once that registry-data gap is closed:** dimension registry resource +
-  per-dimension chunk sources (`worldgen_data.rs`'s `BUNDLED_WORLDGEN_SCOPE`/
-  `bundled_worldgen_serves` currently expose overworld only — a void-generator second dimension is
-  enough to prove plumbing); player-dimension component; portal-frame detection/ignition as a pure
-  function (testable against known-valid/invalid frames, no worldgen needed); a per-player portal
-  timer matching the vanilla mechanics described above; `encode_respawn` + the exact
-  dimension-change packet sequence described above (order matters and is easy to get wrong:
-  respawn → difficulty → abilities → border → clocks → spawn pos → weather → game-event 13 →
-  chunks; same-dimension sends no respawn packet).
-- **Client half: already done** — RESPAWN is fully consumed (dimension visuals, fog, sky landed;
-  `fc6b6c6`). #330 must not re-implement any client piece; the client is the oracle for the
-  server's sequence.
+- **Production path:** configuration registry synchronization, the Nether and End generators,
+  dimension chunk sources, coordinate scaling, portal travel, and `RESPAWN` encoding are wired.
+  `with_nether`'s sibling factory selects `end_chunk_source(seed)` for `Dimension::End`, and the
+  completed End-portal-frame trigger travels to that memoized sibling source. The required packet
+  sequence is `respawn → difficulty → abilities → border → clocks → spawn position → weather →
+  game-event 13 → chunks`; same-dimension travel sends no respawn packet.
+- **Client half:** RESPAWN is already consumed for dimension visuals, fog, and sky. Do not
+  re-implement client handling; use it as the consumer for the server sequence.
 - **Gate:** captured-bytes comparison of the full teleport sequence against a real 26.2 server
   (order-sensitive assert on the packet id sequence, not a set-membership assert — the set
   passes with a wrong order, which is the vacuous version); portal-frame detection table tests
@@ -546,7 +485,7 @@ pathspec commits.
 now (no ECS dependency):      R1 → T1 → W1 → B1+B2 → P1
 pilot for ECS shape A:        R2 (coordinate with docs/plans/server-ecs-migration.md)
 after shape B (players):      S1, P2, B1's damage moves in-World
-after #275 + worldgen call:   D1
+End selection and portal travel:   D1
 ```
 
 - R1 first: T1/W1/S1 all read rules; it is pure and cheap.
@@ -570,11 +509,6 @@ after #275 + worldgen call:   D1
    plain state, but R2 and shape-B-dependent units overlap the migration's own first steps.
    Mitigation: R2 is explicitly the migration's pilot candidate; the orchestrator brokers which
    plan moves first, and no unit builds new locked shared state.
-3. **Client islands.** Six border events, `GameRulesChanged`, and `SpawnPositionChanged` decode
-   to nowhere today; B1/P1 server work without the paired B2/P1-client commits ships invisible
-   state, and `event.rs`'s route table makes the flip look done when nothing consumes it. The
-   pairing rule (route flip + consumer, one commit) is load-bearing; gates are pixel/behaviour
-   gates, never cell-updated gates.
-4. *(Recorded, owned elsewhere)* LAN `bind()` has no tick loop, and `WorldAdminState` is
-   per-connection — both are migration-plan work; this plan's units must not paper over either
-   with new per-connection state.
+3. **Client islands.** Border, game-rule, and spawn events now reach session state, but a session
+   update is not a rendered feature. The border vignette remains the concrete pixel consumer;
+   gate it by pixels and behavior, never by a cell update alone.

@@ -104,7 +104,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | per-entity / per-chunk key-value data | partial — `EntityDataStore`/`ChunkDataStore` are in-memory by their own module doc | **gap** — `fs:read` only, no write | **gap** — `NbtStorageHandle` has no save path in `live_save`; nothing plugin-keyed is written to disk |
 | plugin config file / data dir | **done** — `lodestone-plugin-support::{paths, config}` | partial — read-only | **done** for an embedding crate (plain `std`) |
 | database access | **done**, trivially (unrestricted `std`) | **ceiling** — no network import exists, by design | **done**, trivially |
-| inbound packet observation | partial — decoded `GameEvent` only; `RawPacket` unbuilt (searched: one doc-comment mention, no type) | partial — 3 kinds | partial — a `ServerProtocol` decorator sees every `decode(state, id, payload)` call, version-locked |
+| inbound packet observation | **done** — decoded `GameEvent` plus opt-in `RawPacket` observation; `RawPacketBusPlugin` publishes the connection state, packet id, and exact payload before version-specific decoding | partial — 3 kinds | partial — a `ServerProtocol` decorator sees every `decode(state, id, payload)` call, version-locked |
 | outbound packet mutation / cancel | partial — `EgressFilters` over `ClientAction` at the `ActionQueue` drain; five direct `send_action` paths bypass it (`egress_hook_coverage.rs`) | **gap** | partial — the same decorator sees every `Vec<ServerDirective>` it returns, so it can drop, rewrite, or **append** a `ServerDirective::Send`, version-locked |
 | raw byte injection | **ceiling** — decided observation-only, permanently | ceiling | reachable through the decorator, untested and unsandboxed |
 | the NMS-equivalent escape hatch | **done** — depend on a version crate (`packets`, `adapter` are `pub`), or on `lodestone-shell` for `Sim::ecs()` | **ceiling** — an import not in the WIT world is absent from the linker | **done** — embed `IntegratedServer` and hold the `ChunkSource`, `WorldStateHandle`, `PlayerRegistry`, `MobHandle`, `PluginChannelRegistry` it hands out |
@@ -112,8 +112,8 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | panic isolation | ceiling by decision — trusted code, fatal | **done** — trap/fuel/memory limits, three denial gates | ceiling |
 | registered in the shipped binary | **done** — `run_with_app` / `WindowApp::new_with_app` | **gap** — nothing calls `load_directory` (searched `lodestone-shell`, `lodestone-app`) | **gap** — no constructor takes a plugin; `ServerApp::bootstrap()` is called internally with `ServerCorePlugin` only |
 
-Read by column: the native client column is done or ceiling in every row but two (durable per-entity
-data and `RawPacket`). The WASM column is gap in twenty of twenty-eight rows.
+Read by column: the native client column is done or ceiling in every row but one (durable per-entity
+data). The WASM column is gap in twenty of twenty-eight rows.
 The server column has real capability in exactly the rows where a hand-built registry could be
 bolted onto plain function calls — worldgen, entity spawn, crafting hooks, plugin channels, player
 registry — and gap in every row that needs a schedule to hang a system in.
@@ -486,8 +486,9 @@ plan, not a sprint.
 12. **Both: a reentrancy ledger for the other lock classes** — `MobHandle`, `ChunkWorld`, the chunk
     edit cache — or a type-level shape for `MobHandle::with` that cannot nest. Both sides, native.
     Small to medium.
-13. **Client native: `RawPacket`**, inbound, observation-only, off by default. Client, native.
-    Small; no design decision blocks it.
+13. **Client native: `RawPacket`**, inbound, observation-only, off by default. **Shipped** through
+    `RawPacketBusPlugin` and the driver's pre-decode publication point; focused unit and hermetic
+    driver tests preserve the exact state, id, and payload. Client, native.
 14. **Server: custom item data through save/load** — verify and, if missing, carry
     `custom_data` through `player_data::to_nbt`/`from_nbt`. Server, native. Small to medium.
 15. **Server: open a plugin menu on a remote player.** Needs the container-open packet family and

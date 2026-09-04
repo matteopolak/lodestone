@@ -1,255 +1,133 @@
-# Client rendering and UI: the remaining visual and audio surface
+# Client rendering and UI: remaining visual and audio surface
 
 ## What this is
 
-The decomposition of everything the player *sees or hears* that is not yet at 1:1 parity
-with vanilla 26.2: block entity renderers, sky and weather, smooth lighting, particles, the
-remaining GUI screens, HUD elements, camera/post effects, item and entity visuals, audio, and
-text rendering breadth. Client physics/prediction/input, server-side anything, the plugin
-framework, and benchmarks are covered by the other docs in this directory
-([`../roadmap/README.md`](./README.md) lists them). This doc does not repeat their scope.
+This roadmap covers the player-visible 26.2 client work: scene rendering, GUI and HUD
+surfaces, item and entity presentation, camera effects, audio, and text breadth. Client
+physics and input, server simulation, protocol coverage, plugins, and benchmarks have
+their own roadmaps; [`README.md`](./README.md) indexes them.
 
-Every item below is a GitHub issue, filed as a sub-issue of the tier epic it belongs to
-([#1](https://github.com/matteopolak/lodestone/issues/1) Tier 1,
-[#2](https://github.com/matteopolak/lodestone/issues/2) Tier 1½,
-[#3](https://github.com/matteopolak/lodestone/issues/3) Tier 2,
-[#4](https://github.com/matteopolak/lodestone/issues/4) Tier 3) and on the
-[project board](https://github.com/users/matteopolak/projects/7). [`../backlog.md`](../backlog.md)
-remains the tier-definition and trap record; when it and the tracker disagree, the tracker is
-newer.
+The work is ordered by visible impact per unit of effort. A feature is not complete until
+live state reaches a draw or audio consumer and a focused gate observes the result.
 
-## Why this exists, and the two rules that shaped every issue below
+## Roadmap
 
-1. **Nothing is done until something on screen changes.** This subsystem has produced more
-   confirmed islands than any other in the repo — decoded data with no render consumer
-   (nametags, mob equipment, pickup fly-to-player), or a bool/field that exists but every call
-   site hardcodes it away (enchantment glint). Every issue below either names what will
-   consume the work, or — where the answer is "an existing call site, once one line changes"
-   — says so explicitly, because that is the cheapest and easiest class of fix to mistake for
-   something bigger.
-2. **Re-verify before routing around "X doesn't exist yet."** This pass re-grepped the whole
-   tree for every claim in the original briefing rather than trusting it, and found real
-   staleness — see "Corrections found while grounding this roadmap" below. One stale sentence
-   about item-drop rendering was previously copied into four issues as a shared root cause
-   and misdirected three of them; the lesson generalizes past that one incident.
+### Band 1 — high-impact wiring and scene fundamentals
 
-## Ordering rationale
-
-Ordered by **how much it changes the screen (or the speaker) per unit of effort**, the same
-principle [`../backlog.md`](../backlog.md) already uses. Five bands, each internally ordered
-the same way:
-
-### Band 1 — biggest tell, cheapest fix
-
-The "not Minecraft" tells a first-time viewer would name first, several of which are a
-missing consumer for data or plumbing that already exists.
-
-| issue | item | why it's here |
-|---|---|---|
-| [#22](https://github.com/matteopolak/lodestone/issues/22) | Smooth lighting / AO on the model path | Flat block light + directional shade is the single most recognisable non-vanilla tell now that geometry is right. |
-| [#96](https://github.com/matteopolak/lodestone/issues/96) | Sky dome: gradient, sunrise/sunset tint, void fog | The sky is a flat clear colour today, full stop — every outdoor frame is affected, and the fix is "add a shader," not new state. |
-| [#100](https://github.com/matteopolak/lodestone/issues/100) | Nametags, with occlusion | `custom_name`/`custom_name_visible` are already decoded every tick and consumed by nothing — a pure wiring fix, and the first thing a second player looks for. |
-| [#103](https://github.com/matteopolak/lodestone/issues/103) | Death screen | Currently the player dies and nothing happens — reads as a crash, not a design choice, to anyone who doesn't know the internals. Reuses existing button/screen machinery. |
-| [#130](https://github.com/matteopolak/lodestone/issues/130) | Enchantment glint | The bool field already exists on `ItemIcon`; every call site hardcodes it to `false`. Cheapest genuinely-visible fix in the whole list once the shimmer shader itself is written once. |
-| [#45](https://github.com/matteopolak/lodestone/issues/45) | Sheet particle atlas bug | A live bug, not a gap: flame/smoke/crit particles currently sample block-atlas texels at particle-atlas coordinates. |
-| [#98](https://github.com/matteopolak/lodestone/issues/98) | Hurt flash and screen shake | Cheap screen-space effects with an obvious trigger (damage/explosion events), high "did something happen" signal. |
-
-### Band 2 — core to "a stranger plays survival for an hour"
-
-The rest of Tier 1 and the highest-value Tier 1½ items — everything a full session of
-ordinary survival play would surface.
-
-| issue | item |
+| Feature | Required outcome |
 |---|---|
-| [#24](https://github.com/matteopolak/lodestone/issues/24) | Sun, moon, stars, clouds |
-| [#25](https://github.com/matteopolak/lodestone/issues/25) | Weather: rain, snow, thunder |
-| [#23](https://github.com/matteopolak/lodestone/issues/23) | Block entity renderers (chest and sign first, per its own scope note; skulls/campfires/brewing-stands/lecterns added by comment) |
-| [#58](https://github.com/matteopolak/lodestone/issues/58) | View bobbing, damage tilt, view lag |
-| [#54](https://github.com/matteopolak/lodestone/issues/54) | First-person held item (block/sprite/special poses) |
-| [#57](https://github.com/matteopolak/lodestone/issues/57) | Bow/crossbow draw pose — lands after #54 |
-| [#53](https://github.com/matteopolak/lodestone/issues/53) | Mob render layers (sheep wool first; wolf/creeper/golem/llama/horse/mooshroom/snow-golem/shulker/villager/glowing-eyes family) |
-| [#108](https://github.com/matteopolak/lodestone/issues/108) | Underwater overlay — the submerged flag already exists, this is a draw-only fix |
-| [#60](https://github.com/matteopolak/lodestone/issues/60) | Air-supply tracking + bubble row |
-| [#30](https://github.com/matteopolak/lodestone/issues/30) | HUD animations (hearts/hunger/XP/hotbar-pop) |
-| [#17](https://github.com/matteopolak/lodestone/issues/17) | Armour leather dye + trims |
-| [#112](https://github.com/matteopolak/lodestone/issues/112) | Fire overlay |
-| [#117](https://github.com/matteopolak/lodestone/issues/117) | Text styling draw (bold/italic/underline/strikethrough/obfuscated) |
-| [#121](https://github.com/matteopolak/lodestone/issues/121) | Attack indicator |
-| [#126](https://github.com/matteopolak/lodestone/issues/126) | Held-item name tooltip |
-| [#135](https://github.com/matteopolak/lodestone/issues/135) | Music: menu, biome, situational tracks |
+| Enchantment glint | Propagate `ItemIcon` glint state to a shared shimmer pass instead of hard-coding it off. |
+| Hurt flash and screen shake | Drive small screen-space effects from damage and explosion events. |
 
-### Band 3 — the container/GUI backbone and the visual long tail
+### Band 2 — ordinary survival play
 
-High total effort, individually well-scoped, and mostly independent of each other. This is
-where Tier 2 lives.
+- Weather: rain, snow, thunder, and their scene-state transitions.
+- Block-entity renderers, beginning with chests and signs, then skulls, campfires,
+  brewing stands, lecterns, banners, and shields.
+- First-person presentation: held block, sprite, and special-item poses; bow and
+  crossbow draw poses depend on that held-item path.
+- Held-item and third-person view lag: retain smoothed yaw- and pitch-axis history behind
+  head turns, apply it to the first-person hand pose and third-person body attachment, and
+  leave `Sim::camera` as the unlagged world and interaction origin. Completion requires a
+  rapid-turn gate that observes a nonzero, time-decaying hand/body offset and fails for an
+  unlagged control.
+- Entity layers: wool, skins, overlays, glowing eyes, and species-specific additions.
+- HUD and overlays: underwater, fire, air bubbles, attack indicator, held-item name,
+  and animated health, hunger, experience, and hotbar feedback.
+- Item and text fidelity: leather dye, trims, and bold, italic, underline,
+  strikethrough, and obfuscated text rendering.
+- Music selection for menu, biome, and situational tracks.
 
-| issue | item |
-|---|---|
-| [#28](https://github.com/matteopolak/lodestone/issues/28) | Container screens: the whole family (furnace/anvil/enchanting/brewing/loom/smithing/stonecutter/grindstone/cartography/beacon/villager/horse) |
-| [#50](https://github.com/matteopolak/lodestone/issues/50) | Block items render flat in container screens (bug) |
-| [#51](https://github.com/matteopolak/lodestone/issues/51) | Container screens drawn programmatically, not from pack sprites |
-| [#158](https://github.com/matteopolak/lodestone/issues/158) | Creative inventory screen and category tabs |
-| [#171](https://github.com/matteopolak/lodestone/issues/171) | Generic item tint pipeline (potion/spawn-egg/map colours) |
-| [#174](https://github.com/matteopolak/lodestone/issues/174) | Banner and shield pattern compositing (coordinate with #23) |
-| [#178](https://github.com/matteopolak/lodestone/issues/178) | Particle catalogue: ambient/environmental (soul, portal, enchant, drip, campfire smoke, end_rod, sculk, gust, sonic_boom) |
-| [#182](https://github.com/matteopolak/lodestone/issues/182) | Particle catalogue: combat/event (totem, explosion, firework, note, heart, villager mood, redstone dust, witch) |
-| [#184](https://github.com/matteopolak/lodestone/issues/184) | Filled map item rendering |
-| [#163](https://github.com/matteopolak/lodestone/issues/163) | Recipe book UI |
-| [#167](https://github.com/matteopolak/lodestone/issues/167) | Advancements screen |
-| [#183](https://github.com/matteopolak/lodestone/issues/183) | Ambient sound loops + client-predicted local sound triggers |
-| [#49](https://github.com/matteopolak/lodestone/issues/49) | 26.2's real `sky_darken` timeline (dusk/dawn ramp only — plateaus already correct, explicitly low priority per its own issue) |
-| [#18](https://github.com/matteopolak/lodestone/issues/18) | Five remaining `FluidRenderer` divergences |
-| [#71](https://github.com/matteopolak/lodestone/issues/71) | Settle the crosshair-behind-screen question (research-only, low urgency) |
+### Band 3 — GUI backbone and visual breadth
 
-### Band 4 — atmosphere and immersion polish
+- Finish the container-screen family: furnace, anvil, enchanting, brewing, loom,
+  smithing, stonecutter, grindstone, cartography, beacon, villager, and horse screens.
+- Correct 3D block-item presentation in containers and keep pack-backed screen art rather
+  than replacing it with programmatic approximations.
+- Add the creative inventory, recipe book, advancements, filled maps, item tints, and
+  banner/shield pattern compositing.
+- Expand particles into environmental and combat/event catalogues.
+- Add ambient loops and locally predicted sound triggers.
+- Refine fluid rendering divergences and the crosshair/screen depth rule.
 
-Real, player-visible, but lower frequency or lower stakes than the bands above.
+### Band 4 — atmosphere and lower-frequency interaction
 
-| issue | item |
-|---|---|
-| [#144](https://github.com/matteopolak/lodestone/issues/144) | Nausea / confusion FOV wobble |
-| [#149](https://github.com/matteopolak/lodestone/issues/149) | Portal distortion |
-| [#154](https://github.com/matteopolak/lodestone/issues/154) | Spyglass screen-space vignette — depends on #54/#57 |
-| [#139](https://github.com/matteopolak/lodestone/issues/139) | Freeze overlay + the `freeze_ticks` mechanic (state does not exist at all yet, not just the overlay) |
-| [#32](https://github.com/matteopolak/lodestone/issues/32) | Vanilla settings menu (GUI scale) |
-| [#55](https://github.com/matteopolak/lodestone/issues/55) | Full Options screen tree |
-| [#62](https://github.com/matteopolak/lodestone/issues/62) | Player skins (blocked on Tier 3 auth; elytra needs its own `ElytraModel`/`WingsLayer`, added by comment) |
-| [#10](https://github.com/matteopolak/lodestone/issues/10) | Remote/mob swing animation (`EntityAnimation` unconsumed) |
-| [#29](https://github.com/matteopolak/lodestone/issues/29) | Islands: pickup fly-to-player, mob equipment, drop stack count |
-| [#186](https://github.com/matteopolak/lodestone/issues/186) | Third-person front-facing camera stage (back-view already landed) |
-| [#185](https://github.com/matteopolak/lodestone/issues/185) | Pumpkin overlay |
+- Nausea/confusion field-of-view wobble, portal distortion, freeze and pumpkin overlays,
+  plus the state that drives them.
+- Spyglass vignette after the first-person item and draw-pose paths exist.
+- GUI scale and the complete options hierarchy.
+- Skin fidelity: browser-safe remote and selected-account texture fetches, remote cape preference
+  and texture propagation, and the remaining cape/elytra texture relationship.
+- Remote swing animation, pickup fly-to-player, visible mob equipment, dropped-stack
+  count, and the front-facing third-person camera stage.
 
-### Band 5 — completeness
+### Band 5 — completeness and accessibility
 
-Tier 3: invisible in a screenshot, visible the moment a real player looks for it.
+- Statistics, world creation, credits/end text, chat settings, and social/reporting UI.
+- Rich debug-overlay controls and information layout.
+- Sound subtitles and full Unicode text support, including unihex/TTF rasterization and
+  bidirectional text.
 
-| issue | item |
-|---|---|
-| [#188](https://github.com/matteopolak/lodestone/issues/188) | Statistics screen |
-| [#189](https://github.com/matteopolak/lodestone/issues/189) | Social interactions / player reporting — blocked on secure chat signing |
-| [#190](https://github.com/matteopolak/lodestone/issues/190) | World creation screen (singleplayer already works via defaults without it) |
-| [#192](https://github.com/matteopolak/lodestone/issues/192) | Credits / end-poem screen |
-| [#195](https://github.com/matteopolak/lodestone/issues/195) | Chat settings screen (chat itself already works) |
-| [#197](https://github.com/matteopolak/lodestone/issues/197) | F3 debug overlay parity (two-column layout, F3+B hitboxes, F3+G chunk borders, light-level pie) |
-| [#198](https://github.com/matteopolak/lodestone/issues/198) | Sound subtitle captions (accessibility) |
-| [#187](https://github.com/matteopolak/lodestone/issues/187) | Full Unicode text: unihex/TTF rasterization, bidi |
+## Existing foundations
 
-## What already exists — do not re-flag these
+Do not duplicate these capabilities when extending the roadmap:
 
-Confirmed landed by re-grepping the tree, not by trusting a doc. Listed because every one of
-these is plausible to mistake for missing from a summary description alone:
+- GUI sprite atlases, nine-slice borders, proportional bitmap-font advances, gamma-space
+  text shadows, title/pause screens, crafting, click prediction, item GUI geometry,
+  armor, entity models and animation, dropped items, thrown projectiles, first-person
+  arm swing, block-face occlusion, tinted break particles, fog presets, and key bindings.
+- The live `mesh_models` path supplies per-corner smooth light and ambient occlusion. Its
+  remaining fidelity is face-shape-weighted interpolation for partial quads and applying
+  per-state light emission to the model ambient-occlusion eligibility check.
+- `SkyRenderer` draws the gradient disc, sunrise band, sun, moon, stars, fast and fancy
+  clouds, fog-coloured clear, void fog, and dimension sky mode through the frame path.
+  The remaining sky fidelity is decoding the server-supplied dimension sky selection instead of
+  using the dimension-name fallback.
+- Chat entry and scrollback in `lodestone_shell::chat`, plus rendered status effects,
+  boss bars, scoreboards, tab lists, action bars, and item durability bars in the HUD.
+- Nameplates consume player-list and custom-name state, honor visibility and team rules, and have
+  focused pixel coverage in `nametag_pixels`.
+- `Screen::Death` is a backdrop-aware overlay with manual Respawn and Title Screen actions; live
+  respawn coverage proves a death waits for the selected action.
+- Animated block and item textures through `AnimationMeta`, `AnimTable`, and
+  `BlockModels::anim_slot_uniforms`; `animated_block_pixels` is the pixel gate.
+- Particle-sheet atlas installation uses the same atlas as the UV table, with
+  `sheet_particle_atlas_pixels` guarding the sampled texture.
+- Third-person mode cycling from `Sim::cycle_camera_type` through
+  `WindowApp::redraw`; only the front-facing stage remains.
+- Elytra wings use `ElytraMesh`, the chest-slot draw gate, and an ignored pixel gate. Remaining
+  fidelity is the per-state wing pose and optional cape-sheet selection, not missing geometry.
+- Sound-event lookup, spatial panning, and distance attenuation. Music, ambient loops,
+  subtitles, and locally predicted triggers are separate remaining features.
 
-- Vanilla GUI sprite atlas with nine-slice borders, real `ascii.png` font with proportional
-  advances and gamma-space shadow, title/pause screens, container screens + click predictor,
-  crafting with the real recipe corpus, item GUI geometry, armour at vanilla's four
-  inflations, entity models/animations, dropped items, thrown projectiles, first-person arm
-  with swing, per-face block occlusion, break particles with tint, day/night `sky_darken`
-  (with a known 26.2-timeline divergence, #49), Nether/End fog colour presets, and
-  keybindings — all as described in the original briefing.
-- **Chat itself**: real text entry and scrollback (`crates/lodestone-shell/src/chat.rs`,
-  drawn in `HudGeometry::build_inner` in `hud.rs`), a first-class `Screen::Chat` sub-mode. Only the *settings* screen is
-  missing (#195).
-- **Status effect icons, boss bar, scoreboard sidebar, tab list, and the action bar** are all
-  **drawn today**, not merely modelled as ECS components: `hud.rs` has real draw calls for
-  each, all inside `HudGeometry::build_inner` (`effects.rs` for the status icons; boss bars,
-  scoreboard sidebar, tab list and action bar draw inline in `build_inner`, pixel-gated).
-  `docs/session-components.md`'s framing —
-  "the scoreboard, tab list, boss bars and menus as ECS components" — describes the *data*
-  layer accurately but reads, out of context, like these might not reach the screen. They do.
-- **Item durability bars** are drawn (`draw_item_icon_counted` in
-  `crates/lodestone-shell/src/hud/item_icon.rs`,
-  a real hue-lerped bar shared by the hotbar and container screens) — genuinely easy to miss
-  with a shallow grep, which is exactly how it ended up on a "still needed" list once already.
-- **Animated block/item textures** are real frame-cycling, not frame-0-only: `.mcmeta`
-  animation metadata is fully parsed (`AnimationMeta::from_value` in
-  `crates/lodestone-assets/src/texture.rs`) into a
-  runtime `AnimTable` sampled every tick into a GPU uniform
-  (`BlockModels::anim_slot_uniforms` in `crates/lodestone-render/src/block_models.rs`),
-  pixel-verified by `tests/animated_block_pixels.rs`.
-- **Third-person camera switching** is landed and wired every frame
-  (F5 → `Sim::cycle_camera_type` in `crates/lodestone-shell/src/sim/camera.rs` →
-  `render.set_third_person_body_source` in `WindowApp::redraw`,
-  `crates/lodestone-shell/src/app/redraw.rs`). Only vanilla's third
-  (front-facing) F5 stage is missing — filed narrowly as #186, not as a full
-  "third-person perspectives" rewrite.
-- **The generic sound-event engine, and spatial/directional audio**, are both real: any named
-  vanilla sound event resolves against the actual `sounds.json` at runtime
-  (`crates/lodestone-assets/src/sound.rs`, `crates/lodestone-sound/src/driver.rs`), and panning
-  + distance attenuation are implemented (`crates/lodestone-audio/src/spatial.rs`), not
-  stubbed — an equal-power approximation of vanilla's HRTF, acknowledged as such in-repo. What
-  is missing is *music*, *ambient loops*, *subtitle captions*, and *client-predicted local
-  triggers* — each filed as its own issue above, not "audio" as one undifferentiated gap.
+## Implementation constraints
 
-## Corrections found while grounding this roadmap
+- The model shader already consumes four bind groups. Check device limits before adding a
+  new group; effects should reuse or extend existing bindings where possible.
+- Depth is reversed-Z in `[0, 1]`: clear to `lodestone_render::DEPTH_CLEAR` (`0.0`), with
+  nearer fragments having greater depth. Preserve this convention in comparisons and bias.
+- GUI winding is an agreement with the camera transform: compare
+  `sign(det(gui_ortho * gui_item_pose))` with `sign(det(Camera::view_projection()))`.
+- Tint and shade multiply in gamma space. Use
+  `srgb_to_linear(linear_to_srgb(rgb) * tint * shade)` for new tint paths.
+- WGSL belongs in a crate's `src/shaders/` directory and is loaded with `include_str!`.
+  Do not embed shader source in Rust.
+- `mesh_simple` drives headless rendering while live terrain uses `mesh_models`; model-path
+  effects need a model-path gate. First-person gates need a 16:9 viewport because a square
+  target can legitimately contain no held-item pixels.
 
-Per the task's own warning that a stale claim here has previously misdirected four issues at
-once, everything above was re-verified against current source rather than against the
-original briefing text. Two things in the briefing itself were wrong:
+## How to change it
 
-1. **"Animated textures (frame 0 only today)"** — false. Real cycling animation exists and is
-   pixel-tested; see above. Whatever this claim was true of has since been fixed and the note
-   was not updated.
-2. **"Item durability bars"**, **"effect icons"**, **"boss bars, scoreboard, tab list"** listed
-   under "still needed" — all four already render today (see above). Only the elements *not*
-   listed there that this pass separately confirmed missing (subtitles, attack indicator,
-   held-item tooltip, F3 richness) are genuine gaps.
-3. **"Camera and post: … third-person perspectives"** listed as needing work — true only in a
-   narrow sense (the front-facing F5 stage). The camera-mode switch itself is landed and
-   currently wired; an earlier line inside `docs/third-person-player-body.md` itself claims a
-   stale `None` for the render-state wiring, which is also now corrected by this pass — the
-   doc's own later "Wired" section and the current `WindowApp::redraw` call site
-   (`crates/lodestone-shell/src/app/redraw.rs`) already
-   contradicted its own earlier sentence before this roadmap pass even started.
+Start at the state producer, trace it through render extraction or audio dispatch, and name
+the final consumer before adding fields or decoding packets. For a visual feature, add a
+focused pixel gate that reports a bounding box and a negative control; for audio, verify
+event selection and spatial parameters independently. Keep related effects on shared paths
+(item tint, text layout, particle atlas, and HUD geometry) rather than introducing an
+isolated renderer.
 
-## Traps that apply across this whole area
+## Configuration and dependencies
 
-Repeated here because they are easy to lose track of once work is split across ~50 issues —
-each is attached to its specific issue too, but they recur:
-
-- **The model shader is at wgpu's 4-bind-group floor** (camera/atlas/palette/anim). A fifth
-  bind group validates on an 8-group adapter and is a startup crash on a 4-group one. Check
-  the *limit*, not the adapter, before adding a group for any new effect (glint, tint,
-  overlays).
-- **Depth is reversed-Z `[0,1]`, the same sense as vanilla.** A ported depth comparison
-  and bias transcribes with **no** sign flip, a depth attachment clears to
-  `lodestone_render::DEPTH_CLEAR` (`0.0`), and nearer is *greater*.
-- **The GUI winding invariant is an agreement, not a polarity**: `sign(det(gui_ortho *
-  gui_item_pose))` must equal `sign(det(Camera::view_projection()))`, derived from a real
-  camera. The absolute sign follows the depth direction and is positive under reversed-Z;
-  do not assert it from a screenshot that happens to look right.
-- **Vanilla is not colour-managed**: tint and shade multiply in gamma space. Every new tint
-  path filed above (glint, potion/spawn-egg tint, banner patterns, fire/hurt/underwater
-  overlays) must follow `srgb_to_linear(linear_to_srgb(rgb) * tint * shade)`, not the linear
-  form, or the result washes out — this has already gone wrong once per `CLAUDE.md`'s own
-  validation log.
-- **Never put a double quote inside a WGSL shader**, not even in a comment — the shaders live
-  in Rust `r"…"` raw strings and a `"` ends the string early. Use backticks.
-- **There are two meshers**: `--headless` renders through `mesh_simple`, live terrain through
-  `mesh_models`. Any gate for a model-path effect (AO, glint, tint) verified only against
-  `--headless` may be validated against the one scene that structurally cannot exercise it.
-- **A square viewport draws 0 held-item pixels on a working build.** Any first-person gate
-  (held item, spyglass vignette, view bobbing) written at the repo's usual 256×256 GPU-gate
-  target will read as "does not render" even when it does — use a 16:9 target for these.
-- **Nothing is done until a pixel changes**, with a negative control that must fail the same
-  assertion. Several of the issues above are wiring fixes for data that already exists
-  (nametags, glint, durability — before this pass corrected the last one) precisely because
-  this defect class is the dominant one in this subsystem.
-
-## Issue count and epic distribution
-
-**34 new issues** filed by this pass, plus **25 pre-existing issues** already open in this
-area (the ones named in the five bands above: #10, #17, #18, #22, #23, #24, #25, #28, #29,
-#30, #32, #45, #49, #50, #51, #53, #54, #55, #57, #58, #60, #62, #71 — 23 distinct numbers,
-two of which — #50 and #51 — are themselves already split off #28's family) — **59 issues**
-total spanning this decomposition:
-
-| epic | pre-existing | new | total |
-|---|---|---|---|
-| Tier 1 (#1) | #22, #23, #24, #25, #45, #54, #57, #58 (8) | #96, #98, #100, #103 (4) | 12 |
-| Tier 1½ (#2) | #10, #17, #18, #29, #30, #53, #60 (7) | #108, #112, #117, #121, #126, #130, #135 (7) | 14 |
-| Tier 2 (#3) | #28, #49, #50, #51, #71 (5) | #139, #144, #149, #154, #158, #163, #167, #171, #174, #178, #182, #183, #184 (13) | 18 |
-| Tier 3 (#4) | #32, #55, #62 (3) | #185, #186, #187, #188, #189, #190, #192, #195, #197, #198 (10) | 13 |
-
-That lands inside the ~40-70 issue guideline for the area as a whole, weighted toward Tier 2
-(the container/GUI backbone and the visual long tail — inherently the largest single bucket)
-and Tier 1½ (individually cheap, collectively "a renderer" vs. "the game").
+Rendering depends on `lodestone-render`, assets, and the shell's render loop; audio depends
+on asset sound resolution and `lodestone-audio`. Resource packs supply sprites, texture
+animation metadata, and sounds. Camera and HUD work consumes `lodestone-client` session
+state; account-backed skins depend on the authentication roadmap.

@@ -1167,7 +1167,7 @@ fn piglin_alert_interval(mob: &mut impl MobController) -> i32 {
 /// Zombified piglins use an alert box of **±35 XZ, ±10 Y** with no owner
 /// filter. Wolves use **±16 XZ, ±10 Y** and require the same owner UUID,
 /// because the two species have different group-alert rules. The owner filter
-/// applies only to wolves; see `docs/plans/mob-ai-roster.md` §4 and
+/// applies only to wolves; see `docs/plans/mob-ai-roster.md` and
 /// `roster::neutral` for the range derivations.
 ///
 /// This one-shot path has **no line-of-sight check**. `RayView::is_clear` (used by
