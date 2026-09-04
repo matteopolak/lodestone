@@ -13,6 +13,8 @@ mod serverbound_change_game_mode;
 mod serverbound_interaction_tier2;
 #[path = "serverbound/serverbound_ping_spectator.rs"]
 mod serverbound_ping_spectator;
+#[path = "serverbound/serverbound_player_loaded_decode.rs"]
+mod serverbound_player_loaded_decode;
 #[path = "serverbound/serverbound_protocol_hygiene.rs"]
 mod serverbound_protocol_hygiene;
 #[path = "serverbound/serverbound_recipe_bundle.rs"]

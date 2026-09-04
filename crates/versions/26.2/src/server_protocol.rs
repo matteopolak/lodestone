@@ -3679,11 +3679,9 @@ impl ServerProtocol for V770ServerProtocol {
             // `ServerboundPlayerAbilitiesPacket`/`ServerboundMoveVehiclePacket`/
             // etc. — not merely `decode(encode(x))` against this crate's own
             // client encoder, which already sends every one of these
-            // (`crate::adapter`). All eight still decode to `Ignored`: none
-            // has an existing `ServerBound` variant to lift into, and
-            // `lodestone-server` (its tick-loop work, out of this
-            // crate's reach) has no flight/load-timeout/tick-alignment/
-            // teleport-confirmation/vehicle/boat model yet for any of them.
+            // (`crate::adapter`). The remaining markers without a server
+            // consumer stay `Ignored`; readiness is the one marker that now
+            // gates movement-dependent simulation in `lodestone-server`.
             State::Play if packet_id == play::serverbound::MOVE_PLAYER_ROT => {
                 match decode_full::<MovePlayerRot>(payload) {
                     Some(m) => ServerBound::PlayerRotated {
@@ -3711,8 +3709,10 @@ impl ServerProtocol for V770ServerProtocol {
                 ServerBound::Ignored
             }
             State::Play if packet_id == play::serverbound::PLAYER_LOADED => {
-                let _ = decode_full::<PlayerLoaded>(payload);
-                ServerBound::Ignored
+                match decode_full::<PlayerLoaded>(payload) {
+                    Some(_) => ServerBound::PlayerLoaded,
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::ACCEPT_TELEPORTATION => {
                 let _ = decode_full::<AcceptTeleportation>(payload);
