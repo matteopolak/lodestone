@@ -7,8 +7,8 @@
 //! and how it held:
 //!
 //! * **Handedness / axes:** right-handed, `+X` east, `+Y` up, `+Z` south —
-//!   **held.** Vanilla's eye-space base forward is `(0, 0, -1)`
-//!   (`Camera.FORWARDS`), rotated into world space by
+//!   **held.** Vanilla's eye-space base forward is the constant `(0, 0, -1)`,
+//!   rotated into world space by
 //!   `rotationYXZ(π - yaw, -pitch, 0)`. Expanding that gives world forward
 //!   `(-cos(pitch)·sin(yaw), -sin(pitch), cos(pitch)·cos(yaw))`.
 //! * **Yaw/pitch/forward:** **held, exactly.** The expansion above equals our
@@ -22,13 +22,13 @@
 //!   is **degenerate at pitch ±90** — the flipped-camera bug. See
 //!   `Camera::basis` for the whole mechanism; there is no singularity in
 //!   vanilla's construction, and no pitch clamp tighter than `±90` is needed.
-//! * **FOV is vertical, default 70:** **held.** `GameRenderer`/`Camera` pass
+//! * **FOV is vertical, default 70:** **held.** Vanilla passes
 //!   `options.fov` (default 70) straight into JOML `Matrix4f.perspective`, whose
 //!   first argument is the *vertical* FOV in radians. Sprint/sneak/speed/death
 //!   and under-water/-lava scale this value *before* projection (a multiplier on
 //!   the degrees, clamped `0.1..=1.5`); those are gameplay effects layered on the
 //!   base FOV and are the caller's job — see [`Camera::fov_y_degrees`].
-//! * **Near plane 0.05:** **held** (`Camera.PROJECTION_Z_NEAR = 0.05F`).
+//! * **Near plane 0.05:** **held** (vanilla's own near-plane constant is `0.05F`).
 //! * **Far plane:** **this was under-specified and is now corrected.** Vanilla's
 //!   `depthFar = max(renderDistance_chunks * 16 * 4, cloudRange_chunks * 16)`,
 //!   i.e. **four times the render distance in blocks**, not a fixed 512. At
@@ -55,7 +55,7 @@
 use glam::{Mat4, Vec3, Vec4};
 
 /// Standing player eye height above the feet position, in blocks
-/// (`Avatar.DEFAULT_EYE_HEIGHT`). The camera eye is `feet.y + this`.
+/// (vanilla's own default-eye-height constant). The camera eye is `feet.y + this`.
 ///
 /// Exposed because block-targeting/raycasts must originate from the same eye the
 /// camera renders from; a mismatch here is a gameplay bug, not just a visual one.
@@ -118,7 +118,7 @@ impl Camera {
 
     /// The camera's orthonormal world-space basis, `(right, up, forward)`,
     /// derived from a **single YXZ Euler rotation** exactly the way vanilla's
-    /// `Camera.setRotation` derives its own `forwards`/`up`/`left`
+    /// own rotation-setting function derives its own `forwards`/`up`/`left`
     /// (vanilla's decompiled camera source, 26.2):
     ///
     /// ```text
@@ -319,16 +319,16 @@ impl Camera {
     }
 
     /// [`view_projection`](Self::view_projection), post-multiplied by
-    /// [`nausea_portal_warp`] — the world-side half of issues #144 (nausea)
-    /// and #149 (portal). See that function's doc for the transform itself
+    /// [`nausea_portal_warp`] — the world-side half of the nausea and portal
+    /// screen-space warp. See that function's doc for the transform itself
     /// and why it lives here rather than in `screen_effects.rs`: this is the
     /// **one** matrix every world-space uniform in `RenderState::render_inner`
     /// is rewritten from each frame (sections, the model shared camera
     /// buffer, the outline pass, debug lines — see that function's own `let
     /// view_proj = camera.view_projection()...` line), so injecting the warp
     /// here, at the single upstream source, reaches everything vanilla's own
-    /// `RenderSystem.setProjectionMatrix` call in `GameRenderer.renderLevel`
-    /// does (the whole world pass) and nothing it does not (the HUD/GUI and
+    /// world-render entry point installs the projection matrix for (the
+    /// whole world pass) and nothing it does not (the HUD/GUI and
     /// this crate's own screen-effect overlay pipeline read no camera matrix
     /// at all, so they are structurally unaffected) — without a second call
     /// site to keep in sync.
@@ -340,7 +340,7 @@ impl Camera {
     /// [`view_projection`](Self::view_projection) with an arbitrary **eye-space**
     /// transform inserted between the projection and the view: `P · eye · V`.
     ///
-    /// This is vanilla's `projectionMatrix.mul(...)` seam, and it is the *only*
+    /// This is vanilla's projection-matrix multiply seam, and it is the *only*
     /// way a transform with three rotational degrees of freedom can reach this
     /// camera. [`Camera`] is parameterised by `position`/`yaw`/`pitch` — two
     /// angles — so anything folded into the fields themselves loses its roll
@@ -350,16 +350,16 @@ impl Camera {
     /// # What "eye space" buys, and why no constant flips sign
     ///
     /// Our eye space matches vanilla's exactly (`+X` right, `+Y` up, forward
-    /// `-Z`), so a transform transcribed from a `PoseStack` push in
-    /// `GameRenderer.renderLevel` composes here with **no** sign adjustment. The
+    /// `-Z`), so a transform transcribed from a transform-stack push in
+    /// vanilla's world-render entry point composes here with **no** sign adjustment. The
     /// `[0,1]`-versus-reversed-Z depth difference lives entirely inside the
     /// projection matrix, which sits to the *left* of `eye` and therefore cannot
     /// reach it.
     ///
     /// # Two callers, composed in vanilla's own order
     ///
-    /// `renderLevel` does `projectionMatrix.mul(bobStack)` **first** and applies
-    /// the nausea/portal spin **after**, so the full product is
+    /// Vanilla's world-render entry point multiplies in the view-bob transform
+    /// **first** and applies the nausea/portal spin **after**, so the full product is
     /// `P · bob · warp · V` and a caller wanting both passes
     /// `bob * nausea_portal_warp(..)`. Reversing them puts the spin's skew on the
     /// unbobbed axis, which is a subtle wrongness rather than an obvious one.
@@ -369,19 +369,18 @@ impl Camera {
     }
 }
 
-/// The nausea/portal "spinning" world-projection warp, issues #144/#149's
-/// shared mechanism (`GameRenderer.renderLevel`,
-/// vanilla's decompiled game-renderer source, 26.2):
+/// The nausea/portal "spinning" world-projection warp, the shared mechanism
+/// behind both effects (vanilla's decompiled game-renderer source, 26.2):
 ///
 /// ```text
-/// if (spinningEffectIntensity > 0.0F) {
-///     skew = 5.0F / (spinningEffectIntensity^2 + 5.0F) - spinningEffectIntensity * 0.04F;
+/// if (intensity > 0.0F) {
+///     skew = 5.0F / (intensity^2 + 5.0F) - intensity * 0.04F;
 ///     skew *= skew;
 ///     axis = (0, sqrt(2)/2, sqrt(2)/2);
-///     angle = (spinningEffectTime + worldPartialTicks * spinningEffectSpeed) * (pi/180);
-///     projectionMatrix.rotate(angle, axis);
-///     projectionMatrix.scale(1/skew, 1, 1);
-///     projectionMatrix.rotate(-angle, axis);
+///     angle = (spin_time + partial_ticks * spin_speed) * (pi/180);
+///     proj.rotate(angle, axis);
+///     proj.scale(1/skew, 1, 1);
+///     proj.rotate(-angle, axis);
 /// }
 /// ```
 ///
@@ -394,15 +393,15 @@ impl Camera {
 /// This crate has no persistent per-frame state (`RenderState::render_inner`
 /// takes `&self`, and every "how far has this animation progressed" input
 /// elsewhere in this pass — e.g. the fire overlay's `tick` — is threaded in
-/// from outside rather than accumulated internally), so unlike vanilla's
-/// `GameRenderer.tick`, which integrates `spinningEffectTime +=
-/// spinningEffectSpeed` every tick only while active, this takes the
+/// from outside rather than accumulated internally), so unlike vanilla's own
+/// per-tick update, which integrates the accumulated spin time by the spin
+/// speed every tick only while active, this takes the
 /// *already-computed* `angle_degrees` as a pure argument — see
 /// [`spinning_effect_angle_degrees`] for the (simplified) function this
 /// codebase derives it with.
 ///
-/// Returns the identity at `intensity <= 0.0`, matching vanilla's own `if
-/// (spinningEffectIntensity > 0.0F)` guard, so a caller can multiply this in
+/// Returns the identity at `intensity <= 0.0`, matching vanilla's own
+/// positive-intensity guard, so a caller can multiply this in
 /// unconditionally rather than branching — the same "always safe to call"
 /// shape [`Camera::view_projection_warped`] relies on.
 #[must_use]
@@ -419,9 +418,9 @@ pub fn nausea_portal_warp(intensity: f32, angle_degrees: f32) -> Mat4 {
         * Mat4::from_axis_angle(axis, -angle)
 }
 
-/// The spyglass zoom's field-of-view multiplier (issue #154's *other* half —
-/// see the module doc pointer in `crate::screen_effects` for the vignette/
-/// letterbox half). `AbstractClientPlayer.getFieldOfViewModifier`
+/// The spyglass zoom's field-of-view multiplier — see the module doc pointer
+/// in `crate::screen_effects` for the vignette/letterbox half. Vanilla's own
+/// field-of-view-modifier accessor
 /// (vanilla's decompiled abstract-client-player source, 26.2):
 ///
 /// ```text
@@ -437,13 +436,14 @@ pub fn nausea_portal_warp(intensity: f32, angle_degrees: f32) -> Mat4 {
 /// change) when not scoping, vanilla's `0.1` (a 10x zoom-in: `getFov`
 /// multiplies `options.fov` by this) when scoping.
 ///
-/// Vanilla smooths this behind `Camera.fovModifier`, a `0.5`-per-frame lerp
-/// toward the target (`Camera`'s own decompiled source) clamped to `0.1..=1.5`
+/// Vanilla smooths this behind its own per-frame FOV-modifier field, a
+/// `0.5`-per-frame lerp toward the target (`Camera`'s own decompiled source)
+/// clamped to `0.1..=1.5`
 /// (`Camera`'s own decompiled source) — this function returns the unsmoothed target only;
 /// **not wired to a live `Camera.fov_y_degrees` anywhere in this codebase
 /// yet**, since that value is assigned in `lodestone-shell/src/camera_rig.rs`
-/// (`FOV_Y_DEGREES`/per-frame construction), a file outside this crate and
-/// outside this change's ownership — see `docs/screen-overlays.md`'s #154
+/// (`FOV_Y_DEGREES`/per-frame construction), a file outside this crate's
+/// ownership — see `docs/screen-overlays.md`'s spyglass-FOV
 /// section for the exact composition point.
 #[must_use]
 pub fn spyglass_fov_modifier(scoping: bool) -> f32 {
@@ -453,9 +453,9 @@ pub fn spyglass_fov_modifier(scoping: bool) -> f32 {
 /// The warp's accumulated spin angle, in degrees, as a **pure function of the
 /// current game tick** rather than an integral this crate stores anywhere —
 /// see [`nausea_portal_warp`]'s doc for why. Vanilla's own per-tick speed
-/// (`GameRenderer.tick`, lines 261-270) is
-/// `(portalIntensity * 20 + nauseaIntensity * 7) / (portalIntensity +
-/// nauseaIntensity)` while either is active, `0` otherwise; this treats that
+/// calculation is
+/// `(portal_intensity * 20 + nausea_intensity * 7) / (portal_intensity +
+/// nausea_intensity)` while either is active, `0` otherwise; this treats that
 /// blended speed as constant and multiplies it straight through by `tick`,
 /// which is **not** the same number vanilla's own accumulator would hold
 /// (vanilla only integrates while active and freezes, rather than resets,
@@ -463,7 +463,7 @@ pub fn spyglass_fov_modifier(scoping: bool) -> f32 {
 /// steady-state rotation *rate* the instant either effect is active, just at
 /// a different absolute phase, which is imperceptible for a continuously
 /// looping spin with no fixed start reference). Returns `0.0` when neither
-/// intensity is positive, matching vanilla's own `spinningEffectSpeed = 0`
+/// intensity is positive, matching vanilla's own zero-speed
 /// branch (though the caller does not need this: [`nausea_portal_warp`]
 /// already no-ops below `intensity <= 0.0` regardless of the angle passed).
 #[must_use]
@@ -847,7 +847,7 @@ mod tests {
         assert_eq!(Camera::far_for_render_distance(2, 192), 3072.0);
     }
 
-    // -- nausea/portal projection warp (#144/#149) -----------------------
+    // -- nausea/portal projection warp -----------------------
 
     #[test]
     fn nausea_portal_warp_is_identity_at_zero_or_negative_intensity() {
@@ -1019,7 +1019,7 @@ mod tests {
         assert!((0.0..360.0).contains(&angle), "angle {angle} must be wrapped into [0, 360)");
     }
 
-    // -- spyglass FOV modifier (#154) --------------------------------------
+    // -- spyglass FOV modifier --------------------------------------
 
     #[test]
     fn spyglass_fov_modifier_is_a_tenth_while_scoping() {

@@ -53,7 +53,7 @@
 //!    what vanilla's own front/back handling resolves to in its equivalent
 //!    shader stage.
 //!
-//!    This was **one** light and an `abs()` until issue #383. That formula lights
+//!    A single light with an `abs()` does not work: that formula lights
 //!    a face pointing away from the light as brightly as one pointing into it
 //!    (up and down both `0.9085`, vanilla `1.0` and `0.4`) and bottoms out at
 //!    `0.4` on every normal *perpendicular* to its single direction. Box faces
@@ -295,7 +295,7 @@ impl EntityInstanceRaw {
 }
 
 // ---------------------------------------------------------------------------
-// Mob fire (issue #434 — player report: "mobs dont show flames yet")
+// Mob fire
 // ---------------------------------------------------------------------------
 
 /// The mob-fire billboard's geometry, modelled from vanilla's own fire-overlay
@@ -1235,7 +1235,7 @@ pub const SHADOW_DEPTH_BIAS: wgpu::DepthBiasState = CAMERA_DEPTH_BIAS;
 
 /// One vertex of the entity ground-shadow decal — world-space position, the
 /// shadow-sprite UV, and this piece's own alpha (vanilla's per-piece
-/// `ARGB.white(alpha)` colour, carried as a bare scalar since the colour
+/// white-with-alpha colour packing, carried as a bare scalar since the colour
 /// itself is always white — see [`EntityPipeline::shadow_pipeline`]'s doc for
 /// why this is not built through the shared static-mesh-plus-instance path
 /// every sibling pipeline uses).
@@ -1251,10 +1251,9 @@ pub struct ShadowVertex {
     /// `-x / 2.0 / radius + 0.5` (and the `z` sibling), transcribed on the
     /// Rust side in `lodestone_shell`'s `prepare_shadows`.
     pub uv: [f32; 2],
-    /// This piece's own opacity, already folding in vanilla's
-    /// `powerAtDepth * 0.5 * Lightmap.getBrightness(...)` (vanilla's own
-    /// lightmap brightness function) and the
-    /// `Mth.clamp(.., 0.0, 1.0)` around it.
+    /// This piece's own opacity, already folding in vanilla's own
+    /// depth-based power term times `0.5` times its own lightmap-brightness
+    /// function's output, clamped (vanilla's own clamp helper) to `0.0..=1.0`.
     pub alpha: f32,
 }
 
@@ -1312,8 +1311,8 @@ pub fn upload_shadow_vertices(device: &wgpu::Device, vertices: &[ShadowVertex]) 
 /// mask-layer pass and the mob-fire pass — so a change to the vertex layout or
 /// the colour target cannot land on one and miss the others.
 ///
-/// `blend`/`depth_write` were added for [`EntityPipeline::banner_layer_pipeline`]
-/// (issue #174 step B) without touching the mob/armour pipelines' own
+/// `blend`/`depth_write` exist for [`EntityPipeline::banner_layer_pipeline`]
+/// without touching the mob/armour pipelines' own
 /// behaviour: both existing callers pass `blend: None, depth_write: true`,
 /// exactly what this function hardcoded before — zero behaviour change for
 /// either.
@@ -1326,7 +1325,7 @@ pub fn upload_shadow_vertices(device: &wgpu::Device, vertices: &[ShadowVertex]) 
 /// layer needs the fragment shader itself to change, not just pipeline state.
 ///
 /// `vertex_entry`/`instance_layout` were added for
-/// [`EntityPipeline::flame_pipeline`] (mob fire, issue #434): the flame quads
+/// [`EntityPipeline::flame_pipeline`] (mob fire): the flame quads
 /// carry no light/tint/overlay at all (see [`FlameInstanceRaw`]'s doc for why
 /// that instance format is smaller than [`EntityInstanceRaw`]'s), so the flame
 /// pass needs its own vertex entry point (`"vs_main_flame"`) reading its own,
@@ -1340,8 +1339,8 @@ pub fn upload_shadow_vertices(device: &wgpu::Device, vertices: &[ShadowVertex]) 
 /// Every existing caller passes `wgpu::ColorWrites::ALL`, the literal value
 /// this function hardcoded before, so this is zero behaviour change for
 /// every other pipeline. `water_mask_pipeline` passes
-/// `wgpu::ColorWrites::empty()` — the whole trick behind vanilla's
-/// `RenderPipelines.WATER_MASK` (`ColorTargetState(…, writeMask = 0)`, read
+/// `wgpu::ColorWrites::empty()` — the whole trick behind vanilla's own
+/// water-mask render pipeline (a zero colour write mask, read
 /// directly from `.cache/mc/26.2/client-src`): the same depth-tested,
 /// depth-writing geometry as every other entity, with the fragment shader's
 /// colour output silently discarded rather than composited.
@@ -1476,17 +1475,13 @@ impl EntityPipeline {
             &camera_layout,
             &texture_layout,
             "lodestone-entity",
-            // Vanilla's own value, translated (issue #21). Every 26.2 entity
-            // render type is built from `ENTITY_SNIPPET`, which pins
-            // `DepthStencilState.DEFAULT` (vanilla's render-pipeline registration
-            // table), and that
-            // is `(GREATER_THAN_OR_EQUAL, writeDepth = true)`
+            // Vanilla's own value, translated. Every 26.2 entity
+            // render type shares one depth-stencil declaration, which pins
+            // `(GREATER_THAN_OR_EQUAL, writeDepth = true)`
             // (vanilla's depth-stencil-state declaration) — `DEPTH_COMPARE_NEARER_OR_EQUAL` here,
             // transcribed unflipped because this engine is reversed-Z too.
-            // `ENTITY_SOLID` (`:232`),
-            // `ENTITY_CUTOUT` (`:245`), `ENTITY_CUTOUT_CULL` (`:238`) and
-            // `ENTITY_TRANSLUCENT` (`:274`) all inherit it; none overrides
-            // `withDepthStencilState`.
+            // Every entity render variant (solid, cutout, cutout-cull,
+            // translucent) inherits it; none overrides it.
             //
             // This was the strict comparison until
             // `entity_depth_coincident_pixels.rs` existed to prove the change
@@ -1522,18 +1517,14 @@ impl EntityPipeline {
     /// # Why the tie-admitting comparison, and why it is no longer only here
     ///
     /// Vanilla's own entity depth state is
-    /// `DepthStencilState.DEFAULT = (GREATER_THAN_OR_EQUAL, writeDepth = true)`
+    /// `(GREATER_THAN_OR_EQUAL, writeDepth = true)`
     /// (vanilla's depth-stencil-state declaration), which is
     /// [`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
     /// here — this engine is reversed-Z too, so nothing flips.
     ///
-    /// This doc used to say the base pipeline "uses `Less`, so it is the one that
-    /// departs from vanilla; that is left alone here rather than 'fixed', because
-    /// changing it would alter how *every* mob's coplanar geometry resolves and
-    /// this change has no pixel gate to prove that safe." Both halves were true
-    /// when written. Issue #21 built the missing gate
-    /// (`entity_depth_coincident_pixels.rs`) and then made the change, so
-    /// [`Self::new`] admits the tie too and this pipeline is depth-identical
+    /// [`Self::new`] admits the tie too (proven safe by
+    /// `entity_depth_coincident_pixels.rs`, which measures coplanar geometry
+    /// resolution directly), so this pipeline is depth-identical
     /// to it. It survives as a separate pipeline for its label and its blend
     /// state, not for its depth compare — if the two ever need to diverge again,
     /// this is where it happens.
@@ -1568,14 +1559,14 @@ impl EntityPipeline {
         )
     }
 
-    /// The player body's `PlayerModel` render type.
+    /// The player body's own vanilla render type (its player-model class).
     ///
-    /// Unlike ordinary living models, 26.2 constructs `PlayerModel` with
-    /// `RenderTypes::entityTranslucent`.  This preserves partially-alpha skin
+    /// Unlike ordinary living models, 26.2 constructs the player's own model
+    /// class with its own translucent entity render type.  This preserves partially-alpha skin
     /// pixels in the outer layer (and lets their alpha blend over the base skin)
     /// while retaining the ordinary entity depth-write state.  It is deliberately
     /// separate from [`Self::armour_pipeline`]: armour selects
-    /// `ARMOR_CUTOUT_NO_CULL`, so changing its cutout contract along with a skin
+    /// its own cutout-no-cull armour render type, so changing its cutout contract along with a skin
     /// would incorrectly make texture holes opaque.
     #[must_use]
     pub fn player_skin_pipeline(
@@ -1602,10 +1593,9 @@ impl EntityPipeline {
     }
 
     /// A third render pipeline over this pipeline's own bind-group layouts,
-    /// for banner mask layers (issue #174 step B).
+    /// for banner mask layers.
     ///
-    /// Vanilla's `RenderPipelines.BANNER_PATTERN` (its render-pipeline
-    /// registration table)
+    /// Vanilla's own banner-pattern render pipeline
     /// draws the flag opaque, then each pattern mask layer **translucent, at
     /// equal depth, with depth write off and no alpha cutout** — layers stack
     /// visually rather than z-fighting or punching holes in each other.
@@ -1617,7 +1607,7 @@ impl EntityPipeline {
     /// | `blend` | `None` (cutout) | `None` (cutout) | `ALPHA_BLENDING` |
     /// | `depth_write` | `true` | `true` | `false` |
     ///
-    /// The first column read `Less` until issue #21; all three now agree on the
+    /// All three pipelines agree on the
     /// depth compare, and the blend/depth-write pair is what makes this pipeline
     /// distinct.
     ///
@@ -1638,7 +1628,7 @@ impl EntityPipeline {
     /// `fs_main` is unconditional and vanilla's banner draw has none, so a
     /// mask layer's antialiased/partial-alpha edge texels would have been
     /// lost here rather than blended — this is the shader-side half of
-    /// matching `RenderPipelines.BANNER_PATTERN`; the pipeline-state half
+    /// matching vanilla's own banner-pattern render pipeline; the pipeline-state half
     /// (blend/depth-write, below) is step B. See `entity.wgsl`'s own comment
     /// on `fs_main_no_cutout` and `docs/banner-shield-patterns.md`.
     #[must_use]
@@ -1664,8 +1654,7 @@ impl EntityPipeline {
     }
 
     /// A fourth render pipeline over this pipeline's own bind-group layouts,
-    /// for the mob-fire billboard (issue #434 — player report: "mobs dont show
-    /// flames yet"). Reuses [`Self::camera_layout`]/[`Self::texture_layout`]
+    /// for the mob-fire billboard. Reuses [`Self::camera_layout`]/[`Self::texture_layout`]
     /// exactly like [`armour_pipeline`](Self::armour_pipeline)/
     /// [`banner_layer_pipeline`](Self::banner_layer_pipeline): the flame pass
     /// needs its own *texture* (the combined `fire_0`/`fire_1` strip built by
@@ -1675,18 +1664,18 @@ impl EntityPipeline {
     /// texture), never a fifth, per `CLAUDE.md`'s 4-bind-group-floor note.
     ///
     /// Depth state matches [`Self::new`]/[`armour_pipeline`](Self::armour_pipeline):
-    /// `LessEqual` (vanilla's `DepthStencilState.DEFAULT`,
+    /// `LessEqual` (vanilla's own default depth-stencil state,
     /// `GREATER_THAN_OR_EQUAL` under this engine's `[0,1]` depth), depth write
     /// on. Vanilla's own flame render type
-    /// (`RenderTypes.entityCutoutCull`, 26.2's decompiled render-type
+    /// (its cutout-cull entity render type, from 26.2's decompiled render-type
     /// registration table) inherits
-    /// `ENTITY_SNIPPET`'s `DepthStencilState.DEFAULT` like every other entity
+    /// the same default depth-stencil state like every other entity
     /// render type — there is no separate depth state to translate here, only
     /// the fixed cutout/blend spelled out below.
     ///
     /// `blend: None` (cutout, not translucent) and a dedicated
     /// `"fs_main_flame"` entry point are the load-bearing divergence from
-    /// [`Self::new`]: vanilla's `ENTITY_CUTOUT_CULL` pipeline
+    /// [`Self::new`]: vanilla's own cutout-cull entity render pipeline
     /// (its render-pipeline registration table) is `ALPHA_CUTOUT` at `0.1`, not the
     /// `ALPHA_BLENDING` translucency this doc's own brief initially assumed —
     /// see `fs_main_flame`'s doc in `entity.wgsl` for the corrected threshold
@@ -1728,11 +1717,11 @@ impl EntityPipeline {
     ///
     /// # State, and where each field comes from
     ///
-    /// Vanilla's render type is `RenderTypes.entityTranslucentCullItemTarget`, i.e.
-    /// `RenderPipelines.ENTITY_TRANSLUCENT`:
-    /// `ColorTargetState(BlendFunction.TRANSLUCENT)`, `ALPHA_CUTOUT 0.1F`,
-    /// `PER_FACE_LIGHTING`, `withCull(false)`, and `ENTITY_SNIPPET`'s inherited
-    /// `DepthStencilState.DEFAULT`. Against the siblings:
+    /// Vanilla's render type is its own translucent-cull item-target render
+    /// type, i.e. its own translucent entity render pipeline:
+    /// a translucent-blend colour target, `ALPHA_CUTOUT 0.1F`,
+    /// per-face lighting, no culling, and the inherited
+    /// default depth-stencil state. Against the siblings:
     ///
     /// | | mob ([`Self::new`]) | banner layer ([`Self::banner_layer_pipeline`]) | orb (here) |
     /// |---|---|---|---|
@@ -1745,8 +1734,9 @@ impl EntityPipeline {
     /// geometry stacked over a flag that already wrote depth, so writing again would
     /// z-fight; an orb is a free-standing entity, and with depth write off a pile of
     /// orbs on the ground draws in submission order rather than depth order and the
-    /// far ones paint over the near ones. `ENTITY_TRANSLUCENT` overrides the blend
-    /// function and nothing about depth, so `DepthStencilState.DEFAULT`'s
+    /// far ones paint over the near ones. Vanilla's own translucent entity render
+    /// type overrides the blend
+    /// function and nothing about depth, so the default depth-stencil state's
     /// `writeDepth = true` carries through — the same `LessEqual` translation of
     /// `GREATER_THAN_OR_EQUAL` this file applies everywhere else, per `CLAUDE.md`'s
     /// `[0,1]`-depth note.
@@ -1782,9 +1772,9 @@ impl EntityPipeline {
     /// boat water-clip mask (owner report: "placing down a boat still shows
     /// water through the bottom").
     ///
-    /// Vanilla's `RenderPipelines.WATER_MASK`
+    /// Vanilla's own water-mask render pipeline
     /// (26.2's decompiled render-pipeline registration
-    /// table): `DepthStencilState.DEFAULT` (this engine's
+    /// table): the default depth-stencil state (this engine's
     /// `LessEqual`, same translation every sibling here applies) with
     /// `ColorTargetState(…, writeMask = 0)` — a normal depth-tested,
     /// depth-writing draw whose fragment output never reaches the
@@ -1827,8 +1817,8 @@ impl EntityPipeline {
     }
 
     /// A fifth render pipeline over this pipeline's own bind-group layouts,
-    /// for a `decal: true` armour-trim pattern (issue #17's trims — see
-    /// `docs/armour-rendering.md`'s "Trims" section for the full design).
+    /// for a `decal: true` armour-trim pattern — see
+    /// `docs/armour-rendering.md`'s "Trims" section for the full design.
     ///
     /// Reuses [`Self::camera_layout`]/[`Self::texture_layout`] exactly like
     /// [`armour_pipeline`](Self::armour_pipeline)/
@@ -1842,17 +1832,17 @@ impl EntityPipeline {
     ///
     /// # Why a *third* depth mode, and why it is almost never selected
     ///
-    /// `TrimPattern.decal()` (vanilla's armour-trim class routing through its
+    /// Vanilla's own trim-pattern decal accessor (routing through its
     /// armour-trims-sheet function)
     /// forks the render type vanilla submits a trim through:
     ///
     /// | `decal` | vanilla pipeline | this engine |
     /// |---|---|---|
-    /// | `false` | `ARMOR_CUTOUT_NO_CULL` — `ENTITY_SNIPPET`'s own default | [`armour_pipeline`](Self::armour_pipeline) (identical: no override) |
-    /// | `true` | `ARMOR_DECAL_CUTOUT_NO_CULL` — `CompareOp.EQUAL, writeDepth=false` | **here** |
+    /// | `false` | cutout, no culling — the default armour render type | [`armour_pipeline`](Self::armour_pipeline) (identical: no override) |
+    /// | `true` | decal cutout, no culling — equal-depth compare, no depth write | **here** |
     ///
     /// (vanilla's render-pipeline registration table, read directly from
-    /// its 26.2 decompiled source). `CompareOp.EQUAL` has no "direction" to
+    /// its 26.2 decompiled source). An equal-depth compare has no "direction" to
     /// flip under any depth convention: equality is its own mirror image, so
     /// `CompareFunction::Equal` is not a translation, it is the same
     /// predicate. `depth_write_enabled: false`
@@ -1921,11 +1911,11 @@ impl EntityPipeline {
     /// shared texture layout), so this pass still spends exactly two bind
     /// groups.
     ///
-    /// # State, from vanilla's own `RenderPipelines.ENTITY_SHADOW`
+    /// # State, from vanilla's own entity-shadow render pipeline
     ///
     /// 26.2's decompiled render-pipeline registration table:
-    /// `ColorTargetState(BlendFunction.TRANSLUCENT)`,
-    /// `DepthStencilState(GREATER_THAN_OR_EQUAL, writeDepth = false)`. This
+    /// a translucent-blend colour target,
+    /// depth state `(GREATER_THAN_OR_EQUAL, writeDepth = false)`. This
     /// engine is reversed-Z like vanilla, so `GREATER_THAN_OR_EQUAL` is
     /// [`DEPTH_COMPARE_NEARER_OR_EQUAL`](crate::DEPTH_COMPARE_NEARER_OR_EQUAL)
     /// with no flip — the same transcription every other pipeline in this file
@@ -2182,7 +2172,7 @@ impl EntityCameraUniform {
     /// So sampling world light correctly — which `52f109f` did — cannot darken a
     /// mob at night, because the sampled byte is the same byte. Vanilla darkens
     /// purely client-side, in its light-texture update function, by scaling the
-    /// sky contribution by `Level.getSkyDarken(partialTick) * 0.95 + 0.05`.
+    /// sky contribution by its own sky-darken curve, `sky_darken(partial_tick) * 0.95 + 0.05`.
     /// `crate::entity::sky_darken_for_time_of_day` is that curve.
     ///
     /// # Why a spare fog lane and not a new field
@@ -2238,8 +2228,8 @@ pub fn entity_camera_buffer(
 const ENTITY_WGSL: &str = include_str!("shaders/entity.wgsl");
 const SHADOW_WGSL: &str = include_str!("shaders/entity_shadow.wgsl");
 
-/// The part of 26.2's `RenderPipelines.ENTITY_TRANSLUCENT` contract selected by
-/// `PlayerModel`.  It intentionally keeps the normal living-entity depth state:
+/// The part of 26.2's own translucent entity render pipeline contract selected by
+/// vanilla's own player-model class.  It intentionally keeps the normal living-entity depth state:
 /// translucency changes colour composition and the cutout threshold, not which
 /// surface owns depth.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -2252,10 +2242,10 @@ struct PlayerSkinPipelineContract {
 
 const fn player_skin_pipeline_contract() -> PlayerSkinPipelineContract {
     PlayerSkinPipelineContract {
-        // `RenderPipelines.ENTITY_TRANSLUCENT` defines `ALPHA_CUTOUT = 0.1F`.
+        // Vanilla's own translucent entity render pipeline defines `ALPHA_CUTOUT = 0.1F`.
         alpha_cutout: 0.1,
         blends: true,
-        // `ENTITY_TRANSLUCENT` inherits ENTITY_SNIPPET's DEFAULT depth state.
+        // It inherits the default entity depth-stencil state.
         depth_writes: true,
         depth_compare: DEPTH_COMPARE_NEARER_OR_EQUAL,
     }
@@ -2265,7 +2255,8 @@ const fn player_skin_pipeline_contract() -> PlayerSkinPipelineContract {
 mod tests {
     use super::*;
 
-    /// `PlayerModel` opts into `RenderTypes::entityTranslucent`, rather than
+    /// Vanilla's own player-model class opts into its own translucent entity
+    /// render type, rather than
     /// inheriting a living mob's opaque/cutout model type.  The distinction is
     /// load-bearing for partially-alpha second-skin texels: the 26.2 pipeline
     /// blends them and only cuts out alpha below 0.1.
@@ -2634,7 +2625,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Mob fire geometry (issue #434)
+    // Mob fire geometry
     // -----------------------------------------------------------------------
 
     /// A zombie's real `(width, height)` from
@@ -2909,7 +2900,7 @@ mod tests {
 
     /// [`FlameQuad::fire_1`] must alternate starting from `fire_0`
     /// (vanilla's flame-feature renderer's `ss % 2 == 0 ? fire1 : fire2`, and
-    /// `fire1` names `ModelBakery.FIRE_0` — see that field's own doc for why
+    /// `fire1` names vanilla's own first flame-sprite constant — see that field's own doc for why
     /// the naming looks swapped and is not).
     #[test]
     fn flame_quads_alternate_textures_starting_from_fire_0() {

@@ -1,19 +1,14 @@
-//! Banner and shield pattern-layer compositing (issue #174).
+//! Banner and shield pattern-layer compositing.
 //!
-//! # What this module is, and is not
+//! # What this module is
 //!
-//! This is the **shared compositing/colour math** the issue asks for —
-//! "land the shared compositing function here and have #23's banner work
-//! consume it rather than duplicating layer math" — and nothing more. It
-//! does **not** draw a banner or a shield: there is no banner/shield mesh
-//! anywhere in this codebase yet (grep confirms zero hits for a
-//! flag- or banner-mesh model equivalent), and the item's own pattern
-//! data (`minecraft:banner_patterns`, `minecraft:base_color`) does not
-//! reach a typed value yet either — see "What is still missing" below. This
-//! module is the piece that is genuinely reachable today: given a base
-//! colour and an ordered list of pattern layers, produce the ordered,
-//! coloured draw list any consumer (a block-entity mesh, an inventory icon,
-//! a held-item pose) needs, so that logic is written exactly once.
+//! This is the **shared compositing/colour math** consumed by both the
+//! banner block-entity mesh and item-icon/held-item rendering, so that
+//! logic is written exactly once rather than duplicated per consumer. It
+//! does **not** draw a banner or a shield itself: given a base colour and
+//! an ordered list of pattern layers, it produces the ordered, coloured
+//! draw list a consumer (a block-entity mesh, an inventory icon, a
+//! held-item pose) turns into draw calls over its own mesh.
 //!
 //! # Vanilla's mechanism (not a texture composite — a draw list)
 //!
@@ -57,30 +52,17 @@
 //! game, the same failure mode already documented for every other tint
 //! here.
 //!
-//! # What is still missing (why this lands unwired)
+//! # Consumers
 //!
-//! Two prerequisites, neither of which this module can supply, and neither
-//! of which is in scope for this crate's ownership:
-//!
-//! 1. **No typed decode of the pattern-layer component.** Item components
-//!    this codebase does not have a dedicated [`lodestone_game::item::ComponentValue`]
-//!    variant for land as [`lodestone_game::item::ComponentValue::Opaque`] —
-//!    structurally present (item components are decoded generically) but not
-//!    interpretable as a colour/pattern list. `minecraft:banner_patterns` and
-//!    `minecraft:base_color` are two such components. `lodestone-game` is
-//!    outside this task's file ownership (the cost-screens agent owns it),
-//!    so adding a typed variant is out of scope here — flagged, not built
-//!    speculatively against data this module cannot yet read.
-//! 2. **No banner/shield mesh.** Vanilla's own flag-mesh model
-//!    has per-vertex cloth-wave animation geometry this
-//!    codebase has never ported; the block-entity mesh work is explicitly
-//!    issue #23's scope, not this one's (this issue's own text: "the
-//!    in-world banner block entity rendering itself is #23's scope").
-//!
-//! Once both land, a consumer calls [`banner_pattern_layers`]/
-//! [`shield_pattern_layers`] with the decoded base colour and pattern list,
-//! gets back the ordered `(sprite, gamma_rgb)` draw list, and issues one
-//! draw per entry over its own mesh — no layer math duplicated.
+//! `minecraft:banner_patterns` and `minecraft:base_color` decode as typed
+//! [`lodestone_game::item::ComponentValue`] variants, so a caller resolves a
+//! stack's stored pattern list and dye colour directly rather than through
+//! the generic opaque-component fallback. The banner block-entity mesh and
+//! item-icon/held-item rendering both call [`banner_pattern_layers`] (or
+//! [`shield_pattern_layers`] for a shield's decorative pattern) with the
+//! decoded base colour and pattern list, get back the ordered
+//! `(sprite, gamma_rgb)` draw list, and issue one draw per entry over their
+//! own mesh — no layer math duplicated between the two.
 
 use lodestone_assets::ResourceLocation;
 

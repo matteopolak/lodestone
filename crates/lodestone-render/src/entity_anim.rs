@@ -174,7 +174,7 @@ pub const MAX_SWELL: f32 = 30.0 / (30.0 - 2.0);
 /// [`Skeleton::rest_pose`], so a creeper's culling box describes it at its
 /// resting size while a swelling one is drawn up to 41% wider. That is the
 /// "correct until it clips at the screen edge" failure `from_named_model`'s own
-/// doc comment warns about, in a file this change was not permitted to touch;
+/// doc comment warns about, in a file outside this module's ownership;
 /// widening the creeper's local bounds by this factor is the fix.
 ///
 /// [`EntityMesh::local_min`]: crate::entity::EntityMesh::local_min
@@ -670,10 +670,11 @@ impl AnimInput {
 ///
 /// # What is modelled, and what a variant means
 ///
-/// Only the two-handed *ranged* poses, which are the ones issue #57 reported as
-/// missing. `Empty` is "leave the arms wherever the walk cycle and the attack
+/// Only the two-handed *ranged* poses are modelled.
+/// `Empty` is "leave the arms wherever the walk cycle and the attack
 /// swing put them" and is what every other item still gets — including a held
-/// sword, which vanilla poses with `ITEM` (`xRot * 0.5 - PI/10`). That is a real
+/// sword, which vanilla poses with its own one-handed item pose (a pitch term
+/// scaled by `0.5` and offset by `-PI/10`). That is a real
 /// divergence and it is *deliberate*: `ITEM` needs to know only "is something in
 /// the hand", which the equipment set already says, so it is a separate, cheap
 /// follow-up rather than something to smuggle in behind a using-item bit that has
@@ -1161,16 +1162,16 @@ impl Skeleton {
             }
 
             // Vanilla's humanoid pose setup, minus the swim/ride branches whose state
-            // we do not decode yet. The item-pose branch landed with #57
+            // we do not decode yet. The item-pose branch
             // (`pose_arms_for_item`) and the crouch branch is below.
             AnimFamily::Humanoid => {
                 // Vanilla's humanoid pose setup swim head-pitch clause — only the
-                // `swimAmount > 0.0F` half; `isFallFlying` is state this module's
-                // own doc already lists as absent. Transcribed exactly:
-                // `head.xRot = Mth.rotLerpRad(swimAmount, head.xRot, -PI/4)`.
-                // `poses[h].x_rot` already holds `headPitch * DEG` from the
+                // swim-amount-positive half; the fall-flying state is absent, as
+                // this module's own doc already lists. Transcribed exactly:
+                // `head_x_rot = rot_lerp_rad(swim_amount, head_x_rot, -PI/4)`.
+                // `poses[h].x_rot` already holds `head_pitch * DEG` from the
                 // family-independent head block above this match, matching
-                // vanilla's own `head.xRot = state.xRot * DEG` immediately
+                // vanilla's own `head_x_rot = state_x_rot * DEG` immediately
                 // before this branch.
                 if input.swim_amount > 0.0
                     && let Some(h) = s.head
@@ -1321,12 +1322,12 @@ impl Skeleton {
                 }
 
                 // Vanilla's humanoid pose setup swim leg-kick clause — outside the
-                // `isUsingItem` gate above (vanilla's legs kick regardless of the
+                // using-item gate above (vanilla's legs kick regardless of the
                 // arms) and not gated by [`Self::arms`] either (a swimming
                 // zombie's raised-arm override never touches its legs, so the
                 // kick survives for every [`AnimFamily::Humanoid`] rig).
-                // Transcribed exactly: `Mth.lerp(swimAmount, legXRot, 0.3 *
-                // cos(animationPos * 0.33333334F [+ PI for the left leg]))`.
+                // Transcribed exactly: `lerp(swim_amount, leg_x_rot, 0.3 *
+                // cos(animation_pos * 0.33333334F [+ PI for the left leg]))`.
                 if input.swim_amount > 0.0 {
                     if let Some(i) = s.left_leg {
                         poses[i].x_rot = lerp(
@@ -1552,11 +1553,11 @@ impl Skeleton {
     }
 
     /// Vanilla's per-arm item-pose functions for the ranged [`ArmPose`]s:
-    /// both arms come up to hold the weapon, tracking the head (issue #57).
+    /// both arms come up to hold the weapon, tracking the head.
     ///
     /// # These assign, they do not accumulate
     ///
-    /// Vanilla writes `this.rightArm.xRot = …`, replacing whatever the walk cycle
+    /// Vanilla writes `right_arm_x_rot = …`, replacing whatever the walk cycle
     /// put there — an item pose is a *position*, not an offset. So this uses
     /// direct field assignment and **not** the `set_*_rot` helpers in this module,
     /// which despite their names do `+=` (see their doc comment). Using them here
@@ -1717,20 +1718,22 @@ impl Skeleton {
     }
 }
 
-/// `Mth.lerp(alpha, from, to)` — note vanilla's argument order puts the *alpha*
+/// Vanilla's own lerp helper: `lerp(alpha, from, to)` — note vanilla's
+/// argument order puts the *alpha*
 /// first, which is the opposite of most Rust `lerp` conventions and is the reason
 /// this exists rather than a call to something in `glam`: transcribing
-/// `Mth.lerp(lerpAlpha, 0.4F, 0.85F)` as `0.4.lerp(0.85, alpha)` is easy, and
+/// `lerp(alpha, 0.4F, 0.85F)` as `0.4.lerp(0.85, alpha)` is easy, and
 /// getting it backwards silently swaps a crossbow's start and end pose.
 fn lerp(alpha: f32, from: f32, to: f32) -> f32 {
     from + alpha * (to - from)
 }
 
-/// `Mth.rotLerpRad(alpha, from, to)`: [`lerp`] with the `to - from` difference
+/// Vanilla's own radian-rotation lerp helper: `rot_lerp_rad(alpha, from, to)`:
+/// [`lerp`] with the `to - from` difference
 /// first wrapped into `(-PI, PI]`, so a lerp across the wrap point (e.g.
 /// `from` just under `PI`, `to` just over `-PI`) takes the short way round
 /// instead of spinning the long way through zero. Used by the swim branch's
-/// yRot/zRot arm blends, which cross that seam as the stroke cycles.
+/// y-rotation/z-rotation arm blends, which cross that seam as the stroke cycles.
 fn rot_lerp_rad(alpha: f32, from: f32, to: f32) -> f32 {
     let mut diff = to - from;
     while diff < -std::f32::consts::PI {
@@ -2194,7 +2197,7 @@ mod tests {
     }
 
     /// The range is always `0.0..=1.0`, even at `MAX_SWELL` (~1.071, past 1.0) —
-    /// `Mth.clamp(step, 0.5, 1.0)` caps the top explicitly, unlike
+    /// vanilla's own clamp helper caps the top explicitly at `clamp(step, 0.5, 1.0)`, unlike
     /// `creeper_swell_scale`'s own `g` which clamps to `0.0..=1.0` *before*
     /// raising to the fourth power.
     #[test]
@@ -2585,8 +2588,8 @@ mod tests {
     }
 
     /// Vanilla's humanoid pose setup swim head-pitch clause:
-    /// `head.xRot = Mth.rotLerpRad(swimAmount, head.xRot, -PI/4)`. At
-    /// `AnimInput::REST`'s `head_pitch_deg: 0.0`, `head.xRot` going in is
+    /// `head_x_rot = rot_lerp_rad(swim_amount, head_x_rot, -PI/4)`. At
+    /// `AnimInput::REST`'s `head_pitch_deg: 0.0`, `head_x_rot` going in is
     /// `0.0`, so a full `swim_amount` must land exactly on `-PI/4` — an exact
     /// prediction from the formula, not merely "the head moved".
     ///
@@ -3007,7 +3010,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Arm poses for a used item (issue #57)
+    // Arm poses for a used item
     // -----------------------------------------------------------------------
 
     /// The uncomposed arm rotations a skeleton rig ends up with, so the

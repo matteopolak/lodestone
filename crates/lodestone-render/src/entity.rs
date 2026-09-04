@@ -169,9 +169,9 @@ pub fn sky_darken_for_time_of_day(time_of_day: i64) -> f32 {
 }
 
 /// Look up the ported entity model for a built-in [`EntityType`] — the
-/// registry identity the wire actually carries (issue #523's third pass:
+/// registry identity the wire actually carries.
 /// `EntityType as u8` **is** the `add_entity` registry id, so this call takes
-/// no string at any point between the decoded id and the corpus lookup).
+/// no string at any point between the decoded id and the corpus lookup.
 ///
 /// Returns the matching [`EntityModelEntry`] from the version-free
 /// [`entity_models`] corpus, or `None` if we have no model for that type yet —
@@ -207,9 +207,9 @@ fn corpus_names() -> &'static [&'static str] {
 
 /// [`corpus_names()`] as a set, computed once behind a `OnceLock` from that
 /// same slice (so the two can never drift), for an O(1) "is this a corpus
-/// entry" test — the up-to-90 linear `&str` compares
-/// [`canonical_model_name`] used to run per entity per frame (issue #523),
-/// x4 for the base/armour/flame/wool passes in `gpu/entity_passes.rs`.
+/// entry" test — [`canonical_model_name`] resolves in O(1) instead of the
+/// up-to-90 linear `&str` compares a naive per-entity, per-frame lookup would
+/// cost, x4 for the base/armour/flame/wool passes in `gpu/entity_passes.rs`.
 fn corpus_name_set() -> &'static std::collections::HashSet<&'static str> {
     static SET: std::sync::OnceLock<std::collections::HashSet<&'static str>> =
         std::sync::OnceLock::new();
@@ -304,7 +304,7 @@ fn canonical_model_name_for_type(entity_type: EntityType) -> Option<&'static str
     //
     // O(1) via `corpus_name_set()` rather than a linear scan over
     // `corpus_names()` — same corpus, same membership, just not re-walked for
-    // every one of up to 90 entries on every call (issue #523).
+    // every one of up to 90 entries on every call.
     let path = entity_type.path();
     corpus_name_set().get(path).copied().or_else(|| boat_model_name(path))
 }
@@ -322,11 +322,11 @@ fn canonical_model_name_for_type(entity_type: EntityType) -> Option<&'static str
 /// `EntityModelSet::resolve*` to take `EntityType` would have to either drop
 /// that case or grow a second parameter every mob-only caller would ignore,
 /// and those methods are also called from `crates/lodestone-shell/src/
-/// container/player_preview.rs`, which this pass does not own. That is the
-/// genuine boundary issue #523 asks to stop at rather than force through.
+/// container/player_preview.rs`, which this module does not own. That is the
+/// genuine boundary this function exists to stop at rather than force through.
 ///
-/// What *did* change here (issue #523): a type path that **is** a real
-/// registry entity now resolves via one [`EntityType::from_name`] binary
+/// A type path that **is** a real
+/// registry entity resolves via one [`EntityType::from_name`] binary
 /// search (`O(log 158)`) into [`canonical_model_name_for_type`] — the same
 /// enum-keyed alias table [`model_for_type`] uses, so the two paths cannot
 /// silently disagree — instead of re-testing the three alias literals as
@@ -1634,8 +1634,7 @@ pub struct EntityModelSet {
     /// `name -> index into models`, built once in [`Self::load`] from the same
     /// vector so it cannot drift from it. Turns [`Self::get`] — called for
     /// every drawn entity in every one of the base/armour/flame/wool passes,
-    /// every frame — from an O(90) linear scan into an O(1) lookup (issue
-    /// #523).
+    /// every frame — from an O(90) linear scan into an O(1) lookup.
     index: std::collections::HashMap<&'static str, usize>,
 }
 
@@ -2192,7 +2191,7 @@ impl ArmourModelSet {
 }
 
 // ---------------------------------------------------------------------------
-// Sheep wool (issue #53)
+// Sheep wool
 // ---------------------------------------------------------------------------
 //
 // The wool layer follows exactly the humanoid-armour discipline above — a
@@ -3632,8 +3631,8 @@ pub fn special_item_hover_lift(local_min: Vec3, local_max: Vec3, ground: &Displa
 // and its water patch share one: two matrices that must agree can only be
 // guaranteed to agree by being the same matrix.
 
-/// `poseStack.translate(0.0F, 0.0F, 0.4375F)` — how far in front of the frame's
-/// own plane a *visible* frame's contents sit.
+/// `translate(0.0F, 0.0F, 0.4375F)` on vanilla's own transform stack — how far
+/// in front of the frame's own plane a *visible* frame's contents sit.
 const ITEM_FRAME_CONTENT_LIFT: f32 = 0.4375;
 
 /// The same step for an **invisible** frame, vanilla's `translate(0, 0, 0.5F)`.
@@ -4431,7 +4430,7 @@ pub fn first_person_arm_chain(arm: Arm, attack_anim: f32) -> Mat4 {
 }
 
 /// [`first_person_arm_chain`] with vanilla's own equip-height term — the equip/swap
-/// dip (issue #366).
+/// dip.
 ///
 /// Vanilla's first-person player-arm render function translates `y` by
 /// `y_swing_position + -0.6F + inverse_arm_height * -0.6F`, so the dip coefficient is
@@ -4552,7 +4551,7 @@ pub fn first_person_arm_pose(mesh: &EntityMesh, arm: Arm, attack_anim: f32) -> O
 }
 
 /// [`first_person_arm_pose`] with vanilla's own equip-height dip — see
-/// [`first_person_arm_chain_with_equip`] (issue #366).
+/// [`first_person_arm_chain_with_equip`].
 #[must_use]
 pub fn first_person_arm_pose_with_equip(
     mesh: &EntityMesh,
@@ -5195,7 +5194,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Sheep wool (issue #53)
+    // Sheep wool
     // -----------------------------------------------------------------------
 
     fn cow_mesh() -> EntityMesh {
@@ -5573,7 +5572,7 @@ mod tests {
         }
     }
 
-    /// The round trip issue #523's third pass asks for: `u8` (the wire's
+    /// The round trip from `u8` (the wire's
     /// registry id) → [`EntityType`] → [`model_for_type`], swept for all 158
     /// generated variants and checked against the independent `&str`-keyed
     /// path ([`canonical_model_name`], reached via
@@ -5669,7 +5668,7 @@ mod tests {
     /// passes a corpus name straight through, which the `player_wide`/
     /// `player_slim` path already does.
     ///
-    /// Moved from `tests/boat_model_resolution.rs` (issue #523's third pass):
+    /// Moved from `tests/boat_model_resolution.rs`:
     /// none of `"boat"`/`"chest_boat"`/`"raft"`/`"chest_raft"` is a real
     /// `minecraft:entity_type` registry entry, so there is no `EntityType`
     /// value to hand `model_for_type` any more — this is squarely the
@@ -5712,15 +5711,15 @@ mod tests {
         }
     }
 
-    /// Control for issue #523: `canonical_model_name` and `EntityModelSet::get`
-    /// were switched from an O(90) linear `&str` scan to a `OnceLock`-cached
-    /// `HashSet`/`HashMap` index. This re-derives the *old* linear scan from
+    /// Control: `canonical_model_name` and `EntityModelSet::get`
+    /// are a `OnceLock`-cached `HashSet`/`HashMap` index rather than an O(90)
+    /// linear `&str` scan. This re-derives the *old* linear scan from
     /// scratch, independently of both functions under test, and checks it
     /// against the new implementation for every one of the 158 generated
     /// entity-type paths plus the non-registry pseudo-types
     /// (`player_wide`/`player_slim`, the four boat-family aliases) that
-    /// `canonical_model_name` also has to resolve — the "world-species" gate
-    /// the issue asks for, so a roster of only-already-corpus-named types
+    /// `canonical_model_name` also has to resolve — the "world-species" gate,
+    /// so a roster of only-already-corpus-named types
     /// cannot pass by never exercising the alias table.
     #[test]
     fn canonical_model_name_and_get_agree_with_an_independent_linear_scan() {
@@ -5803,7 +5802,7 @@ mod tests {
         // Types the corpus genuinely has no mesh for — the renderer skips them
         // rather than substituting something mob-shaped.
         //
-        // `arrow` used to be the headline entry here (issue #380): the physics was
+        // `arrow` used to be the headline entry here: the physics was
         // modelled in `lodestone-entity`, no rig existed, and this assert was the
         // written record of that gap. It is kept as its **positive** form rather
         // than deleted, so the gap closing is visible in the diff of the test that
@@ -5830,8 +5829,8 @@ mod tests {
         assert!(canonical_model_name("").is_none());
     }
 
-    /// The other side of [`unknown_entity_type_has_no_model`]: the three
-    /// projectiles issue #380 was about now resolve, and resolve to their **own**
+    /// The other side of [`unknown_entity_type_has_no_model`]: `arrow`,
+    /// `spectral_arrow`, and `trident` resolve, and resolve to their **own**
     /// rigs.
     ///
     /// `arrow` and `spectral_arrow` deliberately *share* a builder
@@ -5995,7 +5994,7 @@ mod tests {
     ///
     /// # The sign is the other way round from the obvious guess
     ///
-    /// Issue #380's investigation note — and this test's own first draft — said
+    /// This test's own first draft assumed
     /// reusing the mob matrix would draw an arrow "1.5 blocks **low**". It draws
     /// it 1.5 blocks **high**, and the difference is the mirror, not the lift:
     /// `entity_model_matrix` is `T(feet) · Ry · S(-1,-1,1) · T(0, -1.501, 0)`, so
@@ -6103,7 +6102,7 @@ mod tests {
             ]
         );
         // A name that is not a model resolves to nothing rather than a wrong sheet.
-        // This was `"arrow"` until issue #380 landed the arrow-renderer rig; the
+        // This was `"arrow"` until the arrow rig landed; the
         // assertion is kept (with a name that really is not a corpus entry) rather
         // than deleted, because "an unknown name yields no sheet" is the property
         // that stops a typo in the corpus from silently drawing a mob under some

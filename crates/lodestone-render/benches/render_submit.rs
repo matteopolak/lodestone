@@ -1,27 +1,27 @@
 //! Per-frame **counts** for the render-submit path, plus mesh-arena and
-//! texture-atlas occupancy (issues #106, #128, #160).
+//! texture-atlas occupancy.
 //!
 //! # Why this file is mostly counts and barely any timings
 //!
 //! `CLAUDE.md`'s measurement rules say a wall-clock number taken while a dozen
 //! other agents build is a sample, not a measurement — and that a *ratio* of two
 //! sequential durations is no safer, because the two arms do not see the same
-//! load. Counts are immune to all of that. Every issue this file addresses is
-//! fortunately count-shaped:
+//! load. Counts are immune to all of that. This file's targets are fortunately
+//! count-shaped:
 //!
-//! * **#128** wants draw-call and bind-group counts to be *measured*, not
-//!   assumed from reading the #75 fix.
-//! * **#106** wants entity render planning gated on "draw-call count staying
-//!   flat as entity count grows", explicitly in preference to a raw timing.
-//! * **#160** wants arena and atlas occupancy, which is bytes and allocation
-//!   counts.
+//! * Draw-call and bind-group counts are *measured*, not assumed from reading
+//!   the per-section camera uniform fix (rewriting it every frame had been
+//!   52.9% of main-thread CPU).
+//! * Entity render planning is gated on "draw-call count staying flat as
+//!   entity count grows", explicitly in preference to a raw timing.
+//! * Arena and atlas occupancy is bytes and allocation counts.
 //!
 //! So the assertions here are all counts and the few durations are recorded
 //! advisory baselines, labelled provisional.
 //!
-//! # What #128 asks for that this crate cannot supply, and the exact seam
+//! # What this crate cannot supply, and the exact seam
 //!
-//! #128 asks for per-frame **draw-call** *and* **bind-group-bind** counts, for
+//! Per-frame **draw-call** *and* **bind-group-bind** counts are wanted for
 //! three paths (model/fluid terrain, packed/demo, entity). Verified state of the
 //! tree, not assumed:
 //!
@@ -34,7 +34,7 @@
 //!   `lodestone-shell` bench (`crates/lodestone-shell/benches/render_submit.rs`)
 //!   that exercises it. This crate cannot reach either: `RenderState` and
 //!   `RenderStats` are `lodestone-shell` types, not `lodestone-render` ones.
-//! * `RenderState::render_inner` (#133) was a **private** fn in
+//! * `RenderState::render_inner` was a **private** fn in
 //!   `crates/lodestone-shell/src/gpu/frame.rs`. **`lodestone-shell` does now
 //!   have a `benches/` directory** (`entity_tick.rs` predates this pass) — an
 //!   earlier note here claiming otherwise was stale by the time it was read;
@@ -131,7 +131,7 @@ fn standing_camera() -> Camera {
     Camera { position: Vec3::new(8.0, 40.0, 8.0), yaw: 0.0, pitch: 20.0, ..Camera::default() }
 }
 
-/// **Issue #128 (draw-call half)** — real per-frame draw-list sizes for the
+/// Real per-frame draw-list sizes for the
 /// terrain path, measured, plus the per-strategy API-call count they imply.
 ///
 /// # A correction this bench's first run produced
@@ -155,8 +155,8 @@ fn standing_camera() -> Camera {
 ///
 /// That table is the honest answer to "how many draw calls does the terrain path
 /// issue": it is strategy-dependent, and on any adapter that gets an MDI
-/// strategy it is **1 per frame, flat in section count** — which is the #128
-/// shape gate. The list sizes below are measured; the mapping to API calls is
+/// strategy it is **1 per frame, flat in section count** — which is the
+/// flat-draw-call-count shape gate. The list sizes below are measured; the mapping to API calls is
 /// read off those three `record` implementations, and this bench prints the
 /// strategy `select_strategy` actually picks on this machine when an adapter is
 /// available, so the applicable row is not a guess either.
@@ -299,13 +299,14 @@ fn entity_instances(
         .collect()
 }
 
-/// **Issue #106** — entity render planning and instance upload, gated the way
-/// that issue asks: on counts that must stay flat as the crowd grows, not on a
-/// millisecond figure.
+/// Entity render planning and instance upload, gated on counts that must
+/// stay flat as the crowd grows, not on a millisecond figure.
 ///
 /// `plan_entities` groups survivors by model type, so **the batch count is the
-/// instanced-draw count**. The #75 shape (per-entity buffer, per-entity bind
-/// group) would show up here as a batch count that tracks entity count. So:
+/// instanced-draw count**. A per-entity buffer and per-entity bind group —
+/// the same failure shape that made the terrain path re-upload an unchanging
+/// camera value thousands of times a frame before it was fixed — would show
+/// up here as a batch count that tracks entity count. So:
 ///
 /// * batch count is asserted `<= distinct model types`, at every crowd size
 ///   from 10 to 5000 — the flat-as-N-grows gate;
@@ -466,7 +467,7 @@ fn map_world(rd: i32) -> MapWorld {
     MapWorld(map)
 }
 
-/// **Issue #160** — mesh-arena occupancy as a tracked number, at two render
+/// Mesh-arena occupancy as a tracked number, at two render
 /// distances, plus the two count invariants the existing
 /// `gpu_world_mesher_upload_evict_roundtrip` test does not cover (it checks the
 /// load→nonzero, unload→zero lifecycle once; this checks *occupancy under load*
@@ -597,7 +598,7 @@ fn synthetic_atlas(n: usize) -> lodestone_assets::Atlas {
     builder.build().expect("synthetic atlas builds")
 }
 
-/// **Issue #160 (atlas half)** — texture-atlas packing occupancy as a function
+/// Texture-atlas packing occupancy as a function
 /// of loaded block variety, via the [`lodestone_render::atlas_occupancy`]
 /// accessor this pass adds (the exact seam this file's module doc used to
 /// name as missing: `AtlasStats` reported sprite *population* and `GpuAtlas`
