@@ -1279,7 +1279,8 @@ pub fn create_portal<S: ChunkSource + ?Sized>(
 /// `crate::fluid` chose for the same question: an unclassified block should stop
 /// the site search rather than be quietly carved out.
 fn blocks_motion(state: &str) -> bool {
-    lodestone_data::block_solidity::blocks_motion(crate::chunk::resolve_palette_state_id(state))
+    lodestone_data::block_states::StateId::new(crate::chunk::resolve_palette_state_id(state))
+        .map(lodestone_data::block_solidity::blocks_motion)
         .unwrap_or(true)
 }
 

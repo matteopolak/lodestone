@@ -314,8 +314,8 @@ pub fn face_sturdy_up(state: &str) -> bool {
 /// `BlockStateBase::blocksMotion`, for the sky scan.
 fn blocks_motion(state: &str) -> bool {
     lodestone_data::block_states::state_id(state)
-        .and_then(lodestone_data::block_solidity::blocks_motion)
-        .unwrap_or(false)
+        .and_then(lodestone_data::block_states::StateId::new)
+        .is_some_and(lodestone_data::block_solidity::blocks_motion)
 }
 
 /// The six face offsets in `Direction.values()` order — **down, up, north,

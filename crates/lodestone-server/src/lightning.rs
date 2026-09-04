@@ -200,8 +200,8 @@ fn base_name(state: &str) -> &str {
 
 fn blocks_motion(state: &str) -> bool {
     lodestone_data::block_states::state_id(state)
-        .and_then(lodestone_data::block_solidity::blocks_motion)
-        .unwrap_or(false)
+        .and_then(lodestone_data::block_states::StateId::new)
+        .is_some_and(lodestone_data::block_solidity::blocks_motion)
 }
 
 /// `Level.getBlockRandomPos` — the level's own tiny LCG, mutated in place.

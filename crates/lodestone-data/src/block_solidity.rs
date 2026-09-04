@@ -67,7 +67,12 @@ mod tests {
         assert!(StateId::new(u32::MAX).is_none());
 
         let valid = StateId::new(0).expect("state zero is in the generated table");
-        assert!(!legacy_solid(valid));
+        for lookup in [
+            legacy_solid as fn(StateId) -> bool,
+            blocks_motion as fn(StateId) -> bool,
+        ] {
+            let _ = lookup(valid);
+        }
     }
 }
 
@@ -97,14 +102,13 @@ pub fn legacy_solid_raw(id: u32) -> Option<bool> {
     StateId::new(id).map(legacy_solid)
 }
 
-/// Vanilla's own "blocks motion" accessor for block-state `id`, or `None` if `id`
-/// is not in `0..`[`STATE_COUNT`].
+/// Vanilla's own "blocks motion" accessor for a validated block-state id.
 ///
 /// This is [`legacy_solid`] with vanilla's two hard-coded exclusions already
 /// folded in — in 26.2 they differ on exactly **two** states,
 /// `minecraft:cobweb` and `minecraft:bamboo_sapling`, both of which are
 /// single-state blocks. Do not re-apply the exclusions on top.
 #[must_use]
-pub fn blocks_motion(id: u32) -> Option<bool> {
-    StateId::new(id).map(|id| bit(&table::BLOCKS_MOTION, id))
+pub fn blocks_motion(id: StateId) -> bool {
+    bit(&table::BLOCKS_MOTION, id)
 }
