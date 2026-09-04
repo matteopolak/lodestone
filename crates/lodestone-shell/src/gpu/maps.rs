@@ -43,24 +43,6 @@ use super::{MapPicture, RenderState};
 /// held or framed map draw.
 pub(super) type PreparedMap = (Arc<GpuModelMesh>, Arc<wgpu::BindGroup>);
 
-/// Cumulative retained-map work for this render state. A stationary second
-/// frame should leave every field unchanged; a map patch changes only the three
-/// texture fields, while a moved/rotated/relit item frame changes only the
-/// framed-mesh fields.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct MapCacheCounters {
-    /// Calls to [`map_texture_rgba`].
-    pub texture_conversions: u64,
-    /// `queue.write_texture` submissions for map pixels.
-    pub texture_uploads: u64,
-    /// Map texture/sampler bind groups constructed.
-    pub texture_bind_groups: u64,
-    /// Held-map mesh builds and GPU uploads.
-    pub held_mesh_builds: u64,
-    /// Framed-map batch mesh builds and GPU uploads.
-    pub framed_mesh_builds: u64,
-}
-
 /// A map texture's exact content identity. The id scopes the revision: two
 /// unrelated maps naturally both start at revision zero.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -187,10 +169,6 @@ impl<K, V> Default for RetainedLast<K, V> {
 }
 
 impl<K: PartialEq, V> RetainedLast<K, V> {
-    fn matches(&self, key: &K) -> bool {
-        self.entry.as_ref().is_some_and(|(previous, _)| previous == key)
-    }
-
     fn get_or_insert_with(&mut self, key: K, build: impl FnOnce() -> V) -> Arc<V> {
         if let Some((previous, value)) = &self.entry
             && previous == &key
@@ -215,7 +193,6 @@ pub(super) struct MapRenderCache {
     textures: RetainedMapEntries<MapTextureKey, wgpu::BindGroup>,
     held_mesh: RetainedLast<u32, GpuModelMesh>,
     framed_batches: RetainedLast<FramedMapsKey, Vec<CachedFramedBatch>>,
-    counters: MapCacheCounters,
 }
 
 impl Default for MapRenderCache {
@@ -224,7 +201,6 @@ impl Default for MapRenderCache {
             textures: RetainedMapEntries::default(),
             held_mesh: RetainedLast::default(),
             framed_batches: RetainedLast::default(),
-            counters: MapCacheCounters::default(),
         }
     }
 }
@@ -255,17 +231,10 @@ impl MapRenderCache {
             // revision walks the cache to drop this map's superseded texture.
             self.textures
                 .retain(|cached, _| cached.map_id != key.map_id || cached == &key);
-            self.counters.texture_conversions += 1;
-            self.counters.texture_uploads += 1;
-            self.counters.texture_bind_groups += 1;
         }
         self.textures.get_or_insert_with(key, || {
             map_texture_bind_group(device, queue, pipeline, picture.colors.as_slice())
         })
-    }
-
-    pub(super) const fn counters(&self) -> MapCacheCounters {
-        self.counters
     }
 }
 
@@ -1289,9 +1258,6 @@ impl RenderState {
         // Full bright, as the GUI item path nails every vertex: the map is drawn
         // in its own camera-space pass with no world position to sample.
         let mut cache = self.map_cache.borrow_mut();
-        if !cache.held_mesh.matches(&inverse_arm_height.to_bits()) {
-            cache.counters.held_mesh_builds += 1;
-        }
         let gpu = cache.held_mesh.get_or_insert_with(inverse_arm_height.to_bits(), || {
             let mesh = map_quad_mesh(held_map_pose(inverse_arm_height), ENTITY_FULLBRIGHT);
             // A map quad is structurally non-empty. Keeping this assertion beside
@@ -1486,9 +1452,6 @@ impl RenderState {
         let key = FramedMapsKey::new(inputs);
         let batch_inputs = key.0.clone();
         let mut cache = self.map_cache.borrow_mut();
-        if !cache.framed_batches.matches(&key) {
-            cache.counters.framed_mesh_builds += 1;
-        }
         let batches = cache.framed_batches.get_or_insert_with(key, || {
             let mut merged: Vec<(i32, ModelMesh)> = Vec::new();
             for input in &batch_inputs {
