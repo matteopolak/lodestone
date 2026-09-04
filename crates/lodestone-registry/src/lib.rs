@@ -391,9 +391,13 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
         // family adapter covers earlier revisions too, but their server packet
         // layouts have not been implemented.
         supports: |protocol| {
-            protocol == lodestone_v1_9::PROTOCOL || protocol == 210 || protocol == 316
+            protocol == lodestone_v1_9::PROTOCOL
+                || protocol == 110
+                || protocol == 210
+                || protocol == 316
         },
         make: |protocol| match protocol {
+            110 => Box::new(lodestone_v1_9::V110ServerProtocol),
             210 => Box::new(lodestone_v1_9::V210ServerProtocol),
             316 => Box::new(lodestone_v1_9::V316ServerProtocol),
             _ => Box::new(lodestone_v1_9::V340ServerProtocol),
@@ -606,9 +610,11 @@ mod tests {
     fn resolves_the_hosted_1_9_family_protocols() {
         assert!(server_protocol_for_protocol(340).is_some());
         assert!(compiled_server_families().contains(&"v1-9"));
+        assert!(server_protocol_for_protocol(110).is_some());
         assert!(server_protocol_for_protocol(210).is_some());
         assert!(server_protocol_for_protocol(316).is_some());
         assert!(server_protocol_for_protocol(209).is_none());
+        assert!(server_protocol_for_protocol(109).is_none());
         assert!(server_protocol_for_protocol(315).is_none());
         assert!(server_protocol_for_protocol(341).is_none());
     }

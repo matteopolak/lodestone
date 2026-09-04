@@ -130,12 +130,18 @@ async fn registry_selected_protocol_210_reaches_play_and_confirms_a_block_break(
 }
 
 #[tokio::test]
+async fn registry_selected_protocol_110_reaches_play_and_confirms_a_block_break() {
+    assert_registry_selected_server_reaches_play_and_confirms_a_block_break(110).await;
+}
+
+#[tokio::test]
 async fn registry_selected_protocol_316_reaches_play_and_confirms_a_block_break() {
     assert_registry_selected_server_reaches_play_and_confirms_a_block_break(316).await;
 }
 
 #[test]
 fn a_non_hosted_legacy_protocol_is_rejected_before_connection_setup() {
+    assert!(lodestone_registry::server_protocol_for_protocol(109).is_none());
     assert!(lodestone_registry::server_protocol_for_protocol(209).is_none());
     assert!(lodestone_registry::server_protocol_for_protocol(315).is_none());
     assert!(lodestone_registry::server_protocol_for_protocol(341).is_none());
