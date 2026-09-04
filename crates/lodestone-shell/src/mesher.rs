@@ -28,7 +28,7 @@
 use std::cell::RefCell;
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 // The worker pool's plumbing. Native-only: `MeshScheduler`'s browser arm has no
 // threads and no channels — it meshes in-frame under a time budget. See that type.
@@ -1769,11 +1769,9 @@ fn report_tint_probe(
     packed: bool,
     probe: TintProbe,
 ) {
-    BIOME_TINT_RESOLVED.fetch_add(u64::from(probe.resolved), Ordering::Relaxed);
     let skipped = probe.no_colormaps + probe.unresolved;
     if skipped > 0 {
-        let before = BIOME_TINT_SKIPPED.fetch_add(u64::from(skipped), Ordering::Relaxed);
-        if before == 0 {
+        if !BIOME_TINT_SKIP_WARNING.swap(true, Ordering::Relaxed) {
             tracing::warn!(
                 target: "mesh",
                 cx = key.cx,
@@ -1783,8 +1781,8 @@ fn report_tint_probe(
                 unresolved = probe.unresolved,
                 "biome tint skipped for a blended quad: it keeps the frame-shared \
                  palette's plains default instead of this position's own biome \
-                 colour. Logged once per session; the running total is \
-                 mesher::biome_tint_counts"
+                 colour. Logged once per process; set LODESTONE_TINT_PROBE for \
+                 per-section counts"
             );
         }
     }
@@ -1819,29 +1817,9 @@ offered={} resolved={} unresolved={} no_colormaps={} not_blended={} untinted={}"
     }
 }
 
-/// Blended-kind quads whose tint was resolved for real, this process.
-static BIOME_TINT_RESOLVED: AtomicU64 = AtomicU64::new(0);
-/// Blended-kind quads whose tint was **skipped** — absent colormaps, or a
-/// blend that returned nothing — and which therefore fell back to the
-/// frame-shared palette's plains default.
-static BIOME_TINT_SKIPPED: AtomicU64 = AtomicU64::new(0);
-
-/// `(resolved, skipped)` blended-kind quads since process start.
-///
-/// A running total rather than a per-section one because the mesh workers have
-/// no `Sim` to report into, and because the question this answers is a session
-/// question: *did any terrain in this session render its biome tint from the
-/// palette default rather than from the position?* A neutral-grey ground and a
-/// correctly plains-green one are indistinguishable on a plains-only world —
-/// the palette default **is** plains — so a screenshot cannot tell them apart
-/// and this counter is the only thing that can.
-#[must_use]
-pub fn biome_tint_counts() -> (u64, u64) {
-    (
-        BIOME_TINT_RESOLVED.load(Ordering::Relaxed),
-        BIOME_TINT_SKIPPED.load(Ordering::Relaxed),
-    )
-}
+/// Whether the once-per-process warning for a skipped blended-kind quad has
+/// fired. Skips come from absent colormaps or a blend that returned nothing.
+static BIOME_TINT_SKIP_WARNING: AtomicBool = AtomicBool::new(false);
 
 /// A fixed pool of worker threads that mesh snapshots off the main thread.
 ///
