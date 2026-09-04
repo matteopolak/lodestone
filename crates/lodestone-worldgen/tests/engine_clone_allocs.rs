@@ -134,7 +134,10 @@ fn cloning_the_per_chunk_router_trees_allocates_nothing() {
     let router = &settings["noise_router"];
 
     let builder = Builder::new(42, &resolver);
-    let trees: Vec<Density> = ROUTES.iter().map(|r| builder.build(&router[r])).collect();
+    let trees: Vec<Density> = ROUTES
+        .iter()
+        .map(|r| builder.build(&router[r]).expect("bundled density-function document"))
+        .collect();
     assert_eq!(trees.len(), 8, "all eight routes must be built");
 
     // Post-U4 shapes: three compiled programs, five Arc-wrapped point trees —

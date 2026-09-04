@@ -5104,6 +5104,17 @@ where
     Ok(())
 }
 
+/// The [`crate::fluid::FluidEnv`] for the column `pos` falls in — the
+/// dimension's real vertical extent rather than [`crate::fluid::FluidEnv::OVERWORLD`]'s
+/// literal bounds, matching how [`crate::tick::run_tick_loop`] derives one for
+/// its own fluid drain. [`crate::fluid::ticks_after_edit`] needs this at every
+/// edit site so the seeding it schedules honours the same build-height guard
+/// a scheduled fluid tick does.
+fn fluid_env_at<S: ChunkSource + ?Sized>(source: &S, pos: BlockPos) -> crate::fluid::FluidEnv {
+    let column = source.column(pos.x.div_euclid(16), pos.z.div_euclid(16));
+    crate::fluid::FluidEnv::overworld_in(column.min_y, column.height)
+}
+
 /// Breaks the block at `pos`: rolls and pops its loot, clears any block entity
 /// and open container against it, and tells the client.
 ///
@@ -5291,16 +5302,19 @@ where
     }
     // Fluid spread's seeding hook (`crate::fluid`). Breaking a block is the
     // single most common way a player starts a fluid moving — mine the floor of
-    // an ocean, or the block beside a spring — and it is exactly vanilla's
-    // `neighborChanged` case: the *water* did not change, so only a notification
-    // can wake it. `ticks_after_edit` covers this cell and its six neighbours and
-    // reads none of them, so it works across a chunk border; a position holding
-    // no fluid is a silent no-op when the tick drains.
+    // an ocean, or the block beside a spring — and it is exactly the
+    // neighbor-changed case: the *water* did not change, so only a notification
+    // can wake it. `ticks_after_edit` reads this cell and its six neighbours to
+    // decide which of them already hold a fluid, and schedules only those.
     //
     // Deliberately **not** folded into `propagate_placement`, whose return value
     // several gates assert on exactly. This is its own request against the same
     // feed, and `run_tick_loop`'s rebase loop routes it to the fluid queue.
-    block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(pos));
+    block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(
+        source,
+        fluid_env_at(source, pos),
+        pos,
+    ));
     let directive = proto.encode_block_update(pos.x, pos.y, pos.z, &new_state);
     apply(conn, state, directive).await?;
     // Breaking a light source has to darken the column, and the `BLOCK_UPDATE`
@@ -5403,7 +5417,11 @@ where
         let current = source.block_state(cell.x, cell.y, cell.z);
         let directive = proto.encode_block_update(cell.x, cell.y, cell.z, &current);
         apply(conn, state, directive).await?;
-        block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(cell));
+        block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(
+            source,
+            fluid_env_at(source, cell),
+            cell,
+        ));
     }
     // A popped torch or lantern has to darken its column too. `should_relight`
     // compares the two states' emission and dampening, so a collapsed flower
@@ -7695,7 +7713,11 @@ where
             // And the same seeding hook `destroy_block` performs, for the same
             // reason: a block placed into a flow, or beside a source, has to
             // start it re-evaluating. See `crate::fluid::ticks_after_edit`.
-            block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(target));
+            block_ticks.request_scheduled_ticks(crate::fluid::ticks_after_edit(
+                source,
+                fluid_env_at(source, target),
+                target,
+            ));
             // Vanilla's own falling-block on-place routine: a placed sand or gravel block owes itself a
             // gravity check two ticks out. Same shape and same call site as the
             // fluid seeding above, and empty for every other block, so no guard.
