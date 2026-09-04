@@ -1,8 +1,9 @@
-//! Offscreen gate for issue #575: at a distance (a minifying, `Linear`-filtered
+//! Offscreen gate: at a distance (a minifying, `Linear`-filtered
 //! sample), a block atlas sprite must not pick up a neighbouring sprite's
 //! texels at its edge. Up close (`Nearest` magnification), the same edge must
-//! show no artefact at all — matching the report's "goes away when I get
-//! closer" exactly.
+//! show no artefact at all — the defect is distance-dependent because the
+//! sampler only blends across the sprite boundary when minifying; magnifying
+//! up close uses `Nearest` and never blends at all.
 //!
 //! ## Why this gate exists
 //!

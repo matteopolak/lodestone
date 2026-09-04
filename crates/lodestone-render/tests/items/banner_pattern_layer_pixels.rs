@@ -1,5 +1,6 @@
-//! Issue #174, step F: the banner pattern-layer draw list, measured through
-//! the real pipeline.
+//! The banner pattern-layer draw list, measured through
+//! the real pipeline: base colour plus ordered pattern-and-dye layers,
+//! resolved from the item's pattern-layers component.
 //!
 //! # What this proves, and what it does not
 //!
@@ -377,8 +378,7 @@ fn jar_manager() -> ResourceManager {
     ResourceManager::new(vec![Box::new(zip) as Box<dyn ResourceSource>])
 }
 
-/// The real banner-pattern atlas (`lodestone_assets::BannerPatternAtlas`,
-/// issue #174's remaining gap, now closed on the `lodestone-assets` side —
+/// The real banner-pattern atlas (`lodestone_assets::BannerPatternAtlas` —
 /// see `docs/banner-shield-patterns.md`), loaded from the real jar. Fails
 /// closed for the same reason as [`jar_manager`].
 fn real_atlas() -> BannerPatternAtlas {

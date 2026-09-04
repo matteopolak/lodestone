@@ -1,8 +1,8 @@
 //! Offscreen gate: the GUI atlas ([`GuiAtlas`]) must not bleed a neighbouring
 //! sprite's texels into a minified, `Linear`-filtered edge sample — the same
-//! defect `atlas_mip_edge_bleed_gate.rs` guards for the block atlas (issue
-//! #575), but reached a different way here because the GUI atlas carries no
-//! mip pyramid at all.
+//! defect `atlas_mip_edge_bleed_gate.rs` guards for the block atlas, but
+//! reached a different way here because the GUI atlas carries no mip pyramid
+//! at all.
 //!
 //! ## Why this gate exists
 //!
