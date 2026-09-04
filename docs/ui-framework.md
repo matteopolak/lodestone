@@ -53,6 +53,8 @@ needs. Whole-tree placement goes through `align_in_rectangle`; centred placement
 with `0.5` on both axes, so it does not have a second convenience entry point to keep in sync.
 `FrameLayout` minimum bounds are likewise changed through the per-axis `set_min_width` and
 `set_min_height` methods; callers that need both set both explicitly.
+`LayoutSettings` keeps the general `align` builder and the live horizontal-centre shorthand;
+direction-specific forwarding aliases are omitted until a screen actually needs one.
 
 Using a hand-arithmetic layout instead of a container is legitimate vanilla, too — the title screen,
 for one, hand-centres rather than using any layout class. Whether a screen is layout-driven or
