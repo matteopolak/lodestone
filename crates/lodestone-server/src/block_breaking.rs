@@ -260,7 +260,7 @@ pub(crate) fn progress_per_tick(block_state: &str, held: Option<&ItemStack>) -> 
     if hardness < 0.0 {
         return Some(0.0);
     }
-    let mining = lodestone_data::tool::mining(held, state_id.raw())?;
+    let mining = lodestone_data::tool::mining(held, state_id);
     let divider = if mining.correct_tool { 30.0 } else { 100.0 };
     // Zero hardness divides to `+inf`, which is the instant-break signal the
     // caller tests with `>= 1.0` — exactly as vanilla's own float division does.

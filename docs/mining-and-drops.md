@@ -12,8 +12,11 @@ generated structures' pre-filled chests.
 
 ### Tool mining speed
 
-`crates/lodestone-data/src/tool.rs::mining(held, state_id) -> Option<ToolMining>`
+`crates/lodestone-data/src/tool.rs::mining(held, state_id: StateId) -> ToolMining`
 implements the reference destroy-speed lookup and correct-tool-for-drops check.
+Raw palette numbers are validated once at the version or wire boundary; the
+generated-table lookup accepts only a `StateId`, so its result is total and
+cannot encode an unknown state as a second, redundant `Option`.
 The obvious approach — decode `minecraft:tool` off the wire and evaluate it —
 is not enough, because most tools never carry it: a pickaxe's
 `minecraft:tool` lives in its **prototype** component map (an empty
