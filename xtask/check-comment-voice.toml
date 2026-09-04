@@ -41,26 +41,6 @@ owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
 
 [[allow]]
-file = "crates/lodestone-shell/src/menu/accounts.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-shell/src/menu/edit_box.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-shell/src/menu/focus.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
-file = "crates/lodestone-shell/src/menu/layout.rs"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
-
-[[allow]]
 file = "crates/lodestone-shell/src/menu/nav.rs"
 owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"

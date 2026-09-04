@@ -6,9 +6,9 @@
 //!
 //! ## What it is
 //!
-//! The third child of the menu-framework epic (#392/#395). [`super::widget`]
-//! landed the leaf, [`super::layout`] landed the containers that place leaves;
-//! this is the part that decides **which leaf gets the keystroke**. Its first
+//! [`super::widget`] provides the leaves and [`super::layout`] provides the
+//! containers that place them; this module decides **which leaf gets the
+//! keystroke**. Its first
 //! real consumer is [`super::edit_box::EditBox`], wired into
 //! [`super::Screen::ServerEdit`] through [`super::nav::EditForm`].
 //!
@@ -126,13 +126,12 @@
 //!   things follow: [`FocusTarget::current_focus_path`] has to be *told* its own
 //!   id to build a [`ComponentPath::Leaf`], and `applyFocus`'s recursion lives on
 //!   [`FocusSet`]/[`FocusTarget::apply_focus`] rather than on the path.
-//! - **[`ComponentPath`] is relative to the container that returned it.** In
-//!   vanilla every path returned by a container is wrapped
-//!   vanilla's own component-path type's `path(this, child)`, so the screen appears at its head; here
-//!   the [`FocusSet`] *is* `this`, so the head element of a returned path is
-//!   already a child id. Nothing nests yet — [`ComponentPath::Path`] exists for
-//!   the scroll list #396 needs, and [`FocusTarget::apply_focus`]'s default is
-//!   the leaf behaviour.
+//! - **[`ComponentPath`] is relative to the container that returned it.** A
+//!   nested container wraps its child's path so the container appears at the
+//!   head; here the [`FocusSet`] is that container, so a returned path starts
+//!   with a child id. Nothing nests yet — [`ComponentPath::Path`] is ready for
+//!   a scrolling list, and [`FocusTarget::apply_focus`]'s default is the leaf
+//!   behaviour.
 //! - **[`KeyEvent`] carries GLFW's raw code, not an abstract key.** That is
 //!   deliberate: `EditBox.keyPressed`'s entire body is a `switch` on it, so
 //!   porting it as a match on the same integers keeps the port checkable against
@@ -150,9 +149,8 @@
 //! - **Narration.** `Screen.addWidget` also appends to `narratables`, and
 //!   [`Registry`] records the distinction, but nothing in this shell speaks. A
 //!   `NarratableEntry` port would reach zero pixels and zero audio.
-//! - **Mouse drag and scroll.** `ContainerEventHandler.mouseDragged`/
-//!   `mouseScrolled` need a drag state machine and a scrolling container; both
-//!   land with #396's list. [`FocusSet::mouse_clicked`] is here because it is
+//! - **Mouse drag and scroll.** Drag events need a drag state machine and a
+//!   scrolling container. [`FocusSet::mouse_clicked`] is here because it is
 //!   what *sets* focus, which is the subject.
 //! - **`setInitialFocus`.** It is gated on
 //!   `minecraft.getLastInputType().isKeyboard()` — a
@@ -1975,7 +1973,7 @@ mod tests {
 
     #[test]
     fn the_focused_child_sees_a_key_before_the_screen_interprets_it() {
-        // The whole point of #395, as a sequence. Child 0 swallows everything;
+        // This sequence proves the dispatch order. Child 0 swallows everything;
         // children 1 and 2 are plain buttons.
         let mut kids = Mixed {
             greedy: Greedy::new(20.0, 20.0, vec![]),

@@ -44,7 +44,8 @@
 //! install), which is fine because both mean the same thing operationally —
 //! play without a Microsoft session — but it does mean a future consumer that
 //! wants to tell "never asked" apart from "explicitly offline" needs a schema
-//! change in `lodestone-auth` this change does not make. See `docs/accounts.md`.
+//! extension in `lodestone-auth` that this screen intentionally does not provide.
+//! See `docs/accounts.md`.
 //!
 //! ## The offline *name*, and why the third footer button changes identity
 //!
@@ -1487,7 +1488,7 @@ async fn finish_ms_token(
     // `lodestone_auth::texture::fetch_texture` for the texture-host allow-list
     // check, and that module stays native-only (no wasm32 caller has needed
     // it yet — porting it is a separate, purely cosmetic follow-up, not part
-    // of closing the sign-in dead end this change fixes). A browser account
+    // of resolving the sign-in dead end). A browser account
     // therefore signs in and joins exactly like a native one; it just draws
     // the default skin rig until that follow-up lands.
     #[cfg(not(target_arch = "wasm32"))]
