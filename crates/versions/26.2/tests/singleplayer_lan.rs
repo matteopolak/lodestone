@@ -11,3 +11,5 @@ mod singleplayer_player_stream;
 mod singleplayer_seam;
 #[path = "singleplayer_lan/lan_player_stream.rs"]
 mod lan_player_stream;
+#[path = "singleplayer_lan/client_adapter_decorator_escape_hatch.rs"]
+mod client_adapter_decorator_escape_hatch;
