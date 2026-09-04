@@ -199,7 +199,7 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   the wire, how one item resolves to several baked geometries (`ItemVariants`), custom
   (plugin-defined) items, armour trim, goat horns, the portable clock crate, and the
   entity-metadata field a dropped item's identity rides on.
-- [Java plugin bridge: backing Paper's own internal calls with Rust](./java-plugin-bridge.md) —
+- [Java plugin bridge: backing Paper's static internal bytecode uses with Rust](./java-plugin-bridge.md) —
   A design, a measurement, and a foundation crate for running **real, unmodified
   Bukkit/Spigot/Paper plugin jars** against this server, with **zero cost when no Java
   plugin is loaded**.
@@ -468,10 +468,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   The tools that keep this workspace buildable and testable at scale: the `just` task
   runner that gives every health check a short canonical name, the GitHub Actions CI
   workflow that verifies pushes without contending for the shared dev machine, the
-  `sccache`/private-target-dir build-caching design that lets many agents build
-  concurrently in one checkout, and the `cargo xtask` static scanners (`islands`,
-  `world-coverage`, and their siblings `connectedness`, `check-ptr-const`,
-  `wasm-check`) that catch classes of defect no compiler check can see.
+  `sccache`/private-target-dir build policy that lets many agents build concurrently
+  in one checkout, and the `cargo xtask` static scanners (`islands`, `world-coverage`,
+  and their siblings `connectedness`, `check-ptr-const`, `wasm-check`) that catch
+  classes of defect no compiler check can see.
 - [Server resource packs](./resource-packs.md) — The end-to-end flow for a
   server-pushed resource pack: the accept/decline prompt, the per-server policy that
   can skip it, the download/verify/apply pipeline, and how a downloaded pack actually
