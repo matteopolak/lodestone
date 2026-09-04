@@ -161,21 +161,14 @@
 //!   team colouring/prefixes and the `belowName` scoreboard line — all
 //!   explicitly out of scope per the issue.
 //!
-//! # Font: the same jar-sourced glyph data the HUD uses, a new draw path
+//! # Font: public client-jar glyph data for a world-space draw path
 //!
-//! [`crate::hud::vanilla_font::VanillaFont`] cannot be reused directly here:
-//! its glyph rasteriser is private and its public draw methods emit into
-//! `hud/item_icon.rs`'s 2-D screen-space `ColourStream`, and both files are
-//! out of scope for this change (a different agent's files, per the task
-//! briefing). This module instead calls the same public, jar-sourced data
-//! source directly — [`lodestone_assets::font::RasterFont`], loaded with the
-//! same `FontLoader::load_raster(&"minecraft:default".parse()?,
-//! &FontOptions::none())` call `VanillaFont::load` makes — and re-derives the
-//! ink-run walk `VanillaFont::glyph` uses (same advance metrics, same
-//! run-length merge), targeting world-space billboard quads instead of
-//! screen-space ones. [`jar_manager`]/[`pack_root`] duplicate
-//! `hud/vanilla_font.rs`'s own discovery snippet for the same reason that
-//! module duplicates it from `crate::resources` — see that module's doc.
+//! Nametags read the default glyph raster directly from `client.jar` through
+//! the public [`lodestone_assets::font::RasterFont`] API. The HUD may layer
+//! resource packs and asset-object-store data over that jar, so the two paths
+//! do not promise identical glyph coverage. This module merges adjacent ink
+//! runs and turns them into world-space billboard quads; no screen-space draw
+//! stream is involved.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -706,11 +699,9 @@ fn font_shear(v: f32) -> f32 {
 /// Falls back to [`FALLBACK_HEIGHT`] for a type path the census cannot
 /// resolve (no `minecraft:<path>` id, or a `0`-height marker type).
 ///
-/// Resolves through [`lodestone_data::entity_type::EntityType::from_name`] (a
-/// binary search over the generated registry, issue #523) rather than
-/// `entity_type_id_parts`'s linear `strip_prefix` scan — this runs once per
-/// named entity per frame, not once per spawn, so the O(158) scan was real
-/// per-frame cost.
+/// Resolves through the generated registry's binary-search lookup. This runs
+/// once per named entity per frame, so keeping the lookup logarithmic avoids a
+/// repeated full-registry scan on every frame.
 #[must_use]
 fn entity_base_height(type_path: &str) -> f32 {
     lodestone_data::entity_type::EntityType::from_name(type_path)
@@ -1610,22 +1601,16 @@ mod tests {
         assert!((entity_base_height("player") - 1.8).abs() < 1e-6);
     }
 
-    /// Behavioural gate for issue #523: `entity_base_height` now resolves
-    /// through `EntityType::from_name`'s binary search rather than
-    /// `entity_type_id_parts`'s linear `strip_prefix` scan. The expected
-    /// heights come from `crates/lodestone-data/tests/support/
-    /// entity_dimensions_jvm.txt` (a real 26.2 server's own
-    /// vanilla's own entity-type get-height accessor dump), an outside source, not from this
-    /// table round-tripping against itself.
+    /// Discriminating check for registry-backed height resolution. Expected
+    /// heights come from the captured dimension record at
+    /// `crates/lodestone-data/tests/support/entity_dimensions_jvm.txt`, an
+    /// outside source rather than this table round-tripping against itself.
     ///
     /// `chicken` and `enderman` are chosen because they are far apart both
-    /// in registry id (26 vs 41) and in height (0.7 vs 2.9): a wrong sort
-    /// order in the new binary search would resolve one of these bare paths
-    /// to a *neighbouring* real entity type rather than failing outright —
-    /// a different, plausible height, not an obvious `None`/panic — and a
-    /// pair this far apart cannot coincidentally agree the way `bogged` and
-    /// `skeleton` do (both `1.99`, see `lodestone-render`'s
-    /// `canonical_model_name` alias).
+    /// in registry id (26 vs 41) and in height (0.7 vs 2.9), so this distant
+    /// captured pair makes an accidental row mapping unlikely to satisfy both
+    /// assertions. The test validates registry-backed resolution against the
+    /// captured dimensions; it does not claim to prove the lookup algorithm.
     #[test]
     fn entity_base_height_matches_the_jvm_dump_for_a_discriminating_pair() {
         assert!((entity_base_height("chicken") - 0.7).abs() < 1e-3);
