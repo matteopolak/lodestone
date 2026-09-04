@@ -59,8 +59,8 @@
 //!
 //! # What this does *not* do
 //!
-//! **Fetch anything.** The URL comes back as a string; nothing here opens a
-//! socket, and the texture bytes are somebody else's problem
+//! **Fetch anything.** Each URL is structurally parsed here, but nothing here
+//! opens a socket or authorizes a host; the texture bytes are somebody else's problem
 //! ([`crate::Image::decode_png`] takes them once they arrive). Nor is the
 //! Yggdrasil signature checked — vanilla's own profile-textures
 //! signature-state query
@@ -306,14 +306,24 @@ pub fn default_skin_for_uuid(most_sig_bits: i64, least_sig_bits: i64) -> Default
 
 /// One entry of vanilla's own textures-payload record's texture map — a URL plus its declared
 /// model. `model` is meaningful only for the `SKIN` entry; a cape or elytra
-/// carries no `metadata.model` and so reads as [`PlayerModelType::Wide`],
-/// which is why [`ProfileTextures`] exposes the cape and elytra as bare URLs.
+/// carries no `metadata.model` and so reads as [`PlayerModelType::Wide`].
+///
+/// URLs are parsed structurally at the profile boundary. Network authorization
+/// remains the responsibility of the fetch path, so constructing this record
+/// does not imply that the URL is safe to request.
+///
+/// ```compile_fail
+/// use lodestone_assets::{PlayerModelType, SkinTexture};
+///
+/// let _texture = SkinTexture {
+///     url: "https://textures.minecraft.net/texture/example".to_owned(),
+///     model: PlayerModelType::Wide,
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkinTexture {
-    /// The texture URL, verbatim. Not fetched, not validated as a URL, and
-    /// **not** host-checked — vanilla's own services library restricts the
-    /// allowed hosts (see `crate::texture`'s module doc), and a caller that goes on to fetch this must do the same.
-    pub url: String,
+    /// The structurally parsed texture URL. It is not fetched or host-checked.
+    pub url: url::Url,
     /// The declared rig, from `metadata.model` via
     /// [`PlayerModelType::by_legacy_services_name`].
     pub model: PlayerModelType,
@@ -330,11 +340,12 @@ pub struct SkinTexture {
 pub struct ProfileTextures {
     /// The `SKIN` entry: the 64×64 body sheet and the declared rig.
     pub skin: Option<SkinTexture>,
-    /// The `CAPE` entry's URL.
-    pub cape: Option<String>,
-    /// The `ELYTRA` entry's URL. Present since 1.19 and independent of the
-    /// cape, though in practice Mojang serves the same image.
-    pub elytra: Option<String>,
+    /// The structurally parsed `CAPE` entry's URL, when valid.
+    pub cape: Option<url::Url>,
+    /// The structurally parsed `ELYTRA` entry's URL, when valid. Present since
+    /// 1.19 and independent of the cape, though in practice services often
+    /// serve the same image.
+    pub elytra: Option<url::Url>,
     /// `profileName`, when the payload carries one. Useful only as a
     /// cross-check that the blob belongs to the profile it was attached to.
     pub profile_name: Option<String>,
@@ -377,7 +388,7 @@ pub fn textures_from_json(json: &serde_json::Value) -> ProfileTextures {
     let url_of = |v: Option<&serde_json::Value>| {
         v.and_then(|e| e.get("url"))
             .and_then(serde_json::Value::as_str)
-            .map(str::to_owned)
+            .and_then(|raw| url::Url::parse(raw).ok())
     };
 
     let skin_entry = entry("SKIN");
@@ -551,9 +562,35 @@ mod tests {
             t.skin.as_ref().map(|s| s.url.as_str()),
             Some("https://textures.example.invalid/skin")
         );
-        assert_eq!(t.cape.as_deref(), Some("https://textures.example.invalid/cape"));
+        assert_eq!(
+            t.cape.as_ref().map(url::Url::as_str),
+            Some("https://textures.example.invalid/cape")
+        );
         assert_eq!(t.elytra, None);
         assert_eq!(t.profile_name.as_deref(), Some("Notch"));
+    }
+
+    #[test]
+    fn malformed_texture_urls_are_absent_without_dropping_valid_siblings() {
+        let json = serde_json::json!({
+            "textures": {
+                "SKIN": { "url": "https://textures.example.invalid/skin" },
+                "CAPE": { "url": "relative/cape" },
+                "ELYTRA": { "url": "https://textures.example.invalid/elytra" }
+            }
+        });
+
+        let textures = textures_from_json(&json);
+
+        assert_eq!(
+            textures.skin.as_ref().map(|skin| skin.url.as_str()),
+            Some("https://textures.example.invalid/skin")
+        );
+        assert_eq!(textures.cape, None);
+        assert_eq!(
+            textures.elytra.as_ref().map(url::Url::as_str),
+            Some("https://textures.example.invalid/elytra")
+        );
     }
 
     /// A skinless account: a well-formed payload with an empty `textures` map

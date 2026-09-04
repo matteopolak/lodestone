@@ -12,8 +12,12 @@ part *name* instead of by the wearer's resolved model/animation family.
 
 ### Skins
 
-Skin identity comes from the `textures` profile property: base64 → JSON → a texture URL plus a
-model-type declaration. The model bit lives on the *skin* entry's `metadata.model` and uses
+Skin identity comes from the `textures` profile property: base64 → JSON → structurally parsed URL
+plus a model-type declaration. Invalid or relative URL entries are omitted independently, so
+valid sibling entries remain independently represented and available at the asset parsing boundary
+when another entry is malformed. This parse only establishes URL structure; the remote fetch path
+still performs its existing scheme/host authorization before opening a socket. The model bit lives
+on the *skin* entry's `metadata.model` and uses
 authlib's `legacyServicesId` spelling, not its `id` — the wire value for the wide rig is
 `"default"`, not `"wide"`. Matching on `"wide"` compiles, always falls back to wide (the enum's
 own default), and the only symptom is Alex's arms being a pixel too thick — nothing crashes, so

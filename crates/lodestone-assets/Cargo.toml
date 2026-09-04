@@ -19,6 +19,7 @@ fontdue.workspace = true
 # copy, shared with `lodestone-particle`, `lodestone-audio`, `lodestone-render`
 # and `lodestone-shell`'s enchanting table.
 lodestone-javarandom.workspace = true
+url = "2.5"
 
 [dev-dependencies]
 lodestone-model.workspace = true

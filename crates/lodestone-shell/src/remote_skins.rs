@@ -95,8 +95,10 @@ use lodestone_assets::{Image, PlayerModelType};
 /// bug, and the wide sheet on the slim rig leaves a gap at the shoulder.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteSkin {
-    /// The texture URL, verbatim off the wire. Not yet host-checked — that
-    /// happens in [`request`], before any socket is opened.
+    /// The string form of a structurally parsed profile URL for the existing
+    /// fetch/cache pipeline. Public construction still permits arbitrary
+    /// strings, including the empty and local-profile sentinel keys, and host
+    /// authorization still happens in [`request`] before any socket is opened.
     pub url: String,
     /// The declared rig, from `metadata.model`.
     pub model: PlayerModelType,
@@ -348,9 +350,9 @@ pub fn skin_for_textures_property(value: &str) -> Option<RemoteSkin> {
             .ok()
             .and_then(|textures| {
                 textures.skin.map(|skin| RemoteSkin {
-                    url: skin.url,
+                    url: skin.url.to_string(),
                     model: skin.model,
-                    cape: textures.cape,
+                    cape: textures.cape.map(|url| url.to_string()),
                     // Vanilla's own default-player-skin default-skin accessor — vanilla's own
                     // answer when no uuid is in hand, which is exactly this
                     // function's situation: it is keyed by the property value
