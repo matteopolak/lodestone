@@ -68,8 +68,8 @@
 //!   then click, or a direct click); Escape backs out of the confirm view or
 //!   closes the screen, matching [`ConfirmNav::handle_key`](super::confirm::
 //!   ConfirmNav::handle_key)'s own Escape rule. Up/Down arrow traversal is
-//!   not wired — the same scope cut [`super::stats::StatsNav`] made before
-//!   issue #445 added pixel scrolling, tracked the same way.
+//!   not wired — keyboard traversal is outside this screen's current input
+//!   model, while mouse hover and activation remain available.
 //! - **No scrolling.** A server with more links than fit the canvas simply
 //!   has its lowest rows run off the bottom, uncautioned — the same
 //!   deliberate flat-list departure [`super::create_world`]'s own module doc

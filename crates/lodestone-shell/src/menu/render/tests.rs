@@ -1,11 +1,5 @@
-//! `menu/render.rs`'s own test module, split out verbatim and unwrapped.
-//! Still `render::tests`, so **no test path changed** — splitting it further
-//! into `render/tests/*.rs` would rename every one of them, which is why this
-//! file is deliberately over the size target the rest of the split aims at.
-//!
-//! `use super::*` below is the module's own, unchanged; the sibling imports
-//! after it are what the old inline module reached through the single flat
-//! namespace.
+//! Tests for the frame model and its geometry, kept beside the production
+//! renderer so pixel and data-path assertions share the same helpers.
 
 use super::*;
 use super::account_screen::{ACCOUNTS_BUTTON_W, ACCOUNTS_FOOTER_SPACING, ACCOUNTS_HEAD_ICON, AccountsBlock, accounts_block, accounts_button_slot, accounts_failed_frame, accounts_idle_frame};
@@ -98,7 +92,7 @@ fn add_server(nav: &mut MenuNav, ui: &mut UiState, name: &str, addr: &str) {
     nav.key(ui, MenuKey::Enter);
 }
 
-/// Issue #47. Every one of the command block screen's seven interactive
+/// Every one of the command block screen's seven interactive
 /// rows, plus the read-only "Previous Output" row, at its exact vanilla
 /// rect on a real canvas — not a restatement of `command_block.rs`'s own
 /// constants, but the actual `MenuFrame`/`row_rect` output a click and a
@@ -160,7 +154,7 @@ fn command_block_rects_match_vanillas_own_arithmetic() {
     assert_eq!(frame.rows[CommandBlockRow::Cancel as usize].label, "Cancel");
 }
 
-/// Issue #47's tab-completion popup rect, predicted against vanilla's own
+/// The tab-completion popup rect, predicted against vanilla's own
 /// clamp formula and checked against a rejected hypothesis: forgetting
 /// the synthetic-slash offset shift (`command_block`'s module doc) would
 /// place the popup 6 px too far right, not merely "somewhere near".
@@ -251,10 +245,10 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
     nav.set_menu_cursor(42.0, 24.0, 854.0, 480.0);
 
     let mut reached = 0;
-    // `Screen::ALL`, not a list restated here: this loop's own copy was a
-    // 12-entry literal plus an `assert_eq!(reached, 12)`, and #397's
-    // `WorldSelect` made both stale at once — a completeness test defeated by
-    // the very thing it exists to notice. The `match` below stays exhaustive,
+    // `Screen::ALL`, not a list restated here: a literal list plus an
+    // `assert_eq!(reached, 12)` can drift from the screen inventory. The shared
+    // inventory centralizes the set and avoids a second independent literal.
+    // The `match` below stays exhaustive,
     // which is what forces a new variant to be given a way to be *reached*;
     // `Screen::ALL`'s own docs say what that does and does not guarantee.
     for screen in Screen::ALL {
@@ -348,7 +342,7 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
                 ui.open_world_select();
                 ui.open_create_world();
             }
-            // Issue #540. Reached the way a player reaches it — through the world
+            // Reached the way a player reaches it — through the world
             // list — because `open_confirm` guards on that screen for the reason
             // its own doc gives.
             Screen::Confirm => {
@@ -394,7 +388,7 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
             // A vanilla-laid-out screen has no centred heading string — its
             // heading is the logo texture (title), a positioned `MenuLabel`
             // (pause), or a real widget row with no separate label at all
-            // (Statistics' tab bar, issue #564 — vanilla draws no "Statistics"
+            // (Statistics' tab bar — vanilla draws no "Statistics"
             // heading either, see `stats::frame`'s own doc), so requiring
             // `title` would be requiring the *un*-vanilla layout. It must
             // still say something.
@@ -410,7 +404,7 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
                 !geometry(&f, 1280.0, 720.0).is_empty(),
                 "{screen:?} draws nothing"
             );
-            // The mechanical check issue #567 asks for: every screen `frame_for`
+            // The mechanical check here asks for: every screen `frame_for`
             // returns `Some` for must carry the four canvas facts
             // `stamp_canvas_facts` stamps — `cursor` in particular, since a
             // frame with `cursor: None` has no hover affordance at all
@@ -460,7 +454,7 @@ fn owns_frame_agrees_with_frame_for_on_every_screen() {
     let _ = &mut nav;
 }
 
-/// Issue #192's own frame: one enabled row (Done), a title label, and a
+/// The credits frame has one enabled row (Done), a title label, and a
 /// non-empty body notice, all resolving on-canvas — the same shape
 /// `error_frame`'s callers already get for free through the sweep above,
 /// spelled out here because `credits_frame` takes no arguments (unlike
@@ -677,8 +671,8 @@ fn a_failed_ping_shows_its_reason_in_the_error_colour() {
 }
 
 /// With nothing to act on, Join / Edit / Delete are **present and inactive** —
-/// `onSelectedChange`'s three, which is #393's disabled path reaching its first
-/// list screen. Direct Connection is inactive whatever the selection.
+/// the three selection-dependent controls. Direct Connection is inactive
+/// whatever the selection.
 ///
 /// The control is executed rather than described: adding a server must flip all
 /// three, or "they are disabled" would pass on a screen whose buttons are
@@ -819,14 +813,15 @@ fn the_server_list_rects_are_vanillas_own() {
         "contentRight - 10 - 5, at contentY"
     );
     // A scroll of one whole row shifts every row up by one `itemHeight`
-    // (#402): row 1 at scroll 0 lands exactly where row 0 sits at scroll 36.
+    // A one-row scroll offset makes row 1 at scroll 0 land exactly where row 0
+    // sits at scroll 36.
     assert_eq!(
         server_row_rect(1, V_W, SERVER_LIST_ITEM_H),
         server_row_rect(0, V_W, 0.0),
         "scrolling by one row is the same shift as re-indexing by one row"
     );
-    // #445: and a *half*-row scroll is expressible at all, which is the whole
-    // conversion. 18 px is one wheel notch; the row lands 18 px above where
+    // A *half*-row scroll is expressible at all, which is the whole conversion.
+    // 18 px is one wheel notch; the row lands 18 px above where
     // it started, not a whole entry above it and not nowhere.
     assert_eq!(
         server_row_top(0, SERVER_LIST_ITEM_H / 2.0),
@@ -977,7 +972,7 @@ fn colour_bounds_in_band(
     seen.then_some((x0, y0, x1 - x0, y1 - y0))
 }
 
-/// #376's rule applied to this screen: the discriminator for a hover overlay
+/// The discriminator for a hover overlay on this screen
 /// is **position**. A gate that proved "an overlay drew in a row" would pass
 /// on an overlay nailed to row 0.
 ///
@@ -1094,7 +1089,7 @@ fn ok_statuses(
     statuses
 }
 
-/// #421's "who's online" tooltip, from the frame side and the draw side
+/// The "who's online" tooltip, from the frame side and the draw side
 /// together: `server_list_frame` shapes the lines from the sample — vanilla's
 /// `... and N more ...` when the sample is short of the count — and
 /// `draw_server_entry` only shows the box when the cursor is over the status
@@ -1594,7 +1589,7 @@ fn band_coverage(
     }
 }
 
-/// #395's pixel gate: a real `EditBox` on a real screen, measured **inside
+/// A pixel gate using a real `EditBox` on a real screen, measured **inside
 /// its own rect**, with the caret at two different positions.
 ///
 /// Every bound here is derived from the widget rather than restated: the rect
@@ -2153,7 +2148,7 @@ fn long_labels_are_clipped_instead_of_overrunning_the_row() {
     );
 }
 
-// -- the account screen (#66/#402) ----------------------------------------
+// -- the account screen -----------------------------------------------------
 
 /// A nav whose `profiles.json` holds `names`, most-recently-used **first**
 /// (the order `AccountsNav::ordered` sorts into, so `names[0]` is row 0).
@@ -2409,7 +2404,7 @@ fn the_account_rows_are_in_the_order_click_assumes() {
     // `AccountsNav::hover` maps a **rendered** row index back through the
     // scroll window and then onto the four button slots, so this order is a
     // coupling between two files — the same guard shape the settings and
-    // multiplayer screens carry against the same #391 bug.
+    // multiplayer screens carry against the same row-index mismatch.
     use crate::menu::accounts::{
         BUTTON_ADD, BUTTON_CANCEL, BUTTON_COUNT, BUTTON_REMOVE, BUTTON_SELECT,
     };
@@ -3557,7 +3552,8 @@ fn the_odd_stat_rows_zebra_grey_reaches_real_geometry_not_just_frame_metadata() 
 
     // The discriminating control CLAUDE.md's own evidence section asks for:
     // the two shades must not coincide, or a solid-white implementation
-    // (the pre-#564 bug) would satisfy the assertion above by accident.
+    // a solid-white implementation would satisfy the assertion above by
+    // accident.
     assert_ne!(odd_grey, widget::argb_to_rgba(-1));
 }
 
@@ -3592,7 +3588,7 @@ fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
          with the panorama"
     );
     assert!(f.vanilla, "and it must be laid out from vanilla's arithmetic");
-    // Ten since issue #535 put vanilla's singleplayer Open to LAN button beside
+    // Ten rows are expected: the singleplayer Open to LAN button sits beside
     // Options. Read from the button table rather than restated, so the two cannot
     // drift.
     assert_eq!(f.rows.len(), PAUSE_BUTTONS.len());
@@ -3608,8 +3604,8 @@ fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
         "selection follows the nav's pause_index"
     );
     // Seven are live: the three with actions, plus Advancements, Statistics and
-    // Player Reporting since issues #167/#188/#189 built the screens behind them,
-    // and Open to LAN since #535 gave `IntegratedServer::open_to_lan` a caller
+    // Player Reporting has a live screen behind it, and Open to LAN has a
+    // caller through `IntegratedServer::open_to_lan`
     // (see `PauseButton::enabled`'s own doc for each — what each screen shows is
     // honest-but-limited, not what made the button liveness conditional).
     let live: Vec<&str> = f
@@ -3640,7 +3636,7 @@ fn pause_frame_builds_vanillas_ten_widgets_in_order_and_tracks_the_highlight() {
     assert!(!geometry(&f, 1280.0, 720.0).is_empty());
 }
 
-/// Issue #535's scope 2: once the hosted world is published, Open to LAN has
+/// Once the hosted world is published, Open to LAN has
 /// nothing left to offer (this client has no unpublish/toggle form — see
 /// `PauseButton::OpenToLan`'s own doc) and `MenuNav::pause_buttons` omits it
 /// rather than merely disabling it.
@@ -3729,7 +3725,7 @@ fn the_title_screen_rects_are_vanillas_own() {
     // row from vanilla's own horizontal-position accessor(n, 3, 20) = 427 - 34 + (n-1)*24, and
     // the Options/Quit pair at `W/2 - 100` / `W/2 + 2`, 98 wide.
     //
-    // Since #394 `title_slot` computes these from an arranged
+    // `title_slot` computes these from an arranged
     // `LinearLayout` column instead of holding them as constants, so this is
     // the **no-move gate** for that conversion: the table is vanilla's own
     // hand arithmetic (which uses no layout class at all) and the values come
@@ -3772,8 +3768,8 @@ fn the_pause_screen_rects_are_vanillas_own() {
     // aligned (0.5, 0.25) so its origin is (321, 78); row y offsets inside it
     // are [0, 70, 94, 118, 142] and each child sits at its own padding.
     //
-    // These nine rects were `pause_slot`'s *implementation* until #394 and are
-    // now its expectation: the values below come out of a real ported
+    // These nine rects are `pause_slot`'s expectation: the values below come
+    // out of a real ported
     // `GridLayout`, and the table is the independent derivation they have to
     // agree with. Two derivations of the same arithmetic, one by hand from the
     // Java and one by running a port of it — which is the only shape of gate
@@ -3788,9 +3784,9 @@ fn the_pause_screen_rects_are_vanillas_own() {
         (B::Feedback, (gx + 84.0, gy + 98.0, 20.0, 20.0)),
         (B::Friends, (gx + 108.0, gy + 98.0, 20.0, 20.0)),
         (B::PlayerReporting, (gx + 132.0, gy + 98.0, 20.0, 20.0)),
-        // Issue #535: the Options row is now vanilla's own has-singleplayer-server
-        // predicate's branch — two half-width cells, same 8 px gutter and same
-        // row `y` as the Advancements/Statistics pair two rows up. The grid's five
+        // The local hosted-game branch creates two half-width cells, with the same
+        // 8 px gutter and row `y` as the Advancements/Statistics pair two rows up.
+        // The grid's five
         // row offsets and its 212x166 size are unchanged, which is why this repair
         // touches three lines and not the table.
         (B::Options, (gx + 4.0, gy + 122.0, 98.0, 20.0)),
@@ -3875,7 +3871,7 @@ fn the_pause_grid_size_matches_whether_or_not_lan_is_published() {
 
 #[test]
 fn a_changed_cell_padding_moves_every_pause_rect() {
-    // #394's negative control, executed rather than described: change one
+    // Negative control, executed rather than described: change one
     // `LayoutSettings` padding value and the rect assertions must go red. The
     // subject is the real builder with one argument varied, not a copy of it,
     // so this cannot pass by testing something else.
@@ -3952,7 +3948,8 @@ fn death_frame_builds_vanillas_two_widgets_in_order_and_tracks_the_highlight() {
     assert_eq!(no_message.labels[1].text, "Score: 0");
 }
 
-/// The discriminating gate for #574: vanilla's own death-screen background-extraction
+/// The discriminating gate for the death-screen background: vanilla's own
+/// background-extraction
 /// logic draws a vertical gradient, not a flat wash, so the colour at the top and the
 /// bottom of the backdrop quad must differ — a gate sampling one point (or the
 /// vertex-*coverage* helpers elsewhere in this file, which count vertices
@@ -4059,7 +4056,7 @@ fn the_death_screens_title_is_anchored_on_the_left_quarter_not_the_centre() {
     );
 }
 
-/// Issue #401: every width-derived [`Origin`] anchor is vanilla's `this.width`
+/// Every width-derived [`Origin`] anchor uses the canvas width
 /// (always `int`) divided by a constant — Java integer division — so the x
 /// term must be `floor`ed. At an *even* width that is invisible, because
 /// `width * 0.5` (or `* 0.25`) is already a whole pixel; **no test before
@@ -4240,7 +4237,7 @@ fn the_highlighted_pause_button_is_visibly_different_from_its_neighbours() {
     // vanilla's `WidgetSprites::get` gives disabled priority over hovered.
     //
     // The subject is **Report Bugs (index 3)**, not Advancements (index 1):
-    // #167 made that one live, and a control pointed at an enabled row measures
+    // A control pointed at an enabled row measures
     // nothing. Report Bugs has no screen behind it and no plan for one, so it is
     // the stable choice.
     let disabled_row = 3;
@@ -4464,8 +4461,8 @@ fn the_button_sprite_matches_vanillas_enabled_hovered_rule() {
 fn every_title_and_pause_widget_draws_the_sprite_the_widget_layer_picks() {
     use crate::menu::nav::{MAIN_BUTTONS, PAUSE_BUTTONS};
 
-    // The island this rules out is the one #393 could most easily have
-    // landed: `menu/widget.rs` compiles, its own tests are green, and
+    // The dead-code path this rules out is the one a widget-layer wiring error could
+    // create: `menu/widget.rs` compiles, its own tests are green, and
     // `draw_widget` keeps a private three-way `if` — so the widget layer is
     // dead code while every existing gate still passes.
     //
@@ -4475,10 +4472,11 @@ fn every_title_and_pause_widget_draws_the_sprite_the_widget_layer_picks() {
     // stopped consulting the widget would have to keep agreeing with
     // vanilla's rule by coincidence, for all 36 (button, focused) pairs, to
     // pass — and if the rule in `widget.rs` is wrong, this fails too.
-    // #394 extends it in the other direction, without new machinery: each
+    // The arranged layout extends it in the other direction, without new
+    // machinery: each
     // case is now drawn at that button's **own** slot, and the sprite's
     // destination rect is asserted against it. `title_slot`/`pause_slot` read
-    // the arranged layout tree since #394, so this is also the gate that says
+    // the arranged layout tree, so this is also the gate that says
     // the layout containers reach pixels — an arrange pass that silently
     // no-opped would put every widget at the block's origin and fail here
     // while every "a button drew something" check still passed.
@@ -5407,8 +5405,8 @@ fn the_world_select_frame_is_the_screen_vanilla_draws() {
 /// This is the anti-island assertion for the save list: `crate::saves` can
 /// enumerate perfectly and reach zero pixels if `frame_for` never emits a row for
 /// a world. It also pins the **row order** — the ids run search → buttons →
-/// worlds, which is *not* the on-screen order, and getting that wrong is #391 at
-/// list scale (every click one control off).
+/// worlds, which is *not* the on-screen order; getting that wrong produces a
+/// one-control offset at list scale (every click one control off).
 #[test]
 fn the_world_select_frame_with_worlds_lists_them_all() {
     use crate::menu::world_select::{FIRST_WORLD_ROW, WORLD_SELECT_BUTTONS, WorldSelectButton};
@@ -5430,7 +5428,7 @@ fn the_world_select_frame_with_worlds_lists_them_all() {
             "{button:?}'s row moved when the list gained rows"
         );
     }
-    // Play and Delete are live now (#468, #540), and Edit/Re-Create still are not.
+    // Play and Delete are live, while Edit and Re-Create are still inactive.
     assert!(f.rows[WorldSelectButton::Play.row()].enabled);
     assert!(f.rows[WorldSelectButton::Delete.row()].enabled);
     assert!(!f.rows[WorldSelectButton::Edit.row()].enabled);
@@ -5550,7 +5548,7 @@ fn every_world_select_button_draws_the_sprite_the_widget_layer_picks() {
                  {expected}, which is what WidgetSprites::get selects"
             );
             // Per-case control: flipping `active` must move the sample off
-            // this region. For the five disabled buttons this is the #397
+            // this region. For the five disabled buttons this is the
             // assertion run in reverse — an enabled Create New World must
             // *not* sample `widget/button_disabled`.
             let flipped = widget::BUTTON_SPRITES.get(!enabled, focused);
@@ -5597,8 +5595,8 @@ fn a_disabled_world_select_label_lands_on_vanillas_grey() {
     assert_eq!(grey, widget::INACTIVE_LABEL);
 
     for (button, want, name) in [
-        // Issue #190 made Create live; Edit is still present-and-disabled
-        // and takes over as the disabled example here.
+        // Create is live; Edit remains present and disabled, so it provides the
+        // disabled example here.
         (B::Edit, grey, "disabled"),
         (B::Back, widget::ACTIVE_LABEL, "enabled"),
     ] {
@@ -5631,7 +5629,7 @@ fn a_disabled_world_select_label_lands_on_vanillas_grey() {
 /// This is the assertion that keeps "the list has a world" distinguishable
 /// from "the list failed to draw" — without it the two are the same picture,
 /// which is exactly the absence-needs-a-control rule. It is also the pixel
-/// half of #287's world list: the button that launches is only honest if the
+/// pixel half of the world list: the button that launches is only honest if the
 /// world it launches is on screen. The band is the row's content rect from
 /// `world_list_row_content_rect`, the same expression the label's position is
 /// derived from, and the failure output is a bounding box rather than a
@@ -6758,7 +6756,7 @@ fn hovering_a_world_select_button_lights_it_without_moving_focus() {
 
     // A **disabled** hovered button still draws the disabled sprite —
     // `WidgetSprites`' three-argument collapse, the single rule a hand-rolled
-    // highlight gets wrong. Edit, not Create (issue #190 made Create live).
+    // highlight gets wrong. Edit, not Create, is the disabled control.
     let edit = frame.rows[B::Edit.row()].clone();
     let mut f = frame_with(vec![edit], 99);
     f.vanilla = true;
@@ -6860,7 +6858,7 @@ fn the_search_box_draws_as_a_field_inside_its_own_slot() {
     // `x + width`. So on a focused box the leftmost vertex in this band is the
     // box's edge, not the text's, and the gate accused the draw of painting
     // 4 px left of `text_x` when the draw was right and the 4 px was
-    // `BORDER_INSET` in the gate's own reasoning. (#395's `EditBox` gate dodges
+    // `BORDER_INSET` in the gate's own reasoning. The focused `EditBox` gate dodges
     // this by insetting its band to `text_x`/`inner_width`; that is the right
     // answer for measuring *what* drew and the wrong one for measuring
     // *where* it started.)
@@ -7962,8 +7960,8 @@ fn a_kick_reason_keeps_the_server_s_colours_through_frame_and_draw() {
     // And the draw actually uses them. `build` with no font takes
     // `text_spans`' fixed-advance fallback, which still emits one coloured quad
     // per glyph into the colour stream — so a red quad and a gold quad must both
-    // be present. Before this change the notice drew through `b.text` with a
-    // single `FG_BAD`, so neither colour could appear.
+    // be present. The single-colour text path would otherwise draw through
+    // `b.text` with `FG_BAD`, so neither colour could appear.
     let geometry = build(&frame, None, None, V_W, V_H);
     let has = |rgb: u32| {
         let want = [
@@ -8588,7 +8586,7 @@ fn in_world_settings_carries_the_same_band_chrome_as_the_main_menu() {
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
-// -- the tab bar "meshes with the border" (issues #564/#567, owner's visual audit) --
+// -- the tab bar "meshes with the border" -----------------------------------
 //
 // Point-sampled, not vertex-counted: `colour_at` reads the *topmost quad
 // covering an exact pixel*, which is what lets this tell a large enclosing
@@ -8783,16 +8781,11 @@ fn create_worlds_tab_bar_gets_the_flanking_separators_but_never_the_merge_fill()
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
 
-/// The owner's report on the just-landed tab widget (issues #564/#567): "the
-/// tabs for Create New World etc look almost perfect! the text like 'Game',
-/// 'World' etc. (the tab labels) are too high up". `draw_tab` blitted the
-/// label at vanilla's own `top` local directly (its own y-accessor, plus 3
-/// when unselected and 0 when selected — vanilla's own menu-tab-bar source)
-/// instead of centring it between `top` and `bottom`
-/// the way vanilla's own menu-tab-button's label-render call, through its own
-/// scrolling-with-default-center helper, through its own active-text-collector's
-/// default-scrolling helper, actually does — see
-/// `widget::tab_label_top`'s own doc for the formula and the incident.
+/// Tab labels must be vertically centred within their controls. The selected
+/// and unselected states use different top insets, then share the same
+/// centring calculation between the control's top and bottom edges; drawing at
+/// the raw top inset would leave both states too high. See
+/// `widget::tab_label_top` for the formula.
 ///
 /// Two arms, selected and unselected, on the **same label** ("More",
 /// `create_world::MORE_TAB`) so a fixture-width or x-position difference
