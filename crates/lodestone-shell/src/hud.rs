@@ -351,10 +351,6 @@ pub struct TabPanel {
     pub max_line_width: f32,
     /// The screen (logical canvas) width the layout was built for.
     pub screen_w: f32,
-    /// How many header lines were laid out.
-    pub header_len: usize,
-    /// How many footer lines were laid out.
-    pub footer_len: usize,
 }
 
 impl TabPanel {
@@ -370,7 +366,6 @@ impl TabPanel {
         show_head: bool,
         max_name_width: f32,
         header_len: usize,
-        footer_len: usize,
         widest_banner: f32,
     ) -> Self {
         // `for (cols = 1; rows > 20; rows = (slots + cols - 1) / cols) { cols++; }`
@@ -413,8 +408,6 @@ impl TabPanel {
             footer_top,
             max_line_width,
             screen_w,
-            header_len,
-            footer_len,
         }
     }
 
@@ -3704,7 +3697,6 @@ impl HudGeometry {
                 players.show_head,
                 max_name_width,
                 players.header.len(),
-                players.footer.len(),
                 widest_banner,
             );
             let plate_x = panel.plate_x();
@@ -10553,7 +10545,7 @@ mod tests {
     /// empty rows of plate hanging below it, so `cols` alone is not a test.
     #[test]
     fn the_column_split_matches_vanillas_own_loop_at_the_threshold() {
-        let panel = |slots: usize| TabPanel::new(640.0, slots, false, 40.0, 0, 0, 0.0);
+        let panel = |slots: usize| TabPanel::new(640.0, slots, false, 40.0, 0, 0.0);
         // One player: one column of one. Not one column of 20.
         assert_eq!((panel(1).cols, panel(1).rows), (1, 1));
         // MAX_ROWS_PER_COL exactly: still one column, because the guard is
@@ -10581,7 +10573,7 @@ mod tests {
     /// has to cross the split.
     #[test]
     fn slots_fill_column_major_so_the_list_reads_downwards() {
-        let panel = TabPanel::new(640.0, 21, false, 40.0, 0, 0, 0.0);
+        let panel = TabPanel::new(640.0, 21, false, 40.0, 0, 0.0);
         assert_eq!(panel.rows, 11);
         let [x0, y0] = panel.slot_origin(0);
         let [x10, y10] = panel.slot_origin(10);
@@ -10601,9 +10593,9 @@ mod tests {
     /// the control: a layout that always added the gap would fail here.
     #[test]
     fn a_header_offsets_the_rows_by_its_own_height_plus_one() {
-        let bare = TabPanel::new(640.0, 3, false, 40.0, 0, 0, 0.0);
+        let bare = TabPanel::new(640.0, 3, false, 40.0, 0, 0.0);
         assert_eq!(bare.rows_top, 10.0);
-        let with_header = TabPanel::new(640.0, 3, false, 40.0, 2, 0, 0.0);
+        let with_header = TabPanel::new(640.0, 3, false, 40.0, 2, 0.0);
         assert_eq!(with_header.rows_top, 10.0 + 2.0 * TAB_LINE_H + 1.0);
         // `yyo += rows * 9 + 1` before the footer plate, counted from wherever the
         // rows actually began.
@@ -10618,10 +10610,10 @@ mod tests {
     /// block width and only ever takes a `max`.
     #[test]
     fn a_wide_banner_widens_the_plate_and_a_narrow_one_leaves_it_alone() {
-        let bare = TabPanel::new(640.0, 3, false, 40.0, 0, 0, 0.0);
-        let narrow = TabPanel::new(640.0, 3, false, 40.0, 1, 0, 4.0);
+        let bare = TabPanel::new(640.0, 3, false, 40.0, 0, 0.0);
+        let narrow = TabPanel::new(640.0, 3, false, 40.0, 1, 4.0);
         assert_eq!(narrow.max_line_width, bare.max_line_width);
-        let wide = TabPanel::new(640.0, 3, false, 40.0, 1, 0, bare.max_line_width + 60.0);
+        let wide = TabPanel::new(640.0, 3, false, 40.0, 1, bare.max_line_width + 60.0);
         assert_eq!(wide.max_line_width, bare.max_line_width + 60.0);
         // …and the plate really does grow with it, rather than the width being
         // computed and dropped.
