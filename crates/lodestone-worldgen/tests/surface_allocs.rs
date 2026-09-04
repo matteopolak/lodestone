@@ -74,8 +74,6 @@ use lodestone_worldgen::surface::{BlockCanon, PreState, SurfaceSystem};
 use serde_json::Value;
 
 const SEED: i64 = 42;
-const MIN_Y: i32 = -64;
-const HEIGHT: i32 = 384;
 
 thread_local! {
     static ALLOCS: Cell<u64> = const { Cell::new(0) };
