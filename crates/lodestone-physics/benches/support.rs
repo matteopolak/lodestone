@@ -9,7 +9,7 @@
 //! crate stops being premature. It is not done in this pass: doing it here
 //! would mean editing `worldgen`'s and `entity`'s `Cargo.toml`/`mod support;`
 //! lines while those crates are held by concurrent agents, which is a bigger
-//! blast radius than one more copy. Flagged in `docs/benchmark-harness.md`
+//! blast radius than one more copy. Flagged in `docs/benchmark-regression-gate.md`
 //! as the next thing to do once those crates are free.
 //!
 //! # What this does

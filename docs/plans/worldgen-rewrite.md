@@ -578,7 +578,7 @@ acceptance is always counters and gates — never a profile, never a bare durati
 
 | # | Unit | Cluster (files) | Depends | Cost | RNG order |
 |---|------|-----------------|---------|------|-----------|
-| U1 | Benchmark harness: counters + C_ss/C_cold + calibration | `benches/`, `src/` counter hooks, `docs/benchmark-harness.md` | — | M | none |
+| U1 | Benchmark harness: counters + C_ss/C_cold + calibration | `benches/`, `src/` counter hooks, `docs/render-benchmarks.md` | — | M | none |
 | U2 | Release baseline + profile on embedded data; publish per-stage µs + counters; re-negotiate targets | bench-results, this doc, DESIGN §12 entry | U1 | S | none |
 | U3 | Numeric ids: interned `u16` states through dense_grid/carver/ore/top-layer; `String` only at serve boundary | `dense_grid.rs`, `carver/`, `feature/mod.rs`, `feature/top_layer.rs`, `overworld.rs` | U1 | L | none (representation) |
 | U4 | Flattened density engine + vanilla cell-fill (its own plain-trilinear order — §12.101, **not** the incremental walk) + per-chunk scratch (kills D1, D3) — order fix landed `08f5d98a`; remainder re-scoped in **#490** | new `engine/` (in the U16 core crate), then `density/`, `aquifer/`, `overworld/fill.rs` cutover | U1, U16 | L | none (no RNG in density) |

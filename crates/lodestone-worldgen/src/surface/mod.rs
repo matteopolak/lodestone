@@ -599,7 +599,8 @@ impl SurfaceSystem {
     /// This used to be an exhaustive map (every one of a chunk's 16×16×`gen_depth`
     /// positions inserted up front from `pre`, then selectively overwritten by
     /// matched rules) so callers could treat the return value as the whole
-    /// column. Profiling (`docs/benchmark-harness.md`) showed that exhaustive
+    /// column. Profiling with CPU-time weighting (see `docs/roadmap/benchmarks.md`)
+    /// showed that exhaustive
     /// pre-fill — 98304 `String` clones and `HashMap` inserts per chunk for a
     /// gen_depth of 384, the overwhelming majority of them immediately
     /// discarded unread — was itself close to a fifth of total column-generation
