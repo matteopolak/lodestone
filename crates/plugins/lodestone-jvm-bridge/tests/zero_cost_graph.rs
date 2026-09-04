@@ -132,9 +132,8 @@ fn dependency_names(manifest: &Path) -> Vec<String> {
 /// The load-bearing assertion: no crate in this workspace names the bridge, so
 /// it is absent from every default build's graph by construction.
 ///
-/// When the bridge does get wired up, it must be behind an **optional
-/// dependency plus a feature that is off by default** — at which point this
-/// test should be updated to assert exactly that, rather than deleted.
+/// The bridge runtime is behind an **optional dependency plus a feature that
+/// is off by default**; the feature declaration has its own assertion below.
 #[test]
 fn nothing_in_the_workspace_depends_on_the_bridge() {
     let root = workspace_root();
@@ -234,9 +233,8 @@ fn the_standalone_invocation_spike_is_outside_the_production_graph() {
     );
 }
 
-/// This crate must not link a JVM. Checked against its own manifest, and
-/// permitting an *optional* dependency only — that is the shape the JNI layer
-/// will land in, and an unconditional one is what must never appear.
+/// This crate must not link a JVM by default. The optional `jvm` feature is the
+/// explicit opt-in boundary for hosts that want to start one.
 #[test]
 fn the_bridge_names_no_unconditional_jvm_linkage() {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
@@ -265,4 +263,22 @@ fn the_bridge_names_no_unconditional_jvm_linkage() {
              a default-off feature. Line was: {declared:?}"
         );
     }
+}
+
+/// The production runtime boundary must be mechanically default-off. Keeping
+/// this in the graph guard makes a future feature edit fail here rather than
+/// silently adding JVM linkage to ordinary server builds.
+#[test]
+fn jvm_support_is_explicitly_default_off() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    let text = std::fs::read_to_string(&manifest).expect("read own manifest");
+    assert!(
+        text.lines().any(|line| line.trim() == "default = []"),
+        "the bridge must have an explicit empty default feature set"
+    );
+    assert!(
+        text.lines()
+            .any(|line| line.trim() == "jvm = [\"dep:jni\"]"),
+        "the JVM runtime must be reachable only through the named jvm feature"
+    );
 }
