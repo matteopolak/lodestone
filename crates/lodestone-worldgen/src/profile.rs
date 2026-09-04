@@ -82,8 +82,9 @@
 //! `column_timed`'s already-`#[cfg(not(target_arch = "wasm32"))]` output).
 //! `crates/lodestone-worldgen/tests/profile_columns_report.rs` is a small
 //! integration test that runs this over a real, fixture-backed generator
-//! and prints the report with `--nocapture`; that is how the numbers in
-//! `docs/tick-and-worldgen-profiling.md` were produced.
+//! and prints the report with `--nocapture`. The profiling guidance in
+//! `docs/tick-scheduling.md` explains why its cache-cold fixture scene must
+//! be named when interpreting that output.
 
 #![cfg(not(target_arch = "wasm32"))]
 

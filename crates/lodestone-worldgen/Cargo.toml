@@ -14,7 +14,7 @@ workspace = true
 default = []
 # Structural counters through the generation hot path, the instrument the
 # worldgen-rewrite acceptance criteria are written in
-# (`docs/plans/worldgen-rewrite.md` Unit 1, `docs/benchmark-harness.md`).
+# (`docs/plans/worldgen-rewrite.md` Unit 1, `docs/render-benchmarks.md`).
 #
 # **This is now a forward, not a definition.** `counters.rs` moved to
 # `lodestone-worldgen-core` in Unit 16, so the `#[cfg(feature = "gen-counters")]`

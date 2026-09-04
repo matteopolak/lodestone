@@ -1,11 +1,11 @@
-//! Real numbers for `profile.rs`'s per-stage percentile aggregator, over a
-//! real fixture-backed generator — the source of the figures quoted in
-//! `docs/tick-and-worldgen-profiling.md`. `src/profile.rs`'s own unit tests
-//! already prove the percentile math against hand-built `StageTimes`; this
-//! file's job is narrower: prove the whole pipeline (a real
+//! A report from `profile.rs`'s per-stage percentile aggregator over a real,
+//! fixture-backed generator. `src/profile.rs`'s own unit tests already prove
+//! the percentile math against hand-built `StageTimes`; this file's job is
+//! narrower: prove the whole pipeline (a real
 //! `OverworldGenerator`, `column_timed`, `profile_columns`) produces a
 //! sane, well-ordered report, and print it with `--nocapture` so a human can
-//! read the actual split.
+//! read the actual split. `docs/tick-scheduling.md` explains why this
+//! cache-cold fixture scene is not a general claim about production costs.
 //!
 //! Same `FsResolver`/fixture-tree shape as `tests/overworld_gen.rs` and
 //! `benches/generation.rs`, with `full: true` (every fixture file, not just
