@@ -497,6 +497,71 @@ tick side. Callback errors map to `JvmError`, while the existing port retains it
 panic/error mapping. This is the host-callable runtime seam, not broad event compatibility or a
 Paper redistribution.
 
+### 4.4 Experimental adapter worker
+
+`adapter::AdapterHost` is the production loading and invocation boundary for an explicitly supplied
+adapter class. It is not Paper plugin discovery or a Fabric mod loader. The host starts it with a
+`JvmConfig`, a dotted Java class name, and a positive operation deadline. Startup happens on one
+dedicated worker; `poll` reports `Ready` only after class loading, static-method validation, and
+native registration succeed. The worker keeps its class reference inside one scoped attachment,
+and each tick uses a local JNI frame so repeated callbacks do not accumulate temporary references.
+
+The adapter bootstrap contract is deliberately small:
+
+```java
+package example;
+public final class Adapter {
+    private static native int blockStateId(int x, int y, int z);
+    public static void onTick(long tick) {
+        int state = blockStateId(11, 7, -3);
+        System.out.println("tick=" + tick + " blockState=" + state);
+    }
+}
+```
+
+The host calls `dispatch_tick` only while `is_idle` is true, drains `service_pending` through its
+public block-state accessor, and polls `TickCompleted` before dispatching again. There is at most
+one outstanding tick, so a slow callback cannot silently build a backlog. `BlockStateQuery` uses
+absolute primary-world block coordinates. The host returns either a real `u32` state ID or a named
+error; an unavailable chunk must not be reported as air. Values outside Java's nonnegative `int`
+range fail explicitly. This bootstrap exposes an observation only, not block mutation or event
+cancellation semantics.
+
+The registered native function receives a thread-local `WorldPort`, never an ECS world. It enters
+the shared callback-depth guard, applies the port deadline, and contains panics/errors at the JNI
+boundary. The port is installed only on the worker: a Java-created thread attempting the native
+query fails with a named worker-thread error. Native queries from class initializers are unsupported
+because initialization can run before registration. Adapters must defer world queries until
+`onTick`.
+
+Loading and callback errors retain the class/method and Java exception description. A missed
+deadline is terminal even if a late completion is queued; the host must drop the adapter and report
+the error. Drop disconnects channels without joining untrusted Java code. Arbitrary Java execution
+cannot be safely killed in-process, so a timed-out callback may keep running until process exit.
+There is no hot reload or JVM restart: JNI allows only one JVM startup in a process, including after
+a failed adapter load. The operator classpath uses the JVM system loader; production interception,
+Paper bootstrapping and Paper's plugin lifecycle are separate remaining work.
+
+Hermetic tests exercise worker/host thread separation, exact block-query arithmetic, sequence
+preservation, overlap rejection, error propagation and terminal deadlines. The live test
+`java_adapter_registration_world_query_and_exception_are_connected` compiles only the repository's
+`tests/java/BridgeAdapter.java` and starts a real JVM. Its success callback expects state `422` for
+`(11,7,-3)`; its failure callback queries `(-19,5,23)` and requires the host's unavailable-chunk error
+to return through Java as a `RuntimeException` naming `onTick` and the native query.
+The fixture also requires an unregistered native to throw `UnsatisfiedLinkError` and a Java-created
+thread to receive the named worker-thread error, with the registered main-worker query as control.
+Run this gate
+in a fresh process with `JAVA_HOME` pointing to a JDK:
+
+```bash
+cargo test -p lodestone-jvm-bridge --features jvm --test adapter_host \
+    java_adapter_registration_world_query_and_exception_are_connected -- --ignored --exact
+```
+
+To extend the boundary, change the adapter's native declaration and the corresponding Rust
+registration together, then add an independently predicted end-to-end fixture. Add concrete public
+host queries on demand rather than enumerating a speculative compatibility surface.
+
 ---
 
 ## 5. The ABI decision

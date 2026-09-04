@@ -24,6 +24,8 @@
 //!   Java/Rust cycle fails before it can overflow or wedge.
 //! - [`runtime`] (with `jvm`) — explicit JVM startup and scoped thread
 //!   attachment, with no ECS guard or world handle in the callback API.
+//! - [`adapter`] (with `jvm`) — a dedicated worker that loads an explicit
+//!   adapter class, registers its native block query, and dispatches ticks.
 //!
 //! ## What is deliberately not here
 //!
@@ -79,6 +81,9 @@ pub mod port;
 
 #[cfg(feature = "jvm")]
 pub mod runtime;
+
+#[cfg(feature = "jvm")]
+pub mod adapter;
 
 pub use callback::{
     CallbackDepthError, CallbackDepthGuard, DEFAULT_CALLBACK_DEPTH_LIMIT,
