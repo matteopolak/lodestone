@@ -382,16 +382,33 @@ What exists:
   positions and states from the generator's domain, and a recorded divergence
   inside the probe alphabet and execution horizon. A replay cannot use the
   general `RunCommand` action to escape the reset lane.
-- **Three live integration targets, plus two historical controls, against a
+- `differential_live_generated_redstone.rs` uses the same generator over the
+  existing two-seam repeater contraption. Its finite domain toggles only the
+  source between air and a redstone block, with one to three actions and gaps
+  no larger than three ticks. It compares the contraption's three existing
+  dust-power alphabets, so an unexpected power is a mismatch rather than a
+  loosely matched success. Generated candidates and the independent property
+  probe use separate dedicated lanes; each candidate force-loads and rebuilds
+  its generated lane, then requires all three repeaters to remain unpowered for
+  twelve consecutive observed ticks before the game-time counter is anchored.
+  A missed RCON tick deadline is retryable only after a full fresh reset, and
+  no accepted comparison has a missed deadline. The ignored target proves the
+  powered dust probe accepts `power=15` and rejects `power=0`, then requires a
+  faulty model read to be generated, semantically shrunk without changing its
+  first-divergence signature, JSON-decoded, and replayed from another reset.
+  The fixed stream must return `NoDivergence`. Replay JSON is rejected before
+  RCON setup unless its scenario, source-only action domain, probe region,
+  state alphabets, and execution horizon exactly match this lane.
+- **Four live integration targets, plus two historical controls, against a
   real vanilla 26.2 server**, all `#[ignore]`d.
   `crates/lodestone-fuzz/tests/differential_live_fluid_spread.rs` pairs
   `FluidModelOracle` with `RconOracle` over a water front spreading down a
   closed stone channel and requires agreement throughout the complete spread.
   `differential_live_redstone_contraption.rs` pairs
   `RedstoneModelOracle` with `RconOracle` over a repeater chain crossing two
-  chunk seams, out to fourteen ticks, and agrees. The generated fluid run is
-  the reset-and-replay path described immediately above. See the two fixed
-  "live finding" sections below.
+  chunk seams, out to fourteen ticks, and agrees. The generated fluid and
+  redstone runs are the reset-and-replay paths described immediately above.
+  See the two fixed "live finding" sections below.
 
 ### Two measured facts about reading and stepping a live world
 
@@ -650,8 +667,8 @@ agreement or disagreement.
   `pause-when-empty-seconds=0` — with nobody logged in, a paused world runs no
   scheduled block ticks and the comparison reports agreement on a frozen
   world.
-- **`LODESTONE_DIFFERENTIAL_REPLAY`** (path) — when running
-  `differential_live_generated_fluid`, bypasses generation and replays the
+- **`LODESTONE_DIFFERENTIAL_REPLAY`** (path) — when running either generated
+  live differential target, bypasses generation and replays the
   versioned JSON's explicit minimized script against a freshly reset live
   lane. The file must satisfy the live scenario's exact generated-domain and
   probe-lane policy before any oracle connection is attempted. The test then
