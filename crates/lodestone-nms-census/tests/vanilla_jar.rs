@@ -1,9 +1,9 @@
-//! Executable-use gate against the pinned local Paper 26.2 server jar.
+//! Executable-use gate against a pinned local Paper 26.2 server jar.
 //!
 //! This stays ignored because the jar is a user-supplied, untracked measurement
-//! input. When deliberately enabled, the exact baseline detects a parser that
-//! loses instruction alignment while still returning a superficially plausible
-//! census.
+//! input and target package are user-supplied. When deliberately enabled, the
+//! exact baseline detects a parser that loses instruction alignment while still
+//! returning a superficially plausible census.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -35,7 +35,21 @@ fn the_pinned_paper_jar_reproduces_the_executable_member_baseline() {
         "the baseline is only valid for the documented Paper 26.2 build 121 materialisation"
     );
 
-    let census = Census::scan_jar(&jar, &ScanOptions::default()).expect("pinned Paper jar scans");
+    let target_prefix = std::env::var("LODESTONE_NMS_CENSUS_PREFIX")
+        .expect("set LODESTONE_NMS_CENSUS_PREFIX to the target package in internal form");
+    assert!(
+        target_prefix.ends_with('/'),
+        "LODESTONE_NMS_CENSUS_PREFIX must end with '/'"
+    );
+    let census = Census::scan_jar(
+        &jar,
+        &ScanOptions {
+            target_prefix: target_prefix.clone(),
+            internal_prefixes: vec![target_prefix],
+            recurse_jars: true,
+        },
+    )
+    .expect("pinned Paper jar scans");
     assert_eq!(census.classes_scanned, 10_353, "recorded class baseline");
     assert_eq!(census.parse_failure_count(), 0, "every class parses");
     assert_eq!(

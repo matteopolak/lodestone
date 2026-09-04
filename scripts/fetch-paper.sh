@@ -4,8 +4,8 @@
 # measured against.
 #
 # WHY THIS EXISTS
-#   `docs/java-plugin-bridge.md` reports a census of the `net.minecraft.*`
-#   surface that Paper's own bytecode calls. That number is only meaningful if
+#   `docs/java-plugin-bridge.md` reports a census of the target-package surface
+#   that Paper's own bytecode calls. That number is only meaningful if
 #   the next reader can reproduce it, and "download the latest Paper" is not
 #   reproducible: Paper publishes several builds a week and each one changes
 #   the counts. So the version AND the build number are pinned here, and the
@@ -99,4 +99,4 @@ echo "  paper ${PAPER_VERSION} build ${PAPER_BUILD}, sha256 verified"
 echo
 echo "census it with:"
 echo "  cargo run --release -p lodestone-nms-census --bin nms-census -- \\"
-echo "      ${dest} --internal net/minecraft/ --top 40"
+echo "      ${dest} --prefix <target-package/> --top 40"

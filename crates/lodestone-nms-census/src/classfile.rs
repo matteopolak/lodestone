@@ -66,9 +66,9 @@ pub struct ClassFile {
     /// Pool index of this class's own `CONSTANT_Class`.
     ///
     /// Read because a reference census is only meaningful when it knows *who
-    /// is referring*: a call from `net.minecraft` to `net.minecraft` is
-    /// internal to the layer being replaced, while the same call from
-    /// `org.bukkit.craftbukkit` is a member the bridge must actually provide.
+    /// is referring*: a call from the replaced layer to itself is internal,
+    /// while the same call from a wrapper or extension class is a member the
+    /// bridge must actually provide.
     pub this_class: u16,
     /// Static member instruction sites decoded from method bytecode.
     member_uses: Vec<MemberUse>,
@@ -358,7 +358,7 @@ pub enum Entry {
     Utf8(String),
     /// `CONSTANT_Class` (tag 7): an index to the internal-form name.
     Class {
-        /// Pool index of the `Utf8` holding e.g. `net/minecraft/world/level/Level`.
+        /// Pool index of the `Utf8` holding e.g. `example/target/World`.
         name_index: u16,
     },
     /// `CONSTANT_Fieldref` / `Methodref` / `InterfaceMethodref` (tags 9, 10, 11).
@@ -605,7 +605,7 @@ impl ConstantPool {
     }
 
     /// The internal-form name of the `CONSTANT_Class` at `index`, e.g.
-    /// `net/minecraft/server/level/ServerLevel`.
+    /// `example/target/World`.
     ///
     /// # Errors
     ///
@@ -662,11 +662,11 @@ impl ConstantPool {
 pub struct MemberRef<'a> {
     /// Field, method or interface method.
     pub kind: RefKind,
-    /// Owning class, internal form (`net/minecraft/world/level/Level`).
+    /// Owning class, internal form (`example/target/World`).
     pub class: &'a str,
-    /// The member's simple name (`getBlockState`, `<init>`).
+    /// The member's simple name (`readState`, `<init>`).
     pub name: &'a str,
-    /// The member's descriptor (`(Lnet/minecraft/core/BlockPos;)V`).
+    /// The member's descriptor (`(Lexample/target/Point;)V`).
     pub descriptor: &'a str,
 }
 

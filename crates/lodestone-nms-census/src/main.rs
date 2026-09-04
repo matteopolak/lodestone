@@ -1,5 +1,6 @@
-//! `nms-census` — report every `net.minecraft.*` member a jar's bytecode
-//! contains, with static instruction-site counts and field directions.
+//! `nms-census` — report every member in a caller-selected target package that
+//! a jar's bytecode contains, with static instruction-site counts and field
+//! directions.
 //!
 //! ```text
 //! cargo run -p lodestone-nms-census --bin nms-census -- <jar> [flags]
@@ -20,8 +21,8 @@ USAGE:
     nms-census <jar> [OPTIONS]
 
 OPTIONS:
-    --prefix <P>          Internal-form package to census, with trailing slash
-                          [default: net/minecraft/]
+    --prefix <P>          Required internal-form package to census, with
+                          trailing slash
     --internal <P>        A prefix whose classes count as part of the layer
                           being replaced, so references *from* them are
                           internal rather than external. Repeatable.
@@ -46,7 +47,7 @@ struct Args {
 
 fn parse_args() -> Result<Option<Args>> {
     let mut jar: Option<PathBuf> = None;
-    let mut prefix = "net/minecraft/".to_owned();
+    let mut prefix: Option<String> = None;
     let mut internal: Vec<String> = Vec::new();
     let mut recurse = true;
     let mut top = 40usize;
@@ -61,7 +62,7 @@ fn parse_args() -> Result<Option<Args>> {
             "--all" => all = true,
             "--classes-only" => classes_only = true,
             "--prefix" => {
-                prefix = args.next().context("--prefix needs a value")?;
+                prefix = Some(args.next().context("--prefix needs a value")?);
             }
             "--internal" => {
                 internal.push(args.next().context("--internal needs a value")?);
@@ -84,9 +85,10 @@ fn parse_args() -> Result<Option<Args>> {
     }
 
     let jar = jar.context("no jar given")?;
-    // A prefix without its trailing slash silently widens the census —
-    // `net/minecraft` also matches `net/minecraftforge/`. Refuse rather than
-    // report a number nobody can interpret.
+    let prefix = prefix.context("--prefix is required; choose the target package to census")?;
+    // A prefix without its trailing slash silently widens the census by
+    // matching sibling packages with the same leading components. Refuse
+    // rather than report a number nobody can interpret.
     if !prefix.ends_with('/') {
         bail!("--prefix must end with '/' (got {prefix:?}); without it the match is a wider package than you meant");
     }

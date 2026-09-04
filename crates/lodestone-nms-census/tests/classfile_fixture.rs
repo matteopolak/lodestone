@@ -42,9 +42,9 @@ use lodestone_nms_census::{Census, ScanOptions, descriptor_object_types};
 ///
 /// | index | entry |
 /// |---|---|
-/// | 1 | `Utf8` `net/minecraft/world/level/Level` |
+/// | 1 | `Utf8` `example/target/World` |
 /// | 2 | `Class` → 1 |
-/// | 3 | `Utf8` `getBlockState` |
+/// | 3 | `Utf8` `readState` |
 /// | 4 | `Utf8` the descriptor |
 /// | 5 | `NameAndType` → 3, 4 |
 /// | 6 | `Long` — **and 7 is its dead second slot** |
@@ -62,8 +62,8 @@ use lodestone_nms_census::{Census, ScanOptions, descriptor_object_types};
 /// and `wide iinc`: a scanner that searches raw bytes for instruction values
 /// would overcount, while a fixed-width-only walker would lose alignment.
 fn fixture_class() -> Vec<u8> {
-    const DESCRIPTOR: &str = "(Lnet/minecraft/core/BlockPos;)\
-                              Lnet/minecraft/world/level/block/state/BlockState;";
+    const DESCRIPTOR: &str = "(Lexample/target/Point;)\
+                              Lexample/target/Value;";
     let mut out = Vec::new();
     out.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes());
     out.extend_from_slice(&0u16.to_be_bytes()); // minor
@@ -79,10 +79,10 @@ fn fixture_class() -> Vec<u8> {
         out.extend_from_slice(s.as_bytes());
     };
 
-    utf8(&mut out, "net/minecraft/world/level/Level"); // 1
+    utf8(&mut out, "example/target/World"); // 1
     out.push(7); // 2: Class
     out.extend_from_slice(&1u16.to_be_bytes());
-    utf8(&mut out, "getBlockState"); // 3
+    utf8(&mut out, "readState"); // 3
     utf8(&mut out, DESCRIPTOR); // 4
     out.push(12); // 5: NameAndType
     out.extend_from_slice(&3u16.to_be_bytes());
@@ -96,7 +96,7 @@ fn fixture_class() -> Vec<u8> {
     out.push(7); // 10: Class
     out.extend_from_slice(&9u16.to_be_bytes());
     utf8(&mut out, "Code"); // 11
-    utf8(&mut out, "isClientSide"); // 12
+    utf8(&mut out, "active"); // 12
     utf8(&mut out, "Z"); // 13
     out.push(12); // 14: NameAndType
     out.extend_from_slice(&12u16.to_be_bytes());
@@ -106,7 +106,7 @@ fn fixture_class() -> Vec<u8> {
     out.extend_from_slice(&14u16.to_be_bytes());
     utf8(&mut out, "run"); // 16
     utf8(&mut out, "()V"); // 17
-    utf8(&mut out, "net/minecraft/world/level/LevelAccessor"); // 18
+    utf8(&mut out, "example/target/WorldView"); // 18
     out.push(7); // 19: Class
     out.extend_from_slice(&18u16.to_be_bytes());
     utf8(&mut out, "tick"); // 20
@@ -258,10 +258,10 @@ fn a_method_reference_resolves_to_class_name_and_descriptor() {
     let member = class.pool.member_ref(8).expect("index 8 is a Methodref");
 
     assert_eq!(member.kind, RefKind::Method);
-    assert_eq!(member.class, "net/minecraft/world/level/Level");
-    assert_eq!(member.name, "getBlockState");
+    assert_eq!(member.class, "example/target/World");
+    assert_eq!(member.name, "readState");
     assert!(
-        member.descriptor.starts_with("(Lnet/minecraft/core/BlockPos;)"),
+        member.descriptor.starts_with("(Lexample/target/Point;)"),
         "descriptor was {:?}",
         member.descriptor
     );
@@ -458,22 +458,22 @@ fn a_truncated_class_file_is_an_error_not_a_short_census() {
 }
 
 /// The descriptor walk finds the types that only ever appear in a signature —
-/// `BlockPos` here is a parameter and is named nowhere else in the pool.
+/// `Point` here is a parameter and is named nowhere else in the pool.
 #[test]
 fn descriptor_types_are_found_where_no_class_constant_exists() {
     let class = ClassFile::parse(&fixture_class()).expect("fixture parses");
     let member = class.pool.member_ref(8).expect("Methodref");
     let named = descriptor_object_types(member.descriptor);
     assert!(
-        named.contains(&"net/minecraft/core/BlockPos"),
-        "BlockPos appears only inside the descriptor; got {named:?}"
+        named.contains(&"example/target/Point"),
+        "Point appears only inside the descriptor; got {named:?}"
     );
     assert!(
         !class
             .pool
             .iter()
-            .any(|(i, _)| class.pool.class_name(i).is_ok_and(|n| n.contains("BlockPos"))),
-        "premise: BlockPos must NOT have its own CONSTANT_Class, or this test \
+            .any(|(i, _)| class.pool.class_name(i).is_ok_and(|n| n.contains("Point"))),
+        "premise: Point must NOT have its own CONSTANT_Class, or this test \
          is not measuring the descriptor walk"
     );
 }
@@ -517,8 +517,8 @@ fn a_jar_containing_the_fixture_separates_executable_and_symbolic_references() {
         .iter()
         .find(|(key, _)| key.kind == MemberUseKind::InvokeVirtual)
         .expect("virtual invocation is reported");
-    assert_eq!(invoke.0.class, "net/minecraft/world/level/Level");
-    assert_eq!(invoke.0.name, "getBlockState");
+    assert_eq!(invoke.0.class, "example/target/World");
+    assert_eq!(invoke.0.name, "readState");
     assert_eq!(invoke.1.external, 2, "two bytecode invocations");
     let get_static = external
         .iter()
@@ -558,4 +558,14 @@ fn a_jar_containing_the_fixture_separates_executable_and_symbolic_references() {
     );
 
     std::fs::remove_file(&jar_path).ok();
+}
+
+#[test]
+fn default_options_require_a_caller_supplied_target_package() {
+    let options = ScanOptions::default();
+    assert_eq!(options.target_prefix, "example/target/");
+    assert_eq!(
+        options.internal_prefixes,
+        vec!["example/target/".to_owned()]
+    );
 }
