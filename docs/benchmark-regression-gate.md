@@ -201,7 +201,7 @@ the durations from those runs are not quoted).
 
 | knob | where | effect |
 |---|---|---|
-| `--min-compared` | `just bench-gate` passes 12 | below this many comparisons, exit 2 |
+| `--min-compared` | `just bench-gate` passes 40 | below this many comparisons, exit 2 |
 | `tolerance_pct` | per baseline entry | ±band as a percentage; `0` means exact. Against a baseline of `0` it reads as an absolute allowance in the metric's own unit, since a ratio against zero is undefined and zero is a real value (a healthy leak probe records exactly zero bytes of growth) |
 | `required` | per baseline entry | `false` skips the entry when unrecorded, for measurements that cannot run everywhere |
 | `LODESTONE_BENCH_RESULTS` / `LODESTONE_BENCH_BASELINES` | environment | override either directory; `--results-dir`/`--baseline-dir` win over both |
@@ -307,8 +307,9 @@ for this fixture.
 ## A duplication worth fixing next
 
 `benches/support.rs` now exists in eight copies (worldgen, world, render, shell, entity,
-physics, the 26.2 protocol family, and now server), byte-identical apart from
-crate-specific guards. It is duplicated because a `benches/` module cannot be imported
-across crates. `lodestone-testsupport` is already a dev-dependency of most of these crates
-and is the natural home; moving it is a cross-crate change of its own rather than a side
-effect of adding a bench, which is why it did not happen here.
+physics, the 26.2 protocol family, and now server). They share a recording schema while
+retaining crate-specific behavior, including worldgen's counter-poisoning filter. The
+modules are duplicated because a `benches/` module cannot be imported across crates.
+`lodestone-testsupport` is already a dev-dependency of most of these crates and is the
+natural home; moving it is a cross-crate API change rather than a side effect of adding a
+bench.
