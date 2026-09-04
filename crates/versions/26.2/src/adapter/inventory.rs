@@ -726,10 +726,13 @@ fn read_pot_decorations(reader: &mut Reader<'_>) -> Result<PotDecorations, Adapt
 
 /// Decodes `minecraft:potion_contents`' payload — `vanilla's own potion contents's own stream codec`:
 /// `Optional<Holder<Potion>>`, `Optional<Integer>`, `List<MobEffectInstance>`, then
-/// `Optional<String>` — and folds it straight into the mixed ARGB colour via
-/// [`lodestone_data::potion::potion_color`], since nothing else in this client reads
-/// the raw potion id or effect list back out.
-fn read_potion_contents_color(reader: &mut Reader<'_>) -> Result<u32, AdapterError> {
+/// `Optional<String>`. All four values remain available to their consumers:
+/// [`lodestone_data::potion::potion_color`] resolves the tint from the id and
+/// custom effects, while the id, complete custom-effect records, and name suffix
+/// cross the model boundary for tooltip composition.
+fn read_potion_contents(
+    reader: &mut Reader<'_>,
+) -> Result<(Option<i32>, u32, Vec<MobEffectInstance>, Option<String>), AdapterError> {
     // `vanilla's own potion's own stream codec = vanilla's holder-registry codec(vanilla's own registries's own potion)`: a
     // plain 0-based VarInt registry id (the same shape `minecraft:mob_effect` uses),
     // wrapped in vanilla's optional-value codec — a bool presence flag then the value.
@@ -747,16 +750,18 @@ fn read_potion_contents_color(reader: &mut Reader<'_>) -> Result<u32, AdapterErr
     };
     // The colour mix is keyed by effect id and amplifier only; the durations and
     // flags the same records carry cannot move a colour.
-    let custom_effects: Vec<(i32, u8)> = read_mob_effect_instances(reader)?
-        .into_iter()
+    let custom_effects = read_mob_effect_instances(reader)?;
+    let color_effects: Vec<(i32, u8)> = custom_effects
+        .iter()
         .map(|effect| (effect.effect_id, effect.amplifier))
         .collect();
-    // `customName`: `vanilla's UTF-8 string codec.apply(vanilla's optional-value codec)`,
-    // consumed for alignment only — nothing here reads it back.
-    if reader.bool().map_err(dec_err)? {
-        reader.string(32767).map_err(dec_err)?;
-    }
-    Ok(lodestone_data::potion::potion_color(potion, custom_color, &custom_effects))
+    let custom_name = if reader.bool().map_err(dec_err)? {
+        Some(reader.string(32767).map_err(dec_err)?)
+    } else {
+        None
+    };
+    let color = lodestone_data::potion::potion_color(potion, custom_color, &color_effects);
+    Ok((potion, color, custom_effects, custom_name))
 }
 
 /// Vanilla's own resolvable-profile stream codec: a composite of a
@@ -1118,12 +1123,17 @@ fn read_component_patch(
             // Decoded for the same reason as the trim, map id and pot decorations
             // above: `minecraft:potion_contents`' payload is not length-prefixed, so
             // leaving it unmodeled truncated the rest of the packet from any potion,
-            // splash potion, lingering potion or tipped arrow onward. Folded straight
-            // into the mixed colour rather than kept as raw fields, since nothing
-            // else in this client reads the potion id or effect list. See
-            // [`read_potion_contents_color`].
+            // splash potion, lingering potion or tipped arrow onward. The registry
+            // id, mixed colour, custom effects and name suffix are retained: title
+            // and effect lore need the raw values, while item tinting needs the
+            // already-resolved colour. See [`read_potion_contents`].
             Some("minecraft:potion_contents") => {
-                components.potion_color = Some(read_potion_contents_color(reader)?);
+                let (potion, color, custom_effects, custom_name) =
+                    read_potion_contents(reader)?;
+                components.potion = potion;
+                components.potion_color = Some(color);
+                components.potion_custom_effects = custom_effects;
+                components.potion_custom_name = custom_name;
             }
             // Decoded for the same reason as the trim, map id, pot decorations and
             // potion contents above: `minecraft:profile`'s payload is not

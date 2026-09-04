@@ -41,6 +41,20 @@ legible against whichever surface is behind it. The full-canvas dim gradient beh
 panel matches vanilla's `isInGameUi()` full-canvas gradient (distinct from the pause menu's tiled
 background) and always draws, independent of whether real background art is attached.
 
+A server-supplied potion stack keeps all four player-visible values from
+`minecraft:potion_contents`: the mixed ARGB used by item tinting, the optional potion registry
+id, the ordered custom-effect list, and the optional effect-name suffix. The 26.2 adapter reads
+them from one component payload, `lodestone-model` carries them, and the model-to-game
+`ItemStack` conversion preserves them before the tooltip consumes them. Built-in effects render
+before custom effects. A component with custom effects but no potion holder still renders those
+effects under the uncraftable-potion title and has no registry id; the client must not invent an
+identity from its colour. For titles, the stack-wide styled custom name wins first, then the
+potion component's name suffix, then the base potion registry id, and finally the no-holder
+`empty` suffix. The holder/effect/name wire order is pinned by the external-server payload in
+`crates/versions/26.2/tests/fixtures/potion_contents_complete.hex`, captured before adapter decoding.
+Re-capture it with the ignored `live-item` gate after starting
+`scripts/live-oracles/survival.sh`; the normal entity suite replays it without a server.
+
 Draw order (four stages, matching vanilla's own layering): dim → background texture → chrome (title,
 wells) → 3-D item models (depth-tested) → flat sprite icons and text. The **carried stack** (the item
 the player is dragging on the cursor) is its own final stratum, replayed after every slot — vanilla's

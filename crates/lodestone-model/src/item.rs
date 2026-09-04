@@ -137,10 +137,10 @@ pub struct ItemComponents {
     /// truncate the rest of the packet from a potion stack onward.
     ///
     /// This is an *effective* value (like [`max_stack_size`](Self::max_stack_size))
-    /// rather than the raw patch, because mixing needs the potion registry's own
-    /// effect census (`lodestone_data::potion`), which is version data this
-    /// version-free type does not own — evaluating at decode time is the same
-    /// tradeoff [`max_stack_size`] already makes.
+    /// rather than the raw colour input, because mixing needs the potion
+    /// registry's own effect census (`lodestone_data::potion`), which is version
+    /// data this version-free type does not own. The custom effects and name are
+    /// still retained separately below for tooltip behavior.
     pub potion_color: Option<u32>,
     /// The raw `minecraft:potion_contents` `potion` field: the network
     /// `minecraft:potion` registry id itself (vanilla's potion network
@@ -156,6 +156,16 @@ pub struct ItemComponents {
     /// holder (a bare custom-effects patch) — the same absent-means-no-component
     /// contract every other patch field here uses.
     pub potion: Option<i32>,
+    /// Custom mob-effect instances appended by `minecraft:potion_contents`, in
+    /// wire order. These remain separate from [`potion`](Self::potion)'s built-in
+    /// effects so a version-aware tooltip can concatenate the two without
+    /// pretending the custom entries belong to the fixed potion registry.
+    pub potion_custom_effects: Vec<MobEffectInstance>,
+    /// Optional effect-name suffix carried inside `minecraft:potion_contents`.
+    /// This is distinct from [`custom_name`](Self::custom_name): the latter is a
+    /// styled display-name override for the whole stack, while this string takes
+    /// precedence only when composing a potion-family item's normal title.
+    pub potion_custom_name: Option<String>,
     /// `minecraft:profile`: a `player_head`/`player_wall_head` stack's owner
     /// identity — the same `name`/`id`/`textures` shape
     /// [`crate::event::PlayerListEntry::properties`] already carries for a

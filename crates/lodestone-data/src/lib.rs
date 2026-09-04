@@ -88,8 +88,8 @@ pub(crate) mod generated_outline_shapes;
 pub(crate) mod generated_particle_types;
 #[path = "generated/path_types.rs"]
 pub(crate) mod generated_path_types;
-#[path = "generated/potion_effect_keys.rs"]
-pub(crate) mod generated_potion_effect_keys;
+#[path = "generated/potion_effect_ids.rs"]
+pub(crate) mod generated_potion_effect_ids;
 #[path = "generated/potion_effects.rs"]
 pub(crate) mod generated_potion_effects;
 #[path = "generated/potions.rs"]

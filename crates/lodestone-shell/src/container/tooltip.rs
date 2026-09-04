@@ -39,10 +39,9 @@
 //!   so a line for it would read "Enchantment that fix" — a fabrication, which
 //!   this module declines the same way `menu::options` declines a row it cannot
 //!   honour. **Potion effect lines are a different source and are implemented**
-//!   ([`potion_lore_lines`]): `PotionContents.addPotionTooltip` composes them
-//!   from the stack's own `minecraft:potion_contents`, not from `minecraft:lore`,
-//!   and the potion registry (unlike `minecraft:enchantment`) is fixed and
-//!   built-in, so it carries no session-scoped id problem.
+//!   ([`potion_lore_lines`]): they are composed from the stack's own built-in
+//!   and custom `minecraft:potion_contents` effects, not from `minecraft:lore`,
+//!   and both referenced registries are fixed and built-in for 26.2.
 //!
 //! ## Dependencies
 //!
@@ -264,10 +263,9 @@ fn lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
 }
 
 /// The tooltip title: [`lodestone_game::item::styled_hover_name`], except for a
-/// potion-family stack carrying a `minecraft:potion_contents` potion id, whose real
-/// title is vanilla's own potion-contents name lookup
-/// (read through `PotionItem.getName`/`TippedArrowItem.getName`) — composed from the
-/// potion's own registry id, not the bare item id.
+/// potion-family stack carrying `minecraft:potion_contents`, whose title is
+/// composed from the component's custom suffix, potion registry id, or `empty`
+/// fallback rather than the bare item id.
 ///
 /// Resolving that needs `lodestone_data::potion`, which
 /// `lodestone_game::item::styled_hover_name` cannot depend on — this build's
@@ -277,9 +275,8 @@ fn lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
 /// one crate `creative.rs`'s own potion-colour resolution already establishes is
 /// allowed to import [`lodestone_data`].
 ///
-/// A custom name still wins outright: vanilla's own get-hover-name accessor checks
-/// `DataComponents.CUSTOM_NAME` before ever calling its own get-name accessor, and
-/// the potion and tipped-arrow items only override the latter.
+/// A stack-wide custom name still wins outright. Only an unnamed stack uses the
+/// potion-local custom suffix, base registry id, or empty-potion fallback.
 ///
 /// Returns the full [`TooltipLine`] rather than a bare `String` so the
 /// [`styled_hover_name_spans`](lodestone_game::item::styled_hover_name_spans)
@@ -292,15 +289,38 @@ fn lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
 /// module builds as a plain literal and can never disagree with itself on
 /// colour.
 fn title_line(stack: &ItemStack) -> TooltipLine {
-    if stack.custom_name().is_none()
-        && let Some(potion_id) = stack.potion_effect_id()
-        && let Some(name) = lodestone_data::potion::potion_item_display_name(stack.item().path(), potion_id)
-    {
-        return TooltipLine {
-            text: name.to_string(),
-            colour: NAME_COLOUR,
-            spans: None,
-        };
+    if stack.custom_name().is_none() {
+        let potion_key = stack
+            .potion_custom_name()
+            .map(str::to_owned)
+            .or_else(|| {
+                stack
+                    .potion_effect_id()
+                    .and_then(lodestone_data::potion::potion_effect_key)
+                    .map(str::to_owned)
+            })
+            .or_else(|| stack.potion_color().is_some().then(|| "empty".to_string()));
+        if let Some(key) = potion_key {
+            let name = lodestone_data::potion::potion_item_display_name_for_key(
+                stack.item().path(),
+                &key,
+            )
+            .map(str::to_owned)
+            .or_else(|| {
+                matches!(
+                    stack.item().path(),
+                    "potion" | "splash_potion" | "lingering_potion" | "tipped_arrow"
+                )
+                .then(|| format!("item.minecraft.{}.effect.{key}", stack.item().path()))
+            });
+            if let Some(name) = name {
+                return TooltipLine {
+                    text: name,
+                    colour: NAME_COLOUR,
+                    spans: None,
+                };
+            }
+        }
     }
     // `&|_| None`: no language table here, so a non-potion item resolves through
     // `base_display_name`'s humanised fallback — "Diamond Sword" for
@@ -321,22 +341,19 @@ fn hover_name(stack: &ItemStack) -> String {
     title_line(stack).text
 }
 
-/// `PotionContents.addPotionTooltip` for a potion-family
-/// stack: empty for every other item (`stack.potion_effect_id()` is `None` unless
-/// [`super::creative::potion_color_for`] — or, on a real join, a decode this build
-/// does not yet perform — attached one; see this module's own doc for that gap).
+/// Effect lore for a potion-family stack. Built-in registry effects are followed
+/// by the component's custom-effect instances; a custom-only component therefore
+/// renders even when it has no potion holder.
 ///
-/// Two clauses, in vanilla's order:
+/// Two clauses, in display order:
 ///
 /// 1. One line per effect: [`lodestone_data::potion::potion_effect_entries`]'s
 ///    `effect_name`, a Roman-numeral amplifier suffix when `amplifier > 0`
-///    (`getPotionDescription`'s `amplifier > 0` gate — `0` renders no numeral at
-///    all, not `"I"`), and a `(m:ss)` duration suffix when `duration_ticks > 20`
-///    (`!effect.endsWithin(20)`) — an instant effect (`healing`/`harming`) prints
-///    no duration. Coloured by [`lodestone_data::potion::PotionEffectEntry::harmful`]
-///    (`MobEffectCategory::getTooltipFormatting`). A potion with **no** effects
-///    (a water bottle) prints vanilla's own `"No Effects"` line instead of an
-///    empty list — the `noEffects` branch, not a fallback this build invented.
+///    (`0` renders no numeral at all, not `"I"`), and a `(m:ss)` duration suffix
+///    only while more than 20 ticks remain. Instant healing and harming therefore
+///    print no duration. Beneficial effects are blue and harmful effects are red,
+///    following their registry category. A potion with **no** effects, such as a
+///    water bottle, prints `"No Effects"` instead of leaving the section empty.
 /// 2. When at least one effect carries an attribute modifier
 ///    ([`lodestone_data::potion::potion_attribute_modifiers`]), a blank line, a
 ///    `"When Applied:"` header, then one signed magnitude line per modifier
@@ -345,10 +362,32 @@ fn hover_name(stack: &ItemStack) -> String {
 ///    `swiftness`/`slowness`/`strength`/`weakness`/`luck`/`leaping`/`invisibility`
 ///    are the ones that do.
 fn potion_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
-    let Some(potion_id) = stack.potion_effect_id() else {
+    let potion_id = stack.potion_effect_id();
+    let custom_effects = stack.potion_custom_effects();
+    if potion_id.is_none()
+        && custom_effects.is_empty()
+        && stack.potion_color().is_none()
+        && stack.potion_custom_name().is_none()
+    {
         return Vec::new();
-    };
-    let entries = lodestone_data::potion::potion_effect_entries(potion_id);
+    }
+    let mut entries: Vec<(&str, u8, i32, bool)> = potion_id
+        .into_iter()
+        .flat_map(lodestone_data::potion::potion_effect_entries)
+        .map(|entry| {
+            (
+                entry.effect_name,
+                entry.amplifier,
+                entry.duration_ticks as i32,
+                entry.harmful,
+            )
+        })
+        .collect();
+    entries.extend(custom_effects.iter().filter_map(|effect| {
+        let (name, harmful) =
+            lodestone_data::potion::mob_effect_tooltip(effect.effect_id)?;
+        Some((name, effect.amplifier, effect.duration_ticks, harmful))
+    }));
     let mut lines = Vec::new();
     if entries.is_empty() {
         lines.push(TooltipLine {
@@ -358,22 +397,32 @@ fn potion_lore_lines(stack: &ItemStack) -> Vec<TooltipLine> {
         });
         return lines;
     }
-    for entry in &entries {
-        let mut text = entry.effect_name.to_string();
-        let numeral = potency_numeral(entry.amplifier);
+    for &(effect_name, amplifier, duration_ticks, harmful) in &entries {
+        let mut text = effect_name.to_string();
+        let numeral = potency_numeral(amplifier);
         if !numeral.is_empty() {
             text = format!("{text} {numeral}");
         }
-        if entry.duration_ticks > 20 {
-            text = format!("{text} ({})", format_duration_mmss(entry.duration_ticks));
+        if duration_ticks == -1 {
+            text = format!("{text} (∞)");
+        } else if duration_ticks > 20 {
+            text = format!("{text} ({})", format_duration_mmss(duration_ticks as u32));
         }
         lines.push(TooltipLine {
             text,
-            colour: if entry.harmful { RED } else { BLUE },
+            colour: if harmful { RED } else { BLUE },
             spans: None,
         });
     }
-    let modifiers = lodestone_data::potion::potion_attribute_modifiers(potion_id);
+    let mut modifiers = potion_id
+        .map(lodestone_data::potion::potion_attribute_modifiers)
+        .unwrap_or_default();
+    modifiers.extend(custom_effects.iter().flat_map(|effect| {
+        lodestone_data::potion::mob_effect_attribute_modifiers(
+            effect.effect_id,
+            effect.amplifier,
+        )
+    }));
     if !modifiers.is_empty() {
         lines.push(TooltipLine {
             text: String::new(),
@@ -1170,11 +1219,60 @@ mod tests {
     #[test]
     fn custom_name_overrides_the_composed_potion_title() {
         let mut stack = potion_stack("potion", "swiftness");
+        stack.set_potion_custom_name(Some("night_vision".to_string()));
         stack.set_custom_name(Some(lodestone_model::Text::literal("Elixir of Life")));
 
         let title = hover_name(&stack);
         assert_eq!(title, lodestone_game::item::styled_hover_name(&stack, &|_| None));
         assert_ne!(title, "Potion of Swiftness");
+        assert_ne!(title, "Potion of Night Vision");
+    }
+
+    #[test]
+    fn potion_contents_custom_name_precedes_the_base_registry_id() {
+        let mut stack = potion_stack("potion", "swiftness");
+        stack.set_potion_custom_name(Some("night_vision".to_string()));
+
+        assert_eq!(hover_name(&stack), "Potion of Night Vision");
+    }
+
+    #[test]
+    fn custom_effect_lore_survives_without_a_potion_holder() {
+        let mut stack = ItemStack::new("minecraft:potion".parse().expect("valid id"), 1);
+        stack.set_potion_color(Some(0xFF89_7116));
+        stack.set_potion_custom_effects(vec![lodestone_model::MobEffectInstance {
+            effect_id: 18,
+            amplifier: 1,
+            duration_ticks: 45,
+            ambient: false,
+            show_particles: true,
+            show_icon: true,
+        }]);
+
+        let lines = tooltip_lines(&stack, false);
+        assert_eq!(
+            lines.iter().map(|line| line.text.as_str()).collect::<Vec<_>>(),
+            vec!["Uncraftable Potion", "Poison II (00:02)"]
+        );
+        assert_eq!(lines[1].colour, RED);
+    }
+
+    #[test]
+    fn custom_effect_lore_follows_the_built_in_effects() {
+        let mut stack = potion_stack("potion", "swiftness");
+        stack.set_potion_custom_effects(vec![lodestone_model::MobEffectInstance {
+            effect_id: 18,
+            amplifier: 0,
+            duration_ticks: 200,
+            ambient: false,
+            show_particles: true,
+            show_icon: true,
+        }]);
+
+        let lines = tooltip_lines(&stack, false);
+        assert_eq!(lines[1].text, "Speed (03:00)");
+        assert_eq!(lines[2].text, "Poison (00:10)");
+        assert_eq!(lines[2].colour, RED);
     }
 
     /// The neuter this module's own doc guards against: if the potion title

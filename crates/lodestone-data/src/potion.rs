@@ -28,7 +28,7 @@
 //! only ever indexes those tables.
 
 use crate::generated_mob_effect_colors::MOB_EFFECT_COLORS;
-use crate::generated_potion_effect_keys::POTION_EFFECT_KEYS;
+use crate::generated_potion_effect_ids::POTION_EFFECT_BASE_IDS;
 use crate::generated_potions::POTION_NAMES;
 
 pub use crate::generated_potion_effects::POTION_EFFECTS;
@@ -116,14 +116,16 @@ pub fn potion_color(potion: Option<i32>, custom_color: Option<u32>, custom_effec
     }
 }
 
-/// The base effect-key name for a network potion registry id — see
-/// [`crate::generated_potion_effect_keys`]'s module doc for why this is not the same
-/// string as [`potion_name`]'s registry path (`long_swiftness`/`strong_swiftness` both
-/// resolve to `"swiftness"` here, matching every duration/potency variant sharing one
-/// item name in vanilla).
+/// The base effect-key name for a network potion registry id.
+///
+/// [`POTION_EFFECT_BASE_IDS`] explicitly maps each duration/potency variant to the
+/// registry id of its base potion; the returned path then comes from the canonical
+/// [`POTION_NAMES`] column. No alias is inferred from a `long_` or `strong_` prefix.
 #[must_use]
 pub fn potion_effect_key(id: i32) -> Option<&'static str> {
-    usize::try_from(id).ok().and_then(|index| POTION_EFFECT_KEYS.get(index).copied())
+    let index = usize::try_from(id).ok()?;
+    let base_id = usize::from(*POTION_EFFECT_BASE_IDS.get(index)?);
+    POTION_NAMES.get(base_id)?.strip_prefix("minecraft:")
 }
 
 /// The display-name-with-prefix formula, ported as a literal table rather than
@@ -140,6 +142,28 @@ pub fn potion_effect_key(id: i32) -> Option<&'static str> {
 #[must_use]
 pub fn potion_item_display_name(base_item: &str, id: i32) -> Option<&'static str> {
     let key = potion_effect_key(id)?;
+    potion_item_display_name_for_key(base_item, key)
+}
+
+/// Resolves a potion-family item title from an explicit effect-name suffix.
+///
+/// The component-local custom name uses this path before the potion registry
+/// id. `"empty"` is the no-holder fallback. Unknown suffixes return `None`
+/// because this crate carries only the built-in English localisation entries.
+#[must_use]
+pub fn potion_item_display_name_for_key(
+    base_item: &str,
+    key: &str,
+) -> Option<&'static str> {
+    if key == "empty" {
+        return match base_item {
+            "potion" => Some("Uncraftable Potion"),
+            "splash_potion" => Some("Splash Uncraftable Potion"),
+            "lingering_potion" => Some("Lingering Uncraftable Potion"),
+            "tipped_arrow" => Some("Uncraftable Tipped Arrow"),
+            _ => None,
+        };
+    }
     let index = ["water", "mundane", "thick", "awkward", "night_vision", "invisibility", "leaping", "fire_resistance", "swiftness", "slowness", "turtle_master", "water_breathing", "healing", "harming", "poison", "regeneration", "strength", "weakness", "luck", "slow_falling", "wind_charged", "weaving", "oozing", "infested"]
         .iter()
         .position(|candidate| *candidate == key)?;
@@ -211,35 +235,62 @@ pub struct PotionEffectEntry {
     pub harmful: bool,
 }
 
-/// Each effect's own display name plus its harmful/beneficial category, for exactly
-/// the mob effects a potion in this build's 46-entry registry can carry — scoped
-/// rather than a general `minecraft:mob_effect` name table, because no other caller in
-/// this tree needs a status effect's *display* name (only
-/// [`crate::mob_effects::mob_effect_name`]'s canonical identifier). Indexed by the same
-/// `mob_effect_index` [`POTION_EFFECTS`] uses. `harmful` is `true` for the harmful
-/// category.
+/// Each built-in effect's English display name plus harmful category, indexed by
+/// the same network id as [`crate::mob_effects::mob_effect_name`]. Custom potion
+/// effects can reference any registry entry, not only the subset used by built-in
+/// potions, so this table covers the complete protocol-776 registry.
 const EFFECT_DISPLAY_NAMES: &[(usize, &str, bool)] = &[
     (0, "Speed", false),
     (1, "Slowness", true),
+    (2, "Haste", false),
+    (3, "Mining Fatigue", true),
     (4, "Strength", false),
     (5, "Instant Health", false),
     (6, "Instant Damage", true),
     (7, "Jump Boost", false),
+    (8, "Nausea", true),
     (9, "Regeneration", false),
     (10, "Resistance", false),
     (11, "Fire Resistance", false),
     (12, "Water Breathing", false),
     (13, "Invisibility", false),
+    (14, "Blindness", true),
     (15, "Night Vision", false),
+    (16, "Hunger", true),
     (17, "Weakness", true),
     (18, "Poison", true),
+    (19, "Wither", true),
+    (20, "Health Boost", false),
+    (21, "Absorption", false),
+    (22, "Saturation", false),
+    (23, "Glowing", false),
+    (24, "Levitation", true),
     (25, "Luck", false),
+    (26, "Bad Luck", true),
     (27, "Slow Falling", false),
+    (28, "Conduit Power", false),
+    (29, "Dolphin's Grace", false),
+    (30, "Bad Omen", false),
+    (31, "Hero of the Village", false),
+    (32, "Darkness", true),
+    (33, "Trial Omen", false),
+    (34, "Raid Omen", false),
     (35, "Wind Charged", true),
     (36, "Weaving", true),
     (37, "Oozing", true),
     (38, "Infested", true),
+    (39, "Breath of the Nautilus", false),
 ];
+
+/// English tooltip name and harmful category for a network mob-effect id.
+#[must_use]
+pub fn mob_effect_tooltip(effect_id: i32) -> Option<(&'static str, bool)> {
+    let effect_index = usize::try_from(effect_id).ok()?;
+    EFFECT_DISPLAY_NAMES
+        .iter()
+        .find(|&&(index, _, _)| index == effect_index)
+        .map(|&(_, name, harmful)| (name, harmful))
+}
 
 /// The raw `(mob_effect_index, amplifier, base_duration_ticks)` triples backing
 /// [`potion_effect_entries`], for a caller that needs each entry's *canonical*
@@ -266,10 +317,8 @@ pub fn potion_effect_entries(id: i32) -> Vec<PotionEffectEntry> {
     effects
         .iter()
         .map(|&(effect_index, amplifier, duration_ticks)| {
-            let (effect_name, harmful) = EFFECT_DISPLAY_NAMES
-                .iter()
-                .find(|&&(idx, _, _)| idx == effect_index)
-                .map_or(("", false), |&(_, name, harmful)| (name, harmful));
+            let (effect_name, harmful) = mob_effect_tooltip(effect_index as i32)
+                .unwrap_or(("", false));
             PotionEffectEntry { effect_name, amplifier, duration_ticks, harmful }
         })
         .collect()
@@ -299,12 +348,37 @@ pub struct AttributeModifierEntry {
 const EFFECT_ATTRIBUTE_MODIFIERS: &[(usize, &str, f64, bool)] = &[
     (0, "Speed", 0.2, true),                    // speed
     (1, "Speed", -0.15, true),                  // slowness
+    (2, "Attack Speed", 0.1, true),              // haste
+    (3, "Attack Speed", -0.1, true),             // mining_fatigue
     (4, "Attack Damage", 3.0, false),            // strength
     (7, "Safe Fall Distance", 1.0, false),       // jump_boost
     (13, "Waypoint Transmit Range", -1.0, true), // invisibility
     (17, "Attack Damage", -4.0, false),          // weakness
+    (20, "Max Health", 4.0, false),               // health_boost
+    (21, "Max Absorption", 4.0, false),           // absorption
     (25, "Luck", 1.0, false),                    // luck
+    (26, "Luck", -1.0, false),                   // unluck
 ];
+
+/// Attribute modifiers produced by one mob-effect instance at `amplifier`.
+#[must_use]
+pub fn mob_effect_attribute_modifiers(
+    effect_id: i32,
+    amplifier: u8,
+) -> Vec<AttributeModifierEntry> {
+    let Ok(effect_index) = usize::try_from(effect_id) else {
+        return Vec::new();
+    };
+    EFFECT_ATTRIBUTE_MODIFIERS
+        .iter()
+        .filter(|&&(index, _, _, _)| index == effect_index)
+        .map(|&(_, attribute_name, base_amount, percent)| AttributeModifierEntry {
+            attribute_name,
+            amount: base_amount * f64::from(u32::from(amplifier) + 1),
+            percent,
+        })
+        .collect()
+}
 
 /// The resolved attribute modifiers for one potion registry entry's built-in effect
 /// list — the `"When Applied:"` section the tooltip appends after the effect lines,
@@ -318,15 +392,8 @@ pub fn potion_attribute_modifiers(id: i32) -> Vec<AttributeModifierEntry> {
     };
     effects
         .iter()
-        .filter_map(|&(effect_index, amplifier, _duration_ticks)| {
-            EFFECT_ATTRIBUTE_MODIFIERS
-                .iter()
-                .find(|&&(idx, _, _, _)| idx == effect_index)
-                .map(|&(_, attribute_name, base_amount, percent)| AttributeModifierEntry {
-                    attribute_name,
-                    amount: base_amount * f64::from(u32::from(amplifier) + 1),
-                    percent,
-                })
+        .flat_map(|&(effect_index, amplifier, _duration_ticks)| {
+            mob_effect_attribute_modifiers(effect_index as i32, amplifier)
         })
         .collect()
 }
@@ -470,6 +537,41 @@ mod tests {
             }
         }
         assert!(mismatches.is_empty(), "{mismatches:#?}");
+    }
+
+    #[test]
+    fn custom_effect_tooltip_data_covers_the_whole_registry() {
+        for effect_id in 0..40 {
+            let (name, _harmful) = mob_effect_tooltip(effect_id)
+                .unwrap_or_else(|| panic!("missing tooltip data for mob effect id {effect_id}"));
+            assert!(!name.is_empty(), "mob effect id {effect_id}");
+        }
+        assert_eq!(mob_effect_tooltip(26), Some(("Bad Luck", true)));
+        assert_eq!(mob_effect_tooltip(29), Some(("Dolphin's Grace", false)));
+        assert_eq!(mob_effect_tooltip(-1), None);
+        assert_eq!(mob_effect_tooltip(40), None);
+
+        assert_eq!(
+            mob_effect_attribute_modifiers(2, 1),
+            vec![AttributeModifierEntry {
+                attribute_name: "Attack Speed",
+                amount: 0.2,
+                percent: true,
+            }]
+        );
+    }
+
+    #[test]
+    fn explicit_and_empty_potion_name_suffixes_resolve_before_registry_fallback() {
+        assert_eq!(
+            potion_item_display_name_for_key("potion", "night_vision"),
+            Some("Potion of Night Vision")
+        );
+        assert_eq!(
+            potion_item_display_name_for_key("potion", "empty"),
+            Some("Uncraftable Potion")
+        );
+        assert_eq!(potion_item_display_name_for_key("potion", "server_name"), None);
     }
 
     /// `long_swiftness`/`strong_swiftness` must resolve to the exact same item name

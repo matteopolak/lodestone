@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 
 use lodestone_model::{
     ArmorTrim, AuthoredEnchantment, BannerPatternLayer, Identifier, ItemEnchantment, ItemProfile,
-    PotDecorations, ResolvedText, Text, TextSpan, ToolPatch, WrittenBookContent,
+    MobEffectInstance, PotDecorations, ResolvedText, Text, TextSpan, ToolPatch, WrittenBookContent,
 };
 
 /// The default maximum stack size when an item carries no
@@ -73,11 +73,10 @@ pub const DYED_COLOR_COMPONENT: &str = "minecraft:dyed_color";
 ///
 /// The value carried under this key is not the raw component — it is
 /// [`lodestone_model::ItemComponents::potion_color`]'s already-mixed opaque ARGB
-/// (`Potion.calculate`'s result), because nothing on this side of the crate boundary
-/// needs the potion id or effect list back out, only the colour a GUI icon or
-/// equipped-item render would tint by. Same crate-boundary gap `DYED_COLOR_COMPONENT`
-/// was added to close: without a branch here a potion's colour is silently dropped
-/// converting a decoded stack into this crate's shape.
+/// because tint consumers need the resolved colour. Title and lore consumers
+/// read the raw registry id, custom effects and component-local name through the
+/// three internal keys below. Without this branch a potion's colour is silently
+/// dropped converting a decoded stack into this crate's shape.
 pub const POTION_COLOR_COMPONENT: &str = "minecraft:potion_contents";
 /// Well-known component identifier carrying the raw `minecraft:potion_contents`
 /// `potion` field — the network `minecraft:potion` registry id itself, not
@@ -88,6 +87,13 @@ pub const POTION_COLOR_COMPONENT: &str = "minecraft:potion_contents";
 /// cannot reconstruct — `swiftness`/`long_swiftness`/`strong_swiftness` mix to the
 /// same colour but must resolve to different lore.
 pub const POTION_EFFECT_COMPONENT: &str = "lodestone:potion_effect";
+/// Internal component key carrying `minecraft:potion_contents` custom effects
+/// across the model/game boundary. See [`ItemStack::potion_custom_effects`].
+pub const POTION_CUSTOM_EFFECTS_COMPONENT: &str = "lodestone:potion_custom_effects";
+/// Internal component key carrying `minecraft:potion_contents`' optional
+/// effect-name suffix across the model/game boundary. See
+/// [`ItemStack::potion_custom_name`].
+pub const POTION_CUSTOM_NAME_COMPONENT: &str = "lodestone:potion_custom_name";
 /// Well-known component identifier for [`lodestone_model::AuthoredEnchantment`].
 /// **Not a real vanilla component key**, for the same reason
 /// [`POTION_EFFECT_COMPONENT`] is not: it carries an identity this client itself
@@ -280,6 +286,9 @@ pub enum ComponentValue {
     /// a real, network-id-keyed enchantment list by a caller that only checks
     /// that key.
     AuthoredEnchantment(AuthoredEnchantment),
+    /// Custom status-effect instances from `minecraft:potion_contents`, kept in
+    /// wire order for tooltip composition.
+    PotionEffects(Vec<MobEffectInstance>),
     /// An opaque, adapter-supplied payload compared byte-for-byte.
     ///
     /// The bytes are whatever canonical encoding the producing adapter chose
@@ -667,6 +676,36 @@ impl ItemStack {
             POTION_EFFECT_COMPONENT,
             id.map(|v| ComponentValue::Int(i64::from(v))),
         );
+    }
+
+    /// Custom effects appended by the stack's `minecraft:potion_contents`.
+    #[must_use]
+    pub fn potion_custom_effects(&self) -> &[MobEffectInstance] {
+        match self.components.get_str(POTION_CUSTOM_EFFECTS_COMPONENT) {
+            Some(ComponentValue::PotionEffects(effects)) => effects,
+            _ => &[],
+        }
+    }
+
+    /// Sets the custom potion effects, removing the internal component when
+    /// `effects` is empty.
+    pub fn set_potion_custom_effects(&mut self, effects: Vec<MobEffectInstance>) {
+        let value = (!effects.is_empty()).then_some(ComponentValue::PotionEffects(effects));
+        self.write_component(POTION_CUSTOM_EFFECTS_COMPONENT, value);
+    }
+
+    /// The optional effect-name suffix inside `minecraft:potion_contents`.
+    #[must_use]
+    pub fn potion_custom_name(&self) -> Option<&str> {
+        match self.components.get_str(POTION_CUSTOM_NAME_COMPONENT) {
+            Some(ComponentValue::Str(name)) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Sets or clears the potion component's effect-name suffix.
+    pub fn set_potion_custom_name(&mut self, name: Option<String>) {
+        self.write_component(POTION_CUSTOM_NAME_COMPONENT, name.map(ComponentValue::Str));
     }
 
     /// The stack's [`AuthoredEnchantment`] — see that type's own doc for what it
@@ -1112,6 +1151,19 @@ impl From<&lodestone_model::ItemStack> for ItemStack {
         {
             components.insert(key, ComponentValue::Int(i64::from(id)));
         }
+        if !stack.components.potion_custom_effects.is_empty()
+            && let Ok(key) = POTION_CUSTOM_EFFECTS_COMPONENT.parse()
+        {
+            components.insert(
+                key,
+                ComponentValue::PotionEffects(stack.components.potion_custom_effects.clone()),
+            );
+        }
+        if let Some(name) = stack.components.potion_custom_name.clone()
+            && let Ok(key) = POTION_CUSTOM_NAME_COMPONENT.parse()
+        {
+            components.insert(key, ComponentValue::Str(name));
+        }
 
         if let Some(authored) = stack.components.authored_enchantment
             && let Ok(key) = AUTHORED_ENCHANTMENT_COMPONENT.parse()
@@ -1301,6 +1353,8 @@ impl From<&ItemStack> for lodestone_model::ItemStack {
             dyed_color: stack.dyed_color(),
             potion_color: stack.potion_color(),
             potion: stack.potion_effect_id(),
+            potion_custom_effects: stack.potion_custom_effects().to_vec(),
+            potion_custom_name: stack.potion_custom_name().map(str::to_owned),
             authored_enchantment: stack.authored_enchantment(),
             trim: stack.trim(),
             map_id: stack.map_id(),
@@ -1928,6 +1982,15 @@ mod tests {
                 dyed_color: Some(0x00_11_22_33),
                 potion_color: Some(0xFF_38_5D_C6),
                 potion: Some(14),
+                potion_custom_effects: vec![lodestone_model::MobEffectInstance {
+                    effect_id: 18,
+                    amplifier: 1,
+                    duration_ticks: 45,
+                    ambient: false,
+                    show_particles: true,
+                    show_icon: true,
+                }],
+                potion_custom_name: Some("night_vision".to_string()),
                 authored_enchantment: Some(lodestone_model::AuthoredEnchantment { path: "sharpness", level: 5 }),
                 // Only the two registry paths round-trip: this crate's
                 // component map has no slot for an inline trim's descriptions,
