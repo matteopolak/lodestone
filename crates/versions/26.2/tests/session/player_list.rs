@@ -100,14 +100,11 @@ fn player_info_remove_rejects_truncated_uuid_list() {
     );
 }
 
-/// Issue #283's real gap, closed: `INITIALIZE_CHAT`'s session used to reach
-/// `PlayerInfoEntry` (see `player_info.rs`'s own
-/// `initialize_chat_is_kept_not_discarded`) and stop there — `adapter::player`
-/// dropped it converting to the canonical `lodestone_model::event::PlayerListEntry`,
-/// which had no field to carry it into. This drives the real
-/// `player_info_update` packet through `V770Adapter::handle_packet` and
-/// asserts the session survives all the way to the emitted
-/// `ClientEvent::PlayerListUpdate` entry — not just the intermediate decode.
+/// The `INITIALIZE_CHAT` action carries a signed session through packet
+/// decoding into the canonical `lodestone_model::event::PlayerListEntry`.
+/// This fixture sends a complete `player_info_update` packet through
+/// `V770Adapter::handle_packet` and verifies that the emitted
+/// `ClientEvent::PlayerListUpdate` entry retains the session fields.
 #[test]
 fn player_info_update_carries_the_chat_session_into_the_model_event() {
     let adapter = V770Adapter::new();
