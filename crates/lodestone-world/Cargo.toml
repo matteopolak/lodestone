@@ -29,7 +29,7 @@ serde_json = { workspace = true }
 # (normal dep, not dev) -- a dev-dependency cycle back from here is fine
 # (Cargo only forbids cycles in the normal/library graph; this edge only
 # ever compiles for this crate's own test/bench targets).
-lodestone-testsupport = { workspace = true }
+lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 # Path dev-dependency, test-only: `tests/pool_footprint.rs` (issue #362) needs
 # real, JVM-verified overworld terrain rather than hand-built uniform sections
 # to measure the chunk-memory-pool question honestly. `lodestone-worldgen` has

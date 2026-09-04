@@ -512,14 +512,13 @@ CONFINEMENT_RULES=(
   # --- crates outside the wasm build, tightened toward "no crate but
   # lodestone-time may name std::time's clocks" ---
   #
-  # None of these three crates appears in the CRATES compile subset above: each is
-  # either dev-dependency-only (lodestone-testsupport, confirmed: every one of its
-  # dependents lists it under [dev-dependencies], so its lib target is never
-  # linked into a --lib build, wasm or native), a native-only bin nothing depends
-  # on (lodestone-allocbench — a standalone allocator benchmark, already excluded
-  # from the workspace-wide --all-features sweep for its allocator-feature
-  # mutual-exclusion), or reaches wasm only via a `#[cfg(test)]` module that
-  # never enters a `--lib` build either way (lodestone-world's
+  # None of these three crates appears in the CRATES compile subset above: testsupport
+  # is mostly dev-dependency-only, while its optional normal edges from sound/fuzz are
+  # off by default; its new bench-record feature is additionally native-only. The
+  # other two are a native-only bin nothing depends on (lodestone-allocbench — a
+  # standalone allocator benchmark, already excluded from the workspace-wide
+  # --all-features sweep for its allocator-feature mutual-exclusion) and code reached
+  # only from a `#[cfg(test)]` module (lodestone-world's
   # `fill_region_lock_hold_time_on_a_large_synthetic_fill` benchmark-style test).
   #
   # Rules for them still earn their keep: a rule here is what turns "this file
@@ -545,8 +544,11 @@ CONFINEMENT_RULES=(
   "lodestone-auth systemtime-ban|crates/lodestone-auth/src|SystemTime::now(|browser_login.rs,migrate.rs"
   "lodestone-world instant-ban|crates/lodestone-world/src|Instant::now(|world.rs"
   "lodestone-world systemtime-ban|crates/lodestone-world/src|SystemTime::now(|world.rs"
+  # `bench_record.rs` is the one additional native-only source file: the module
+  # declaration in `src/lib.rs` requires both `bench-record` and not-wasm32. The
+  # scanner is lexical, so it must be allowlisted even though wasm never compiles it.
   "lodestone-testsupport instant-ban|crates/lodestone-testsupport/src|Instant::now(|lib.rs"
-  "lodestone-testsupport systemtime-ban|crates/lodestone-testsupport/src|SystemTime::now(|lib.rs"
+  "lodestone-testsupport systemtime-ban|crates/lodestone-testsupport/src|SystemTime::now(|lib.rs,bench_record.rs"
   "lodestone-allocbench instant-ban|crates/lodestone-allocbench/src|Instant::now(|main.rs"
   "lodestone-allocbench systemtime-ban|crates/lodestone-allocbench/src|SystemTime::now(|main.rs"
   # --- lodestone-time itself ---

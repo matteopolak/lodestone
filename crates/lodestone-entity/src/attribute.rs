@@ -927,8 +927,7 @@ fn template_bases(template: BaseTemplate) -> Vec<(&'static str, f64)> {
 /// Vanilla's own ranged-attribute default for a bare path, or `0.0` if unknown (unknown
 /// paths never appear in the hand-verified templates above).
 fn default_path(path: &str) -> f64 {
-    // `Identifier::from_str` on a bare path yields the `minecraft` namespace.
-    Identifier::from_str(&format!("minecraft:{path}"))
+    Identifier::new_borrowed("minecraft", path)
         .ok()
         .and_then(|id| default_def(&id))
         .map(|d| d.default)

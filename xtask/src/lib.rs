@@ -9470,14 +9470,14 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
         // --- crates outside the wasm build, tightened toward "no crate but
         // lodestone-time may name std::time's clocks" ---
         //
-        // None of these three crates appears in wasm_crates() above: each is
-        // either dev-dependency-only (lodestone-testsupport — every dependent
-        // lists it under [dev-dependencies], so its lib target is never linked
-        // into a --lib build, wasm or native), a native-only bin nothing depends
-        // on (lodestone-allocbench, already excluded from the workspace-wide
-        // --all-features sweep for its allocator mutual-exclusion), or reaches
-        // wasm only via a #[cfg(test)] module that never enters a --lib build
-        // either way (lodestone-world's
+        // None of these three crates appears in wasm_crates() above: testsupport
+        // is mostly dev-dependency-only, while its optional normal edges from
+        // sound/fuzz are off by default; its new bench-record feature is
+        // additionally native-only. The other two are a native-only bin nothing
+        // depends on (lodestone-allocbench, already excluded from the
+        // workspace-wide --all-features sweep for its allocator mutual-exclusion),
+        // or reaches wasm only via a #[cfg(test)] module that never enters a
+        // --lib build either way (lodestone-world's
         // fill_region_lock_hold_time_on_a_large_synthetic_fill test).
         //
         // A rule here still earns its keep: it turns "this file structurally
@@ -9527,11 +9527,14 @@ pub fn confinement_rules() -> Vec<ConfinementRule> {
             banned: "Instant::now(",
             allowlist: &["lib.rs"],
         },
+        // `bench_record.rs` is gated at the module declaration by both the
+        // `bench-record` feature and not-wasm32. The scanner is lexical, so the
+        // native-only file must still be named here.
         ConfinementRule {
             label: "lodestone-testsupport systemtime-ban",
             src_dir: "crates/lodestone-testsupport/src",
             banned: "SystemTime::now(",
-            allowlist: &["lib.rs"],
+            allowlist: &["lib.rs", "bench_record.rs"],
         },
         ConfinementRule {
             label: "lodestone-allocbench instant-ban",

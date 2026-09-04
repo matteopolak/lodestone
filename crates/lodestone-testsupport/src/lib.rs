@@ -3,6 +3,9 @@
 pub mod bench_fixtures;
 pub mod directives;
 
+#[cfg(all(feature = "bench-record", not(target_arch = "wasm32")))]
+pub mod bench_record;
+
 pub use directives::assert_emits_set;
 
 use std::future::Future;

@@ -10,5 +10,6 @@ workspace = true
 [dependencies]
 lodestone-core.workspace = true
 lodestone-world.workspace = true
+smol_str.workspace = true
 thiserror.workspace = true
 uuid.workspace = true

@@ -119,6 +119,43 @@ fn resource_keys_reject_invalid_forms() {
 }
 
 #[test]
+fn identifier_new_retains_owned_string_compatibility() {
+    let id = Identifier::new("custom".to_owned(), "path/to/value".to_owned())
+        .expect("owned constructor remains compatible");
+    assert_eq!(id, Identifier::new_borrowed("custom", "path/to/value").unwrap());
+}
+
+#[test]
+fn identifier_parsing_and_value_semantics_remain_stable() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<Identifier>();
+
+    static GENERATED_PATH: &str = "generated/path";
+    let parsed = Identifier::from_str(GENERATED_PATH).expect("bare path uses default namespace");
+    let explicit = Identifier::new_borrowed("minecraft", "generated/path").unwrap();
+    assert_eq!(parsed, explicit);
+    assert!(parsed <= explicit);
+    assert_eq!(parsed.to_string(), "minecraft:generated/path");
+
+    let earlier = Identifier::new_borrowed("a", "path").unwrap();
+    assert!(earlier < parsed);
+    let mut ordered = std::collections::BTreeSet::new();
+    ordered.insert(parsed.clone());
+    ordered.insert(earlier);
+    assert_eq!(
+        ordered.into_iter().next(),
+        Some(Identifier::new_borrowed("a", "path").unwrap())
+    );
+
+    use std::hash::{Hash, Hasher};
+    let mut left = std::collections::hash_map::DefaultHasher::new();
+    let mut right = std::collections::hash_map::DefaultHasher::new();
+    parsed.hash(&mut left);
+    explicit.hash(&mut right);
+    assert_eq!(left.finish(), right.finish());
+}
+
+#[test]
 fn text_flattens_nested_extra_children() {
     let mut root = Text::literal("Hello");
     let mut child = Text::literal(", ");

@@ -3002,6 +3002,7 @@ version = "0.1.0"
 dependencies = [
  "lodestone-core",
  "lodestone-world",
+ "smol_str",
  "thiserror 2.0.19",
  "uuid",
 ]
@@ -3063,6 +3064,7 @@ name = "lodestone-physics"
 version = "0.1.0"
 dependencies = [
  "criterion",
+ "lodestone-testsupport",
  "serde_json",
 ]
 
@@ -3589,6 +3591,7 @@ dependencies = [
  "flate2",
  "lodestone-core",
  "lodestone-server",
+ "lodestone-testsupport",
  "lodestone-time",
  "lodestone-worldgen-core",
  "memory-stats",

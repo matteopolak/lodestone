@@ -32,9 +32,9 @@ harmless while scaling with world size, entity count, or render distance:
 | Memory and server work | `lodestone-world`: `memory_footprint`, `session_rss`; `lodestone-server`: `server_tick` |
 
 The census is **23 explicit `[[bench]]` targets across eight packages**. The packages
-disable automatic bench discovery, so the eight `benches/support.rs` helper modules are
-not runnable benchmark targets. This count is a registry of Cargo targets, not proof that
-every production workload is represented.
+disable automatic bench discovery, so the recorder modules are not runnable benchmark
+targets. This count is a registry of Cargo targets, not proof that every production
+workload is represented.
 
 ## Harness design
 
@@ -42,11 +42,12 @@ every production workload is represented.
   and each owning package uses Criterion as a dev-dependency with
   `default-features = false, features = ["cargo_bench_support"]`; this keeps optional
   reporting and parallelism dependencies out of normal library builds.
-- **Per-crate recording** lives in each `benches/support.rs`. It appends one JSON object
-  per metric to the gitignored `bench-results/<name>.jsonl` file:
-  `{timestamp, git_sha, machine, profile, scene, metric, value, unit}`. The duplicated
-  module is intentional until its public API can move without forcing unrelated bench
-  changes; see [`../render-benchmarks.md`](../render-benchmarks.md).
+- **Shared recording** lives in the native-only, opt-in
+  `lodestone-testsupport::bench_record` module. The seven ordinary families retain
+  tiny `benches/support.rs` re-export shims; worldgen keeps a local wrapper around it
+  because counter-poisoning is specific to that crate. It appends one JSON object per
+  metric to the gitignored `bench-results/<name>.jsonl` file:
+  `{timestamp, git_sha, machine, profile, scene, metric, value, unit}`.
 - **Fixtures** use shared realistic or synthetic terrain helpers where a benchmark needs
   terrain input. A benchmark must state which it uses, because fixture shape is part of
   what its result means.
@@ -178,10 +179,11 @@ them.
 ## How to change it
 
 Add a benchmark by creating an explicit `[[bench]]` declaration in its owning package,
-setting `harness = false`, and adding the target to the census above. Import the local
-`benches/support.rs` recorder when the benchmark emits comparable metrics. If the
-recorder schema changes, update every one of the eight copies as one reviewed cross-crate
-change.
+setting `harness = false`, and adding the target to the census above. Keep the owning
+package's `benches/support.rs` re-export shim for ordinary comparable metrics;
+worldgen must continue using its local counter-guard wrapper. If the recorder schema
+changes, update the shared module, its focused tests, and the shim surface only if the
+API changes.
 
 To add a CI-gated metric, first prove that it is a deterministic count or fixed-fixture
 quantity, then add its committed baseline and extend the control suite. Do not add a
@@ -209,9 +211,9 @@ The benchmark infrastructure is in place, but its coverage is not complete:
   production-shaped profile remains absent.
 - The server-tick fixture is an in-memory floor rather than a generator- or region-backed
   production-shaped workload.
-- The eight `benches/support.rs` modules duplicate a common recording schema but contain
-  crate-specific behavior, including worldgen's counter-poisoning filter. A shared-home
-  migration needs a deliberately scoped API rather than a byte-for-byte move.
+- The shared recorder is intentionally native-only and feature-gated because it writes
+  local files and reads process metadata. Worldgen's counter-poisoning filter remains a
+  local wrapper and must fail closed for unlisted units.
 - Committed count baselines have not been validated across more than one machine class.
 - GPU-dependent shell benchmarks need an adapter-equipped runner before they can join the
   CI-gated set.

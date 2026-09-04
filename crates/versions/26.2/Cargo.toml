@@ -72,7 +72,7 @@ getrandom = { version = "0.2", features = ["js"] }
 
 [dev-dependencies]
 lodestone-net = { workspace = true }
-lodestone-testsupport = { workspace = true }
+lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 # `test-util` for `#[tokio::test(start_paused = true)]` + time-auto-advance,
 # used by `tests/server_liveness.rs` to observe the keep-alive interval and
 # time-of-day broadcast against the real client without a real wall-clock

@@ -29,4 +29,5 @@ serde_json = { workspace = true, optional = true }
 
 [features]
 default = []
+bench-record = ["dep:serde_json"]
 worldgen = ["dep:lodestone-worldgen", "dep:serde_json"]
