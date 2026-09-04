@@ -362,37 +362,6 @@ impl Sim {
         self.net.as_ref()
     }
 
-    /// Whether the terrain under the player is still streaming in — the
-    /// post-login half of the loading screen. `false` with no live
-    /// session: the demo/dev world has no net client and is never "loading
-    /// terrain".
-    ///
-    /// The condition is vanilla's `LevelLoadTracker.WaitingForPlayerChunk`
-    /// readiness rule — see [`crate::menu::loading::is_level_ready`], which holds
-    /// the decision and the record it was ported from. This function's whole job is
-    /// gathering the four observations it reads.
-    ///
-    /// The column math is the same as `live_collision` (`sim/collide.rs`), the
-    /// other reader of this exact question, so the two cannot disagree about which
-    /// chunk the player is standing on.
-    ///
-    /// # The bound, and why it is not belt-and-braces
-    ///
-    /// This used to be the bare column test with no timeout, which makes the
-    /// screen's dismissal a liveness assumption about the server. The owner's
-    /// report was that assumption failing: the server centred the join view on
-    /// chunk `(0, 0)` instead of on the joining player, so for a player restored
-    /// away from the origin the column this waits for was never sent — and, because
-    /// the server's own view tracker had recorded it as sent, never would be. The
-    /// screen had no way out. That server defect is fixed
-    /// (`lodestone_server::server`'s join centre), and the timeout is what makes a
-    /// *future* one present as a 30 s delay rather than as a game that never starts.
-    #[must_use]
-    pub fn terrain_loading(&self) -> bool {
-        self.terrain_wait()
-            .is_some_and(|wait| !crate::menu::loading::is_level_ready(wait))
-    }
-
     /// How long the terrain phase has been up, shared by [`Self::terrain_wait`]
     /// and [`Self::asset_wait`] so the two can never disagree about the deadline
     /// — see `crate::menu::loading::assets_ready` for why they share one at all.
@@ -411,6 +380,10 @@ impl Sim {
     /// The column math is the same as `live_collision` (`sim/collide.rs`), the
     /// other reader of this exact question, so the two cannot disagree about
     /// which chunk the player is standing on.
+    ///
+    /// Readiness is bounded by the shared loading deadline. A missing required
+    /// column therefore delays presentation for at most 30 seconds instead of
+    /// leaving the loading screen up indefinitely.
     #[must_use]
     pub fn terrain_wait(&self) -> Option<crate::menu::loading::TerrainWait> {
         let net = self.net()?;
@@ -459,8 +432,8 @@ impl Sim {
     }
 
     /// What the loading screen must still hold the world back for, or `None`
-    /// when it is presentable. `None` with no live session, for the same reason
-    /// [`Self::terrain_loading`] is `false` there.
+    /// when it is presentable. This is also `None` with no live session because
+    /// [`Self::terrain_wait`] has no network observations to gather there.
     ///
     /// One expression feeding both the dismissal and the label the screen draws
     /// — `crate::menu::loading::world_wait` holds the decision and the record it
@@ -487,7 +460,7 @@ impl Sim {
     ///
     /// Also starts the terrain wait's clock, on the transition *into*
     /// `LoadingTerrain` and not on a re-set of the same phase, so the timeout in
-    /// [`Self::terrain_loading`] measures the phase and cannot be pushed forward by
+    /// [`Self::terrain_wait`] measures the phase and cannot be pushed forward by
     /// a repeated `NetUpdate::ConnectPhase`. This is still the only place a real
     /// boundary is recorded; the clock reads off that boundary rather than
     /// replacing it.
@@ -532,7 +505,7 @@ impl Sim {
     /// view radius to size the grid from.
     ///
     /// Centred on the chunk under the player, the same column math
-    /// [`Self::terrain_loading`] uses — the two must agree about which chunk
+    /// [`Self::terrain_wait`] uses — the two must agree about which chunk
     /// is "the player's own", or the grid's centre cell and the dismissal
     /// predicate would be pointing at different columns.
     ///

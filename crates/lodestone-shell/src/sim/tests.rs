@@ -8954,9 +8954,8 @@ fn app_rs_fills_hud_frame_chat_spans_not_the_legacy_chat_field() {
 /// The first assertion is the load-bearing control. It establishes that this
 /// fixture really is in the "presentable before the pack arrives" state, so the
 /// hold in the second step is attributable to the pack and not to the join being
-/// unready for some other reason. A predecessor implementation based only on
-/// `Sim::terrain_loading` answered "presentable" at all three
-/// steps.
+/// unready for some other reason. A terrain-only readiness predicate answers
+/// "presentable" at all three steps.
 ///
 /// The guard is `crate::net::hold_pack_apply_for_test`, which hands out the
 /// **production** `PackApplyInFlight` that `begin_accept` takes and whose `Drop`
@@ -9036,7 +9035,7 @@ fn redraw_applies_a_pending_pack_before_it_asks_whether_to_stop_covering_the_wor
     let gate = src
         .find("self.sim.world_wait()")
         .expect("the loading overlay must be gated on `Sim::world_wait`, which \
-                 is the two-rule predicate — `terrain_loading` alone dismisses \
+                 is the two-rule predicate — terrain readiness alone dismisses \
                  while a pack is still being applied");
 
     assert!(

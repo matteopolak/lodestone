@@ -193,7 +193,9 @@ enforces it: the atlas reload must run **before** the loading-overlay check on t
 or the player sees one frame of the stale atlas before the cover goes up. Singleplayer pays
 nothing for this — no pack push exists on the integrated server, so the asset half is satisfied
 instantly — and a browser build never blocks on a pack download at all, since it has no HTTP
-client in its dependency graph for that path.
+client in its dependency graph for that path. `Sim::world_wait` is the shell's sole aggregation
+surface for this decision; extend `TerrainWait` or `AssetWait` and the corresponding predicate
+instead of adding a parallel readiness flag.
 
 ### The join generation scheduler (server-side)
 

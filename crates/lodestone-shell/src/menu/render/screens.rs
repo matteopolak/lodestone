@@ -1085,10 +1085,10 @@ const LOADING_DETAIL: [f32; 4] = [160.0 / 255.0, 160.0 / 255.0, 160.0 / 255.0, 1
 /// screen in this file that draws a number. The number has to be real: it is
 /// the client's own loaded-column count over the view square the server is
 /// going to send (see [`crate::menu::loading::TerrainProgress`]), and the bar
-/// cannot reach the end, because the screen is dismissed by a real predicate
-/// (`Sim::terrain_loading`) and not by the bar filling. A bar that could read
+/// cannot reach the end, because the screen is dismissed by the combined
+/// `Sim::world_wait` predicate and not by the bar filling. A bar that could read
 /// as complete while the screen was still up would turn an honest freeze into a
-/// false reassurance, which is the one failure mode the issue singles out.
+/// false reassurance.
 ///
 /// `detail` is drawn dimmer than the phase name so a glance reads the phase
 /// first and the count second — the count is for diagnosing a stall ("stuck at
