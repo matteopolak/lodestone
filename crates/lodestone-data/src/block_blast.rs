@@ -88,6 +88,7 @@
 //! (spread and burnout) and `explosion_blocks` (blast destruction).
 
 use crate::block::Block;
+use crate::block_states::StateId;
 use crate::generated_block_blast as table;
 
 pub use table::{BLOCK_COUNT, EMPTY_RESISTANCE, STATE_COUNT};
@@ -197,17 +198,16 @@ pub const FLUID_EXPLOSION_RESISTANCE: f32 = 100.0;
 
 /// **The explosion hot path.** Vanilla's own explosion damage calculator's
 /// "get block explosion resistance" step
-/// for the block state whose global id is `id`, as a single flat array index.
+/// for validated block state `id`, as a single flat array index.
 ///
 /// `None` is vanilla's own empty-optional result — the cell is air *and* holds no fluid,
-/// so a blast ray pays no resistance term for it at all. `None` is also returned
-/// for an id outside `0..`[`STATE_COUNT`], which is the same inert answer.
+/// so a blast ray pays no resistance term for it at all.
 ///
 /// The `max(block, fluid)` is already folded in at generation time, so a
 /// waterlogged state answers `100.0` with no property parsing here.
 #[must_use]
-pub fn explosion_resistance_for_state_id(id: u32) -> Option<f32> {
-    let &entry = table::STATE_RESISTANCE_ENTRY.get(id as usize)?;
+pub fn explosion_resistance_for_state_id(id: StateId) -> Option<f32> {
+    let entry = table::STATE_RESISTANCE_ENTRY[id.raw() as usize];
     let bits = table::RESISTANCE_VALUES[entry as usize];
     (bits != EMPTY_RESISTANCE).then(|| f32::from_bits(bits))
 }
@@ -221,7 +221,7 @@ pub fn explosion_resistance_for_state_id(id: u32) -> Option<f32> {
 #[must_use]
 pub fn explosion_resistance_for_state(state: &str) -> Option<f32> {
     if let Some(id) = crate::block_states::state_id(state) {
-        return explosion_resistance_for_state_id(id);
+        return StateId::new(id).and_then(explosion_resistance_for_state_id);
     }
     let name = base_name(state);
     let is_air = matches!(
@@ -325,12 +325,13 @@ mod tests {
         let mut empty = 0usize;
         let mut fluid_capped = 0usize;
         for id in 0..STATE_COUNT {
+            let state_id = StateId::new(id).expect("generated state id is valid");
             let name = crate::block_states::block_name(id).expect("every id has a block");
             let waterlogged = crate::block_states::properties(id)
                 .expect("every id has properties")
                 .iter()
                 .any(|(k, v)| *k == "waterlogged" && *v == "true");
-            let flat = explosion_resistance_for_state_id(id);
+            let flat = explosion_resistance_for_state_id(state_id);
             let block = blast_or_inert(name).explosion_resistance;
             let is_air = matches!(
                 name,
@@ -354,12 +355,14 @@ mod tests {
         assert!(fluid_capped > 1000, "waterloggable states, got {fluid_capped}");
     }
 
-    /// Out-of-range ids are inert rather than a panic — the ray walk indexes this
-    /// with whatever the world hands it.
     #[test]
-    fn out_of_range_state_ids_are_empty() {
-        assert_eq!(explosion_resistance_for_state_id(STATE_COUNT), None);
-        assert_eq!(explosion_resistance_for_state_id(u32::MAX), None);
+    fn validated_state_lookup_is_total_and_invalid_raw_ids_stop_at_boundary() {
+        let lookup = explosion_resistance_for_state_id
+            as fn(crate::block_states::StateId) -> Option<f32>;
+        let state = crate::block_states::StateId::new(0).expect("state zero is valid");
+        let _ = lookup(state);
+        assert!(crate::block_states::StateId::new(STATE_COUNT).is_none());
+        assert!(crate::block_states::StateId::new(u32::MAX).is_none());
     }
 
     /// The two sets that must not be conflated — see this module's own doc

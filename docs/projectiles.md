@@ -67,7 +67,8 @@ crater shape and resistance behavior exactly — a creeper's blast can never des
 stone room only ever loses the six Chebyshev-adjacent cells to a centred blast — because both are direct
 consequences of the same per-step arithmetic. Per-block-type blast resistance is a generated table pulled
 from a real headless server (`blocks.json` has no such field), keyed to a flat per-state array for the
-hot ray-march loop.
+hot ray-march loop. That array accepts `lodestone_data::block_states::StateId`; the world-read boundary
+validates its raw palette id once, while `None` remains reserved for a valid air state with no fluid.
 
 Entity exposure, damage and knockback are a separate, older pipeline that already existed; this only adds
 the "does a block actually disappear" half. Loot drops from destroyed blocks, block entities, and
