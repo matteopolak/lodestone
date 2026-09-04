@@ -164,10 +164,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   cannot see — wrong behaviour that never panics (the motivating example: breaking a
   waterlogged block used to destroy the water too, which is not the real mechanic).
   Track B is a narrow slice rather than a finished fuzzer: fixed scripts run end to
-  end against a live vanilla server, while bounded generated scripts and semantic
-  shrinking are proven only against fresh in-memory oracles. Generated live runs
-  remain deliberately unwired until their reset and tick-boundary semantics can be
-  made trustworthy. Its own section below says exactly what is and is not there.
+  end against a live vanilla server, and bounded generated fluid scripts now run
+  against that oracle with per-case reset, timing-boundary checks, semantic shrinking,
+  and replay. The generator's general properties are also proven against fresh
+  in-memory oracles. Its own section below says exactly what is and is not there.
 - [`gpu/` module layout and shader conventions](./gpu-module-layout.md) — How
   `crates/lodestone-shell`'s render coordinator (`RenderState`) is split across
   `gpu.rs` and a `gpu/` folder of submodules, plus the convention every WGSL shader in
