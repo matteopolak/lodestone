@@ -620,7 +620,7 @@ fn a_player_file_from_another_game_version_is_refused_rather_than_overwritten() 
     use lodestone_core::Nbt;
     use lodestone_server::player_data::PlayerData;
 
-    let ours = PlayerData::default().to_nbt();
+    let ours = PlayerData::default().to_nbt().expect("default player encodes");
     PlayerData::from_nbt(&ours).expect("our own version reads back");
 
     let Nbt::Compound(mut fields) = ours else {
@@ -641,4 +641,161 @@ fn a_player_file_from_another_game_version_is_refused_rather_than_overwritten() 
         "an older DataVersion must be refused; reading it with 26.2's schema and \
          then writing it back is how a save gets destroyed"
     );
+}
+
+/// A saved item component uses the persistent compound shape, while the model
+/// retains the same value as a nameless network-NBT byte sequence.
+#[test]
+fn player_item_custom_data_uses_the_persistent_component_shape() {
+    use lodestone_core::Nbt;
+    use lodestone_server::player_data::PlayerData;
+
+    let persisted = Nbt::Compound(vec![
+        ("DataVersion".to_owned(), Nbt::Int(4903)),
+        (
+            "Inventory".to_owned(),
+            Nbt::List {
+                element_type: lodestone_core::NbtTag::Compound,
+                elements: vec![Nbt::Compound(vec![
+                    ("Slot".to_owned(), Nbt::Byte(4)),
+                    ("id".to_owned(), Nbt::String("minecraft:compass".to_owned())),
+                    ("count".to_owned(), Nbt::Int(1)),
+                    (
+                        "components".to_owned(),
+                        Nbt::Compound(vec![
+                            (
+                                "minecraft:custom_data".to_owned(),
+                                Nbt::Compound(vec![("id".to_owned(), Nbt::Int(4919))]),
+                            ),
+                        ]),
+                    ),
+                ])],
+            },
+        ),
+    ]);
+
+    let data = PlayerData::from_nbt(&persisted).expect("persistent item shape decodes");
+    assert_eq!(
+        data.inventory[4]
+            .as_ref()
+            .and_then(|stack| stack.components.custom_data.as_deref()),
+        Some(
+            &[0x0a, 0x03, 0x00, 0x02, b'i', b'd', 0x00, 0x00, 0x13, 0x37, 0x00][..]
+        ),
+        "the persistent compound must become nameless network NBT bytes"
+    );
+}
+
+/// A malformed component value does not discard the rest of its inventory
+/// entry. The item identity and count remain usable while custom data is
+/// absent.
+#[test]
+fn player_item_custom_data_wrong_type_is_skipped() {
+    use lodestone_core::Nbt;
+    use lodestone_server::player_data::PlayerData;
+
+    let persisted = Nbt::Compound(vec![
+        ("DataVersion".to_owned(), Nbt::Int(4903)),
+        (
+            "Inventory".to_owned(),
+            Nbt::List {
+                element_type: lodestone_core::NbtTag::Compound,
+                elements: vec![Nbt::Compound(vec![
+                    ("Slot".to_owned(), Nbt::Byte(7)),
+                    ("id".to_owned(), Nbt::String("minecraft:compass".to_owned())),
+                    ("count".to_owned(), Nbt::Int(3)),
+                    (
+                        "components".to_owned(),
+                        Nbt::Compound(vec![(
+                            "minecraft:custom_data".to_owned(),
+                            Nbt::String("not a compound".to_owned()),
+                        )]),
+                    ),
+                ])],
+            },
+        ),
+    ]);
+
+    let data = PlayerData::from_nbt(&persisted).expect("wrong custom-data type is tolerated");
+    let stack = data.inventory[7].as_ref().expect("item identity survives");
+    assert_eq!(stack.item.to_string(), "minecraft:compass");
+    assert_eq!(stack.count, 3);
+    assert!(stack.components.custom_data.is_none());
+}
+
+/// Strict save validation rejects malformed, non-compound, and trailing-byte
+/// network NBT without replacing an already valid player file.
+#[test]
+fn player_item_custom_data_invalid_save_preserves_the_previous_file() {
+    use lodestone_model::{ItemComponents, ItemStack};
+    use lodestone_server::player_data::{PlayerData, PlayerDataStore};
+
+    let dir = tempdir("player-custom-data");
+    let store = PlayerDataStore::new(&dir).expect("player store");
+    let uuid = Uuid::new_v4();
+    let mut valid = PlayerData::default();
+    valid.inventory[0] = Some(ItemStack {
+        item: "minecraft:compass".parse().expect("valid item"),
+        count: 1,
+        components: ItemComponents {
+            custom_data: Some(vec![
+                0x0a, 0x03, 0x00, 0x02, b'i', b'd', 0x00, 0x00, 0x13, 0x37, 0x00,
+            ]),
+            ..ItemComponents::default()
+        },
+    });
+    store.write(uuid, &valid).expect("valid custom data saves");
+    let saved_root = lodestone_anvil::player_dat::read_from_file(&store.path_for(uuid))
+        .expect("read the saved NBT")
+        .expect("saved player exists");
+    let lodestone_core::Nbt::Compound(root_fields) = saved_root else {
+        panic!("saved player root must be a compound");
+    };
+    let inventory = root_fields
+        .iter()
+        .find(|(name, _)| name == "Inventory")
+        .map(|(_, value)| value)
+        .expect("saved inventory field");
+    let lodestone_core::Nbt::List { elements, .. } = inventory else {
+        panic!("saved inventory must be a list");
+    };
+    let lodestone_core::Nbt::Compound(item_fields) = &elements[0] else {
+        panic!("saved item must be a compound");
+    };
+    let components = item_fields
+        .iter()
+        .find(|(name, _)| name == "components")
+        .map(|(_, value)| value)
+        .expect("saved components field");
+    assert_eq!(
+        components,
+        &lodestone_core::Nbt::Compound(vec![
+            (
+                "minecraft:custom_data".to_owned(),
+                lodestone_core::Nbt::Compound(vec![("id".to_owned(), lodestone_core::Nbt::Int(4919))]),
+            ),
+        ]),
+        "save must store the parsed compound, not the network framing bytes"
+    );
+
+    for invalid in [
+        vec![0x0a, 0x00, 0x00],
+        vec![0x03, 0x00, 0x00, 0x00, 0x01],
+    ] {
+        let mut data = valid.clone();
+        data.inventory[0]
+            .as_mut()
+            .expect("valid item")
+            .components
+            .custom_data = Some(invalid);
+        assert!(data.to_nbt().is_err(), "invalid custom data must fail before writing");
+        assert!(store.write(uuid, &data).is_err());
+    }
+
+    let reopened = store
+        .read(uuid)
+        .expect("previous file remains readable")
+        .expect("previous file remains present");
+    assert_eq!(reopened.inventory[0], valid.inventory[0]);
+    let _ = std::fs::remove_dir_all(dir);
 }

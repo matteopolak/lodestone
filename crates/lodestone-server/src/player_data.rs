@@ -30,7 +30,7 @@
 //! | `Air` | `Short` | not `Int` |
 //! | `Fire` | `Short` | negative when not burning |
 //! | `fall_distance` | `Double` | snake_case, unlike its neighbours |
-//! | `Inventory` | `List<Compound>` | `{Slot: Byte, id: String, count: Int}` |
+//! | `Inventory` | `List<Compound>` | `{Slot: Byte, id: String, count: Int, components: Compound?}` |
 //! | `playerGameType` | `Int` | camelCase, and *not* `GameType` |
 //! | `SelectedItemSlot` | `Int` | the hotbar index |
 //! | `XpLevel` | `Int` | the level, **not** the lifetime total |
@@ -82,7 +82,7 @@
 
 use std::path::{Path, PathBuf};
 
-use lodestone_core::{Nbt, NbtTag};
+use lodestone_core::{Nbt, NbtTag, Reader, Writer, read_network_nbt, write_network_nbt};
 use lodestone_model::{GameMode, ItemStack, Rotation, Vec3};
 
 use crate::inventory::{PLAYER_NATIVE_SIZE, PlayerInventory};
@@ -270,8 +270,13 @@ impl PlayerData {
     /// Modelled fields first, then everything preserved — so a field that
     /// somehow appears in both lists is overridden by our own value rather than
     /// by whichever the reader reached last.
+    ///
+    /// # Errors
+    ///
+    /// [`lodestone_anvil::Error::Nbt`] when an inventory item's custom-data
+    /// bytes are not one complete compound-shaped network-NBT value.
     #[must_use]
-    pub fn to_nbt(&self) -> Nbt {
+    pub fn to_nbt(&self) -> Result<Nbt, lodestone_anvil::Error> {
         let mut fields = vec![
             (
                 "DataVersion".to_owned(),
@@ -302,7 +307,10 @@ impl PlayerData {
                 "SelectedItemSlot".to_owned(),
                 Nbt::Int(i32::from(self.selected_slot)),
             ),
-            ("Inventory".to_owned(), inventory_to_nbt(&self.inventory)),
+            (
+                "Inventory".to_owned(),
+                inventory_to_nbt(&self.inventory)?,
+            ),
             // Written in vanilla's own declaration order, and the *types* are the
             // part worth checking rather than the order: `XpLevel` and `XpTotal`
             // are both `Int` and `XpP` is a `Float`, so a level written into
@@ -315,7 +323,7 @@ impl PlayerData {
             fields.push(("playerGameType".to_owned(), Nbt::Int(game_type_value(mode))));
         }
         fields.extend(self.preserved.iter().cloned());
-        Nbt::Compound(fields)
+        Ok(Nbt::Compound(fields))
     }
 
     /// Decodes a player root compound.
@@ -457,7 +465,8 @@ impl PlayerDataStore {
         uuid: uuid::Uuid,
         data: &PlayerData,
     ) -> Result<(), lodestone_anvil::Error> {
-        lodestone_anvil::player_dat::write_to_file(&data.to_nbt(), &self.path_for(uuid))
+        let root = data.to_nbt()?;
+        lodestone_anvil::player_dat::write_to_file(&root, &self.path_for(uuid))
     }
 }
 
@@ -536,27 +545,71 @@ fn game_type_from_value(value: i32) -> Option<GameMode> {
     }
 }
 
-/// The `Inventory` list: `{Slot, id, count}` per occupied slot, empties omitted
-/// — vanilla's own sparse form (a real file with 12 items has 12 entries, not 41).
-fn inventory_to_nbt(slots: &[Option<ItemStack>]) -> Nbt {
-    Nbt::List {
+/// The `Inventory` list: `{Slot, id, count, components?}` per occupied slot,
+/// empties omitted — the sparse persistent form (a real file with 12 items has
+/// 12 entries, not 41). The only component currently converted is the
+/// top-level `minecraft:custom_data` compound; its model bytes are validated
+/// as complete network NBT before this function returns.
+fn inventory_to_nbt(slots: &[Option<ItemStack>]) -> Result<Nbt, lodestone_anvil::Error> {
+    let elements = slots
+        .iter()
+        .enumerate()
+        .filter_map(|(index, slot)| {
+            let stack = slot.as_ref()?;
+            Some(item_to_nbt(index, stack))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Nbt::List {
         element_type: NbtTag::Compound,
-        elements: slots
-            .iter()
-            .enumerate()
-            .filter_map(|(index, slot)| {
-                let stack = slot.as_ref()?;
-                Some(Nbt::Compound(vec![
-                    ("Slot".to_owned(), Nbt::Byte(index as i8)),
-                    ("id".to_owned(), Nbt::String(stack.item.to_string())),
-                    (
-                        "count".to_owned(),
-                        Nbt::Int(i32::try_from(stack.count).unwrap_or(i32::MAX)),
-                    ),
-                ]))
-            })
-            .collect(),
+        elements,
+    })
+}
+
+fn item_to_nbt(index: usize, stack: &ItemStack) -> Result<Nbt, lodestone_anvil::Error> {
+    let mut fields = vec![
+        ("Slot".to_owned(), Nbt::Byte(index as i8)),
+        ("id".to_owned(), Nbt::String(stack.item.to_string())),
+        (
+            "count".to_owned(),
+            Nbt::Int(i32::try_from(stack.count).unwrap_or(i32::MAX)),
+        ),
+    ];
+    if let Some(bytes) = &stack.components.custom_data {
+        fields.push((
+            "components".to_owned(),
+            Nbt::Compound(vec![(
+                "minecraft:custom_data".to_owned(),
+                custom_data_to_persistent(index, bytes)?,
+            )]),
+        ));
     }
+    Ok(Nbt::Compound(fields))
+}
+
+fn custom_data_to_persistent(
+    slot: usize,
+    bytes: &[u8],
+) -> Result<Nbt, lodestone_anvil::Error> {
+    let mut reader = Reader::new(bytes);
+    let value = read_network_nbt(&mut reader).map_err(lodestone_anvil::Error::Nbt)?;
+    reader
+        .ensure_empty()
+        .map_err(lodestone_anvil::Error::Nbt)?;
+    if !matches!(value, Nbt::Compound(_)) {
+        return Err(lodestone_anvil::Error::Nbt(lodestone_core::Error::Custom(
+            format!("inventory slot {slot} custom_data must have a compound root"),
+        )));
+    }
+    Ok(value)
+}
+
+fn custom_data_to_network(value: &Nbt) -> Option<Vec<u8>> {
+    let Nbt::Compound(_) = value else {
+        return None;
+    };
+    let mut writer = Writer::default();
+    write_network_nbt(&mut writer, value).ok()?;
+    Some(writer.into_vec())
 }
 
 fn inventory_from_nbt(nbt: Option<&Nbt>) -> Vec<Option<ItemStack>> {
@@ -589,7 +642,15 @@ fn inventory_from_nbt(nbt: Option<&Nbt>) -> Vec<Option<ItemStack>> {
             Some(Nbt::Byte(c)) => i32::from(*c).max(0) as u32,
             _ => 1,
         };
-        out[slot] = Some(ItemStack::new(key, count));
+        let mut stack = ItemStack::new(key, count);
+        if let Some(components) = field(entry, "components") {
+            if let Some(custom_data) = field(components, "minecraft:custom_data")
+                .and_then(custom_data_to_network)
+            {
+                stack.components.custom_data = Some(custom_data);
+            }
+        }
+        out[slot] = Some(stack);
     }
     out
 }
