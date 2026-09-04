@@ -32,6 +32,11 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   separate subsystem from server-side mob AI (`docs/mob-ai.md`) — this is a
   pathfinder for a *player-shaped* body, built as an opt-in plugin for people writing
   bots on top of the client, not a feature of the shipped game.
+- [Benchmark regression gate](./benchmark-regression-gate.md) — The committed half
+  of the benchmark harness: `bench-baselines/*.json` holds what a deterministic
+  benchmark metric is *supposed* to be, `scripts/bench-gate.py` compares a fresh run
+  against it and fails on drift in either direction, and CI's `bench-gate` job runs
+  both on every push and pull request. It gates counts only — never a duration.
 - [Block entity renderers](./block-entity-renderers.md) — The render path for blocks
   whose visible geometry is not (fully) described by their own block model — chests,
   skulls, signs, banners, shields, bells, shulker boxes, lecterns, campfires,
