@@ -341,8 +341,8 @@ impl PlayerPreview {
     /// exists — there is no local player uuid yet, only [`DEFAULT_MODEL`]'s
     /// bootstrap guess. This is the seam that corrects it once one is known,
     /// called every container frame from
-    /// `ContainerRenderer::render_geometry_scaled_between_strata` (the same
-    /// frame. The `(uuid, source)` identity below keeps that call cheap while
+    /// `ContainerRenderer::render_geometry_scaled_between_strata`. The
+    /// `(uuid, source)` identity below keeps that call cheap while
     /// still rebinding after an account change or renderer rebuild.
     ///
     /// # One resolver, keyed on one uuid
@@ -351,9 +351,8 @@ impl PlayerPreview {
     /// calls for the world-side default of every other player with no
     /// declared skin — `lodestone_assets::skin::default_skin_for_uuid`. Two
     /// call sites reading one pure function of the same uuid cannot disagree
-    /// by construction, which is the acceptance bar issue #646 states
-    /// explicitly (the original report was exactly this: Alex in the
-    /// inventory, Steve in the world, for the *same* player).
+    /// by construction, preventing the inventory and world from choosing
+    /// different default models for the same player.
     ///
     /// A cached sheet is accepted only when it belongs to this UUID. An old
     /// unowned `skin.png` therefore cannot leak another switcher account into
@@ -774,7 +773,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #646: the uuid-derived default, decoupled from the GPU/filesystem
+    // UUID-derived defaults, decoupled from the GPU and filesystem
     // -----------------------------------------------------------------------
 
     /// `uuid_default_model` is the whole decision behind
