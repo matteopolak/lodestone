@@ -34,10 +34,12 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import io
 import json
 import re
 import struct
 import sys
+import zipfile
 import zlib
 from pathlib import Path
 
@@ -46,6 +48,7 @@ SEEDS = Path(__file__).resolve().parent
 CACHE = REPO / ".cache" / "mc"
 REPORTS = CACHE / "26.2" / "generated" / "reports"
 VANILLA_DATA = CACHE / "26.2" / "src" / "data" / "minecraft"
+VANILLA_ASSETS = CACHE / "26.2" / "src" / "assets" / "minecraft"
 SURVIVAL_WORLD = CACHE / "survival" / "world"
 V26_2_FIXTURES = REPO / "crates" / "versions" / "26.2" / "tests" / "fixtures"
 PACKET_IDS_RS = REPO / "crates" / "versions" / "26.2" / "src" / "generated" / "packet_ids.rs"
@@ -500,6 +503,30 @@ def seed_block_states() -> list[str]:
     return [f"{len(chosen)} block-state strings from blocks.json -> block_state_string"]
 
 
+def seed_resource_pack_zip() -> list[str]:
+    """A real single-entry-per-file zip archive, built from vanilla's own
+    language files.
+
+    `ZipSource::from_bytes` parses a whole resource pack's central directory
+    and every entry's local header; the *container* here is assembled by this
+    script (no vanilla `client.jar` is checked out under `.cache/`, only the
+    decompiled source tree's loose asset files), but every byte the archive
+    holds -- `assets/minecraft/lang/en_us.json` and `deprecated.json`, each
+    truncated to `MAX_SEED_BYTES` -- is real vanilla content, and the zip
+    structure (central directory, local headers, deflate streams) is genuine
+    `zipfile` output, not our own writer's.
+    """
+    lang = require(VANILLA_ASSETS / "lang")
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in ("en_us.json", "deprecated.json"):
+            path = require(lang / name)
+            zf.writestr(f"assets/minecraft/lang/{name}", path.read_bytes()[:MAX_SEED_BYTES])
+        zf.writestr("assets/.mcassetsroot", b"")
+    write_seed("resource_pack_zip_source", "vanilla_lang_pack.zip", buf.getvalue())
+    return ["a zip of vanilla's own lang files -> resource_pack_zip_source"]
+
+
 FAMILIES = [
     seed_packet_decoders,
     seed_nbt,
@@ -509,6 +536,7 @@ FAMILIES = [
     seed_text_json,
     seed_text_nbt,
     seed_block_states,
+    seed_resource_pack_zip,
 ]
 
 
