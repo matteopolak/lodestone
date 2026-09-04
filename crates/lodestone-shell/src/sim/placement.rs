@@ -332,9 +332,10 @@ const FACING_ALL: &[&str] = &[
 ///
 /// # Provenance, and why this is a measurement rather than a guess
 ///
-/// Derived from `.cache/mc/26.2/generated/reports/blocks.json` — Mojang's own
-/// generator output, data source #1 — by taking each block's `"default": true`
-/// state and collecting, per property name, the set of values it holds there.
+/// Derived from the generated block registry report at
+/// `.cache/mc/26.2/generated/reports/blocks.json` by taking each block's
+/// `"default": true` state and collecting, per property name, the set of values
+/// it holds there.
 /// 93 property names appear; **60 of them take one value across all 1,196
 /// blocks** and are listed below. The 17 that do not (`facing`, `axis`, `half`,
 /// `type`, `shape`, `lit`, `waterlogged`, `level`, `mode`, `rotation`, `up`,

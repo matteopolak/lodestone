@@ -558,9 +558,8 @@ mod nearby_entity_radius_tests {
     }
 }
 
-/// Issue #614's last static lead: does `mesher.rs`'s section-to-world-y
-/// placement agree with what [`Sim::live_collision`] queries against, in a
-/// dimension whose `min_y` differs from the overworld's?
+/// Section-to-world-y placement must agree with what [`Sim::live_collision`]
+/// queries, including dimensions whose `min_y` differs from the overworld's.
 ///
 /// # Why both sides are expected to agree, and what would make them not
 ///

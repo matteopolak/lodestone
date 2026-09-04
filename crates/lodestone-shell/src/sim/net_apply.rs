@@ -625,11 +625,11 @@ impl Sim {
                     tracing::info!(target: "chat", "Local game hosted on port {port}");
                     self.push_local_chat(format!("Local game hosted on port {port}"));
                     self.status = format!("open to LAN on {port}");
-                    // Issue #535's scope 2: the ground truth
-                    // `app::session::drive_ui_from_session` reconciles into
-                    // `MenuNav::set_lan_published`, so the pause menu stops
-                    // offering a button with nothing left to do. See
-                    // `Self::lan_published`'s own field doc.
+                    // `NetUpdate::LanOpened` is the source for the local-host
+                    // notification. `app::session::drive_ui_from_session`
+                    // reconciles `Self::lan_published` into
+                    // `MenuNav::set_lan_published`, keeping the pause-menu
+                    // action aligned with the session state.
                     self.lan_published = true;
                 }
                 NetUpdate::Sound {
