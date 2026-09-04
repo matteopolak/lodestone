@@ -31,22 +31,17 @@ use crate::keybinds::Keybinds;
 /// Matches vanilla's own auto-gui-scale sentinel.
 pub const AUTO_GUI_SCALE: u32 = 0;
 
-/// Default look sensitivity — vanilla's own persisted-options declarations
-/// (a unit-interval double, default `0.5`), and already what [`Config::default`] used before
-/// [`Options::sensitivity`] existed, so the migration in issue #443 changes
-/// nothing for an untouched install.
+/// Default look sensitivity: a unit-interval value with default `0.5`. This
+/// matches [`Config::default`], so loading an untouched install keeps the same
+/// effective sensitivity when no persisted value is present.
 pub const DEFAULT_SENSITIVITY: f32 = 0.5;
 
 /// Default render distance in chunks.
 ///
-/// **This is 8, and vanilla's is 12.** The difference is
-/// deliberate and predates issue #443: `Config::default().render_distance` has
-/// been 8 for this client's whole life, so making the persisted default 12 would
-/// silently hand every existing install a 2.25× larger chunk load the first time
-/// they launched a build with a settings row wired. A migration must not change
-/// behaviour it is only supposed to relocate; the *slider's range* is still
-/// vanilla's `2..=32` (see `menu::options::INT_RANGE_SLIDERS`), so a player can
-/// reach 12 or 32 — this is the starting point, not a ceiling.
+/// **This is 8 by design.** Keeping the command-line default at 8 avoids a
+/// 2.25x larger chunk load for an install without a persisted setting. The
+/// *slider's range* is still `2..=32` (see `menu::options::INT_RANGE_SLIDERS`),
+/// so a player can reach 12 or 32; this is the starting point, not a ceiling.
 pub const DEFAULT_RENDER_DISTANCE: u32 = 8;
 
 /// Vanilla's `renderDistance` minimum (an int range starting at 2 in its own
@@ -552,10 +547,9 @@ pub fn calculate_gui_scale(desired: u32, framebuffer_width: u32, framebuffer_hei
 /// [`crate::menu::servers::ServerList`]'s rule that a missing or corrupt file
 /// is the default, never an error.
 ///
-/// **Not `Eq`** since #203 added `mouse_wheel_sensitivity: f32` — `f32` has no
-/// `Eq` impl (`NaN != NaN`), so the struct can no longer derive it. Nothing
-/// depended on `Options: Eq` before this (checked: no `HashSet`/`BTreeMap`
-/// keyed on it), only `PartialEq`, which every test here already uses.
+/// **Not `Eq`** because `mouse_wheel_sensitivity: f32` cannot implement that
+/// trait (`NaN != NaN`). The shell compares options with `PartialEq`, and no
+/// collection in this crate uses `Options` as a key.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Options {
     /// The user's chosen `gui_scale`: [`AUTO_GUI_SCALE`] or an explicit
@@ -608,10 +602,8 @@ pub struct Options {
     /// for `damage_tilt_strength`'s reason: vanilla cannot produce a rate outside
     /// this range, and a negative one would spin the sky backwards.
     pub panorama_speed: f32,
-    /// Vanilla's `key.sneak` toggle option (its own persisted-options
-    /// declarations name it `toggleCrouch`, issue #202): sneak is hold-to-activate when
-    /// `false` (vanilla's own default) and press-to-toggle when `true`. Fed to
-    /// [`lodestone_controller::InputState::set_toggle_modes`].
+    /// Sneak is hold-to-activate when `false` and press-to-toggle when `true`.
+    /// Fed to [`lodestone_controller::InputState::set_toggle_modes`].
     pub toggle_sneak: bool,
     /// As [`Self::toggle_sneak`], for `key.sprint` (vanilla's own `toggleSprint`).
     pub toggle_sprint: bool,
@@ -696,12 +688,10 @@ pub struct Options {
     /// default reads **100%** and the maximum **200%** — the stored number is
     /// half the percentage a player sees.
     ///
-    /// **This field is the migration in issue #443.** It used to live only on
-    /// [`Config`], parsed from argv every run and never written back, so the
-    /// settings row for it had to stay inactive: a row that appeared to set it
-    /// would have been fabricated persistence. The consumer already existed
-    /// (`sim/step.rs`'s `apply_mouse`), which is what made this the highest-value
-    /// remaining migration rather than a new feature.
+    /// **Persisted look sensitivity.** This field is loaded from `options.json`
+    /// and can be overridden by `--sensitivity` for one run. The simulation
+    /// consumes it through `sim/step.rs`'s `apply_mouse`, so the settings row
+    /// and runtime behavior use the same value.
     ///
     /// `--sensitivity` on argv still wins for that run — see
     /// [`Config::resolve_persisted`].
@@ -2618,8 +2608,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    // -- toggle sneak/sprint/attack/use, auto-jump, mouse invert/sensitivity
-    //    (issues #202/#203/#444) ---
+    // -- toggle sneak/sprint/attack/use, auto-jump, mouse invert/sensitivity ---
 
     #[test]
     fn toggle_and_invert_default_off_and_write_no_key_when_untouched() {
@@ -2999,8 +2988,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    // -- chat display options (issue: player report on "chat options ...
-    // size, etc.") -----------------------------------------------------------
+    // -- chat display options (scale, width, height, opacity, and colours) ---
 
     #[test]
     fn chat_options_default_to_vanillas_own_defaults() {
@@ -3264,7 +3252,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(path.parent().unwrap());
     }
 
-    // -- issue #443: the argv -> options.json migration ----------------------
+    // -- argv/options.json precedence and persistence ------------------------
 
     /// A flag that was **given** wins over `options.json` for that run; a flag
     /// that was **not** given loses to it.

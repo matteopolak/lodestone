@@ -37,14 +37,14 @@ mod background;
 /// surface (`SetBeaconEffects` remainder) — see its own module
 /// doc.
 pub mod beacon;
-/// Bundle scroll-to-select tracking (`BUNDLE_ITEM_SELECTED` /
-/// #613's `SelectBundleItem` remainder) — see its own module doc.
+/// Bundle scroll-to-select tracking (`BUNDLE_ITEM_SELECTED`) — see its own
+/// module doc.
 pub mod bundle;
 /// The crafter's slot-disable toggle (`SetContainerSlotState`
 /// remainder) — see its own module doc.
 pub mod crafter;
-/// The enchanting table's three enchant-offer buttons (issue #613's
-/// `ContainerButtonClick` remainder) — see its own module doc.
+/// The enchanting table's three enchant-offer buttons — see its own module
+/// doc.
 pub mod enchant;
 /// The shared GUI vertex builder — colour, item-sprite, glint, block-model and
 /// background streams. `pub(crate)` because it now has three consumers: the
@@ -73,9 +73,7 @@ pub mod merchant;
 mod player_preview;
 mod recipe_book;
 mod renderer;
-/// The stonecutter's recipe-selection scroll list (issue #613's
-/// `ContainerButtonClick` remainder for this screen) — see its own module
-/// doc.
+/// The stonecutter's recipe-selection scroll list — see its own module doc.
 pub mod stonecutter;
 // `pub(crate)`, not private: `hud`'s chat `show_item` tooltip composes its
 // body from `tooltip::tooltip_lines`, the same line-gathering an inventory
