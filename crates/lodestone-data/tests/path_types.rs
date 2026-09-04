@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use lodestone_model::{PathType, PathTypeRegistry};
-use lodestone_data::block_states;
+use lodestone_data::block_states::{self, StateId};
 use lodestone_data::path_types::{self, PathTypes};
 
 fn manifest_dir() -> PathBuf {
@@ -178,6 +178,10 @@ fn states_named(name: &str) -> impl Iterator<Item = u32> + '_ {
     (0..block_states::STATE_COUNT).filter(move |&id| block_states::block_name(id) == Some(name))
 }
 
+fn validated(raw: u32) -> StateId {
+    StateId::new(raw).unwrap_or_else(|| panic!("state id {raw} must be in the generated table"))
+}
+
 #[test]
 fn count_matches_block_state_table() {
     assert_eq!(
@@ -188,16 +192,15 @@ fn count_matches_block_state_table() {
 }
 
 #[test]
-fn ids_are_contiguous_and_out_of_range_is_none() {
+fn ids_are_contiguous_and_out_of_range_is_rejected_at_the_boundary() {
     let count = path_types::STATE_COUNT;
     for id in 0..count {
-        assert!(
-            path_types::path_type(id).is_some(),
-            "id {id} in 0..{count} did not resolve to a path type"
-        );
+        let state = StateId::new(id)
+            .unwrap_or_else(|| panic!("id {id} in 0..{count} did not validate"));
+        let _ = path_types::path_type(state);
     }
-    assert!(path_types::path_type(count).is_none());
-    assert!(path_types::path_type(u32::MAX).is_none());
+    assert!(StateId::new(count).is_none());
+    assert!(StateId::new(u32::MAX).is_none());
 }
 
 #[test]
@@ -205,15 +208,15 @@ fn registry_impl_matches_free_function() {
     let reg = PathTypes;
     assert_eq!(reg.state_count(), path_types::STATE_COUNT);
     for id in [0, 1, 100, 1000, path_types::STATE_COUNT - 1] {
-        assert_eq!(reg.path_type(id), path_types::path_type(id));
+        assert_eq!(reg.path_type(id), Some(path_types::path_type(validated(id))));
     }
     assert_eq!(reg.path_type(path_types::STATE_COUNT), None);
 }
 
 #[test]
 fn air_is_open_and_stone_is_blocked() {
-    assert_eq!(path_types::path_type(0), Some(PathType::Open), "air");
-    assert_eq!(path_types::path_type(1), Some(PathType::Blocked), "stone");
+    assert_eq!(path_types::path_type(validated(0)), PathType::Open, "air");
+    assert_eq!(path_types::path_type(validated(1)), PathType::Blocked, "stone");
 }
 
 #[test]
@@ -222,15 +225,15 @@ fn fluids_classify_as_water_and_lava() {
     // the exact trap the oracle guards against. Pin them per-block.
     for id in states_named("minecraft:water") {
         assert_eq!(
-            path_types::path_type(id),
-            Some(PathType::Water),
+            path_types::path_type(validated(id)),
+            PathType::Water,
             "water id {id}"
         );
     }
     for id in states_named("minecraft:lava") {
         assert_eq!(
-            path_types::path_type(id),
-            Some(PathType::Lava),
+            path_types::path_type(validated(id)),
+            PathType::Lava,
             "lava id {id}"
         );
     }
@@ -251,8 +254,8 @@ fn fences_and_walls_are_fence() {
         let mut checked = 0usize;
         for id in states_named(name) {
             assert_eq!(
-                path_types::path_type(id),
-                Some(PathType::Fence),
+                path_types::path_type(validated(id)),
+                PathType::Fence,
                 "{name} id {id}"
             );
             checked += 1;
@@ -261,7 +264,7 @@ fn fences_and_walls_are_fence() {
     }
     // A fence gate is FENCE when closed and OPEN when open — both must occur.
     let gate: HashSet<_> = states_named("minecraft:oak_fence_gate")
-        .map(|id| path_types::path_type(id).unwrap())
+        .map(|id| path_types::path_type(validated(id)))
         .collect();
     assert_eq!(
         gate,
@@ -273,7 +276,7 @@ fn fences_and_walls_are_fence() {
 #[test]
 fn doors_split_by_material_and_open_state() {
     let oak: HashSet<_> = states_named("minecraft:oak_door")
-        .map(|id| path_types::path_type(id).unwrap())
+        .map(|id| path_types::path_type(validated(id)))
         .collect();
     assert_eq!(
         oak,
@@ -281,7 +284,7 @@ fn doors_split_by_material_and_open_state() {
         "wooden door: open -> DoorOpen, closed -> DoorWoodClosed"
     );
     let iron: HashSet<_> = states_named("minecraft:iron_door")
-        .map(|id| path_types::path_type(id).unwrap())
+        .map(|id| path_types::path_type(validated(id)))
         .collect();
     assert_eq!(
         iron,
@@ -309,13 +312,13 @@ fn special_blocks_have_expected_types() {
     ];
     for (name, want) in cases {
         let id = first_id_named(name).unwrap_or_else(|| panic!("{name} present"));
-        assert_eq!(path_types::path_type(id), Some(want), "{name} (id {id})");
+        assert_eq!(path_types::path_type(validated(id)), want, "{name} (id {id})");
     }
     // Trapdoors themselves are TRAPDOOR (tag-based).
     for id in states_named("minecraft:oak_trapdoor") {
         assert_eq!(
-            path_types::path_type(id),
-            Some(PathType::Trapdoor),
+            path_types::path_type(validated(id)),
+            PathType::Trapdoor,
             "oak_trapdoor id {id}"
         );
     }
@@ -353,7 +356,7 @@ fn committed_table_matches_dump() {
     let mut mismatches = 0usize;
     for (id, ty) in types.iter().enumerate() {
         let want = screaming_to_camel(ty);
-        let got = format!("{:?}", path_types::path_type(id as u32).unwrap());
+        let got = format!("{:?}", path_types::path_type(validated(id as u32)));
         if got != want {
             mismatches += 1;
         }

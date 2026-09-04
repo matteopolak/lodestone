@@ -6,7 +6,10 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 
-use lodestone_data::{block_states, collision_shapes, entity_dimensions, path_types};
+use lodestone_data::{
+    block_states::{self, StateId},
+    collision_shapes, entity_dimensions, path_types,
+};
 use lodestone_entity::pathfinding::{Aabb, BlockCues, MobShape, PathType, PathWorld};
 use lodestone_entity::{RayView, seen_percent};
 use lodestone_model::{BlockPos, Vec3};
@@ -253,8 +256,8 @@ impl ChunkWorld {
     /// [`block_states::state_id`], if the block name at that cell is one the
     /// 26.2 census knows about.
     #[must_use]
-    fn state_id(&self, x: i32, y: i32, z: i32) -> Option<u32> {
-        block_states::state_id(self.block_state(x, y, z))
+    fn state_id(&self, x: i32, y: i32, z: i32) -> Option<StateId> {
+        block_states::state_id(self.block_state(x, y, z)).and_then(StateId::new)
     }
 }
 
@@ -271,7 +274,7 @@ impl PathWorld for ChunkWorld {
         // world's terrain (worldgen, `set_solid`, `set_block`) emits canonical
         // vanilla state strings, but a tick must never panic on a lookup miss.
         self.state_id(x, y, z)
-            .and_then(path_types::path_type)
+            .map(path_types::path_type)
             .map_or_else(
                 || {
                     if self.is_solid(x, y, z) {
@@ -315,8 +318,7 @@ impl PathWorld for ChunkWorld {
         let path = state.split('[').next().unwrap_or(state);
         let edible_for_sheep = self
             .state_id(x, y, z)
-            .and_then(block_states::StateId::new)
-            .map(block_states::StateId::block)
+            .map(StateId::block)
             .is_some_and(|block| {
                 lodestone_data::tool::block_tag_contains("minecraft:edible_for_sheep", block)
             });
@@ -364,7 +366,7 @@ impl PathWorld for ChunkWorld {
             return 1.0;
         }
         self.state_id(x, y, z)
-            .and_then(collision_shapes::collision_boxes)
+            .and_then(|state| collision_shapes::collision_boxes(state.raw()))
             .map_or_else(
                 || if self.is_solid(x, y, z) { 1.0 } else { 0.0 },
                 |boxes| {
