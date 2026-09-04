@@ -6,8 +6,7 @@
 joins Minecraft **1.21.11** — protocol **774** — with one adapter, one
 generated packet-id table, one generated block-state table, one generated
 entity registry, and this era's own chunk, velocity, chat and tab-list codecs.
-It is the joining direction only, so 774 is a version we can play on and not
-one we can host.
+The same feature registers `V774ServerProtocol` for hosting protocol 774.
 
 The protocol number comes from two independent sources that agree. The jar's
 own `version.json` inside `.cache/mc/1.21.11/server.jar` reports
@@ -197,6 +196,31 @@ happened to the 1.20.6 era.
 * `LODESTONE_REGEN=1` switches the two table tests from asserting to
   generating.
 
+## Hosting
+
+`server_protocol::V774ServerProtocol` implements offline login, configuration,
+the Overworld join and teleport, chunk batches, and block breaking updates.
+Its `src/generated/hosting-configuration.txt` contains registry, feature and
+tag packets extracted from this family's committed real-server join capture.
+The capture retains four registries; all retained entries have payloads, so
+these entries do not require known-pack agreement. The remaining synchronized
+registries still need authoritative fixtures and external-client validation.
+Dimension and plains biome IDs come from that ordered registry stream.
+
+Chunks cover y=-64 through 319 with typed heightmap arrays, uncounted palette
+long arrays and inline light framing. The teleport includes its leading ID,
+three velocity fields and 32-bit flags. Canonical block states must have a
+unique exact inverse; unsupported states, non-plains biomes and block entities
+produce explicit chunk-encoding errors. Light arrays are currently empty;
+external-client lighting and broad gameplay acceptance remain unverified.
+
+Extend the family's `server_protocol` and its `tests/server_protocol.rs` wire
+controls together. When replacing the authoritative capture, re-extract
+configuration packet IDs 7, 12 and 13; the fixture identity test checks the
+production payloads against that capture. `tests/server_integration.rs` verifies
+registry-selected login, Play, chunk receipt and a block break through the real
+integrated-server loop.
+
 ## Dependencies
 
 `lodestone-core` (codec primitives, `Reader`/`Writer`, anonymous NBT, dispatch
@@ -206,11 +230,13 @@ tables), `lodestone-macros` (the `Encode`/`Decode`/`Packet` derives and the
 `PalettedContainer`, `Heightmaps`, `ColumnLight`), `lodestone-data` (the
 canonical 26.2 registries the wire is translated into),
 `lodestone-protocol-common` (shared packet definitions whose declared ranges
-cover 774). Registration is three manifest lines and six sites in
+cover 774), and `lodestone-server` (hosting protocol and checked chunk boundary).
+Registration lives in
 `lodestone-registry`; `cargo run -p xtask -- check-deletable 1.21.11` reports
 the crate cleanly deletable, which is the property the version seam exists to
 keep.
 
-For tests: `lodestone-net` (the framed connection the recorder joins with),
+For tests: `lodestone-client` and `lodestone-registry` for integrated hosting,
+`lodestone-net` (the framed connection the recorder joins with),
 `lodestone-testsupport` (unique usernames, the async RCON client), `tokio`,
 `serde_json` and `uuid`.

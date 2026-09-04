@@ -12,6 +12,7 @@ lodestone-core = { workspace = true }
 lodestone-data = { workspace = true }
 lodestone-macros = { workspace = true }
 lodestone-model = { workspace = true }
+lodestone-server = { path = "../../lodestone-server" }
 # Packet definitions measured identical (wire shape and codec) to their
 # counterparts in the eras below; see that crate's module docs for which
 # packets and their protocol ranges.
@@ -21,6 +22,8 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+lodestone-client = { workspace = true }
+lodestone-registry = { workspace = true, features = ["v1-20-6"] }
 lodestone-net = { workspace = true }
 lodestone-testsupport = { workspace = true }
 tokio = { workspace = true }

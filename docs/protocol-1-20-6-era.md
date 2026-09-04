@@ -244,18 +244,43 @@ The crate itself reads no environment variable and has no runtime
 configuration: the negotiated protocol is the only per-connection input, and it
 is resolved once at construction.
 
-Hosting is not configurable because this family has no `ServerProtocol`: it can
-join a 766 server and cannot host one.
+The same feature registers `V766ServerProtocol` for hosting protocol 766.
+
+## Hosting
+
+`server_protocol::V766ServerProtocol` implements offline login, configuration,
+the Overworld join and teleport, chunk batches, and block breaking updates.
+The configuration fixture in `src/generated/hosting-configuration.txt` contains
+only registry, feature and tag packets from the committed real-server join
+capture. The capture retains four registries; every retained entry includes its
+payload and needs no known-pack agreement. The remaining synchronized registries
+still need authoritative fixtures and external-client validation. Dimension and
+plains biome IDs are resolved from the retained ordered stream.
+
+Chunks cover y=-64 through 319, use anonymous NBT heightmaps, counted palette
+long arrays, and inline light framing without a trust-edges byte. The outbound
+block-state inverse accepts only unique canonical mappings. Unsupported states,
+non-plains biomes and block entities return explicit chunk-encoding errors.
+Light arrays are currently empty; external-client lighting and broad gameplay
+acceptance remain unverified. This is a minimal host, not full Play coverage.
+
+To extend hosting, change this family's `server_protocol` and add outside wire
+controls to `tests/server_protocol.rs`. Re-extract the fixture's configuration
+packet IDs 7, 12 and 13 if the authoritative join capture changes; the fixture
+identity test detects drift. `tests/server_integration.rs` checks the actual
+registry-selected server/client path through Play, chunk receipt and block break.
 
 ## Dependencies
 
-Only the six crates every version family may depend on: `lodestone-core`
+The wire implementation uses `lodestone-core`
 (codecs, NBT, dispatch table), `lodestone-model` (the version-free
 `VersionAdapter`, `ClientEvent` and `Directive` vocabulary), `lodestone-macros`
 (the `Encode`/`Decode`/`Packet` derives), `lodestone-protocol-common` (one
 shared packet, the brand payload), `lodestone-data` (the canonical 26.2
 block-state, block-entity and mob-effect registries) and `lodestone-world`
-(paletted column storage and light). Tests additionally use `lodestone-net`,
+(paletted column storage and light). Hosting uses `lodestone-server`'s protocol
+trait and checked chunk boundary. Tests additionally use `lodestone-client`,
+`lodestone-registry`, `lodestone-net`,
 `lodestone-testsupport` (RCON), `tokio` and `serde_json`.
 
 Nothing else depends on this crate except `lodestone-registry`, through one
