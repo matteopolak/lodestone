@@ -609,16 +609,15 @@ fn biome_sky_color(value: &Nbt) -> Option<u32> {
     }
 }
 
-/// `DimensionType::ambient_light_color`'s decode: `attributes` →
-/// `minecraft:visual/ambient_light_color`, same shape as [`biome_sky_color`]
-/// (vanilla's own rgb-color attribute type shares its string-or-int codec
-/// with every user of it, not just biomes) — a hex string on the wire, an
-/// int or the `{ modifier, argument }` form both legal for a data pack to
-/// author.
+/// Reads the ambient-light colour nested below `attributes` at
+/// `minecraft:visual/ambient_light_color`. Like [`biome_sky_color`], it
+/// accepts a hexadecimal string on the wire, an integer, or the
+/// `{ modifier, argument }` form a data pack may author.
 ///
 /// Confirmed against a real captured `dimension_type` payload
 /// (`tests/fixtures/registry_data_dimension_type.hex`): the Nether's entry
-/// carries the NBT string `"#302821"` at exactly this key.
+/// carries `0x302821` at this key. Its wire NBT string spells the same value
+/// as `#` followed by `302821`.
 fn dimension_ambient_light_color(fields: &[(String, Nbt)]) -> Option<u32> {
     let Nbt::Compound(attributes) = field(fields, "attributes")? else {
         return None;

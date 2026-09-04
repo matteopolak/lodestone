@@ -42,9 +42,9 @@
 
 use lodestone_model::VersionAdapter;
 
-/// Generated protocol/data-version table for GitHub epic #343's sixteen
-/// target versions. Use the [`version_table`] module for the public API and
-/// provenance docs; this holds only the raw generated data.
+/// Generated protocol/data-version table for the sixteen target versions. Use
+/// the [`version_table`] module for the public API and provenance docs; this
+/// holds only the raw generated data.
 #[path = "generated/version_table.rs"]
 pub(crate) mod generated_version_table;
 
@@ -52,23 +52,12 @@ pub mod version_table;
 
 /// A compiled-in protocol version family.
 ///
-/// # The multi-protocol seam (epic #343 unit U2)
+/// # The multi-protocol seam
 ///
-/// `make` takes the **negotiated protocol**. It did not always: families used
-/// to be built by a zero-argument `fn() -> Box<dyn VersionAdapter>`, and
-/// [`adapter_for_protocol`] resolved a family by constructing every adapter in
-/// turn and asking each one `supports`. Two consequences, and the first is the
-/// one that mattered:
-///
-/// 1. **A family could not serve more than one protocol revision**, because
-///    the negotiated number reached the adapter nowhere — there was nothing to
-///    select a per-protocol `packet_ids` table by. The plan for #343 groups
-///    versions by wire era (v110 covering 1.9.4/1.10.2/1.11.2, v498 covering
-///    1.14.4/1.15.2, v756 covering 1.17.1/1.18.2) precisely to avoid eleven
-///    near-duplicate crates, and every one of those groupings needs this.
-/// 2. Resolution allocated and discarded a boxed adapter per family it
-///    skipped. Now `protocols` answers membership with no allocation at all,
-///    and exactly one adapter is ever constructed.
+/// `make` takes the **negotiated protocol**, allowing one family to serve every
+/// protocol revision listed in its `protocols` slice. Resolution first checks
+/// that borrowed coverage list and then constructs exactly one adapter for the
+/// selected protocol.
 ///
 /// `protocols` deliberately **points at the family crate's own `PROTOCOLS`
 /// const** rather than restating the numbers here — the same reasoning
@@ -119,13 +108,10 @@ const FAMILIES: &[Family] = &[
     #[cfg(feature = "v26-2")]
     Family {
         label: "v26-2",
-        // v26-2 has no `PROTOCOLS`/`adapter_for` yet, so its coverage is spelled
-        // from its own `PROTOCOL` const and the negotiated number is discarded.
-        // Sound, not a shortcut deferred: v26-2 is single-protocol (776, the
-        // canonical version and the only `ServerProtocol`), so there is nothing
-        // for it to select between, and #343's plan keeps it single-protocol
-        // deliberately to keep the hosting seam simple. Give it the pair when
-        // it ever gains a second revision.
+        // v26-2 is single-protocol (776), so its coverage is spelled from its
+        // own `PROTOCOL` const and there is no per-protocol adapter selection.
+        // The negotiated number is therefore intentionally discarded by this
+        // constructor; the family remains the only `ServerProtocol` provider.
         protocols: &[lodestone_v26_2::PROTOCOL],
         make: |_protocol| Box::new(lodestone_v26_2::adapter()),
     },
@@ -220,9 +206,8 @@ pub fn adapter_for_protocol(protocol: i32) -> Option<Box<dyn VersionAdapter>> {
 }
 
 /// One compiled-in family's entry in the protocol → [`lodestone_physics::PhysicsProfile`]
-/// mapping. See [`physics_profile_for_protocol`] for the actual family →
-/// profile table and why two of the four map to an approximation rather than a
-/// validated fit.
+/// mapping. See [`physics_profile_for_protocol`] for the family → profile
+/// table and the fidelity limits of the available profiles.
 #[derive(Clone, Copy)]
 struct PhysicsFamily {
     /// Same list [`Family::protocols`] uses for this family — borrowed from the
@@ -239,42 +224,38 @@ struct PhysicsFamily {
 }
 
 /// Only two [`lodestone_physics::PhysicsProfile`]s exist
-/// (`mc_1_8`/`mc_1_21`), against **six** client families. This table is the
-/// one place that says which of the two each family gets, and it is
-/// deliberately not a 1:1 fit for two of them:
+/// (`mc_1_8`/`mc_1_21`) for the **ten** client families. This table is the one
+/// place that says which profile each family gets. `v1-8`, `v1-21-11`, and
+/// `v26-2` are exact matches; the other seven families use the closer
+/// available profile with explicitly documented fidelity limits:
 ///
-/// - **`v1-8` (1.8.9) → `mc_1_8`.** Exact family match — this is the profile
-///   the movement core was ported and golden-traced against for that era.
+/// - **`v1-8` (1.8.9) → `mc_1_8`.** Exact family match for the movement rules
+///   represented by this profile.
 /// - **`v1-7` (1.7.6-1.7.10) → `mc_1_8`.** Not an exact match, but the
 ///   structurally right half of the choice: protocol 5 pre-dates the 1.9
 ///   input-pipeline rewrite, so `mc_1_8`'s input model is the algorithm this
 ///   era actually ran, where `mc_1_21`'s would be the wrong one on every tick.
-///   Its constants are 1.8's rather than 1.7's and have not been traced
-///   against this era, so treat it as "the pre-1.9 profile, unvalidated for
-///   this era" until one is ported and golden-traced.
-/// - **`v26-2` (26.2) → `mc_1_21`.** Exact family match, and the only mapping
-///   that mattered before this table existed: every production construction
-///   site hardcoded `mc_1_21()` unconditionally, which happened to be correct
-///   only because `v26-2` was the only family ever actually joined.
+///   Its constants are 1.8's rather than 1.7's and are not validated for this
+///   era, so it is the pre-1.9 profile with explicitly limited fidelity.
+/// - **`v26-2` (26.2) → `mc_1_21`.** Exact family match. This is the profile
+///   used by the current production construction sites for this family.
+/// - **`v1-21-11` (1.21.11) → `mc_1_21`.** Exact family match.
 /// - **`v1-9` (1.9.4-1.12.2), `v1-13` (1.13.2), `v1-14` (1.14.4-1.16.5) and
-///   `v1-17` (1.17.1-1.18.2), `v1-19` (1.19.4), `v1-20-6` (1.20.5-1.20.6),
-///   `v1-21-11` (1.21.11) →
-///   `mc_1_21`, as an approximation, not a validated fit.** None of the three
-///   vanilla eras is a clean match for either profile: all post-date the 1.9
+///   `v1-17` (1.17.1-1.18.2), `v1-19` (1.19.4), `v1-20-6` (1.20.5-1.20.6) →
+///   `mc_1_21`, as an approximation, not a validated fit. None of these six
+///   later families is a clean match for either profile: all post-date the 1.9
 ///   input-pipeline rewrite ([`InputModel::UnitSquareProjection`], which
 ///   `mc_1_21` selects and `mc_1_8` does not), so `mc_1_8` would run the
 ///   *wrong* structural input algorithm for any of them, not merely an
-///   imprecise one. But 1.12.2 pre-dates Update Aquatic's swimming-pose
-///   system entirely, and 1.13.2 and 1.16.5, while post-Update-Aquatic, have
-///   not been checked against [`FluidModel::Modern`]'s exact constants — so
-///   `mc_1_21`'s fluid half is unvalidated fidelity for all three, not a
-///   known-correct one. `mc_1_21` is still the nearer pick: the input model
+///   imprecise one. Their fluid behavior is not validated against
+///   [`FluidModel::Modern`]'s exact constants. `mc_1_21` is still the nearer pick:
+///   the input model
 ///   is live on *every* tick a player takes, while the fluid model only
 ///   diverges while actually in a fluid, so getting the input pipeline
-///   structurally right dominates. Treat movement through v1-9/v1-13/v1-14/v1-17 as
-///   "the modern profile, unvalidated for this era" — not as bit-exact
-///   parity — until an era-specific profile is ported and golden-traced the
-///   way `mc_1_8` was.
+///   structurally right dominates. Treat movement through
+///   v1-9/v1-13/v1-14/v1-17/v1-19/v1-20-6 as "the modern profile, unvalidated
+///   for this era" — not as bit-exact parity. An era-specific profile would be
+///   required for bit-exact fidelity.
 const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
     #[cfg(feature = "v1-7")]
     PhysicsFamily {
@@ -336,10 +317,10 @@ const PHYSICS_FAMILIES: &[PhysicsFamily] = &[
 /// no live adapter at all but still simulates a player — so an unrecognised or
 /// unresolvable protocol number (including every number in a
 /// `--no-default-features` build, where [`PHYSICS_FAMILIES`] is empty) falls
-/// back to `mc_1_21`, i.e. exactly what every production call site
-/// unconditionally hardcoded before this function existed. Threading a real
-/// protocol number through this is a pure improvement over that baseline, not
-/// a regression risk: the worst case reproduces the old constant.
+/// back to `mc_1_21`, the profile used by the current production fallback.
+/// Threading a real protocol number through this lookup preserves that fallback
+/// for unknown protocols while selecting a family-specific profile when one is
+/// available.
 #[must_use]
 pub fn physics_profile_for_protocol(protocol: i32) -> lodestone_physics::PhysicsProfile {
     PHYSICS_FAMILIES
@@ -357,8 +338,9 @@ pub fn physics_profile_for_protocol(protocol: i32) -> lodestone_physics::Physics
 /// not the same: a family can have a `VersionAdapter` (so the client can *join*
 /// that version) and no `ServerProtocol` (so we cannot *host* it). Today only
 /// `v26-2` implements the server side, and a fused table would have had to carry
-/// an `Option` that is `None` for three of four entries and mean "this family
-/// cannot be hosted" — which reads as an oversight rather than a fact.
+/// an `Option` that is `None` for every client family except `v26-2` and mean
+/// "this family cannot be hosted" — a distinction better represented by the
+/// separate table.
 #[derive(Clone, Copy)]
 struct ServerFamily {
     /// Human-readable family label, e.g. `"v26-2"`. Same value as the matching
@@ -430,12 +412,9 @@ pub fn compiled_server_families() -> Vec<&'static str> {
 
 /// Returns every protocol number any compiled-in family handles.
 ///
-/// Formerly "the *primary* protocol of every family", derived by constructing
-/// each adapter and asking `protocol_version()`. Since a family may now cover a
-/// whole wire era, the honest answer is the union of their coverage — and it is
-/// read straight off [`Family::protocols`], so it needs no allocation and
-/// cannot disagree with what [`adapter_for_protocol`] will actually resolve.
-/// Identical output while every compiled family is single-protocol.
+/// Returns the union of each compiled family's protocol coverage. The values
+/// are read straight from [`Family::protocols`], so this requires no adapter
+/// construction and cannot disagree with what [`adapter_for_protocol`] resolves.
 #[must_use]
 pub fn supported_protocols() -> Vec<i32> {
     FAMILIES
@@ -480,9 +459,8 @@ mod tests {
             assert!(compiled_server_families().is_empty());
             assert!(server_protocol_for_protocol(776).is_none());
             // No family compiled means `physics_profile_for_protocol` has
-            // nothing to match, so it must fall back to the same `mc_1_21`
-            // every production call site hardcoded before this function
-            // existed — never `None`, and never a panic. This is also what
+            // nothing to match, so it must fall back to `mc_1_21` — never
+            // `None`, and never a panic. This is also what
             // `cargo check -p lodestone-shell --no-default-features` depends
             // on staying true.
             assert_eq!(
@@ -501,9 +479,10 @@ mod tests {
         assert!(compiled_families().contains(&"v1-8"));
     }
 
-    /// `v1-8` is 1.8.9, the one family with an exact-match [`PhysicsProfile`]
-    /// (`mc_1_8`) — see [`PHYSICS_FAMILIES`]'s doc comment for why the other
-    /// three families do not get this.
+    /// `v1-8` is 1.8.9, the exact-match family for [`PhysicsProfile`] `mc_1_8`.
+    /// `v1-7` also maps there because its pre-1.9 input model is structurally
+    /// closer; `v1-21-11` and `v26-2` are exact modern-profile families, while
+    /// the remaining later families use that profile as an approximation.
     #[cfg(feature = "v1-8")]
     #[test]
     fn v47_maps_to_the_1_8_physics_profile() {
@@ -521,9 +500,7 @@ mod tests {
         assert!(supported_protocols().contains(&776));
     }
 
-    /// `v26-2` (26.2) is the other exact-match family, and the only one that
-    /// mattered before this table existed — every production site hardcoded
-    /// this exact constant unconditionally.
+    /// `v26-2` (26.2) is an exact-match family using the modern profile.
     #[cfg(feature = "v26-2")]
     #[test]
     fn v770_maps_to_the_modern_physics_profile() {
@@ -533,12 +510,16 @@ mod tests {
         );
     }
 
-    /// The serverbound twin resolves the same family the clientbound one does.
+    /// The serverbound twin resolves the currently hostable family for the
+    /// same protocol that the clientbound table accepts. The clientbound
+    /// [`FAMILIES`] table also contains join-only families with no server
+    /// implementation, so the two tables intentionally need not agree for
+    /// every accepted client protocol.
     ///
-    /// Asserting both directions agree is the point: `supports` is delegated to
-    /// the family's `VersionAdapter`, so a family that can be joined can be
-    /// hosted at exactly the same protocol numbers — there is no second, hand
-    /// written protocol list to drift.
+    /// The hostable entry delegates `supports` to its `VersionAdapter`, so its
+    /// client and server protocol coverage cannot drift. This assertion checks
+    /// that shared coverage while also checking that unsupported numbers remain
+    /// rejected.
     ///
     /// That a *joined session* comes out the other end is
     /// `crates/versions/26.2/tests/singleplayer_seam.rs`, which drives this
@@ -604,7 +585,7 @@ mod tests {
     /// never `None`, never a panic — because a session (including the
     /// offline demo world, which has no live adapter at all) always needs
     /// *some* [`PhysicsProfile`], and the safe fallback is the same constant
-    /// every production call site hardcoded before this function existed.
+    /// used by the production fallback.
     #[test]
     fn unknown_protocol_falls_back_to_the_modern_physics_profile() {
         assert_eq!(

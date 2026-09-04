@@ -436,17 +436,14 @@ impl Default for SharedState {
             // names. A system or plugin in this `World` can therefore read
             // chunks without a second copy existing anywhere.
             world_ecs.insert_resource(ChunkWorld::from_shared(Arc::clone(&world)));
-            // Issue #423: the write half of the split, on the same `Arc` — so a
-            // system in *this* ECS that legitimately edits the store has a
-            // sanctioned route (`ChunkWorldWrite`) instead of reaching for the
-            // raw lock `world_write` guards.
+            // The matching write resource shares this `Arc`, so ECS systems
+            // that edit chunks use `ChunkWorldWrite` rather than bypassing the
+            // synchronization behind `world_write`.
             world_ecs.insert_resource(ChunkWorldWrite::from_shared(Arc::clone(&world)));
             let session = lodestone_ecs::spawn_session(world_ecs);
-            // Issue #104: `new_ingest_handle()` above never adds
-            // `GameEventBusPlugin`, so this is `false` for every
-            // `SharedState::default` today — a bot/test that wants the bus
-            // has no opt-in path through this constructor yet, named as a
-            // follow-up rather than solved here.
+            // `new_ingest_handle()` does not install a `GameEventBus`; cache
+            // that fact so the ordinary state has no event-bus work beyond the
+            // branch in `Self::apply`.
             let bus_enabled = world_ecs.contains_resource::<lodestone_ecs::GameEventBus>();
             (session, bus_enabled)
         });
@@ -581,11 +578,9 @@ impl SharedState {
     /// entities, so it is not worth an API change to avoid — but if `apply` ever
     /// takes the event by value, drop it.
     pub(crate) fn apply(&self, event: &ClientEvent) {
-        // Issue #104: the plugin event bus. Pushed before the routing branch
-        // below and through no `match` on `event` at all — see
-        // `push_to_game_event_bus`'s own doc and
-        // `tests::game_event_bus_write_site_has_no_match_on_the_event` for why
-        // that absence is the property this write site exists to have.
+        // Push to the optional event bus before routing. This deliberately
+        // avoids matching on `event`, so every event variant reaches the bus
+        // without needing a parallel routing table here.
         // `self.game_event_bus_enabled` is a plain `bool` cached at
         // construction (`Self::default`/`Self::adopting`), so a client that
         // never opted in pays nothing beyond this one branch — no extra
@@ -1060,9 +1055,9 @@ impl SharedState {
                 latency: Some(entry.latency),
                 display_name: entry.display_name.clone(),
                 listed: Some(entry.listed),
-                // Issue #62: `Some` even when empty, because a folded entry *has*
-                // a value for every field — the wire `Option`s meant "this delta
-                // did not mention it" and the fold has already merged them.
+                // A folded entry has a concrete collection even when it is
+                // empty. The wire `Option` meant a delta omitted this field;
+                // the fold has already merged that distinction away.
                 properties: Some(
                     entry
                         .profile

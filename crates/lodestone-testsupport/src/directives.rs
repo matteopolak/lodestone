@@ -1,10 +1,10 @@
 //! Order-tolerant assertions for `Vec<Directive>` produced by
 //! `VersionAdapter::handle_packet`/`ClientDriver::execute`-style call sites.
 //!
-//! Every directive assertion in the workspace was, before this module
-//! existed, exact-length and exact-order (`assert_eq!(…, vec![Directive…])`
-//! or `match directives.as_slice() { … }`) — with no subsequence or
-//! set-based alternative anywhere. That is correct for *some* of them: per
+//! Many directive assertions use exact length and exact order
+//! (`assert_eq!(…, vec![Directive…])` or `match directives.as_slice() { … }`)
+//! because no subsequence or set-based alternative is safe for every case.
+//! That is correct for *some* of them: per
 //! `Driver::execute`'s doc comment, order genuinely changes wire behaviour
 //! when a `SetCompression` reframes later `Send`s, when `SetState` into
 //! `Configuration` performs an extra socket write, when a `Disconnect`
@@ -19,11 +19,10 @@
 //! `match event` arms). For those, exact order is not a real invariant —
 //! it's an accident of the classifier/adapter's internal call order — and
 //! asserting it anyway means every new `ClientEvent` variant added anywhere
-//! near an existing one is a spurious test break. That is exactly what
-//! reddened `main` for one commit when `ClientEvent::BiomeVisuals` (#96)
-//! landed: a three-element exact-vec assertion whose own comment claimed
-//! order was load-bearing, when the three events fold into disjoint
-//! resources and the fold is provably commutative.
+//! near an existing one can be a spurious test break when the events update
+//! disjoint resources and their fold is commutative. This helper captures
+//! that case while retaining strict checks for directives whose order has
+//! observable wire effects.
 //!
 //! [`assert_emits_set`] is the replacement for exactly that shape: it
 //! requires every directive to be an `Emit` (a `Send`/`SetState`/

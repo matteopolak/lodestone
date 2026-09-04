@@ -1,13 +1,13 @@
-//! Hermetic wiring tests for issue #616's `SET_BEACON` remainder: the
-//! serverbound `ServerboundSetBeaconPacket` decode, and the two clientbound
-//! packets (`update_mob_effect`/`remove_mob_effect`) a beacon's periodic
-//! effect application needs to actually put a buff icon on a client's HUD.
+//! Hermetic wiring tests for `SET_BEACON` packet decoding and beacon-effect
+//! delivery: the local `ServerBound::SetBeacon` variant, plus the two
+//! clientbound packets (`update_mob_effect`/`remove_mob_effect`) that deliver a
+//! beacon's periodic effects to a client's HUD.
 //!
-//! Serverbound bytes are hand-built from the wire spec
-//! (`vanilla's own mob effect's own stream codec` is a direct, 0-based registry VarInt — verified
-//! against the committed `MOB_EFFECT_NAMES` table, not assumed). Clientbound
-//! bytes go through the real, independently written
-//! [`V770Adapter::handle_packet`] — the same "two independent
+//! Serverbound bytes are hand-built from the wire schema: each selected power
+//! is encoded as a presence byte followed by its 0-based registry VarInt,
+//! verified against the committed `MOB_EFFECT_NAMES` table, not assumed.
+//! Clientbound bytes go through the actual [`V770Adapter::handle_packet`] path —
+//! the same "two independent
 //! implementations of one spec" shape `container_encoders.rs` and
 //! `book_content_wiring.rs` already use, chosen for the same reason their own
 //! doc comments give: `decode(encode(x)) == x` alone proves nothing

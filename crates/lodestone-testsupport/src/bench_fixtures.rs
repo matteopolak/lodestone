@@ -1,36 +1,29 @@
-//! Shared chunk/column terrain fixtures for the benchmark harness (epic #78,
-//! issue #80): one place that knows what "realistic terrain" means, instead
-//! of the four ad-hoc hand-rolled shapes issue #80 found scattered across
-//! `lodestone-world` (`tests/memory.rs`, `tests/pool_footprint.rs`,
+//! Shared chunk/column terrain fixtures for benchmark harnesses. The module
+//! keeps the definition of "realistic terrain" in one place instead of
+//! duplicating hand-rolled shapes across `lodestone-world`
+//! (`tests/memory.rs`, `tests/pool_footprint.rs`,
 //! `benches/light_propagation.rs`) and `lodestone-render`
-//! (`tests/world_mesher_bench.rs`, `tests/scene_bench.rs`) --
-//! `docs/benchmark-harness.md` and issue #80 itself record the duplication;
-//! this module is the fix.
+//! (`tests/world_mesher_bench.rs`, `tests/scene_bench.rs`).
 //!
-//! Two realism tiers, matching issue #80's split exactly:
+//! Two realism tiers are available:
 //!
 //! - [`synthetic_column`] / [`synthetic_overworld_column`] -- **Tier 2
 //!   (fast, synthetic)**. No worldgen dependency, no filesystem I/O: a stone
 //!   floor, a varied surface band, open sky above -- the same *public shape*
-//!   real terrain has, at `seed = 0` byte-identical to the hand-rolled
-//!   `realistic_terrain_column` every one of the sites above used to define
-//!   for itself. Use this for benchmarks that need many columns cheaply and
-//!   do not care about worldgen fidelity (meshing, light propagation,
-//!   memory/footprint).
+//!   real terrain has. At `seed = 0`, it matches the established
+//!   `realistic_terrain_column` shape used by the sites above. Use this for
+//!   benchmarks that need many columns cheaply and do not care about worldgen
+//!   fidelity (meshing, light propagation, memory/footprint).
 //! - [`RealTerrain`] (behind this crate's `worldgen` feature, default off)
-//!   -- **Tier 1 (real, exact, slow)**. Drives the actual, JVM-verified
-//!   `lodestone_worldgen::overworld::OverworldGenerator` -- the same
-//!   pipeline `lodestone-worldgen`'s own parity tests prove bit-for-bit
-//!   against a real vanilla server -- and converts its output into an
-//!   ordinary [`lodestone_world::ChunkColumn`] via the same
-//!   intern-block-state-names-to-ids conversion
-//!   `lodestone-world/tests/pool_footprint.rs` already used. Use this for
-//!   throughput and stage-split benchmarks where realism is the point.
+//!   -- **Tier 1 (real, exact, slow)**. Drives
+//!   `lodestone_worldgen::overworld::OverworldGenerator` and converts its
+//!   output into an ordinary [`lodestone_world::ChunkColumn`] with the
+//!   block-state-name-to-id conversion used by
+//!   `lodestone-world/tests/pool_footprint.rs`. Use this for throughput and
+//!   stage-split benchmarks where realism is the point.
 //!
 //! Neither tier performs network I/O, needs a live server, or needs
-//! `--features live` -- both run everywhere `cargo test`/`cargo bench`
-//! already runs, which is the acceptance criterion issue #80 states
-//! explicitly.
+//! `--features live`; both run wherever `cargo test`/`cargo bench` runs.
 //!
 //! # Why a feature gate on the real tier
 //!
@@ -46,8 +39,8 @@
 
 use lodestone_world::{ChunkColumn, PaletteKind};
 
-/// Overworld shape constant every existing hand-rolled fixture already
-/// agreed on (`lodestone-world/tests/memory.rs`,
+/// Overworld shape constant shared by the benchmark fixtures
+/// (`lodestone-world/tests/memory.rs`,
 /// `lodestone-world/benches/light_propagation.rs`,
 /// `lodestone-world/tests/pool_footprint.rs`): 1.18+'s `y = -64..320`.
 pub const MODERN_MIN_Y: i32 = -64;
@@ -55,20 +48,17 @@ pub const MODERN_SECTIONS: usize = 24;
 
 /// Tier 2 (fast, synthetic): a [`ChunkColumn`] at the same public shape real
 /// terrain has -- a solid stone base, a *varied* surface band that forces
-/// real per-cell differences (never a flat, uniform slab, which is the
-/// "vacuous world" trap `CLAUDE.md` names: a light/mesh benchmark over
-/// uniform terrain degenerates to near-O(1) regardless of whether the
-/// algorithm under test is correct), and open sky above.
+/// real per-cell differences (never a flat, uniform slab, because a
+/// light/mesh benchmark over uniform terrain degenerates to near-O(1)
+/// regardless of whether the algorithm under test is correct), and open sky
+/// above.
 ///
-/// Deterministic in `seed`: `seed = 0` reproduces the exact shape
-/// `lodestone-world/tests/memory.rs`'s and
-/// `lodestone-world/benches/light_propagation.rs`'s original hand-rolled
-/// `realistic_terrain_column` used before this module existed, byte for
-/// byte -- consolidating those call sites onto this function is a pure
-/// dedup, not a behaviour change, unless a caller asks for a different seed
-/// to get a *different* (but equally varied) surface band, e.g. to build a
-/// non-uniform neighbourhood for a light/mesh benchmark that borders several
-/// columns.
+/// The result is deterministic in `seed`: `seed = 0` reproduces the
+/// established `realistic_terrain_column` shape used by
+/// `lodestone-world/tests/memory.rs` and
+/// `lodestone-world/benches/light_propagation.rs`. A different seed produces
+/// a different, equally varied surface band, which is useful for a
+/// non-uniform neighbourhood in a light or mesh benchmark spanning columns.
 ///
 /// `min_y`/`sections` are explicit rather than defaulted to the modern
 /// overworld shape ([`MODERN_MIN_Y`]/[`MODERN_SECTIONS`], see
@@ -86,7 +76,7 @@ pub fn synthetic_column(min_y: i32, sections: usize, seed: u64) -> ChunkColumn {
         0,
     );
     let stone = 1u32;
-    // Stone floor: 104 levels, matching the original fixture's `MIN_Y..40`
+    // Stone floor: 104 levels, matching the reference fixture's `MIN_Y..40`
     // when `min_y == -64` (40 - (-64) == 104).
     let surface_start = min_y + 104;
     let surface_end = surface_start + 8;
@@ -101,10 +91,9 @@ pub fn synthetic_column(min_y: i32, sections: usize, seed: u64) -> ChunkColumn {
         for z in 0..16 {
             for x in 0..16 {
                 // `rem_euclid`, not `%`, so this stays well-defined for a
-                // `min_y` that puts the surface band at a negative `y` --
-                // the original hand-rolled formula (`(x + z + y as usize) %
-                // 6`) only ever saw positive `y` (40..48), so it could get
-                // away with a `usize` cast.
+                // `min_y` that puts the surface band at a negative `y`.
+                // The reference shape uses positive `y` values (40..48),
+                // where a `usize` cast would also be valid.
                 let id = 1
                     + (i64::from(x as i32) + i64::from(z as i32) + i64::from(y) + seed as i64)
                         .rem_euclid(6) as u32;
@@ -133,12 +122,11 @@ mod real {
     use lodestone_worldgen::overworld::OverworldGenerator;
     use serde_json::Value;
 
-    /// Same "generator plumbing" shape as `lodestone-worldgen`'s own
-    /// `tests/overworld_gen.rs`/`benches/generation.rs` and
-    /// `lodestone-world/tests/pool_footprint.rs`'s `FsResolver`: reads
-    /// density functions and noises straight off disk under the checked-in
-    /// JVM-parity fixture tree every one of those already reads, so this is
-    /// not a new fixture format -- just a shared place to build it from.
+    /// Reads density functions and noises from the checked-in fixture tree
+    /// used by `lodestone-worldgen`'s `tests/overworld_gen.rs`,
+    /// `benches/generation.rs`, and
+    /// `lodestone-world/tests/pool_footprint.rs`. Keeping this resolver here
+    /// gives all real-terrain benchmarks the same input format.
     struct FsResolver {
         root: std::path::PathBuf,
     }
@@ -172,18 +160,16 @@ mod real {
         }
     }
 
-    /// Tier 1 (real, exact, slow): drives the real, JVM-verified
-    /// [`OverworldGenerator`] and converts its output into an ordinary
-    /// [`ChunkColumn`] via [`ChunkColumn::set_block`] -- the same conversion
-    /// shape `lodestone-world/tests/pool_footprint.rs` uses (block-state-name
-    /// interning into a stable `u32` space, air elided), minus that file's
-    /// `PalettedContainer`-level plumbing, which a bench fixture does not
-    /// need.
+    /// Tier 1 (real, exact, slow): drives [`OverworldGenerator`] and converts
+    /// its output into an ordinary [`ChunkColumn`] via
+    /// [`ChunkColumn::set_block`]. Block-state names are interned into a
+    /// stable `u32` space and air is elided; the lower-level
+    /// `PalettedContainer` plumbing used by
+    /// `lodestone-world/tests/pool_footprint.rs` is unnecessary for a bench
+    /// fixture.
     ///
-    /// Built once per `RealTerrain` (construction reads and parses the
-    /// fixture JSON tree), matching
-    /// `lodestone-server/examples/bench_worldgen.rs`'s "build the generator
-    /// once" guidance -- do not construct a fresh one per column.
+    /// Construction reads and parses the fixture JSON tree, so build one
+    /// `RealTerrain` and reuse it for all columns in a benchmark.
     #[allow(missing_debug_implementations)] // `OverworldGenerator` has none either.
     pub struct RealTerrain {
         generator: OverworldGenerator,
@@ -192,12 +178,12 @@ mod real {
     }
 
     impl RealTerrain {
-        /// Reads the same checked-in JVM-parity fixture tree
-        /// `lodestone-worldgen`'s own tests/benches read
-        /// (`crates/lodestone-worldgen/tests/support/worldgen_data`) -- no
-        /// network I/O, no live server. `seed` is the world seed passed to
-        /// [`OverworldGenerator::new`], not this crate's `synthetic_column`
-        /// seed -- the two tiers' seeds are unrelated parameters.
+        /// Reads the checked-in fixture tree used by
+        /// `lodestone-worldgen`'s tests and benches
+        /// (`crates/lodestone-worldgen/tests/support/worldgen_data`), with no
+        /// network I/O or live server. `seed` is the world seed passed to
+        /// [`OverworldGenerator::new`], not the `synthetic_column` seed; the
+        /// two tiers interpret their seeds independently.
         #[must_use]
         pub fn new(seed: i64) -> Self {
             let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -274,11 +260,10 @@ mod tests {
 
     #[test]
     fn synthetic_column_matches_the_original_hand_rolled_shape_at_seed_zero() {
-        // Byte-for-byte re-derivation of `lodestone-world/tests/memory.rs`'s
-        // and `benches/light_propagation.rs`'s pre-fixture
-        // `realistic_terrain_column`: stone through y=39, a varied surface
-        // band 40..48, air above. This is the consolidation's own evidence
-        // that it changed no existing benchmark's numbers.
+        // The reference shape used by `lodestone-world/tests/memory.rs` and
+        // `benches/light_propagation.rs` has stone through y=39, a varied
+        // surface band 40..48, and air above. These assertions keep the
+        // shared fixture compatible with that shape.
         let col = synthetic_overworld_column(0);
         assert_eq!(col.min_y(), MODERN_MIN_Y);
 
@@ -286,7 +271,7 @@ mod tests {
         assert_eq!(col.get_block(0, 0, 0), 1);
         assert_eq!(col.get_block(15, 39, 15), 1);
 
-        // Surface band: the original formula was
+        // Surface band: the reference formula is
         // `1 + ((x + z + y as usize) % 6)` for y in 40..48.
         for y in 40..48 {
             for z in [0usize, 7, 15] {
@@ -326,10 +311,9 @@ mod tests {
 
     #[test]
     fn synthetic_column_exercises_more_than_one_block_id_in_the_surface_band() {
-        // Anti-vacuity: a "varied surface band" that is secretly uniform
-        // would let a light/mesh benchmark measure the vacuous-world trap
-        // CLAUDE.md names (uniform terrain propagates/culls in near-O(1)
-        // regardless of correctness).
+        // A secretly uniform "varied surface band" would let a light or mesh
+        // benchmark measure a vacuous world: uniform terrain can propagate or
+        // cull in near-O(1) regardless of algorithm correctness.
         let col = synthetic_overworld_column(0);
         let mut ids = std::collections::HashSet::new();
         for z in 0..16usize {
@@ -343,12 +327,11 @@ mod tests {
         );
     }
 
-    /// Tier 1 smoke test: `RealTerrain` actually drives the real generator
-    /// and produces varied, non-vacuous terrain (not `#[ignore]`d -- unlike
-    /// the multi-minute `lodestone-world/tests/pool_footprint.rs` sweep, one
-    /// column costs low-double-digit milliseconds per
-    /// `lodestone-worldgen/benches/generation.rs`, cheap enough for the
-    /// default `cargo test` run whenever the `worldgen` feature is on).
+    /// Tier 1 smoke test: `RealTerrain` drives the generator and produces
+    /// varied, non-vacuous terrain. One column is cheap enough for the
+    /// default `cargo test` run whenever the `worldgen` feature is enabled;
+    /// the larger `lodestone-world/tests/pool_footprint.rs` sweep remains a
+    /// separate benchmark.
     #[cfg(feature = "worldgen")]
     #[test]
     fn real_terrain_produces_varied_non_air_blocks() {

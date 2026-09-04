@@ -1,21 +1,17 @@
-//! The version table backing GitHub epic #343: support the latest patch of
-//! every major Minecraft release from 1.7.10 through 26.2 — sixteen versions
-//! — via one canonical internal version (26.2) plus a per-version
-//! translation layer at the network edge, à la ViaVersion. This module is
-//! **not** that translation layer; it is the reference data the layer (and
-//! the crates that eventually implement it) will be built against: for each
-//! of the sixteen versions, the protocol number, the save-format
-//! `DataVersion`, the release date, and — critically — exactly where each
-//! figure came from.
+//! The version table records the latest targeted release for each major-version
+//! slot from 1.7.10 through 26.2 — sixteen versions — alongside canonical
+//! internal version 26.2. It is reference data for protocol and save-format
+//! translation layers, not a translation layer itself: for each version it
+//! records the protocol number, the save-format `DataVersion`, the release
+//! date, and — critically — exactly where each figure came from.
 //!
 //! # Why this lives in `lodestone-registry`
 //!
 //! This crate is already "the single, deliberate aggregation point where
 //! Lodestone names concrete protocol version crates" (see the crate-level
-//! docs). A table of every version the project has committed to supporting,
-//! independent of which families are compiled in yet, belongs next to that
-//! aggregation point rather than duplicated per-family or invented ad hoc
-//! when the next family is scaffolded.
+//! docs). A table of every targeted version, independent of which families
+//! are compiled into a particular build, belongs next to that aggregation
+//! point rather than duplicated per-family.
 //!
 //! # Provenance rules (see `CLAUDE.md`, "Data sources, in order")
 //!
@@ -26,43 +22,38 @@
 //!    in separate columns for exactly that reason).
 //! 2. **`vendor/minecraft-data`'s `data/pc/common/protocolVersions.json`** is
 //!    used only where the jar predates `version.json` — cross-check-grade,
-//!    never authoritative. Empirically, in `EPIC_343_VERSIONS`, that boundary
+//!    never authoritative. In the checked-in target version set, that boundary
 //!    falls **between 1.13.2 and 1.14.4**: 1.13.2's cached server jar has no
 //!    `version.json`, 1.14.4's does (protocol 498 / dataVersion 1976). The
 //!    file itself documents `version.json`'s introduction as 18w47b, a 1.14
 //!    snapshot, which matches.
 //! 3. For every version where *both* sources are available (1.14.4 through
-//!    26.2, all nine of them, at the time this table was last generated),
-//!    they agree exactly — zero disagreements were found. That is measured,
-//!    not assumed: `xtask version-table` hard-errors on any (protocol_version,
-//!    data_version) disagreement between the jar and `minecraft-data` rather
-//!    than silently preferring one, so an agreeing `cross_checked: true` row
-//!    is a real cross-check, not a default.
+//!    26.2), they agree exactly. This is measured by `xtask version-table`,
+//!    which hard-errors on any (protocol_version, data_version) disagreement
+//!    rather than silently preferring one, so an agreeing `cross_checked: true`
+//!    row is a real cross-check, not a default.
 //!
-//! # The weakest row: 1.7.10
+//! # The least independently attested row: 1.7.10
 //!
 //! 1.7.10 predates `minecraft-data`'s own per-version directory structure —
 //! there is no `vendor/minecraft-data/data/pc/1.7.10/`, only a generic
 //! `data/pc/1.7/` aliased to `minecraftVersion: "1.7.10"`. It does, however,
 //! have an explicit entry in `protocolVersions.json` (`version: 5,
 //! dataVersion: 18`), so it is not *entirely* uncovered — narrower than "no
-//! coverage at all," which turned out to be an inaccurate way to describe it
-//! (see `docs/version-table.md` for the fuller account). No vanilla jar was
-//! fetched for 1.7.10 in generating this table (see below), so its row rests
+//! coverage at all". No server jar is used for the 1.7.10 row, so it rests
 //! solely on that one community-maintained cross-reference file with no jar
-//! to check it against — the least independently attested entry here.
+//! to check it against. See `docs/multi-protocol-seam.md` for the full provenance
+//! account.
 //!
-//! # Not every version's jar was fetched
+//! # Jar coverage
 //!
 //! `xtask version-table` only inspects a server jar it can find already
 //! cached at `.cache/mc/<version>/server.jar`, plus whatever `--fetch-missing`
-//! explicitly adds. At the time this table was last generated, jars for
-//! 1.7.10, 1.9.4, 1.10.2, and 1.11.2 were not fetched — all four predate
-//! 1.13.2, whose jar was fetched and confirmed to still lack `version.json`,
-//! so fetching those older four would not have produced any additional
-//! protocol/data-version evidence beyond what `minecraft-data` already gives
-//! (see `docs/version-table.md` for the exact reasoning and how to fetch them
-//! anyway if that changes).
+//! explicitly adds. The checked-in table has no cached jars for 1.7.10, 1.9.4,
+//! 1.10.2, and 1.11.2. These releases predate 1.13.2, whose jar also lacks
+//! `version.json`, so their rows use the cross-reference data source. See
+//! `docs/multi-protocol-seam.md` for the provenance and the procedure for fetching
+//! those jars when independent confirmation is needed.
 //!
 //! # How to refresh
 //!
@@ -94,10 +85,10 @@ pub fn entry(minecraft_version: &str) -> Option<&'static Entry> {
 mod tests {
     use super::*;
 
-    /// The exact sixteen versions epic #343 named, in release order. Kept
-    /// here (independent of `xtask::EPIC_343_VERSIONS`) so a hermetic,
-    /// network-free `cargo test -p lodestone-registry` still catches the
-    /// table silently losing or reordering a target version.
+    /// The exact sixteen target versions in release order. Kept independently
+    /// of the generator's target list so a hermetic, network-free
+    /// `cargo test -p lodestone-registry` still catches the table silently
+    /// losing or reordering a target version.
     const EXPECTED_VERSIONS: [&str; 16] = [
         "1.7.10", "1.8.9", "1.9.4", "1.10.2", "1.11.2", "1.12.2", "1.13.2", "1.14.4", "1.15.2",
         "1.16.5", "1.17.1", "1.18.2", "1.19.4", "1.20.6", "1.21.11", "26.2",
@@ -140,13 +131,11 @@ mod tests {
 
     #[test]
     fn jar_sourced_rows_are_exactly_1_14_4_and_later() {
-        // Empirically-established boundary (see module docs): 1.13.2's
-        // cached jar has no version.json, 1.14.4's does. Everything at or
-        // after 1.14.4 in this table was jar-sourced when this table was
-        // last generated; everything before was minecraft-data-only. This
-        // pins that boundary so a future regen silently losing jar coverage
-        // (e.g. a jar going missing from the cache) is visible as a row
-        // moving from `JarVersionJson` back to `MinecraftData`.
+        // The table's source boundary is 1.13.2/1.14.4: the former's cached
+        // jar has no version.json, while the latter's does. Rows at or after
+        // 1.14.4 are jar-sourced; earlier rows use minecraft-data. Keeping
+        // this boundary explicit makes a missing cached jar visible as a
+        // source change from `JarVersionJson` back to `MinecraftData`.
         let index_of_1_14_4 = VERSIONS
             .iter()
             .position(|entry| entry.minecraft_version == "1.14.4")

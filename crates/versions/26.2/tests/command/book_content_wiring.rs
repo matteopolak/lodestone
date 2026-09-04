@@ -1,15 +1,15 @@
-//! Hermetic wiring tests for issue #616's `EDIT_BOOK` remainder: the
-//! serverbound `ServerboundEditBookPacket` decode, and the two new
+//! Hermetic wiring tests for `EDIT_BOOK` packet decoding and book-content
+//! delivery: the local `ServerBound::EditBook` variant, plus the two
 //! clientbound item components (`minecraft:writable_book_content` /
-//! `minecraft:written_book_content`) that let a signed or drafted book
-//! actually reach a client's screen.
+//! `minecraft:written_book_content`) that let a signed or drafted book actually
+//! reach a client's screen.
 //!
-//! Serverbound bytes are hand-built from the wire spec
-//! (`vanilla's own serverbound edit book packet's own stream codec`), never round-tripped through
-//! this crate's own encoder — there is no serverbound `EditBook` encoder in
-//! this client-side crate to round-trip through anyway, so this is the only
-//! available check. Clientbound bytes go through the real, independently
-//! written [`V770Adapter::handle_packet`] rather than a bespoke reader (the
+//! Serverbound bytes are hand-built from the wire schema: slot, page count,
+//! length-prefixed UTF-8 pages, and an optional title presence byte. They are
+//! never round-tripped through this crate's own encoder — there is no
+//! serverbound `EditBook` encoder in this client-side crate, so this is the
+//! only available check. Clientbound bytes go through the actual
+//! [`V770Adapter::handle_packet`] path rather than a bespoke reader (the
 //! same "two independent implementations of one spec" shape
 //! `container_encoders.rs` already documents), *and* the component-patch
 //! tail is additionally asserted byte-for-byte against a hand-computed
@@ -177,8 +177,8 @@ fn writable_book_content_reaches_a_client_container_set_slot() {
     let expected_tail: Vec<u8> = vec![
         0x01, // 1 added component
         0x00, // 0 removed components (both counts precede every entry —
-        // `vanilla's own data component patch's own stream codec`'s own `encode`, verified against
-        // the jar; not added-count/entries/removed-count)
+        // added entries are encoded before removed entries; not
+        // added-count/entries/removed-count)
         0x36, // component id 54 = minecraft:writable_book_content
         0x02, // 2 pages
         0x01, b'A', 0x00, // page "A", no filtered alternate
@@ -198,8 +198,9 @@ fn writable_book_content_reaches_a_client_container_set_slot() {
 
 /// `minecraft:written_book_content` (component id 55) round trips with every
 /// field distinct from its neighbours (generation `2`, not `0`; `resolved:
-/// false`, not vanilla's usual `true`, so a hardcoded `true` in either
-/// direction would be caught) — the "pairwise-distinct fixture" discipline
+/// false`, intentionally different from the neighbouring boolean value, so a
+/// hardcoded `true` in either direction would be caught) — the
+/// "pairwise-distinct fixture" discipline
 /// CLAUDE.md's evidence section requires for adjacent same-typed fields.
 #[test]
 fn written_book_content_reaches_a_client_container_set_slot() {
