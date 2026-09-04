@@ -12,8 +12,10 @@ use lodestone_world::{Heightmap, LongArrayFraming, PaletteKind, PalettedContaine
 use uuid::Uuid;
 
 use crate::PROTOCOL_1_17_1;
-use crate::canonical::wire_state_for_756;
+use crate::adapter::PROTOCOL_1_18_2;
+use crate::canonical::{wire_state_for_756, wire_state_for_758};
 use crate::packet_ids::{handshaking, login, play};
+use crate::packet_ids_758::{handshaking as handshaking_758, login as login_758, play as play_758};
 use crate::packets::game::{BlockDig, ClientboundPositionLook, JoinGame};
 use crate::packets::handshake::SetProtocol;
 use crate::packets::login::{LoginStart, LoginSuccess, SetCompression};
@@ -22,6 +24,9 @@ use crate::packets::position::{Position, pack_position};
 const CTX: Ctx = Ctx {
     version: PROTOCOL_1_17_1,
 };
+const CTX_758: Ctx = Ctx {
+    version: PROTOCOL_1_18_2,
+};
 const COMPRESSION_THRESHOLD: i32 = 256;
 const MIN_Y: i32 = 0;
 const HEIGHT: i32 = 256;
@@ -29,10 +34,17 @@ const SECTION_EDGE: i32 = 16;
 const SECTION_COUNT: usize = 16;
 const SECTION_BLOCKS: usize = 4096;
 const PLAINS_BIOME_ID: i32 = 1;
+const MODERN_MIN_Y: i32 = -64;
+const MODERN_HEIGHT: i32 = 384;
+const MODERN_SECTION_COUNT: usize = 24;
 
 /// Server implementation for protocol 756.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct V756ServerProtocol;
+
+/// Server implementation for protocol 758.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct V758ServerProtocol;
 
 fn send<T: Encode>(packet_id: i32, packet: &T) -> ServerDirective {
     ServerDirective::Send {
@@ -41,9 +53,23 @@ fn send<T: Encode>(packet_id: i32, packet: &T) -> ServerDirective {
     }
 }
 
+fn send_758<T: Encode>(packet_id: i32, packet: &T) -> ServerDirective {
+    ServerDirective::Send {
+        packet_id,
+        payload: encode_body(packet, CTX_758).expect("fixed protocol-758 packet must encode"),
+    }
+}
+
 fn decode_full<T: Decode>(payload: &[u8]) -> Option<T> {
     let mut reader = Reader::new(payload);
     let value = T::decode(&mut reader, CTX).ok()?;
+    reader.ensure_empty().ok()?;
+    Some(value)
+}
+
+fn decode_full_758<T: Decode>(payload: &[u8]) -> Option<T> {
+    let mut reader = Reader::new(payload);
+    let value = T::decode(&mut reader, CTX_758).ok()?;
     reader.ensure_empty().ok()?;
     Some(value)
 }
@@ -98,10 +124,10 @@ fn encode_heightmaps(column: &ChunkColumn) -> Result<Vec<u8>, ChunkEncodeError> 
     Ok(out.into_vec())
 }
 
-fn dimension_type() -> Vec<u8> {
+fn dimension_type(min_y: i32, height: i32) -> Vec<u8> {
     let nbt = Nbt::Compound(vec![
-        ("min_y".to_owned(), Nbt::Int(MIN_Y)),
-        ("height".to_owned(), Nbt::Int(HEIGHT)),
+        ("min_y".to_owned(), Nbt::Int(min_y)),
+        ("height".to_owned(), Nbt::Int(height)),
     ]);
     let mut writer = Writer::default();
     write_named_nbt(&mut writer, "", &nbt).expect("fixed dimension entry must encode");
@@ -293,7 +319,7 @@ impl ServerProtocol for V756ServerProtocol {
                     previous_game_mode: -1,
                     world_names: vec!["minecraft:overworld".to_owned()],
                     dimension_codec: dimension_codec(),
-                    dimension: dimension_type(),
+                    dimension: dimension_type(MIN_Y, HEIGHT),
                     world_name: "minecraft:overworld".to_owned(),
                     hashed_seed: 0,
                     max_players: 20,
@@ -349,5 +375,293 @@ impl ServerProtocol for V756ServerProtocol {
     fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
         self.try_encode_block_update(x, y, z, state)
             .expect("call try_encode_block_update to handle an unrepresentable protocol-756 state")
+    }
+}
+
+fn wire_state_758(canonical: u32) -> Result<u32, ChunkEncodeError> {
+    wire_state_for_758(canonical).ok_or_else(|| {
+        ChunkEncodeError::new(format!(
+            "canonical state {canonical} has no unique exact protocol-758 representation"
+        ))
+    })
+}
+
+fn encode_heightmaps_758(column: &ChunkColumn) -> Result<Vec<u8>, ChunkEncodeError> {
+    let mut heightmap = Heightmap::new(MODERN_HEIGHT as u32);
+    let air = lodestone_data::block_states::air_state_id();
+    for z in 0..16usize {
+        for x in 0..16usize {
+            let height = (MODERN_MIN_Y..MODERN_MIN_Y + MODERN_HEIGHT)
+                .rev()
+                .find(|&y| column.block_state_id(x as i32, y, z as i32) != air)
+                .map_or(0, |y| {
+                    u32::try_from(y - MODERN_MIN_Y + 1).expect("height is non-negative")
+                });
+            heightmap.set(x, z, height);
+        }
+    }
+    let nbt = Nbt::Compound(vec![(
+        "MOTION_BLOCKING".to_owned(),
+        Nbt::LongArray(heightmap.longs().iter().map(|&value| value as i64).collect()),
+    )]);
+    let mut out = Writer::default();
+    write_named_nbt(&mut out, "", &nbt).map_err(|error| ChunkEncodeError::new(error.to_string()))?;
+    Ok(out.into_vec())
+}
+
+fn encode_container_758(writer: &mut Writer, kind: PaletteKind, values: &[u32]) -> bool {
+    let container = PalettedContainer::from_values(kind, values);
+    let single = container.is_single();
+    container.encode(writer);
+    if single {
+        // Protocol 758 retains the zero long-array count after a single-value
+        // container. Its decoder consumes that byte explicitly before parsing
+        // the following container.
+        writer.var_i32(0);
+    }
+    single
+}
+
+fn encode_chunk_body_758(
+    cx: i32,
+    cz: i32,
+    column: &ChunkColumn,
+) -> Result<Vec<u8>, ChunkEncodeError> {
+    let Some(column_end) = column.min_y.checked_add(column.height) else {
+        return Err(ChunkEncodeError::new("protocol-758 column bounds overflow"));
+    };
+    if column.min_y > MODERN_MIN_Y || column_end < MODERN_MIN_Y + MODERN_HEIGHT {
+        return Err(ChunkEncodeError::new(format!(
+            "protocol-758 requires columns covering y={MODERN_MIN_Y} through y={}",
+            MODERN_MIN_Y + MODERN_HEIGHT - 1
+        )));
+    }
+    if !column.block_entities().is_empty() {
+        return Err(ChunkEncodeError::new(
+            "protocol-758 chunk block entities are not implemented",
+        ));
+    }
+    for qy in 0..usize::try_from(MODERN_HEIGHT / 4).expect("fixed biome layers") {
+        for qz in 0..4 {
+            for qx in 0..4 {
+                if column.biome_cell(qx, qy, qz) != "minecraft:plains" {
+                    return Err(ChunkEncodeError::new(format!(
+                        "biome {} has no exact protocol-758 representation",
+                        column.biome_cell(qx, qy, qz)
+                    )));
+                }
+            }
+        }
+    }
+
+    let air = lodestone_data::block_states::air_state_id();
+    let block_kind = PaletteKind::block_states().with_framing(LongArrayFraming::Prefixed);
+    let biome_kind = PaletteKind::biomes().with_framing(LongArrayFraming::Prefixed);
+    let biome_values = [u32::try_from(PLAINS_BIOME_ID).expect("plains id fits u32"); 64];
+    let mut sections = Writer::default();
+    let mut trailing_padding = 0usize;
+    for section in 0..MODERN_SECTION_COUNT {
+        let y_base = MODERN_MIN_Y
+            + i32::try_from(section).expect("section fits i32") * SECTION_EDGE;
+        let mut states = Vec::with_capacity(SECTION_BLOCKS);
+        for y in y_base..y_base + SECTION_EDGE {
+            for z in 0..SECTION_EDGE {
+                for x in 0..SECTION_EDGE {
+                    states.push(column.block_state_id(x, y, z));
+                }
+            }
+        }
+        let non_air = states.iter().filter(|&&state| state != air).count();
+        sections.i16(i16::try_from(non_air).expect("section has at most 4096 blocks"));
+        let wire_states: Result<Vec<u32>, _> = states.iter().copied().map(wire_state_758).collect();
+        if encode_container_758(&mut sections, block_kind, &wire_states?) {
+            trailing_padding += 1;
+        }
+        let _ = encode_container_758(&mut sections, biome_kind, &biome_values);
+    }
+    for _ in 0..trailing_padding {
+        sections.u8(0);
+    }
+
+    let mut packet = Writer::default();
+    packet.i32(cx);
+    packet.i32(cz);
+    packet.bytes(&encode_heightmaps_758(column)?);
+    packet
+        .var_bytes(&sections.into_vec())
+        .map_err(|error| ChunkEncodeError::new(error.to_string()))?;
+    packet.var_i32(0);
+    // Empty masks and arrays mean no light layer is supplied. The client
+    // retains its normal missing-light handling for this initial column.
+    packet.bool(false);
+    for _ in 0..4 {
+        packet.var_i32(0);
+    }
+    packet.var_i32(0);
+    packet.var_i32(0);
+    Ok(packet.into_vec())
+}
+
+impl V758ServerProtocol {
+    /// Converts and encodes a block update without replacing an unsupported state.
+    pub fn try_encode_block_update(
+        &self,
+        x: i32,
+        y: i32,
+        z: i32,
+        state: &str,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        let canonical = lodestone_data::block_states::state_id(state)
+            .ok_or_else(|| ChunkEncodeError::new(format!("unknown canonical block state {state}")))?;
+        let wire = wire_state_758(canonical)?;
+        let mut payload = Writer::default();
+        payload.i64(pack_position(BlockPos::new(x, y, z)));
+        payload.var_i32(i32::try_from(wire).expect("protocol-758 state fits in i32"));
+        Ok(ServerDirective::Send {
+            packet_id: play_758::clientbound::BLOCK_CHANGE,
+            payload: payload.into_vec(),
+        })
+    }
+}
+
+impl ServerProtocol for V758ServerProtocol {
+    fn decode(&self, state: State, packet_id: i32, payload: &[u8]) -> ServerBound {
+        match state {
+            State::Handshaking if packet_id == handshaking_758::serverbound::SET_PROTOCOL => {
+                let Some(handshake) = decode_full_758::<SetProtocol>(payload) else {
+                    return ServerBound::Ignored;
+                };
+                let next_state = if handshake.protocol_version == PROTOCOL_1_18_2 {
+                    if handshake.next_state == 2 { State::Login } else { State::Status }
+                } else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::Handshake { next_state }
+            }
+            State::Login if packet_id == login_758::serverbound::LOGIN_START => {
+                decode_full_758::<LoginStart>(payload).map_or(ServerBound::Ignored, |start| {
+                    ServerBound::LoginStart {
+                        username: start.username,
+                        uuid: Uuid::nil(),
+                    }
+                })
+            }
+            State::Play if packet_id == play_758::serverbound::BLOCK_DIG => {
+                let Some(BlockDig {
+                    status,
+                    location: Position(pos),
+                    face,
+                }) = decode_full_758(payload)
+                else {
+                    return ServerBound::Ignored;
+                };
+                let (Some(action), Some(face)) = (block_action(status), block_face(face)) else {
+                    return ServerBound::Ignored;
+                };
+                ServerBound::BlockAction {
+                    action,
+                    pos,
+                    face,
+                    sequence: 0,
+                }
+            }
+            _ => ServerBound::Ignored,
+        }
+    }
+
+    fn login_success(&self, username: &str, uuid: Uuid) -> Vec<ServerDirective> {
+        vec![
+            send_758(
+                login_758::clientbound::COMPRESS,
+                &SetCompression {
+                    threshold: COMPRESSION_THRESHOLD,
+                },
+            ),
+            ServerDirective::SetCompression(COMPRESSION_THRESHOLD),
+            send_758(
+                login_758::clientbound::SUCCESS,
+                &LoginSuccess {
+                    uuid,
+                    username: username.to_owned(),
+                },
+            ),
+        ]
+    }
+
+    fn has_configuration_phase(&self) -> bool {
+        false
+    }
+
+    fn begin_configuration(&self) -> Vec<ServerDirective> {
+        Vec::new()
+    }
+
+    fn begin_play(&self, view_radius: i32) -> Vec<ServerDirective> {
+        vec![
+            send_758(
+                play_758::clientbound::LOGIN,
+                &JoinGame {
+                    entity_id: 1,
+                    is_hardcore: false,
+                    game_mode: 0,
+                    previous_game_mode: -1,
+                    world_names: vec!["minecraft:overworld".to_owned()],
+                    dimension_codec: dimension_codec(),
+                    dimension: dimension_type(MODERN_MIN_Y, MODERN_HEIGHT),
+                    world_name: "minecraft:overworld".to_owned(),
+                    hashed_seed: 0,
+                    max_players: 20,
+                    view_distance: view_radius,
+                    simulation_distance: view_radius,
+                    reduced_debug_info: false,
+                    enable_respawn_screen: true,
+                    is_debug: false,
+                    is_flat: true,
+                },
+            ),
+            send_758(
+                play_758::clientbound::POSITION,
+                &ClientboundPositionLook {
+                    x: 8.0,
+                    y: 100.0,
+                    z: 8.0,
+                    yaw: 0.0,
+                    pitch: 0.0,
+                    flags: 0,
+                    teleport_id: 0,
+                    dismount_vehicle: false,
+                },
+            ),
+        ]
+    }
+
+    fn begin_chunk_batch(&self) -> ServerDirective {
+        ServerDirective::None
+    }
+
+    fn encode_chunk(&self, cx: i32, cz: i32, column: &ChunkColumn) -> ServerDirective {
+        self.try_encode_chunk(cx, cz, column)
+            .expect("call try_encode_chunk to handle an unrepresentable protocol-758 column")
+    }
+
+    fn try_encode_chunk(
+        &self,
+        cx: i32,
+        cz: i32,
+        column: &ChunkColumn,
+    ) -> Result<ServerDirective, ChunkEncodeError> {
+        Ok(ServerDirective::Send {
+            packet_id: play_758::clientbound::MAP_CHUNK,
+            payload: encode_chunk_body_758(cx, cz, column)?,
+        })
+    }
+
+    fn end_chunk_batch(&self, _batch_size: i32) -> ServerDirective {
+        ServerDirective::None
+    }
+
+    fn encode_block_update(&self, x: i32, y: i32, z: i32, state: &str) -> ServerDirective {
+        self.try_encode_block_update(x, y, z, state)
+            .expect("call try_encode_block_update to handle an unrepresentable protocol-758 state")
     }
 }

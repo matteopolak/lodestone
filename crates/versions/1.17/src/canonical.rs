@@ -155,6 +155,15 @@ pub(crate) fn wire_state_for_756(canonical: u32) -> Option<u32> {
     }
 }
 
+/// Returns the unique protocol-758 state for a canonical state.
+///
+/// The two releases' source state reports are byte-identical, but keeping a
+/// separate entry point makes the negotiated protocol explicit at each host
+/// call site.
+pub(crate) fn wire_state_for_758(canonical: u32) -> Option<u32> {
+    wire_state_for_756(canonical)
+}
+
 /// Resolves a negotiated protocol to its block-state table.
 ///
 /// # Panics

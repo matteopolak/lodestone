@@ -48,7 +48,7 @@ two-slot array of `OnceLock`s indexed the same way `ids_for` resolves a table.
 756's table does not fail construction on a stale entry and 758's does not fail
 on an unlisted id.
 
-### Hosted protocol 756
+### Hosted protocols 756 and 758
 
 `V756ServerProtocol` is the hosted half for 1.17.1. It uses the protocol-756
 table for handshake, login, join, position, chunk, block-update and break
@@ -61,12 +61,16 @@ other source shape is an explicit encoding error. Canonical block states are
 looked up through the inverse of the committed jar-backed table; missing or
 ambiguous states are rejected rather than substituted.
 
-The registry exposes only protocol 756 through
-`server_protocol_for_protocol(756)`. Protocol 758 has a materially different
-join and chunk layout, including an extra join field and per-section biomes
-and light, so it remains a separate future host. The in-memory control joins
-through the registry, reads a known chunk block and observes its block update
-after a break. A real 1.17.1 client session remains required validation.
+The registry exposes protocol 756 through
+`server_protocol_for_protocol(756)` and protocol 758 through
+`server_protocol_for_protocol(758)`. `V758ServerProtocol` is deliberately a
+separate implementation: it sends `simulation_distance` in the join packet,
+requires a source covering y=-64 through y=319, sends every one of 24 sections
+with its own biome container, keeps the zero long-array count for
+single-valued containers, and appends the inline light framing. The in-memory
+controls join each registry-selected server, read a known chunk block and
+observe its block update after a break. Real 1.17.1 and 1.18.2 client sessions
+remain required validation.
 
 ### One block-state table and one entity table, which is not what the era below needs
 
@@ -271,8 +275,8 @@ weaker control.
 ## Configuration
 
 None new. The era is selected by a `v1-17` feature on `lodestone-registry`; the
-client registry reads `PROTOCOLS` from the crate, while the server registry
-currently exposes only protocol 756. Oracle ports live in
+client registry reads `PROTOCOLS` from the crate, and the server registry
+exposes both protocols through separate implementations. Oracle ports live in
 [`scripts/live-oracles/legacy.sh`](../scripts/live-oracles/legacy.sh) (1.17.1
 game `25592` / RCON `25593`, 1.18.2 game `25594` / RCON `25595`) and are read
 from there by `tests/capture_join.rs`'s `MEMBERS` table. Both rows use
