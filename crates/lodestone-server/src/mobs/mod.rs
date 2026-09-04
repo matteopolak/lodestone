@@ -969,13 +969,13 @@ const PIGLIN_ALERT_INTERVAL_TICKS: (i32, i32) = (80, 120);
 /// death experience.
 const PLAYER_HURT_EXPERIENCE_TIME: u64 = 100;
 
-/// Vanilla's own default ambient-sound-interval getter's default (`80`) — the forced gap
+/// Default ambient-sound interval (`80`) — the forced gap
 /// [`roll_ambient_sound`] enforces after an idle vocalisation fires (and
 /// after a hurt sound, via [`MobSim::note_vocalisation`]) before the
 /// per-tick chance of firing again starts climbing from zero.
 const AMBIENT_SOUND_INTERVAL: i32 = 80;
 
-/// Vanilla's own armadillo hurt-handler sets a "danger detected recently"
+/// Armadillo damage sets a "danger detected recently"
 /// memory with an 80-tick expiry — the ticks [`SimMob::armadillo_danger_ticks`] is (re)set to on
 /// every hit that passes the invulnerability gate.
 const ARMADILLO_DANGER_TICKS: i32 = 80;
@@ -1008,20 +1008,19 @@ fn axolotl_play_dead_roll(id: u64, health_bits: u32, damage_bits: u32) -> (u32, 
     ((mix1 % 3) as u32, (mix2 % 3) as u32)
 }
 
-/// Vanilla's own allay "forget a heard note block" timer — the literal `600` a heard note
+/// Allay "forget a heard note block" timer — the literal `600` a heard note
 /// block's cooldown memory is (re)set to.
 const ALLAY_NOTEBLOCK_COOLDOWN_TICKS: i32 = 600;
 
-/// Vanilla's own allay self-duplication cooldown constant.
+/// Allay self-duplication cooldown constant.
 const ALLAY_DUPLICATION_COOLDOWN_TICKS: i32 = 6000;
 
-/// Vanilla's own one-slot container's max stack size — the allay's inventory holds at
+/// One-slot container max stack size — the allay's inventory holds at
 /// most one stack of whatever it is carrying.
 const ALLAY_INVENTORY_MAX: u32 = 64;
 
-/// Not a vanilla constant — vanilla's own allay item-pickup-reach bounding-box
-/// inflation (a unit box on every axis) is a
-/// bounding-box inflation this seam has no box to apply; chosen generous
+/// Allay item-pickup reach. The seam has no bounding box to inflate, so this
+/// radius is chosen generously
 /// enough that a flying allay actually reaches ground items in its path
 /// without this crate's plain squared-distance check missing an item a real
 /// box-overlap test would have caught. A disclosed narrowing, the same
@@ -1029,40 +1028,36 @@ const ALLAY_INVENTORY_MAX: u32 = 64;
 /// seam" cut.
 const ALLAY_ITEM_PICKUP_RADIUS: f64 = 1.5;
 
-/// Not a vanilla constant — real vanilla's item-delivery behavior hovers inside a
-/// close-enough(4)/too-far(16) band and throws
-/// while still moving; this seam's [`MobSim::allay_deliver_items`] instead
+/// Item delivery uses a close-enough/too-far band and throws while moving;
+/// this seam's [`MobSim::allay_deliver_items`] instead
 /// drops the instant the allay is within this distance of its liked
-/// note block's own "one above" cell, matching vanilla's own delivery
-/// activity's own walk-to-poi close-enough stop distance so the mob is
-/// actually standing there when this fires.
+/// note block's "one above" cell, so the mob is standing there when this
+/// fires.
 const ALLAY_DELIVER_ARRIVAL_DISTANCE: f64 = 2.5;
 
-/// Vanilla's own random-sitting camel behaviour's minimum pose time (20
+/// Random-sitting camel minimum pose time (20
 /// seconds, converted to ticks) — the minimum
 /// ticks a camel must hold its current pose before [`camel_random_sitting`]
-/// is even eligible to flip it again, in either direction (vanilla's own
-/// start-conditions check gates the toggle on this alone, regardless of
-/// which way it is about to flip).
+/// is eligible to flip it again in either direction. The toggle is gated by
+/// this duration regardless of which way it is about to flip.
 const CAMEL_RANDOM_SITTING_MIN_TICKS: i64 = 400;
 
-/// Vanilla's own sitting-pose ordinal — the real jar ordinal, matching the `10` this
-/// codebase's own `pose_from_id` (`crates/protocol/v770/src/packets/metadata.rs`)
-/// already maps to `EntityPose::Sitting`. Reused here for a species other
+/// Sitting-pose ordinal `10`, which this codebase's `pose_from_id`
+/// maps to `EntityPose::Sitting` in the protocol metadata. Reused here for a species other
 /// than the warden, which is the only other current `MetadataField::Pose`
 /// producer.
 const CAMEL_POSE_SITTING: u32 = 10;
 
-/// Vanilla's own default pose ordinal, `0`.
+/// Default standing pose ordinal, `0`.
 const CAMEL_POSE_STANDING: u32 = 0;
 
-/// Vanilla's own camel dash-cooldown constant — the reset value applied on a
-/// rider-triggered jump, and the gate the camel's own jump handler checks
+/// Camel dash-cooldown constant — the reset value applied on a rider-triggered
+/// jump, and the gate the dash handler checks
 /// (cooldown at or below zero) before a new dash can start.
 const CAMEL_DASH_COOLDOWN_TICKS: i32 = 55;
 
-/// Vanilla's own camel dash-minimum-duration constant — the one fixed duration vanilla's
-/// own dash actually defines. Real "is dashing" stays `true` until
+/// Camel dash minimum duration — the fixed duration used by the dash state. The
+/// "is dashing" state stays `true` until
 /// the cooldown drops under `50` and the camel is grounded, in a liquid, or
 /// carrying a passenger,
 /// i.e. until the camel has travelled for at least this many ticks *and*
@@ -1073,8 +1068,8 @@ const CAMEL_DASH_COOLDOWN_TICKS: i32 = 55;
 /// stand-in for the real landing-triggered reset.
 const CAMEL_DASH_MINIMUM_DURATION_TICKS: i32 = 5;
 
-/// An independent, deterministic per-tick coin flip approximating
-/// vanilla's own random-sitting camel behaviour's trigger. Real vanilla re-rolls this choice (one
+/// An independent, deterministic per-tick coin flip for random-sitting camel
+/// behavior. The reference behavior re-rolls this choice (one
 /// of four equally-weighted idle behaviours) only when no walk target is
 /// set — a brain-internal signal `MobSim` cannot read, since installing a
 /// [`BrainGoal`](lodestone_entity::brain::BrainGoal) into a mob's goal
@@ -1082,9 +1077,8 @@ const CAMEL_DASH_MINIMUM_DURATION_TICKS: i32 = 5;
 /// into it). So this is a disclosed simplification, not a transcription: an
 /// independent per-tick draw, salted differently from
 /// [`roll_ambient_sound`]'s hash so the two streams do not correlate for a
-/// camel that is eligible for both in the same tick. `% 2400` is not a
-/// vanilla constant — there is no fixed one to cite, since real frequency
-/// depends on how often the camel's wander finishes — chosen only to keep
+/// camel that is eligible for both in the same tick. `% 2400` is a local
+/// simulation constant, chosen only to keep
 /// the expected wait (~2 minutes once eligible) long enough to read as a
 /// deliberate rest rather than a flicker.
 fn camel_sit_roll(id: u64, tick_count: u64) -> bool {
@@ -1096,23 +1090,21 @@ fn camel_sit_roll(id: u64, tick_count: u64) -> bool {
     mix % 2400 == 0
 }
 
-/// Vanilla's own random-sitting camel behaviour's toggle, called for a live camel not already
-/// forced to stand by [`MobSim::tick`]'s own water check (see that call
+/// Random-sitting camel behavior runs for a live camel not already forced to
+/// stand by [`MobSim::tick`]'s water check (see that call
 /// site's doc). Flips [`SimMob::camel_sitting`] when eligible and
 /// [`camel_sit_roll`] fires.
 ///
-/// Gated on vanilla's own start-conditions check's own
-/// conditions this sim can actually see: at least
+/// Gated on the conditions this sim can see: at least
 /// [`CAMEL_RANDOM_SITTING_MIN_TICKS`] since the last pose change, not
 /// leashed, and not ridden (`m.rider`, the same field
 /// [`MobSim::tick`]'s goal-tick gate already reads for "is something else
-/// driving this mob's movement"). **Disclosed simplification**: vanilla also
-/// checks that the camel is grounded and not panicking; `on_ground` has no
+/// driving this mob's movement"). **Disclosed simplification**: the simulation
+/// also omits grounded and panicking checks; `on_ground` has no
 /// per-tick reading for a walking land mob in this sim, and `is_panicking`
 /// exists but is deliberately left out here — it already forces a mob's
-/// *movement* into fleeing, so a hurt camel already refuses to path toward a
-/// sit target the way vanilla's own movement-control sink would, without this function
-/// needing to duplicate that gate.
+/// *movement* into fleeing, so a hurt camel refuses to path toward a sit target
+/// without this function needing to duplicate that gate.
 fn camel_random_sitting(m: &mut SimMob<'_>, tick_count: u64) {
     if m.is_leashed() || m.rider.is_some() {
         return;
@@ -1127,10 +1119,10 @@ fn camel_random_sitting(m: &mut SimMob<'_>, tick_count: u64) {
     }
 }
 
-/// The flat knockback power vanilla's own default-knockback step applies to
+/// The flat knockback power applied to
 /// **every** damaging hit, regardless of the attacker's own
-/// `minecraft:attack_knockback` attribute — a fixed `0.4` power fed into
-/// vanilla's own knockback-impulse call. This is separate from,
+/// `minecraft:attack_knockback` attribute — a fixed `0.4` power fed into the
+/// knockback impulse. This is separate from,
 /// and applied before, any attacker-specific bonus (sprint attack,
 /// enchantments) — see [`MobSim::attack`]'s own doc comment for why the two
 /// are chained as two `knockback_impulse` calls rather than summed into one.
@@ -1149,8 +1141,8 @@ fn hostile_probe(path: &str) -> ResourceKey {
         .unwrap_or_else(|_| item_entity_type())
 }
 
-/// One draw from [`ANGER_TICKS`], matching vanilla's own
-/// uniform-int-range sampling: `lo + nextInt(hi - lo + 1)`.
+/// One draw from [`ANGER_TICKS`] using inclusive uniform-int sampling:
+/// `lo + nextInt(hi - lo + 1)`.
 ///
 /// The `+ 1` is the inclusive upper bound, and dropping it is the classic
 /// off-by-one that makes 780 unreachable — a difference no "does the grudge
@@ -1172,20 +1164,13 @@ fn piglin_alert_interval(mob: &mut impl MobController) -> i32 {
 /// is newly hurt, and if so the alert box's half-extents and whether the
 /// alerted mob's owner must match the victim's.
 ///
-/// vanilla's own piglin-alert-others step (box inflated by the piglin's own
-/// follow range on X/Z and `10.0` on Y) =
-/// **±35 XZ, ±10 Y**, no owner filter — piglins are not tameable) and
-/// vanilla's own "alert others of the same owner" goal registered on the
-/// wolf (box inflated by the wolf's own
-/// follow range on X/Z and `10.0` on Y = **±16 XZ, ±10
-/// Y**, plus an owner-uuid match, since the wolf is
-/// tameable — see `docs/plans/mob-ai-roster.md` §4's follow-range
-/// citations and `roster::neutral`'s module doc for both derivations).
+/// Zombified piglins use an alert box of **±35 XZ, ±10 Y** with no owner
+/// filter. Wolves use **±16 XZ, ±10 Y** and require the same owner UUID,
+/// because the two species have different group-alert rules. The owner filter
+/// applies only to wolves; see `docs/plans/mob-ai-roster.md` §4 and
+/// `roster::neutral` for the range derivations.
 ///
-/// Re-verified against vanilla's own "alert others of the same owner" goal (26.2 jar) rather than
-/// assumed: this one-shot path has **no line-of-sight check at all** — an
-/// earlier version of this comment said line of sight was disclosed-missing
-/// here, which was never true for this method. `RayView::is_clear` (used by
+/// This one-shot path has **no line-of-sight check**. `RayView::is_clear` (used by
 /// `crate::explosion`'s exposure sampling and `crate::mobs::projectiles`)
 /// would be the primitive if one were ever needed here.
 ///
@@ -1204,7 +1189,7 @@ fn piglin_alert_interval(mob: &mut impl MobController) -> i32 {
 /// producer, resolved in [`MobSim::tick`]'s own per-mob loop
 /// ([`SimMob::piglin_alert_ticks`] carries the throttle) and applied to the
 /// rest of `self.mobs` afterwards, reusing this function's own box for the
-/// propagation. The one disclosed approximation: vanilla's own
+/// propagation. The disclosed approximation is that this seam's
 /// sensing-based line-of-sight-to-target check wants a live entity reference this seam does
 /// not carry (see [`MobController::angry_target`]'s own doc for why), so the
 /// line-of-sight check and the alerted position both read
@@ -1219,9 +1204,9 @@ fn alert_species(species_path: &str) -> Option<(f64, f64, bool)> {
     }
 }
 
-/// One draw of vanilla's own bee AI step's self-destruct roll, evaluated once
+/// One draw of the bee self-destruct roll, evaluated once
 /// every 5th tick since the sting connected (`elapsed % 5 == 0`, checked by
-/// the caller): a bounded-int draw against `clamp(1200 - timeSinceSting, 1, 1200)`, testing for zero.
+/// the caller): a bounded-int draw against `clamp(1200 - elapsed, 1, 1200)`, testing for zero.
 ///
 /// The clamp is what bounds it at both ends — at `elapsed == 1200` the
 /// divisor is `1` and the roll is unconditional, and `1200` is itself a
@@ -1251,7 +1236,7 @@ fn bee_sting_death_roll(tick_count: u64, id: i32, elapsed: u64) -> bool {
     mix % denom == 0
 }
 
-/// One tick of vanilla's own generic per-tick base update's idle-vocalisation roll:
+/// One tick of the generic idle-vocalisation roll:
 /// if alive and a bounded-int-under-1000 draw is less than the ambient-sound
 /// timer (post-increment), reset the timer and play the ambient sound.
 /// The timer starts
