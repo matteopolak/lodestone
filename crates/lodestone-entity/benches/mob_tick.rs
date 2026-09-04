@@ -43,7 +43,7 @@ use lodestone_model::Vec3;
 
 /// Same fence arena as `pathfinding_search.rs`'s `detour_fence` (duplicated —
 /// each `benches/*.rs` file is its own compilation unit, and this harness's
-/// convention, per `docs/benchmark-harness.md`, is duplication over a shared
+/// convention, per `docs/render-benchmarks.md`, is duplication over a shared
 /// bench-only crate). A real obstacle so `move_to` actually invokes A* rather
 /// than reusing a trivial straight walk — the same shape
 /// `ai::navigating_mob.rs`'s own

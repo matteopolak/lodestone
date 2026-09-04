@@ -349,7 +349,7 @@ points; the per-family `redstone_*.rs` files and new files are free.
 | **U3** | Dispatch swap: `react_to_notification` predicate chain → kind match, string arm kept as debug reference | `random_tick.rs` | single agent; serialises after all U2 |
 | **U4** | `WritePlan` unification (single-cell wrap, piston/tripwire adapters, fan-out policies) | `random_tick.rs`, `tick.rs` | single agent; serialises after U3 |
 | **U5** | Cross-column seam: 3×3 view, cross-column writes, scheduled-tick container decision, border oracle gate | `random_tick.rs`, `tick.rs`, `chunk.rs`/`chunk_store.rs`, `server.rs` (placement path) | single agent; the big one; after U4 |
-| **U6** | Contraption benchmark suite over the harness (`docs/benchmark-harness.md` patterns; this is the sixth `support.rs` site — promote it to a shared crate per that doc's own threshold, or take the seventh copy consciously) | new `crates/lodestone-server/benches/redstone.rs` | concurrent once U1 exists; scales up after U5 |
+| **U6** | Contraption benchmark suite over the harness (`docs/oracles-and-benchmarks.md`'s redstone benchmark section; shared `support.rs` duplication is tracked in `docs/benchmark-regression-gate.md`) | new `crates/lodestone-server/benches/redstone.rs` | concurrent once U1 exists; scales up after U5 |
 | **U7** | *(conditional on U1/U6 numbers after U5)* listener index + border registry + staleness tripwire | new `redstone_graph.rs`; integration in `random_tick.rs` | last, single agent, only if §8's bar is met |
 
 Three lanes run concurrently at the start (U0, U1, U6-scaffolding); the U2 fan-out is the wide

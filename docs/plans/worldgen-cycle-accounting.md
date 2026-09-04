@@ -250,8 +250,8 @@ for its owner rather than performing the edit.
   self-check does this automatically); if the worldgen pipeline's own spread is wider
   (e.g. any surviving `RandomState` iteration in a hot path is address-dependent), the
   gateable effect size moves with it and the ledger says so.
-- **`benchmark-harness.md`'s Configuration section still requires the tokio
-  `opt-level=1` workaround** (and the C_ss run snippet repeats it); the
-  `rust-toolchain.toml` pin comment records the ICE fixed at `nightly-2026-08-07`
-  (release workspace build + bench `--no-run` validated). Stale doc, U20's orbit;
-  reported, not edited here.
+- **The old benchmark configuration's tokio `opt-level=1` workaround was a
+  historical constraint, not a current requirement.** The `rust-toolchain.toml`
+  pin comment records the ICE fixed at `nightly-2026-08-07` (release workspace
+  build + bench `--no-run` validated); current benchmark guidance is in
+  `docs/render-benchmarks.md`.

@@ -979,7 +979,7 @@ fn bench_ore_composition_sweep(c: &mut Criterion) {
     // Scene names the patch size AND the resolver, because both changed: the
     // pre-fix runs of this metric were 12x12 with a resolver that supplied no
     // ore data. A different scene string is what stops `bench-compare` pairing
-    // the two, per `docs/benchmark-harness.md`.
+    // the two, per `docs/roadmap/benchmarks.md`.
     let scene = format!("seed={SEED} patch=4x4(16 chunks) resolver=full ores=real_plains_fixture");
     let n = coords.len();
     let mut per_chunk_us: Vec<f64> = Vec::with_capacity(n);
