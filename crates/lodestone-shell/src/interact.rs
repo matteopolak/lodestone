@@ -987,10 +987,11 @@ pub fn drive_mining(
         // exactly as `drive_placement` already does. `id_value` — the state that
         // *was* there — not `id::AIR`, matching `sim::actions::Sim::break_block`'s
         // offline mirror of the same case.
-        if let Some(sound) = lodestone_data::sound_types::sound_type(id_value)
-            && let Some(sound_name) = lodestone_data::sound_types::break_sound_name(id_value)
+        if let Some(state) = lodestone_data::block_states::StateId::new(id_value)
+            && let Some(sound_name) = lodestone_data::sound_types::break_sound_name(state)
             && let Some(engine) = &mut audio.0
         {
+            let sound = lodestone_data::sound_types::sound_type(state);
             engine.play_sound(
                 sound_name,
                 lodestone_model::event::SoundCategory::Block,
@@ -1249,10 +1250,11 @@ pub fn drive_placement(
     // the placing player from the server's broadcast, so our copy has to come
     // from here or not at all. Tied to `state_id` (the predicted state), not
     // the held item, because the sound is the *placed* state's `SoundType`.
-    if let Some(sound) = lodestone_data::sound_types::sound_type(state_id)
-        && let Some(sound_name) = lodestone_data::sound_types::place_sound_name(state_id)
+    if let Some(state) = lodestone_data::block_states::StateId::new(state_id)
+        && let Some(sound_name) = lodestone_data::sound_types::place_sound_name(state)
         && let Some(engine) = &mut audio.0
     {
+        let sound = lodestone_data::sound_types::sound_type(state);
         engine.play_sound(
             sound_name,
             lodestone_model::event::SoundCategory::Block,

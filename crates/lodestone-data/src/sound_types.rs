@@ -6,7 +6,7 @@
 //! the packet carries a **block-state id and nothing else**: vanilla's own
 //! level-event handler's break case looks the sound up locally from the
 //! block state's own sound-type accessor.
-//! That is exactly the state lodestone was in — see `docs/sound-playback.md`.
+//! That is exactly the state lodestone was in — see `docs/sound.md`.
 //!
 //! # Data source: interrogate the real jar
 //!
@@ -77,6 +77,7 @@
 //!   per-state sound-type override in the game). The table is therefore
 //!   state-keyed, not block-keyed.
 
+use crate::block_states::StateId;
 use crate::generated_sound_types as table;
 use crate::sound_events;
 
@@ -175,18 +176,17 @@ impl BlockSoundType {
     }
 }
 
-/// The `SoundType` for block-state `id`, or `None` if `id` is not in
-/// `0..`[`STATE_COUNT`].
+/// The `SoundType` for validated block-state `id`.
 ///
 /// Zero-heap: two rodata reads, no search. Note that this answers for **air**
 /// too (see the module gotchas) — the caller decides whether a sound is
 /// appropriate.
 #[must_use]
-pub fn sound_type(id: u32) -> Option<BlockSoundType> {
-    let &entry = table::STATE_ENTRY.get(id as usize)?;
+pub fn sound_type(id: StateId) -> BlockSoundType {
+    let entry = table::STATE_ENTRY[id.raw() as usize];
     let (volume, pitch, break_sound, step_sound, place_sound, hit_sound, fall_sound) =
         table::ENTRIES[entry as usize];
-    Some(BlockSoundType {
+    BlockSoundType {
         volume,
         pitch,
         break_sound,
@@ -194,37 +194,34 @@ pub fn sound_type(id: u32) -> Option<BlockSoundType> {
         place_sound,
         hit_sound,
         fall_sound,
-    })
+    }
 }
 
 /// The break sound name for block-state `id`, ready to hand to a sound engine.
 ///
-/// `None` when `id` is out of range **or** the sound is the
-/// [`EMPTY_SOUND`] sentinel — the two cases a caller would otherwise have to
-/// distinguish by hand before every play, and both mean "nothing to play".
+/// `None` when the sound is the [`EMPTY_SOUND`] sentinel or its generated event
+/// id does not resolve. Raw ids must first pass [`StateId::new`].
 #[must_use]
-pub fn break_sound_name(id: u32) -> Option<&'static str> {
-    let name = sound_type(id)?.break_sound_name()?;
+pub fn break_sound_name(id: StateId) -> Option<&'static str> {
+    let name = sound_type(id).break_sound_name()?;
     (!BlockSoundType::is_empty_sound(name)).then_some(name)
 }
 
 /// The place sound name for block-state `id`. Same `None` contract as
 /// [`break_sound_name`].
 #[must_use]
-pub fn place_sound_name(id: u32) -> Option<&'static str> {
-    let name = sound_type(id)?.place_sound_name()?;
+pub fn place_sound_name(id: StateId) -> Option<&'static str> {
+    let name = sound_type(id).place_sound_name()?;
     (!BlockSoundType::is_empty_sound(name)).then_some(name)
 }
 
 /// The step sound name for block-state `id`. Same `None` contract as
 /// [`break_sound_name`].
 ///
-/// Nothing in the tree plays footsteps yet — they are per-tick, per-surface and
-/// distance-gated, and the *producer* is the missing half (see
-/// `docs/sound-playback.md`). This accessor exists because the data half is now
-/// free, not because a caller is waiting.
+/// The shell's local-player footstep producer calls this per movement tick after
+/// selecting the surface below the player's feet (see `docs/sound.md`).
 #[must_use]
-pub fn step_sound_name(id: u32) -> Option<&'static str> {
-    let name = sound_type(id)?.step_sound_name()?;
+pub fn step_sound_name(id: StateId) -> Option<&'static str> {
+    let name = sound_type(id).step_sound_name()?;
     (!BlockSoundType::is_empty_sound(name)).then_some(name)
 }

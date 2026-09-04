@@ -53,6 +53,14 @@ now, using the block's `sound_types` census (see
 `pitch*0.8` scaling, which must never be retyped since the identical
 expression appears at both of vanilla's own call sites.
 
+The census lookup accepts `lodestone_data::block_states::StateId`, not a raw
+integer. Packet, chunk and prediction boundaries validate their raw state id
+once with `StateId::new`; after that, every one of the 32,366 states has a
+total `BlockSoundType` lookup. An unknown raw id remains silent at those
+boundaries. The sound-name helpers still return `Option` because
+`minecraft:intentionally_empty` is a valid sound-event sentinel that means
+there is deliberately no sample to play.
+
 The explosion sound was missing for a structural reason, not a routing gap:
 v26-2 never decoded packet id 36 (`minecraft:explode`) at all, so there was
 nothing to forward. The explosion's pitch is **rolled client-side** from the
