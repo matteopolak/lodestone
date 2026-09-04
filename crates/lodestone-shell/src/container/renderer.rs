@@ -163,26 +163,9 @@ impl ContainerRenderer {
         self.player_preview.is_some()
     }
 
-    /// Bind a real skin to the inventory avatar: a declared rig, and optionally
-    /// the sheet to draw it with (`None` uses the pack's own sheet for that rig).
-    ///
-    /// This is the GPU seam used by the account-scoped fetch and preview
-    /// resolver. Returns `false` when the avatar is not attached at all, or when the
-    /// rig or sheet cannot be resolved; never leaves a half-applied state.
-    pub fn set_player_skin(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        model: lodestone_assets::PlayerModelType,
-        sheet: Option<&lodestone_assets::Image>,
-    ) -> bool {
-        self.player_preview
-            .as_mut()
-            .is_some_and(|p| p.set_skin(device, queue, model, sheet))
-    }
-
     /// Which rig the inventory avatar is drawing, or `None` when it is not
-    /// attached. The assertable half of [`set_player_skin`](Self::set_player_skin).
+    /// attached. The GPU resolver gate reads this after a real render call to
+    /// prove that the frame's UUID selected the expected model.
     #[must_use]
     pub fn player_preview_model(&self) -> Option<lodestone_assets::PlayerModelType> {
         self.player_preview.as_ref().map(|p| p.skin_model())

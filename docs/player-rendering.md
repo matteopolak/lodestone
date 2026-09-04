@@ -37,8 +37,8 @@ same upload path every other entity texture uses.
 
 **The rig and the sheet swap together, on purpose.** A slim-authored sheet drawn on the wide rig
 (or vice versa) shifts every arm UV by a texel, reading as a texture bug rather than a model bug —
-so the skin-setting entry point takes rig and sheet as one pair, changing neither if either is
-invalid, rather than offering "just replace the texture". Custom player heads
+so the retained-skin resolver applies rig and sheet as one pair, changing neither if either is
+invalid, rather than exposing a separate "just replace the texture" path. Custom player heads
 (`minecraft:player_head` with a profile) reuse this same fetch at several independent draw sites
 (world, inventory slot, hand, third-person held item), each with its own resolver and cache.
 
