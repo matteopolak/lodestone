@@ -8,8 +8,10 @@
 //! separately:
 //!
 //! 1. **Nothing in the workspace depends on this crate.** Checked by scanning
-//!    every manifest — the edge a future change actually adds is a crate
-//!    *naming* this one, and that is a line in a `Cargo.toml`.
+//!    every workspace manifest — the edge a future change actually adds is a
+//!    crate *naming* this one, and that is a line in a `Cargo.toml`. Nested
+//!    standalone workspaces are executable experiments, not production graph
+//!    members, so they are excluded explicitly.
 //! 2. **This crate names no JVM linkage of its own**, and if it ever does, it
 //!    does so behind an optional dependency rather than an unconditional one.
 //!
@@ -60,8 +62,8 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Every `Cargo.toml` under `crates/` and `xtask/`.
-fn all_manifests(root: &Path) -> Vec<PathBuf> {
+/// Every workspace-member `Cargo.toml` under `crates/` and `xtask/`.
+fn workspace_manifests(root: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut stack = vec![root.join("crates"), root.join("xtask")];
     while let Some(dir) = stack.pop() {
@@ -82,8 +84,17 @@ fn all_manifests(root: &Path) -> Vec<PathBuf> {
             }
         }
     }
-    out.push(root.join("Cargo.toml"));
+    let root_manifest = root.join("Cargo.toml");
+    out.retain(|manifest| !declares_standalone_workspace(manifest));
+    out.push(root_manifest);
     out
+}
+
+/// A nested `[workspace]` root is not a member of the production workspace.
+fn declares_standalone_workspace(manifest: &Path) -> bool {
+    std::fs::read_to_string(manifest).is_ok_and(|text| {
+        text.lines().any(|line| line.trim() == "[workspace]")
+    })
 }
 
 /// Dependency-table keys from a manifest, from every `[dependencies]`,
@@ -127,7 +138,7 @@ fn dependency_names(manifest: &Path) -> Vec<String> {
 #[test]
 fn nothing_in_the_workspace_depends_on_the_bridge() {
     let root = workspace_root();
-    let manifests = all_manifests(&root);
+    let manifests = workspace_manifests(&root);
 
     assert!(
         manifests.len() > 20,
@@ -175,7 +186,7 @@ fn nothing_in_the_workspace_depends_on_the_bridge() {
 fn the_detector_finds_a_dependent_where_one_really_exists() {
     let root = workspace_root();
     let mut dependents = 0;
-    for manifest in all_manifests(&root) {
+    for manifest in workspace_manifests(&root) {
         if dependency_names(&manifest)
             .iter()
             .any(|name| name == "lodestone-ecs")
@@ -189,6 +200,37 @@ fn the_detector_finds_a_dependent_where_one_really_exists() {
          lodestone-ecs, which is depended upon widely. The parser is not \
          reading dependency tables, so a clean result for the bridge proves \
          nothing."
+    );
+}
+
+/// The control on the standalone-workspace exclusion: the invocation spike
+/// really does name the bridge, but it must not be classified as a production
+/// workspace consumer.
+#[test]
+fn the_standalone_invocation_spike_is_outside_the_production_graph() {
+    let root = workspace_root();
+    let spike_root = root.join(
+        "crates/plugins/lodestone-jvm-bridge/spike/invocation",
+    );
+    let spike = spike_root.join("Cargo.toml");
+    assert!(
+        dependency_names(&spike).iter().any(|name| name == SELF_NAME),
+        "premise failed: the invocation spike no longer depends on the bridge"
+    );
+    assert!(
+        declares_standalone_workspace(&spike),
+        "the invocation spike must remain a standalone Cargo workspace"
+    );
+    assert!(
+        !workspace_manifests(&root).contains(&spike),
+        "a standalone spike was classified as a production workspace member"
+    );
+
+    let ignore = std::fs::read_to_string(spike_root.join(".gitignore"))
+        .expect("the standalone spike must define its artifact exclusions");
+    assert!(
+        ignore.lines().any(|line| line.trim() == "target/"),
+        "an ordinary standalone Cargo run must not expose target/ as untracked source"
     );
 }
 
