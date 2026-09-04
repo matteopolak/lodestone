@@ -35,14 +35,14 @@
 //! * [`OneOccluder`] — the real scene: one diagonal occluder, AO enabled
 //!   (the `ModelSectionView::ambient_occlusion_at` default). Expects a small
 //!   dark region in exactly one quadrant.
-//! * [`NoOccluder`] — **executed negative control #1**: identical scene, no
+//! * [`NoOccluder`] — **executed negative control A**: identical scene, no
 //!   occluder. Must render uniformly bright — proving the darkening in the
 //!   first scene is caused by the occluder, not some fixed shader constant or
 //!   a UV/lighting artefact.
-//! * [`OneOccluderAoFlat`] — **executed negative control #2**, and the direct
-//!   exercise of the new gate this issue added: the *same* occluder as scene
-//!   1, but `ambient_occlusion_at` returns `false`. Per vanilla's
-//!   `tesselateFlat` fallback, this must render uniformly bright **despite**
+//! * [`OneOccluderAoFlat`] — **executed negative control B**, exercising
+//!   the flat-shading fallback directly: the *same* occluder as scene
+//!   1, but `ambient_occlusion_at` returns `false`. Per vanilla's flat-mesh
+//!   fallback, this must render uniformly bright **despite**
 //!   the occluder — proving `mesh_models` actually consults the flag rather
 //!   than always computing smooth AO.
 //!
@@ -52,14 +52,14 @@
 //! gate in this file, added when the AO term stopped reading
 //! [`ModelSectionView::occludes_at`] (a *face-culling* predicate) and started
 //! reading [`ModelSectionView::ao_occludes_at`] (vanilla's
-//! `getShadeBrightness`, a *collision* predicate). The three scenes are chosen
+//! per-block shade-brightness override, a *collision* predicate). The three scenes are chosen
 //! so that each of the two candidate predicates produces a **different**
 //! prediction, which is the only way a gate can tell them apart:
 //!
 //! | scene | `occludes_at` | `ao_occludes_at` | correct byte | byte if the old predicate were still in use |
 //! |---|---|---|---|---|
 //! | [`LeavesOccluder`] | `false` (cutout sprite) | `true` (full collision cube) | ~204 | 255 |
-//! | [`BarrierOccluder`] | `false` | `false` (`BarrierBlock` overrides to `1.0`) | 255 | 255 |
+//! | [`BarrierOccluder`] | `false` | `false` (barrier's shade-brightness override is `1.0`) | 255 | 255 |
 //! | [`CullingOccluderOnly`] | `true` | `false` | 255 | ~204 |
 //!
 //! `LeavesOccluder` is the bug this closes — the underside of a tree canopy. Its
@@ -70,10 +70,10 @@
 //!
 //! `BarrierOccluder` is the control that fails if the predicate went the *other*
 //! way: `barrier`'s collision shape **is** a full block, so a naive
-//! `isCollisionShapeFullBlock` derivation with the seven `getShadeBrightness`
+//! full-collision-shape derivation with the seven per-block shade-brightness
 //! overrides dropped would darken this scene. `CullingOccluderOnly` is the
-//! control that fails if the AO term still reads `occludes_at` at all — it was
-//! byte ~204 before this change and must be 255 after.
+//! control that fails if the AO term still reads `occludes_at` at all — it must
+//! be byte 255, not the ~204 a face-culling-based predicate would produce.
 //!
 //! `#[ignore]`d because it needs a real GPU adapter; run explicitly:
 //! `cargo test -p lodestone-render --test model_ao_corner_gate -- --ignored --nocapture`.
@@ -226,8 +226,8 @@ impl ModelSectionView for NoOccluder {
 }
 
 /// Identical occluder to [`OneOccluder`], but `ambient_occlusion_at` reports
-/// `false` — the direct exercise of this issue's new gate. Per vanilla's
-/// `tesselateFlat` fallback, `mesh_models` must render this uniformly bright
+/// `false` — the direct exercise of the flat-shading fallback. Per vanilla's
+/// flat-mesh fallback, `mesh_models` must render this uniformly bright
 /// despite the occluder.
 struct OneOccluderAoFlat;
 impl ModelSectionView for OneOccluderAoFlat {
@@ -600,7 +600,7 @@ fn model_path_ao_darkens_exactly_one_corner_and_the_flag_can_disable_it() {
 
     // --- Scene 3 (executed negative control, and the feature under test):
     // the *same* occluder as scene 1, but `ambient_occlusion_at` says no.
-    // Per vanilla's `tesselateFlat`, this must render exactly like scene 2 —
+    // Per vanilla's flat-mesh fallback, this must render exactly like scene 2 —
     // uniformly bright — proving `mesh_models` actually branches on the flag
     // rather than always computing smooth AO regardless of it.
     assert!(
@@ -639,13 +639,13 @@ fn ao_occluder_predicate_is_shade_brightness_not_face_culling() {
         lodestone_data::shade_brightness::occludes_ambient_light(leaves),
         Some(true),
         "premise: oak_leaves darkens an AO corner in vanilla (full collision cube, no \
-         getShadeBrightness override). Without this the leaves scene proves nothing"
+         shade-brightness override). Without this the leaves scene proves nothing"
     );
     assert_eq!(
         lodestone_data::shade_brightness::occludes_ambient_light(barrier),
         Some(false),
-        "premise: barrier does NOT darken an AO corner (BarrierBlock overrides \
-         getShadeBrightness to 1.0) even though its collision shape IS a full block — this is \
+        "premise: barrier does NOT darken an AO corner (its shade-brightness override \
+         is 1.0) even though its collision shape IS a full block — this is \
          what makes it a control against the naive collision derivation"
     );
 
@@ -684,7 +684,7 @@ fn ao_occluder_predicate_is_shade_brightness_not_face_culling() {
     let [v0, v1, v2, v3] = corner_samples(&leaves_frame).map(|(_, b)| b);
     assert!(
         (predicted_byte - 12..=predicted_byte + 12).contains(&i32::from(v0)),
-        "vertex 0's neighbour is a leaf block: vanilla's getShadeBrightness is 0.2 there, so \
+        "vertex 0's neighbour is a leaf block: vanilla's shade brightness is 0.2 there, so \
          the corner must read near {predicted_byte}, got {v0}. A reading of 255 means the AO \
          term is still asking occludes_at (leaves are cutout, so it answers `false`) — the \
          canopy-underside bug"
@@ -709,11 +709,11 @@ fn ao_occluder_predicate_is_shade_brightness_not_face_culling() {
     );
 
     // --- Scene B: the exemption control. If someone "simplifies" the predicate
-    // to `collision_shapes`-derived `isCollisionShapeFullBlock`, barrier becomes
+    // to a `collision_shapes`-derived full-block check, barrier becomes
     // an occluder and this fires.
     assert!(
         barrier_bbox.is_none(),
-        "barrier is exempt in vanilla (BarrierBlock.getShadeBrightness returns 1.0) but \
+        "barrier is exempt in vanilla (its shade-brightness override returns 1.0) but \
          darkened a region at {barrier_bbox:?} — the predicate has been replaced by something \
          that only looks at the collision shape, where barrier IS a full block"
     );

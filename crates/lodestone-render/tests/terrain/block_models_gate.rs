@@ -242,14 +242,14 @@ fn water_classifies_as_a_fluid_with_resolvable_sprites() {
 fn nether_portal_is_a_translucent_non_occluding_swirl() {
     // Owner report: "the nether portal swirly block is missing is opaque when it
     // isnt supposed to be". Vanilla derives a block's chunk render layer from the
-    // real texture's alpha channel (`com.mojang.blaze3d.platform.Transparency` /
-    // `ChunkSectionLayer.byTransparency`, from the 26.2 decompile) rather than
+    // real texture's alpha channel (scanning for any partially-transparent or
+    // fully-transparent texel, per the 26.2 decompile) rather than
     // from a hardcoded per-block table, so this is a data question: does the real
     // `block/nether_portal` sprite carry any partial-alpha texel? Measured
     // directly on `.cache/mc/26.2/client-src/assets/minecraft/textures/block/
     // nether_portal.png`: every one of its 8192 texels (16x512, all 32 animation
     // frames) has alpha strictly between 0 and 255 — none fully opaque, none
-    // fully transparent — so every frame is `Transparency.TRANSLUCENT` and the
+    // fully transparent — so every frame classifies as translucent and the
     // whole block must land on the translucent pass, exactly like stained glass.
     let (models, _mgr, reg) = build_models();
     let id = find_state(reg.as_ref(), "minecraft:nether_portal", &[("axis", "x")])
@@ -282,7 +282,8 @@ fn nether_portal_is_a_translucent_non_occluding_swirl() {
 /// name the exact sprite the quad's UVs were baked against, over **every**
 /// quad of **every** real block state — not a synthetic fixture.
 ///
-/// This is the instrument #526 asked for: `BlockModels::build`'s per-state
+/// This is the instrument that proves the baker no longer pays a linear scan:
+/// `BlockModels::build`'s per-state
 /// loop used to recover "which sprite does this quad sample" with a linear
 /// UV-containment scan (`sprite_for_uv`) over every atlas sprite, once per
 /// quad per state — over 32k states and >1000 block sprites

@@ -1,4 +1,4 @@
-//! GPU pixel gates for the three things issue #96 added to the sky pass: the
+//! GPU pixel gates for the three things the sky pass draws: the
 //! horizon-to-zenith **gradient** (and its freedom from banding), the
 //! **sunrise/sunset band**, and **void fog**.
 //!
@@ -203,8 +203,8 @@ fn expected_fog_value(camera: &Camera, x: u32, y: u32) -> Option<f32> {
 
 /// [`expected_fog_value`] for an explicit `sky_fog_end`, in blocks.
 ///
-/// Issue #399 made the fog end a function of the render distance
-/// (`min(renderDistanceInBlocks, 512)`, `AtmosphericFogEnvironment`'s own decompiled source), so
+/// The sky disc's fog end is a function of the render distance
+/// (`min(renderDistanceInBlocks, 512)`), so
 /// the expected value is no longer derivable from the disc's geometry alone. Note
 /// which half of that changed: the *disc* is still 512 blocks across and the
 /// membership test below is unchanged — only the divisor moves, which is why a
@@ -260,7 +260,7 @@ fn gradient_error(
 }
 
 /// [`gradient_error`] against a gradient that ends at an explicit `sky_fog_end`
-/// rather than at the attribute's 512-block default (issue #399).
+/// rather than at the attribute's 512-block default.
 ///
 /// Pointing this at the *wrong* fog end is what makes the two-render-distance
 /// gate below a magnitude measurement instead of a direction one: a frame drawn at
@@ -391,25 +391,24 @@ fn the_horizon_gradient_matches_the_per_pixel_fog_value() {
 }
 
 // ---------------------------------------------------------------------------
-// 1b. Issue #399: the gradient's *end* is the render distance, not a constant
+// 1b. The gradient's *end* is the render distance, not a constant
 // ---------------------------------------------------------------------------
 
 /// The two render distances this gate asserts at, in chunks, with the fog end each
 /// must produce in blocks.
 ///
 /// Both `want_end` values are `Math.min(renderDistanceInChunks * 16, 512)` worked
-/// by hand from `AtmosphericFogEnvironment`'s own decompiled source plus
-/// `FogRenderer`'s own decompiled source/`:193` — **not** from
+/// by hand from vanilla's fog environment and fog renderer sources — **not** from
 /// `sky_fog_end_for_render_distance`, which is code under test here.
 ///
 /// 8 and 32 are the pair that matters. 32 is the *only* render distance at which
-/// the pre-#399 constant `512` was correct, so a gate that asserted there alone
-/// would have passed against the bug; 8 is the client default, where the constant
-/// stretched the ramp by exactly `512 / 128 = 4`.
+/// a fixed constant `512` reads as correct, so a gate that asserted there alone
+/// would miss a build that hardcodes it; 8 is the client default, where a fixed
+/// constant stretches the ramp by exactly `512 / 128 = 4`.
 const RD_CASES: [(u32, f32); 2] = [(8, 128.0), (32, 512.0)];
 
-/// **Issue #399's gate. Two render distances, because the defect was that the
-/// value did not vary with render distance at all** — asserting at one distance
+/// **Two render distances, because a fog-end bug's signature is that the
+/// value does not vary with render distance at all** — asserting at one distance
 /// measures *whether* the disc has a gradient, never *how far* it runs, which is
 /// `CLAUDE.md`'s `magnitude` species.
 ///
@@ -417,9 +416,10 @@ const RD_CASES: [(u32, f32); 2] = [(8, 128.0), (32, 512.0)];
 /// derived from that pixel's own ray **and that distance's** fog end, and — the
 /// half that actually pins the magnitude — it must **badly fail** the *other*
 /// distance's expectation. The second measurement is the control, and it is
-/// intrinsic rather than bolted on: the pre-#399 shader produces the
+/// intrinsic rather than bolted on: a shader with a fixed `512`-block fog end
+/// produces the
 /// render-distance-32 frame for both cases, so the `RD 8` row's cross-check is
-/// literally the old behaviour being rejected.
+/// literally that fixed-constant behaviour being rejected.
 ///
 /// # Why the tolerance is derived rather than shared
 ///
@@ -513,7 +513,7 @@ fn the_horizon_gradient_ends_at_the_render_distance_not_at_a_constant() {
     }
 }
 
-/// **Control, NOT EXECUTED (no cargo run this session).** The pre-#399 shader: a
+/// **Control, NOT EXECUTED (no cargo run this session).** A shader with a
 /// disc whose fog end is the hardcoded 512-block attribute default regardless of
 /// render distance.
 ///
@@ -572,7 +572,8 @@ fn control_a_constant_512_block_fog_end_is_wrong_at_render_distance_8() {
 }
 
 /// **Control, EXECUTED.** Hand the shipped pass a fog colour *equal* to the sky
-/// colour — the pass's own pre-#96 state, where the disc was a single flat
+/// colour — the state before a sky dome existed at all, where the disc was a
+/// single flat
 /// colour. The frame must then be uniform, and the gradient detector above must
 /// report a large error against the two-colour expectation.
 ///
@@ -835,7 +836,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
 const PEAK_SUNSET_TICK: i64 = 12_732;
 
 /// A pixel is "warm" when red clearly dominates blue. At dusk the sky disc is
-/// `SKY_COLOR` scaled by the `#848484` multiplier — still blue-dominant — while
+/// `SKY_COLOR` scaled by the `0x848484` multiplier — still blue-dominant — while
 /// the band is `#da6333`, so this separates the two cleanly without needing an
 /// exact expected colour (which the linear-vs-gamma blend-space divergence
 /// documented on `SUNRISE_BLEND` would make brittle).
@@ -1080,8 +1081,8 @@ fn disc_brightness(pixels: &[u8], camera: &Camera) -> (f64, usize) {
 /// falloff is quadratic), and at the world bottom (black).
 ///
 /// The expected ratio is not a guess — it is [`VoidFog::brightness`] applied in
-/// gamma space, which is what `FogRenderer.computeFogColor` does to
-/// `ARGB.redFloat(color)`. Doing it in linear space instead would predict
+/// gamma space, which is what vanilla's fog-colour computation does to
+/// the colour's red channel. Doing it in linear space instead would predict
 /// roughly `0.53` at the midpoint where the correct answer is `0.25`, so this
 /// gate also pins the colour space.
 #[test]
@@ -1185,7 +1186,7 @@ fn control_disabled_void_fog_leaves_the_world_bottom_bright() {
 }
 
 // ---------------------------------------------------------------------------
-// 4. Per-biome sky tint — the fourth and last box on #96
+// 4. Per-biome sky tint — the fourth and last of the sky pass's own boxes
 // ---------------------------------------------------------------------------
 
 /// Real 26.2 biome sky colours, as sRGB bytes.

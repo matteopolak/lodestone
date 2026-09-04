@@ -4,7 +4,7 @@
 //! The user's report, on a live 26.2 server: water "shows the 'flowing down'
 //! effect on the edges that touch non-water blocks which is weird and shouldnt
 //! happen". It was a **culling** bug, not a texture-choice bug — vanilla's
-//! `FluidRenderer.tesselate` does use the `*_flow` sprite on every fluid side
+//! fluid mesher does use the `*_flow` sprite on every fluid side
 //! face, but it culls that face when the neighbour occludes it, and the
 //! neighbour on a shoreline is `grass_block`.
 //!
@@ -188,7 +188,7 @@ fn a_grass_banked_pond_draws_no_flowing_side_faces() {
          pre-fix control on this same scene emits {bad_vertical}"
     );
     // The whole sky above the pond is open air, so every top-surface cell's
-    // `shouldRenderBackwardUpFace` (issue #18 gap 4, closed) ring is all-air:
+    // `should_render_backward_up_face_in` ring is all-air:
     // each of the 64 level quads gets a back copy, matching vanilla's own
     // open-water behaviour rather than a single-sided sheet.
     assert_eq!(

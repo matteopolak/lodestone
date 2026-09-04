@@ -1,4 +1,4 @@
-//! Issue #400: the packed full-cube path darkens at night and fades into fog.
+//! The packed full-cube path darkens at night and fades into fog.
 //!
 //! # Which scene, and why `--headless`'s mesher is the *right* one here
 //!
@@ -20,13 +20,12 @@
 //!
 //! `block.wgsl` diverged from `model.wgsl` in three ways. The third — the shade
 //! multiply happening in **linear** space rather than gamma — was fixed in
-//! `a80a095`, and that changes the arithmetic, so issue #400's own number table
-//! is half-stale. This gate carries the *current* derivation:
+//! `a80a095`, changing the arithmetic. This gate carries the *current* derivation:
 //!
 //! 1. **No `sky_darken`**: `0.2 + 0.8 * max(sky, block)` where `model.wgsl` has
 //!    `max(sky * sky_darken(), block)`. Fixed here.
 //! 2. **No fog lanes at all**: `Camera` was `view_proj` + `section_origin`, so
-//!    there was nowhere for fog to arrive. The lanes arrived with issue #76's
+//!    there was nowhere for fog to arrive. The lanes arrived with the
 //!    shared-camera split; this reads them.
 //! 3. Linear-space shade multiply. Already fixed — asserted below only as the
 //!    wrong hypothesis the midnight byte must **not** land on.
@@ -105,7 +104,7 @@ const NOON_BYTE: i32 = 128;
 /// `light_term = 0.2 + 0.8 * 0.24 = 0.392`.
 const MIDNIGHT_BYTE: i32 = 50;
 /// What the same frame would read if the shade multiply were still in linear
-/// space (issue #400's divergence 3, fixed in `a80a095`). Asserted *against*.
+/// space (the third divergence, fixed in `a80a095`). Asserted *against*.
 const MIDNIGHT_BYTE_IF_LINEAR: i32 = 82;
 
 /// The GPU's own rounding of the final sRGB encode, and nothing more. Must stay

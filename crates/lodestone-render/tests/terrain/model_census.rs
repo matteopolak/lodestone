@@ -472,8 +472,8 @@ fn item_model_coverage() {
     );
 }
 
-/// **Vegetation bakes real geometry** — the located suspect from issue #478,
-/// tested rather than assumed.
+/// **Vegetation bakes real geometry** — a suspect for missing trees/plants in
+/// worldgen, tested rather than assumed.
 ///
 /// `mesh_models` skips any cell whose `quads_at` is empty
 /// (`lodestone-render/src/models.rs`), and `BlockModels::quads` falls back to an
@@ -505,7 +505,7 @@ fn vegetation_states_bake_non_empty_geometry() {
     let baker = BlockBaker::new(&manager, &resolver, &atlas);
     let report = BlocksReport::load(&report_path).expect("load blocks.json");
 
-    // The blocks #478's worldgen sweep reported placing, plus the leaf and log
+    // The blocks a worldgen sweep reports placing, plus the leaf and log
     // species a tree is actually built from.
     let wanted: BTreeSet<&str> = [
         "minecraft:short_grass",

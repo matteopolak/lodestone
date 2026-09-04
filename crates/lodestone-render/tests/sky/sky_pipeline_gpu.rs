@@ -166,7 +166,7 @@ fn sky_pass_paints_the_whole_frame() {
         // `.with_cloud_status(Fast)`: this gate's ">50% non-black" threshold was
         // set against FAST's near-unbounded quad (`CLOUD_PLANE_HALF_EXTENT` =
         // 768 blocks, alpha-tested every pixel with no radial cutoff). FANCY
-        // (issue #403's default — see `CloudStatus`'s doc) only builds real
+        // (the default — see `CloudStatus`'s doc) only builds real
         // geometry within `CLOUD_FANCY_RADIUS_CELLS` (192 blocks) of the
         // camera, a deliberately bounded per-frame-CPU-rebuild cost — at this
         // steep upward pitch that mesh subtends far less of the frame than
@@ -506,7 +506,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         wgpu::AddressMode::Repeat,
         filter,
         // Alpha-blended, matching the shipped `CloudPipeline`'s `CLOUD_BLEND`
-        // (vanilla's `BlendFunction.TRANSLUCENT`). This was `None` while the
+        // (vanilla's translucent blend function). This was `None` while the
         // shipped pipeline was opaque.
         Some(wgpu::BlendState::ALPHA_BLENDING),
     );
@@ -763,9 +763,9 @@ fn render_textured_quad(
 /// Root cause: `environment/celestial/sun.png` in the 26.2 client jar is a
 /// fully **opaque** PNG (palette-indexed, no `tRNS` chunk — confirmed by
 /// walking its raw chunks) whose RGB is a near-black-to-bright-white radial
-/// falloff. Vanilla's `RenderPipelines.CELESTIAL`
-/// (vanilla's decompiled render-pipelines source, 26.2)
-/// blends it with `BlendFunction.OVERLAY` — additive, `dst_factor: One` — so
+/// falloff. Vanilla's celestial render pipeline
+/// (its decompiled render-pipelines source, 26.2)
+/// blends it with an additive overlay blend function — `dst_factor: One` — so
 /// that near-black RGB only ever *adds* a sliver onto the sky.
 /// `CelestialPipeline` used ordinary `SrcAlpha`/`OneMinusSrcAlpha` blending
 /// before this fix, which *replaces* the destination wherever alpha is 1.0 —
@@ -951,10 +951,10 @@ fn real_jar_clouds_are_not_black_fringed() {
         frame.view(),
         &camera,
         // `.with_cloud_status(Fast)`: this gate is specifically about the FAST
-        // alpha-tested quad's fringe artifact (issue #372's fix), so it must
+        // alpha-tested quad's fringe artifact, so it must
         // stay pinned to FAST regardless of `SkyFrame::new`'s own default —
         // see `crate::sky::CloudStatus`'s doc for why that default is now
-        // `Fancy` (issue #403). A FANCY 3D mesh has real screen-space gaps
+        // `Fancy`. A FANCY 3D mesh has real screen-space gaps
         // between faces that `fringe_fraction` would misclassify as this
         // gate's fringe, which is a different defect entirely.
         &lodestone_render::SkyFrame::new(6_000, DAY_SKY)
@@ -1009,7 +1009,7 @@ fn real_jar_clouds_are_not_black_fringed() {
     );
 }
 
-/// **Anti-island proof for FANCY clouds (issue #403).** `cloud_mesh.rs` landed
+/// **Anti-island proof for FANCY clouds.** `cloud_mesh.rs` landed
 /// as `dc8a028` with 11 hermetic tests and zero consumers, disclosed as
 /// unwired at the time. `sky.rs`'s `fancy_cloud_geometry`/`cloud_face_vertices`
 /// and this crate's own unit tests prove the *math*, but every one of them is
