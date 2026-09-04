@@ -87,6 +87,7 @@
 //! string→id resolution on the slow path. Consumers: `lodestone-server`'s `fire`
 //! (spread and burnout) and `explosion_blocks` (blast destruction).
 
+use crate::block::Block;
 use crate::generated_block_blast as table;
 
 pub use table::{BLOCK_COUNT, EMPTY_RESISTANCE, STATE_COUNT};
@@ -139,18 +140,16 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
     })
 }
 
-/// The blast/flammability facts for `block`, which may be a bare block name or a
-/// full canonical state string (the `[...]` suffix is ignored).
+/// The blast/flammability facts for `block`, which may be a bare block path, a
+/// full canonical block name, or a full canonical state string (the `[...]`
+/// suffix is ignored).
 ///
 /// `None` for a name not in the 26.2 block registry. Prefer [`blast_or_inert`]
 /// when an unknown name should simply behave like air.
 #[must_use]
 pub fn blast(block: &str) -> Option<BlockBlast> {
-    let name = base_name(block);
-    let index = table::BY_NAME
-        .binary_search_by_key(&name, |(candidate, _)| *candidate)
-        .ok()?;
-    let entry = table::BY_NAME[index].1;
+    let block = Block::from_name(base_name(block))?;
+    let entry = table::ENTRY_BY_REGISTRY_ID[usize::from(block.registry_id())];
     let (bits, ignite_odds, burn_odds, ignited_by_lava) = table::ENTRIES[entry as usize];
     Some(BlockBlast {
         explosion_resistance: f32::from_bits(bits),
@@ -391,15 +390,24 @@ mod tests {
         assert_eq!(blast("minecraft:air").unwrap(), BlockBlast::INERT);
     }
 
-    /// The sorted-name array really is sorted, which is what makes the binary
-    /// search above correct — a generator that emitted registry order would
-    /// silently return wrong answers for most names rather than fail.
     #[test]
-    fn by_name_is_sorted_and_complete() {
-        assert_eq!(table::BY_NAME.len(), BLOCK_COUNT as usize);
+    fn full_bare_and_state_suffixed_names_resolve_to_the_same_block() {
+        let full = blast("minecraft:oak_fence");
+
+        assert_eq!(blast("oak_fence"), full);
+        assert_eq!(blast("minecraft:oak_fence[waterlogged=false]"), full);
+    }
+
+    /// Every built-in block has one generated entry index, and every index
+    /// points into the de-duplicated facts table.
+    #[test]
+    fn entry_index_is_complete_and_in_bounds() {
+        assert_eq!(table::ENTRY_BY_REGISTRY_ID.len(), BLOCK_COUNT as usize);
         assert!(
-            table::BY_NAME.windows(2).all(|w| w[0].0 < w[1].0),
-            "BY_NAME must be strictly ascending by name"
+            table::ENTRY_BY_REGISTRY_ID
+                .iter()
+                .all(|&entry| usize::from(entry) < table::ENTRIES.len()),
+            "every generated registry entry index must address ENTRIES"
         );
     }
 }

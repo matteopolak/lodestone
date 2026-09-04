@@ -57,7 +57,6 @@ use Kind::{CanonicalNames, CrossReference, DuplicateNames, OpenStringSpace};
 /// rows are the migration queue, in table-size order.
 const ALLOWED: &[(&str, &str, Kind, &str)] = &[
     ("attribute_types.rs", "ATTRIBUTE_NAMES", CanonicalNames, "the minecraft:attribute registry"),
-    ("block_blast.rs", "BY_NAME", CrossReference, "block name -> index; should be a permutation of block registry ids, as block_enum's REGISTRY_IDS_BY_NAME already is"),
     ("block_entity_types.rs", "TYPE_NAMES", CanonicalNames, "the minecraft:block_entity_type registry"),
     ("block_registry.rs", "BLOCK_REGISTRY_NAMES", CanonicalNames, "the minecraft:block registry, in registration order; Block::name reads this"),
     ("block_states.rs", "BLOCK_NAMES", DuplicateNames, "a second, name-sorted copy of the block names; should become a permutation over BLOCK_REGISTRY_NAMES"),
@@ -197,7 +196,7 @@ fn every_generated_string_column_is_classified() {
     }
     assert_eq!(
         debt.len(),
-        4,
+        3,
         "the count of untyped registry columns changed; if it went down, update this number \
          and delete the ALLOWED row — it is meant to reach zero"
     );
