@@ -2,10 +2,10 @@
 
 ## What it is
 
-`crates/versions/1.19` (package `lodestone-v1-19`) serves Minecraft 1.19.4 —
-protocol **762** — from a single adapter, one generated packet-id table, one
-generated block-state table, one generated entity registry, and the era's own
-chat, spawn and chunk-shape code. It is the fifth era crate, after
+`crates/versions/1.19` (package `lodestone-v1-19`) joins and hosts Minecraft
+1.19.4 — protocol **762** — from one generated packet-id table, one generated
+block-state table, one generated entity registry, and the era's own chat,
+spawn and chunk-shape code. It is the fifth era crate, after
 [`1.9`](./protocol-1-9-era.md), [`1.14`](./protocol-1-14-era.md),
 [`1.13`](./protocol-1-13-era.md) and [`1.17`](./protocol-1-17-era.md).
 
@@ -125,6 +125,31 @@ window in some other dimension.
 adapter retains the registry blob the join delivered and re-resolves through
 it. An adapter that keeps reading the old inline field reads a string where an
 NBT compound was and desynchronises immediately.
+
+### Hosted play
+
+`V762ServerProtocol` is selected by `lodestone-registry` for protocol 762.
+It stays in the legacy login-to-Play path: `login_success` writes the
+1.19 profile-property list, but there is no Configuration phase. Its join
+packet carries an overworld dimension-registry entry for `-64..319`, then the
+position packet without the older trailing dismount flag.
+
+Every hosted column supplies all 24 sections, with a block palette and a biome
+palette per section, followed by the inline light framing this protocol uses.
+The encoder projects a source that covers that complete vertical window;
+columns with block entities or a biome other than plains are rejected until
+their wire forms are implemented. The outbound state inverse comes only from
+the committed 1.19.4 state table, and a missing or ambiguous canonical state
+is an error rather than a substitution.
+
+`tests/server_integration.rs` is the consumer-path control: a registry-selected
+server and the 762 adapter complete login, render the fixture chunk, and apply
+a block-break update over an in-memory connection. `tests/server_protocol.rs`
+also checks the packet ids present in the real 1.19.4 capture and decodes the
+hosted join and chunk bodies with the production codecs. This is not
+real-client validation; a separately run 1.19.4 client remains the proof that
+the complete join registry and empty-light handling are accepted outside the
+in-process adapter.
 
 ### The nine shape deltas, and which mechanism carries each
 
@@ -261,6 +286,10 @@ surfaces as a mismatch to re-derive rather than as a silently weaker control.
   here, fail-closed, and only the client driver may raise it.
 - **The adapter type is called `V762Adapter`**; the folder is named for its
   Minecraft version.
+- **Extending the host**: keep `V762ServerProtocol` independent from adjacent
+  eras. Add a captured-byte control before changing join, section, light or
+  action framing; expand the registry entry only together with a client-facing
+  test that consumes the added registry data.
 - Regenerating the jar dumps needs a **Java 17** container image: 1.19.4
   declares `java_version` 17 in its own jar and refuses to start under 8. It
   ships a bundler jar, so the data generator is selected through the bundler's
@@ -269,7 +298,8 @@ surfaces as a mismatch to re-derive rather than as a silently weaker control.
 ## Configuration
 
 None new. The era is selected by a `v1-19` feature on `lodestone-registry`; the
-registry reads `PROTOCOLS` from the crate. Oracle ports live in
+registry reads `PROTOCOLS` from the crate and selects `V762ServerProtocol` for
+hosting protocol 762. Oracle ports live in
 [`scripts/live-oracles/legacy.sh`](../scripts/live-oracles/legacy.sh) (1.19.4
 game `25596` / RCON `25597`; 1.20.6, which belongs to no family and exists only
 so the upper neighbour capture can be recorded, game `25598` / RCON `25599`)
@@ -295,7 +325,8 @@ registry the generated table targets, and the mob-effect names the effect
 packets resolve through), `lodestone-model` (`ChatAckInfo`, `ChatSessionInfo`
 and the rest of the canonical event model — the chat-signing shapes it already
 carried for the modern family are what let this era report signed chat without
-a new model type). Recording needs Apple `container` and
+a new model type), and `lodestone-server` (the version-free hosted-server
+seam). Recording needs Apple `container` and
 [`scripts/live-oracles/legacy.sh`](../scripts/live-oracles/legacy.sh);
 regenerating the block-state and entity tables additionally needs the jar's own
 data generator under a Java 17 image; replay needs nothing.
