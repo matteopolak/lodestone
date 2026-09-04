@@ -2384,8 +2384,6 @@ pub struct EndChunkSource {
 }
 
 impl EndChunkSource {
-    /// The End dimension type's `min_y` (`data/minecraft/dimension_type/the_end.json`).
-    pub const MIN_Y: i32 = 0;
     /// The End dimension type's `height` — **not** its `logical_height` (which, unlike
     /// the Nether's, is the same 256), and not the generator's 128 either. See the
     /// struct doc.
@@ -2399,19 +2397,6 @@ impl EndChunkSource {
             edits: Mutex::new(HashMap::new()),
             dragon_fight_started: std::sync::atomic::AtomicBool::new(false),
         }
-    }
-
-    /// The lowest world `y` this source's columns contain.
-    #[must_use]
-    pub fn min_y(&self) -> i32 {
-        Self::MIN_Y
-    }
-
-    /// How many `y` levels this source's columns contain — the dimension's, not
-    /// the generator's. See the struct doc.
-    #[must_use]
-    pub fn height(&self) -> i32 {
-        Self::WINDOW_HEIGHT
     }
 
     fn generate(&self, cx: i32, cz: i32) -> ChunkColumn {
@@ -2600,15 +2585,12 @@ mod tests {
     /// [`EndChunkSource`] serves the *dimension's* 256-row window, not the
     /// generator's own 128 — the same padding [`NetherChunkSource`] needs and for
     /// the same reason (see [`ChunkColumn::from_end`]'s doc). A source that
-    /// forgot the pad would report a column whose `height()` disagrees with what
+    /// forgot the pad would report a column whose `height` disagrees with what
     /// `the_end`'s registry entry promises the client, which is a decode failure
     /// rather than a short world.
     #[test]
     fn end_chunk_source_pads_the_generators_128_rows_to_the_dimensions_256() {
         let source = crate::worldgen_data::end_chunk_source(-195_764_831);
-        assert_eq!(source.height(), 256);
-        assert_eq!(source.min_y(), 0);
-
         let column = source.column(0, 0);
         assert_eq!(column.height, 256, "the served column must be the dimension's own height");
         // Above the generator's own 128 rows, the padding must be air — checked
