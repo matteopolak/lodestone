@@ -766,15 +766,6 @@ pub struct Sim {
     /// the `NetUpdate::Particles` arm in `sim::net_apply`, this client's
     /// `ClientLevel.doAddParticle`.
     particle_level: crate::config::ParticleLevel,
-    /// Wall-clock instant the first chunk arrived at this client, for join-latency
-    /// measurement. `None` until the first `NetUpdate::Chunk` is processed.
-    /// `crate::platform::Instant`, not `std::time::Instant`, for the same reason
-    /// `terrain_wait_started` above says: `std`'s traps on the shell's wasm32
-    /// target. Latent rather than live today — this field is only ever set to
-    /// `None` — but a future `Some(Instant::now())` here would be a browser crash,
-    /// and `scripts/wasm-check.sh`'s `lodestone-shell instant-confinement` rule
-    /// keeps it from being written with the trapping type.
-    first_chunk_at: Option<crate::platform::Instant>,
     /// Per-position chest lid animation state — vanilla's
     /// `ChestLidController`, one per open or closing chest.
     ///
