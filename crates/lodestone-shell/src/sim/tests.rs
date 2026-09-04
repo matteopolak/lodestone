@@ -5074,6 +5074,32 @@ fn give_main_hand_item(sim: &mut Sim, item: &str) {
     });
 }
 
+/// Installs one toggleable `PlayerInteract` veto and records every context the
+/// production ask site presents to it.
+fn install_player_interact_veto(
+    sim: &mut Sim,
+    deny: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<lodestone_ecs::veto::VerbContext>>>,
+) {
+    let mut vetoes = lodestone_ecs::veto::ActionVetoes::default();
+    vetoes.register(
+        lodestone_ecs::veto::Verb::PlayerInteract,
+        "shell-test",
+        0,
+        move |ctx| {
+            seen.lock()
+                .expect("context recorder is not poisoned")
+                .push(*ctx);
+            if deny.load(std::sync::atomic::Ordering::Relaxed) {
+                lodestone_ecs::veto::Verdict::Deny
+            } else {
+                lodestone_ecs::veto::Verdict::Allow
+            }
+        },
+    );
+    sim.write(|world| world.insert_resource(vetoes));
+}
+
 /// Same idiom as [`give_main_hand_item`], carrying a real
 /// `minecraft:written_book_content` — the component
 /// `crates/protocol/v770/src/adapter/inventory.rs`'s
@@ -5457,6 +5483,197 @@ fn use_item_generic_sends_nothing_with_an_empty_main_hand() {
     assert!(
         sent.is_empty(),
         "an empty main hand has nothing to use and must send nothing, got {sent:?}"
+    );
+}
+
+#[test]
+fn player_interact_veto_denies_entity_branch_before_any_effect() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:bow");
+    sim.write(|world| world.resource_mut::<EntityRayTarget>().0 = Some(42));
+    sim.set_ray_target_for_test(Some(RayHit::face_center([4, 64, 4], [0, 1, 0])));
+    let local = sim.local;
+
+    let deny = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    install_player_interact_veto(&mut sim, deny.clone(), seen.clone());
+
+    sim.use_item_live();
+
+    let denied_actions: Vec<ClientAction> =
+        std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        denied_actions.is_empty(),
+        "a denial must send nothing: {denied_actions:?}"
+    );
+    assert!(!sim.read(|world| world.resource::<UsingItem>().0));
+    assert_eq!(
+        sim.read(|world| world.get::<ItemUseEffects>(local).and_then(|effects| effects.0)),
+        None,
+        "a denial must not arm held-use movement effects"
+    );
+    assert_eq!(
+        sim.read(|world| world.resource::<lodestone_ecs::player::ItemUseTicks>().0),
+        None,
+        "a denial must not start the held-use clock"
+    );
+    assert_eq!(
+        *seen.lock().expect("context recorder is not poisoned"),
+        vec![lodestone_ecs::veto::VerbContext::PlayerInteract {
+            pos: None,
+            target_entity_id: Some(42),
+        }],
+        "entity targeting wins over the simultaneous block-ray fixture"
+    );
+    assert!(!sim.body_pose.is_swinging(), "a denial must not start a local swing");
+
+    deny.store(false, std::sync::atomic::Ordering::Relaxed);
+    sim.use_item_live();
+    let allowed_actions: Vec<ClientAction> =
+        std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(matches!(
+        allowed_actions.first(),
+        Some(ClientAction::InteractEntity { entity_id: 42, .. })
+    ));
+    assert!(
+        allowed_actions.iter().any(|action| matches!(
+            action,
+            ClientAction::UseItem { sequence: 1, .. }
+        )),
+        "the first allowed use must retain the first prediction sequence: {allowed_actions:?}"
+    );
+    assert!(sim.read(|world| world.resource::<UsingItem>().0));
+    assert!(sim.body_pose.is_swinging(), "the allowed entity branch must still swing");
+    assert_eq!(
+        seen.lock().expect("context recorder is not poisoned").len(),
+        2
+    );
+}
+
+#[test]
+fn player_interact_veto_denies_block_branch_before_prediction_or_send() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:bow");
+    let clicked = BlockPos::new(4, 64, 4);
+    let local = sim.local;
+    sim.set_ray_target_for_test(Some(RayHit::face_center(
+        [clicked.x, clicked.y, clicked.z],
+        [0, 1, 0],
+    )));
+
+    let deny = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    install_player_interact_veto(&mut sim, deny.clone(), seen.clone());
+
+    sim.use_item_live();
+
+    let denied_actions: Vec<ClientAction> =
+        std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        denied_actions.is_empty(),
+        "a denial must send nothing: {denied_actions:?}"
+    );
+    let pending = sim.read(|world| world.resource::<PlacementPredictor>().0.pending().len());
+    assert_eq!(pending, 0, "a denial must not add a pending prediction");
+    assert!(!sim.read(|world| world.resource::<UsingItem>().0));
+    assert_eq!(
+        sim.read(|world| world.get::<ItemUseEffects>(local).and_then(|effects| effects.0)),
+        None,
+        "a denial must not arm held-use movement effects"
+    );
+    assert_eq!(
+        *seen.lock().expect("context recorder is not poisoned"),
+        vec![lodestone_ecs::veto::VerbContext::PlayerInteract {
+            pos: Some(clicked),
+            target_entity_id: None,
+        }]
+    );
+    assert!(!sim.body_pose.is_swinging(), "a denial must not start a local swing");
+
+    deny.store(false, std::sync::atomic::Ordering::Relaxed);
+    sim.use_item_live();
+    let allowed_actions: Vec<ClientAction> =
+        std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        allowed_actions.iter().any(|action| matches!(
+            action,
+            ClientAction::UseItemOn { pos, sequence: 1, .. } if *pos == clicked
+        )),
+        "the first allowed block interaction must retain sequence one: {allowed_actions:?}"
+    );
+    assert!(
+        allowed_actions.iter().any(|action| matches!(
+            action,
+            ClientAction::UseItem { sequence: 2, .. }
+        )),
+        "the allowed fallback must consume the next shared sequence: {allowed_actions:?}"
+    );
+    assert_eq!(
+        seen.lock().expect("context recorder is not poisoned").len(),
+        2
+    );
+}
+
+#[test]
+fn player_interact_veto_denies_air_branch_before_firework_boost() {
+    let (net, actions, _feed) = NetClient::loopback_with_feed();
+    let mut sim = Sim::new(test_config());
+    sim.drain_all_meshes();
+    sim.attach_net(net);
+    give_main_hand_item(&mut sim, "minecraft:firework_rocket");
+    sim.player_mut(|player| player.fall_flying = true);
+
+    let deny = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    install_player_interact_veto(&mut sim, deny.clone(), seen.clone());
+
+    sim.use_item_live();
+
+    let denied_actions: Vec<ClientAction> =
+        std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        denied_actions.is_empty(),
+        "a denial must send nothing: {denied_actions:?}"
+    );
+    assert_eq!(
+        sim.read(|world| world.resource::<lodestone_ecs::player::FireworkBoost>().0),
+        0
+    );
+    assert_eq!(
+        *seen.lock().expect("context recorder is not poisoned"),
+        vec![lodestone_ecs::veto::VerbContext::PlayerInteract {
+            pos: None,
+            target_entity_id: None,
+        }]
+    );
+    assert!(!sim.body_pose.is_swinging(), "a denial must not start a local swing");
+
+    deny.store(false, std::sync::atomic::Ordering::Relaxed);
+    sim.use_item_live();
+    let allowed_actions: Vec<ClientAction> =
+        std::iter::from_fn(|| actions.try_recv().ok()).collect();
+    assert!(
+        allowed_actions.iter().any(|action| matches!(
+            action,
+            ClientAction::UseItem { sequence: 1, .. }
+        )),
+        "the first allowed air use must retain sequence one: {allowed_actions:?}"
+    );
+    assert_eq!(
+        sim.read(|world| world.resource::<lodestone_ecs::player::FireworkBoost>().0),
+        20,
+        "the allowed standard rocket use must start its exact 20-tick boost"
+    );
+    assert!(sim.body_pose.is_swinging(), "the allowed rocket use must still swing");
+    assert_eq!(
+        seen.lock().expect("context recorder is not poisoned").len(),
+        2
     );
 }
 

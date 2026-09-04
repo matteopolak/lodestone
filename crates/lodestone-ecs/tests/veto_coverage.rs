@@ -40,19 +40,14 @@ const WIRED: &[(&str, &str)] = &[
     ("EntityDamage", "lodestone-shell/src/sim/actions.rs"),
     ("InventoryClick", "lodestone-client/src/state.rs"),
     ("PlayerMove", "lodestone-controller/src/ecs.rs"),
+    ("PlayerInteract", "lodestone-shell/src/sim/actions.rs"),
 ];
 
 /// Verbs the registry defines that **nothing asks about yet**, with the reason.
 ///
-/// - `PlayerInteract` commits in three branches of `Sim::use_item_live`, each of
-///   which also runs the placement predictor and takes a use-sequence number.
-///   Denying after the sequence is taken forks the counter, which
-///   `docs/baritone-port.md` §3.6 forbids outright, so the ask has to go in
-///   ahead of it in all three branches.
-///
-/// A plugin can register a predicate today; it simply will not be consulted,
-/// and `docs/packet-wiring.md` says so in the same table.
-const NOT_WIRED_YET: &[&str] = &["PlayerInteract"];
+/// Empty today. This remains a separate list so a newly declared verb must be
+/// classified deliberately rather than inheriting a wired status by default.
+const NOT_WIRED_YET: &[&str] = &[];
 
 const SCANNED: &[&str] = &["lodestone-shell", "lodestone-controller", "lodestone-client"];
 
@@ -132,11 +127,10 @@ fn every_verb_claimed_wired_has_a_real_engine_ask_site() {
 
 /// **The control.** The verbs in [`NOT_WIRED_YET`] must have **no** ask site.
 ///
-/// Two jobs. It keeps the doc honest — a table claiming a verb is unwired while
-/// it quietly works is as wrong as the reverse. And it proves the scanner
-/// *discriminates*: a scanner that returned every file for every query would
-/// pass the test above and fail this one. Without this pair, the wired test
-/// could be passing on a scanner that always says yes.
+/// This keeps the doc honest: a table claiming a verb is unwired while it
+/// quietly works is as wrong as the reverse. Scanner discrimination has its own
+/// control below so this assertion remains meaningful when the deferred list is
+/// empty.
 #[test]
 fn the_verbs_documented_as_unwired_really_have_no_ask_site() {
     for variant in NOT_WIRED_YET {
@@ -148,6 +142,18 @@ fn the_verbs_documented_as_unwired_really_have_no_ask_site() {
              WIRED in this file and update docs/packet-wiring.md's table."
         );
     }
+}
+
+/// A negative control against the real repository scan, independent of how
+/// declared verbs are classified between [`WIRED`] and [`NOT_WIRED_YET`].
+#[test]
+fn scanner_returns_no_files_for_a_guaranteed_absent_context() {
+    // The hyphen makes this impossible to define as a Rust enum variant.
+    let found = files_asking_about("ScannerNegativeControl-NotARustIdentifier");
+    assert!(
+        found.is_empty(),
+        "the scanner's absent-query control unexpectedly matched {found:?}"
+    );
 }
 
 /// Every verb the registry defines is accounted for in exactly one of the two

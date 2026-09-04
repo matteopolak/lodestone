@@ -87,13 +87,19 @@ direction — there is no equivalent inbound hook for a plugin command arriving 
 
 `ActionVetoes` (`crates/lodestone-ecs/src/veto.rs`) is the veto point for interaction verbs a
 protection or anti-grief plugin needs to cancel *before* they commit — `BlockBreak`,
-`BlockPlace`, `EntityDamage`, `InventoryClick`, and `PlayerMove` are wired today;
-`PlayerInteract` is deferred because its commitment sites must not fork a block-prediction
-sequence number ahead of the ask. A plugin
+`BlockPlace`, `EntityDamage`, `InventoryClick`, `PlayerMove`, and `PlayerInteract` are all wired.
+A plugin
 registers a predicate per verb, keyed by priority; the first `Deny` short-circuits, and later
 predicates cannot un-deny. The predicate receives only a typed `VerbContext`, never the
 `World`, for the same reentrancy reason `EgressFilters`' callback does not get one — the verb's
 commit site is often a plain method already holding a guard.
+
+`PlayerInteract` is asked exactly once at the start of `Sim::use_item_live`, after choosing the
+same entity-first, block-second, air-last target that the click will commit. Its context carries
+either the protocol entity id, the clicked `BlockPos`, or neither for air. A denial returns before
+held-item use state, firework boost state, armour or block prediction, the shared use-sequence
+counter, swings, sounds, and direct socket sends can change. The chosen ray targets are reused by
+the allowed path, so a predicate cannot approve one target while the click commits another.
 
 `InventoryClick` is asked inside `SharedState::menu_click` while its existing world write guard
 is held, before `SessionMenus::click_action` runs. The context carries the active window id plus
