@@ -1,11 +1,9 @@
-//! The gate that says Phase 0 is not an island: assert the **production**
-//! constructor built a server `World` and ran a registered system against it.
+//! Production wiring gates for the server ECS `World`.
 //!
 //! # Why this test is in `src/` and not `tests/`
 //!
-//! `crate::ecs` is not re-exported from `lib.rs` — that file is a brokered choke
-//! point in this repo, so Phase 0's patch to it is exactly one `mod ecs;` line
-//! and nothing else. An in-crate test needs no export at all.
+//! These tests need access to the private ECS setup, so they live beside it
+//! rather than in the external integration-test crate.
 //!
 //! # Why it drives `IntegratedServer` rather than `ServerApp::bootstrap`
 //!
@@ -111,16 +109,47 @@ fn production_server() -> IntegratedServer {
     server
 }
 
-/// **The Phase 0 gate.** Constructing a real integrated server must build a
-/// server `World` and run a registered system against it.
+/// Wait until the tick task has completed exactly `expected` clock ticks.
+///
+/// `TickStats` and `ServerTickWitness` are independent atomic observations,
+/// so they are not a synchronized snapshot. Reaching this barrier through the
+/// clock's final `record_tick` is what makes the witness assertion below a
+/// statement about the same completed tick rather than a race between two
+/// readers. The bounded cooperative polling makes a missing completion fail
+/// deterministically instead of hanging this test forever.
+async fn wait_for_completed_ticks(server: &IntegratedServer, expected: u64) {
+    const MAX_YIELDS: usize = 100;
+
+    for _ in 0..MAX_YIELDS {
+        let observed = server
+            .tick_stats()
+            .expect("a production tick-task constructor must expose TickStats")
+            .tick_count;
+        match observed.cmp(&expected) {
+            std::cmp::Ordering::Equal => return,
+            std::cmp::Ordering::Greater => panic!(
+                "the tick task completed {observed} ticks while waiting for exactly {expected}; \
+                 paused time must not create an extra world tick"
+            ),
+            std::cmp::Ordering::Less => tokio::task::yield_now().await,
+        }
+    }
+
+    panic!(
+        "the tick task did not complete {expected} ticks after {MAX_YIELDS} cooperative yields; \
+         its completion path is not live"
+    );
+}
+
+/// Constructing a real integrated server must build a server `World` and run
+/// its startup schedule once.
 ///
 /// The assertion is an exact `Some(1)`, not `>= 1` and not "is some": one
 /// `ServerBoot` run, one `advance_server_tick` execution. `Some(0)` is the
 /// island — the `App` was constructed and no schedule ran against it, which is
-/// the same `WindowApp.ecs` shape verbatim. `None` means production stopped constructing the `World`
-/// at all. A value above 1 means something ran the schedule more than once, or
-/// Phase 1 landed and this gate needs to account for `GameTick` too. Predicted
-/// from the code path, not observed and then written down.
+/// the same inert-scaffold shape. `None` means production stopped constructing
+/// the `World` at all. The paused-time lockstep gates below cover the later
+/// `GameTick` executions separately.
 ///
 /// No polling, no timing, no `yield_now`: `open_in_memory_with_mobs` calls
 /// `ServerApp::bootstrap` **synchronously**, before it spawns anything, so this
@@ -132,9 +161,8 @@ async fn the_production_integrated_server_runs_a_registered_system() {
     assert_eq!(
         server.server_tick_count(),
         Some(1),
-        "production must build a server World and run ServerBoot against it exactly once; \
-         Some(0) means Phase 0 is an island (registered but never run), None means the World is no \
-         longer constructed in production at all — see docs/server-ecs-phase0.md"
+        "production must build a server World and run ServerBoot exactly once; \
+         Some(0) means no startup schedule ran, None means the World is no longer constructed"
     );
 }
 
@@ -153,9 +181,70 @@ async fn the_production_lan_server_runs_a_registered_system() {
     assert_eq!(
         server.server_tick_count(),
         Some(1),
-        "open-to-LAN must build its own server World and run ServerBoot against it exactly \
-         once — see docs/server-ecs-phase0.md"
+        "open-to-LAN must build its own server World and run ServerBoot exactly once"
     );
+}
+
+/// The primary singleplayer loop must drive `GameTick` once for every completed
+/// world tick. The clock completion barrier is deliberate: its final
+/// `record_tick` runs after `GameTick`, so observing exactly `TICKS` there
+/// establishes that the witness must already include the same `TICKS` runs.
+#[tokio::test(start_paused = true)]
+async fn the_primary_in_memory_tick_loop_drives_game_tick_in_lockstep() {
+    const TICKS: u64 = 5;
+
+    let server = production_server();
+    assert_eq!(server.server_tick_count(), Some(1), "ServerBoot must run once at construction");
+
+    // `tokio::spawn` does not poll synchronously. Establish its `sleep_until`
+    // baseline before advancing virtual time, or the first period could be lost.
+    tokio::task::yield_now().await;
+    for _ in 0..TICKS {
+        tokio::time::advance(crate::tick::TICK_PERIOD).await;
+    }
+    wait_for_completed_ticks(&server, TICKS).await;
+
+    assert_eq!(
+        server.server_tick_count(),
+        Some(1 + TICKS),
+        "ServerBoot plus exactly one GameTick per completed primary-world tick"
+    );
+    assert_eq!(
+        server.tick_stats().expect("primary world has TickStats").overrun_count,
+        0,
+        "regular paused-time periods must not record an overrun"
+    );
+    server.shutdown().await;
+}
+
+/// The LAN primary loop has its own `World`, and therefore needs the same
+/// lockstep proof rather than inheriting singleplayer's result by inference.
+#[tokio::test(start_paused = true)]
+async fn the_primary_lan_tick_loop_drives_game_tick_in_lockstep() {
+    const TICKS: u64 = 5;
+
+    let server = IntegratedServer::bind("127.0.0.1:0", Silent, AirWorld, 1)
+        .await
+        .expect("binding loopback on an OS-assigned port must succeed");
+    assert_eq!(server.server_tick_count(), Some(1), "ServerBoot must run once at construction");
+
+    tokio::task::yield_now().await;
+    for _ in 0..TICKS {
+        tokio::time::advance(crate::tick::TICK_PERIOD).await;
+    }
+    wait_for_completed_ticks(&server, TICKS).await;
+
+    assert_eq!(
+        server.server_tick_count(),
+        Some(1 + TICKS),
+        "ServerBoot plus exactly one GameTick per completed LAN primary-world tick"
+    );
+    assert_eq!(
+        server.tick_stats().expect("LAN primary world has TickStats").overrun_count,
+        0,
+        "regular paused-time periods must not record an overrun"
+    );
+    server.shutdown().await;
 }
 
 /// Negative control's encodable half: a constructor that does **not** build a

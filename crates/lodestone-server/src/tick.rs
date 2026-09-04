@@ -49,6 +49,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use bevy_ecs::world::World;
 use crate::block_entities::BlockEntityHandle;
 use crate::border::{BorderFeed, WorldBorder};
 use crate::chunk::ChunkSource;
@@ -1312,18 +1313,106 @@ pub(crate) async fn run_tick_loop<W>(
     .await
 }
 
-/// The real body shared by [`run_tick_loop`] and
-/// [`run_tick_loop_with_weather`] — the latter only differs in that it
-/// carries a real [`WeatherFeed`] the connection drains instead of the
-/// wrapper's discarded default. See the wrapper's own doc comment for why a
-/// second, differently-named function exists instead of adding `weather_out`
-/// to [`run_tick_loop`]'s own signature (it would break the world-loop's
-/// non-weather call sites in `crate::chunk_store`/`crate::redstone_placement_gate`,
-/// which this module does not edit). [`SleepVote`]/[`SleepFeed`]
-/// follow the same `_with_weather` shape for the same reason, so the sleep
-/// wiring lives here too.
+/// Runs the weather-aware loop without a server ECS `World`.
+///
+/// This preserves the generic loop used by independently managed dimensions
+/// and test fixtures. [`run_primary_tick_loop_with_weather`] adds the one
+/// primary-world behavior without changing those callers.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) async fn run_tick_loop_with_weather<W>(
+    mobs: MobHandle,
+    mob_out: LiveMobSource,
+    block_entities: BlockEntityHandle,
+    clock: Arc<TickClock>,
+    world: Arc<W>,
+    block_tick_out: BlockTickFeed,
+    tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
+    explosion_out: ExplosionFeed,
+    weather_out: WeatherFeed,
+    weather: WeatherState,
+    sleep_vote: &SleepVote,
+    sleep_feed: &SleepFeed,
+    scheduled: crate::region_source::ScheduledTickHandle,
+    world_state: crate::world_state::WorldStateHandle,
+    follow: crate::tick_area::TickFollow,
+    border: BorderFeed,
+) where
+    W: ChunkSource,
+{
+    run_tick_loop_with_weather_impl(
+        mobs,
+        mob_out,
+        block_entities,
+        clock,
+        world,
+        block_tick_out,
+        tick_area,
+        explosion_out,
+        weather_out,
+        weather,
+        sleep_vote,
+        sleep_feed,
+        scheduled,
+        world_state,
+        follow,
+        border,
+        None,
+    )
+    .await;
+}
+
+/// Runs a primary integrated world's tick loop with its server ECS `World`.
+///
+/// The `World` stays owned by this task for its full lifetime. Its `GameTick`
+/// schedule runs after the existing scheduled-and-physics timing sample and
+/// immediately before the completed-tick accounting. Loops for independently
+/// managed dimensions continue to use [`run_tick_loop_with_weather`].
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) async fn run_primary_tick_loop_with_weather<W>(
+    server_world: World,
+    mobs: MobHandle,
+    mob_out: LiveMobSource,
+    block_entities: BlockEntityHandle,
+    clock: Arc<TickClock>,
+    world: Arc<W>,
+    block_tick_out: BlockTickFeed,
+    tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
+    explosion_out: ExplosionFeed,
+    weather_out: WeatherFeed,
+    weather: WeatherState,
+    sleep_vote: &SleepVote,
+    sleep_feed: &SleepFeed,
+    scheduled: crate::region_source::ScheduledTickHandle,
+    world_state: crate::world_state::WorldStateHandle,
+    follow: crate::tick_area::TickFollow,
+    border: BorderFeed,
+) where
+    W: ChunkSource,
+{
+    run_tick_loop_with_weather_impl(
+        mobs,
+        mob_out,
+        block_entities,
+        clock,
+        world,
+        block_tick_out,
+        tick_area,
+        explosion_out,
+        weather_out,
+        weather,
+        sleep_vote,
+        sleep_feed,
+        scheduled,
+        world_state,
+        follow,
+        border,
+        Some(server_world),
+    )
+    .await;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_tick_loop_with_weather_impl<W>(
     mobs: MobHandle,
     mob_out: LiveMobSource,
     block_entities: BlockEntityHandle,
@@ -1395,6 +1484,10 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // built its own throwaway `BorderFeed::default()`, so a resize command
     // would have mutated a border nothing read and nothing ticked.
     border: BorderFeed,
+    // Only the two primary `IntegratedServer` loops provide this `World`.
+    // Every other caller keeps its existing behavior without manufacturing a
+    // separate scheduler for a dimension or test fixture.
+    mut server_world: Option<World>,
 ) where
     W: ChunkSource,
 {
@@ -3373,6 +3466,13 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         let t_scheduled_end = tokio::time::Instant::now();
         clock.record_phase(TickPhase::ScheduledAndPhysics, t_scheduled_end.duration_since(t_weather_end));
 
+        // The primary world's ECS work is part of the total tick duration but
+        // deliberately outside the scheduled-and-physics sample above. The
+        // completed-tick counter is the barrier the production gate waits on,
+        // so this must remain immediately before its `record_tick` call.
+        if let Some(server_world) = server_world.as_mut() {
+            server_world.run_schedule(crate::ecs::GameTick);
+        }
         clock.record_tick(tick_start.elapsed());
     }
 }

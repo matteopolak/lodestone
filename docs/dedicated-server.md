@@ -66,6 +66,14 @@ is a plain synchronous call on the tick task — there is no second runtime or t
 tokio to reconcile with, and the tick loop's structure (spawn once, `sleep_until`-driven,
 unchanged call site) does not change.
 
+Each primary `IntegratedServer` constructor moves one server `World` into its one world-tick task.
+That task runs `GameTick` once after the scheduled-and-physics timing sample and immediately before
+`TickClock::record_tick`. The schedule's work is therefore included in total MSPT without being
+misattributed to the scheduled-and-physics phase, and a completed `TickStats::tick_count` is a
+completion barrier for the matching `ServerTickWitness` observation. Independently managed
+dimension loops retain their own generic ticking path; they do not construct or share this primary
+server `World`.
+
 The server owns its own `World`, entirely separate from the client's: they have contradictory
 clock policies (the client forgives lost time past a cap; the server must keep advancing and only
 forgives past vanilla's 2-second threshold), singleplayer is already structurally multiplayer (a
