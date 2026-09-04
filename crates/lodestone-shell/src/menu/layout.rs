@@ -891,12 +891,6 @@ impl FrameLayout {
         self.min_height = ipx(min_height);
     }
 
-    /// `setMinDimensions(int, int)`.
-    pub fn set_min_dimensions(&mut self, min_width: f32, min_height: f32) {
-        self.set_min_width(min_width);
-        self.set_min_height(min_height);
-    }
-
     /// `defaultChildLayoutSetting()` — the live baseline, centred by default.
     pub fn default_child_layout_setting(&mut self) -> &mut LayoutSettings {
         &mut self.default_child_settings
