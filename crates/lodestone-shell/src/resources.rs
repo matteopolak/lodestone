@@ -527,7 +527,7 @@ static SELECTED_PACKS: std::sync::RwLock<Option<Vec<String>>> = std::sync::RwLoc
 
 /// Bumped by every [`set_selected_packs`] **or** [`set_mipmap_levels`] call —
 /// the trigger a live reload polls for, since neither the pack stack nor the
-/// mip depth carries a cheap "did this change" signal of its own (two
+/// mip depth carries a cheap change signal of its own (two
 /// `Vec<String>`s are only comparable by a full equality check, and the
 /// poller already needs an `Ordering::Relaxed` atomic load to be cheap enough
 /// to run every frame, exactly like `TerrainMesh::set_cutout_leaves`'s own
@@ -825,7 +825,8 @@ fn load_persisted_selection() -> Vec<String> {
 ///
 /// - the **block atlas and per-state models** rebuild per session
 ///   (`sim/build.rs`'s `BlockResources::load`), i.e. on the next world join —
-///   which is the visible acceptance condition for issue #415;
+///   which is the visible condition for a different pack selection to take
+///   effect;
 /// - the **GUI/menu atlases, item atlas, sky, container panels, weather, glint
 ///   and entity sheets** rebuild when their owner is next constructed
 ///   (`app/lifecycle.rs`, `menu/render/renderer.rs`, `gpu/entities.rs`);
@@ -1666,11 +1667,11 @@ pub fn load_container_background() -> Option<Arc<crate::container::ContainerBack
 /// ([`crate::particles::Particles::with_particle_atlas`]) reads its sprite
 /// *rects* and the renderer
 /// ([`crate::gpu::RenderState::install_particle_sheet_atlas`]) uploads its
-/// *pixels*. Issue #45 was precisely a UV table addressing an image other than
-/// the one bound, so handing both sides the same `Arc` — rather than two stitches
-/// that happen to pack identically — makes that class of mismatch
-/// unrepresentable instead of merely unlikely. The [`OnceLock`] is what buys
-/// that: every caller in the process gets the same object.
+/// *pixels*. The UV table and sampled image must come from the same atlas;
+/// handing both sides the same `Arc` — rather than two stitches that happen to
+/// pack identically — makes that class of mismatch unrepresentable instead of
+/// merely unlikely. The [`OnceLock`] is what buys that: every caller in the
+/// process gets the same object.
 ///
 /// (Two `AtlasBuilder` runs over one pack *are* byte-identical today — the
 /// definition paths are sorted and deduplicated for exactly that reason — but
