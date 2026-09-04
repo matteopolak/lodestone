@@ -75,7 +75,7 @@ use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
 // `source.primary().tickets()` into every real join path this file spawns —
 // see each call site's own comment for why that handle, not a fresh default.
 use crate::ticket::TicketStoreHandle;
-// `run_tick_loop`/`run_tick_loop_with_weather` (like `open_in_memory_with_mobs`
+// `run_primary_tick_loop_with_weather` (like `open_in_memory_with_mobs`
 // and `bind` — their callers — are
 // `#[cfg(not(target_arch = "wasm32"))]`-gated in `tick.rs` — these imports must
 // carry the identical `cfg`, or they are unresolved-import hard errors on
@@ -84,17 +84,16 @@ use crate::ticket::TicketStoreHandle;
 // `wasm32-unknown-unknown`; keeping the gate on the imports matches the native-only
 // tick-loop entry points and lets the browser build resolve all imports.
 #[cfg(not(target_arch = "wasm32"))]
-use crate::tick::run_tick_loop_with_weather;
+use crate::tick::run_primary_tick_loop_with_weather;
 // the night-skip vote and its feed, wired into
 // `open_in_memory_with_mobs_using` (singleplayer) — see that constructor and
 // `crate::sleep`'s module doc. Native-only for the same reason the tick-loop
-// import above is: `run_tick_loop_with_weather` is `cfg`-gated, and the
+// import above is: `run_primary_tick_loop_with_weather` is `cfg`-gated, and the
 // sleep-feed `container_sync_tick` arm in `serve_play` is native-only too.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sleep::{SleepFeed, SleepVote};
-// The wrapper calls `run_tick_loop_with_weather` directly (to carry the real
-// sleep vote), and that function needs the weather pair even though this crate
-// does not wire weather yet — see the call in
+// The primary-world variant carries the real sleep vote and needs the weather
+// pair even though this crate does not wire weather yet — see the call in
 // `open_in_memory_with_mobs_using`.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::weather::{WeatherFeed, WeatherState};
@@ -715,8 +714,8 @@ pub struct IntegratedServer {
     /// MSPT/TPS/overrun accounting for `tick_task` — `Some` iff
     /// `tick_task` is, and read through [`tick_stats`](Self::tick_stats).
     clock: Option<Arc<TickClock>>,
-    /// The read-only witness for this server's own `bevy_ecs::World` (the ECS
-    /// Phase 0 setup), `Some` iff `tick_task` is — the `World` itself is owned
+    /// The read-only witness for this server's own `bevy_ecs::World`, `Some`
+    /// iff `tick_task` is — the `World` itself is owned
     /// outright by that task and has no lock, so this handle is the *only*
     /// thing about it observable from here. Read through
     /// [`server_tick_count`](Self::server_tick_count); see
@@ -2052,18 +2051,18 @@ impl IntegratedServer {
         });
 
         let clock = Arc::new(TickClock::new());
-        // Phase 0: build this server's own `bevy_ecs::World` here,
+        // Build this server's own `bevy_ecs::World` here,
         // synchronously, before the tick task spawns — the same reason
         // `mob_handle` above is built here rather than inside the future, and
-        // it is also what makes the Phase 0 gate deterministic (no polling: by
+        // it is also what makes the startup gate deterministic (no polling: by
         // the time this constructor returns, `ServerBoot` has already run).
         //
         // `into_world()` rather than keeping the `App`: `bevy_app::App` is
         // **not** `Send` (its `runner` field is a `Box<dyn FnOnce(App) ->
         // AppExit>` with no `Send` bound), so it cannot cross `spawn`. `World`
         // is, and it carries the `Schedules` resource with it. See
-        // `crate::ecs`'s module doc — Phase 1 threads `&mut World` into
-        // `run_tick_loop`, not `&mut App`.
+        // `crate::ecs`'s module doc — the primary tick-loop variant owns a
+        // `World`, not an `App`.
         let server_app = crate::ecs::ServerApp::bootstrap();
         let server_tick = server_app.witness();
         let server_world = server_app.into_world();
@@ -2108,9 +2107,6 @@ impl IntegratedServer {
         };
         let tick_task = spawn_tick_task(&shutdown, async move {
             // Owned by the tick task, with no lock, per `docs/server-ecs.md`.
-            // Phase 1 replaces this binding with a `&mut` argument to
-            // `run_tick_loop` and runs `GameTick` once per iteration.
-            let _server_world = server_world;
             // the `_with_weather` variant so the real sleep vote
             // and feed reach the loop (the plain `run_tick_loop` wrapper only
             // forwards a fresh, disconnected vote — that is the loop `bind`'s
@@ -2119,7 +2115,8 @@ impl IntegratedServer {
             // exactly what the wrapper
             // would have passed, which is why switching variants is
             // observably a no-op for the sky.
-            run_tick_loop_with_weather(
+            run_primary_tick_loop_with_weather(
+                server_world,
                 mob_handle,
                 live_mobs,
                 block_entities,
@@ -2926,8 +2923,7 @@ impl IntegratedServer {
         let hub_block_ticks = BlockTickFeed::default();
         let hub_explosions = ExplosionFeed::default();
         let clock = Arc::new(TickClock::new());
-        // The ECS Phase 0 setup, same as `open_in_memory_with_mobs` above — and for
-        // the reason that constructor's comment gives: one world, one loop, one
+        // The ECS setup mirrors `open_in_memory_with_mobs` above: one world, one loop, one
         // `World`. The LAN path gets its own tick loop, so LAN gets its own server
         // `World` too rather than sharing singleplayer's, which would be exactly
         // the "both entry points share one loop" mistake the comment above this
@@ -2987,8 +2983,8 @@ impl IntegratedServer {
         };
         let tick_task = spawn_tick_task(&shutdown, async move {
             // Owned by the tick task, with no lock, per `docs/server-ecs.md`.
-            let _server_world = server_world;
-            run_tick_loop_with_weather(
+            run_primary_tick_loop_with_weather(
+                server_world,
                 tick_mobs,
                 tick_live_mobs,
                 tick_block_entities,
@@ -3720,7 +3716,7 @@ impl IntegratedServer {
     }
 
     /// How many times a system registered on this server's own
-    /// `bevy_ecs::World` has run (the ECS Phase 0 setup), or `None` for a handle
+    /// `bevy_ecs::World` has run, or `None` for a handle
     /// with no world-tick task — the same `Some` iff `tick_task` rule
     /// [`tick_stats`](Self::tick_stats) follows.
     ///
@@ -3736,10 +3732,10 @@ impl IntegratedServer {
     /// outside the tick task reaches into it, and this must not become the
     /// exception.
     ///
-    /// After Phase 0 this reads `Some(1)` for the life of the handle (one
-    /// `ServerBoot` run). Once Phase 1 lands it advances once per world tick and
-    /// should track [`TickStats::tick_count`] — a divergence between the two is
-    /// the island detector.
+    /// It starts at `Some(1)` after `ServerBoot` and then advances once per
+    /// completed primary-world tick. Its value is therefore one more than
+    /// [`TickStats::tick_count`] while that task is live; a divergence is the
+    /// scheduling island detector.
     #[must_use]
     pub fn server_tick_count(&self) -> Option<u64> {
         self.server_tick

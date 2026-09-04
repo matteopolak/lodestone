@@ -440,24 +440,31 @@ assertion. Run it and watch it fail.
 **Unblocks:** everything.
 **Re-read before writing:** `crates/lodestone-ecs/src/{plugin.rs,sets.rs,events.rs}`.
 
-### Phase 1 — the tick loop drives the `World`; tick-locals become `Resource`s
+### Phase 1 — the primary tick loop drives the `World`
 
-**Owns:** `src/tick.rs`, `src/ecs/plugin.rs`, new `crates/lodestone-server/benches/world_tick.rs`.
-**Choke point:** `Cargo.toml` `[[bench]] name = "world_tick"`, `harness = false`.
-**Content:** `run_tick_loop` gains `app: &mut App` and calls
-`app.world_mut().run_schedule(GameTick)` once per iteration, at the position `mobs.with(MobSim::tick)`
-occupies today. Census rows 12–15 and 17 move into `Resource`s. **Row 16 stays a driver local** —
-`next_tick_at` and the overload branch do not enter the `World`. `lodestone_ecs::runner.rs`'s
-`Runner::Headless` is the reference for the accumulator shape, not a dependency to add.
-**Gate:** an integrated test driving the real `open_in_memory_with_mobs` that asserts `tick_count`
-advances **and** that a `Resource`-backed counter incremented by a `GameTick` system advances in
-lockstep with it.
-**Negative control:** delete the `run_schedule` call; the resource counter must freeze while
-`tick_count` keeps advancing. That divergence is the island detector.
-**Perf gate:** establish the `world_tick` baseline. First measurement, so no regression threshold yet
-— but publish the number in the commit message so Phase 7 has an anchor.
-**Unblocks:** scheduled-tick producers; chunk lifecycle gains a place
-to hang a per-tick chunk system.
+**Owns:** `src/tick.rs`, `src/integrated.rs`, `src/ecs/gate.rs`, and this plan's scheduling record.
+**Content:** `IntegratedServer::open_in_memory_with_mobs` and `IntegratedServer::bind` each move
+their own `bevy_ecs::World` into their one primary world-tick task. The primary-loop variant runs
+`World::run_schedule(GameTick)` once per completed world tick, after
+`TickPhase::ScheduledAndPhysics` has been sampled and immediately before `TickClock::record_tick`.
+That placement includes the schedule in total MSPT without charging it to the existing scheduled
+phase. `App` does not cross the spawn boundary: it is `!Send`; `World` owns the schedules and is
+the movable value.
+
+**Gate:** paused-time production tests drive both primary constructors for an exact count of normal
+tick periods. They wait until `TickStats::tick_count` reaches that count, then assert the witness is
+the one startup run plus exactly that many `GameTick` runs and that no overrun was recorded. The
+clock observation is a completion barrier, not a synchronized snapshot with the witness.
+
+**Negative control:** removing the `run_schedule(GameTick)` call leaves `TickStats::tick_count`
+advancing while `ServerTickWitness` remains at its one startup run, so the lockstep gate fails.
+
+**Scope:** this is a heartbeat only. It does not move tick locals into `Resource`s, expose plugin
+registration, or create a server ECS `World` for dimension loops. Those loops stay on the generic
+tick path until their ownership and cadence are designed explicitly.
+
+**Unblocks:** moving one simulation concern at a time into `GameTick` without first changing the
+clock or the server's task ownership.
 
 ### Phase 2 — the proposal queue and the `Adjudicate` set
 
