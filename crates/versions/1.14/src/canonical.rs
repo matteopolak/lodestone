@@ -54,6 +54,9 @@
 //! out-of-bounds case. The **caller** (`packets/chunk.rs`) decides to
 //! substitute air and logs the tally; this module only resolves and counts.
 
+use std::collections::HashMap;
+use std::sync::OnceLock;
+
 use crate::{generated_canonical, generated_canonical_498, generated_canonical_578};
 
 /// One protocol's `wire state id -> canonical 26.2 state id` mapping.
@@ -128,6 +131,71 @@ static TABLE_754: CanonicalTable = CanonicalTable {
     states: &generated_canonical::STATE_TO_CANONICAL,
     air: generated_canonical::AIR_STATE_ID,
 };
+
+static CANONICAL_TO_WIRE_578: OnceLock<HashMap<u32, u32>> = OnceLock::new();
+static CANONICAL_TO_WIRE_754: OnceLock<HashMap<u32, u32>> = OnceLock::new();
+static CANONICAL_TO_WIRE_498: OnceLock<HashMap<u32, u32>> = OnceLock::new();
+
+fn canonical_to_wire_578() -> &'static HashMap<u32, u32> {
+    CANONICAL_TO_WIRE_578.get_or_init(|| {
+        let mut states = HashMap::with_capacity(generated_canonical_578::STATE_TO_CANONICAL.len());
+        for (wire, &canonical) in generated_canonical_578::STATE_TO_CANONICAL.iter().enumerate() {
+            // Keep the lowest wire id for aliases. This is deterministic and
+            // keeps the inverse total over every canonical state the table can
+            // represent; states absent from the table remain explicit errors.
+            states.entry(canonical).or_insert_with(|| {
+                u32::try_from(wire).expect("protocol-578 wire state fits in u32")
+            });
+        }
+        states
+    })
+}
+
+/// Returns the deterministic protocol-578 wire representative for a canonical
+/// state, or `None` when that state has no entry in the committed table.
+pub(crate) fn wire_state_for_578(canonical: u32) -> Option<u32> {
+    canonical_to_wire_578().get(&canonical).copied()
+}
+
+fn canonical_to_wire_754() -> &'static HashMap<u32, u32> {
+    CANONICAL_TO_WIRE_754.get_or_init(|| {
+        let mut states = HashMap::with_capacity(generated_canonical::STATE_TO_CANONICAL.len());
+        for (wire, &canonical) in generated_canonical::STATE_TO_CANONICAL.iter().enumerate() {
+            // Keep the lowest wire id for aliases. This makes the inverse
+            // deterministic while retaining every representable canonical id.
+            states.entry(canonical).or_insert_with(|| {
+                u32::try_from(wire).expect("protocol-754 wire state fits in u32")
+            });
+        }
+        states
+    })
+}
+
+/// Returns the deterministic protocol-754 wire representative for a canonical
+/// state, or `None` when that state has no entry in the committed table.
+pub(crate) fn wire_state_for_754(canonical: u32) -> Option<u32> {
+    canonical_to_wire_754().get(&canonical).copied()
+}
+
+fn canonical_to_wire_498() -> &'static HashMap<u32, u32> {
+    CANONICAL_TO_WIRE_498.get_or_init(|| {
+        let mut states = HashMap::with_capacity(generated_canonical_498::STATE_TO_CANONICAL.len());
+        for (wire, &canonical) in generated_canonical_498::STATE_TO_CANONICAL.iter().enumerate() {
+            // Keep the lowest wire id for aliases. This makes the inverse
+            // deterministic while retaining every representable canonical id.
+            states.entry(canonical).or_insert_with(|| {
+                u32::try_from(wire).expect("protocol-498 wire state fits in u32")
+            });
+        }
+        states
+    })
+}
+
+/// Returns the deterministic protocol-498 wire representative for a canonical
+/// state, or `None` when that state has no entry in the committed table.
+pub(crate) fn wire_state_for_498(canonical: u32) -> Option<u32> {
+    canonical_to_wire_498().get(&canonical).copied()
+}
 
 /// Resolves a negotiated protocol to its block-state table.
 ///

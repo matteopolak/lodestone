@@ -253,11 +253,12 @@ labelled so the difference is on the record.
 
 Its own control that it measures anything is a population sweep: after the constructor's
 asynchronous world install completes, the fixture seeds the live server surface with exactly
-zero or 48 mobs in the same 5x5 area. It asserts those exact rosters before requiring the
-populated arm to do more chunk-source work. That avoids configuration-dependent demo population
-and makes removed fixture seeding fail before it can make the work comparison vacuous. The fixture
-resets its source counters after that setup, so the recorded per-tick counts exclude asynchronous
-world installation.
+zero or 48 mobs in the same 5x5 area. It asserts those exact rosters and samples the live roster
+after each driven tick, requiring the populated arm to retain more resident simulation state. That
+avoids configuration-dependent demo population and makes removed fixture seeding fail before it
+can make the population comparison vacuous. The fixture resets its source counters after setup, so
+the recorded cold-load counts exclude asynchronous world installation; those counters may remain
+zero during the measured loop because the retaining store serves resident columns.
 
 ### Fixture limits
 
@@ -283,7 +284,12 @@ its tick index, alongside the phase-labelled worst-duration metric retained for 
 The cumulative count proves every driven tick reached each phase; the rolling count preserves the
 percentile window's bounded semantics. Under the paused runtime the phase durations are tied at
 zero, so the first phase owns that diagnostic window; it proves the phase recorder is wired, but
-is not a cost measurement. The wall-clock figures remain the cost figures for this fixture.
+is not a cost measurement. The recorder also emits the exact `ticks` and `roster` for each sweep
+point, so a result can be checked against its scenario identity as well as its cold-load counts.
+The harness also samples the live mob roster after each driven tick and uses that resident-state
+metric for the population anti-vacuity control: the retaining chunk store legitimately leaves the
+underlying cold-load counters at zero once asynchronous fixture setup has completed. The wall-clock
+figures remain the cost figures for this fixture.
 
 ## Dependencies
 

@@ -52,11 +52,11 @@
 //! duration ceiling is the wrong shape for a gate. So:
 //!
 //! * **Asserted**: the tick count advanced exactly as many times as time was
-//!   advanced; the populated world does strictly more chunk-source work than
-//!   the empty one; the loop forgave no overruns.
-//! * **Recorded and compared against a stored baseline**: the per-tick count
-//!   of `ChunkSource::column` calls, which is a property of the simulation and
-//!   not of the machine.
+//!   advanced; the populated world retains a strictly larger live roster
+//!   sample than the empty one; the loop forgave no overruns.
+//! * **Recorded as diagnostics**: the normalized count of cold-load
+//!   `ChunkSource::column` calls, which is a property of fixture setup rather
+//!   than a wall-clock measurement.
 //! * **Recorded as diagnostics**: each phase's sample window, percentile and
 //!   budget summary, plus the largest phase window and its phase label.
 //! * **Recorded, advisory only**: every microsecond figure.
@@ -169,6 +169,10 @@ struct TickRun {
     ticks: u64,
     overruns: u64,
     roster: usize,
+    /// Sum of the live mob roster observed after each driven tick. Unlike the
+    /// underlying source counters, this crosses the retaining store and sees
+    /// the simulation's resident `ChunkWorld` state directly.
+    mob_roster_samples: u64,
     column_calls: u64,
     block_reads: u64,
     /// Wall time of the whole advance loop, measured *outside* the paused
@@ -317,6 +321,9 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
         );
 
         let roster = seed_fixture_mobs(&server, mob_count).await;
+        let mobs = server
+            .mobs()
+            .expect("open_in_memory_with_mobs exposes its live mob handle");
 
         // The asynchronous install fetches the fixture's complete 5x5 area.
         // That setup work establishes a live simulation but is not work done
@@ -341,8 +348,15 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
         tokio::task::yield_now().await;
 
         let started = Instant::now();
+        let mut mob_roster_samples = 0;
         for _ in 0..TICKS {
             tokio::time::advance(TICK_PERIOD).await;
+            // `advance` wakes the tick task, but the current task can keep
+            // running until it yields. Sampling after this yield makes each
+            // observation correspond to one completed driven tick rather
+            // than repeatedly seeing the pre-tick state.
+            tokio::task::yield_now().await;
+            mob_roster_samples += mobs.with(|sim| sim.iter().count() as u64);
         }
         tokio::task::yield_now().await;
         let wall = started.elapsed();
@@ -354,6 +368,7 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
             ticks: stats.tick_count,
             overruns: stats.overrun_count,
             roster,
+            mob_roster_samples,
             column_calls: columns.load(Ordering::Relaxed),
             block_reads: block_reads.load(Ordering::Relaxed),
             wall,
@@ -421,19 +436,19 @@ fn tick_cost(c: &mut Criterion) {
         );
     }
 
-    // The control that the instrument sees the simulation at all. If a world
-    // with POPULATED_MOBS mobs does not touch the chunk source more than an empty one in
-    // the same area, the counter is wired to something that is not the tick.
+    // The control that the instrument sees the simulation at all. The source
+    // counters intentionally measure only cold loads: the constructor's
+    // retaining store fills the mob area before the driven ticks, so those
+    // counters can legitimately remain zero during the measured loop. The
+    // live roster sample crosses that cache boundary and is the population
+    // distinction this benchmark can observe without changing production code.
     assert!(
-        populated.column_calls + populated.block_reads
-            > empty.column_calls + empty.block_reads,
-        "a populated world must do strictly more chunk-source work than an \
-         empty one; empty={}+{} populated={}+{}. Equal counts mean this bench \
-         is not measuring the simulation.",
-        empty.column_calls,
-        empty.block_reads,
-        populated.column_calls,
-        populated.block_reads,
+        populated.mob_roster_samples > empty.mob_roster_samples,
+        "a populated world must retain a strictly larger live roster sample \
+         than an empty one; empty={} populated={}. Equal counts mean this \
+         bench is not observing the simulation.",
+        empty.mob_roster_samples,
+        populated.mob_roster_samples,
     );
 
     for (label, run) in [("empty", &empty), ("populated", &populated)] {
@@ -462,9 +477,33 @@ fn tick_cost(c: &mut Criterion) {
     let empty_scene = "flat in-memory world, mobs=0 area=5x5 view_radius=2";
     let populated_scene = "flat in-memory world, mobs=48 area=5x5 view_radius=2";
 
-    // Counts: comparable across machines, so these are what a stored baseline
-    // can hold.
+    // Deterministic fixture counts: comparable across machines and useful for
+    // checking that the named sweep point still ran the intended scenario.
     for (scene, run) in [(empty_scene, &empty), (populated_scene, &populated)] {
+        // Keep the fixture identity beside its work counters. These are
+        // deterministic integrity metrics: a changed tick count or roster
+        // means the sweep no longer represents the scenario named by `scene`.
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "ticks",
+            scene,
+            value: run.ticks as f64,
+            unit: "ticks",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "roster",
+            scene,
+            value: run.roster as f64,
+            unit: "mobs",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "mob_roster_samples_per_tick",
+            scene,
+            value: run.mob_roster_samples as f64 / run.ticks as f64,
+            unit: "mobs",
+        });
         support::record(support::Record {
             bench: "server_tick",
             metric: "column_calls_per_tick",

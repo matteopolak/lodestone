@@ -802,7 +802,7 @@ fn placed_block_entity_for_item(item: &str) -> Option<(&'static str, PlacedBlock
         // 1016-1039) — one block-entity type each
         // (`minecraft:sign`/`minecraft:hanging_sign`, see
         // [`BlockEntity::type_id`]). The block name is the item's own name:
-        // `block_items::block_for_item` reports the *standing* block for every
+        // `block_items::block_placed_by` reports the *standing* block for every
         // one of these (wall/hanging-attached orientation is
         // `placed_block_state`'s job, resolved after this call, exactly as the
         // debug_assert at [`block_entity_for_item`]'s call site expects).

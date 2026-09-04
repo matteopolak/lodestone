@@ -46,7 +46,7 @@ Several screens share infrastructure worth knowing about up front:
 ### Main menu
 
 `Screen::MainMenu` — the title screen: Singleplayer / Multiplayer / Quit, plus icon buttons for
-Friends (disabled — no vanilla-equivalent service exists here), Language, Accessibility, and a
+Friends (disabled — 26.2 ships a Friends service, but Lodestone's integration is not implemented), Language, Accessibility, and a
 Minecraft Realms row (disabled). Its layout is vanilla's `TitleScreen` reproduced exactly, drawn with
 the resource pack's own button art. Lives under `crates/lodestone-shell/src/menu/`: `menu.rs` for the
 `Screen`/`UiState` state machine, `menu/nav.rs` for input, `menu/render.rs` for layout and draw,

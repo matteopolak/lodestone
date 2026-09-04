@@ -323,22 +323,31 @@ fn state_id_validates_once_and_is_total_afterwards() {
     assert_eq!(mismatches, 0, "StateId::block disagrees with block_name");
 }
 
-/// The typed placement accessor and the string one must be the same fact.
+/// The typed placement accessor must agree with every item-name table row.
 #[test]
-fn block_items_typed_and_string_accessors_agree() {
+fn block_items_typed_accessor_matches_item_names() {
     use lodestone_data::block_items;
+    use lodestone_data::item::Item;
     assert_eq!(
-        block_items::block_placed_by("minecraft:redstone"),
+        block_items::block_placed_by(Item::from_name("minecraft:redstone").expect("registered item")),
         Some(Block::RedstoneWire),
         "the census's flagship disagreement with a name match"
     );
-    assert_eq!(block_items::block_placed_by("minecraft:diamond_sword"), None);
+    assert_eq!(
+        block_items::block_placed_by(
+            Item::from_name("minecraft:diamond_sword").expect("registered item")
+        ),
+        None
+    );
     let mut checked = 0usize;
     for id in 0..block_items::ITEM_COUNT {
-        let typed = block_items::block_for_item_id(id as i32);
+        let item = Item::from_registry_id(id as u16).expect("table id is in the item registry");
+        let typed = block_items::block_placed_by(item);
         assert_eq!(typed.map(Block::name), {
             let name = lodestone_data::items::item_name(id as i32);
-            name.and_then(block_items::block_for_item)
+            name.and_then(Item::from_name)
+                .and_then(block_items::block_placed_by)
+                .map(Block::name)
         });
         if typed.is_some() {
             checked += 1;

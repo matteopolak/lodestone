@@ -15,6 +15,12 @@ The folder is named `1.14` for the era's opening release. It has never been a
 protocol number, and now it is not even a single protocol — ask
 `VersionAdapter::supports`.
 
+The family also provides server protocols for 498, 578 and 754. Each selector
+uses its separate packet registry and chunk encoder, with its committed state
+table as the sole canonical-state inverse. Hosting remains intentionally
+narrower than full server behaviour: light updates and most Play actions still
+need their own protocol evidence.
+
 ## How it works
 
 ### Protocol selection
@@ -41,6 +47,24 @@ three-slot array of `OnceLock`s indexed the same way `ids_for` resolves a
 table. `spawn_entity_weather` is an `IGNORED::ranged` entry covering
 `498..=578`, so 754's table does not fail construction on a stale entry and
 the older two do not fail on an unlisted id.
+
+`V498ServerProtocol`, `V578ServerProtocol` and `V754ServerProtocol` handle
+their era-specific handshake and login shapes, transition directly to Play,
+and emit join, initial position, chunk, block-update and Play-disconnect
+packets. Each chunk encoder requires a 0..256 column, writes a named
+heightmap, and rejects a non-plains biome, block entity, or canonical state
+absent from that protocol's committed table rather than silently substituting.
+Protocol 498 writes 256 fixed biome integers inside the length-prefixed
+`chunkData` buffer after its straddling section palettes; protocol 578 writes
+1,024 fixed biome integers before the buffer and also uses straddling palettes;
+protocol 754 writes a length-prefixed VarInt biome array and padded palettes.
+Light-update encoding and the remaining serverbound play actions are still
+outside this host slice and require their own protocol evidence.
+
+The host tests anchor packet ids in the committed generated tables and exercise
+each differing chunk framing against the crate's independent decoder. A live
+client/server acceptance capture for these host selectors is not yet
+committed, so it remains a gate before calling this host production-ready.
 
 ### Three data sets, not one
 
@@ -171,9 +195,10 @@ line for the whole capture, so a future lenient decode cannot quietly undo it.
 
 ## Configuration
 
-None new. The era is selected by the existing `v1-14` feature on
-`lodestone-registry`; the registry reads `PROTOCOLS` from the crate, so all
-three protocols became resolvable without a registry edit. Oracle ports live in
+The era is selected by the existing `v1-14` feature on `lodestone-registry`.
+Joining and hosting both resolve all three protocols; the host constructor
+selects 498, 578 or 754 before any packet is encoded.
+Oracle ports live in
 `scripts/live-oracles/legacy.sh` and are read from there by
 `tests/capture_join.rs`'s `MEMBERS` table.
 
@@ -183,7 +208,8 @@ three protocols became resolvable without a registry edit. Oracle ports live in
 IGNORED}`), `lodestone-macros` (`since`/`until`/`protocols`),
 `lodestone-protocol-common` (the shared packet definitions, one of whose ranges
 this work widened), `lodestone-world`, `lodestone-data` (the canonical 26.2
-block-state registry the generated tables target). Recording needs Apple
+block-state registry the generated tables target), and `lodestone-server` for
+the hosting seam. Recording needs Apple
 `container` and [`scripts/live-oracles/legacy.sh`](../scripts/live-oracles/legacy.sh);
 regenerating the block-state and entity tables additionally needs each jar's
 own data generator under `container`; replay needs nothing.

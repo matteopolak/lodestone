@@ -347,8 +347,8 @@ struct ServerFamily {
     /// Whether this host implements a given protocol number. A family may host
     /// fewer revisions than its joining adapter supports.
     supports: fn(i32) -> bool,
-    /// Constructs a boxed server protocol for this family.
-    make: fn() -> Box<dyn lodestone_server::ServerProtocol>,
+    /// Constructs a boxed server protocol for the negotiated protocol.
+    make: fn(i32) -> Box<dyn lodestone_server::ServerProtocol>,
 }
 
 impl std::fmt::Debug for ServerFamily {
@@ -370,19 +370,19 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
     ServerFamily {
         label: "v1-7",
         supports: |protocol| protocol == lodestone_v1_7::PROTOCOL,
-        make: || Box::new(lodestone_v1_7::V5ServerProtocol),
+        make: |_| Box::new(lodestone_v1_7::V5ServerProtocol),
     },
     #[cfg(feature = "v1-8")]
     ServerFamily {
         label: "v1-8",
         supports: |protocol| protocol == lodestone_v1_8::PROTOCOL,
-        make: || Box::new(lodestone_v1_8::V47ServerProtocol),
+        make: |_| Box::new(lodestone_v1_8::V47ServerProtocol),
     },
     #[cfg(feature = "v26-2")]
     ServerFamily {
         label: "v26-2",
         supports: |protocol| lodestone_v26_2::adapter().supports(protocol),
-        make: || Box::new(lodestone_v26_2::V770ServerProtocol),
+        make: |_| Box::new(lodestone_v26_2::V770ServerProtocol),
     },
     #[cfg(feature = "v1-9")]
     ServerFamily {
@@ -391,13 +391,30 @@ const SERVER_FAMILIES: &[ServerFamily] = &[
         // the preceding revisions too, but their server packet layouts have
         // not been implemented.
         supports: |protocol| protocol == lodestone_v1_9::PROTOCOL,
-        make: || Box::new(lodestone_v1_9::V340ServerProtocol),
+        make: |_| Box::new(lodestone_v1_9::V340ServerProtocol),
     },
     #[cfg(feature = "v1-13")]
     ServerFamily {
         label: "v1-13",
         supports: |protocol| protocol == lodestone_v1_13::PROTOCOL,
-        make: || Box::new(lodestone_v1_13::V404ServerProtocol),
+        make: |_| Box::new(lodestone_v1_13::V404ServerProtocol),
+    },
+    #[cfg(feature = "v1-14")]
+    ServerFamily {
+        label: "v1-14",
+        // Hosting has separate implementations for all three packet layouts;
+        // each selector owns its packet ids, join shape and chunk framing.
+        supports: |protocol| {
+            protocol == lodestone_v1_14::PROTOCOL_1_14_4
+                || protocol == lodestone_v1_14::PROTOCOL_1_15_2
+                || protocol == lodestone_v1_14::PROTOCOL_1_16_5
+        },
+        make: |protocol| match protocol {
+            lodestone_v1_14::PROTOCOL_1_14_4 => Box::new(lodestone_v1_14::V498ServerProtocol),
+            lodestone_v1_14::PROTOCOL_1_15_2 => Box::new(lodestone_v1_14::V578ServerProtocol),
+            lodestone_v1_14::PROTOCOL_1_16_5 => Box::new(lodestone_v1_14::V754ServerProtocol),
+            _ => unreachable!("server family checked protocol before construction"),
+        },
     },
 ];
 
@@ -422,7 +439,7 @@ pub fn server_protocol_for_protocol(
     SERVER_FAMILIES
         .iter()
         .find(|family| (family.supports)(protocol))
-        .map(|family| (family.make)())
+        .map(|family| (family.make)(protocol))
 }
 
 /// Returns the label of every compiled-in family that can be served in-process
@@ -603,6 +620,16 @@ mod tests {
         assert!(adapter.supports(754));
         assert!(supported_protocols().contains(&754));
         assert!(compiled_families().contains(&"v1-14"));
+    }
+
+    #[cfg(feature = "v1-14")]
+    #[test]
+    fn resolves_all_three_hosted_protocols_for_the_1_14_family() {
+        assert!(server_protocol_for_protocol(498).is_some());
+        assert!(server_protocol_for_protocol(578).is_some());
+        assert!(server_protocol_for_protocol(754).is_some());
+        assert!(compiled_server_families().contains(&"v1-14"));
+        assert!(server_protocol_for_protocol(497).is_none());
     }
 
     /// `v1-14` speaks protocol 754 (1.16.5) — the folder name is not the

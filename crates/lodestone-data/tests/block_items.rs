@@ -46,6 +46,7 @@ use std::path::PathBuf;
 
 use lodestone_data::block::Block;
 use lodestone_data::block_items;
+use lodestone_data::item::Item;
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -53,6 +54,12 @@ fn manifest_dir() -> PathBuf {
 
 fn committed_path() -> PathBuf {
     manifest_dir().join("src/generated/block_items.rs")
+}
+
+fn placed_block_name(item: &str) -> Option<&'static str> {
+    Item::from_name(item)
+        .and_then(block_items::block_placed_by)
+        .map(Block::name)
 }
 
 /// The committed JVM dump — an external anchor, not gitignored.
@@ -181,11 +188,11 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
     let mut checked_some = 0usize;
     let mut checked_none = 0usize;
     for row in &rows {
-        let id = i32::try_from(row.id).expect("item id fits i32");
         // Compared as *names*, so the expected value stays the dump's own
         // string rather than a `Block` this crate produced — the table is typed
         // now, but the anchor must still come from outside it.
-        let actual = block_items::block_for_item_id(id).map(Block::name);
+        let item = Item::from_name(&row.item).expect("dump item is in the registry");
+        let actual = block_items::block_placed_by(item).map(Block::name);
         assert_eq!(
             actual,
             row.block.as_deref(),
@@ -193,10 +200,10 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
             row.id,
             row.item
         );
-        // The name-keyed accessor must agree with the id-keyed one for every
-        // item -- otherwise `items::item_id`'s reverse scan has drifted.
+        // Resolving the dump's name to `Item` must reach the same row as the
+        // item enum above.
         assert_eq!(
-            block_items::block_for_item(&row.item),
+            placed_block_name(&row.item),
             row.block.as_deref(),
             "name and id lookups disagree for {}",
             row.item
@@ -229,7 +236,8 @@ fn committed_table_matches_the_committed_dump_row_for_row() {
 fn every_placed_block_is_a_real_registered_block() {
     let mut checked = 0usize;
     for id in 0..block_items::ITEM_COUNT {
-        let Some(block) = block_items::block_for_item_id(id as i32) else {
+        let item = Item::from_registry_id(id as u16).expect("table id is in the item registry");
+        let Some(block) = block_items::block_placed_by(item) else {
             continue;
         };
         let found = (0..lodestone_data::block_states::STATE_COUNT)
@@ -259,7 +267,7 @@ fn the_census_disagrees_with_a_name_match_exactly_where_the_game_does() {
         ("minecraft:melon_seeds", "minecraft:melon_stem"),
     ] {
         assert_eq!(
-            block_items::block_for_item(item),
+            placed_block_name(item),
             Some(block),
             "{item} must place {block}"
         );
@@ -275,7 +283,7 @@ fn the_census_disagrees_with_a_name_match_exactly_where_the_game_does() {
             "{item} must still name a real block, or this test proves nothing"
         );
         assert_eq!(
-            block_items::block_for_item(item),
+            placed_block_name(item),
             None,
             "{item} names a block but is not a BlockItem, so it must place nothing"
         );
@@ -294,7 +302,7 @@ fn plain_blocks_resolve_to_themselves_and_tools_resolve_to_nothing() {
         "minecraft:sand",
         "minecraft:oak_log",
     ] {
-        assert_eq!(block_items::block_for_item(item), Some(item), "{item} places itself");
+        assert_eq!(placed_block_name(item), Some(item), "{item} places itself");
     }
 
     for item in [
@@ -306,19 +314,14 @@ fn plain_blocks_resolve_to_themselves_and_tools_resolve_to_nothing() {
         "minecraft:flint_and_steel",
     ] {
         assert_eq!(
-            block_items::block_for_item(item),
+            placed_block_name(item),
             None,
             "{item} is not a BlockItem and must place nothing"
         );
     }
 
     // An item this version does not know is a miss, not a panic.
-    assert_eq!(block_items::block_for_item("minecraft:not_a_real_item"), None);
-    assert_eq!(block_items::block_for_item_id(-1), None);
-    assert_eq!(
-        block_items::block_for_item_id(block_items::ITEM_COUNT as i32),
-        None
-    );
+    assert_eq!(placed_block_name("minecraft:not_a_real_item"), None);
 }
 
 /// [`block_items::item_for_block`], the inverse this issue's server-side half
@@ -327,7 +330,7 @@ fn plain_blocks_resolve_to_themselves_and_tools_resolve_to_nothing() {
 /// shapes — a block with no `BlockItem` at all, and an out-of-range `Block`
 /// cannot occur since `Block` is exhaustive, so only the first shape is real.
 #[test]
-fn item_for_block_inverts_block_for_item_id_for_ordinary_blocks() {
+fn item_for_block_inverts_block_for_item_for_ordinary_blocks() {
     for (item, block_name) in [
         ("minecraft:dirt", "minecraft:dirt"),
         ("minecraft:oak_planks", "minecraft:oak_planks"),
@@ -338,7 +341,7 @@ fn item_for_block_inverts_block_for_item_id_for_ordinary_blocks() {
         assert_eq!(
             block_items::item_for_block(block).map(lodestone_data::item::Item::name),
             Some(item),
-            "item_for_block({block_name}) must invert block_for_item({item})"
+            "item_for_block({block_name}) must invert the placement lookup for {item}"
         );
     }
 }
@@ -358,18 +361,17 @@ fn item_for_block_is_none_for_a_block_with_no_block_item() {
 }
 
 /// Every block this crate's `item_for_block` names must round-trip back
-/// through [`block_items::block_for_item_id`] — the property that makes it a
+/// through [`block_items::block_placed_by`] — the property that makes it a
 /// true inverse rather than an independently-wrong second table.
 #[test]
-fn item_for_block_round_trips_through_block_for_item_id_for_every_block() {
+fn item_for_block_round_trips_through_block_placed_by_for_every_block() {
     let mut checked = 0usize;
     for block in Block::all() {
         let Some(item) = block_items::item_for_block(block) else {
             continue;
         };
-        let item_id = i32::from(item.registry_id());
         assert_eq!(
-            block_items::block_for_item_id(item_id),
+            block_items::block_placed_by(item),
             Some(block),
             "{item:?} must place {block:?} back"
         );
@@ -391,7 +393,7 @@ fn the_block_entity_blocks_still_resolve_to_themselves() {
         "minecraft:brewing_stand",
         "minecraft:chest",
     ] {
-        assert_eq!(block_items::block_for_item(item), Some(item));
+        assert_eq!(placed_block_name(item), Some(item));
     }
 }
 

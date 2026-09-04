@@ -3368,6 +3368,7 @@ dependencies = [
  "lodestone-model",
  "lodestone-net",
  "lodestone-protocol-common",
+ "lodestone-server",
  "lodestone-testsupport",
  "lodestone-world",
  "serde_json",

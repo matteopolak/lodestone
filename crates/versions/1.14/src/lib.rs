@@ -14,9 +14,9 @@
 //! `lodestone-core` and `lodestone-model` are not silently over-fitted to any
 //! single wire format.
 //!
-//! Like every version crate it depends only on `lodestone-core`,
-//! `lodestone-model`, `lodestone-macros` and `lodestone-world`, so the entire
-//! era can be removed by deleting this one folder.
+//! Like every version crate it depends only on the shared protocol, model,
+//! macro, world and server crates, so the entire era can be removed by
+//! deleting this one folder.
 
 #![forbid(unsafe_code)]
 
@@ -101,8 +101,10 @@ pub mod adapter;
 pub mod canonical;
 pub mod entity_types;
 pub mod packets;
+pub mod server_protocol;
 
 pub use adapter::{
     PROTOCOL, PROTOCOL_1_14_4, PROTOCOL_1_15_2, PROTOCOL_1_16_5, PROTOCOLS, V735Adapter, adapter,
     adapter_for,
 };
+pub use server_protocol::{V498ServerProtocol, V578ServerProtocol, V754ServerProtocol};

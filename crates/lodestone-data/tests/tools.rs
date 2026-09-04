@@ -52,7 +52,7 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 
 use lodestone_model::{ItemStack, ItemTool, ToolBlocks, ToolPatch, ToolRule};
-use lodestone_data::{block_states, hardness, item::Item, tool};
+use lodestone_data::{block_states::{self, StateId}, hardness, item::Item, tool};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -877,14 +877,31 @@ fn block_registry_ids_match_the_dump() {
 fn every_block_state_maps_to_its_own_block() {
     let dump = parse_dump(DUMP);
     for state in 0..block_states::STATE_COUNT {
-        let registry_id = tool::block_registry_id(state).expect("every state maps to a block");
+        let registry_id = StateId::new(state)
+            .expect("state is in range")
+            .block()
+            .registry_id();
         assert_eq!(
             dump.blocks[registry_id as usize].as_str(),
             block_states::block_name(state).expect("state has a name"),
             "state {state} maps to the wrong block"
         );
     }
-    assert_eq!(tool::block_registry_id(block_states::STATE_COUNT), None);
+}
+
+#[test]
+fn typed_block_tag_membership_uses_the_state_block_identity() {
+    let short_grass = StateId::new(state_named("minecraft:short_grass")).expect("known state");
+    let stone = StateId::new(state_named("minecraft:stone")).expect("known state");
+
+    assert!(
+        tool::block_tag_contains("minecraft:edible_for_sheep", short_grass.block()),
+        "short grass is a member of the grazing tag"
+    );
+    assert!(
+        !tool::block_tag_contains("minecraft:edible_for_sheep", stone.block()),
+        "stone is not a member of the grazing tag"
+    );
 }
 
 /// The headline number: a diamond pickaxe on stone. Every input is read from a
@@ -1049,7 +1066,10 @@ fn a_wire_supplied_tool_overrides_the_prototype() {
 #[test]
 fn a_wire_supplied_rule_can_name_blocks_by_registry_id() {
     let stone = state_named("minecraft:stone");
-    let stone_block = tool::block_registry_id(stone).expect("stone maps to a block");
+    let stone_block = StateId::new(stone)
+        .expect("stone is in range")
+        .block()
+        .registry_id();
     let mut wand = stack("minecraft:stick");
     wand.components.tool = ToolPatch::Set(ItemTool::new(
         vec![ToolRule::new(
