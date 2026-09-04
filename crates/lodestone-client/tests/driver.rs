@@ -484,6 +484,53 @@ fn start_with_cookies(
 
 // --- Tests ------------------------------------------------------------------
 
+/// An opted-in caller world receives the exact inbound packet before the fake
+/// adapter turns it into a decoded event. The payload includes a zero byte and
+/// a high byte so a string-like or lossy observation cannot pass this gate.
+#[tokio::test]
+async fn raw_packet_bus_observes_the_wire_bytes_before_decoding() {
+    const PACKET_ID: i32 = 0x44;
+    let payload = [0x00, 0xff, 0x7f, 0x01];
+
+    let mut app = lodestone_ecs::app::App::new();
+    app.add_plugins((
+        lodestone_ecs::ingest::IngestPlugin,
+        lodestone_ecs::SessionPlugin,
+        lodestone_ecs::RawPacketBusPlugin,
+    ));
+    let session = lodestone_ecs::spawn_session(app.world_mut());
+    let world = Arc::new(lodestone_ecs::parking_lot::RwLock::new(
+        std::mem::take(app.world_mut()),
+    ));
+
+    let adapter = FakeAdapter::new().on(
+        ConnectionState::Handshaking,
+        PACKET_ID,
+        vec![Directive::Emit(ClientEvent::Ping { id: 9 })],
+    );
+    let (client_io, server_io) = memory_pair();
+    let (handle, mut events) = ClientBuilder::new(server(), profile(), Box::new(adapter))
+        .ecs(world.clone(), session)
+        .connect_with(client_io);
+    let mut peer = Connection::new(server_io);
+
+    peer.write_packet(PACKET_ID, &payload).await.unwrap();
+    assert_eq!(events.recv().await, Some(ClientEvent::Ping { id: 9 }));
+
+    let ecs = world.read();
+    let messages = ecs
+        .resource::<lodestone_ecs::ecs::message::Messages<lodestone_ecs::RawPacket>>();
+    let packet = messages
+        .iter_current_update_messages()
+        .next()
+        .expect("the opted-in raw packet bus must receive the inbound packet");
+    assert_eq!(packet.state, ConnectionState::Handshaking);
+    assert_eq!(packet.packet_id, PACKET_ID);
+    assert_eq!(packet.payload, payload);
+
+    drop(handle);
+}
+
 /// [`ClientBuilder::seed_cookies`]: a `cookie_request` for a key the *prior*
 /// session had stored answers from the seeded map, and a key that was never
 /// stored — seeded or otherwise — still answers `None`, exactly like an

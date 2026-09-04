@@ -40,7 +40,7 @@ use lodestone_game::{
 };
 use lodestone_model::{
     BlockPos, ChunkPos, ClientAction, ClientEvent, DimensionId, DimensionTypeInfo,
-    EntityAttributeSnapshot, EntityEquipment, EntityPose, EntityVariant, GameMode,
+    ConnectionState, EntityAttributeSnapshot, EntityEquipment, EntityPose, EntityVariant, GameMode,
     ItemStack, PlayerListEntry, Reported, ResourceKey, Rotation, Text, Vec3,
 };
 use lodestone_world::{ChunkPos as WorldChunkPos, ChunkSection, SectionLight, World};
@@ -396,6 +396,10 @@ pub(crate) struct SharedState {
     /// when the `World` is built, and that is always before a `SharedState`
     /// wraps it.
     game_event_bus_enabled: bool,
+    /// Whether [`Self::ecs`] carries [`lodestone_ecs::RawPacketBus`]. This is
+    /// cached at construction so the ordinary client does not clone inbound
+    /// packet payloads or take an ECS lock when no plugin observes them.
+    raw_packet_bus_enabled: bool,
     /// Whether the driver's live [`ConnectionState`](lodestone_model::ConnectionState)
     /// is currently `Play`, kept in lockstep with `Driver::state` by the
     /// `Directive::SetState` arm in `driver.rs`.
@@ -429,24 +433,27 @@ impl Default for SharedState {
         // systems as well as `IngestPlugin`'s, so this `World` folds the session
         // read-model too. It needs one entity to hang those components off.
         let world = Arc::new(RwLock::new(World::new()));
-        let (session, game_event_bus_enabled) = lodestone_ecs::hold_write(&ecs, |world_ecs| {
-            world_ecs.insert_resource(WorldTime::default());
-            // Stage 4 (§4.1(d)): the chunk store is a resource, and it is the
-            // *same* store `world_write` hands the adapter — one `Arc`, two
-            // names. A system or plugin in this `World` can therefore read
-            // chunks without a second copy existing anywhere.
-            world_ecs.insert_resource(ChunkWorld::from_shared(Arc::clone(&world)));
-            // The matching write resource shares this `Arc`, so ECS systems
-            // that edit chunks use `ChunkWorldWrite` rather than bypassing the
-            // synchronization behind `world_write`.
-            world_ecs.insert_resource(ChunkWorldWrite::from_shared(Arc::clone(&world)));
-            let session = lodestone_ecs::spawn_session(world_ecs);
-            // `new_ingest_handle()` does not install a `GameEventBus`; cache
-            // that fact so the ordinary state has no event-bus work beyond the
-            // branch in `Self::apply`.
-            let bus_enabled = world_ecs.contains_resource::<lodestone_ecs::GameEventBus>();
-            (session, bus_enabled)
-        });
+        let (session, game_event_bus_enabled, raw_packet_bus_enabled) =
+            lodestone_ecs::hold_write(&ecs, |world_ecs| {
+                world_ecs.insert_resource(WorldTime::default());
+                // Stage 4 (§4.1(d)): the chunk store is a resource, and it is the
+                // *same* store `world_write` hands the adapter — one `Arc`, two
+                // names. A system or plugin in this `World` can therefore read
+                // chunks without a second copy existing anywhere.
+                world_ecs.insert_resource(ChunkWorld::from_shared(Arc::clone(&world)));
+                // The matching write resource shares this `Arc`, so ECS systems
+                // that edit chunks use `ChunkWorldWrite` rather than bypassing the
+                // synchronization behind `world_write`.
+                world_ecs.insert_resource(ChunkWorldWrite::from_shared(Arc::clone(&world)));
+                let session = lodestone_ecs::spawn_session(world_ecs);
+                // `new_ingest_handle()` does not install either optional bus;
+                // cache that fact so the ordinary state performs no bus work.
+                let game_event_bus_enabled =
+                    world_ecs.contains_resource::<lodestone_ecs::GameEventBus>();
+                let raw_packet_bus_enabled =
+                    world_ecs.contains_resource::<lodestone_ecs::RawPacketBus>();
+                (session, game_event_bus_enabled, raw_packet_bus_enabled)
+            });
         Self {
             inner: Arc::new(RwLock::new(LocalEcho::default())),
             world,
@@ -454,6 +461,7 @@ impl Default for SharedState {
             ecs,
             session,
             game_event_bus_enabled,
+            raw_packet_bus_enabled,
             in_play: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -519,9 +527,13 @@ impl SharedState {
     /// `lodestone_shell::sim::Sim`, brokered / out of this pass's scope)
     /// decides by adding `GameEventBusPlugin` before calling this.
     pub(crate) fn adopting(ecs: EcsHandle, session: Entity) -> Self {
-        let game_event_bus_enabled = lodestone_ecs::hold_read(&ecs, |world| {
-            world.contains_resource::<lodestone_ecs::GameEventBus>()
-        });
+        let (game_event_bus_enabled, raw_packet_bus_enabled) =
+            lodestone_ecs::hold_read(&ecs, |world| {
+                (
+                    world.contains_resource::<lodestone_ecs::GameEventBus>(),
+                    world.contains_resource::<lodestone_ecs::RawPacketBus>(),
+                )
+            });
         Self {
             inner: Arc::new(RwLock::new(LocalEcho::default())),
             world: Arc::new(RwLock::new(World::new())),
@@ -529,7 +541,28 @@ impl SharedState {
             ecs,
             session,
             game_event_bus_enabled,
+            raw_packet_bus_enabled,
             in_play: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Publishes one inbound packet to the optional raw observation bus before
+    /// the version adapter sees it. The payload is cloned only when a plugin
+    /// installed [`lodestone_ecs::RawPacketBusPlugin`] in the caller's world.
+    pub(crate) fn record_raw_packet(
+        &self,
+        state: ConnectionState,
+        packet_id: i32,
+        payload: &[u8],
+    ) {
+        if self.raw_packet_bus_enabled {
+            lodestone_ecs::hold_write(&self.ecs, |world| {
+                world.write_message(lodestone_ecs::RawPacket {
+                    state,
+                    packet_id,
+                    payload: payload.to_vec(),
+                });
+            });
         }
     }
 
@@ -2118,6 +2151,22 @@ mod tests {
             messages.len(),
             0,
             "a disabled state's apply() must never reach a different state's bus"
+        );
+    }
+
+    /// The raw bus has the same zero-cost default as the decoded event bus:
+    /// recording a packet on a state that was not built with the opt-in plugin
+    /// leaves no message resource behind.
+    #[test]
+    fn a_default_state_does_not_record_raw_packets() {
+        let state = SharedState::default();
+        state.record_raw_packet(ConnectionState::Play, 7, &[0, 255]);
+
+        let ecs = state.ecs.read();
+        assert!(
+            ecs.get_resource::<lodestone_ecs::ecs::message::Messages<lodestone_ecs::RawPacket>>()
+                .is_none(),
+            "SharedState::default must not allocate the raw packet bus"
         );
     }
 }

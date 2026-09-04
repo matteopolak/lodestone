@@ -1,21 +1,20 @@
-//! The plugin event bus: a typed, version-free `Message` mirror
-//! of every [`ClientEvent`] the client decodes, for a plugin that wants to
-//! *observe* the event stream directly rather than poll component state
-//! after the fact.
+//! The plugin event buses: typed, version-free `Message` mirrors for decoded
+//! client events and raw inbound packets. A plugin can observe either stream
+//! directly rather than polling component state after the fact.
 //!
 //! # Why `GameEvent` wraps `ClientEvent` rather than inventing a second
 //! vocabulary
 //!
 //! `ClientEvent` is already version-free, `Clone`, and `#[non_exhaustive]`
 //! (`lodestone_model::event`) — a second ~107-variant enum mirroring it would
-//! be exactly the staleness factory `CLAUDE.md` calls this repo's
-//! most-documented defect class: two enums drift, and nothing forces the
-//! second one to grow a variant when the first one does. `docs/bevy-migration.md`
-//! §5.1's original `RawPacket` proposal is the version-*opaque* half of the
-//! plugin event bus (wire bytes, still unbuilt); this is the version-*free*,
-//! already-decoded half, and it costs nothing extra to keep in sync because it
-//! is not a copy —
-//! it is `ClientEvent` itself, one field deep.
+//! be exactly a staleness factory: two enums drift, and nothing forces the
+//! second one to grow a variant when the first one does.
+//!
+//! The `RawPacket` bus is the version-*opaque* half of the plugin event bus:
+//! it carries the connection state, packet id, and exact body before a
+//! version-specific adapter decodes it. The `GameEvent` bus is the
+//! version-*free*, already-decoded half, and it costs nothing extra to keep in
+//! sync because it is not a copy — it is `ClientEvent` itself, one field deep.
 //!
 //! # Why this cannot become a sixth silent-drop router
 //!
@@ -33,18 +32,16 @@
 //!
 //! # Gated off by default
 //!
-//! With the bus on, every event — including the ones `SharedState::apply`
-//! currently routes to `LocalEcho` with no ECS lock at all — has to take the
-//! `EcsHandle` write lock to reach [`Messages<GameEvent>`]. That is a real,
-//! measurable cost this crate has no business imposing on every client that
-//! never asked for the bus, so [`GameEventBus`] is a marker resource nothing
-//! inserts by default: `SharedState` checks for it once, at construction
-//! (before any hot-path lock is taken), and caches the answer. See that
-//! type's own doc for the exact mechanics.
+//! With either bus on, the driver takes the `EcsHandle` write lock to publish
+//! into its message queue, and raw observation also copies the packet body.
+//! Those are measurable costs this crate has no business imposing on a client
+//! that never asked for observation, so both marker resources are absent by
+//! default. `SharedState` checks them once at construction (before any
+//! hot-path lock is taken) and caches the answers.
 
 use bevy_app::{App, Plugin};
 use bevy_ecs::prelude::{IntoScheduleConfigs, Message, Messages, ResMut, Resource};
-use lodestone_model::ClientEvent;
+use lodestone_model::{ClientEvent, ConnectionState};
 
 use crate::schedules::GameTick;
 use crate::sets::TickSet;
@@ -60,6 +57,27 @@ use crate::sets::TickSet;
 /// thing"), so there is nothing to hide behind a method here.
 #[derive(Message, Debug, Clone, PartialEq)]
 pub struct GameEvent(pub ClientEvent);
+
+/// One inbound packet before version-specific decoding.
+///
+/// This is observation-only: the driver publishes the connection state, packet
+/// id, and exact payload it received, while the adapter remains the sole
+/// consumer that can turn those bytes into state or directives. Keeping the
+/// value in this version-free crate lets a plugin inspect an unknown packet
+/// without depending on a protocol family.
+#[derive(Message, Debug, Clone, PartialEq, Eq)]
+pub struct RawPacket {
+    /// Protocol phase in which the packet arrived.
+    pub state: ConnectionState,
+    /// Packet id as read from the length-framed packet.
+    pub packet_id: i32,
+    /// Packet body, excluding the packet id and outer length framing.
+    pub payload: Vec<u8>,
+}
+
+/// Marker resource a plugin inserts to opt into [`RawPacket`] observation.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct RawPacketBus;
 
 /// Marker resource a plugin's own [`Plugin::build`] inserts (directly, or by
 /// adding [`GameEventBusPlugin`]) to opt into the bus.
@@ -116,9 +134,32 @@ impl Plugin for GameEventBusPlugin {
     }
 }
 
+/// Registers the version-free raw-packet observation bus and its tick aging
+/// system. This plugin is separate from [`GameEventBusPlugin`] so a plugin that
+/// needs decoded events does not also pay to clone every inbound payload.
+#[derive(Debug, Default)]
+pub struct RawPacketBusPlugin;
+
+impl Plugin for RawPacketBusPlugin {
+    fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::CorePlugin>() {
+            app.add_plugins(crate::CorePlugin);
+        }
+        app.init_resource::<RawPacketBus>();
+        app.add_message::<RawPacket>();
+        app.add_systems(GameTick, age_raw_packet_bus.in_set(TickSet::Send));
+    }
+}
+
 /// `TickSet::Send`: ages [`Messages<GameEvent>`]'s double buffer once per
 /// tick. See [`GameEventBusPlugin`]'s doc for why nothing else calls this.
 fn age_game_event_bus(mut messages: ResMut<Messages<GameEvent>>) {
+    messages.update();
+}
+
+/// Ages [`Messages<RawPacket>`] after every reader has observed this tick's
+/// inbound packets.
+fn age_raw_packet_bus(mut messages: ResMut<Messages<RawPacket>>) {
     messages.update();
 }
 
@@ -128,9 +169,12 @@ mod tests {
     use bevy_ecs::resource::Resource;
     use bevy_ecs::system::ResMut;
     use bevy_ecs::world::World;
-    use lodestone_model::ClientEvent;
+    use lodestone_model::{ClientEvent, ConnectionState};
 
-    use super::{GameEvent, GameEventBus, GameEventBusPlugin};
+    use super::{
+        GameEvent, GameEventBus, GameEventBusPlugin, RawPacket, RawPacketBus,
+        RawPacketBusPlugin,
+    };
     use crate::GameTick;
 
     #[derive(Resource, Default)]
@@ -197,5 +241,54 @@ mod tests {
         let event = ClientEvent::Ping { id: 42 };
         let wrapped = GameEvent(event.clone());
         assert_eq!(wrapped.0, event);
+    }
+
+    /// Raw observation is opt-in independently of decoded event observation.
+    #[test]
+    fn the_raw_packet_marker_is_absent_by_default() {
+        let world = World::new();
+        assert!(world.get_resource::<RawPacketBus>().is_none());
+    }
+
+    /// Installing the raw bus exposes its message resource to a reader and
+    /// preserves the packet metadata and payload without decoding it.
+    #[test]
+    fn a_raw_packet_reaches_a_reader_with_exact_bytes() {
+        let mut app = bevy_app::App::new();
+        app.add_plugins(RawPacketBusPlugin);
+        app.init_resource::<SeenCount>();
+
+        fn observe(mut packets: MessageReader<RawPacket>, mut count: ResMut<SeenCount>) {
+            for packet in packets.read() {
+                assert_eq!(packet.state, ConnectionState::Play);
+                assert_eq!(packet.packet_id, 0x2a);
+                assert_eq!(packet.payload.as_slice(), [0x00, 0xff, 0x7f]);
+                count.0 += 1;
+            }
+        }
+
+        app.add_systems(GameTick, observe);
+        app.world_mut().write_message(RawPacket {
+            state: ConnectionState::Play,
+            packet_id: 0x2a,
+            payload: vec![0x00, 0xff, 0x7f],
+        });
+        app.world_mut().run_schedule(GameTick);
+
+        assert_eq!(app.world().resource::<SeenCount>().0, 1);
+    }
+
+    /// A world without the opt-in plugin has no raw message queue, so the
+    /// driver's conditional write cannot allocate or retain packet bytes.
+    #[test]
+    fn writing_a_raw_packet_without_the_bus_is_a_no_op() {
+        let mut world = World::new();
+        assert!(world
+            .write_message(RawPacket {
+                state: ConnectionState::Login,
+                packet_id: 3,
+                payload: vec![1, 2, 3],
+            })
+            .is_none());
     }
 }
