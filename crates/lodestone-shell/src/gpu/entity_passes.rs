@@ -157,28 +157,13 @@ fn note_missing_entity_model(type_path: &str, model_path: &str) {
     }
 }
 
-/// One entity's own hitbox width in blocks — its type's base width times its age
-/// scale — or `None` for a type with no `entity_dimensions` entry.
-///
-/// This is vanilla's `EntityRenderState.boundingBoxWidth`, and it is the only
-/// input to the flame's size. `age_scale` is [`EntityDraw::scale`], which is
-/// `0.5` for a `Baby` and `1.0` otherwise — vanilla's
-/// `getDimensions().scale(getAgeScale())`, which scales **both** axes, so it
-/// changes the flame's `s` and cannot change its layer count.
-///
-/// Kept as a free function rather than a method on `EntityDraw` because it reads
-/// `lodestone_data`, which the draw type deliberately does not.
-///
-/// Resolves `type_path` through [`lodestone_data::entity_type::EntityType::from_name`]
-/// (binary search over the generated registry) rather than
-/// `entity_type_id_parts`'s linear `strip_prefix` scan — called once per
-/// on-fire entity per frame, so the scan cost was real.
-/// Issue #573: `AvatarRenderer.setupRotations`'s swim branch — vanilla's own
-/// player-only body-pitch rotation toward horizontal as `swim_amount` ramps
-/// `0..1`, applied as an extra whole-body rotation on top of whatever
-/// [`lodestone_render::dying_entity_model_matrix`] already placed. A no-op
-/// when `swim_amount <= 0.0`, which is every non-swimming entity, every
-/// frame.
+/// Player-only swim pitch: an interpolated whole-body rotation toward
+/// horizontal as `swim_amount` moves from `0..1`, applied on top of the base
+/// placement from [`lodestone_render::dying_entity_model_matrix`]. The zero
+/// endpoint is an exact no-op. The transform is skipped whenever
+/// `swim_amount <= 0.0`; positive values can remain during the ramp's decay
+/// tail after leaving water, so that explicit condition is the only no-op
+/// guarantee.
 ///
 /// # Player only, not every `LivingEntity`
 ///
@@ -399,6 +384,17 @@ fn hide_armor_stand_parts(
     }
 }
 
+/// One entity's own hitbox width in blocks — its type's base width times its age
+/// scale — or `None` for a type with no `entity_dimensions` entry.
+///
+/// The width is the only input to the fire overlay's size. `age_scale` is
+/// [`EntityDraw::scale`], which scales the base dimensions on both axes and
+/// therefore changes the overlay's size without changing its layer count.
+///
+/// Kept as a free function rather than a method on `EntityDraw` because it reads
+/// `lodestone_data`, which the draw type deliberately does not. The type path is
+/// resolved through the generated registry's binary-search lookup; this runs
+/// once per on-fire entity per frame.
 fn flame_hitbox_width(type_path: &str, age_scale: f32) -> Option<f32> {
     let entity_type = lodestone_data::entity_type::EntityType::from_name(type_path)?;
     let dims = lodestone_data::entity_dimensions::base_dimensions_for(entity_type);
@@ -1191,9 +1187,9 @@ impl RenderState {
                 note_missing_entity_model(e.type_path.as_ref(), e.model_type_path());
                 continue;
             };
-            // Issue #573: the swim body-pitch rotation. Gated on `type_path`,
-            // not on `swim_amount > 0.0` alone — see `apply_swim_rotation`'s
-            // own doc for why only the player is ported.
+            // Apply the interpolated swim pitch only to the player. The type
+            // check is separate from the amount gate because this field is
+            // present for every entity kind.
             if e.type_path.as_ref() == "player" {
                 apply_swim_rotation(&mut instance, e.feet, e.yaw, e.death_time, e.pitch, e.swim_amount);
             }
@@ -3761,12 +3757,11 @@ mod tests {
         );
     }
 
-    /// Issue #573's own discriminating assertion: `swim_amount = 0.0` must be
-    /// the exact untouched orientation, `1.0` must rotate the body
-    /// substantially, and `0.5` must sit **strictly between** the two —
-    /// which a boolean/threshold implementation (snapping at some cutoff)
-    /// cannot do, since it can only ever agree with one endpoint or the
-    /// other.
+    /// Three-point control for the interpolated swim pitch: `0.0` must be the
+    /// exact untouched orientation, `1.0` must rotate the body substantially,
+    /// and `0.5` must lie strictly between those endpoints. The midpoint
+    /// check rules out a boolean or threshold implementation that snaps at a
+    /// cutoff.
     #[test]
     fn swim_rotation_interpolates_and_does_not_snap_at_a_threshold() {
         let feet = glam::Vec3::new(4.0, 70.0, -2.0);

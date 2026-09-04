@@ -328,20 +328,12 @@ fn structure_block_outline_draws_visible_pixels() {
     );
 }
 
-/// Headless proof that the plugin-billboard pass — the render half of issue
-/// #161's `ExtractSet::Debug` billboard channel (`docs/plugin-api.md`) —
-/// actually draws pixels through
-/// [`RenderState::set_plugin_billboards_source`], not merely that a pipeline
-/// object exists. Same differential idiom as
-/// `debug_lines_source_draws_visible_pixels` immediately above: render the
-/// same open-sky scene with the source unset and with it returning one
-/// bright, untextured billboard squarely in view, and confirm the second
-/// frame lit pixels the first did not.
-///
-/// This is deliberately the *only* place that calls
-/// `set_plugin_billboards_source` in this repo today — this test proves the
-/// pipeline side works in isolation, the same scope
-/// `debug_lines_source_draws_visible_pixels` documents for its own pass.
+/// Headless pixel differential for the plugin-billboard pass. Render the same
+/// open-sky scene with [`RenderState::set_plugin_billboards_source`] unset and
+/// with it returning one bright, untextured billboard in view; the second
+/// frame must contain pixels the first does not. Keeping the scene and camera
+/// identical makes the changed-pixel count attributable to billboard
+/// submission rather than pipeline construction.
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn plugin_billboards_source_draws_visible_pixels() {
@@ -2349,10 +2341,10 @@ fn linear_to_srgb(c: f32) -> f32 {
     if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 }
 }
 
-/// `TAB_ROW_FILL`'s alpha, `0x20 / 255` (`docs/tab-list.md`).
+/// `TAB_ROW_FILL`'s alpha, `0x20 / 255`.
 const TAB_ROW_FILL_ALPHA: f32 = 32.0 / 255.0;
 
-/// Vanilla's own blend: composited directly on raw gamma bytes, no colour
+/// Reference gamma-byte blend: composited directly on raw gamma bytes, no colour
 /// management at all. A white (`0xFFFFFF`) foreground at [`TAB_ROW_FILL_ALPHA`]
 /// over a grey background byte `bg` — every channel is symmetric for a grey
 /// background, so this is a scalar. Exact, not a bracket: raw-byte alpha
@@ -2362,10 +2354,10 @@ fn predicted_vanilla_gamma_byte(bg: u8) -> f32 {
     bg_f + TAB_ROW_FILL_ALPHA * (255.0 - bg_f)
 }
 
-/// The bug's own hypothesis: the GPU treats the shader's raw-byte-derived
-/// output as *linear* light because the target view is sRGB, blends in linear
-/// space, then re-encodes on write. White's linear value is `1.0` (sRGB's own
-/// fixed point), so only the background side needs converting.
+/// sRGB-target control hypothesis: the GPU treats the shader's raw-byte-derived
+/// output as *linear* light, blends in linear space, then re-encodes on write.
+/// White's linear value is `1.0` (sRGB's own fixed point), so only the
+/// background side needs converting.
 fn predicted_linear_hypothesis_gamma_byte(bg: u8) -> f32 {
     let bg_lin = srgb_to_linear(f32::from(bg) / 255.0);
     let blended_lin = TAB_ROW_FILL_ALPHA + bg_lin * (1.0 - TAB_ROW_FILL_ALPHA);
@@ -2374,12 +2366,11 @@ fn predicted_linear_hypothesis_gamma_byte(bg: u8) -> f32 {
 
 /// Build the *exact* `hud.wgsl` flat-colour pipeline `HudRenderer::new`
 /// builds in `hud.rs` (same vertex layout, same `ALPHA_BLENDING` state), but
-/// standalone against a caller-chosen `color_format` — so this gate can
-/// measure both the buggy (today's production, sRGB-target) and fixed
-/// (raw-target) blend without needing the off-limits `hud.rs`/`app/**` wiring
-/// that will eventually pick between them (see `docs/tab-list.md`'s "reported
-/// for brokering" note). Sourced from the same `shaders/hud.wgsl` file
-/// production uses, not a reimplementation.
+/// standalone against a caller-chosen `color_format`. The raw-target result
+/// represents production's `RenderTarget::raw_view_format()` plus
+/// `HudRenderer::flat_colour_view()` pairing; the sRGB target is an explicit
+/// control for the colour-space comparison. Sourced from the same
+/// `shaders/hud.wgsl` file production uses, not a reimplementation.
 fn build_hud_flat_pipeline(
     device: &wgpu::Device,
     color_format: wgpu::TextureFormat,
@@ -2527,57 +2518,43 @@ fn render_flat_blend_over_grey(
     [pixels[0], pixels[1], pixels[2], pixels[3]]
 }
 
-/// Issue #672: the tab list row fill (`TAB_ROW_FILL = 0x20FFFFFF`) reads "too
-/// bright" against vanilla. `docs/tab-list.md` diagnoses this as a
-/// colour-space mismatch, not a wrong constant: vanilla blends translucent
-/// GUI colour directly on raw gamma bytes, while this HUD's flat-colour
-/// pipeline (`hud.wgsl`) writes the same raw bytes into a render target whose
-/// view is sRGB-decoding, so the hardware blends in **linear** light instead.
+/// Gamma-byte HUD blend control for the tab-list row fill
+/// (`TAB_ROW_FILL = 0x20FFFFFF`). The reference composition blends
+/// translucent GUI colour directly on raw gamma bytes, while this HUD's
+/// flat-colour pipeline (`hud.wgsl`) is paired in production with
+/// `RenderTarget::raw_view_format()` and `HudRenderer::flat_colour_view()` so
+/// the hardware blends directly on gamma bytes. Comparing that raw target
+/// with an sRGB-decoding control, which blends in **linear** light, isolates
+/// the colour-space difference over the same sweep.
 ///
 /// Sweeps the background from black to white and renders the real
 /// `hud.wgsl`/`ALPHA_BLENDING` pipeline (built by [`build_hud_flat_pipeline`],
 /// sourced from the same `shaders/hud.wgsl` production uses) against two
 /// targets:
 ///
-/// - **raw** (`Rgba8Unorm`) — what [`lodestone_render::target::RenderTarget::raw_view_format`]
-///   now exposes, and what the brokered `hud.rs` fix is meant to draw the
-///   flat-colour pass into;
-/// - **corrected** (`Rgba8UnormSrgb`) — what every pipeline in this codebase
-///   (including, still, the unfixed production HUD pass) draws into today.
+/// - **raw** (`Rgba8Unorm`) — the raw view that production's
+///   `HudRenderer::flat_colour_view()` draws into (from
+///   [`lodestone_render::target::RenderTarget::raw_view_format`]);
+/// - **sRGB control** (`Rgba8UnormSrgb`) — an explicit comparison target whose
+///   view decodes to linear light before blending.
 ///
-/// # What is predicted exactly vs. bracketed — and a correction to the record
+/// # What is predicted exactly vs. bracketed
 ///
 /// Raw-byte alpha compositing in 8-bit space is plain linear interpolation,
 /// so the **raw** target's result is predicted to the byte
 /// ([`predicted_vanilla_gamma_byte`], tolerance ±2 for rounding). The
-/// **corrected** target's result is *not* asserted to the byte — this
+/// **sRGB control** target's result is *not* asserted to the byte — this
 /// codebase has already measured that `ALPHA_BLENDING` on an sRGB Metal
 /// target is "a real, repeatable, non-trivial function of the raw fragment
 /// alpha byte" that resists a textbook closed form — but it *is* bracketed.
 ///
-/// **`docs/tab-list.md` describes this sweep's shape as "fixed point at black
-/// and white, diverges most in between" — a symmetric hump. An independent
-/// re-derivation from the sRGB transfer function (`predicted_vanilla_gamma_byte`
-/// vs. [`predicted_linear_hypothesis_gamma_byte`], checked in a standalone
-/// script before this test was written, matching CLAUDE.md's own "re-derive
-/// the arithmetic separately, do not predict the plausible round number"
-/// rule) says otherwise for *this* colour pair.** `TAB_ROW_FILL`'s foreground
-/// is white — `1.0` in both gamma and linear representations, a genuine fixed
-/// point on its own — so the *only* source of divergence is the
-/// **background**'s sRGB decode, and that curve's nonlinearity is itself
-/// asymmetric (steep near `0`, near-identity approaching `1`). The predicted
-/// shape is **monotonically decreasing** from black to white: divergence
-/// ≈67/255 at `bg=0`, shrinking smoothly to exactly `0` at `bg=255` (the only
-/// literal fixed point, because foreground and background are then both
-/// white) — not a hump peaking in the middle. This matches the *other* half
-/// of `docs/tab-list.md`'s own sentence, which independently says the
-/// divergence is "large against a dark background..., shrinking toward zero
-/// as the background approaches white" — that clause and the "fixed point at
-/// black and white" clause describe two different shapes, and the assertions
-/// below follow the one the arithmetic (and the doc's own more precise
-/// clause) supports. If the real measurement disagrees with *this*
-/// prediction too, that is a further correction to make, not a reason to
-/// assert the doc's hump shape unverified.
+/// `TAB_ROW_FILL`'s foreground is white — `1.0` in both gamma and linear
+/// representations — so the only source of divergence is the background's
+/// sRGB decode. The independently evaluated transfer function predicts a
+/// monotonically decreasing difference from black to white: about `67/255` at
+/// `bg=0`, shrinking smoothly to exactly `0` at `bg=255`, where foreground
+/// and background coincide. The assertions below check that measured sweep
+/// against those independently derived expectations.
 #[test]
 #[ignore = "requires a GPU adapter"]
 fn hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target() {
@@ -2598,9 +2575,8 @@ fn hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target() {
     assert_eq!(CORRECTED.remove_srgb_suffix(), RAW);
 
     let fg = [1.0_f32, 1.0, 1.0, TAB_ROW_FILL_ALPHA];
-    // Black to white, nine points, endpoints included — the sweep that
-    // originally identified this as a colour-space bug rather than a wrong
-    // constant.
+    // Black to white, nine points, endpoints included — both target formats
+    // receive the same background sweep for a direct comparison.
     let sweep: [u8; 9] = [0, 32, 64, 96, 128, 160, 192, 224, 255];
 
     struct Row {
@@ -2641,10 +2617,9 @@ fn hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target() {
         );
     }
 
-    // 1) The raw target must match vanilla's own blend to the byte. This is
-    // the assertion that fails under the wrong pipeline: swap `RAW` for
-    // `CORRECTED` in the call above and every one of these goes red (see the
-    // module doc's neuter record).
+    // 1) The raw target must match the reference gamma-byte blend to the byte.
+    // Replacing `RAW` with `CORRECTED` makes these comparisons fail, so the
+    // format-sensitive differential is what gives this assertion its control.
     let mut raw_mismatches: Vec<(u8, f32, u8)> = Vec::new();
     for r in &rows {
         if (f32::from(r.raw_actual) - r.vanilla).abs() > 2.0 {
@@ -2658,9 +2633,9 @@ fn hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target() {
          {raw_mismatches:?}"
     );
 
-    // 2) The corrected (sRGB) target's error against vanilla must be large
-    // against a *dark* background -- this is the bug, reproduced live rather
-    // than asserted from the doc, and it is what makes assertion 1 meaningful
+    // 2) The sRGB control's error against the reference must be large against
+    // a *dark* background. This is measured live rather than asserted from
+    // prose, and it is what makes assertion 1 meaningful
     // rather than coincidental (a pipeline indifferent to format would pass
     // assertion 1 by luck if this one also passed). Per the module doc's
     // re-derivation, the divergence is largest near black and falls off
@@ -2682,13 +2657,12 @@ fn hud_flat_colour_blend_matches_vanilla_gamma_on_a_raw_target() {
          (re-check docs/tab-list.md) or this gate's fixture is broken."
     );
 
-    // 3) And it must collapse close to vanilla at the *white* end only —
+    // 3) And it must collapse close to the reference at the *white* end only —
     // white is the one point in this sweep where foreground and background
     // coincide (both `0xFFFFFF`), so every consistent blend model, gamma or
     // linear, must agree there. This is deliberately **not** asserted at
-    // black too — see the module doc's correction to `docs/tab-list.md`'s
-    // "fixed point at black and white" phrasing; black is where this sweep's
-    // divergence is largest, not where it collapses.
+    // black too — black is where this sweep's divergence is largest, not where
+    // it collapses.
     let mut white_end_errors: Vec<(u8, f32, u8)> = Vec::new();
     for r in rows.iter().filter(|r| r.bg == 255) {
         let err = (f32::from(r.corrected_actual) - r.vanilla).abs();
