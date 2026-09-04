@@ -11,6 +11,23 @@
 //! update game mode, …) where legacy servers sent discrete packets; that
 //! packing is a protocol-adapter concern. What lives here is the resulting
 //! per-entry state and the operations that mutate it.
+//!
+//! # Header, footer and per-player names carry no click/hover, on purpose
+//!
+//! [`TabList::header`]/[`TabList::footer`] and [`PlayerListEntry::display_name`]
+//! are [`Text`], the same component type a chat line or a sign uses, so a
+//! server could in principle set a `clickEvent`/`hoverEvent` on any of them.
+//! Nothing here interprets one, and that is not an omission: the decompiled
+//! overlay this list feeds (`crates/versions/26.2/.cache`'s
+//! `PlayerTabOverlay`/`Hud` sources) has no `mouseClicked`, no
+//! `handleComponentClicked` and no hover-tooltip call anywhere in either
+//! class — the tab overlay is drawn while the crosshair still owns the
+//! cursor, so there is no free pointer to hit-test against in the first
+//! place. `lodestone_shell::tablist::tab_list_view` accordingly flattens
+//! every one of these through `to_spans()`, which keeps colour and format
+//! but has no `click`/`hover` fields to carry even if this crate populated
+//! them — the honest shape for a surface vanilla itself never makes
+//! interactive.
 
 use std::collections::HashMap;
 

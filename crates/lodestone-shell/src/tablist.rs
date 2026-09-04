@@ -30,6 +30,16 @@
 //!
 //! ## How to change it, and the gotchas
 //!
+//! **Rows and banners flatten through `to_spans()`, never `to_interactive_spans()`,
+//! and that is not a gap to close.** [`lodestone_game::tablist::TabList::header`]/
+//! `footer` and a row's display name are ordinary [`Text`](lodestone_model::Text)
+//! and could in principle carry a `clickEvent`/`hoverEvent`, but this client's
+//! decompiled reference (`PlayerTabOverlay`/`Hud`) has no click or hover
+//! handling for the overlay at all — it draws while Tab is held and the
+//! crosshair still owns the cursor, so vanilla itself never has a free
+//! pointer to hit-test the list against. `to_spans()` keeps every run's
+//! colour and format, which is the whole of what this surface displays.
+//!
 //! **The header and footer render only when the server sent them.** A vanilla
 //! server sends neither unless a plugin or a datapack sets one, which is why
 //! vanilla's own tab list shows neither; [`banner_lines`] returns an empty `Vec`

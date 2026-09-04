@@ -57,10 +57,19 @@
 //! inheritance follows one rule throughout: a child's own value wins where it
 //! has one, otherwise the parent's survives.
 //!
-//! Not modelled: `translatable`, `keybind`, `score`, `selector`, `nbt` and
-//! `object` contents. A `Compound` carrying one of those and no `text` field
-//! contributes nothing rather than a placeholder — a real gap, disclosed
-//! here rather than half-built, and one no sign written by a player can hit.
+//! `translatable` **is** modelled — [`append_component_spans`]'s `Compound`
+//! arm resolves a `translate`/`with`/`fallback` node against a caller-supplied
+//! table exactly as [`lodestone_model::Text::resolve`] does over its own
+//! tree, ported by hand rather than shared (see "Why this is not
+//! `lodestone_model::text::Text`" below). [`SignText::parse`] passes no
+//! table, so a `translate` node it meets resolves to its own key — the same
+//! honest, disclosed "no table in hand" default `docs/text-resolution.md`
+//! documents for a server-list MOTD; [`SignText::parse_with_translate`] is
+//! the escape hatch for a caller that has a real one. `keybind`, `score`,
+//! `selector`, `nbt` and `object` stay unmodelled: a `Compound` carrying one
+//! of those and no `text`/`translate` field contributes nothing rather than
+//! a placeholder — a real gap, disclosed here rather than half-built, and
+//! one no sign written by a player can hit.
 //!
 //! # Why this is not `lodestone_model::text::Text`
 //!
@@ -75,7 +84,13 @@
 //! dependency cycle. [`SignTextSpan`] is this crate's own minimal analogue —
 //! same shape as [`lodestone_model::text::TextSpan`], already flattened and
 //! fully inherited rather than a tree, since sign text has no click/hover
-//! events or translation keys to preserve — and
+//! events to preserve (vanilla's own sign-editing/interaction is a whole-block
+//! action, never a per-run one, unlike a book page or a chat line) and no
+//! `translate` node left unresolved by the time it reaches one — a `Compound`
+//! carrying one is expanded during the walk itself (see the "Not modelled"
+//! paragraph above), so there is nothing later for a tree-shaped type to
+//! still be carrying. Passing a real translator into a walk that produces an
+//! already-flat type is what a closure buys over a tree here — and
 //! `lodestone-shell`'s `gpu/sign_text.rs` (which already depends on both
 //! crates) converts one into a real `lodestone_model::text::TextSpan` on its
 //! way into `gpu::nametag::layout_styled_ink_runs`, the same world-space
@@ -251,7 +266,17 @@ pub struct SignText {
 }
 
 impl SignText {
-    /// Parses a sign block entity's NBT. Always returns a value —
+    /// Parses a sign block entity's NBT against no translation table: a
+    /// `translate` node (see [`Self::parse_with_translate`]) resolves to its
+    /// own key rather than a real word, the same honest-when-no-table-exists
+    /// form `docs/text-resolution.md` documents for a server-list MOTD or an
+    /// item tooltip. No sign a player has ever typed carries one — every
+    /// real capture in `docs/block-entity-renderers.md` is a collapsed
+    /// string literal — so this is the right default for a caller with no
+    /// language table in hand, which is most of them (round-trip tests, the
+    /// legacy-chunk converters, the world's own NBT store).
+    ///
+    /// Always returns a value —
     /// `Nbt::End` (a sign the server sent no extra data for) and a malformed
     /// or unexpectedly-shaped compound both degrade to
     /// [`SignText::default`] rather than `None`, the same fail-open contract
@@ -260,18 +285,34 @@ impl SignText {
     /// vanishing.
     #[must_use]
     pub fn parse(nbt: &Nbt) -> Self {
+        Self::parse_with_translate(nbt, &|_| None)
+    }
+
+    /// [`Self::parse`], resolving any `translate` node it meets against a
+    /// real language table instead of showing the raw key. See the module
+    /// doc's "Field names, from the real codec" section for why a
+    /// `translate` node can appear here at all even though a player-typed
+    /// sign never produces one: nothing upstream of this parse rules one
+    /// out, and the previous version of this walker silently contributed
+    /// nothing at all for one — the same "an absence must be disclosed, not
+    /// discovered" defect the module doc's history section already tells
+    /// once for the JSON-vs-NBT shape.
+    #[must_use]
+    pub fn parse_with_translate(nbt: &Nbt, translate: &dyn Fn(&str) -> Option<String>) -> Self {
         let Nbt::Compound(fields) = nbt else {
             return SignText::default();
         };
         SignText {
-            front: find(fields, "front_text").map_or_else(SignSide::default, parse_side),
-            back: find(fields, "back_text").map_or_else(SignSide::default, parse_side),
+            front: find(fields, "front_text")
+                .map_or_else(SignSide::default, |side| parse_side(side, translate)),
+            back: find(fields, "back_text")
+                .map_or_else(SignSide::default, |side| parse_side(side, translate)),
             waxed: find(fields, "is_waxed").and_then(as_bool).unwrap_or(false),
         }
     }
 }
 
-fn parse_side(nbt: &Nbt) -> SignSide {
+fn parse_side(nbt: &Nbt, translate: &dyn Fn(&str) -> Option<String>) -> SignSide {
     let Nbt::Compound(fields) = nbt else {
         return SignSide::default();
     };
@@ -285,7 +326,7 @@ fn parse_side(nbt: &Nbt) -> SignSide {
     let mut lines: [Vec<SignTextSpan>; 4] = Default::default();
     if let Some(Nbt::List { elements, .. }) = find(fields, "messages") {
         for (slot, element) in lines.iter_mut().zip(elements.iter()) {
-            *slot = resolve_message(element);
+            *slot = resolve_message(element, translate);
         }
     }
     SignSide {
@@ -402,7 +443,11 @@ fn parse_text_color_name(name: &str) -> Option<u32> {
 ///   collapse-to-plain-string branch and it is the shape a player-typed
 ///   sign line always arrives in.
 /// * [`Nbt::Compound`] contributes its own `text` (styled by its own fields
-///   over the inherited ones) and then recurses into `extra` with that
+///   over the inherited ones), or — when it carries no `text` — its own
+///   `translate` (plus `with`/`fallback`), resolved against `translate` and
+///   expanded through [`expand_translate_pattern`]; `text` wins when both are
+///   present, the same precedence `lodestone_model`'s own NBT component
+///   parse uses. Either way it then recurses into `extra` with the node's
 ///   resolved style as the new parent.
 /// * [`Nbt::List`]: element `0` is the root and every later element is
 ///   *appended to it* as a sibling, so the rest inherit element `0`'s
@@ -413,6 +458,7 @@ fn append_component_spans(
     nbt: &Nbt,
     parent: ResolvedStyle,
     depth: usize,
+    translate: &dyn Fn(&str) -> Option<String>,
     out: &mut Vec<SignTextSpan>,
 ) {
     if depth > MAX_DEPTH {
@@ -424,23 +470,110 @@ fn append_component_spans(
             let resolved = ResolvedStyle::own_from_compound(fields).inherit(parent);
             if let Some(text) = find(fields, "text").and_then(as_string) {
                 resolved.push_text(text, out);
+            } else if let Some(key) = find(fields, "translate").and_then(as_string) {
+                let with: &[Nbt] = match find(fields, "with") {
+                    Some(Nbt::List { elements, .. }) => elements,
+                    _ => &[],
+                };
+                let fallback = find(fields, "fallback").and_then(as_string);
+                let pattern = translate(key)
+                    .or_else(|| fallback.map(str::to_owned))
+                    .unwrap_or_else(|| key.to_owned());
+                expand_translate_pattern(&pattern, with, resolved, translate, depth + 1, out);
             }
             if let Some(extra) = find(fields, "extra") {
-                append_component_spans(extra, resolved, depth + 1, out);
+                append_component_spans(extra, resolved, depth + 1, translate, out);
             }
         }
         Nbt::List { elements, .. } => {
             let Some((root, siblings)) = elements.split_first() else {
                 return;
             };
-            append_component_spans(root, parent, depth + 1, out);
+            append_component_spans(root, parent, depth + 1, translate, out);
             let sibling_parent = resolved_style_of(root, parent, depth + 1);
             for sibling in siblings {
-                append_component_spans(sibling, sibling_parent, depth + 1, out);
+                append_component_spans(sibling, sibling_parent, depth + 1, translate, out);
             }
         }
         _ => {}
     }
+}
+
+/// Expands a resolved `translate` pattern into spans styled by `parent`,
+/// substituting `with` — the same `%s` (sequential), `%N$s` (1-based
+/// indexed) and `%%` (literal `%`) placeholder grammar
+/// [`lodestone_model::Text::resolve`] applies over its own tree, ported here
+/// rather than shared because this crate cannot depend on that one (see the
+/// module doc's "Why this is not `lodestone_model::text::Text`" section).
+///
+/// Unlike that function, there is no tree to hand back: each substituted
+/// argument is itself walked through [`append_component_spans`] with
+/// `parent` as its resolving style and appended to `out` directly, since a
+/// [`SignTextSpan`] is already the fully-flattened, non-tree form. An
+/// out-of-range or absent argument contributes nothing, matching the model
+/// crate's own `expand_pattern`.
+fn expand_translate_pattern(
+    pattern: &str,
+    with: &[Nbt],
+    parent: ResolvedStyle,
+    translate: &dyn Fn(&str) -> Option<String>,
+    depth: usize,
+    out: &mut Vec<SignTextSpan>,
+) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let mut buffer = String::new();
+    let mut chars = pattern.chars().peekable();
+    let mut next_auto = 0usize;
+
+    let flush = |buffer: &mut String, out: &mut Vec<SignTextSpan>| {
+        if !buffer.is_empty() {
+            parent.push_text(buffer, out);
+            buffer.clear();
+        }
+    };
+    let push_arg = |index: usize, out: &mut Vec<SignTextSpan>| {
+        if let Some(arg) = with.get(index) {
+            append_component_spans(arg, parent, depth + 1, translate, out);
+        }
+    };
+
+    while let Some(character) = chars.next() {
+        if character != '%' {
+            buffer.push(character);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('%') => {
+                chars.next();
+                buffer.push('%');
+            }
+            Some('s') => {
+                chars.next();
+                flush(&mut buffer, out);
+                push_arg(next_auto, out);
+                next_auto += 1;
+            }
+            Some(digit) if digit.is_ascii_digit() => {
+                let mut index = 0usize;
+                while let Some(d) = chars.peek().copied().filter(char::is_ascii_digit) {
+                    chars.next();
+                    index = index.saturating_mul(10).saturating_add((d as usize) - ('0' as usize));
+                }
+                if chars.peek() == Some(&'$') {
+                    chars.next();
+                    if chars.peek() == Some(&'s') {
+                        chars.next();
+                    }
+                }
+                flush(&mut buffer, out);
+                push_arg(index.saturating_sub(1), out);
+            }
+            _ => buffer.push('%'),
+        }
+    }
+    flush(&mut buffer, out);
 }
 
 /// The style a node resolves to, for use as the parent of its own siblings —
@@ -464,9 +597,9 @@ fn resolved_style_of(nbt: &Nbt, parent: ResolvedStyle, depth: usize) -> Resolved
 /// Resolves one `messages` element into styled spans — see the module doc
 /// for why this is structural NBT and **not** JSON, and for the closed
 /// encode/decode loop that hid the difference.
-fn resolve_message(nbt: &Nbt) -> Vec<SignTextSpan> {
+fn resolve_message(nbt: &Nbt, translate: &dyn Fn(&str) -> Option<String>) -> Vec<SignTextSpan> {
     let mut out = Vec::new();
-    append_component_spans(nbt, ResolvedStyle::default(), 0, &mut out);
+    append_component_spans(nbt, ResolvedStyle::default(), 0, translate, &mut out);
     out
 }
 
@@ -498,6 +631,19 @@ mod tests {
             text: text.to_owned(),
             ..Default::default()
         }
+    }
+
+    /// A translator that resolves nothing — most fixtures below have no
+    /// `translate` node at all, and the ones that do pass their own table
+    /// explicitly.
+    fn no_tr(_: &str) -> Option<String> {
+        None
+    }
+
+    /// `resolve_message` with [`no_tr`], for the many fixtures with no
+    /// `translate` node to resolve.
+    fn resolve_message_plain(nbt: &Nbt) -> Vec<SignTextSpan> {
+        resolve_message(nbt, &no_tr)
     }
 
     /// A `Compound` component node, built from the real style record's and
@@ -637,7 +783,7 @@ mod tests {
                 ]),
             ),
         ]);
-        let spans = resolve_message(&node);
+        let spans = resolve_message_plain(&node);
         let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
         assert_eq!(joined, "hello world!");
     }
@@ -651,7 +797,7 @@ mod tests {
     fn a_string_element_is_literal_text_even_when_it_looks_like_json() {
         for raw in ["123", "true", "{\"text\":\"x\"}"] {
             assert_eq!(
-                resolve_message(&Nbt::String(raw.to_owned())),
+                resolve_message_plain(&Nbt::String(raw.to_owned())),
                 vec![plain(raw)],
                 "a collapsed literal must reach the draw verbatim: {raw}"
             );
@@ -673,7 +819,7 @@ mod tests {
             ]),
             Nbt::String("b".to_owned()),
         ]);
-        let spans = resolve_message(&node);
+        let spans = resolve_message_plain(&node);
         assert_eq!(spans.len(), 2, "{spans:?}");
         assert_eq!(spans[0].color, Some(0x00ff_5555));
         assert_eq!(
@@ -729,7 +875,7 @@ mod tests {
                 list(vec![compound(vec![("text", Nbt::String("b".to_owned()))])]),
             ),
         ]);
-        let spans = resolve_message(&node);
+        let spans = resolve_message_plain(&node);
         assert_eq!(spans.len(), 2, "{spans:?}");
         assert_eq!(spans[0].text, "a");
         assert_eq!(spans[0].color, Some(0x0012_3456));
@@ -756,7 +902,7 @@ mod tests {
                 ])]),
             ),
         ]);
-        let spans = resolve_message(&node);
+        let spans = resolve_message_plain(&node);
         assert_eq!(spans[0].color, Some(0x00ff_5555));
         assert_eq!(spans[1].color, Some(0x0000_ff00));
     }
@@ -766,7 +912,7 @@ mod tests {
     /// the dye-colour fallback is the *draw site*'s job, not this parser's.
     #[test]
     fn a_message_with_no_colour_anywhere_resolves_to_none() {
-        let spans = resolve_message(&compound(vec![(
+        let spans = resolve_message_plain(&compound(vec![(
             "text",
             Nbt::String("plain".to_owned()),
         )]));
@@ -793,7 +939,7 @@ mod tests {
                 ]),
             ),
         ]);
-        let spans = resolve_message(&node);
+        let spans = resolve_message_plain(&node);
         assert_eq!(spans.len(), 3, "{spans:?}");
         assert!(spans[0].bold && spans[0].underlined, "{:?}", spans[0]);
         // Inherits both flags from "a".
@@ -830,5 +976,111 @@ mod tests {
             );
         }
         assert_eq!(SignDyeColor::from_name("not_a_colour"), None);
+    }
+
+    /// **The regression this walker was given `translate` support for.**
+    /// Before it, a `Compound` with a `translate` field and no `text` matched
+    /// neither the `text` branch nor anything else, so
+    /// [`append_component_spans`]'s `Compound` arm contributed nothing at
+    /// all for it — silently, the same "matched no arm" shape the module doc's
+    /// history section already tells once for an unhandled `Compound`. A
+    /// two-argument pattern with indexed placeholders, because a sequential
+    /// `%s` reading would happen to produce the same order by coincidence.
+    #[test]
+    fn a_translate_node_resolves_against_the_supplied_table_with_indexed_args() {
+        let node = compound(vec![
+            ("translate", Nbt::String("sign.greeting".to_owned())),
+            (
+                "with",
+                list(vec![
+                    Nbt::String("Steve".to_owned()),
+                    Nbt::String("the village".to_owned()),
+                ]),
+            ),
+        ]);
+        let tr = |key: &str| {
+            (key == "sign.greeting").then(|| "Welcome %2$s, %1$s!".to_owned())
+        };
+        let spans = resolve_message(&node, &tr);
+        let joined: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(joined, "Welcome the village, Steve!");
+    }
+
+    /// [`SignText::parse`] itself passes no table — the honest "nothing to
+    /// consult" default `docs/text-resolution.md` documents for a
+    /// server-list MOTD — so a `translate` node it meets shows its own key
+    /// rather than vanishing, matching [`Text::resolve`]'s own fallback rule.
+    /// This is the negative control for the test above: without a real
+    /// table the key survives instead of the line going blank.
+    #[test]
+    fn parse_with_no_translator_falls_back_to_the_raw_key() {
+        let nbt = compound(vec![(
+            "front_text",
+            compound(vec![(
+                "messages",
+                list(vec![
+                    compound(vec![("translate", Nbt::String("sign.greeting".to_owned()))]),
+                    Nbt::String(String::new()),
+                    Nbt::String(String::new()),
+                    Nbt::String(String::new()),
+                ]),
+            )]),
+        )]);
+        let text = SignText::parse(&nbt);
+        assert_eq!(text.front.lines[0], vec![plain("sign.greeting")]);
+    }
+
+    /// A `fallback` string is used ahead of the bare key when the table has
+    /// no entry — the same three-step "table, then fallback, then key" order
+    /// [`lodestone_model::Text::resolve`] documents.
+    #[test]
+    fn an_unresolved_key_falls_back_to_the_components_own_fallback_before_the_key() {
+        let node = compound(vec![
+            ("translate", Nbt::String("some.missing.key".to_owned())),
+            ("fallback", Nbt::String("a plain fallback line".to_owned())),
+        ]);
+        let spans = resolve_message(&node, &no_tr);
+        assert_eq!(spans, vec![plain("a plain fallback line")]);
+    }
+
+    /// `text` wins over `translate` when a `Compound` somehow carries both —
+    /// the same precedence `lodestone_model`'s own NBT component parse uses,
+    /// so a sign and a chat line agree about which field a renderer trusts
+    /// first.
+    #[test]
+    fn a_text_field_wins_over_a_translate_field_on_the_same_node() {
+        let node = compound(vec![
+            ("text", Nbt::String("literal wins".to_owned())),
+            ("translate", Nbt::String("sign.greeting".to_owned())),
+        ]);
+        let tr = |key: &str| (key == "sign.greeting").then(|| "should not appear".to_owned());
+        let spans = resolve_message(&node, &tr);
+        assert_eq!(spans, vec![plain("literal wins")]);
+    }
+
+    /// An argument that itself carries style keeps it — a translate node's
+    /// substituted argument is walked through the full component parse, not
+    /// dropped to plain text, so a coloured killer name inside a translated
+    /// sign line (the shape `death.attack.mob`-style keys have) still reaches
+    /// the board in colour.
+    #[test]
+    fn a_translate_arguments_own_style_survives_the_substitution() {
+        let node = compound(vec![
+            ("translate", Nbt::String("%s says hi".to_owned())),
+            (
+                "with",
+                list(vec![compound(vec![
+                    ("text", Nbt::String("Notch".to_owned())),
+                    ("color", Nbt::String("red".to_owned())),
+                ])]),
+            ),
+        ]);
+        // No table entry: the pattern falls back to the key itself, which is
+        // the literal format string here, exercising substitution either way.
+        let spans = resolve_message(&node, &no_tr);
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        assert_eq!(spans[0].text, "Notch");
+        assert_eq!(spans[0].color, Some(0x00ff_5555));
+        assert_eq!(spans[1].text, " says hi");
     }
 }
