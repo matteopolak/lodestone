@@ -52,12 +52,6 @@ fn test_nav(tag: &str) -> MenuNav {
     test_nav_path(tag, true)
 }
 
-/// [`test_nav`] with **no** account in the roster: the ownership gate is closed,
-/// so `frame_for` draws the gate whatever screen `UiState` is on.
-fn unowned_test_nav(tag: &str) -> MenuNav {
-    test_nav_path(tag, false)
-}
-
 /// The shared body. `owned` seeds a one-account `profiles.json` beside the
 /// server list **before** construction, because `AccountsNav` reads the roster
 /// once in its constructor.

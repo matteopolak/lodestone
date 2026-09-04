@@ -2169,11 +2169,6 @@ fn sim_with_particles(count: i32) -> (Sim, Camera) {
     (sim, camera)
 }
 
-/// [`sim_with_particles`] at the full [`HOLD_MEASUREMENT_PARTICLES`].
-fn sim_with_many_particles() -> (Sim, Camera) {
-    sim_with_particles(HOLD_MEASUREMENT_PARTICLES)
-}
-
 /// [`Sim::lock_holds`]'s guard-*acquisition* count (not duration) for one
 /// `extract_particles` call over `count` particles, plus how many particles
 /// actually survived to be extracted — the volume half of the *world*-species
