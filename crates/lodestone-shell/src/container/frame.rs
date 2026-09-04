@@ -237,6 +237,18 @@ pub struct ContainerFrame<'a> {
     /// ingredients, which a local grid match cannot predict from an
     /// incomplete or empty grid.
     pub recipe_ghost: Option<&'a ItemStack>,
+    /// The stonecutter's own result grid, already resolved to drawable
+    /// stacks and already filtered to whatever the input slot holds — see
+    /// `crate::container::stonecutter::server_matches`. `&[]` (the default)
+    /// draws no buttons, matching every existing caller (headless builds,
+    /// the pixel gates, `tests/container_screen.rs`).
+    ///
+    /// This is the server's own authoritative list
+    /// (`lodestone_game::recipe_sync::RecipeBookSync::stonecutter_results_for`),
+    /// not `crate::container::stonecutter::matches`'s local recipe-book
+    /// guess: the two agree on this build's own bundled corpus but only this
+    /// field is correct against a server running a different datapack.
+    pub stonecutter_matches: &'a [ItemStack],
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -269,6 +281,7 @@ impl<'a> ContainerFrame<'a> {
             beacon_secondary: None,
             bundle_selection: None,
             recipe_ghost: None,
+            stonecutter_matches: &[],
             effects: &[],
         }
     }
@@ -300,6 +313,7 @@ impl<'a> ContainerFrame<'a> {
             beacon_secondary: None,
             bundle_selection: None,
             recipe_ghost: None,
+            stonecutter_matches: &[],
             effects: &[],
         }
     }
@@ -429,6 +443,14 @@ impl<'a> ContainerFrame<'a> {
     #[must_use]
     pub fn with_recipe_ghost(mut self, ghost: Option<&'a ItemStack>) -> Self {
         self.recipe_ghost = ghost;
+        self
+    }
+
+    /// Attach the stonecutter's server-derived result grid — see
+    /// [`stonecutter_matches`](Self::stonecutter_matches).
+    #[must_use]
+    pub fn with_stonecutter_matches(mut self, matches: &'a [ItemStack]) -> Self {
+        self.stonecutter_matches = matches;
         self
     }
 
