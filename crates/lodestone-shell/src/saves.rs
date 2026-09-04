@@ -704,8 +704,14 @@ pub fn create_world(
 /// [`crate::menu::create_world::WorldCreationConfig::flat_layers`]/
 /// [`crate::menu::create_world::WorldCreationConfig::single_biome`] — see
 /// [`create_world_in`]'s own doc for where and why this reaches disk.
+///
+/// **Not** `#[cfg(not(target_arch = "wasm32"))]`, unlike [`create_world_in`]'s
+/// wasm32-refusing body: this is plain data (two owned `String`-keyed
+/// shapes, no file handle), and both of its callers'
+/// `generator_override: Option<(&GeneratorOverride, &str)>` parameters are
+/// ungated, so a wasm32 build must still be able to name the type even
+/// though nothing on that target ever constructs or reads one.
 #[derive(Debug, Clone, PartialEq)]
-#[cfg(not(target_arch = "wasm32"))]
 pub enum GeneratorOverride {
     /// Vanilla's own flat ("Superflat") generator — bottom-to-top
     /// `(block id, height)` pairs, plus the fixed surface biome and the two
