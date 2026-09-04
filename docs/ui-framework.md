@@ -79,6 +79,8 @@ what it can do:
 
 A widget in the wrong list compiles, is unit-testable, and is simply unclickable or invisible with
 nothing failing loudly — this is the most common way a new widget silently does nothing.
+`FocusSet` retains render membership for registry classification, but screen-specific renderers own
+draw order, so the focus API does not expose a separate raw render-list accessor.
 
 `Screen`-level key handling has a strict order: Escape is answered first (if the screen closes on
 it), then the **currently focused child alone** gets the key — dispatch never iterates the whole
