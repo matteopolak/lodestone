@@ -956,11 +956,10 @@ impl Sim {
 
     /// This frame's particle instances, ready for upload.
     ///
-    /// Owned rather than borrowed since §4.1(c). The alternative — handing back a
-    /// mapped read guard — would keep the one `World` read-locked for the whole GPU
-    /// upload, which is exactly the "ingest stalls the frame" failure this change
-    /// has to avoid, only inverted: the frame would stall ingest. A `memcpy` of a
-    /// few thousand POD instances is the cheaper end of that trade.
+    /// Owned rather than borrowed: extraction copies the instances out of the
+    /// `World` read guard before the renderer uploads them. Returning a mapped
+    /// guard would hold the world lock for the whole GPU upload and stall ingest;
+    /// copying a few thousand POD instances keeps the lock duration bounded.
     #[must_use]
     pub fn particle_instances(&self) -> Vec<ParticleInstance> {
         self.read(|w| w.resource::<ParticleSim>().0.instances().to_vec())
