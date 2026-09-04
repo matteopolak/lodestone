@@ -706,19 +706,22 @@ mod tests {
         );
     }
 
-    /// A component kind this parse does not model (`translatable`) yields no
+    /// A component kind this parse does not model (`selector`) yields no
     /// spans, which is the *other* remaining hypothesis for the owner's
     /// signs. It has to be distinguishable from a missing record, not folded
     /// into one "no text" outcome.
+    ///
+    /// Not `translate`: that component kind is modelled (it resolves against
+    /// a caller-supplied table, falling back to its own key with no table in
+    /// hand), so it now reports a span rather than none — `keybind`, `score`,
+    /// `selector`, `nbt` and `object` are the ones this parse still leaves
+    /// unmodelled.
     #[test]
     fn an_unmodelled_component_reports_zero_spans() {
         let messages = Nbt::List {
             element_type: NbtTag::Compound,
             elements: vec![
-                Nbt::Compound(vec![(
-                    "translate".to_owned(),
-                    nbt_string("block.minecraft.stone"),
-                )]),
+                Nbt::Compound(vec![("selector".to_owned(), nbt_string("@e"))]),
                 nbt_string(""),
                 nbt_string(""),
                 nbt_string(""),
