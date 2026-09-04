@@ -1078,6 +1078,9 @@ pub enum ServerBound {
         /// Outcome reported by the client.
         response: ResourcePackResponseKind,
     },
+    /// The client completed its initial placement and is ready for movement
+    /// dependent simulation.
+    PlayerLoaded,
     /// The client closed a container screen (`ServerboundContainerClosePacket`).
     /// `window_id` is the id the client had open — vanilla's
     /// `ServerPlayer::doCloseContainer` compares this against nothing at all

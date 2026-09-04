@@ -109,7 +109,9 @@ eases half the remaining distance per tick and is what the camera reads.
 
 Movement is client-authoritative, so the server reads no physics tick for
 `fallDistance` — everything is driven off inbound move packets, sampling
-the block below the feet. Damage: `floor((distance + 1e-6 -
+the block below the feet. The first placement movement is not fed to the fall
+tracker until the client sends its empty readiness marker; a respawn re-arms
+that gate. Damage: `floor((distance + 1e-6 -
 SAFE_FALL_DISTANCE) * blockModifier * FALL_DAMAGE_MULTIPLIER)`, applied
 only when positive (`SAFE_FALL_DISTANCE = 3.0`, multiplier `1.0`, default
 block modifier `1.0`, cushioned `0.2` for hay/honey, slime `0.0`, powder

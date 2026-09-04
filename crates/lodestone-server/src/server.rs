@@ -3924,6 +3924,7 @@ where
             | ServerBound::RecipePlaced { .. }
             | ServerBound::RecipeBookSettingsChanged { .. }
             | ServerBound::ResourcePackResponse { .. }
+            | ServerBound::PlayerLoaded
             | ServerBound::ContainerClosed { .. }
             | ServerBound::Attack { .. }
             | ServerBound::InteractEntity { .. }
@@ -7641,6 +7642,9 @@ async fn apply_client_command<T, P, S>(
     // Whether the player died in a portal-traveled dimension. The caller uses
     // this flag to rebuild the dimension view after respawn.
     away_from_home: bool,
+    // The readiness marker must be received again after a respawn before
+    // movement-dependent simulation resumes.
+    client_loaded: &mut bool,
     // Set to the resolved respawn position when a cross-dimension reset is
     // required; otherwise remains `None`.
     dimension_reset: &mut Option<Vec3>,
@@ -7653,6 +7657,7 @@ where
     match action {
         0 if vitals.health() <= 0.0 => {
             vitals.respawn();
+            *client_loaded = false;
             // Prefer a usable bed position and fall back to the world spawn when
             // the bed is broken or obstructed.
             let target = respawn
@@ -9713,9 +9718,10 @@ fn swing_action(hand: u8) -> u8 {
 /// selection/container click/creative-slot write against [`PlayerInventory`]
 /// (see
 /// [`apply_carried_item_changed`]/[`apply_container_clicked`]/[`apply_creative_mode_slot_set`]).
-/// Every other packet decodes to [`ServerBound::Ignored`] in `State::Play`
-/// under the current protocols (no further state transitions are modeled —
-/// no dimension change yet) and is a no-op here.
+/// The `PlayerLoaded` marker is folded into the connection's readiness state;
+/// fall simulation begins only after that marker, and is re-armed after a
+/// respawn. Other unmodeled packets remain [`ServerBound::Ignored`] in
+/// `State::Play`.
 /// The three world-derived facts [`FallSample`] needs, read off the terrain the
 /// player is standing in.
 ///
@@ -9940,6 +9946,7 @@ async fn fall_status_sample<T, P, S>(
     vitals: &mut PlayerVitals,
     username: &str,
     on_ground: bool,
+    client_loaded: bool,
     // `invulnerable` — creative and spectator. `fall` is not in
     // `#minecraft:bypasses_invulnerability` (only `out_of_world` and
     // `generic_kill` are), so an invulnerable player takes none of it. The
@@ -9957,6 +9964,9 @@ where
     P: ServerProtocol,
     S: ChunkSource + ?Sized,
 {
+    if !client_loaded {
+        return Ok(());
+    }
     let Some((x, y, z)) = *player_pos else {
         return Ok(());
     };
@@ -10096,6 +10106,9 @@ async fn dispatch_play_packet<T, P, S>(
     // Responses to server-pushed resource packs are recorded here for the
     // host; policy decisions remain outside the protocol loop.
     resource_packs: &ResourcePackPushFeed,
+    // Set by the client's empty readiness marker; fall simulation waits for
+    // this signal so the first placement movement cannot create a false fall.
+    client_loaded: &mut bool,
     // This connection's composter roll source — seeded once in
     // `serve_play`, advanced once per right-click (see
     // [`apply_composter_use`]'s `roll` parameter).
@@ -10331,7 +10344,7 @@ where
             )
             .await?;
 
-            if let Some(raw) =
+            if *client_loaded && let Some(raw) =
                 fall.on_player_moved(fall_sample(source.get(), x, y, z, on_ground))
                 && !Abilities::for_mode(*game_mode).invulnerable
                 && vitals.apply_fall_damage(raw as f32).is_some()
@@ -10377,6 +10390,7 @@ where
                 vitals,
                 username,
                 on_ground,
+                *client_loaded,
                 Abilities::for_mode(*game_mode).invulnerable,
                 advancements,
                 player_uuid,
@@ -10397,6 +10411,7 @@ where
                 vitals,
                 username,
                 on_ground,
+                *client_loaded,
                 Abilities::for_mode(*game_mode).invulnerable,
                 advancements,
                 player_uuid,
@@ -10683,6 +10698,9 @@ where
         }
         ServerBound::ResourcePackResponse { id, response } => {
             resource_packs.record_response(ResourcePackResponseRecord { id, response });
+        }
+        ServerBound::PlayerLoaded => {
+            *client_loaded = true;
         }
         ServerBound::ContainerClosed { window_id } => {
             // Closing returns carried items and virtual crafting/workstation
@@ -11473,6 +11491,7 @@ where
                 action,
                 commands.permission_level,
                 away_from_home,
+                client_loaded,
                 dimension_reset,
             )
             .await?;
@@ -12224,6 +12243,7 @@ where
     let mut pending_keep_alive: Option<i64> = None;
     let mut pending_break: Option<PendingBreak> = None;
     let mut player_pos: Option<(f64, f64, f64)> = None;
+    let mut client_loaded = false;
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
     let mut player_rot: Option<Rotation> = None;
@@ -12578,6 +12598,7 @@ where
                     entities.players(),
                     block_ticks,
                     resource_packs,
+                    &mut client_loaded,
                     &mut composter_rng,
                     &mut bone_meal_rng,
                     &mut experience,
@@ -14762,6 +14783,7 @@ where
     // drowning, border damage, burning, status effects, and hunger; fall damage
     // remains driven by inbound `PlayerMoved` packets.
     let mut player_pos: Option<(f64, f64, f64)> = None;
+    let mut client_loaded = false;
     // The rotation is stored alongside `player_pos` — see `dispatch_play_packet`'s own
     // parameter comment.
     let mut player_rot: Option<Rotation> = None;
@@ -14940,6 +14962,7 @@ where
             entities.players(),
             block_ticks,
             _resource_packs,
+            &mut client_loaded,
             &mut composter_rng,
             &mut bone_meal_rng,
             &mut experience,
@@ -18616,6 +18639,7 @@ mod tests {
         let world = crate::world_state::WorldStateHandle::default();
         let mut advancements =
             AdvancementManager::new(Vec::new()).expect("an empty advancement tree is valid");
+        let mut client_loaded = true;
         let mut dimension_reset: Option<Vec3> = None;
 
         apply_client_command(
@@ -18633,6 +18657,7 @@ mod tests {
             0, // PERFORM_RESPAWN
             4, // irrelevant here: only the `REQUEST_GAMERULE_VALUES` arm reads it
             away_from_home,
+            &mut client_loaded,
             &mut dimension_reset,
         )
         .await
