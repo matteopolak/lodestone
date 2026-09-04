@@ -100,4 +100,4 @@ pub mod sound_ids;
 pub use lodestone_canonical::{canonical, flattening};
 
 pub use adapter::{PROTOCOL, PROTOCOLS, V340Adapter, adapter, adapter_for};
-pub use server_protocol::V340ServerProtocol;
+pub use server_protocol::{V316ServerProtocol, V340ServerProtocol};
