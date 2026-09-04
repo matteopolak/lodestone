@@ -1706,6 +1706,43 @@ mod tests {
         }
     }
 
+    /// Every production caller of [`lodestone_worldgen::density::Builder::build`]
+    /// (the overworld/nether/end generators, the aquifer, the surface system,
+    /// the biome climate sampler, the ore-vein programs) reads its document
+    /// from [`EmbeddedResolver`] and then `.expect(...)`s the `Result` rather
+    /// than propagating it, on the grounds that a document we compiled into
+    /// the binary can only fail to parse as a shipping bug, never as
+    /// attacker-supplied input. That claim was previously an assumption; this
+    /// test makes it a checked gate by walking every embedded
+    /// `density_function/*` entry through the same builder those callers use.
+    /// A future bundled document that does not build now fails here, at the
+    /// data boundary, instead of surfacing later as a panic wherever a
+    /// generator happens to get constructed.
+    #[test]
+    fn every_embedded_density_function_document_builds() {
+        use lodestone_worldgen::density::Builder;
+
+        let resolver = EmbeddedResolver;
+        let builder = Builder::new(0, &resolver);
+        let mut checked = 0usize;
+        for &(id, raw) in EMBEDDED_WORLDGEN {
+            if !id.starts_with("density_function/") {
+                continue;
+            }
+            let node: Value = serde_json::from_str(raw)
+                .unwrap_or_else(|e| panic!("embedded '{id}' is not valid JSON: {e}"));
+            if let Err(err) = builder.build(&node) {
+                panic!("embedded density-function document '{id}' failed to build: {err}");
+            }
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no 'density_function/*' entries found in the embedded table — this scan \
+             would otherwise pass vacuously"
+        );
+    }
+
     /// Issue #407's version gate, driven end to end: a protocol reporting the
     /// 26.2 scope is served the bundled data; a protocol reporting no scope (a
     /// family without worldgen, or one whose data this crate does not embed)

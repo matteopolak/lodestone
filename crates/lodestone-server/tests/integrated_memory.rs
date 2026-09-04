@@ -213,7 +213,9 @@ fn overworld_final_density(seed: i64, root: &Path) -> Density {
     .unwrap();
     // Build first, then drop the borrow before returning the owned Density.
     let builder = Builder::new(seed, &resolver);
-    builder.build(&settings["noise_router"]["final_density"])
+    builder
+        .build(&settings["noise_router"]["final_density"])
+        .expect("bundled final_density density-function document")
 }
 
 #[tokio::test]

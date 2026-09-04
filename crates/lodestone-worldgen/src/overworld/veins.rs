@@ -106,9 +106,15 @@ impl VeinPrograms {
         }
         let id = |name: &str| interner.id_of(name);
         Some(Self {
-            toggle: Program::compile(&builder.build(&router["vein_toggle"])),
-            ridged: Program::compile(&builder.build(&router["vein_ridged"])),
-            gap: Program::compile(&builder.build(&router["vein_gap"])),
+            toggle: Program::compile(
+                &builder.build(&router["vein_toggle"]).expect("bundled vein_toggle density-function document"),
+            ),
+            ridged: Program::compile(
+                &builder.build(&router["vein_ridged"]).expect("bundled vein_ridged density-function document"),
+            ),
+            gap: Program::compile(
+                &builder.build(&router["vein_gap"]).expect("bundled vein_gap density-function document"),
+            ),
             positional: {
                 let mut src = builder.positional_factory().from_hash_of("minecraft:ore");
                 src.fork_positional()

@@ -626,7 +626,9 @@ impl OverworldGenerator {
     ) -> Self {
         let builder = Builder::new(seed, resolver);
         let router = &settings["noise_router"];
-        let final_density = builder.build(&router["final_density"]);
+        let final_density = builder
+            .build(&router["final_density"])
+            .expect("bundled final_density density-function document");
         let canon = identity_canon(settings);
         // Built here rather than in the `Self { .. }` literal below because
         // `SurfaceSystem::new` interns its whole result-state set into it at
@@ -674,15 +676,33 @@ impl OverworldGenerator {
         // after every one of these `builder.build()` calls.
         let aquifer_trees = AquiferTrees {
             final_density: crate::engine::Program::compile(&final_density),
-            erosion: crate::engine::Program::compile(&builder.build(&router["erosion"])),
-            depth: crate::engine::Program::compile(&builder.build(&router["depth"])),
-            barrier: std::sync::Arc::new(builder.build(&router["barrier"])),
-            floodedness: std::sync::Arc::new(
-                builder.build(&router["fluid_level_floodedness"]),
+            erosion: crate::engine::Program::compile(
+                &builder.build(&router["erosion"]).expect("bundled erosion density-function document"),
             ),
-            spread: std::sync::Arc::new(builder.build(&router["fluid_level_spread"])),
-            lava: std::sync::Arc::new(builder.build(&router["lava"])),
-            prelim: std::sync::Arc::new(builder.build(&router["preliminary_surface_level"])),
+            depth: crate::engine::Program::compile(
+                &builder.build(&router["depth"]).expect("bundled depth density-function document"),
+            ),
+            barrier: std::sync::Arc::new(
+                builder.build(&router["barrier"]).expect("bundled barrier density-function document"),
+            ),
+            floodedness: std::sync::Arc::new(
+                builder
+                    .build(&router["fluid_level_floodedness"])
+                    .expect("bundled fluid_level_floodedness density-function document"),
+            ),
+            spread: std::sync::Arc::new(
+                builder
+                    .build(&router["fluid_level_spread"])
+                    .expect("bundled fluid_level_spread density-function document"),
+            ),
+            lava: std::sync::Arc::new(
+                builder.build(&router["lava"]).expect("bundled lava density-function document"),
+            ),
+            prelim: std::sync::Arc::new(
+                builder
+                    .build(&router["preliminary_surface_level"])
+                    .expect("bundled preliminary_surface_level density-function document"),
+            ),
             positional: {
                 use crate::rng::{PositionalRandomFactory, RandomSource};
                 let mut src = builder

@@ -477,7 +477,9 @@ impl SurfaceSystem {
         let surface_noise = builder.noise("minecraft:surface");
         let surface_secondary_noise = builder.noise("minecraft:surface_secondary");
         let master = builder.positional_factory();
-        let prelim = builder.build(&settings["noise_router"]["preliminary_surface_level"]);
+        let prelim = builder
+            .build(&settings["noise_router"]["preliminary_surface_level"])
+            .expect("bundled preliminary_surface_level density-function document");
 
         let parser = RuleParser {
             builder,

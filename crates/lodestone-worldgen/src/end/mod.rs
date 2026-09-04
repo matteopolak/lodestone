@@ -346,7 +346,9 @@ impl EndGenerator {
         let router = &settings["noise_router"];
         let interner = Arc::new(StateInterner::new());
         let canon = identity_canon(settings);
-        let final_density = Program::compile(&builder.build(&router["final_density"]));
+        let final_density = Program::compile(
+            &builder.build(&router["final_density"]).expect("bundled final_density density-function document"),
+        );
         let surface = SurfaceSystem::new(settings, &builder, &canon, &interner);
 
         let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(0) as i32;

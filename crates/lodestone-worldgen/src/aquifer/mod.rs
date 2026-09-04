@@ -269,7 +269,11 @@ impl AquiferSystem {
             let min_y = settings["noise"]["min_y"].as_i64().unwrap_or(-64) as i32;
             let height = settings["noise"]["height"].as_i64().unwrap_or(384) as i32;
             return Self::disabled(
-                Program::compile(&builder.build(&router["final_density"])),
+                Program::compile(
+                    &builder
+                        .build(&router["final_density"])
+                        .expect("bundled final_density density-function document"),
+                ),
                 builder.slot_count(),
                 sea_level,
                 fluid_from_settings(settings),
@@ -282,14 +286,36 @@ impl AquiferSystem {
             );
         }
 
-        let final_density_node = Program::compile(&builder.build(&router["final_density"]));
-        let erosion_node = Program::compile(&builder.build(&router["erosion"]));
-        let depth_node = Program::compile(&builder.build(&router["depth"]));
-        let barrier = Arc::new(builder.build(&router["barrier"]));
-        let floodedness = Arc::new(builder.build(&router["fluid_level_floodedness"]));
-        let spread = Arc::new(builder.build(&router["fluid_level_spread"]));
-        let lava = Arc::new(builder.build(&router["lava"]));
-        let prelim = Arc::new(builder.build(&router["preliminary_surface_level"]));
+        let final_density_node = Program::compile(
+            &builder
+                .build(&router["final_density"])
+                .expect("bundled final_density density-function document"),
+        );
+        let erosion_node = Program::compile(
+            &builder.build(&router["erosion"]).expect("bundled erosion density-function document"),
+        );
+        let depth_node = Program::compile(
+            &builder.build(&router["depth"]).expect("bundled depth density-function document"),
+        );
+        let barrier =
+            Arc::new(builder.build(&router["barrier"]).expect("bundled barrier density-function document"));
+        let floodedness = Arc::new(
+            builder
+                .build(&router["fluid_level_floodedness"])
+                .expect("bundled fluid_level_floodedness density-function document"),
+        );
+        let spread = Arc::new(
+            builder
+                .build(&router["fluid_level_spread"])
+                .expect("bundled fluid_level_spread density-function document"),
+        );
+        let lava =
+            Arc::new(builder.build(&router["lava"]).expect("bundled lava density-function document"));
+        let prelim = Arc::new(
+            builder
+                .build(&router["preliminary_surface_level"])
+                .expect("bundled preliminary_surface_level density-function document"),
+        );
 
         // vanilla's own aquifer-random query = random.fromHashOf("minecraft:aquifer").forkPositional().
         let mut aquifer_src = builder
