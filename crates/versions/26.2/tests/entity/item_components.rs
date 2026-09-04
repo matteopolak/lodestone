@@ -484,6 +484,45 @@ fn replays_the_captured_plain_pickaxe_fixture() {
     );
 }
 
+/// Replays a `potion_contents` payload authored by the external 26.2 survival
+/// oracle. Unlike the hand-built potion tests below, this fixture independently
+/// fixes the holder/custom-effect/custom-name field order and scalar encodings.
+#[test]
+fn replays_the_captured_potion_contents_fixture() {
+    let payload = fixture_bytes("potion_contents_complete.hex");
+    let item = slot_item(&handle(play::clientbound::CONTAINER_SET_SLOT, &payload));
+
+    assert_eq!(item.item.to_string(), "minecraft:potion");
+    assert_eq!(item.components.potion, Some(13));
+    assert_eq!(
+        item.components.potion_custom_name.as_deref(),
+        Some("night_vision")
+    );
+    assert_eq!(
+        item.components.potion_custom_effects,
+        vec![MobEffectInstance {
+            // The 26.2 registry report assigns poison id 18; the capture carries
+            // that independently as byte `12`.
+            effect_id: 18,
+            amplifier: 1,
+            duration_ticks: 45,
+            ambient: false,
+            show_particles: true,
+            show_icon: true,
+        }]
+    );
+    assert_eq!(item.components.potion_color, Some(0xFF12_3456));
+    assert!(!item.components.has_unmodeled);
+
+    let game_item = lodestone_game::item::ItemStack::from(&item);
+    assert_eq!(game_item.potion_effect_id(), Some(13));
+    assert_eq!(
+        game_item.potion_custom_effects(),
+        item.components.potion_custom_effects
+    );
+    assert_eq!(game_item.potion_custom_name(), Some("night_vision"));
+}
+
 /// `minecraft:pot_decorations` decodes its four sherds into the right four faces.
 ///
 /// Wire shape (26.2 `vanilla's own pot decorations's own stream codec` =
@@ -818,20 +857,19 @@ fn a_brick_face_and_a_short_list_both_decode_as_undecorated() {
     assert_eq!(pot.front, None, "past the declared count");
 }
 
-/// `minecraft:potion_contents` decodes into the *mixed* colour, and a component
-/// placed after it in the same patch proves the reader is still correctly
-/// aligned — the general risk with any component whose payload is not
-/// length-prefixed.
+/// `minecraft:potion_contents` decodes into both the raw potion registry id and
+/// the mixed colour, and a component placed after it in the same patch proves the
+/// reader is still correctly aligned — the general risk with any component whose
+/// payload is not length-prefixed.
 ///
 /// Wire shape (`vanilla's own potion contents's own stream codec`): `Optional<Holder<Potion>>`,
-/// `Optional<Integer>`, `List<MobEffectInstance>`, `Optional<String>`. This
-/// stack references `minecraft:swiftness` by holder id with no custom colour and
-/// no custom effects, so the expected colour is exactly what
-/// `lodestone_data::potion::potion_color` computes from the potion's own
-/// built-in effect list — an outside source this test does not itself derive.
+/// `Optional<Integer>`, `List<MobEffectInstance>`, `Optional<String>`. Stack id
+/// 13 is `minecraft:swiftness` in the 26.2 registry report. Its expected
+/// colour is the independently recorded speed-effect colour, not a value encoded
+/// and then decoded by this implementation.
 #[test]
-fn decodes_potion_contents_into_the_mixed_colour_and_stays_aligned() {
-    let swiftness = lodestone_data::potion::potion_id("minecraft:swiftness").expect("swiftness");
+fn decodes_potion_contents_into_the_registry_id_and_mixed_colour_and_stays_aligned() {
+    let swiftness = 13;
 
     let mut patch = Writer::default();
     patch.var_i32(2); // two added components
@@ -842,7 +880,8 @@ fn decodes_potion_contents_into_the_mixed_colour_and_stays_aligned() {
     patch.var_i32(swiftness);
     patch.bool(false); // no custom_color
     patch.var_i32(0); // no custom_effects
-    patch.bool(false); // no custom_name
+    patch.bool(true); // potion custom_name present
+    patch.string("night_vision");
 
     // A second, ordinary component right after it — if `potion_contents`
     // consumed the wrong number of bytes, this decodes garbage or the patch
@@ -859,9 +898,27 @@ fn decodes_potion_contents_into_the_mixed_colour_and_stays_aligned() {
     );
     assert_eq!(
         item.components.potion_color,
-        Some(lodestone_data::potion::potion_color(Some(swiftness), None, &[])),
-        "the mixed colour must come from the potion's own built-in effect list"
+        Some(0xFF33_EBFF),
+        "the mixed colour must match the independently recorded speed-effect colour"
     );
+    assert_eq!(
+        item.components.potion,
+        Some(swiftness),
+        "the raw registry id must remain available for potion title and lore lookup"
+    );
+    assert_eq!(
+        item.components.potion_custom_name.as_deref(),
+        Some("night_vision"),
+        "the component-local name must survive for title precedence"
+    );
+    assert!(item.components.potion_custom_effects.is_empty());
+    let game_item = lodestone_game::item::ItemStack::from(&item);
+    assert_eq!(
+        game_item.potion_effect_id(),
+        Some(swiftness),
+        "the decoded id must cross the model-to-game boundary used by tooltips"
+    );
+    assert_eq!(game_item.potion_custom_name(), Some("night_vision"));
     assert_eq!(
         item.components.custom_name.as_ref().map(Text::to_plain_string),
         Some("Zoomer".to_owned()),
@@ -915,6 +972,27 @@ fn custom_color_wins_and_a_recursive_hidden_effect_does_not_misalign_the_reader(
         Some(0xFFFF_00FF),
         "custom_color must win outright and be opaqued"
     );
+    assert_eq!(
+        item.components.potion,
+        None,
+        "a custom-effects potion component with no holder must not invent a registry id"
+    );
+    assert_eq!(
+        item.components.potion_custom_effects,
+        vec![MobEffectInstance {
+            effect_id: speed,
+            amplifier: 2,
+            duration_ticks: 600,
+            ambient: false,
+            show_particles: true,
+            show_icon: true,
+        }],
+        "the outer custom effect must survive while its hidden fallback remains decode-only"
+    );
+    assert_eq!(item.components.potion_custom_name, None);
+    let game_item = lodestone_game::item::ItemStack::from(&item);
+    assert_eq!(game_item.potion_effect_id(), None);
+    assert_eq!(game_item.potion_custom_effects(), item.components.potion_custom_effects);
     assert_eq!(
         item.components.custom_name.as_ref().map(Text::to_plain_string),
         Some("Trailing".to_owned()),

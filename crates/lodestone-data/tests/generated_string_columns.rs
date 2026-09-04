@@ -45,7 +45,7 @@ enum Kind {
     CrossReference,
 }
 
-use Kind::{CanonicalNames, CrossReference, OpenStringSpace};
+use Kind::{CanonicalNames, OpenStringSpace};
 
 /// Every `&str`-typed generated column, with its verdict.
 ///
@@ -66,7 +66,6 @@ const ALLOWED: &[(&str, &str, Kind, &str)] = &[
     ("menus.rs", "MENU_NAMES", CanonicalNames, "the minecraft:menu registry"),
     ("mob_effects.rs", "MOB_EFFECT_NAMES", CanonicalNames, "the minecraft:mob_effect registry"),
     ("particle_types.rs", "PARTICLE_TYPE_NAMES", CanonicalNames, "the minecraft:particle_type registry"),
-    ("potion_effect_keys.rs", "POTION_EFFECT_KEYS", CrossReference, "vanilla's own potion-name accessor collapses every long_/strong_ variant of one potion onto the same key (e.g. swiftness/long_swiftness/strong_swiftness -> \"swiftness\"); keys into the same minecraft:potion path space POTION_NAMES already carries, just many-to-one"),
     ("potions.rs", "POTION_NAMES", CanonicalNames, "the minecraft:potion registry"),
     ("sound_events.rs", "SOUND_EVENT_NAMES", CanonicalNames, "the minecraft:sound_event registry"),
     ("tools.rs", "BLOCK_TAGS", CanonicalNames, "the block-tag registry; its members are already typed u16 block ids"),
@@ -179,7 +178,7 @@ fn every_generated_string_column_is_classified() {
     // Report the migration queue rather than staying silent about it.
     let debt: Vec<&(&str, &str, Kind, &str)> = ALLOWED
         .iter()
-        .filter(|(_, _, kind, _)| matches!(kind, CrossReference))
+        .filter(|(_, _, kind, _)| *kind == Kind::CrossReference)
         .collect();
     eprintln!(
         "classified {} generated string columns; {} still carry registry entries as strings:",
@@ -191,7 +190,7 @@ fn every_generated_string_column_is_classified() {
     }
     assert_eq!(
         debt.len(),
-        1,
+        0,
         "the count of untyped registry columns changed; if it went down, update this number \
          and delete the ALLOWED row — it is meant to reach zero"
     );

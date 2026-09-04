@@ -121,6 +121,14 @@ present in the report. `sound_events::sound_event` bounds-checks the name table 
 joins the sparse metadata, preserving the same `(name, Option<range>)` API without storing a
 second set of 1,968 string pointers.
 
+Potion display-name keys use the same canonical-column rule. A generated 46-entry `u8` table
+maps each potion registry id to the registry id of its explicitly declared base potion, then
+`potion::potion_effect_key` resolves that id through `POTION_NAMES` and returns the bare path.
+The 24 unique base mappings come from the committed `potion_effect_bases_26_2.txt` fixture;
+duration and potency aliases are source data, not names inferred by removing `long_` or
+`strong_`. The fixture-backed generator rejects missing, duplicate, or out-of-range ids and a
+base name absent from the canonical potion registry.
+
 ### `lodestone-data`: the crate these censuses live in
 
 Owns roughly twenty generated 26.2 game-data tables — block states, hardness, collision
@@ -154,7 +162,9 @@ protocol, which is not a second copy of the canonical census.
 
 - **Every generated file in this cluster is generated — never hand-edit one.** Regenerate
   with `LODESTONE_REGEN=1 cargo test -p <crate> --test <name> <fn> -- --ignored --nocapture`;
-  each test file's own header carries the exact invocation.
+  each test file's own header carries the exact invocation. The hermetic potion base-id table
+  uses `LODESTONE_REGEN=1 cargo test -p lodestone-data --test potion_effect_ids
+  committed_table_matches_the_committed_fixture -- --nocapture` (without `--ignored`).
 - **A generated census keyed by a built-in registry must reuse that registry's canonical
   names.** For example, the blast/fire facts use a `Block` registry-id → fact-index
   mapping; they do not repeat block names beside the facts. Its generator checks that
