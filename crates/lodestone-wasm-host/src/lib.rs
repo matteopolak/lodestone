@@ -36,16 +36,16 @@
 //!                                                                   ActionQueue
 //! ```
 //!
-//! The four pieces, and the issue each closes:
+//! The pieces, and what each owns:
 //!
-//! | module | issue | what it owns |
-//! |---|---|---|
-//! | [`host`] | [#172](https://github.com/matteopolak/lodestone/issues/172) | the embedding: engine, per-guest `Store`, the gated `Linker`, fuel preemption |
-//! | [`capability`] | #172/#175 | the capability vocabulary and the two enforcement mechanisms |
-//! | `wit/lodestone-plugin.wit` | [#173](https://github.com/matteopolak/lodestone/issues/173) | the ABI surface — the WIT world, vendored as the single source of truth |
-//! | [`abi`] | #173 | the lift from `ClientEvent` and the lower to `ClientAction`, each capability-gated |
-//! | [`conductor`] | #173 | [`WasmHostPlugin`]: the one native system that drives every guest and is the single writer of `ActionQueue` on their behalf |
-//! | [`manifest`] | [#175](https://github.com/matteopolak/lodestone/issues/175) | `plugin.toml`: name, version, ABI world, priority, declared capabilities |
+//! | module | what it owns |
+//! |---|---|
+//! | [`host`] | the embedding: engine, per-guest `Store`, the gated `Linker`, fuel preemption |
+//! | [`capability`] | the capability vocabulary and the two enforcement mechanisms |
+//! | `wit/lodestone-plugin.wit` | the ABI surface — the WIT world, vendored as the single source of truth |
+//! | [`abi`] | the lift from `ClientEvent` and the lower to `ClientAction`, each capability-gated |
+//! | [`conductor`] | [`WasmHostPlugin`]: the one native system that drives every guest and is the single writer of `ActionQueue` on their behalf |
+//! | [`manifest`] | `plugin.toml`: name, version, ABI world, priority, declared capabilities |
 //!
 //! # Why the ABI is the intent doctrine, not a new vocabulary
 //!

@@ -1,4 +1,4 @@
-//! What a plugin may do — the capability vocabulary issue #175's manifest
+//! What a plugin may do — the capability vocabulary a plugin manifest
 //! declares against, and the thing the host's `Linker` and conductor enforce.
 //!
 //! # Two enforcement mechanisms, and knowing which one you are relying on
@@ -108,8 +108,8 @@ impl Capability {
     /// Parse a manifest capability name.
     ///
     /// `None` means *unrecognised*, which a manifest loader must turn into a
-    /// loud rejection rather than a silent skip — issue #175's "a manifest from a
-    /// newer ABI version than the host supports" case. Dropping an unknown name
+    /// loud rejection rather than a silent skip — the case of a manifest from a
+    /// newer ABI version than the host supports. Dropping an unknown name
     /// would grant a plugin less than it asked for and let it run anyway, which
     /// is the worst of both: it does not work, and nothing says why.
     #[must_use]

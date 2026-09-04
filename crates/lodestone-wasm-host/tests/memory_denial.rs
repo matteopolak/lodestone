@@ -1,4 +1,6 @@
-//! The unbounded-allocation half of issue #176's sandbox verification gate.
+//! The unbounded-allocation half of the sandbox verification gate: a hostile
+//! guest that keeps growing linear memory must be denied by the configured
+//! ceiling, with a negative control proving the ceiling is actually installed.
 //!
 //! # Why the control is "a looser ceiling grows further", not "the sandbox off"
 //!

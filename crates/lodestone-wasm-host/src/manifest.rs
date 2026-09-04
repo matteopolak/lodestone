@@ -1,4 +1,4 @@
-//! `plugin.toml` (issue #175): what a plugin says about itself, and what it asks to
+//! `plugin.toml`: what a plugin says about itself, and what it asks to
 //! be allowed to do.
 //!
 //! # The format
@@ -266,11 +266,12 @@ impl Manifest {
 /// # What this deliberately does not do
 ///
 /// **Dependency ordering.** `docs/plans/runtime-plugin-loading.md` suggests
-/// manifest-declared dependencies topologically sorted — Bukkit's shape — as part of
-/// this issue. There is no `depends` field here, and that is a decision rather than
-/// an omission: a field that is parsed and not enforced is worse than no field,
-/// because a plugin author reads it as a guarantee. Load order is issue #166's, and
-/// the field should arrive with the sort that honours it.
+/// manifest-declared dependencies topologically sorted — Bukkit's shape — as a
+/// future extension of this format. There is no `depends` field here, and that is
+/// a decision rather than an omission: a field that is parsed and not enforced is
+/// worse than no field, because a plugin author reads it as a guarantee. A
+/// `depends` field should arrive together with the topological sort that honours
+/// it, not before.
 pub fn scan_directory(dir: &Path) -> Vec<Result<(PathBuf, Manifest), ManifestError>> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         // A missing plugins directory is the normal case for a fresh install, not an
@@ -351,8 +352,9 @@ capabilities = ["log", "observe:chat", "act:chat"]
         assert!(!caps.contains(Capability::FsRead));
     }
 
-    /// **Issue #175's headline rejection.** An unrecognised capability names itself
-    /// and lists what the host does know.
+    /// A manifest requesting an unrecognised capability is rejected loudly by
+    /// name, rather than silently dropped, and the error lists what the host
+    /// does know.
     #[test]
     fn an_unknown_capability_is_rejected_by_name_with_the_known_list() {
         let text = GOOD.replace(r#""act:chat""#, r#""fs:write""#);

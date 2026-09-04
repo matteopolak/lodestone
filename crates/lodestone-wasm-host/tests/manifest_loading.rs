@@ -1,4 +1,4 @@
-//! Issue #175 end to end: a `plugins/` directory on disk, each plugin a
+//! Manifest-driven loading end to end: a `plugins/` directory on disk, each plugin a
 //! subdirectory with a `plugin.toml` and a `.wasm`, loaded by manifest and
 //! observably acting — plus the rejections, each with the shipped example's real
 //! manifest as the control.

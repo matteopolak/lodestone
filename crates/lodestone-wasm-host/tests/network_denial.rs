@@ -1,4 +1,4 @@
-//! The network half of issue #176's sandbox verification gate — the sibling of
+//! The network half of the sandbox verification gate — the sibling of
 //! `tests/capability_denial.rs`'s filesystem gate, and structurally different for
 //! a reason worth stating up front.
 //!

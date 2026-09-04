@@ -32,8 +32,10 @@
 //! control.
 //!
 //! Epochs remain the better long-term answer (they cost nothing on the fast path,
-//! where fuel costs a counter decrement per block) and are issue #176's business,
-//! together with the watchdog thread that makes them real.
+//! where fuel costs a counter decrement per block), but they need a watchdog
+//! thread calling `Engine::increment_epoch` on a timer to mean anything — a
+//! deadline configured without one can never trip. That pairing is not built
+//! yet; fuel is what this crate enforces today.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -58,8 +60,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The world version this host speaks. A guest's `init` must return this, and a
 /// manifest must declare it; anything else is a load-time rejection.
 ///
-/// This is the machine-checked half of issue #170's ABI versioning — the WIT
-/// world is a named, versioned unit, so "a guest built against
+/// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
 pub const ABI_WORLD: &str = "lodestone:plugin@0.1.0";
@@ -241,8 +242,9 @@ impl filesystem::Host for GuestState {
 }
 
 /// One instantiated guest: its own `Store` (so its linear memory, and therefore
-/// its state, persists across ticks — issue #173's decision (2)) and typed
-/// handles to its two exports.
+/// its state, persists across ticks — the host owns dispatch but a guest may
+/// keep its own state between calls rather than being purely stateless) and
+/// typed handles to its two exports.
 pub struct LoadedPlugin {
     name: String,
     info: PluginInfo,
