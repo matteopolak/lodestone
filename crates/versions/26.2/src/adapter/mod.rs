@@ -1068,7 +1068,8 @@ impl VersionAdapter for V770Adapter {
         // invisible to any shape table, and skipping them is wrong for 2,618
         // of 32,366 states. One bit
         // out of rodata. See `lodestone_data::block_solidity`.
-        lodestone_data::block_solidity::blocks_motion(state_id)
+        lodestone_data::block_states::StateId::new(state_id)
+            .map(lodestone_data::block_solidity::blocks_motion)
     }
 
     fn block_bubble_column_drag(&self, state_id: u32) -> Option<bool> {

@@ -395,8 +395,8 @@ fn committed_table_matches_the_committed_dump() {
             block_states::block_name(id)
         );
         assert_eq!(
-            block_solidity::blocks_motion(id),
-            Some(dump.blocks_motion[state]),
+            block_solidity::blocks_motion(state_id),
+            dump.blocks_motion[state],
             "blocksMotion for state {id} ({:?})",
             block_states::block_name(id)
         );
@@ -440,15 +440,10 @@ fn ids_are_contiguous_and_out_of_range_is_none() {
             block_solidity::legacy_solid_raw(id).expect("valid state has a solid flag"),
             "id {id} legacySolid"
         );
-        assert!(
-            block_solidity::blocks_motion(id).is_some(),
-            "id {id} blocksMotion"
-        );
+        let _ = block_solidity::blocks_motion(state_id);
     }
     assert_eq!(block_solidity::legacy_solid_raw(count), None);
     assert_eq!(block_solidity::legacy_solid_raw(u32::MAX), None);
-    assert_eq!(block_solidity::blocks_motion(count), None);
-    assert_eq!(block_solidity::blocks_motion(u32::MAX), None);
 }
 
 /// "Blocks motion" is "legacy solid" minus exactly two blocks in 26.2. Pinned as a
@@ -460,11 +455,11 @@ fn blocks_motion_differs_from_legacy_solid_on_exactly_cobweb_and_bamboo_sapling(
     let mut differ = BTreeSet::new();
     for id in 0..block_solidity::STATE_COUNT {
         let state_id = StateId::new(id).expect("generated state id is in range");
-        if Some(block_solidity::legacy_solid(state_id)) != block_solidity::blocks_motion(id) {
+        if block_solidity::legacy_solid(state_id) != block_solidity::blocks_motion(state_id) {
             differ.insert(block_states::block_name(id).expect("named"));
             assert_eq!(
-                block_solidity::blocks_motion(id),
-                Some(false),
+                block_solidity::blocks_motion(state_id),
+                false,
                 "the exclusion list can only turn \"blocks motion\" *off* (state {id})"
             );
         }
@@ -562,7 +557,8 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
             "minecraft:cobweb" | "minecraft:bamboo_sapling" | "minecraft:ladder" => false,
             _ => shape_is_solid(collision_shapes::collision_boxes(id).expect("resolves")),
         };
-        let truth = block_solidity::blocks_motion(id).expect("resolves");
+        let state_id = StateId::new(id).expect("generated state id is in range");
+        let truth = block_solidity::blocks_motion(state_id);
         if old != truth {
             wrong_states += 1;
             wrong_blocks.insert(name);
@@ -608,8 +604,9 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
         "minecraft:dead_tube_coral",
     ] {
         let id = first_id_named(name);
+        let state_id = StateId::new(id).expect("named state is in range");
         assert!(
-            block_solidity::blocks_motion(id).expect("resolves"),
+            block_solidity::blocks_motion(state_id),
             "{name} must block motion"
         );
         assert!(
@@ -631,8 +628,9 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
         "minecraft:scaffolding",
     ] {
         let id = first_id_named(name);
+        let state_id = StateId::new(id).expect("named state is in range");
         assert!(
-            !block_solidity::blocks_motion(id).expect("resolves"),
+            !block_solidity::blocks_motion(state_id),
             "{name} must not block motion"
         );
         assert!(
@@ -648,10 +646,11 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
     // flag is
     // what makes vanilla disagree, and the old code hard-coded that one case.
     let ladder = first_id_named("minecraft:ladder");
+    let ladder_state = StateId::new(ladder).expect("ladder state is in range");
     let boxes = collision_shapes::collision_boxes(ladder).expect("resolves");
     assert!(shape_is_solid(boxes), "a ladder lands on the threshold");
     assert!(
-        !block_solidity::blocks_motion(ladder).expect("resolves"),
+        !block_solidity::blocks_motion(ladder_state),
         "vanilla's ladder does not block motion"
     );
     let b = boxes[0];
@@ -665,10 +664,9 @@ fn the_shipped_shape_derivation_gets_a_measured_set_of_blocks_wrong() {
 fn hand_checked_solidity_rows() {
     // The slime block registers with no forceSolid* call and a
     // full cube, so geometry and truth agree: solid.
-    assert_eq!(
-        block_solidity::blocks_motion(first_id_named("minecraft:slime_block")),
-        Some(true)
-    );
+    let slime = StateId::new(first_id_named("minecraft:slime_block"))
+        .expect("slime block state is in range");
+    assert!(block_solidity::blocks_motion(slime));
     // The cobweb block's own "no collision" marker empties its collision shape, its
     // own "force solid on" flag makes "legacy solid" true anyway, and "blocks
     // motion"'s own
@@ -677,13 +675,13 @@ fn hand_checked_solidity_rows() {
     assert!(block_solidity::legacy_solid(
         StateId::new(cobweb).expect("cobweb resolves")
     ));
-    assert_eq!(block_solidity::blocks_motion(cobweb), Some(false));
+    assert!(!block_solidity::blocks_motion(
+        StateId::new(cobweb).expect("cobweb state is in range")
+    ));
     assert!(collision_shapes::collision_boxes(cobweb).expect("resolves").is_empty());
     // Air blocks a nothing.
-    assert_eq!(
-        block_solidity::blocks_motion(first_id_named("minecraft:air")),
-        Some(false)
-    );
+    let air = StateId::new(first_id_named("minecraft:air")).expect("air state is in range");
+    assert!(!block_solidity::blocks_motion(air));
 }
 
 // ---------------------------------------------------------------------------

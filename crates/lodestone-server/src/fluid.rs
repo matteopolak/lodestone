@@ -650,11 +650,13 @@ fn state_id(state: &str) -> u32 {
 
 /// The real blocks-motion query, out of `lodestone_data`'s jar-derived census.
 ///
-/// `None` from the census means the state is not in the table, and the safe
+/// A state missing from the census is invalid, and the safe
 /// answer is **yes it blocks** — a gap must stop fluid rather than let it
 /// through a block we failed to classify.
 fn blocks_motion(state: &str) -> bool {
-    lodestone_data::block_solidity::blocks_motion(state_id(state)).unwrap_or(true)
+    lodestone_data::block_states::StateId::new(state_id(state))
+        .map(lodestone_data::block_solidity::blocks_motion)
+        .unwrap_or(true)
 }
 
 /// `true` iff this block is a real liquid-block-container — in 26.2 that is

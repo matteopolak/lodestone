@@ -707,7 +707,8 @@ mod real_collision {
         }
 
         fn block_blocks_motion(&self, state_id: u32) -> Option<bool> {
-            lodestone_data::block_solidity::blocks_motion(state_id)
+            lodestone_data::block_states::StateId::new(state_id)
+                .map(lodestone_data::block_solidity::blocks_motion)
         }
     }
 

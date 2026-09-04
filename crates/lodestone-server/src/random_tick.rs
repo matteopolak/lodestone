@@ -883,8 +883,8 @@ impl RandomTickScheduler {
                         return events;
                     }
                 } else if lodestone_data::block_states::state_id(&state)
-                    .and_then(lodestone_data::block_solidity::blocks_motion)
-                    .unwrap_or(false)
+                    .and_then(lodestone_data::block_states::StateId::new)
+                    .is_some_and(lodestone_data::block_solidity::blocks_motion)
                 {
                     return events;
                 }

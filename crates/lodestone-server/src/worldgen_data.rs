@@ -450,12 +450,8 @@ fn freeze_facts() -> &'static Value {
         use lodestone_data::{block_solidity, block_states, snow_support};
 
         type Reader = fn(lodestone_data::block_states::StateId) -> bool;
-        fn blocks_motion(id: lodestone_data::block_states::StateId) -> bool {
-            block_solidity::blocks_motion(id.raw())
-                .expect("validated state is present in the solidity census")
-        }
         const COLUMNS: [(&str, Reader); 5] = [
-            ("blocks_motion", blocks_motion),
+            ("blocks_motion", block_solidity::blocks_motion),
             ("has_fluid_state", snow_support::has_fluid_state),
             ("water_source", snow_support::is_water_source_liquid_block),
             ("face_full_up", snow_support::face_full_up),
