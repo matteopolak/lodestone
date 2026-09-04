@@ -402,9 +402,9 @@ const SEED_CANVAS: (f32, f32) = (854.0, 480.0);
 /// The title `StringWidget` is **not** here. Vanilla registers it (`:76` visits
 /// every leaf) but `StringWidget`'s constructor sets `active = false`
 ///, so it can never take focus and never receives an
-/// event; the only registry it observably belongs to is `narratables`, and
-/// nothing in this shell narrates. It is drawn as a [`super::render::MenuLabel`]
-/// instead.
+/// event; the only additional capability its registration would provide is
+/// narration, and nothing in this shell narrates. It is drawn as a
+/// [`super::render::MenuLabel`] instead.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WorldSelectWidgets {
     /// The header's search field. Filters the list by

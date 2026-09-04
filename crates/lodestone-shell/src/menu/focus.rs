@@ -90,16 +90,16 @@
 //! Ship only the strict pass and focus dies at the end of a column instead of
 //! hopping to the next one.
 //!
-//! ## The three registries, and why they are an island factory
+//! ## The registration modes, and why they are an island factory
 //!
-//! `Screen` keeps three lists and a widget's membership
+//! Two stored lists encode three registration modes, and a widget's membership
 //! decides what it can do:
 //!
-//! | added with | drawn | gets events | narrated |
-//! |---|---|---|---|
-//! | `addRenderableWidget` | yes | yes | yes |
-//! | `addWidget` | **no** | yes | yes |
-//! | `addRenderableOnly` | yes | **no** | no |
+//! | added with | drawn | gets events |
+//! |---|---|---|
+//! | `addRenderableWidget` | yes | yes |
+//! | `addWidget` | **no** | yes |
+//! | `addRenderableOnly` | yes | **no** |
 //!
 //! `ContainerEventHandler`'s dispatch reads `children()`, which only
 //! `addWidget` appends to. So a widget in the wrong list is unit-testable,
@@ -146,9 +146,10 @@
 //!
 //! ## Not here, on purpose
 //!
-//! - **Narration.** `Screen.addWidget` also appends to `narratables`, and
-//!   [`Registry`] records the distinction, but nothing in this shell speaks. A
-//!   `NarratableEntry` port would reach zero pixels and zero audio.
+//! - **Narration.** `Screen.addWidget` also registers the widget for narration,
+//!   but nothing in this shell speaks, so [`FocusSet`] does not retain a third
+//!   list with no consumer. A `NarratableEntry` port would reach zero pixels
+//!   and zero audio.
 //! - **Mouse drag and scroll.** Drag events need a drag state machine and a
 //!   scrolling container. [`FocusSet::mouse_clicked`] is here because it is
 //!   what *sets* focus, which is the subject.
@@ -760,11 +761,11 @@ impl ComponentPath {
 /// it wrong is silent — see the module docs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Registry {
-    /// `addRenderableWidget`: drawn, receives events, narrated.
+    /// `addRenderableWidget`: drawn and receives events.
     RenderableWidget,
-    /// `addWidget`: receives events and narrated, **not drawn**.
+    /// `addWidget`: receives events and is **not drawn**.
     Widget,
-    /// `addRenderableOnly`: drawn, **inert** — no events, no narration.
+    /// `addRenderableOnly`: drawn and **inert** — no events.
     RenderableOnly,
 }
 
@@ -935,7 +936,7 @@ pub enum KeyOutcome {
 /// `Screen`'s focus bookkeeping and `ContainerEventHandler`'s dispatch, over the
 /// ids of children the caller owns.
 ///
-/// Holds the three registries in their *own* insertion orders, because
+/// Holds the two registries in their *own* insertion orders, because
 /// `addRenderableWidget` appends to both `renderables` and `children` while the
 /// other two append to one each — so a screen that interleaves them has two
 /// different orders, and Tab follows `children`'s while drawing follows
@@ -946,9 +947,6 @@ pub struct FocusSet {
     children: Vec<usize>,
     /// `Screen.renderables` order — draw order.
     renderables: Vec<usize>,
-    /// `Screen.narratables` order. Recorded for fidelity; nothing reads it yet
-    /// (see the module docs).
-    narratables: Vec<usize>,
     /// `AbstractContainerEventHandler.focused`.
     focused: Option<usize>,
     /// vanilla's own screen base's `shouldCloseOnEsc()`. `true` in vanilla's base class
@@ -973,7 +971,6 @@ impl FocusSet {
         Self {
             children: Vec::new(),
             renderables: Vec::new(),
-            narratables: Vec::new(),
             focused: None,
             close_on_esc: true,
         }
@@ -987,16 +984,15 @@ impl FocusSet {
         self
     }
 
-    /// `Screen.addRenderableWidget`: drawn, interactive, narrated.
+    /// `Screen.addRenderableWidget`: drawn and interactive.
     pub fn add_renderable_widget(&mut self, id: usize) {
         self.renderables.push(id);
         self.add_widget(id);
     }
 
-    /// `Screen.addWidget`: interactive and narrated, **not drawn**.
+    /// `Screen.addWidget`: interactive and **not drawn**.
     pub fn add_widget(&mut self, id: usize) {
         self.children.push(id);
-        self.narratables.push(id);
     }
 
     /// `Screen.addRenderableOnly`: drawn and **inert**. It never enters
@@ -1025,12 +1021,6 @@ impl FocusSet {
     #[must_use]
     pub fn children(&self) -> &[usize] {
         &self.children
-    }
-
-    /// `Screen.narratables`.
-    #[must_use]
-    pub fn narratables(&self) -> &[usize] {
-        &self.narratables
     }
 
     /// `getFocused()`.
