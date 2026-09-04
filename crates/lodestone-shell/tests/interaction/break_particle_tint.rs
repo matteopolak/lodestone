@@ -1,34 +1,29 @@
 //! Regression gate: **break debris must take its block's tint**, or foliage and
 //! redstone throw white flecks.
 //!
-//! # The bug this reproduces
+//! # Behaviour under test
 //!
-//! A user reported: *"if I break a block that causes another to break, the
-//! particles for the other block are white."* The wire was innocent — a live
-//! capture (`lodestone-v26-2`'s `live_destroy_block_event` gate) shows
-//! `level_event` 2001 carrying the cascaded block's correct block-state id, and
-//! that id resolves to the correct `#particle` sprite. What was missing is the
-//! *other* half of vanilla's break-particle construction: the base colour
-//! starts at a fixed grey (0.6 in each channel), then — if the block state has
-//! a biome tint source at tint index 0 — that source's colour (evaluated for
-//! this block, level and position) is multiplied into each channel.
+//! When support loss causes a second block to break, the `level_event` 2001
+//! payload carries that block's state id, which resolves to its `#particle`
+//! sprite. Break-particle construction starts with a fixed grey base colour
+//! (0.6 in each channel); if the state has a biome tint source at tint index 0,
+//! the source colour evaluated for this block, level and position is multiplied
+//! into each channel.
 //!
-//! Both shell emit sites passed a hardcoded `[1.0; 3]` there. The tinted blocks
-//! are *exactly* the ones whose atlas sprites are **greyscale** (`grass`,
-//! `fern`, the leaves, `sugar_cane`, `redstone_dust_*`), because vanilla stores
-//! them grey and colours them at draw time — so the missing multiply did not
-//! desaturate the debris a little, it rendered it near-white. Measured:
-//! `redstone_wire` debris came out `#cbcbcb`, `short_grass` `#676667`.
+//! The emitter must pass that multiplier to both break-debris paths. Tinted
+//! blocks are *exactly* the ones whose atlas sprites are **greyscale** (`grass`,
+//! `fern`, the leaves, `sugar_cane`, `redstone_dust_*`), because their colour is
+//! applied at draw time — without the multiplier, the debris renders near-white.
+//! Measured examples: `redstone_wire` debris is RGB (203, 203, 203), while
+//! `short_grass` is RGB (103, 102, 103).
 //!
-//! # Why the report reads as "the *cascading* block"
+//! # Why cascading breaks expose it
 //!
-//! Not because the two emit paths mask each other. Because of **which blocks
-//! cascade**: the block a player punches is nearly always an untinted one
-//! (stone, dirt, planks, ore) for which `[1.0; 3]` is the right answer, while
-//! the block that pops when its support goes is nearly always foliage or wiring
-//! — grass, fern, sugar cane, vine, lily pad, redstone wire — i.e. the tinted
-//! set. The asymmetry is in the block population, not in the code path, which is
-//! why "break something and look at the debris" never reproduced it.
+//! The block a player punches is usually untinted (stone, dirt, planks, ore),
+//! for which `[1.0; 3]` is correct. A block released by support loss is usually
+//! foliage or wiring — grass, fern, sugar cane, vine, lily pad, redstone wire —
+//! which belongs to the tinted set. The asymmetry is in the block population,
+//! not in the emitter path.
 //!
 //! # What this gate does that the existing one cannot
 //!
@@ -41,10 +36,9 @@
 //! `breaking_block` flecks, no local prediction — which is exactly the shape of
 //! the `NetUpdate::BlockDestroyed` path a cascading break takes.
 //!
-//! Every assertion is paired with a **control that is executed and observed to
-//! fail**: the same fragments, recomputed with the pre-fix `[1.0; 3]`, must be
-//! grey where the subject is coloured. A control that merely *would* fail is not
-//! evidence.
+//! Every assertion is paired with an **executed control**: the same fragments,
+//! recomputed with no tint multiplier, must be grey where the subject is
+//! coloured. A control that merely *would* fail is not evidence.
 //!
 //! Run it explicitly (it needs `.cache/mc/<version>/client.jar` +
 //! `generated/reports/blocks.json`, and per §12.52 it **fails** rather than
@@ -139,8 +133,8 @@ fn to_srgb(c: f32) -> u8 {
 }
 
 /// One destroy burst, measured two ways: the mean **on-screen** colour of its
-/// visible fragments as the shipped code tints them (`subject`) and as the
-/// pre-fix hardcoded `[1.0; 3]` tinted them (`control`).
+/// visible fragments with the state's tint (`subject`) and with no tint
+/// multiplier (`control`).
 ///
 /// Both come from the **same** burst — one `Particles`, one RNG stream, one set
 /// of quads — because the particle engine is not seeded deterministically across
@@ -171,13 +165,13 @@ fn burst(p: &mut Particles, models: &BlockModels, state: u32) -> Burst {
     });
 
     // The state's own tint, already folded into the instance colour as
-    // `base * tint` where `base` is vanilla's break-particle 0.6 grey times the
+    // `base * tint` where `base` is the break-particle 0.6 grey times the
     // light shade — channel-independent, so the control's untinted colour is recovered
     // by *dividing the tint back out of one channel*, not by dividing every
     // channel. That distinction is load-bearing: `redstone_wire` at power 0 has
     // a tint of `[0.3, 0.0, 0.0]`, so two of its channels are exactly zero and a
     // per-channel division reconstructs a red control instead of the grey one
-    // the pre-fix code actually produced.
+    // the untinted emitter path produces.
     let own = models.particle_tint(state).unwrap_or([1.0; 3]);
     let widest = (0..3).max_by(|a, b| own[*a].total_cmp(&own[*b])).unwrap();
     assert!(
@@ -204,7 +198,7 @@ fn burst(p: &mut Particles, models: &BlockModels, state: u32) -> Burst {
             continue;
         }
         visible += 1;
-        // `base` == the untinted `[1.0; 3]` colour the pre-fix emit sites produced.
+        // `base` is the untinted `[1.0; 3]` colour used by the control path.
         let base = f(8 + widest) / own[widest];
         for c in 0..3 {
             let lit = to_linear(texel[c]);
@@ -269,9 +263,9 @@ fn cascading_block_debris_is_tinted_not_grey() {
          island case: the data exists and nothing consumes it"
     );
 
-    // Blocks that cascade when their support is removed **and** whose vanilla
-    // `#particle` sprite is stored greyscale — the population the user actually
-    // saw as white. `sugar_cane` is deliberately *not* here: its sprite is
+    // Blocks that cascade when their support is removed **and** whose `#particle`
+    // sprite is stored greyscale — the population most likely to show white
+    // debris. `sugar_cane` is deliberately *not* here: its sprite is
     // already green on disk, so losing the tint desaturates it rather than
     // whitening it, and asserting "the control is grey" for it would be a
     // control that cannot fire. It is covered by the every-tinted-subject check
@@ -309,8 +303,8 @@ fn cascading_block_debris_is_tinted_not_grey() {
             visible > 0,
             "{name} threw no visible debris, so the colour assertion would be vacuous"
         );
-        // The control is the pre-fix code. Observing it grey here — every run,
-        // not hypothetically — is what proves the detector fires.
+        // Observing the untinted control as grey here — every run, not
+        // hypothetically — proves that the detector fires.
         assert!(
             is_grey(control),
             "{name}: the pre-fix control came out #{:02x}{:02x}{:02x}, which is not grey. The \
@@ -361,11 +355,11 @@ fn cascading_block_debris_is_tinted_not_grey() {
         );
     }
 
-    // Untinted blocks must stay untinted — the fix must not tint the world.
-    // `grass_block` is the one that catches a fix built on the *face* tint
-    // rather than the particle tint: vanilla special-cases its break-particle
-    // tint source to "no tint" precisely because its `#particle` is
-    // `block/dirt`, so a face-derived fix throws green dirt.
+    // Untinted blocks must stay untinted — the tint multiplier must be a no-op.
+    // `grass_block` catches an implementation that uses the *face* tint rather
+    // than the particle tint. Its particle tint source is intentionally none
+    // because `#particle` is `block/dirt`; applying a face tint would turn the
+    // dirt debris green.
     for name in [
         "minecraft:stone",
         "minecraft:dirt",
@@ -394,9 +388,8 @@ fn cascading_block_debris_is_tinted_not_grey() {
     }
 }
 
-/// Census over **every** tinted state, so the claim is a count rather than a
-/// handful of hand-picked examples: how many states' debris was grey before the
-/// tint reached the emitter, and how many still are after.
+/// Census over **every** tinted state: how many states' debris is grey with the
+/// untinted control, and how many remain grey after the tint reaches the emitter.
 #[test]
 #[ignore = "requires a fetched vanilla client.jar + blocks.json under .cache/mc/<version>/"]
 fn no_tinted_state_still_throws_grey_debris() {
@@ -460,7 +453,7 @@ fn no_tinted_state_still_throws_grey_debris() {
     eprintln!("grey debris BEFORE the tint reached the emitter: {} blocks", grey_before.len());
     eprintln!("grey debris AFTER:                               {} blocks", grey_after.len());
 
-    // The control, as a population: the bug was not one block.
+    // The control must be grey across a population, not just for one block.
     assert!(
         grey_before.len() > 15,
         "only {} of {} tinted blocks threw grey debris without their tint. The control is too \

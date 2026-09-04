@@ -7,17 +7,16 @@
 //! `crate::interact::drive_mining` became a `TickSet::Send` system in Stage 5, so
 //! it runs inside `run_schedule(GameTick)` — which the driver runs inside
 //! `lodestone_ecs::hold_write`, i.e. under `EcsHandle`'s `parking_lot` **write**
-//! guard. It read the held item through `ClientHandle::player_menu`, and that
-//! accessor used to take a raw `ecs.read()` on the *same* `Arc<RwLock<World>>`.
-//! `parking_lot::RwLock` is not reentrant, so the first tick of a real dig
-//! wedged the render thread with no panic and no log line.
+//! guard. It reads the held item through `ClientHandle::player_menu`, and that
+//! accessor must not take a second guard on the *same* `Arc<RwLock<World>>`.
+//! `parking_lot::RwLock` is not reentrant, so a real dig must not enter that
+//! nested-access path before producing any packet or particle.
 //!
 //! Every production `self.ecs.read()`/`.write()` call in
-//! `lodestone_client::state::SharedState` — `player_menu` included — is now
-//! routed through `lodestone_ecs::hold_read`/[`hold_write`], so the same
-//! reentrant call no longer wedges: `handle.rs`'s rule-1 ledger now catches the
-//! second guard on the same thread and panics naming both call sites, before
-//! the raw lock is ever touched.
+//! `lodestone_client::state::SharedState` — `player_menu` included — routes
+//! through `lodestone_ecs::hold_read`/[`hold_write`]. The rule-1 ledger catches
+//! a second guard on the same thread and panics naming both call sites, before
+//! the process can hang silently.
 //!
 //! # How it works
 //!
@@ -28,7 +27,7 @@
 //!   closure on a watchdog thread and asserts it still returns — the chunk
 //!   store is a different lock than the `World` guard, so this must not wedge.
 //! * [`player_menu_inside_a_world_write_guard_panics`] is the **control** for the
-//!   `World`-lock half. It performs the exact pre-fix call —
+//!   `World`-lock half. It performs the guarded call —
 //!   `player_menu()` inside a `hold_write` closure, on the *same* thread as the
 //!   outer guard — and is `#[should_panic]` rather than routed through the
 //!   watchdog: the rule-1 ledger panics immediately rather than hanging, so
@@ -47,7 +46,7 @@
 //!   write guard, against a real `ClientHandle` that adopted the same `EcsHandle`,
 //!   with a loaded chunk and a resolving hardness census — every early return in
 //!   `drive_mining` bypassed. It asserts the tick finishes *and* that it produced
-//!   the dig packets, so a fix that silently stopped digging would fail it.
+//!   the dig packets, so skipping the held-item path would fail it.
 //!
 //! Every potentially-*wedging* call still runs on a spawned thread joined
 //! through a bounded channel: a deadlocked thread is leaked, never awaited, so
@@ -122,7 +121,7 @@ const TARGET: [i32; 3] = [3, 4, 5];
 /// [`BlockHardness`] or `drive_mining` aborts the dig before it ever reaches the
 /// held-item read this file is about. One type, so the two cannot drift apart.
 ///
-/// The hardness is a plain positive number rather than vanilla's stone value: the
+/// The hardness is a plain positive number rather than the reference stone value: the
 /// gate asserts a dig *starts*, not how long it takes, and pinning a real hardness
 /// here would be an expected value sourced from our own guess.
 #[derive(Debug, Default)]
@@ -252,9 +251,9 @@ impl Harness {
 
         // The chunk store's read/write halves, named from the *client's* `Arc`
         // so a write through one and a read through the other see each
-        // other — `drive_mining` now takes both, for the local block-edit
-        // prediction (issue #596), the same pair `drive_placement`'s own
-        // harness (`place_intent.rs`) already installs.
+        // other — `drive_mining` takes both for local block-edit prediction,
+        // matching the pair `drive_placement`'s own harness (`place_intent.rs`)
+        // already installs.
         let chunk_world = client.chunk_world();
         let chunk_world_write = client.chunk_world_write();
 
@@ -303,9 +302,9 @@ fn build_resources(world: &mut EcsWorld) {
     // this file is about the world-lock deadlock, not about sound.
     world.insert_resource(FrameClock::default());
     world.insert_resource(AudioEngine(None));
-    // `drive_mining`'s local block-edit prediction (issue #596) needs a mesh
-    // scheduler to re-mesh through; a `Demo` classifier is the same
-    // GPU-free choice `place_intent.rs`'s harness makes for `drive_placement`.
+    // `drive_mining`'s local block-edit prediction needs a mesh scheduler to
+    // re-mesh through; a `Demo` classifier is the same GPU-free choice
+    // `place_intent.rs`'s harness makes for `drive_placement`.
     world.insert_resource(TerrainMesh::new(MeshScheduler::new(
         1,
         lodestone::blocks::ShellClassifier::Demo(lodestone::blocks::DemoClassifier),
@@ -406,18 +405,18 @@ fn the_world_lock_is_not_reentrant_through_client_handle() {
 
 /// **The control, `World`-lock half.** Reaching a `World`-lock-backed
 /// `ClientHandle` accessor from inside a `hold_write` closure on the *same*
-/// thread now panics — the rule-1 reentrancy ledger catching what used to be a
-/// silent, permanent deadlock.
+/// thread panics — the rule-1 reentrancy ledger exposes the nested access
+/// instead of allowing a silent, permanent deadlock.
 ///
-/// This is the pre-fix call verbatim: `drive_mining` resolved the held item with
+/// `drive_mining` resolves the held item with
 /// `net.get().map(ClientHandle::player_menu)`, and `SharedState::player_menu`
-/// now takes `hold_read` on the same handle `hold_write` is holding for the
-/// `GameTick` schedule — the same handle, so the ledger's rule 1 fires.
+/// takes `hold_read` on the same handle `hold_write` holds for the `GameTick`
+/// schedule — the same handle, so the ledger's rule 1 fires.
 ///
 /// Without this test the gate below is vacuous in the *world* sense: a
 /// `drive_mining` that returned early (no target, no census, no chunk) would
 /// complete just as fast, and nothing would show that the input actually
-/// contained the structure the fix exists to handle.
+/// contained the structure under test.
 ///
 /// Runs directly on the test's own thread, deliberately **not** through
 /// [`within_budget`]: a panic here is immediate rather than a hang, so there is
@@ -443,10 +442,10 @@ fn player_menu_inside_a_world_write_guard_panics() {
 /// guard, must finish — and must actually dig.
 ///
 /// Every early return in `drive_mining` is bypassed by [`Harness::build`], so the
-/// system runs all the way through the held-item resolution that used to
-/// deadlock. The action assertion is what stops a "fix" that removed the hang by
-/// removing the feature: a tick that produced no `SwingArm` would mean the dig
-/// never started, which is the same screen as the freeze from the player's side.
+/// system runs all the way through held-item resolution. The action assertion
+/// also rejects an implementation that avoids the lock by skipping that work: a
+/// tick that produces no `SwingArm` means the dig never started, which is the
+/// same screen as a freeze from the player's side.
 #[test]
 fn a_full_dig_tick_completes_under_the_world_write_guard() {
     let harness = Harness::build();
