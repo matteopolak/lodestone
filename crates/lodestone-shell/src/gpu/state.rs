@@ -1876,14 +1876,6 @@ impl RenderState {
         self.map_source = MapSource(Some(Box::new(f)));
     }
 
-    /// Cumulative map-cache work for this device/session. This is a profiling
-    /// counter, not a draw count: an unchanged second frame must leave it
-    /// untouched.
-    #[must_use]
-    pub fn map_cache_counters(&self) -> super::MapCacheCounters {
-        self.map_cache.borrow().counters()
-    }
-
     /// Install the source for this frame's sign text — same shape as
     /// [`set_skull_source`](Self::set_skull_source): an independent gather,
     /// no shared per-frame state, and no partial-tick interpolation because

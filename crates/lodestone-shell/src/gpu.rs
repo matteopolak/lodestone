@@ -87,7 +87,6 @@ pub use occlusion::TerrainOcclusion;
 pub use plugin_billboards::{PluginBillboardInstance, plugin_billboard_vertices};
 pub use outline::{CrackTarget, gather_crack_targets};
 pub use screen_effects::ScreenEffects;
-pub use maps::MapCacheCounters;
 pub use sources::{
     AmbientLightSource, BannerSource, BeaconSource, BellSource, BlockEntitySource, BrushableSource,
     CampfireSource,
