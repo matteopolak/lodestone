@@ -1,13 +1,13 @@
 //! Bounded packet replay against the public client read-model.
 //!
-//! A scripted adapter loads one chunk and accepts block, entity and inventory
-//! packets, while independent maps apply the same actions. Fixed scripts cover
-//! each read-model dimension, and a deterministic generated block campaign
-//! exercises 288 packet replays. The comparison reads client-owned block,
-//! entity and inventory state after each tick, proving that packet handling
-//! reaches the read model rather than merely producing an event. A separate
-//! fixed proof starts an `IntegratedServer` and synchronizes against its real
-//! tick counter while reading the retained `ChunkSource` directly.
+//! A scripted adapter loads one chunk and accepts block, entity, inventory, and
+//! generic-container packets, while independent maps apply the same actions.
+//! Fixed scripts cover each read-model dimension, and deterministic generated
+//! campaigns exercise 464 packet replays. The comparison reads client-owned
+//! state after each tick, proving that packet handling reaches the read model
+//! rather than merely producing an event. A separate fixed proof starts an
+//! `IntegratedServer` and synchronizes against its real tick counter while
+//! reading the retained `ChunkSource` directly.
 
 use std::collections::HashMap;
 use std::convert::Infallible;
@@ -25,7 +25,7 @@ use lodestone_fuzz::differential::{
 };
 use lodestone_model::{
     AdapterError, ChunkPos as ModelChunkPos, EntityMovement, Identifier, ItemComponents, ItemStack,
-    SectionPos, WorldSink,
+    SectionPos, Text, WorldSink,
 };
 use lodestone_net::{Connection, memory_pair};
 use lodestone_server::{
@@ -46,8 +46,13 @@ const ENTITY_MOVE_PACKET: i32 = 4;
 const ENTITY_REMOVE_PACKET: i32 = 5;
 const INVENTORY_CONTENT_PACKET: i32 = 6;
 const INVENTORY_SLOT_PACKET: i32 = 7;
+const CONTAINER_OPEN_PACKET: i32 = 8;
+const CONTAINER_CONTENT_PACKET: i32 = 9;
+const CONTAINER_SLOT_PACKET: i32 = 10;
 const TARGET: (i32, i32, i32) = (1, 0, 1);
 const INVENTORY_TARGET_SLOT: usize = 36;
+const CONTAINER_WINDOW_ID: i32 = 4;
+const CONTAINER_TARGET_SLOT: usize = 0;
 const AIR: &str = "minecraft:air";
 const STONE: &str = "minecraft:stone";
 const AIR_ID: u32 = 0;
@@ -202,6 +207,68 @@ impl VersionAdapter for ScriptedAdapter {
                     item: None,
                 })])
             }
+            CONTAINER_OPEN_PACKET => {
+                if !payload.is_empty() {
+                    return Err(AdapterError::Decode(
+                        "container open packet must have an empty body".into(),
+                    ));
+                }
+                Ok(vec![Directive::Emit(ClientEvent::ScreenOpened {
+                    window_id: CONTAINER_WINDOW_ID,
+                    menu_type: Identifier::new("minecraft", "generic_9x3").unwrap(),
+                    title: Text::literal("Generated container"),
+                })])
+            }
+            CONTAINER_CONTENT_PACKET => {
+                if payload.len() != 4 {
+                    return Err(AdapterError::Decode(
+                        "container content packet must carry a stack count".into(),
+                    ));
+                }
+                let count = i32::from_be_bytes(payload.try_into().unwrap());
+                if !(1..=64).contains(&count) {
+                    return Err(AdapterError::Decode(
+                        "container content packet count must be between one and 64".into(),
+                    ));
+                }
+                let mut items = vec![None; 27 + 36];
+                items[CONTAINER_TARGET_SLOT] = Some(ItemStack {
+                    item: Identifier::new("minecraft", "diamond").unwrap(),
+                    count: count as u32,
+                    components: ItemComponents::default(),
+                });
+                Ok(vec![Directive::Emit(ClientEvent::ContainerContent {
+                    window_id: CONTAINER_WINDOW_ID,
+                    state_id: 11,
+                    items,
+                    carried_item: None,
+                })])
+            }
+            CONTAINER_SLOT_PACKET => {
+                if payload.len() != 8 {
+                    return Err(AdapterError::Decode(
+                        "container slot packet must carry a slot and stack count".into(),
+                    ));
+                }
+                let slot = i32::from_be_bytes(payload[0..4].try_into().unwrap());
+                let count = i32::from_be_bytes(payload[4..8].try_into().unwrap());
+                if slot != CONTAINER_TARGET_SLOT as i32 || !(0..=64).contains(&count) {
+                    return Err(AdapterError::Decode(
+                        "container slot packet has an invalid fixture slot or count".into(),
+                    ));
+                }
+                let item = (count > 0).then(|| ItemStack {
+                    item: Identifier::new("minecraft", "diamond").unwrap(),
+                    count: count as u32,
+                    components: ItemComponents::default(),
+                });
+                Ok(vec![Directive::Emit(ClientEvent::ContainerSlot {
+                    window_id: CONTAINER_WINDOW_ID,
+                    state_id: 12,
+                    slot,
+                    item,
+                })])
+            }
             _ => Err(AdapterError::Unsupported(format!(
                 "fixture packet id {packet_id}"
             ))),
@@ -251,26 +318,36 @@ struct ClientStateOracle {
     fault_after_ticks: Option<u64>,
     entity_fault_after_ticks: Option<u64>,
     inventory_fault_after_ticks: Option<u64>,
+    container_fault_after_ticks: Option<u64>,
     runtime: Runtime,
 }
 
 impl ClientStateOracle {
     fn new(fault_after_ticks: Option<u64>) -> Self {
-        Self::new_with_faults(fault_after_ticks, None, None)
+        Self::new_with_faults(fault_after_ticks, None, None, None)
     }
 
     fn new_entity(entity_fault_after_ticks: Option<u64>) -> Self {
-        Self::new_with_faults(None, entity_fault_after_ticks, None)
+        Self::new_with_faults(None, entity_fault_after_ticks, None, None)
     }
 
     fn new_inventory(inventory_fault_after_ticks: Option<u64>) -> Self {
-        Self::new_with_faults(None, None, inventory_fault_after_ticks)
+        Self::new_with_faults(None, None, inventory_fault_after_ticks, None)
+    }
+
+    fn new_container(container_fault_after_ticks: Option<u64>) -> Self {
+        let mut oracle = Self::new_with_faults(None, None, None, container_fault_after_ticks);
+        oracle
+            .send_packet(CONTAINER_OPEN_PACKET, &[])
+            .expect("open fixture container");
+        oracle
     }
 
     fn new_with_faults(
         fault_after_ticks: Option<u64>,
         entity_fault_after_ticks: Option<u64>,
         inventory_fault_after_ticks: Option<u64>,
+        container_fault_after_ticks: Option<u64>,
     ) -> Self {
         let runtime = Builder::new_current_thread()
             .enable_all()
@@ -288,6 +365,7 @@ impl ClientStateOracle {
             fault_after_ticks,
             entity_fault_after_ticks,
             inventory_fault_after_ticks,
+            container_fault_after_ticks,
             runtime,
         };
         oracle.send_packet(LOAD_PACKET, &[]).expect("load fixture chunk");
@@ -383,6 +461,42 @@ impl ClientStateOracle {
             .is_some_and(|fault_after| self.tick >= fault_after)
         {
             items.remove(&INVENTORY_TARGET_SLOT);
+        }
+        items
+    }
+
+    fn send_container_action(&mut self, action: ContainerAction) -> Result<(), String> {
+        let (packet_id, payload) = match action {
+            ContainerAction::Content { count } => {
+                (CONTAINER_CONTENT_PACKET, count.to_be_bytes().to_vec())
+            }
+            ContainerAction::Slot { count } => {
+                let mut payload = Vec::with_capacity(8);
+                payload.extend_from_slice(&(CONTAINER_TARGET_SLOT as i32).to_be_bytes());
+                payload.extend_from_slice(&count.to_be_bytes());
+                (CONTAINER_SLOT_PACKET, payload)
+            }
+        };
+        self.send_packet(packet_id, &payload)
+    }
+
+    fn container_snapshot(&self) -> HashMap<usize, (String, i32)> {
+        let menu = self
+            .handle
+            .open_menu()
+            .expect("the generated container must remain open")
+            .menu;
+        let mut items = (0..menu.slot_count())
+            .filter_map(|slot| {
+                menu.slot_item(slot)
+                    .map(|stack| (slot, (stack.item().to_string(), stack.count())))
+            })
+            .collect::<HashMap<_, _>>();
+        if self
+            .container_fault_after_ticks
+            .is_some_and(|fault_after| self.tick >= fault_after)
+        {
+            items.remove(&CONTAINER_TARGET_SLOT);
         }
         items
     }
@@ -982,6 +1096,125 @@ fn run_inventory_differential(
     InventoryDifferentialOutcome::Agreed
 }
 
+#[derive(Debug, Clone, Copy)]
+enum ContainerAction {
+    Content { count: i32 },
+    Slot { count: i32 },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ContainerScriptStep {
+    tick: u64,
+    action: ContainerAction,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct ContainerDivergence {
+    tick: u64,
+    slot: usize,
+    left: Option<(String, i32)>,
+    right: Option<(String, i32)>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ContainerDifferentialOutcome {
+    Agreed,
+    Diverged(ContainerDivergence),
+}
+
+#[derive(Default)]
+struct ContainerExpectedWorld {
+    slots: HashMap<usize, (String, i32)>,
+}
+
+impl ContainerExpectedWorld {
+    fn apply(&mut self, action: ContainerAction) {
+        match action {
+            ContainerAction::Content { count } | ContainerAction::Slot { count } => {
+                if count == 0 {
+                    self.slots.remove(&CONTAINER_TARGET_SLOT);
+                } else {
+                    self.slots.insert(
+                        CONTAINER_TARGET_SLOT,
+                        ("minecraft:diamond".into(), count),
+                    );
+                }
+            }
+        }
+    }
+
+    fn snapshot(&self) -> HashMap<usize, (String, i32)> {
+        self.slots.clone()
+    }
+}
+
+const GENERATED_CONTAINER_CASES: usize = 8;
+const GENERATED_CONTAINER_STEPS: usize = 6;
+
+fn generated_container_campaign() -> Vec<Vec<ContainerScriptStep>> {
+    (0..GENERATED_CONTAINER_CASES)
+        .map(|case| {
+            (0..GENERATED_CONTAINER_STEPS)
+                .map(|step| {
+                    let seed = case * 19 + step * 7;
+                    let action = if step == 0 {
+                        ContainerAction::Content {
+                            count: 2 + (seed % 12) as i32,
+                        }
+                    } else if case == 0 && step == 1 {
+                        ContainerAction::Slot { count: 12 }
+                    } else if seed % 4 == 0 {
+                        ContainerAction::Slot { count: 0 }
+                    } else {
+                        ContainerAction::Slot {
+                            count: 1 + (seed % 64) as i32,
+                        }
+                    };
+                    ContainerScriptStep {
+                        tick: step as u64,
+                        action,
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn run_container_differential(
+    script: &[ContainerScriptStep],
+    expected: &mut ContainerExpectedWorld,
+    client: &mut ClientStateOracle,
+) -> ContainerDifferentialOutcome {
+    let last_tick = script.iter().map(|step| step.tick).max().unwrap_or(0);
+    for tick in 0..=last_tick {
+        for step in script.iter().filter(|step| step.tick == tick) {
+            expected.apply(step.action);
+            client
+                .send_container_action(step.action)
+                .expect("container packet fixture");
+        }
+        client.advance_tick().expect("container fixture tick");
+        let left = expected.snapshot();
+        let right = client.container_snapshot();
+        if left != right {
+            let mut slots: Vec<_> = left.keys().chain(right.keys()).copied().collect();
+            slots.sort_unstable();
+            slots.dedup();
+            let slot = slots
+                .into_iter()
+                .find(|slot| left.get(slot) != right.get(slot))
+                .expect("different container maps must name a differing slot");
+            return ContainerDifferentialOutcome::Diverged(ContainerDivergence {
+                tick,
+                slot,
+                left: left.get(&slot).cloned(),
+                right: right.get(&slot).cloned(),
+            });
+        }
+    }
+    ContainerDifferentialOutcome::Agreed
+}
+
 const GENERATED_CASES: usize = 24;
 const GENERATED_STEPS_PER_CASE: usize = 12;
 
@@ -1335,5 +1568,48 @@ fn integrated_server_world_fault_reports_the_first_diverging_tick() {
             assert_eq!(divergence.right.as_deref(), Some(AIR));
         }
         other => panic!("first integrated-server fault was not reported: {other:?}"),
+    }
+}
+
+#[test]
+fn generated_container_packet_campaign_matches_after_each_tick() {
+    let campaign = generated_container_campaign();
+    assert_eq!(campaign.len(), GENERATED_CONTAINER_CASES);
+    assert!(campaign
+        .iter()
+        .all(|script| script.len() == GENERATED_CONTAINER_STEPS));
+    for script in campaign {
+        let result = thread::spawn(move || {
+            let mut expected = ContainerExpectedWorld::default();
+            let mut client = ClientStateOracle::new_container(None);
+            run_container_differential(&script, &mut expected, &mut client)
+        })
+        .join()
+        .expect("generated container-state differential thread");
+        assert!(matches!(result, ContainerDifferentialOutcome::Agreed));
+    }
+}
+
+#[test]
+fn generated_container_campaign_fault_reports_the_first_diverging_tick() {
+    let script = generated_container_campaign()
+        .into_iter()
+        .next()
+        .expect("generated container campaign has a first script");
+    let result = thread::spawn(move || {
+        let mut expected = ContainerExpectedWorld::default();
+        let mut client = ClientStateOracle::new_container(Some(2));
+        run_container_differential(&script, &mut expected, &mut client)
+    })
+    .join()
+    .expect("generated container-state control thread");
+    match result {
+        ContainerDifferentialOutcome::Diverged(divergence) => {
+            assert_eq!(divergence.tick, 1);
+            assert_eq!(divergence.slot, CONTAINER_TARGET_SLOT);
+            assert_eq!(divergence.left, Some(("minecraft:diamond".into(), 12)));
+            assert_eq!(divergence.right, None);
+        }
+        other => panic!("generated container-state control was not reported: {other:?}"),
     }
 }
