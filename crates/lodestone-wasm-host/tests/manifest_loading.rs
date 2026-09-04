@@ -263,7 +263,7 @@ fn a_directory_with_one_broken_plugin_still_loads_the_good_one() {
     install(
         &root,
         "broken",
-        &base.replace("lodestone:plugin@0.1.0", "lodestone:plugin@9.9.9"),
+        &base.replace("lodestone:plugin@0.2.0", "lodestone:plugin@9.9.9"),
         "chat_responder.wasm",
         &wasm,
     );

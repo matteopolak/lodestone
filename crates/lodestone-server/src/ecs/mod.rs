@@ -121,8 +121,22 @@ impl ServerApp {
     /// for the same reason.
     #[must_use]
     pub fn bootstrap() -> Self {
+        Self::bootstrap_with(|_| {})
+    }
+
+    /// Builds the server `World` with caller-supplied application
+    /// configuration before plugin finalization and [`ServerBoot`].
+    ///
+    /// [`ServerCorePlugin`] is installed before `configure` runs, so native
+    /// server plugins can add systems to the public server schedules and
+    /// ordering sets. The completed [`App`] remains on the constructing
+    /// thread; [`into_world`](Self::into_world) is the boundary used by the
+    /// async tick task because `App` itself is not `Send`.
+    #[must_use]
+    pub fn bootstrap_with(configure: impl FnOnce(&mut App)) -> Self {
         let mut app = App::empty();
         app.add_plugins(ServerCorePlugin);
+        configure(&mut app);
         app.finish();
         app.cleanup();
         app.world_mut().run_schedule(ServerBoot);

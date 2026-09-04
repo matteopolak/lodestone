@@ -57,6 +57,8 @@
 //! * **Recorded and compared against a stored baseline**: the per-tick count
 //!   of `ChunkSource::column` calls, which is a property of the simulation and
 //!   not of the machine.
+//! * **Recorded as diagnostics**: each phase's sample window, percentile and
+//!   budget summary, plus the largest phase window and its phase label.
 //! * **Recorded, advisory only**: every microsecond figure.
 //!
 //! Run with `cargo bench -p lodestone-server --bench server_tick`.
@@ -73,7 +75,8 @@ use criterion::{Criterion, criterion_group, criterion_main};
 
 use lodestone_model::{ResourceKey, Vec3};
 use lodestone_server::{
-    ChunkColumn, ChunkSource, IntegratedServer, TickPhase, WorstPhaseWindow, TICK_HISTORY_LEN,
+    ChunkColumn, ChunkSource, IntegratedServer, PhaseStats, TickPhase, WorstPhaseWindow,
+    TICK_HISTORY_LEN,
 };
 use lodestone_v26_2::server_protocol::V770ServerProtocol;
 
@@ -173,16 +176,80 @@ struct TickRun {
     wall: Duration,
     /// What the tick loop's own clock believed, for the side-by-side above.
     reported_mspt_avg_ms: f64,
-    /// Each phase's bounded percentile-window sample count.
-    mobs_and_items_rolling_samples: u64,
-    weather_and_sleep_rolling_samples: u64,
-    scheduled_and_physics_rolling_samples: u64,
-    /// Each phase's cumulative sample count since the clock was created.
-    mobs_and_items_total_samples: u64,
-    weather_and_sleep_total_samples: u64,
-    scheduled_and_physics_total_samples: u64,
+    /// The three summaries captured by the live tick instrument, in execution
+    /// order. Keeping the complete snapshots here prevents the recorder from
+    /// silently dropping percentile and budget information at the bench edge.
+    phase_stats: [PhaseStats; 3],
     /// Longest phase interval observed during this sweep point.
     worst_phase: WorstPhaseWindow,
+}
+
+#[derive(Debug, PartialEq)]
+struct PhaseMetric {
+    name: String,
+    value: f64,
+    unit: &'static str,
+}
+
+fn phase_metrics(stats: PhaseStats) -> [PhaseMetric; 7] {
+    let prefix = match stats.phase {
+        TickPhase::MobsAndItems => "mobs_and_items",
+        TickPhase::WeatherAndSleep => "weather_and_sleep",
+        TickPhase::ScheduledAndPhysics => "scheduled_and_physics",
+    };
+    [
+        ("rolling_samples", stats.sample_count as f64, "samples"),
+        ("total_samples", stats.total_sample_count as f64, "samples"),
+        ("p50_us", stats.p50_ms * 1_000.0, "us"),
+        ("p95_us", stats.p95_ms * 1_000.0, "us"),
+        ("p99_us", stats.p99_ms * 1_000.0, "us"),
+        ("max_us", stats.max_ms * 1_000.0, "us"),
+        ("over_budget_count", stats.over_budget_count as f64, "ticks"),
+    ]
+    .map(|(suffix, value, unit)| PhaseMetric {
+        name: format!("{prefix}_{suffix}"),
+        value,
+        unit,
+    })
+}
+
+fn phase_has_samples(stats: PhaseStats) -> bool {
+    stats.sample_count > 0 && stats.total_sample_count > 0
+}
+
+/// A synthetic zero summary is the negative control for the recorder. If the
+/// projection ever stops carrying a phase's values, this check fails before a
+/// real sweep can publish an apparently healthy but neutered phase.
+fn assert_phase_metric_control() {
+    let active = PhaseStats {
+        phase: TickPhase::WeatherAndSleep,
+        sample_count: 4,
+        total_sample_count: 9,
+        p50_ms: 1.25,
+        p95_ms: 2.5,
+        p99_ms: 2.75,
+        max_ms: 3.0,
+        over_budget_count: 0,
+    };
+    let neutered = PhaseStats {
+        phase: TickPhase::WeatherAndSleep,
+        sample_count: 0,
+        total_sample_count: 0,
+        p50_ms: 0.0,
+        p95_ms: 0.0,
+        p99_ms: 0.0,
+        max_ms: 0.0,
+        over_budget_count: 0,
+    };
+    assert!(phase_has_samples(active));
+    assert!(!phase_has_samples(neutered));
+    let active_metrics = phase_metrics(active);
+    let neutered_metrics = phase_metrics(neutered);
+    assert_ne!(active_metrics, neutered_metrics);
+    assert_eq!(active_metrics[2].name, "weather_and_sleep_p50_us");
+    assert_eq!(active_metrics[2].value, 1_250.0);
+    assert_eq!(active_metrics[3].value, 2_500.0);
+    assert_eq!(active_metrics[6].value, 0.0);
 }
 
 /// Waits until the in-memory world's asynchronous reseed has installed the
@@ -291,12 +358,7 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
             block_reads: block_reads.load(Ordering::Relaxed),
             wall,
             reported_mspt_avg_ms: stats.mspt_avg_ms,
-            mobs_and_items_rolling_samples: stats.mobs_and_items.sample_count,
-            weather_and_sleep_rolling_samples: stats.weather_and_sleep.sample_count,
-            scheduled_and_physics_rolling_samples: stats.scheduled_and_physics.sample_count,
-            mobs_and_items_total_samples: stats.mobs_and_items.total_sample_count,
-            weather_and_sleep_total_samples: stats.weather_and_sleep.total_sample_count,
-            scheduled_and_physics_total_samples: stats.scheduled_and_physics.total_sample_count,
+            phase_stats: [stats.mobs_and_items, stats.weather_and_sleep, stats.scheduled_and_physics],
             worst_phase: stats
                 .worst_phase_window
                 .expect("every completed tick records every phase, so the worst window exists"),
@@ -307,6 +369,7 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
 }
 
 fn tick_cost(c: &mut Criterion) {
+    assert_phase_metric_control();
     // Two sweep points, and the pair is the measurement: an empty world and a
     // populated one. A single point would be a number with nothing to compare
     // it against, which is the shape this workspace's rules single out as
@@ -339,24 +402,18 @@ fn tick_cost(c: &mut Criterion) {
 
     for (label, run) in [("empty", &empty), ("populated", &populated)] {
         let expected_rolling_samples = TICKS.min(TICK_HISTORY_LEN as u64);
-        assert_eq!(run.mobs_and_items_total_samples, TICKS, "{label}: mobs-and-items total samples");
-        assert_eq!(run.weather_and_sleep_total_samples, TICKS, "{label}: weather-and-sleep total samples");
-        assert_eq!(
-            run.scheduled_and_physics_total_samples, TICKS,
-            "{label}: scheduled-and-physics total samples"
-        );
-        assert_eq!(
-            run.mobs_and_items_rolling_samples, expected_rolling_samples,
-            "{label}: mobs-and-items rolling samples"
-        );
-        assert_eq!(
-            run.weather_and_sleep_rolling_samples, expected_rolling_samples,
-            "{label}: weather-and-sleep rolling samples"
-        );
-        assert_eq!(
-            run.scheduled_and_physics_rolling_samples, expected_rolling_samples,
-            "{label}: scheduled-and-physics rolling samples"
-        );
+        for stats in run.phase_stats {
+            assert!(
+                phase_has_samples(stats),
+                "{label}: {:?} must have a rolling and cumulative sample",
+                stats.phase
+            );
+            assert_eq!(stats.total_sample_count, TICKS, "{label}: {:?} total samples", stats.phase);
+            assert_eq!(
+                stats.sample_count, expected_rolling_samples,
+                "{label}: {:?} rolling samples", stats.phase
+            );
+        }
         assert_eq!(
             run.worst_phase.phase,
             TickPhase::MobsAndItems,
@@ -391,12 +448,12 @@ fn tick_cost(c: &mut Criterion) {
             run.block_reads,
             run.wall.as_secs_f64() * 1e3,
             run.reported_mspt_avg_ms,
-            run.mobs_and_items_rolling_samples,
-            run.weather_and_sleep_rolling_samples,
-            run.scheduled_and_physics_rolling_samples,
-            run.mobs_and_items_total_samples,
-            run.weather_and_sleep_total_samples,
-            run.scheduled_and_physics_total_samples,
+            run.phase_stats[0].sample_count,
+            run.phase_stats[1].sample_count,
+            run.phase_stats[2].sample_count,
+            run.phase_stats[0].total_sample_count,
+            run.phase_stats[1].total_sample_count,
+            run.phase_stats[2].total_sample_count,
             run.worst_phase.micros,
             run.worst_phase.phase,
         );
@@ -422,48 +479,17 @@ fn tick_cost(c: &mut Criterion) {
             value: run.block_reads as f64 / run.ticks as f64,
             unit: "calls",
         });
-        support::record(support::Record {
-            bench: "server_tick",
-            metric: "mobs_and_items_rolling_samples",
-            scene,
-            value: run.mobs_and_items_rolling_samples as f64,
-            unit: "samples",
-        });
-        support::record(support::Record {
-            bench: "server_tick",
-            metric: "weather_and_sleep_rolling_samples",
-            scene,
-            value: run.weather_and_sleep_rolling_samples as f64,
-            unit: "samples",
-        });
-        support::record(support::Record {
-            bench: "server_tick",
-            metric: "scheduled_and_physics_rolling_samples",
-            scene,
-            value: run.scheduled_and_physics_rolling_samples as f64,
-            unit: "samples",
-        });
-        support::record(support::Record {
-            bench: "server_tick",
-            metric: "mobs_and_items_total_samples",
-            scene,
-            value: run.mobs_and_items_total_samples as f64,
-            unit: "samples",
-        });
-        support::record(support::Record {
-            bench: "server_tick",
-            metric: "weather_and_sleep_total_samples",
-            scene,
-            value: run.weather_and_sleep_total_samples as f64,
-            unit: "samples",
-        });
-        support::record(support::Record {
-            bench: "server_tick",
-            metric: "scheduled_and_physics_total_samples",
-            scene,
-            value: run.scheduled_and_physics_total_samples as f64,
-            unit: "samples",
-        });
+        for stats in run.phase_stats {
+            for metric in phase_metrics(stats) {
+                support::record(support::Record {
+                    bench: "server_tick",
+                    metric: &metric.name,
+                    scene,
+                    value: metric.value,
+                    unit: metric.unit,
+                });
+            }
+        }
         let worst_phase_metric = match run.worst_phase.phase {
             TickPhase::MobsAndItems => "worst_phase_mobs_and_items_us",
             TickPhase::WeatherAndSleep => "worst_phase_weather_and_sleep_us",
@@ -475,6 +501,20 @@ fn tick_cost(c: &mut Criterion) {
             scene,
             value: run.worst_phase.micros as f64,
             unit: "us",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "worst_phase_us",
+            scene,
+            value: run.worst_phase.micros as f64,
+            unit: "us",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "worst_phase_tick",
+            scene,
+            value: run.worst_phase.tick_count as f64,
+            unit: "tick",
         });
     }
 

@@ -46,5 +46,7 @@ pub mod entity_metadata;
 pub mod entity_types;
 pub mod item_types;
 pub mod packets;
+pub mod server_protocol;
 
 pub use adapter::{PROTOCOL, PROTOCOLS, V47Adapter, adapter, adapter_for};
+pub use server_protocol::V47ServerProtocol;

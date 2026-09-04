@@ -29,18 +29,19 @@
 //!                                     Linker gets only the granted imports
 //!                                                         │
 //!                                                         ▼
-//!   Messages<GameEvent> ──lift──▶ list<event> ──▶ guest.on-tick ──▶ list<action>
-//!                                                                        │
-//!                                                                       lower
-//!                                                                        ▼
-//!                                                                   ActionQueue
+//!   Messages<GameEvent> ──lift──▶ list<event> ──▶ guest.on-tick ──┐
+//!   host tick ──▶ due guest tasks ──▶ guest.on-task ──────────────┴─▶ list<action>
+//!                                                                      │
+//!                                                                     lower
+//!                                                                      ▼
+//!                                                                 ActionQueue
 //! ```
 //!
 //! The pieces, and what each owns:
 //!
 //! | module | what it owns |
 //! |---|---|
-//! | [`host`] | the embedding: engine, per-guest `Store`, the gated `Linker`, fuel preemption |
+//! | [`host`] | the embedding: engine, per-guest `Store` and scheduler, the gated `Linker`, fuel preemption |
 //! | [`capability`] | the capability vocabulary and the two enforcement mechanisms |
 //! | `wit/lodestone-plugin.wit` | the ABI surface — the WIT world, vendored as the single source of truth |
 //! | [`abi`] | the lift from `ClientEvent` and the lower to `ClientAction`, each capability-gated |

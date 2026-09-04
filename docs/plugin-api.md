@@ -315,20 +315,22 @@ plugin.wasm ──sniff──▶ component ────────────�
                                                        │
                                 Linker gets ONLY the granted imports
                                                        │
-Messages<GameEvent> ──lift──▶ list<event> ──▶ guest.on-tick ──▶ list<action> ──lower──▶ ActionQueue
+Messages<GameEvent> ──lift──▶ list<event> ──▶ guest.on-tick ──┐
+host tick ──▶ due guest tasks ──▶ guest.on-task ─────────────┴─▶ list<action> ──lower──▶ ActionQueue
 ```
 
 The ABI is the intent doctrine, curated, not a parallel vocabulary — every way a native plugin observes
 or acts is already call-shaped or copy-shaped, so the WIT `event`/`action` variants are a curated subset
-of the same thing; none hands out a `World` borrow. The guest exports one `on-tick(events) -> actions`
-function rather than separate poll/submit imports: one boundary crossing per tick instead of three, and
-— the reason that matters more — a return value structurally cannot be produced outside the guest's own
-tick window, which keeps one native conductor the single writer of `ActionQueue` even against a
-malicious guest. A guest cannot itself be a bevy system, so one conductor drives every guest in
-sequence, ordered by a `priority` field in its manifest.
+of the same thing; none hands out a `World` borrow. The guest returns actions from host-invoked
+`on-tick(events)` and `on-task(id, token)` callbacks rather than through a submit import. A return
+value structurally cannot be produced outside one of those callback windows, which keeps one native
+conductor the single writer of `ActionQueue` even against a malicious guest. A guest cannot itself be
+a bevy system, so one conductor drives every guest in sequence, ordered by a `priority` field in its
+manifest.
 
-Two independent enforcement mechanisms have very different guarantees. An **import** capability (e.g.
-`fs:read`) is enforced by the wasmtime `Linker` itself — the interface is simply absent, so a guest
+Two independent enforcement mechanisms have very different guarantees. An **import** capability
+(e.g. `fs:read` or `schedule:tasks`) is enforced by the wasmtime `Linker` itself — the interface is
+simply absent, so a guest
 referencing it without the grant fails to instantiate at all, structurally unforgeable. A **data-flow**
 capability (e.g. `observe:chat`, `act:chat`) is enforced by the host's own conductor code — events are
 never lifted to an ungranted guest and its actions are silently dropped, which means the manifest is a
@@ -338,11 +340,11 @@ must be modelled as an import rather than trusted as data-flow.
 Not in the ABI yet: the intent half of the doctrine (`BreakIntent`/`PlaceIntent`/`MovementIntent`/
 `LookIntent`) — a guest can chat and observe but cannot yet mine, place, or steer, since an
 install/remove-shaped component needs paired ABI calls plus an outcome poll, a bigger surface than one
-value-shaped tick crossing. Command registration/invocation, scheduler/async equivalents, `Monitor`-tier
-enforcement for a guest, and declared load-order dependencies are all named gaps. Nothing in the shipped
-client registers the WASM host yet — it is reachable through the real `client_app()`, but no shell code
-calls `load_directory`. Browser plugin support is out of scope: `wasmtime` cannot itself run inside a
-wasm32 guest.
+value-shaped tick crossing. Command registration/invocation, async equivalents, `Monitor`-tier
+enforcement for a guest, and declared load-order dependencies are all named gaps. The native windowed
+client installs the WASM conductor before `WindowApp` adopts its `App` and scans the cwd-relative
+`plugins/` directory through `PluginHost::load_directory`. Browser plugin support is out of scope:
+`wasmtime` cannot itself run inside a wasm32 guest.
 
 ## How to change it, and the gotchas
 
@@ -384,14 +386,22 @@ loading mechanism, feature flag, or manifest format yet. `GameEventBusPlugin`, `
 `AsyncTaskPoolPlugin`, and `PersistentDataPlugin` are each opt-in and install `CorePlugin` themselves if
 absent.
 
-**WASM tier:** `PluginHost::new(policy)` takes a `CapabilitySet` (`default_policy()` grants everything
-except `fs:read`); `with_fuel(n)` bounds each guest's per-`on-tick` instruction budget — fuel rather than
+**WASM tier:** `PluginHost::new(policy)` takes a `CapabilitySet` (`default_policy()` withholds
+`fs:read` and `schedule:tasks`); `with_fuel(n)` bounds each guest's per-host-tick instruction budget —
+fuel rather than
 epoch-based preemption, since an epoch deadline needs a watchdog and a host without one has a deadline
 that never trips; `with_memory_limit(n)` bounds linear memory; `with_filesystem_root(p)` is required in
 addition to `fs:read`, or a granted plugin still reads nothing. Each plugin is one subdirectory with its
 own `plugin.toml` declaring capabilities, subscribed event kinds, and load-order priority. A plain
 `cargo build` producing a core wasm module is enough — the host sniffs the preamble and encodes it into
 a component itself, so no extra tool is required on a plugin author's `PATH`.
+
+The shipped native windowed client uses `DEFAULT_PLUGIN_DIR`, the cwd-relative `plugins/` directory.
+It does not create that directory: absence means an empty plugin set. Each invalid, ABI-mismatched, or
+capability-denied child is logged and excluded without blocking valid siblings. Embedders and tests can
+call `lodestone_shell::wasm_plugins::install_from_directory` with an explicit path before handing the
+`App` to `Sim::from_app` or `run_with_app`. If the caller already installed `WasmHostPlugin`, that host
+and its policy remain authoritative; the shell does not add a second loader.
 
 ## Dependencies
 

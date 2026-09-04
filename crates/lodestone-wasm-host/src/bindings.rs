@@ -12,7 +12,7 @@
 //! import in the world. That is the wrong shape for a capability host: the whole
 //! design is that an import is present in the `Linker` only when policy grants
 //! it, and a guest that does not use an ungranted import must still load. So the
-//! host instantiates through the `Linker` itself and reaches the two exports with
+//! host instantiates through the `Linker` itself and reaches the three exports with
 //! `Instance::get_typed_func`, using the generated `event`/`action` types — which
 //! derive `ComponentType`/`Lift`/`Lower` — as the signature. The typed lifting is
 //! the part worth having; the all-or-nothing linking is not.

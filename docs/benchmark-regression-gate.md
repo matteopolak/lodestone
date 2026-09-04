@@ -277,12 +277,13 @@ cargo bench -p lodestone-server --bench server_tick
 `TickStats` includes the three per-phase summaries and the worst recorded phase window, so
 the bench can read them through `IntegratedServer::tick_stats()` without exposing its clock.
 Each sweep asserts a cumulative phase count of 200 and a rolling phase count of
-`min(200, TICK_HISTORY_LEN)` for every phase, then records both values with a metric named for
-the worst phase. The cumulative count proves every driven tick reached the recorder; the rolling
-count preserves the percentile window's bounded semantics. Under the paused runtime the phase
-durations are tied at zero, so the first phase owns that diagnostic window; it proves the phase
-recorder is wired, but is not a cost measurement. The wall-clock figures remain the cost figures
-for this fixture.
+`min(200, TICK_HISTORY_LEN)` for every phase, then records every summary's rolling and cumulative
+counts, p50/p95/p99/max duration, and over-budget count. It also records the worst duration and
+its tick index, alongside the phase-labelled worst-duration metric retained for easy filtering.
+The cumulative count proves every driven tick reached each phase; the rolling count preserves the
+percentile window's bounded semantics. Under the paused runtime the phase durations are tied at
+zero, so the first phase owns that diagnostic window; it proves the phase recorder is wired, but
+is not a cost measurement. The wall-clock figures remain the cost figures for this fixture.
 
 ## Dependencies
 

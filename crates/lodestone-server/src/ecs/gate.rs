@@ -14,12 +14,39 @@
 //! singleplayer session makes, observed through the same public
 //! `server_tick_count()` accessor a shell would use.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use bevy_app::{App, Plugin};
+use bevy_ecs::resource::Resource;
+use bevy_ecs::schedule::IntoScheduleConfigs;
+use bevy_ecs::system::Res;
 use lodestone_core::State;
 use uuid::Uuid;
 
 use crate::chunk::{ChunkColumn, ChunkSource};
+use crate::ecs::{GameTick, ServerApp, TickSet};
 use crate::integrated::IntegratedServer;
 use crate::protocol::{ServerBound, ServerDirective, ServerProtocol};
+
+#[derive(Resource, Clone)]
+struct PluginTickCount(Arc<AtomicU64>);
+
+#[derive(Clone)]
+struct CountingServerPlugin(Arc<AtomicU64>);
+
+impl Plugin for CountingServerPlugin {
+    fn build(&self, app: &mut App) {
+        app.insert_resource(PluginTickCount(Arc::clone(&self.0)));
+        app.add_systems(
+            GameTick,
+            (|count: Res<PluginTickCount>| {
+                count.0.fetch_add(1, Ordering::Relaxed);
+            })
+            .in_set(TickSet::Publish),
+        );
+    }
+}
 
 /// Every column is bare air — the cheapest terrain that still lets
 /// `MobHandle::seeded` build a `ChunkWorld`. Mirrors `tick.rs`'s own
@@ -213,6 +240,81 @@ async fn the_primary_in_memory_tick_loop_drives_game_tick_in_lockstep() {
         server.tick_stats().expect("primary world has TickStats").overrun_count,
         0,
         "regular paused-time periods must not record an overrun"
+    );
+    server.shutdown().await;
+}
+
+/// A caller-composed server plugin must survive the production constructor and
+/// run on the primary world's real tick task, not only on a hand-built `App`.
+#[tokio::test(start_paused = true)]
+async fn a_supplied_server_plugin_runs_on_the_primary_world_tick_task() {
+    const TICKS: u64 = 4;
+
+    let observed = Arc::new(AtomicU64::new(0));
+    let plugin_observed = Arc::clone(&observed);
+    let server_app = ServerApp::bootstrap_with(|app| {
+        app.add_plugins(CountingServerPlugin(plugin_observed));
+    });
+    let (server, _client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
+        Silent,
+        AirWorld,
+        (0..=0, 0..=0),
+        (0, 0),
+        0,
+        1,
+        server_app,
+    );
+
+    assert_eq!(
+        observed.load(Ordering::Relaxed),
+        0,
+        "a GameTick plugin must not run during ServerBoot"
+    );
+    tokio::task::yield_now().await;
+    for _ in 0..TICKS {
+        tokio::time::advance(crate::tick::TICK_PERIOD).await;
+    }
+    wait_for_completed_ticks(&server, TICKS).await;
+
+    assert_eq!(
+        observed.load(Ordering::Relaxed),
+        TICKS,
+        "the supplied plugin must run exactly once per completed production world tick"
+    );
+    server.shutdown().await;
+}
+
+/// Control for the plugin gate: carrying the same observable as a resource is
+/// insufficient unless a caller actually registers the plugin system.
+#[tokio::test(start_paused = true)]
+async fn a_supplied_resource_without_a_plugin_system_never_runs() {
+    const TICKS: u64 = 4;
+
+    let observed = Arc::new(AtomicU64::new(0));
+    let resource_observed = Arc::clone(&observed);
+    let server_app = ServerApp::bootstrap_with(|app| {
+        app.insert_resource(PluginTickCount(resource_observed));
+    });
+    let (server, _client) = IntegratedServer::open_in_memory_with_mobs_and_server_app(
+        Silent,
+        AirWorld,
+        (0..=0, 0..=0),
+        (0, 0),
+        0,
+        1,
+        server_app,
+    );
+
+    tokio::task::yield_now().await;
+    for _ in 0..TICKS {
+        tokio::time::advance(crate::tick::TICK_PERIOD).await;
+    }
+    wait_for_completed_ticks(&server, TICKS).await;
+
+    assert_eq!(
+        observed.load(Ordering::Relaxed),
+        0,
+        "control failed: the observable changed without the plugin system"
     );
     server.shutdown().await;
 }

@@ -81,8 +81,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
+use lodestone_data::{
+    block_solidity,
+    block_states::{self, StateId},
+    collision_shapes,
+};
 use lodestone_model::{DEFAULT_BLOCK_PHYSICS, block_physics};
-use lodestone_data::{block_solidity, block_states, collision_shapes};
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -383,9 +387,10 @@ fn committed_table_matches_the_committed_dump() {
     );
     for state in 0..dump.state_count {
         let id = state as u32;
+        let state_id = StateId::new(id).expect("dump state id is in range");
         assert_eq!(
-            block_solidity::legacy_solid(id),
-            Some(dump.legacy_solid[state]),
+            block_solidity::legacy_solid(state_id),
+            dump.legacy_solid[state],
             "legacySolid for state {id} ({:?})",
             block_states::block_name(id)
         );
@@ -429,11 +434,19 @@ fn count_matches_block_state_table() {
 fn ids_are_contiguous_and_out_of_range_is_none() {
     let count = block_solidity::STATE_COUNT;
     for id in 0..count {
-        assert!(block_solidity::legacy_solid(id).is_some(), "id {id} legacySolid");
-        assert!(block_solidity::blocks_motion(id).is_some(), "id {id} blocksMotion");
+        let state_id = StateId::new(id).expect("generated state id is in range");
+        assert_eq!(
+            block_solidity::legacy_solid(state_id),
+            block_solidity::legacy_solid_raw(id).expect("valid state has a solid flag"),
+            "id {id} legacySolid"
+        );
+        assert!(
+            block_solidity::blocks_motion(id).is_some(),
+            "id {id} blocksMotion"
+        );
     }
-    assert_eq!(block_solidity::legacy_solid(count), None);
-    assert_eq!(block_solidity::legacy_solid(u32::MAX), None);
+    assert_eq!(block_solidity::legacy_solid_raw(count), None);
+    assert_eq!(block_solidity::legacy_solid_raw(u32::MAX), None);
     assert_eq!(block_solidity::blocks_motion(count), None);
     assert_eq!(block_solidity::blocks_motion(u32::MAX), None);
 }
@@ -446,7 +459,8 @@ fn ids_are_contiguous_and_out_of_range_is_none() {
 fn blocks_motion_differs_from_legacy_solid_on_exactly_cobweb_and_bamboo_sapling() {
     let mut differ = BTreeSet::new();
     for id in 0..block_solidity::STATE_COUNT {
-        if block_solidity::legacy_solid(id) != block_solidity::blocks_motion(id) {
+        let state_id = StateId::new(id).expect("generated state id is in range");
+        if Some(block_solidity::legacy_solid(state_id)) != block_solidity::blocks_motion(id) {
             differ.insert(block_states::block_name(id).expect("named"));
             assert_eq!(
                 block_solidity::blocks_motion(id),
@@ -660,7 +674,9 @@ fn hand_checked_solidity_rows() {
     // motion"'s own
     // `block != COBWEB` clause turns it back off. All three layers, one block.
     let cobweb = first_id_named("minecraft:cobweb");
-    assert_eq!(block_solidity::legacy_solid(cobweb), Some(true));
+    assert!(block_solidity::legacy_solid(
+        StateId::new(cobweb).expect("cobweb resolves")
+    ));
     assert_eq!(block_solidity::blocks_motion(cobweb), Some(false));
     assert!(collision_shapes::collision_boxes(cobweb).expect("resolves").is_empty());
     // Air blocks a nothing.

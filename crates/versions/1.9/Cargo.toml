@@ -17,6 +17,7 @@ lodestone-model = { workspace = true }
 # v1-8/v1-14 counterparts; see that crate's module docs for which packets and
 # their protocol ranges.
 lodestone-protocol-common = { workspace = true }
+lodestone-server = { path = "../../lodestone-server" }
 lodestone-world = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
@@ -46,7 +47,9 @@ live-entity = []
 live-interaction = []
 
 [dev-dependencies]
+lodestone-client = { workspace = true }
 lodestone-net = { workspace = true }
+lodestone-registry = { workspace = true, features = ["v1-9"] }
 lodestone-testsupport = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }

@@ -197,8 +197,9 @@ fn state_id_of(name: &str) -> u32 {
 /// anything the predictor's own formula does not classify as one-shot.
 fn instant_break_fixture() -> OneBlockVersion {
     let state = state_id_of(INSTANT_BREAK_BLOCK);
-    let census = lodestone_data::hardness::hardness(state)
-        .unwrap_or_else(|| panic!("{INSTANT_BREAK_BLOCK} (state {state}) has no census hardness"));
+    let state_id = lodestone_data::block_states::StateId::new(state)
+        .unwrap_or_else(|| panic!("{INSTANT_BREAK_BLOCK} (state {state}) is outside the census"));
+    let census = lodestone_data::hardness::hardness(state_id);
 
     // The predictor's own instant-break condition, not a proxy for it: this is
     // the expression `Mining::start` branches on. `tool_speed`/`on_ground` are

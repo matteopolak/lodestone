@@ -36,9 +36,24 @@
 //! handful of tiers — dirt-like, stone-like, wood-like, and so on), so a state
 //! maps to a `u16` index into that small table.
 
+use crate::block_states::StateId;
 use crate::generated_hardness as table;
 
 pub use table::STATE_COUNT;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_id_boundary_rejects_invalid_raw_ids_and_lookup_is_total() {
+        assert!(StateId::new(STATE_COUNT).is_none());
+        assert!(StateId::new(u32::MAX).is_none());
+
+        let valid = StateId::new(0).expect("state zero is in the generated table");
+        assert!(hardness(valid).hardness.is_finite());
+    }
+}
 
 /// A block state's break-time inputs: vanilla's own "destroy speed" field (hardness) and
 /// whether the correct tool is required for drops.
@@ -57,11 +72,19 @@ pub struct Hardness {
 ///
 /// Zero-heap: reads straight from rodata. O(1) indexing, no search.
 #[must_use]
-pub fn hardness(id: u32) -> Option<Hardness> {
-    let &entry = table::STATE_ENTRY.get(id as usize)?;
+pub fn hardness(id: StateId) -> Hardness {
+    let entry = table::STATE_ENTRY[id.raw() as usize];
     let (hardness, requires_correct_tool) = table::ENTRIES[entry as usize];
-    Some(Hardness {
+    Hardness {
         hardness,
         requires_correct_tool,
-    })
+    }
+}
+
+/// Raw-id compatibility boundary for callers that have not validated a
+/// block-state id. New code should construct [`StateId`] and call [`hardness`]
+/// so this complete table is accessed with a total lookup.
+#[must_use]
+pub fn hardness_raw(id: u32) -> Option<Hardness> {
+    StateId::new(id).map(hardness)
 }

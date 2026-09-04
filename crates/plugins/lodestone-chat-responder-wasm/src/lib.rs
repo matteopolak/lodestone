@@ -28,6 +28,8 @@ wit_bindgen::generate!({
 });
 
 use lodestone::plugin::logging::{log, LogLevel};
+#[cfg(feature = "scheduler")]
+use lodestone::plugin::scheduler::{cancel, schedule_once, schedule_repeating};
 
 /// How many chat messages this guest has been handed since it was loaded.
 ///
@@ -35,18 +37,34 @@ use lodestone::plugin::logging::{log, LogLevel};
 /// `unsafe_code`; a wasm guest is single-threaded, so the atomicity costs nothing
 /// and buys the borrow checker's approval.
 static SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "scheduler")]
+static REPEATS_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "scheduler")]
+static ZERO_PERIOD_SEEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(feature = "scheduler")]
+static REPEATING_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
 
 struct ChatResponder;
 
 impl Guest for ChatResponder {
     fn init() -> PluginInfo {
         log(LogLevel::Info, "chat-responder starting up");
+        #[cfg(feature = "scheduler")]
+        {
+            schedule_once(2, 11);
+            let repeating = schedule_repeating(1, 2, 22);
+            REPEATING_ID.store(repeating, std::sync::atomic::Ordering::Relaxed);
+            let cancelled = schedule_once(1, 33);
+            cancel(cancelled);
+            schedule_once(2, 44);
+            schedule_repeating(1, 0, 66);
+        }
         PluginInfo {
             name: "chat-responder".to_string(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             // Must match `lodestone_wasm_host::ABI_WORLD`, or the host refuses to
             // load this plugin with a message that names both sides.
-            abi: "lodestone:plugin@0.1.0".to_string(),
+            abi: "lodestone:plugin@0.2.0".to_string(),
         }
     }
 
@@ -62,6 +80,47 @@ impl Guest for ChatResponder {
 
         #[cfg(not(any(feature = "spin", feature = "alloc-loop", feature = "network")))]
         return respond(events);
+    }
+
+    fn on_task(id: TaskId, token: u64) -> Vec<Action> {
+        #[cfg(feature = "scheduler")]
+        {
+            return match token {
+                11 => {
+                    schedule_once(0, 55);
+                    vec![Action::SendChat("task: once".to_owned())]
+                }
+                22 => {
+                    if id != REPEATING_ID.load(std::sync::atomic::Ordering::Relaxed) {
+                        return vec![Action::SendChat("task: repeating id changed".to_owned())];
+                    }
+                    let invocation =
+                        REPEATS_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if invocation == 2 {
+                        cancel(id);
+                    }
+                    vec![Action::SendChat(format!("task: repeating {invocation}"))]
+                }
+                33 => vec![Action::SendChat("task: cancelled task ran".to_owned())],
+                44 => vec![Action::SendChat("task: same deadline".to_owned())],
+                55 => vec![Action::SendChat("task: callback scheduled".to_owned())],
+                66 => {
+                    let invocation =
+                        ZERO_PERIOD_SEEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if invocation == 2 {
+                        cancel(id);
+                    }
+                    vec![Action::SendChat(format!("task: zero period {invocation}"))]
+                }
+                _ => Vec::new(),
+            };
+        }
+
+        #[cfg(not(feature = "scheduler"))]
+        {
+            let _ = (id, token);
+            Vec::new()
+        }
     }
 }
 

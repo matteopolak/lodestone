@@ -58,6 +58,10 @@ alloc-loop = []
 # The network-denial fixture: a guest that attempts a real TCP connect. See
 # `crates/lodestone-wasm-host/tests/network_denial.rs`.
 network = []
+# The scheduler conformance fixture. It imports the host's task scheduler,
+# schedules one-shot and repeating callbacks during `init`, and cancels both a
+# pending task and a running repeating task.
+scheduler = []
 
 [dependencies]
 # The only dependency, and it must stay that way: everything a guest links is

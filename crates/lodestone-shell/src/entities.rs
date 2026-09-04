@@ -8497,8 +8497,13 @@ mod tests {
         });
         interp.world_mut().entity_mut(ingest).insert(DisplayItem(Some(head)));
         interp.update(0.0);
+        let ground = interp
+            .draws()
+            .into_iter()
+            .find(|draw| draw.id == ITEM)
+            .expect("the ground item must already be in the unordered draw list");
         assert_eq!(
-            interp.draws()[0].item_skin.as_deref(),
+            ground.item_skin.as_deref(),
             Some(URL),
             "control: the ground item must already have its profile skin"
         );

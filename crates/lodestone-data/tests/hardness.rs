@@ -48,7 +48,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use lodestone_data::block_states;
+use lodestone_data::block_states::{self, StateId};
 use lodestone_data::hardness;
 
 fn manifest_dir() -> PathBuf {
@@ -213,8 +213,9 @@ fn committed_table_matches_the_committed_dump_bit_for_bit() {
     );
     let mut checked = 0usize;
     for row in &rows {
-        let entry = hardness::hardness(row.id as u32)
+        let state_id = StateId::new(row.id as u32)
             .unwrap_or_else(|| panic!("id {} ({}) missing from table", row.id, row.name));
+        let entry = hardness::hardness(state_id);
         assert_eq!(
             entry.hardness.to_bits(),
             row.hardness_bits,
@@ -245,21 +246,21 @@ fn count_matches_block_state_table() {
 
 #[test]
 fn out_of_range_ids_are_none() {
-    assert_eq!(hardness::hardness(hardness::STATE_COUNT), None);
-    assert_eq!(hardness::hardness(u32::MAX), None);
+    assert_eq!(hardness::hardness_raw(hardness::STATE_COUNT), None);
+    assert_eq!(hardness::hardness_raw(u32::MAX), None);
 }
 
 #[test]
 fn every_id_resolves() {
     for id in 0..hardness::STATE_COUNT {
-        assert!(hardness::hardness(id).is_some(), "id {id} did not resolve");
+        assert!(hardness::hardness_raw(id).is_some(), "id {id} did not resolve");
     }
 }
 
 #[test]
 fn bedrock_is_unbreakable() {
     let id = first_id_named("minecraft:bedrock").expect("bedrock present");
-    let entry = hardness::hardness(id).expect("bedrock resolves");
+    let entry = hardness::hardness_raw(id).expect("bedrock resolves");
     assert_eq!(entry.hardness, -1.0, "bedrock (id {id}) must be unbreakable");
 }
 
@@ -267,8 +268,8 @@ fn bedrock_is_unbreakable() {
 fn obsidian_is_far_harder_than_dirt() {
     let obsidian_id = first_id_named("minecraft:obsidian").expect("obsidian present");
     let dirt_id = first_id_named("minecraft:dirt").expect("dirt present");
-    let obsidian = hardness::hardness(obsidian_id).expect("obsidian resolves");
-    let dirt = hardness::hardness(dirt_id).expect("dirt resolves");
+    let obsidian = hardness::hardness_raw(obsidian_id).expect("obsidian resolves");
+    let dirt = hardness::hardness_raw(dirt_id).expect("dirt resolves");
     assert_eq!(obsidian.hardness, 50.0, "obsidian (id {obsidian_id}) hardness");
     assert_eq!(dirt.hardness, 0.5, "dirt (id {dirt_id}) hardness");
     assert!(
@@ -283,8 +284,8 @@ fn obsidian_is_far_harder_than_dirt() {
 fn stone_requires_correct_tool_dirt_does_not() {
     let stone_id = first_id_named("minecraft:stone").expect("stone present");
     let dirt_id = first_id_named("minecraft:dirt").expect("dirt present");
-    let stone = hardness::hardness(stone_id).expect("stone resolves");
-    let dirt = hardness::hardness(dirt_id).expect("dirt resolves");
+    let stone = hardness::hardness_raw(stone_id).expect("stone resolves");
+    let dirt = hardness::hardness_raw(dirt_id).expect("dirt resolves");
     assert!(
         stone.requires_correct_tool,
         "stone (id {stone_id}) must require the correct tool for drops"

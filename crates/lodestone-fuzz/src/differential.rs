@@ -85,8 +85,12 @@
 //!   fix in a scratch worktree and require the harness to rediscover it. That
 //!   needs an action corpus rich enough to reach the reverted code path,
 //!   which needs generation first.
-//! - **No client-state comparison.** Only the two-`WorldOracle`, block-state
-//!   half exists.
+//! - **The generic `WorldOracle` remains block-state-only.** The hermetic
+//!   `tests/differential_client_state.rs` fixture uses this block-state half,
+//!   adds direct entity and inventory comparisons through public client
+//!   queries, and runs a real `IntegratedServer` tick loop against a direct
+//!   `ChunkSource` read; scheduled-tick state is not exposed by that read
+//!   model.
 
 use std::time::Duration;
 

@@ -4,9 +4,9 @@
 
 `lodestone-v1-7` is the client protocol crate for **protocol 5**, spoken by
 Minecraft 1.7.6 through 1.7.10 — the bottom of the version ladder and the only
-era that shares almost nothing with its neighbour. It implements the **joining
-direction only**: there is no `ServerProtocol`, so this version can be joined
-but not hosted.
+era that shares almost nothing with its neighbour. It provides both the joining
+adapter and `V5ServerProtocol`; the registry selects the latter only for
+protocol 5.
 
 ## The protocol number, and where it came from
 
@@ -43,6 +43,28 @@ deliberately ignored with a reason, or fails table construction.
 `cargo xtask connectedness` reports **clientbound decoded 50/65, emits 50/65,
 decoded-but-stranded 0, serverbound encoded 19/24**, examined over 50 dispatch
 arms.
+
+### Hosted path
+
+`V5ServerProtocol` moves directly from login success to Play because this wire
+has no configuration exchange or whole-connection compression. Its join packet
+uses a signed one-byte dimension, and the initial placement's middle double is
+the eye position rather than the feet. The adapter echoes that placement using
+the separate `y` and `stance` fields the serverbound form requires.
+
+Hosted chunks use the single-column `map_chunk` form: the body has two 16-bit
+masks and an `i32` compressed length, then a zlib stream. Within that stream,
+each present section contributes a type array, metadata nibble array,
+block-light nibble array, and sky-light nibble array; the biome footer follows.
+The committed section fixture under `crates/versions/1.7/tests/` anchors this
+order. A canonical column must cover y=0 through y=255, and every emitted
+state must have an exact legacy inverse within protocol 5's defined numeric
+block ranges `0..=164` or `170..=175`; unsupported states fail encoding rather
+than becoming air. Block updates use their protocol-5 position shape and the
+same conversion. The in-memory integration test reaches Play, observes a known
+chunk block, breaks it, and observes its replacement update.
+That control does not replace a live protocol-5 client session against the
+host, which remains the external compatibility check.
 
 ### What is genuinely different, not merely older
 
@@ -142,6 +164,11 @@ row's display name.
   packet and `IGNORED` every deliberately untranslated one with its reason.
   Both entries must be spelled literally — `cargo xtask connectedness` reads
   `Handler::new(` as a text anchor and a helper function defeats it.
+- **Hosting** is `src/server_protocol.rs`. Keep its zlib chunk body local to
+  this era: later hosted families use materially different section encodings.
+  Add a byte-level control in `tests/server_protocol.rs` and a visible
+  client/server assertion in `tests/server_integration.rs` for every hosted
+  packet family.
 - **Tables** in `src/generated/` are regenerated, never edited:
   `LODESTONE_REGEN=1 cargo test -p lodestone-v1-7 --test entity_types` rebuilds
   the entity-type tables from the committed wire transcript, reproducing the
@@ -176,7 +203,7 @@ row's display name.
 
 | knob | where | effect |
 |---|---|---|
-| feature `v1-7` | `lodestone-registry` | Registers the family. Off by default, like every family |
+| feature `v1-7` | `lodestone-registry` | Registers both the joining adapter and the protocol-5 server family. Off by default, like every family |
 | `LODESTONE_REGEN=1` | `tests/entity_types.rs` | Regenerates the entity-type tables from the committed transcript |
 | `./scripts/live-oracles/legacy.sh 1.7.10` | — | Boots the oracle on `:25602`, RCON `:25603`, container `lodestone-mc1710`, `eclipse-temurin:8-jdk`, flat quiet overworld |
 
@@ -192,8 +219,10 @@ row's display name.
   as a silent mis-parse.
 - `lodestone-core`, `lodestone-macros`, `lodestone-model`, `lodestone-world`,
   `lodestone-data` — the usual seam.
-- `flate2` for the per-packet chunk inflate, and `md-5` for the offline-mode
-  UUID derivation described above.
+- `lodestone-server` supplies the version-free host trait and chunk source;
+  `lodestone-client` provides the in-memory consumer control.
+- `flate2` handles the per-packet chunk inflate and deflate, and `md-5` handles
+  the offline-mode UUID derivation described above.
 
 ## Evidence
 

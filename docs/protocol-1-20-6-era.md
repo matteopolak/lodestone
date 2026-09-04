@@ -244,9 +244,8 @@ The crate itself reads no environment variable and has no runtime
 configuration: the negotiated protocol is the only per-connection input, and it
 is resolved once at construction.
 
-Hosting is not configurable because it is not implemented: only `v26-2`
-implements `ServerProtocol`, so this family can join a 766 server and cannot be
-one.
+Hosting is not configurable because this family has no `ServerProtocol`: it can
+join a 766 server and cannot host one.
 
 ## Dependencies
 

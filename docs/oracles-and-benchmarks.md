@@ -53,7 +53,7 @@ trip can only ever be as strict as a shared misunderstanding between its two hal
 repo has shipped defects invisible to exactly that blind spot before. Every property test calls
 a decoder through a `catch_unwind` wrapper (never directly, or a panic aborts the whole test
 process instead of reporting one shrunk failing case) and — for the four client protocol
-families' clientbound decode, and `v26-2`'s serverbound decode (the only family that hosts) —
+families' clientbound decode, and `v26-2`'s serverbound decode —
 reads the real generated packet-id tables, so "which packet ids get fuzzed" tracks the code
 generator rather than a hand-maintained list. The frame-level `Codec` (length prefix and zlib
 compression, ahead of every family's own decode) is fuzzed too, with a termination bound so a

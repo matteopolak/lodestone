@@ -92,8 +92,8 @@ insert-to-take-control/remove-to-release convention for plugin movement control.
 | capability | status | completion gate or remaining work |
 |---|---|---|
 | Host and sandbox | done, narrow | `lodestone-wasm-host`, `PluginHost`, fuel, memory, filesystem-root, trap, and memory gates are real. |
-| Capability ABI | done, narrow | `wit/lodestone-plugin.wit` has three event kinds, three actions, and `log`/`fs:read` imports. Add scheduler, commands, block access, and entity actions before claiming feature parity. |
-| Shipped application reach | partial | Wire loading into the shipped application; a host implementation alone is not user-visible capability. |
+| Capability ABI | done, narrow | `wit/lodestone-plugin.wit` has three event kinds, three actions, `log`/`fs:read`, and delayed/repeating task scheduling with cancellation. Add commands, block access, and entity actions before claiming feature parity. |
+| Shipped application reach | done, native windowed client | The runner discovers cwd-relative `plugins/` through the real shell `Sim`; browser hosting remains excluded because Wasmtime is native-only. |
 
 ## Scheduling, reentrancy, and testability
 

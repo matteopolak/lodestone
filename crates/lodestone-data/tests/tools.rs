@@ -899,7 +899,7 @@ fn diamond_pickaxe_mines_stone_in_six_ticks() {
     assert!(mining.correct_tool, "a pickaxe drops stone");
     assert_eq!(mining.damage_per_block, 1);
 
-    let hardness = hardness::hardness(stone).expect("stone hardness").hardness;
+    let hardness = hardness::hardness_raw(stone).expect("stone hardness").hardness;
     assert_eq!(
         ticks_to_break(hardness, mining.speed, mining.correct_tool),
         6,
@@ -922,7 +922,7 @@ fn bare_hand_on_stone_is_151_ticks_not_45() {
     );
     assert_eq!(mining.damage_per_block, 0, "a bare hand has no durability cost");
 
-    let hardness = hardness::hardness(stone).expect("stone hardness").hardness;
+    let hardness = hardness::hardness_raw(stone).expect("stone hardness").hardness;
     assert_eq!(
         ticks_to_break(hardness, mining.speed, mining.correct_tool),
         151,
@@ -989,7 +989,7 @@ fn a_wooden_pickaxe_speeds_up_obsidian_but_never_drops_it() {
         .expect("obsidian resolves");
     assert!(diamond.correct_tool, "diamond drops obsidian");
 
-    let hardness = hardness::hardness(obsidian).expect("obsidian hardness").hardness;
+    let hardness = hardness::hardness_raw(obsidian).expect("obsidian hardness").hardness;
     assert_eq!(
         ticks_to_break(hardness, wooden.speed, wooden.correct_tool),
         2500,

@@ -548,7 +548,7 @@ async fn live_click_machine_agrees_with_server() {
     {
         let s0 = seed(&mut rcon, &mut session, &user, &[(36, diamond, 64)]).await;
         let mut menu = menu_from(&s0);
-        Click::left(36).apply(&mut menu, ctx);
+        Click::left(36).apply(&mut menu, ctx.clone());
         let s1 = session.click(36, 0, mode::PICKUP).await;
         assert_match("left-pickup-whole", &menu, &s1);
     }
@@ -557,7 +557,7 @@ async fn live_click_machine_agrees_with_server() {
     {
         let s0 = seed(&mut rcon, &mut session, &user, &[(36, diamond, 64)]).await;
         let mut menu = menu_from(&s0);
-        Click::right(36).apply(&mut menu, ctx);
+        Click::right(36).apply(&mut menu, ctx.clone());
         let s1 = session.click(36, 1, mode::PICKUP).await;
         assert_match("right-pickup-half", &menu, &s1);
     }
@@ -566,8 +566,8 @@ async fn live_click_machine_agrees_with_server() {
     {
         let s0 = seed(&mut rcon, &mut session, &user, &[(36, diamond, 64)]).await;
         let mut menu = menu_from(&s0);
-        Click::left(36).apply(&mut menu, ctx);
-        Click::right(37).apply(&mut menu, ctx);
+        Click::left(36).apply(&mut menu, ctx.clone());
+        Click::right(37).apply(&mut menu, ctx.clone());
         session.click(36, 0, mode::PICKUP).await;
         let s1 = session.click(37, 1, mode::PICKUP).await;
         assert_match("right-place-one", &menu, &s1);
@@ -577,7 +577,7 @@ async fn live_click_machine_agrees_with_server() {
     {
         let s0 = seed(&mut rcon, &mut session, &user, &[(36, diamond, 64)]).await;
         let mut menu = menu_from(&s0);
-        Click::shift(36).apply(&mut menu, ctx);
+        Click::shift(36).apply(&mut menu, ctx.clone());
         let s1 = session.click(36, 0, mode::QUICK_MOVE).await;
         assert_match("quick-move-shift", &menu, &s1);
     }
@@ -586,7 +586,7 @@ async fn live_click_machine_agrees_with_server() {
     {
         let s0 = seed(&mut rcon, &mut session, &user, &[(9, diamond, 40)]).await;
         let mut menu = menu_from(&s0);
-        Click::hotbar_swap(9, 3).apply(&mut menu, ctx); // main slot 9 <-> hotbar index 3 (menu 39)
+        Click::hotbar_swap(9, 3).apply(&mut menu, ctx.clone()); // main slot 9 <-> hotbar index 3 (menu 39)
         let s1 = session.click(9, 3, mode::SWAP).await;
         assert_match("hotbar-swap", &menu, &s1);
     }
@@ -601,8 +601,8 @@ async fn live_click_machine_agrees_with_server() {
         )
         .await;
         let mut menu = menu_from(&s0);
-        Click::left(36).apply(&mut menu, ctx); // cursor = 32
-        Click::double(36).apply(&mut menu, ctx); // gather up to 64
+        Click::left(36).apply(&mut menu, ctx.clone()); // cursor = 32
+        Click::double(36).apply(&mut menu, ctx.clone()); // gather up to 64
         session.click(36, 0, mode::PICKUP).await;
         let s1 = session.click(36, 0, mode::PICKUP_ALL).await;
         assert_match("double-click-collect", &menu, &s1);
@@ -612,14 +612,14 @@ async fn live_click_machine_agrees_with_server() {
     {
         let s0 = seed(&mut rcon, &mut session, &user, &[(36, diamond, 10)]).await;
         let mut menu = menu_from(&s0);
-        Click::drop_one(36).apply(&mut menu, ctx);
+        Click::drop_one(36).apply(&mut menu, ctx.clone());
         let s1 = session.click(36, 0, mode::THROW).await;
         assert_match("throw-drop-one", &menu, &s1);
     }
     {
         let s0 = seed(&mut rcon, &mut session, &user, &[(36, diamond, 10)]).await;
         let mut menu = menu_from(&s0);
-        Click::drop_stack(36).apply(&mut menu, ctx);
+        Click::drop_stack(36).apply(&mut menu, ctx.clone());
         let s1 = session.click(36, 1, mode::THROW).await;
         assert_match("throw-drop-stack", &menu, &s1);
     }
@@ -628,8 +628,8 @@ async fn live_click_machine_agrees_with_server() {
     {
         let s0 = seed(&mut rcon, &mut session, &user, &[(36, diamond, 64)]).await;
         let mut menu = menu_from(&s0);
-        Click::left(36).apply(&mut menu, ctx); // cursor = 64
-        menu.perform_drag(drag_type::EVEN, &[9, 10, 11], ctx);
+        Click::left(36).apply(&mut menu, ctx.clone()); // cursor = 64
+        menu.perform_drag(drag_type::EVEN, &[9, 10, 11], ctx.clone());
         // server: pick up, then start/add/add/add/end (all stale-state resyncs)
         session.click(36, 0, mode::PICKUP).await;
         session
@@ -654,7 +654,7 @@ async fn live_click_machine_agrees_with_server() {
     {
         let s0 = seed(&mut rcon, &mut session, &user, &[(36, diamond, 64)]).await;
         let mut menu = menu_from(&s0);
-        Click::left(36).apply(&mut menu, ctx);
+        Click::left(36).apply(&mut menu, ctx.clone());
         menu.perform_drag(drag_type::ONE, &[9, 10, 11], ctx);
         session.click(36, 0, mode::PICKUP).await;
         session

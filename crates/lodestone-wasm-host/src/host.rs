@@ -43,7 +43,7 @@ use std::path::{Path, PathBuf};
 use wasmtime::component::{Component, Linker, TypedFunc};
 use wasmtime::{Config, Engine, Store, StoreLimits, StoreLimitsBuilder};
 
-use crate::bindings::lodestone::plugin::{filesystem, logging, types};
+use crate::bindings::lodestone::plugin::{filesystem, logging, scheduler, types};
 use crate::capability::{Capability, CapabilitySet};
 
 /// The WIT vocabulary, re-exported from the generated bindings so that nothing
@@ -63,7 +63,7 @@ pub use crate::bindings::lodestone::plugin::types::{
 /// The WIT world is a named, versioned unit, so "a guest built against
 /// `lodestone:plugin@0.2.0`" is a thing the host can *detect* rather than
 /// discover as a mysterious trap.
-pub const ABI_WORLD: &str = "lodestone:plugin@0.1.0";
+pub const ABI_WORLD: &str = "lodestone:plugin@0.2.0";
 
 /// Default per-tick fuel budget. Chosen as "enough for any plugin doing plain
 /// data work over a tick's event batch, nowhere near enough to survive a spin
@@ -76,6 +76,14 @@ pub const DEFAULT_MEMORY_LIMIT: usize = 32 * 1024 * 1024;
 /// How many *core* wasm instances one plugin may create. See the comment at the
 /// `StoreLimitsBuilder` call site for why this is not 1.
 const MAX_CORE_INSTANCES_PER_PLUGIN: usize = 32;
+
+#[derive(Debug, Clone, Copy)]
+struct ScheduledTask {
+    id: types::TaskId,
+    due_tick: u64,
+    token: u64,
+    period_ticks: Option<u32>,
+}
 
 /// Everything that can go wrong loading or driving a guest.
 ///
@@ -179,6 +187,11 @@ pub struct GuestState {
     /// Reads are additionally confined to this subtree when `fs:read` is granted.
     /// `None` refuses every read, while still recording it.
     fs_root: Option<PathBuf>,
+    current_tick: u64,
+    next_task_id: types::TaskId,
+    scheduled_tasks: Vec<ScheduledTask>,
+    running_task: Option<types::TaskId>,
+    cancel_running_task: bool,
 }
 
 impl fmt::Debug for GuestState {
@@ -188,6 +201,8 @@ impl fmt::Debug for GuestState {
             .field("log_lines", &self.log_lines.len())
             .field("fs_reads", &self.fs_reads)
             .field("fs_root", &self.fs_root)
+            .field("current_tick", &self.current_tick)
+            .field("scheduled_tasks", &self.scheduled_tasks.len())
             .finish_non_exhaustive()
     }
 }
@@ -241,16 +256,70 @@ impl filesystem::Host for GuestState {
     }
 }
 
+impl GuestState {
+    fn schedule(
+        &mut self,
+        delay_ticks: u32,
+        period_ticks: Option<u32>,
+        token: u64,
+    ) -> types::TaskId {
+        let id = self.next_task_id;
+        self.next_task_id = self.next_task_id.wrapping_add(1);
+        let delay = u64::from(delay_ticks.max(1));
+        self.scheduled_tasks.push(ScheduledTask {
+            id,
+            due_tick: self.current_tick.saturating_add(delay),
+            token,
+            period_ticks,
+        });
+        id
+    }
+
+    fn take_next_due_task(&mut self) -> Option<ScheduledTask> {
+        let index = self
+            .scheduled_tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, task)| task.due_tick <= self.current_tick)
+            .min_by_key(|(_, task)| task.id)
+            .map(|(index, _)| index)?;
+        Some(self.scheduled_tasks.swap_remove(index))
+    }
+}
+
+impl scheduler::Host for GuestState {
+    fn schedule_once(&mut self, delay_ticks: u32, token: u64) -> types::TaskId {
+        self.schedule(delay_ticks, None, token)
+    }
+
+    fn schedule_repeating(
+        &mut self,
+        delay_ticks: u32,
+        period_ticks: u32,
+        token: u64,
+    ) -> types::TaskId {
+        self.schedule(delay_ticks, Some(period_ticks.max(1)), token)
+    }
+
+    fn cancel(&mut self, id: types::TaskId) {
+        self.scheduled_tasks.retain(|task| task.id != id);
+        if self.running_task == Some(id) {
+            self.cancel_running_task = true;
+        }
+    }
+}
+
 /// One instantiated guest: its own `Store` (so its linear memory, and therefore
 /// its state, persists across ticks — the host owns dispatch but a guest may
 /// keep its own state between calls rather than being purely stateless) and
-/// typed handles to its two exports.
+/// typed handles to its three exports.
 pub struct LoadedPlugin {
     name: String,
     info: PluginInfo,
     granted: CapabilitySet,
     store: Store<GuestState>,
     on_tick: TypedFunc<(Vec<Event>,), (Vec<Action>,)>,
+    on_task: TypedFunc<(types::TaskId, u64), (Vec<Action>,)>,
     failure: Option<String>,
 }
 
@@ -316,13 +385,46 @@ impl LoadedPlugin {
             self.failure = Some(format!("setting fuel: {e:?}"));
             return Vec::new();
         }
+        let next_tick = self.store.data().current_tick.saturating_add(1);
+        self.store.data_mut().current_tick = next_tick;
+        let mut actions = Vec::new();
+        while let Some(task) = self.store.data_mut().take_next_due_task() {
+            {
+                let state = self.store.data_mut();
+                state.running_task = Some(task.id);
+                state.cancel_running_task = false;
+            }
+            match self.on_task.call(&mut self.store, (task.id, task.token)) {
+                Ok((task_actions,)) => actions.extend(task_actions),
+                Err(e) => {
+                    let message = format!("{e:?}");
+                    tracing::error!(plugin = %self.name, "plugin task failed and will not be called again: {message}");
+                    self.failure = Some(message);
+                    return Vec::new();
+                }
+            }
+            let state = self.store.data_mut();
+            state.running_task = None;
+            if !state.cancel_running_task
+                && let Some(period_ticks) = task.period_ticks
+            {
+                state.scheduled_tasks.push(ScheduledTask {
+                    due_tick: state.current_tick.saturating_add(u64::from(period_ticks)),
+                    ..task
+                });
+            }
+            state.cancel_running_task = false;
+        }
         // No `post_return` call: wasmtime 47 deprecated it as a no-op — the runtime
         // now runs the component's own `post-return` itself. Calling it emits a
         // deprecation warning and does nothing, so a version bump that reinstates
         // the requirement would show up as a *trap*, not a warning. Worth knowing
         // if guests start failing after a wasmtime upgrade.
         match self.on_tick.call(&mut self.store, (events.to_vec(),)) {
-            Ok((actions,)) => actions,
+            Ok((tick_actions,)) => {
+                actions.extend(tick_actions);
+                actions
+            }
             Err(e) => {
                 let message = format!("{e:?}");
                 tracing::error!(plugin = %self.name, "plugin failed and will not be called again: {message}");
@@ -503,6 +605,13 @@ impl PluginHost {
                     message: format!("linking filesystem: {e:?}"),
                 })?;
         }
+        if granted.contains(Capability::ScheduleTasks) {
+            scheduler::add_to_linker::<_, wasmtime::component::HasSelf<_>>(&mut linker, |s| s)
+                .map_err(|e| HostError::Compile {
+                    name: name.to_owned(),
+                    message: format!("linking scheduler: {e:?}"),
+                })?;
+        }
 
         let state = GuestState {
             name: name.to_owned(),
@@ -526,6 +635,11 @@ impl PluginHost {
             } else {
                 None
             },
+            current_tick: 0,
+            next_task_id: 0,
+            scheduled_tasks: Vec::new(),
+            running_task: None,
+            cancel_running_task: false,
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limits);
@@ -559,6 +673,13 @@ impl PluginHost {
                 export: "on-tick".to_owned(),
                 message: format!("{e:?}"),
             })?;
+        let on_task = instance
+            .get_typed_func::<(types::TaskId, u64), (Vec<Action>,)>(&mut store, "on-task")
+            .map_err(|e| HostError::MissingExport {
+                name: name.to_owned(),
+                export: "on-task".to_owned(),
+                message: format!("{e:?}"),
+            })?;
 
         let (info,) = init.call(&mut store, ()).map_err(|e| HostError::Trap {
             name: name.to_owned(),
@@ -585,6 +706,7 @@ impl PluginHost {
             granted,
             store,
             on_tick,
+            on_task,
             failure: None,
         });
         Ok(self.plugins.len() - 1)

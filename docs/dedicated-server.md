@@ -74,6 +74,20 @@ completion barrier for the matching `ServerTickWitness` observation. Independent
 dimension loops retain their own generic ticking path; they do not construct or share this primary
 server `World`.
 
+Native embedders can build that primary application with `ServerApp::bootstrap_with`, adding their
+plugins after `ServerCorePlugin` installs the public schedules and ordering sets but before plugin
+finalization and `ServerBoot`. Passing the result to
+`IntegratedServer::open_in_memory_with_mobs_and_server_app` moves its `World` into the same primary
+tick task, so plugin systems scheduled in `GameTick` are production work rather than a test-only
+application. Persistent embedders use
+`IntegratedServer::open_persistent_with_mobs_and_commands_and_server_app` for the same handoff; the
+shorter constructors preserve their existing behavior by supplying `ServerApp::bootstrap()`.
+
+The standalone binary builds that application in `dedicated_server_app` and passes it through
+`open_persistent_server`, the same persistent leaf tested by an embedding host. Compiled-in native
+plugins belong in that builder. The default binary installs none, and there is deliberately no
+runtime plugin directory, dynamic Rust loader, or `server.properties` selection policy yet.
+
 The server owns its own `World`, entirely separate from the client's: they have contradictory
 clock policies (the client forgives lost time past a cap; the server must keep advancing and only
 forgives past vanilla's 2-second threshold), singleplayer is already structurally multiplayer (a
@@ -207,6 +221,14 @@ lost if the world is stopped before a player ever visits.
   connection task is where it belongs.
 - **Adding an ECS `Resource` a plugin will order against**: it must be genuinely `'static`-owned
   (`Send + Sync + 'static`), the same constraint the client-side plugin doctrine already enforces.
+- **Registering a native server plugin in an embedding application**: add it through
+  `ServerApp::bootstrap_with`, then pass that exact application to either
+  `IntegratedServer::open_in_memory_with_mobs_and_server_app` or
+  `IntegratedServer::open_persistent_with_mobs_and_commands_and_server_app`. Do not build a second
+  `App` beside the server: only the extracted primary `World` is ticked.
+- **Registering a compiled-in plugin in the standalone binary**: add it in
+  `dedicated_server_app`. Keep `open_persistent_server` as the single path into persistent world
+  construction so tests and production cannot select different applications.
 - **Do not install the client's `CorePlugin` on the server's `App`** — it inserts a frame clock and
   a render-driven schedule chain that are both meaningless server-side; the server needs its own
   core plugin.
@@ -225,6 +247,8 @@ lost if the world is stopped before a player ever visits.
   `whitelist.json`/`banned-players.json`/`banned-ips.json` alongside them, vanilla's own layout.
 - `LanConfig` — the open-to-LAN/publish surface (view radius, RCON, query, discovery, online mode,
   commands, resource packs, plugin channels); defaults are the offline, minimal-surface behavior.
+- Native server plugin registration is an in-process, compile-time builder choice, not a
+  `server.properties` key. Runtime discovery and dynamic native loading are not supported.
 - Tick-loop constants (`TICK_PERIOD`, the 100-sample MSPT window, the derived overload/warning
   thresholds) and session-liveness constants (`KEEP_ALIVE_INTERVAL` = 15s, `TIME_SYNC_INTERVAL` = 1s)
   are compile-time constants in `lodestone-server`, not runtime settings.
