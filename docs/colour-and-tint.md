@@ -58,7 +58,9 @@ server's own registry sync (not a hardcoded jar-derived id table), so a data pac
 renamed or reassigned biome resolves correctly; an unresolvable id or an empty
 registry falls back to the plains default rather than rendering untinted — those two
 failure modes look identical on a plains world and need an instrumented probe
-(`LODESTONE_TINT_PROBE`) to tell apart from a screenshot alone. The
+(`LODESTONE_TINT_PROBE`) to tell apart from a screenshot alone. The probe reports
+each meshed section's resolved and skipped counts to stderr; the ordinary tracing
+path emits a single warning on the first skipped blended quad. The
 mangrove-swamp/swamp noise-based colour variation is the one known unported detail;
 64 of 66 biomes are unaffected.
 
