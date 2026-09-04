@@ -41,13 +41,14 @@ carries no on-disk override). `lodestone_server::worldgen_data::overworld_chunk_
 turns that classification into the real `ChunkSource` a world directory's own file specifies,
 returning `Ok(None)` when there is nothing to override.
 
-**As of this writing, nothing on the singleplayer launch path calls
-`overworld_chunk_source_override` yet** — `lodestone-shell`'s own chunk-source construction
-(`net.rs`'s `preset_chunk_source`) still builds Flat/Single-Biome worlds from this crate's bundled
-*default* preset/biome regardless of what a given world's `world_gen_settings.dat` actually
-stores, so a customized world does not yet generate according to the player's choice when played.
-The reader and the chunk-source builder are both real and tested; the one remaining step is a
-shell-side call site adopting them.
+The singleplayer/LAN launch path (`net.rs`'s `Origin::Integrated` handling) calls
+`overworld_chunk_source_override` first, whenever a world directory is in scope, and only falls
+back to `preset_chunk_source`'s bundled *default* preset/biome on `Ok(None)` — no stored override,
+which is every world type besides Flat and Single Biome, and every Flat/Single-Biome world created
+before this wiring landed. A customized world therefore generates according to the player's own
+choice from the moment it is first played, not only once a separate vanilla server re-opens the
+save folder. Native only: a browser build has no world directory to read one back from, and takes
+the bundled-default arm unconditionally.
 
 `lodestone-server`'s own chunk-NBT schema module owns the mapping between an in-memory
 `ChunkColumn` and the actual chunk NBT tree; the persistence layer sits below the chunk cache and
