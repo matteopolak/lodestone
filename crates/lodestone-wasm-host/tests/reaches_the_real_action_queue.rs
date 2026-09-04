@@ -1,4 +1,4 @@
-//! Issue #173's gate, and the one that answers `CLAUDE.md`'s island rule: a
+//! The gate that answers `CLAUDE.md`'s island rule for this crate: a
 //! separately-built `.wasm` loaded from a file changes the state of the **real
 //! client `App`**.
 //!

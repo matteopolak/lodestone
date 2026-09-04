@@ -17,7 +17,8 @@
 //! This proves *fuel* preempts. It does not prove epoch interruption works, because
 //! this crate does not use epochs — see `src/host.rs`'s header for why (an epoch
 //! deadline with no watchdog to increment the epoch is a deadline that can never
-//! trip). Issue #176 owns epochs and the watchdog thread together.
+//! trip). Epochs and the watchdog thread that would make them real remain future
+//! work, not yet built.
 
 mod support;
 

@@ -1,4 +1,4 @@
-//! The ABI surface (issue #173): the lift from `lodestone_model::ClientEvent` into
+//! The capability-gated ABI surface: the lift from `lodestone_model::ClientEvent` into
 //! a WIT `event`, the lower from a WIT `action` back into
 //! `lodestone_model::ClientAction`, and the capability that gates each direction.
 //!

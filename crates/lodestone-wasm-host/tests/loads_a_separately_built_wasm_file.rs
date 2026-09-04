@@ -1,4 +1,4 @@
-//! Issue #172's gate: a `.wasm` file that this crate has **no compile-time
+//! The runtime-loading gate: a `.wasm` file that this crate has **no compile-time
 //! knowledge of** is built by a separate `rustc` invocation for a different target
 //! triple, opened by path at runtime, and observably changes what the host
 //! produces.
@@ -70,8 +70,8 @@ fn a_wasm_file_built_separately_changes_behaviour_once_loaded_from_disk() {
     );
 }
 
-/// Issue #173's open decision (2), answered by observation: the guest owns its
-/// state across host calls.
+/// Answered by observation: the guest owns its state across host calls, rather
+/// than the host rebuilding a stateless guest per tick.
 ///
 /// The counter in the reply is the evidence. A stateless request/response host —
 /// one that built a fresh instance per tick — would answer `seen: 1` every time,
