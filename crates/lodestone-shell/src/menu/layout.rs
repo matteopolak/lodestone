@@ -5,9 +5,9 @@
 //!
 //! ## What it is
 //!
-//! The second child of the menu-framework epic (#392/#394). [`super::widget`]
-//! landed the leaf ([`Widget`]) and the [`LayoutElement`] seam; this is the part
-//! that *places* leaves. Its consumer is [`super::render`]'s `title_slot` and
+//! [`super::widget`] provides the leaf ([`Widget`]) and the [`LayoutElement`]
+//! seam; this is the part that *places* leaves. Its consumer is
+//! [`super::render`]'s `title_slot` and
 //! `pause_slot`, which no longer hold hand-typed offsets: the title column and
 //! the pause grid are built here, arranged, and read back.
 //!
@@ -58,16 +58,16 @@
 //! canvas-independent**: only the final `alignInRectangle` depends on the screen
 //! size, and that is exactly what `Origin` applies at draw time. So a tree is
 //! arranged once per process and a resize costs neither a rebuild nor a
-//! re-arrange. When #395 gives widgets persistent focus, `OptionsSubScreen`'s
-//! order becomes the right one for screens that own state — which is the reason
-//! this choice is written down rather than assumed.
+//! re-arrange. Screens with persistent widget state use the repositioning order
+//! once they own state; recording that distinction here prevents a future
+//! caller from assuming that rebuilding is always safe.
 //!
-//! **#395 landed and that is what happened**, for the one screen that owns state:
+//! A stateful screen follows that rule:
 //! [`super::edit_box::EditBox`] holds a caret, a selection and a scroll offset, so
 //! `Screen::ServerEdit`'s fields cannot be rebuilt per frame and
 //! [`super::render`]'s `draw_edit_box` *repositions* them instead. Nothing in this
-//! file changed — the title and pause trees still have nothing to reposition — but
-//! the sentence above is no longer hypothetical. See `docs/menu-focus.md`.
+//! module needs repositioning — the title and pause trees still have no persistent
+//! fields — while the edit screen does. See `docs/menu-focus.md`.
 //!
 //! ## How to change it
 //!
@@ -142,8 +142,9 @@
 //!   cell settings are top-left, unlike `FrameLayout`'s.
 //! - **`CommonLayouts`.** Two static helpers over `LinearLayout`; they belong with
 //!   whichever screen first needs them.
-//! - **Focus and tab order.** `Screen`-level dispatch is #395. A layout knows
-//!   nothing about it in vanilla either.
+//! - **Focus and tab order.** Screen-level dispatch belongs to [`super::focus`].
+//!   A layout only computes geometry and does not decide which child receives an
+//!   event.
 //!
 //! ## Dependencies
 //!
@@ -1195,14 +1196,12 @@ pub const CONTENT_MARGIN_TOP: f32 = 30.0;
 /// [`FrameLayout`]s — header pinned at the top, footer pinned at the bottom,
 /// content between them.
 ///
-/// It is the base of `OptionsSubScreen`, so **every**
-/// settings sub-screen inherits it, which is why it is ported now even though the
-/// screen that consumes it is #55/#396. Nothing in this commit builds one outside
-/// its tests — that is a deliberate exception to this repo's island rule, taken
-/// because the arithmetic is exactly the part that is expensive to rediscover and
-/// cheap to get subtly wrong.
+/// It is the base of `OptionsSubScreen`, so **every** settings sub-screen
+/// inherits it; it is defined before another consumer needs it because its
+/// arithmetic is expensive to rediscover and easy to get subtly wrong. The
+/// unit tests keep that behavior executable and reviewable.
 ///
-/// The trap named in #394 is real: **the content rect depends on the header and
+/// **The content rect depends on the header and
 /// footer heights, which screens set after construction**
 /// (`setHeaderHeight`/`setFooterHeight`). Nothing is computed until
 /// `arrange_elements`, so reading a content rect earlier gives a plausible,
@@ -1547,12 +1546,10 @@ pub fn tab_bar_geometry(width: f32, tab_count: usize) -> (f32, f32) {
 /// plus the per-tab offset, in one place so a **second** screen's tab bar cannot
 /// drift from the first's arithmetic.
 ///
-/// This is what makes the tab widget actually shared rather than merely
-/// duplicated: before this existed, [`super::render::row_rect`]'s `MenuRow::tab`
-/// arm called `super::stats::tab_row_rect` directly, so a second consumer of the
-/// same [`super::render::TabEntryView`] (Create New World, issue #567) had no
-/// generic geometry to resolve against — only Statistics's own screen-specific
-/// wrapper. Both screens' own `tab_row_rect` helpers now call this.
+/// This keeps the tab widget shared: [`super::render::row_rect`]'s
+/// `MenuRow::tab` arm delegates to this helper, and each screen-specific
+/// `tab_row_rect` helper uses the same geometry for its
+/// [`super::render::TabEntryView`].
 #[must_use]
 pub fn tab_bar_row_rect(index: usize, count: usize, width: f32) -> (f32, f32, f32, f32) {
     let (start_x, tab_width) = tab_bar_geometry(width, count);
@@ -1928,7 +1925,7 @@ mod tests {
 
     #[test]
     fn header_and_footer_heights_set_after_construction_change_the_content_rect() {
-        // #394's named trap: the content rect depends on band heights a screen
+        // The content rect depends on band heights a screen
         // sets *later*, so nothing may be computed before `arrange_elements`.
         let mut layout = HeaderAndFooterLayout::new(400.0, 200.0);
         layout.add_to_contents(cell(200.0, 60.0));

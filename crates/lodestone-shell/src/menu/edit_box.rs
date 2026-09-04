@@ -3,14 +3,13 @@
 //!
 //! ## What it is
 //!
-//! The first widget in this shell that genuinely needs #395's focus layer: it
-//! only accepts input when [`super::focus::FocusSet`] says it is focused, and
-//! the *reason* Left/Right move its caret instead of moving focus is the
-//! `Screen.keyPressed` ordering [`super::focus`] ports, not a rule written here.
+//! The first widget in this shell that genuinely needs [`super::focus::FocusSet`]
+//! dispatch: it only accepts input while focused, and Left/Right move its caret
+//! because the screen offers events to the focused child before navigation.
 //!
 //! Its consumer is [`super::Screen::ServerEdit`]'s name and address fields, via
-//! [`super::nav::EditForm`] — converted, not added alongside. #396's world-select
-//! search box is next.
+//! [`super::nav::EditForm`]. A world-select search box can reuse the same widget
+//! when that screen gains a search field.
 //!
 //! ## There is no inline suggestion, on purpose
 //!
@@ -64,10 +63,9 @@
 //!   where vanilla's own abstract-button base is
 //!   `SPRITES.get(this.active, this.isHoveredOrFocused())`. So: `isActive()`
 //!   (i.e. `visible && active`) not the raw field, and **`isFocused()` alone** —
-//!   hovering a text field does *not* draw its highlighted sprite. #393's
-//!   correction ("join them with `||`") is right about the button and wrong about
-//!   this widget; [`EditBox::background_sprite`] is deliberately not
-//!   [`super::widget::Widget::background_sprite`].
+//!   hovering a text field does *not* draw its highlighted sprite. Button hover
+//!   handling therefore cannot be copied here; [`EditBox::background_sprite`]
+//!   deliberately differs from [`super::widget::Widget::background_sprite`].
 //!
 //! - **The grey text colour is keyed on `isEditable`, not on `active`.**
 //!   vanilla's own edit-box widget is `this.isEditable ? this.textColor :
@@ -178,8 +176,8 @@
 //!   decline (`isCopy`/`isCut`/`isPaste` all returned `false`, on the reasoning
 //!   that a cut into a clipboard nobody could write was a data-loss trap worse
 //!   than doing nothing); that was right while the seam did not exist, and
-//!   wrong to leave that way once it does — see the module's own issue history
-//!   for the paste-inserts-`v` report this replaced.
+//!   wrong to leave that way once the seam exists: the in-memory test boundary
+//!   makes clipboard behavior safe to exercise without involving the OS.
 //! - **A `false` from [`EditBox::handle_key`] is load-bearing.** It is what
 //!   lets Up/Down out to `Screen`'s focus navigation
 //!   (vanilla's own edit-box widget lists 260/264/265/266/267 in the `default:` group),
@@ -218,7 +216,8 @@ use super::widget::{LayoutElement, Widget, WidgetSprites, argb_to_rgba};
 /// closure parameter the way [`EditBox::measure_with`]'s font is: `handle_key`
 /// is also [`super::focus::FocusTarget::key_pressed`]'s body, and that trait
 /// method's signature is shared with every other focusable widget, so adding
-/// a parameter here would ripple into files this change does not own.
+/// a parameter here would force every focusable widget to accept a field-specific
+/// argument.
 #[cfg(not(test))]
 mod clipboard_seam {
     pub fn get() -> String {
@@ -345,8 +344,8 @@ pub const fn is_cursor_visible(millis_since_focus: u64) -> bool {
 ///
 /// This exists so `extractWidgetRenderState`'s arithmetic
 /// lives *here*, next to the state it reads, rather than
-/// being re-derived inside `super::render`'s draw loop. #393 established the
-/// discipline: a screen asks the widget, it does not restate the widget's rules.
+/// being re-derived inside `super::render`'s draw loop. Keeping this arithmetic
+/// here means a screen asks the widget for its state instead of restating rules.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditBoxDraw {
     /// The visible text left of the caret — or the whole visible slice when the
@@ -380,9 +379,8 @@ pub struct EditBoxDraw {
 /// `EditBox` (vanilla's own edit-box widget's own source file).
 ///
 /// Wraps a [`Widget`] rather than duplicating its bounds and state, so the
-/// [`LayoutElement`] seam #394's containers arrange through, and the
-/// `active`/`visible`/`focused` flags #395 dispatches on, have exactly one
-/// definition.
+/// [`LayoutElement`] seam's containers and the focus dispatcher share one
+/// definition of the `active`/`visible`/`focused` flags.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditBox {
     /// The `AbstractWidget` half: bounds, `active`, `visible`, `focused`, and
@@ -1360,7 +1358,7 @@ mod tests {
 
     #[test]
     fn horizontal_arrows_move_the_caret_and_vertical_ones_are_declined() {
-        // This is the ordering #395 exists for, at the widget end: `EditBox`
+        // This is the ordering required at the widget boundary: `EditBox`
         // consumes 262/263 and refuses 264/265, and that refusal is what lets a
         // screen move focus with Up/Down while the field keeps Left/Right.
         let mut b = field();
@@ -1789,7 +1787,7 @@ mod tests {
         let mut b = EditBox::new(0.0, 0.0, 200.0, 20.0, "Address");
         b.set_position(40.0, 128.0);
         // `rectangle()` is ambiguous on purpose: `LayoutElement`'s is the `f32`
-        // tuple #394's containers arrange with, `FocusTarget`'s is the integer
+        // tuple layout containers arrange with, `FocusTarget`'s is the integer
         // `ScreenRectangle` navigation compares. Both must describe the same box,
         // and a call site has to say which it wants.
         assert_eq!(
@@ -1804,7 +1802,7 @@ mod tests {
         // methods and not fields.
         assert_eq!(b.text_x(), 44.0);
         assert_eq!(b.text_y(), 134.0);
-        // And `visit_widgets` yields the wrapped widget, so #394's containers
+        // And `visit_widgets` yields the wrapped widget, so layout containers
         // can arrange a field exactly like a button.
         let mut seen = 0;
         b.visit_widgets(&mut |w| {
