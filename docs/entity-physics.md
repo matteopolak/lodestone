@@ -73,6 +73,16 @@ clientbound half isn't wired). Hard collision inflates its query by `1.0E-7` (pu
 gathered once from the movement box, ahead of block colliders. `onClimbable()` vetoes `isPushable()`, so a
 mob crush cannot shove a player off a ladder.
 
+`Sim::tick_nearby_entities` applies a deliberately broad, per-axis candidate filter before the actual
+overlap predicate. Its radius is cached once from
+`lodestone_data::entity_census::movement_collision_max_dimensions`, the union of types that push the
+player and types that can hard-collide with movement. The current 16.0-wide dragon establishes the
+16-block radius while the 12-high giant remains covered vertically; future wider hard-only colliders are
+included too. The 16-block last-known-safe value is also a floor: an empty or malformed census cannot
+silently narrow the filter and lose a real candidate; a future wider generated entry expands it
+automatically. This is a performance pre-filter only — `lodestone_physics::push::pair_admitted` still
+decides whether the candidate can contribute an impulse.
+
 ### Vehicles
 
 **Riding: seat, camera, mount/dismount.** `ClientboundSetPassengersPacket` is absolute, not a delta, and
@@ -258,6 +268,11 @@ discard entity) — reversing either shows both old and new block at once, or ne
   concrete powder, anvils and pointed dripstone have extra vanilla behaviour this port doesn't have.
 - **Changing any recurrence-based physics** (boat drag, falling-block fall, minecart slowdown): re-derive
   the closed form in a separate script rather than adjusting expected numbers to match new code.
+- **Changing movement-collision capabilities**: keep
+  `lodestone_data::entity_census::movement_collision_max_dimensions` as the single source for the
+  shell's broad-phase radius. It deliberately includes both crowd pushers and hard colliders; do not
+  reintroduce a second literal beside `Sim::tick_nearby_entities`, because the floor is only a
+  non-shrinking fallback.
 - **A per-tick ground/water/inside-block check must scan every integer cell the movement crossed this
   tick**, not just the destination — falling blocks and item settling both depend on this.
 - **A name-keyed persistence schema must exclude a field only when its decode failed to consume it for
