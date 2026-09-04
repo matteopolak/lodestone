@@ -2984,6 +2984,17 @@ async fn run_async(
                 // (an in-memory session), or no settings file yet because this
                 // open is the one creating the world. Both fall through to the
                 // bundled generator, which is what they should do.
+                //
+                // wasm32 has neither `world_dir` (cfg-gated off
+                // `Origin::Integrated` the same way `lan_port`/`online_mode`
+                // are, above) nor `lodestone_server::overworld_chunk_source_override`
+                // itself (native-only: it reads a real file, and a browser
+                // singleplayer world has no filesystem to have written
+                // `world_gen_settings.dat` to) — so a browser session always
+                // takes the `None` arm below, exactly as it already does for
+                // every world type this screen offers besides Flat and Single
+                // Biome on native.
+                #[cfg(not(target_arch = "wasm32"))]
                 let stored = match &world_dir {
                     Some(dir) => match lodestone_server::overworld_chunk_source_override(
                         dir,
@@ -3000,6 +3011,8 @@ async fn run_async(
                     },
                     None => None,
                 };
+                #[cfg(target_arch = "wasm32")]
+                let stored: Option<(Arc<dyn lodestone_server::ChunkSource>, i32, i32)> = None;
                 let (source, min_y, height) = match stored {
                     Some(built) => built,
                     None => {
