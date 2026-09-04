@@ -2193,38 +2193,28 @@ fn component_type_id(name: &str) -> Option<i32> {
         .find(|&id| lodestone_data::data_component_types::component_type_name(id) == Some(name))
 }
 
-/// Writes an item stack's outbound `DataComponentPatch` — the tail of
-/// vanilla's own item-stack type's own optional-stream-codec accessor this function's caller writes for
+/// Writes an item stack's outbound component patch for
 /// `container_set_slot`/`container_set_content`/`merchant_offers`: a VarInt
-/// added-component count, that many `(type id, payload)` entries, then a
-/// VarInt removed-component count.
+/// added-component count, a VarInt removed-component count, then the added
+/// `(type id, payload)` entries.
 ///
-/// **Scope.** Only the two book components issue #616's `EDIT_BOOK` needed
-/// (`writable_book_content`/`written_book_content`) are ever written here;
-/// `removed` is always `0` because this crate only ever *adds* a component to
-/// a stack it itself produces, never removes one from a stack a client
-/// already has. Every other modeled [`ItemComponents`] field
-/// (`custom_name`, `enchantments`, `dyed_color`, `trim`, …) still writes as
-/// an empty patch — a real, pre-existing gap this function does not close
-/// (each needs its own outbound stream-codec writer, mirrored against the
-/// jar the way the two below are, and that is its own project). **Not a
-/// regression**: before this function existed, this crate's clientbound
-/// direction wrote an unconditional `0`/`0` for every stack regardless of
-/// what it carried, so no component of any kind ever reached the wire
-/// outbound.
+/// **Scope.** Only the two book components used by the book-edit path
+/// (`writable_book_content`/`written_book_content`) are written here.
+/// `removed` is always `0` because this crate only adds components to stacks
+/// it produces; it never removes one from a stack already held by a client.
+/// Every other modeled [`ItemComponents`] field (`custom_name`,
+/// `enchantments`, `dyed_color`, `trim`, …) remains an empty patch until its
+/// outbound stream-codec writer is implemented and checked against the
+/// protocol's reference bytes.
 fn write_item_component_patch(w: &mut Writer, components: &ItemComponents) {
     let count = i32::from(components.writable_book_content.is_some())
         + i32::from(components.written_book_content.is_some());
-    // vanilla's own data-component-patch type's own stream codec's own `encode`/`decode` (verified
-    // against the jar): **both** counts are written up front — `positiveCount`
-    // then `negativeCount` — before a single entry follows, not
-    // added-count/entries/removed-count. Writing the removed count after the
-    // entries (this function's own first draft) round-trips through nothing
-    // but itself; the real decoder reads both counts before it reads its
-    // first entry, exactly the "predict the value, do not merely round-trip
-    // against your own encoder" trap this repo's evidence standards warn
-    // about, caught here by `book_content_wiring.rs`'s round trip through
-    // the independently-written client decoder.
+    // The wire format writes both counts up front: the added-component count
+    // followed by the removed-component count, before any entry. This order
+    // is pinned by `book_content_wiring.rs` through the independently-written
+    // client decoder; placing the removed count after the entries would make
+    // the payload incompatible even though a symmetric local round trip could
+    // appear to succeed.
     w.var_i32(count);
     w.var_i32(0); // removed components: this crate never sends a removal.
     if let Some(pages) = &components.writable_book_content {
@@ -2325,11 +2315,10 @@ fn write_item_cost(w: &mut Writer, cost: &(ResourceKey, i32)) {
     }
 }
 
-/// Hand-written encoder for the clientbound `merchant_offers` packet
-/// (`ClientboundMerchantOffersPacket`), which has no existing struct because
-/// it is currently only ever *decoded* (see
-/// `crate::adapter::inventory::decode_merchant_offers`, the exact mirror of
-/// this wire layout) — issue #245.
+/// Hand-written encoder for the clientbound `merchant_offers` packet. No
+/// shared packet struct covers this direction; the decoder at
+/// `crate::adapter::inventory::decode_merchant_offers` documents the same
+/// wire layout.
 ///
 /// Wire layout: VarInt window id, VarInt offer count, then per offer:
 /// `cost_a` ([`write_item_cost`]), `result` as one
@@ -2343,9 +2332,9 @@ fn write_item_cost(w: &mut Writer, cost: &(ResourceKey, i32)) {
 ///
 /// Every offer this crate generates is freshly created and unused:
 /// `out_of_stock` is always `false`, `uses`/`special_price_diff`/`demand`
-/// always `0`, and `price_multiplier` is vanilla's own no-discount default
-/// (`0.05`) — this crate tracks no villager reputation yet to derive a real
-/// one from (see the reputation issue).
+/// always `0`, and `price_multiplier` is the no-discount default (`0.05`).
+/// This crate does not model villager reputation, so it has no other value to
+/// derive here.
 fn encode_merchant_offers_body(
     window_id: i32,
     offers: &[MerchantOfferOut],
@@ -3710,15 +3699,14 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<ClientTickEnd>(payload);
                 ServerBound::Ignored
             }
-            // `ServerboundMoveVehiclePacket` now lifts into a real variant: the
-            // server grew a vehicle model (`lodestone_server::mobs`' vehicle
-            // registry), so the client's authoritative report of where its boat
-            // has got to finally has a consumer. Before this it decoded and was
-            // dropped, which meant a mounted boat could be steered on the client
-            // and never moved anywhere anyone else could see.
+            // Vehicle movement lifts into a real variant consumed by the
+            // server's vehicle registry. The client's authoritative boat
+            // transform therefore reaches the simulation and can be observed
+            // by other connected players.
             //
-            // No entity id on the wire — vanilla resolves `player.getRootVehicle()`
-            // — so the variant carries only the transform.
+            // No entity id is present on the wire; the server associates this
+            // transform with the player's root vehicle, so the variant carries
+            // only position and orientation.
             State::Play if packet_id == play::serverbound::MOVE_VEHICLE => {
                 match decode_full::<MoveVehicle>(payload) {
                     Some(m) => ServerBound::VehicleMoved {
@@ -3729,11 +3717,10 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Issue #262's `PADDLE_BOAT` remainder: this used to decode-and-
-            // discard. `crate::server`'s consumer feeds
-            // `MobSim::apply_boat_paddle`, which is purely cosmetic (see that
-            // method's own doc) but real: a second connected player now sees
-            // someone else's boat animate its paddles.
+            // `PADDLE_BOAT` carries the left/right paddle states to
+            // `MobSim::apply_boat_paddle`. The effect is cosmetic, but the
+            // server applies it so a second connected player sees another
+            // player's boat animate its paddles.
             State::Play if packet_id == play::serverbound::PADDLE_BOAT => {
                 match decode_full::<PaddleBoat>(payload) {
                     Some(PaddleBoat { left, right }) => ServerBound::PaddleBoat { left, right },
@@ -3951,25 +3938,21 @@ impl ServerProtocol for V770ServerProtocol {
                 let _ = decode_full::<RecipeBookSeenRecipe>(payload);
                 ServerBound::Ignored
             }
-            // Issue #616's remainder: this used to decode-and-discard; now a
-            // real `ServerBound::SelectTrade`, with `crate::server`'s
-            // consumer resolving the villager from this connection's own
-            // tracked open-merchant state (the packet itself carries no
-            // window id — see that variant's own doc comment).
+            // `SELECT_TRADE` lifts into `ServerBound::SelectTrade`. The server
+            // consumer resolves the villager from this connection's tracked
+            // open-merchant state; the packet itself carries no window id.
             State::Play if packet_id == play::serverbound::SELECT_TRADE => {
                 match decode_full::<SelectTrade>(payload) {
                     Some(p) => ServerBound::SelectTrade { index: p.index },
                     None => ServerBound::Ignored,
                 }
             }
-            // `ServerboundSetBeaconPacket`: two `Optional<Holder<MobEffect>>`
-            // values (primary then secondary power), each read by
-            // [`read_optional_mob_effect`] — the exact inverse of
-            // `crate::adapter::encode_set_beacon`. Issue #616's remainder:
-            // this used to decode-and-discard; now lifted into a real
-            // `ServerBound::SetBeacon`, `crate::beacon`'s validation and
-            // `crate::server`'s consumer being the two things that were
-            // missing, not this decode.
+            // The beacon-setting packet carries two optional effect keys
+            // (primary, then secondary), each read by
+            // [`read_optional_mob_effect`], the inverse of
+            // `crate::adapter::encode_set_beacon`. The decoded values lift
+            // into `ServerBound::SetBeacon`; validation and application live
+            // in `crate::beacon` and the server consumer.
             State::Play if packet_id == play::serverbound::SET_BEACON => {
                 let mut r = Reader::new(payload);
                 // See `SET_CREATIVE_MODE_SLOT`'s comment above for why these
@@ -3988,13 +3971,11 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Issue #616's remainder. `ServerboundEditBookPacket` carries no
-            // `ItemStack` at all (see `EditBook`'s own doc comment) — the
-            // component-patch decode gap that blocks the item-carrying
-            // serverbound packets (`CONTAINER_CLICK`/`SET_CREATIVE_MODE_SLOT`)
-            // does not apply here. `crate::server`'s consumer looks the book
-            // up in the tracked `PlayerInventory` by `slot` itself, mirroring
-            // `handleEditBook`'s own `this.player.getInventory().getItem(slot)`.
+            // The book-edit packet carries no `ItemStack`; the component-patch
+            // decode path used by the item-carrying packets
+            // (`CONTAINER_CLICK`/`SET_CREATIVE_MODE_SLOT`) does not apply.
+            // The server consumer looks the book up in the tracked
+            // `PlayerInventory` by `slot`.
             State::Play if packet_id == play::serverbound::EDIT_BOOK => {
                 match decode_full::<EditBook>(payload) {
                     Some(EditBook { slot, pages, title }) => {
@@ -4053,11 +4034,11 @@ impl ServerProtocol for V770ServerProtocol {
                     None => ServerBound::Ignored,
                 }
             }
-            // Issue #692: this used to decode-and-discard. Wire-invisible on
-            // the *clientbound* direction (vanilla's own bundle-contents component's own stream codec
-            // always reconstructs `selectedItem = -1`), but server-side
-            // load-bearing — `crate::server`'s consumer stores it for
-            // vanilla's own bundle-contents component's own mutable::removeOne`'s next right-click-extract.
+            // The selected-item packet is not represented in the clientbound
+            // bundle-contents payload, whose selected-item marker is always
+            // unset. The server consumer nevertheless stores the selected
+            // slot so the next right-click extraction can remove the intended
+            // item.
             State::Play if packet_id == play::serverbound::BUNDLE_ITEM_SELECTED => {
                 match decode_full::<SelectBundleItem>(payload) {
                     Some(SelectBundleItem { slot_id, selected_item_index }) => {
@@ -4067,18 +4048,12 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
 
-            // World/block-admin, remaining packets beyond
-            // `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY`/`SET_GAME_RULE` above.
-            // A prior pass deliberately left the seven below
-            // undecoded, reasoning they are "deep features, not decode
-            // gaps" (command-block/jigsaw/structure/game-test state, none
-            // of which this crate models). That reasoning about the
-            // *feature* stands for the remaining six — nothing here builds
-            // jigsaw structures or the game-test framework. Command blocks
-            // are the exception now: issue #48's remainder gave this crate a
-            // real `BlockEntity::CommandBlock` and a `crate::server` consumer
-            // (see `crate::command_block`'s own module doc), so this arm
-            // decodes for real instead of mapping to `Ignored`.
+            // World and block-administration packets beyond
+            // `CHANGE_DIFFICULTY`/`LOCK_DIFFICULTY`/`SET_GAME_RULE` remain
+            // ignored because this crate does not model jigsaw, structure,
+            // or game-test state. Command-block updates are the exception:
+            // they decode into `BlockEntity::CommandBlock` and are consumed by
+            // `crate::server` through `crate::command_block`.
             State::Play if packet_id == play::serverbound::SET_COMMAND_BLOCK => {
                 match decode_full::<SetCommandBlock>(payload) {
                     Some(SetCommandBlock { pos, command, mode, flags }) => ServerBound::SetCommandBlock {

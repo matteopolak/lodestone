@@ -28,8 +28,8 @@
 //!
 //! # Dependencies
 //!
-//! None at runtime. Generated from Mojang's own generator output, which is
-//! `CLAUDE.md`'s data source #1.
+//! None at runtime. Generated from the repository's authoritative registry
+//! report, recorded in the source header above.
 
 /// Number of stat type entries (network ids are `0..STAT_TYPE_COUNT`).
 pub const STAT_TYPE_COUNT: u32 = 9;
