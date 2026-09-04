@@ -47,13 +47,24 @@ connection's own cursor) is *replication* and belongs to the connection task.
 
 ### Server-side ECS
 
-`lodestone-server` links `bevy_ecs` (via `lodestone-ecs`) so server-side plugins get the same
-intent doctrine client-side plugins already have, matching Bukkit/Spigot's own precedent of
-implementing core server functionality through the plugin surface itself. `bevy_ecs` is pinned
-without the `multi_threaded` feature workspace-wide, so `World::run_schedule` is a plain
-synchronous call on the tick task — there is no second runtime or thread pool for tokio to
-reconcile with, and the tick loop's structure (spawn once, `sleep_until`-driven, unchanged call
-site) does not change.
+`lodestone-server` links `bevy_app`/`bevy_ecs` directly, **not** via `lodestone-ecs`: two
+`World`s means a shared `ScheduleLabel` type buys nothing at runtime, while linking
+`lodestone-ecs` would drag the entire client vocabulary (`LocalPlayer`, `FrameClock`,
+`SessionMenus`, …) plus `lodestone-physics`/`-game`/`-world` into this crate's graph — and into
+the browser bundle, which links `lodestone-server` and links neither `bevy_ecs` nor
+`lodestone-ecs` today. The server's own schedule labels and `SystemSet` anchors
+(`crates/lodestone-server/src/ecs/schedules.rs`) intentionally reuse none of `lodestone-ecs`'s
+names even where they coincide (`TickSet`, `GameTick`, `NetIngest`), and it installs no
+`Extract`/frame-anything: there is no render loop to extract to, since open-to-LAN never draws
+a frame. A server-side plugin gets its own adjudication window on the server's own `World`, not
+the client `lodestone-ecs` plugin surface reused wholesale — `ActionVetoes`, `PermissionStore`,
+`TaskScheduler`, `CommandRegistry` and the rest of that vocabulary live only in `lodestone-ecs`
+and are a documented gap on this binary, not something this link brings along for free (see
+[`roadmap/plugin-framework.md`](./roadmap/plugin-framework.md)'s Commands/Permissions rows).
+`bevy_ecs` is pinned without the `multi_threaded` feature workspace-wide, so `World::run_schedule`
+is a plain synchronous call on the tick task — there is no second runtime or thread pool for
+tokio to reconcile with, and the tick loop's structure (spawn once, `sleep_until`-driven,
+unchanged call site) does not change.
 
 The server owns its own `World`, entirely separate from the client's: they have contradictory
 clock policies (the client forgives lost time past a cap; the server must keep advancing and only
@@ -206,8 +217,8 @@ lost if the world is stopped before a player ever visits.
 ## Dependencies
 
 `lodestone-server` (the shared implementation), `lodestone-registry` (feature-gated `v26-2`, the
-only crate allowed to name a version family), `lodestone-ecs`/`bevy_app`/`bevy_ecs` (server-side
-plugin scheduling, no `multi_threaded`), `lodestone-auth` + `reqwest` (online-mode session-server
-verification), `lodestone-net` (the shared connection/codec seam), `tokio` (`time`, `net`, `signal`,
-native only). The dedicated-server binary adds nothing render-, GPU-, or window-shaped to that
-graph.
+only crate allowed to name a version family), `bevy_app`/`bevy_ecs` directly — **not**
+`lodestone-ecs`, deliberately (server-side plugin scheduling on the server's own `World`, no
+`multi_threaded`) — `lodestone-auth` + `reqwest` (online-mode session-server verification),
+`lodestone-net` (the shared connection/codec seam), `tokio` (`time`, `net`, `signal`, native
+only). The dedicated-server binary adds nothing render-, GPU-, or window-shaped to that graph.

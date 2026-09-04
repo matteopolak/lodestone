@@ -109,10 +109,14 @@ shape, and a plugin author should copy it for anything similar:
 clamped between the component and the physics integrator. `LookIntent { yaw, pitch }` is distinct from
 the camera, applied before physics reads yaw, and absent by default.
 
-**Known gap:** the *human* break/place path does not go through this seam yet — it drives the same
-predictor directly, through shell-only resources a plugin cannot reach. A plugin can veto another
-plugin's dig but has no way to veto a human's, because the human path never asks the intent seam
-anything.
+**Known gap, narrower than it looks:** the *human* break/place path does not go through the intent
+seam's observation half — a human's dig never populates `BreakIntent`/`BreakOutcome`, so a plugin
+cannot *watch* a human dig the way it watches its own intent. It can still **veto** one:
+`drive_mining` asks `ActionVetoes` before advancing the dig state machine on both the human-driven
+hit and the `BreakIntent`-driven one, in the same call, at the same site — `via_intent` only decides
+whether `BreakOutcome` gets a written verdict afterward, never whether the veto itself is asked. A
+protection plugin's `Deny` stops a real player's dig exactly as it stops another plugin's. The actual
+gap is narrower: the human path can be *vetoed* but not *observed* through `BreakIntent`/`BreakOutcome`.
 
 `crates/plugins/lodestone-block-jobs` is a reference producer: a plain queue of `BlockJob`s
 (`Break`/`Place`, each a `pos`/`face` pair) that a `TickSet::Intent` system installs one at a time,
@@ -184,6 +188,9 @@ architecture makes unrepresentable elsewhere) and outbound mutation only exists 
 adapter. Real-time anti-cheat and a disguise visible to *other* players both need outbound byte mutation
 and stay out of reach; everything else (protection, economy, minigames, HUD mods, a client-side-only
 disguise) is served by `ActionVetoes`/`EgressFilters` instead — see [`packet-wiring.md`](./packet-wiring.md).
+This ceiling is scoped to the shared, version-free crates a native plugin ordinarily depends on. A
+plugin willing to depend on a version crate directly and pay for version-locking has a real escape
+hatch outside this ceiling — see [`plugin-packet-decorators.md`](./plugin-packet-decorators.md).
 
 ### Cross-plugin custom messages and channels
 
@@ -206,8 +213,15 @@ duplicate-plugin panic. Aging (`Messages<T>::update()`, or it grows unbounded) r
 decodes nothing, forever, with no error) and panics at build time on a malformed channel string rather
 than silently never matching. `decode` returning `None` is not an error and never disconnects — vanilla
 reads and discards an unparseable payload too. A built-in `minecraft:brand` channel plugin ships as the
-worked example. Server-side, inbound `custom_payload` decodes at the wire level, but the plugin-facing
-API on top of that registry does not exist yet.
+worked example.
+
+Server-side, `lodestone_server::plugin_channels::{PluginChannelRegistry, PluginChannelHandler}` are the
+plugin-facing API over `custom_payload` — not just wire-level decode. `PluginChannelHandler` is the
+trait a plugin implements per channel; `PluginChannelRegistry::register` installs one, `dispatch` feeds
+it an inbound payload, and `broadcast` sends a payload to every connection sharing the registry.
+`LanConfig::plugin_channels` carries one `PluginChannelRegistry` into every accepted connection (cloned
+per connection, so registrations made before `open_to_lan`/`bind` reach every player who joins after),
+which is what makes this a real cross-connection channel rather than a per-connection stub.
 
 ### Commands
 
