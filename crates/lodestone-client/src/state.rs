@@ -1515,7 +1515,7 @@ mod tests {
             "the production path must actually ask the registered veto"
         );
         assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(20), notified)
+            crate::native_time::timeout(std::time::Duration::from_millis(20), notified)
                 .await
                 .is_err(),
             "a denied no-op must not wake read-model waiters"
@@ -1548,9 +1548,12 @@ mod tests {
                 denied: 0,
             }
         );
-        tokio::time::timeout(std::time::Duration::from_millis(20), notified)
-            .await
-            .expect("an allowed prediction must wake read-model waiters");
+        assert!(
+            crate::native_time::timeout(std::time::Duration::from_millis(20), notified)
+                .await
+                .is_ok(),
+            "an allowed prediction must wake read-model waiters"
+        );
     }
 
     /// **The real path, not the fold called directly and not the `NetIngest`
