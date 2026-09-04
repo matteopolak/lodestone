@@ -87,13 +87,15 @@ fn noise_router_matches_jvm_over_whole_region() {
     let router = &settings["noise_router"];
 
     let builder = Builder::new(SEED, &resolver);
-    let continents = builder.build(&router["continents"]);
-    let erosion = builder.build(&router["erosion"]);
-    let ridges = builder.build(&router["ridges"]);
-    let temperature = builder.build(&router["temperature"]);
-    let vegetation = builder.build(&router["vegetation"]);
-    let depth = builder.build(&router["depth"]);
-    let final_density = builder.build(&router["final_density"]);
+    let continents = builder.build(&router["continents"]).expect("bundled continents density-function document");
+    let erosion = builder.build(&router["erosion"]).expect("bundled erosion density-function document");
+    let ridges = builder.build(&router["ridges"]).expect("bundled ridges density-function document");
+    let temperature =
+        builder.build(&router["temperature"]).expect("bundled temperature density-function document");
+    let vegetation = builder.build(&router["vegetation"]).expect("bundled vegetation density-function document");
+    let depth = builder.build(&router["depth"]).expect("bundled depth density-function document");
+    let final_density =
+        builder.build(&router["final_density"]).expect("bundled final_density density-function document");
 
     let mut got: BTreeMap<String, String> = BTreeMap::new();
     for x in 0..16 {

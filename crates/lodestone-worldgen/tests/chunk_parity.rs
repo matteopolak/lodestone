@@ -71,7 +71,9 @@ fn interpolated_final_density_matches_jvm_over_whole_chunk() {
     .unwrap();
 
     let builder = Builder::new(SEED, &resolver);
-    let final_density = builder.build(&settings["noise_router"]["final_density"]);
+    let final_density = builder
+        .build(&settings["noise_router"]["final_density"])
+        .expect("bundled final_density density-function document");
     let sampler =
         NoiseChunkSampler::new(final_density, builder.slot_count(), CELL_WIDTH, CELL_HEIGHT);
 
@@ -131,7 +133,9 @@ fn interpolated_final_density_matches_jvm_over_whole_chunk_bounded_dense() {
     .unwrap();
 
     let builder = Builder::new(SEED, &resolver);
-    let final_density = builder.build(&settings["noise_router"]["final_density"]);
+    let final_density = builder
+        .build(&settings["noise_router"]["final_density"])
+        .expect("bundled final_density density-function document");
     // Chunk (0,0)'s exact bounds: x/z in [0,15], y over the full generated
     // range the reference dump covers (-64..=319, see the file's own y
     // values) — the bounded-sampler contract `new_bounded` documents.

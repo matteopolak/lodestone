@@ -235,7 +235,7 @@ fn interpolated_sampler_for(seed: i64, root: &Path) -> NoiseChunkSampler {
         node["type"]
     );
     let builder = Builder::new(seed, &resolver);
-    let interpolated = builder.build(node);
+    let interpolated = builder.build(node).expect("bundled overworld final_density density-function document");
     NoiseChunkSampler::new(interpolated, builder.slot_count(), CELL_WIDTH, CELL_HEIGHT)
 }
 

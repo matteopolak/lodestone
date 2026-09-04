@@ -107,9 +107,11 @@ fn mul_does_not_evaluate_its_second_operand_when_the_first_is_zero() {
     // `invert` of 0.0 is 1/0 = +inf.
     let poison = json!({"type": "minecraft:invert", "argument": 0.0});
 
-    let short = b.build(&json!({
-        "type": "minecraft:mul", "argument1": 0.0, "argument2": poison
-    }));
+    let short = b
+        .build(&json!({
+            "type": "minecraft:mul", "argument1": 0.0, "argument2": poison
+        }))
+        .expect("test fixture density-function document");
     let sampler = NoiseChunkSampler::new(short, b.slot_count(), 4, 8);
     let got = sampler.final_density(1, 2, 3);
     assert_eq!(
@@ -124,10 +126,12 @@ fn mul_does_not_evaluate_its_second_operand_when_the_first_is_zero() {
     // something to catch. Without this the test would pass just as happily
     // against `argument2: 0.0`.
     let b2 = Builder::new(SEED, &r);
-    let live = b2.build(&json!({
-        "type": "minecraft:mul", "argument1": 1.0,
-        "argument2": {"type": "minecraft:invert", "argument": 0.0}
-    }));
+    let live = b2
+        .build(&json!({
+            "type": "minecraft:mul", "argument1": 1.0,
+            "argument2": {"type": "minecraft:invert", "argument": 0.0}
+        }))
+        .expect("test fixture density-function document");
     let control = NoiseChunkSampler::new(live, b2.slot_count(), 4, 8).final_density(1, 2, 3);
     assert!(
         control.is_infinite(),
@@ -138,10 +142,12 @@ fn mul_does_not_evaluate_its_second_operand_when_the_first_is_zero() {
     // And the point interpreter must short-circuit identically; it is a separate
     // `match` over the same tree and has diverged before.
     let b3 = Builder::new(SEED, &r);
-    let tree = b3.build(&json!({
-        "type": "minecraft:mul", "argument1": 0.0,
-        "argument2": {"type": "minecraft:invert", "argument": 0.0}
-    }));
+    let tree = b3
+        .build(&json!({
+            "type": "minecraft:mul", "argument1": 0.0,
+            "argument2": {"type": "minecraft:invert", "argument": 0.0}
+        }))
+        .expect("test fixture density-function document");
     assert_eq!(
         tree.compute(Context::new(1, 2, 3)),
         0.0,
@@ -173,16 +179,18 @@ fn flat_cache_evaluates_a_nested_interpolated_transparently() {
     const CH: i32 = 8;
 
     // flat_cache(interpolated(noise))
-    let tree = b.build(&json!({
-        "type": "minecraft:flat_cache",
-        "argument": {"type": "minecraft:interpolated", "argument": noise3()}
-    }));
+    let tree = b
+        .build(&json!({
+            "type": "minecraft:flat_cache",
+            "argument": {"type": "minecraft:interpolated", "argument": noise3()}
+        }))
+        .expect("test fixture density-function document");
     let sampler = NoiseChunkSampler::new(tree, b.slot_count(), CW, CH);
 
     // A raw-noise oracle over the same instantiated noise, via the point
     // interpreter (transparent for flat_cache and interpolated alike).
     let b2 = Builder::new(SEED, &r);
-    let raw = b2.build(&noise3());
+    let raw = b2.build(&noise3()).expect("test fixture density-function document");
     let at = |x: i32, y: i32, z: i32| raw.compute(Context::new(x, y, z));
 
     // Query at (5, 3, 5): quart snap gives (4, 0, 4), which with cell_width 8 is
@@ -231,7 +239,9 @@ fn flat_cache_evaluates_a_nested_interpolated_transparently() {
 fn flat_cache_snaps_xz_to_the_quart_grid_and_ignores_y() {
     let r = resolver();
     let b = Builder::new(SEED, &r);
-    let tree = b.build(&json!({"type": "minecraft:flat_cache", "argument": noise3()}));
+    let tree = b
+        .build(&json!({"type": "minecraft:flat_cache", "argument": noise3()}))
+        .expect("test fixture density-function document");
     let s = NoiseChunkSampler::new(tree, b.slot_count(), 4, 8);
 
     let base = s.final_density(4, 0, 4);
@@ -257,7 +267,7 @@ fn flat_cache_snaps_xz_to_the_quart_grid_and_ignores_y() {
     // And the y-independence is a property of flat_cache, not of the noise: the
     // same noise sampled directly does vary with y.
     let b2 = Builder::new(SEED, &r);
-    let raw = b2.build(&noise3());
+    let raw = b2.build(&noise3()).expect("test fixture density-function document");
     assert_ne!(
         raw.compute(Context::new(4, 0, 4)).to_bits(),
         raw.compute(Context::new(4, 7, 4)).to_bits(),
@@ -286,7 +296,9 @@ fn flat_cache_snaps_xz_to_the_quart_grid_and_ignores_y() {
 fn cache_2d_is_transparent_in_both_evaluators() {
     let r = resolver();
     let b = Builder::new(SEED, &r);
-    let tree = b.build(&json!({"type": "minecraft:cache_2d", "argument": noise3()}));
+    let tree = b
+        .build(&json!({"type": "minecraft:cache_2d", "argument": noise3()}))
+        .expect("test fixture density-function document");
 
     // Field: transparent, so it must track y.
     let s = NoiseChunkSampler::new(tree.clone(), b.slot_count(), 4, 8);
@@ -343,9 +355,11 @@ fn cache_once_and_friends_are_transparent_in_both_evaluators() {
         "minecraft:blend_density",
     ] {
         let b = Builder::new(SEED, &r);
-        let wrapped = b.build(&json!({"type": ty, "argument": noise3()}));
+        let wrapped = b
+            .build(&json!({"type": ty, "argument": noise3()}))
+            .expect("test fixture density-function document");
         let bare = Builder::new(SEED, &r);
-        let plain = bare.build(&noise3());
+        let plain = bare.build(&noise3()).expect("test fixture density-function document");
 
         let ws = NoiseChunkSampler::new(wrapped.clone(), b.slot_count(), 4, 8);
         let ps = NoiseChunkSampler::new(plain.clone(), bare.slot_count(), 4, 8);
@@ -398,11 +412,13 @@ fn the_field_interpolates_x_inner_not_y_inner() {
     const CH: i32 = 8;
 
     let b = Builder::new(SEED, &r);
-    let tree = b.build(&json!({"type": "minecraft:interpolated", "argument": noise3()}));
+    let tree = b
+        .build(&json!({"type": "minecraft:interpolated", "argument": noise3()}))
+        .expect("test fixture density-function document");
     let s = NoiseChunkSampler::new(tree, b.slot_count(), CW, CH);
 
     let b2 = Builder::new(SEED, &r);
-    let raw = b2.build(&noise3());
+    let raw = b2.build(&noise3()).expect("test fixture density-function document");
     let at = |x: i32, y: i32, z: i32| raw.compute(Context::new(x, y, z));
 
     let mut checked = 0usize;

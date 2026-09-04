@@ -117,7 +117,9 @@ fn corner_lookups_and_evaluations_match_the_cell_geometry() {
     .unwrap();
 
     let builder = Builder::new(SEED, &resolver);
-    let final_density = builder.build(&settings["noise_router"]["final_density"]);
+    let final_density = builder
+        .build(&settings["noise_router"]["final_density"])
+        .expect("bundled final_density density-function document");
 
     // --- premise: the graph is real and does interpolate ------------------
     // Without this, a stub or a mis-rooted tree would measure zero lookups and

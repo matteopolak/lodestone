@@ -121,7 +121,7 @@ fn density_router_matches_jvm() {
         let tag = format!("ow[{seed}]");
 
         for (label, key) in CLIMATE {
-            let df = builder.build(&router[key]);
+            let df = builder.build(&router[key]).expect("bundled density-function document");
             for x in XS {
                 for z in ZS {
                     let v = df.compute(Context::new(x, 0, z));
@@ -131,7 +131,7 @@ fn density_router_matches_jvm() {
         }
 
         for (label, key) in VOLUMETRIC {
-            let df = builder.build(&router[key]);
+            let df = builder.build(&router[key]).expect("bundled density-function document");
             for x in XS {
                 for y in YS {
                     for z in ZS {
