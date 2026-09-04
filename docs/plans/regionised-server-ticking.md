@@ -1,39 +1,39 @@
-# Plan: regionised server ticking (issue #342)
+# Plan: regionised server ticking
 
 ## What it is
 
 A design document — not an implementation — for splitting the server's single-threaded world
 tick into independently-ticked regions (Folia's model: groups of nearby chunks, each ticked on
 its own thread, with explicit hand-off for anything crossing a boundary), so throughput can
-scale past one core the way vanilla structurally cannot. Filed deliberately as a **later** item
-in issue #342; this doc exists to ground that "later" in the tick-loop architecture and
-profiling instrumentation that now actually exist, rather than in the intuition the issue was
-originally filed on. Written 2026-08-16 against a re-verified tree — every claim below was
+scale past one core the way vanilla structurally cannot. It is deliberately a **later** item:
+this doc grounds that timing in the tick-loop architecture and profiling instrumentation that
+now actually exist, rather than in intuition. Written 2026-08-16 against a re-verified tree —
+every claim below was
 checked against `crates/lodestone-server/src/tick.rs`, `docs/tick-and-worldgen-profiling.md`,
-and `docs/plans/server-ecs-migration.md` for this pass, not inherited from the issue body.
+and `docs/plans/server-ecs-migration.md` for this pass, not inherited from an external tracker.
 
 **This is not an implementation plan with phases ready to dispatch**, unlike
 `docs/plans/server-ecs-migration.md`. Section ["Preconditions"](#preconditions-and-why-none-are-fully-met-yet)
-below is explicit that the gating sequence issue #342 itself lays out — tick loop exists →
+below is explicit that the gating sequence is tick loop exists →
 MSPT/TPS accounting → single-threaded parity → server-tick benchmarks → *profile* → decide — has
 reached "a tick loop and a profiler exist" and nothing past that. What follows is the design this
-repo would execute *if and when* profiling justifies it, written now so the next re-read of #342
+repo would execute *if and when* profiling justifies it, written now so the next re-read
 has more than intuition to work from, and so the region model's hardest questions (data
 partitioning, cross-region hand-off, lock ordering) are worked through once rather than
 re-derived under time pressure when the "profile" step finally lands a number that says "yes."
 
 ## Preconditions, and why none are fully met yet
 
-Issue #342's own sequencing: **server tick loop exists → MSPT/TPS accounting → single-threaded
-parity with vanilla → server-tick benchmarks (#78) → profile → decide.** Re-verified here:
+The required sequencing: **server tick loop exists → MSPT/TPS accounting → single-threaded
+parity → server-tick benchmarks → profile → decide.** Re-verified here:
 
 | precondition | status |
 |---|---|
 | A real server tick loop exists | **Met.** `run_tick_loop`/`run_tick_loop_with_weather` in `tick.rs` (~4,100 lines) drive mobs, block entities, redstone, TNT, minecarts, boats, the dragon fight, weather and scheduled ticks at real 20 Hz, with `TickClock`/`TickStats` MSPT/TPS accounting and overrun handling built in. |
 | MSPT/TPS accounting | **Met**, as part of the row above — `TickClock` already tracks per-tick duration and reports MSPT/TPS. |
 | Single-threaded parity with vanilla | **Not measured.** No doc or test asserts "server tick matches vanilla, single-threaded" as an achieved milestone; `docs/server-gameplay-gap-census.md` and friends track ongoing per-feature parity, not a single completed checkpoint. This is the real gate (see below). |
-| Server-tick benchmarks (#78) | **Not built for the tick loop specifically.** #78's 33 sub-issues are closed and `benches/` directories exist for worldgen, world, and entity crates, but `crates/lodestone-server` has no `benches/` directory at all — no throughput/profiling harness for the tick loop as a whole. |
-| Profile before architecting | **Partially met, and this is the useful new state since #342 was filed.** `tick.rs` grew three `TickPhase` buckets (`MobsAndItems`, `WeatherAndSleep`, `ScheduledAndPhysics`) with rolling percentile history, an over-budget counter, and a global worst-window tracker — see ["What the profiler already shows"](#what-the-profiler-already-shows). This is real per-phase data, but only an **idle-world floor** has been measured; no live, populated-world reading exists yet (see that section's own caveat). |
+| Server-tick benchmarks | **Partially met.** `crates/lodestone-server/benches/server_tick.rs` drives the real loop through two in-memory sweep points, asserts deterministic tick and cumulative phase-sample counts plus the rolling-window cap, and records the named worst phase. Its paused clock makes the per-phase duration tie a wiring control rather than a profile, so it is not a populated-world throughput benchmark. |
+| Profile before architecting | **Partially met.** `tick.rs` has three `TickPhase` buckets with rolling percentile history, an over-budget counter, and a global worst-window tracker. `TickStats` snapshots every summary for consumers such as the benchmark — see ["What the profiler already shows"](#what-the-profiler-already-shows). This is real per-phase data, but only an **idle-world floor** has been measured; no live, populated-world reading exists yet (see that section's own caveat). |
 
 **Bottom line: the gating sequence has not reached "profile a real populated world," which is
 the step that would justify committing to regionisation over a cheaper alternative.** This doc's
@@ -59,9 +59,9 @@ writeup; this section extracts what a regionisation decision needs from it):
 all three phases sit two to three orders of magnitude below the 10ms soft budget on an
 `EmptyWorld` with no players or mobs — the cost of the loop *existing*, not of it doing real
 work. **This says nothing about which phase dominates a populated world**, which needs a live
-oracle (`scripts/live-oracles/{creative,survival,terrain}.sh`) with players connected and
-`TickClock::phase_stats`/`worst_phase_window` read off a live clock — not attempted by this doc
-or by the profiling pass that built the instrument. That live reading is the single most
+oracle (`scripts/live-oracles/{creative,survival,terrain}.sh`) with players connected and the
+phase summaries/worst window read through `TickStats` — not attempted by this doc or by the
+profiling pass that built the instrument. That live reading is the single most
 valuable next measurement before any region design decision, because it would say whether
 `ScheduledAndPhysics` — the phase that can call into worldgen, and therefore the phase most
 naturally cut along region boundaries — is actually where the server spends its time, or whether
@@ -102,8 +102,8 @@ rather than one non-reentrant lock).
 
 ## Current architecture census (what regionisation would actually partition)
 
-Re-verified against the tree for this pass — **issue #342's own framing ("our single
-`RwLock<World>`") is stale**, and worth correcting explicitly since a wrong architecture claim
+Re-verified against the tree for this pass — **the single-`RwLock<World>` framing is stale**,
+and worth correcting explicitly since a wrong architecture claim
 here would misdirect every design decision downstream of it:
 
 - **There is no single `RwLock<World>`.** `lodestone_world::World` (`crates/lodestone-world/src/world.rs`)
@@ -117,15 +117,15 @@ here would misdirect every design decision downstream of it:
     `WorldState` each have their own `.with(|state| ...)`-style handle over their own mutex
     (`access.rs`, `block_entities.rs`, `border.rs`, `game_rules.rs`, `scheduled_tick.rs`,
     `world_state.rs`).
-  - So today's architecture is already **N locks, not one** — closer to the *end state* issue
-    #342's own "what it costs" section warns regionisation would require ("N locks with an
-    ordering requirement, which is how deadlocks are usually born") than to the single-lock
-    starting point the issue describes. This is genuinely useful: the lock-splitting half of
+  - So today's architecture is already **N locks, not one** — closer to the *end state*
+    regionisation would require ("N locks with an ordering requirement, which is how deadlocks
+    are usually born") than to a single-lock starting point. This is genuinely useful: the
+    lock-splitting half of
     regionisation's cost may already be partly paid, incidentally, by unrelated subsystem work
-    — but it also means **the ordering discipline issue #342 flags as a new hazard is already a
-    live hazard today**, independent of regionisation, and the self-deadlock incident above is
+    — but it also means **the ordering discipline is already a live hazard today**, independent
+    of regionisation, and the self-deadlock incident above is
     evidence it is not yet fully disciplined.
-- **The ECS substrate has landed further than issue #342's last re-verification recorded, but
+- **The ECS substrate has landed further than the last re-verification recorded, but
   still does not drive the tick loop.** `docs/plans/server-ecs-migration.md`'s own status note
   (2026-08-15): Phase 0 landed — `crates/lodestone-server/src/ecs/{mod,plugin,schedules,gate}.rs`
   exist, `ServerCorePlugin` installs `ServerTick`/`ServerTickWitness` and opens
@@ -151,13 +151,13 @@ particular to this codebase.
 
 ## The region model: design questions, worked through
 
-Issue #342's own "what it costs" section names the real semantic changes. This section works
-through *how* each would land, not just that it would cost something.
+This section names the real semantic changes and works through *how* each would land, not just
+that it would cost something.
 
 ### Partitioning: one `bevy_ecs::World` per region, or one partitioned `World`
 
-Issue #342 recommends "the former is probably cleaner." Re-examined against the current state
-above: since **the ECS `World` does not drive gameplay yet** (Phase 1 of the ECS migration is
+Re-examined against the current state above: since **the ECS `World` does not drive gameplay yet**
+(Phase 1 of the ECS migration is
 still open), this question is not currently answerable against real code — it is a question
 about a substrate that has not yet been asked to hold game state at all. The honest sequencing
 is: land ECS Phase 1 (single `World`, single-threaded, driving the real tick) first, and let
@@ -178,7 +178,7 @@ but per-region-pair rather than global — this is real new complexity, not a de
 
 ### Lock ordering: the `hold_read`/`hold_write` tripwire needs to become a real ordering assertion
 
-Issue #342 already names this. Concretely, given the census above already has six-plus
+The design already names this. Concretely, given the census above already has six-plus
 independent locks (`ChunkStore`'s cache, ticket store, access lists, block entities, world
 border, game rules, scheduled ticks, world state) **before** regionisation adds N more
 per-region locks, the ordering discipline needed is not hypothetical future work — a real
@@ -203,8 +203,7 @@ against the self-deadlock class this repo has already hit once.
 
 ## Sequencing, restated against today's state
 
-Issue #342's original sequencing holds; this is the same list annotated with what is actually
-done:
+The required sequencing holds; this is the same list annotated with what is actually done:
 
 1. ~~Server tick loop exists~~ — **done**.
 2. ~~MSPT/TPS accounting~~ — **done**.
@@ -212,25 +211,25 @@ done:
    "matches vanilla, single-threaded" checkpoint exists. This should be a named, dated milestone
    (a doc or a test asserting it, the way this doc's own preconditions table wants to check
    against something concrete) before any region work starts, because once ticking is concurrent
-   a behavioural divergence and a race look identical in a bug report — exactly issue #342's own
-   stated reason, still correct.
-4. **Server-tick benchmarks (#78) applied to the tick loop specifically — not built.** No
-   `benches/` directory exists for `lodestone-server`. This is comparatively cheap standalone
-   work (a criterion harness driving `run_tick_loop` against a fixture world) and should land
-   before the next profiling pass, so "profile" in step 5 has a repeatable instrument rather than
-   a one-off live-oracle reading.
+   a behavioural divergence and a race look identical in a bug report.
+4. **Server-tick benchmark applied to the tick loop — partially built.**
+   `crates/lodestone-server/benches/server_tick.rs` drives `run_tick_loop` through equal-area
+   empty and populated fixture worlds. It waits for the asynchronous world install, seeds exact
+   zero and nonzero rosters through the live server API, verifies tick and phase-recorder counts,
+   and rejects a population sweep that does not move chunk-source work. Its paused clock makes the
+   phase timing a wiring control rather than a populated-world profile, so the repeatable
+   instrument exists but the decision-quality scene in step 5 still does not.
 5. **Profile a populated world, naming the scene — not done.** The idle-world floor above is not
    this step; it is the floor the real measurement subtracts from. Do this against at least two
    scenes (a single player exploring frontier, and a redstone/entity-dense build) given the
-   worldgen side's own demonstrated scene-dependence, and read `TickClock::phase_stats`/
-   `worst_phase_window` off a live `TickClock` via the existing oracles.
+   worldgen side's own demonstrated scene-dependence, and read the phase summaries/worst window
+   from the live clock's `TickStats` via the existing oracles.
 6. **Only then decide.** If `ScheduledAndPhysics` dominates and the dominant cost within it is
    genuinely parallelisable across chunk regions (not, say, a single global bottleneck like the
    dragon fight or a redstone contraption at spawn that every player's region would contend for
-   anyway), regionisation is the right lever. If it is not — the same caution issue #342's own
-   body already raises, citing #75's finding that this repo's assumed bottleneck was wrong once
-   already — close this plan with the measurement that says so, per issue #342's own closing
-   instruction: a perf change (or non-change) with no before/after number is not a result.
+   anyway), regionisation is the right lever. If it is not, close this plan with the measurement
+   that says so: a performance change (or non-change) with no before/after number is not a
+   result.
 
 ## Risks and gotchas
 
@@ -251,8 +250,8 @@ done:
   specifically to check this before committing.
 - **Do not let this plan's existence read as a decision already made.** Every section above is
   scaffolding for a *future* profiling-driven decision, and the honest current answer to "should
-  we regionise" is still "not yet measured" — restating issue #342's own verdict, now with the
-  reasoning spelled out once so it does not need re-deriving.
+  we regionise" is still "not yet measured" — with the reasoning spelled out once so it does not
+  need re-deriving.
 
 ## Configuration
 
@@ -270,6 +269,5 @@ from an assumption.
   first" step would extend to a populated-world reading.
 - `docs/server-gameplay-gap-census.md` and friends — where single-threaded parity work is
   currently tracked (not as a single milestone yet; see "Sequencing" step 3).
-- Issue [#341](https://github.com/matteopolak/lodestone/issues/341) ("do not target Folia" as a
-  plugin-compatibility surface) — a different, narrower statement than this plan; both can be
-  true at once, per issue #342's own "Not to be confused with" section.
+- The plugin-compatibility scope remains distinct from this throughput-focused design; both
+  constraints can hold at once.

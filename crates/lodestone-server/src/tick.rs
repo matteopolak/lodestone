@@ -186,7 +186,7 @@ pub(crate) type PlayTimerInstant = tokio::time::Instant;
 /// Rolling-average window for [`TickStats::mspt_avg_ms`] — matches vanilla's
 /// own `tickTimesNanos` ring buffer size
 /// (`private final long[] tickTimesNanos = new long[100];`).
-const HISTORY_LEN: usize = 100;
+pub const TICK_HISTORY_LEN: usize = 100;
 
 /// One coarse phase of [`run_tick_loop`]'s body, for per-phase timing.
 ///
@@ -230,7 +230,7 @@ const TICK_PHASE_COUNT: usize = 3;
 
 /// [`TickPhase`] names in discriminant order, for a report that wants to
 /// join a phase index back to a label.
-pub const TICK_PHASE_NAMES: [&str; TICK_PHASE_COUNT] =
+pub(crate) const TICK_PHASE_NAMES: [&str; TICK_PHASE_COUNT] =
     ["mobs_and_items", "weather_and_sleep", "scheduled_and_physics"];
 
 /// Above this, one phase in one tick counts as "over budget" rather than
@@ -246,7 +246,7 @@ const PHASE_SOFT_BUDGET: Duration = Duration::from_millis(MILLIS_PER_TICK / 5);
 /// The single largest [`TickPhase`] duration a [`TickClock`] has ever
 /// recorded, and which phase and (approximately) which tick it was — "the
 /// worst unserviced window, named", as opposed to a rolling percentile that
-/// forgets anything older than [`HISTORY_LEN`] samples.
+/// forgets anything older than [`TICK_HISTORY_LEN`] samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WorstPhaseWindow {
     pub phase: TickPhase,
@@ -266,9 +266,13 @@ pub struct WorstPhaseWindow {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PhaseStats {
     pub phase: TickPhase,
-    /// How many samples this is derived from — at most [`HISTORY_LEN`],
+    /// How many samples this is derived from — at most [`TICK_HISTORY_LEN`],
     /// because the ring buffer drops the oldest sample past that.
     pub sample_count: u64,
+    /// Total samples recorded for this phase since the clock was created.
+    /// Unlike [`Self::sample_count`], this counter is never limited by the
+    /// percentile history window.
+    pub total_sample_count: u64,
     pub p50_ms: f64,
     pub p95_ms: f64,
     pub p99_ms: f64,
@@ -912,6 +916,10 @@ pub struct TickClock {
     /// Per-[`TickPhase`] rolling duration history, same shape and cap as
     /// `history` above, indexed by the phase's discriminant.
     phase_history: [Mutex<VecDeque<u64>>; TICK_PHASE_COUNT],
+    /// Per-phase cumulative sample counts. This remains separate from the
+    /// bounded histories so callers can prove a long-running clock reached
+    /// each recorder even after its percentile window fills.
+    phase_sample_count: [AtomicU64; TICK_PHASE_COUNT],
     /// Per-phase "exceeded [`PHASE_SOFT_BUDGET`]" counts — a counter, not a
     /// duration, so it stays cheap and load-invariant to read even after
     /// millions of ticks, unlike re-deriving it from the (bounded) history.
@@ -934,8 +942,9 @@ impl TickClock {
             tick_count: AtomicU64::new(0),
             last_mspt_micros: AtomicU64::new(0),
             overrun_count: AtomicU64::new(0),
-            history: Mutex::new(VecDeque::with_capacity(HISTORY_LEN)),
-            phase_history: std::array::from_fn(|_| Mutex::new(VecDeque::with_capacity(HISTORY_LEN))),
+            history: Mutex::new(VecDeque::with_capacity(TICK_HISTORY_LEN)),
+            phase_history: std::array::from_fn(|_| Mutex::new(VecDeque::with_capacity(TICK_HISTORY_LEN))),
+            phase_sample_count: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
             phase_over_budget: [const { AtomicU64::new(0) }; TICK_PHASE_COUNT],
             worst_phase: Mutex::new(None),
         }
@@ -952,7 +961,7 @@ impl TickClock {
         self.tick_count.fetch_add(1, Ordering::Relaxed);
         self.last_mspt_micros.store(micros, Ordering::Relaxed);
         let mut history = self.history.lock().expect("tick history lock poisoned");
-        if history.len() == HISTORY_LEN {
+        if history.len() == TICK_HISTORY_LEN {
             history.pop_front();
         }
         history.push_back(micros);
@@ -981,11 +990,12 @@ impl TickClock {
     pub(crate) fn record_phase(&self, phase: TickPhase, elapsed: Duration) {
         let micros = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         let idx = phase as usize;
+        self.phase_sample_count[idx].fetch_add(1, Ordering::Relaxed);
         {
             let mut history = self.phase_history[idx]
                 .lock()
                 .expect("tick phase history lock poisoned");
-            if history.len() == HISTORY_LEN {
+            if history.len() == TICK_HISTORY_LEN {
                 history.pop_front();
             }
             history.push_back(micros);
@@ -1001,7 +1011,7 @@ impl TickClock {
 
     /// A percentile summary of `phase`'s recorded durations — see
     /// [`PhaseStats`]. Sorts a clone of the ring buffer (bounded at
-    /// [`HISTORY_LEN`] samples), so this is cheap enough for a debug command
+    /// [`TICK_HISTORY_LEN`] samples), so this is cheap enough for a debug command
     /// or a test to call, but it is not itself called from the tick loop.
     #[must_use]
     pub fn phase_stats(&self, phase: TickPhase) -> PhaseStats {
@@ -1024,6 +1034,7 @@ impl TickClock {
         PhaseStats {
             phase,
             sample_count: sample_count as u64,
+            total_sample_count: self.phase_sample_count[idx].load(Ordering::Relaxed),
             p50_ms: percentile(0.50),
             p95_ms: percentile(0.95),
             p99_ms: percentile(0.99),
@@ -1075,6 +1086,10 @@ impl TickClock {
             mspt_avg_ms,
             tps,
             overrun_count: self.overrun_count(),
+            mobs_and_items: self.phase_stats(TickPhase::MobsAndItems),
+            weather_and_sleep: self.phase_stats(TickPhase::WeatherAndSleep),
+            scheduled_and_physics: self.phase_stats(TickPhase::ScheduledAndPhysics),
+            worst_phase_window: self.worst_phase_window(),
         }
     }
 }
@@ -1094,6 +1109,14 @@ pub struct TickStats {
     /// forgiven the backlog. Zero across a healthy run; see
     /// [`run_tick_loop`]'s own doc comment for what a nonzero count means.
     pub overrun_count: u64,
+    /// Snapshot of the first tick phase's percentile summary.
+    pub mobs_and_items: PhaseStats,
+    /// Snapshot of the second tick phase's percentile summary.
+    pub weather_and_sleep: PhaseStats,
+    /// Snapshot of the scheduled and physics phase's percentile summary.
+    pub scheduled_and_physics: PhaseStats,
+    /// Largest phase duration seen since this clock was created.
+    pub worst_phase_window: Option<WorstPhaseWindow>,
 }
 
 /// `GameRules.MAX_COMMAND_SEQUENCE_LENGTH`'s default (`65536`) — this crate
@@ -3844,7 +3867,7 @@ mod tests {
     #[test]
     fn mspt_average_and_tps_reflect_a_doubled_tick_cost() {
         let clock = TickClock::new();
-        for _ in 0..HISTORY_LEN {
+        for _ in 0..TICK_HISTORY_LEN {
             clock.record_tick(Duration::from_millis(100));
         }
         let stats = clock.stats();
@@ -3860,17 +3883,17 @@ mod tests {
         );
     }
 
-    /// The rolling history caps at [`HISTORY_LEN`] samples: pushing far more
+    /// The rolling history caps at [`TICK_HISTORY_LEN`] samples: pushing far more
     /// than that must not let the average drift toward the oldest (discarded)
     /// samples. Feed 100 slow ticks, then 100 fast ones; the average must
     /// land near the fast figure, not halfway between the two.
     #[test]
     fn history_window_evicts_the_oldest_samples() {
         let clock = TickClock::new();
-        for _ in 0..HISTORY_LEN {
+        for _ in 0..TICK_HISTORY_LEN {
             clock.record_tick(Duration::from_millis(200));
         }
-        for _ in 0..HISTORY_LEN {
+        for _ in 0..TICK_HISTORY_LEN {
             clock.record_tick(Duration::from_millis(50));
         }
         let stats = clock.stats();
@@ -3879,7 +3902,7 @@ mod tests {
             "expected the 200ms samples to have aged out, got avg {}",
             stats.mspt_avg_ms
         );
-        assert_eq!(stats.tick_count, (HISTORY_LEN * 2) as u64);
+        assert_eq!(stats.tick_count, (TICK_HISTORY_LEN * 2) as u64);
     }
 
     // ---------------------------------------------------------------------
@@ -3927,6 +3950,24 @@ mod tests {
         assert_eq!(untouched.max_ms, 0.0);
     }
 
+    /// The percentile ring retains only [`TICK_HISTORY_LEN`] samples, but callers
+    /// that drive a clock need an independent cumulative count to prove that
+    /// every tick reached a phase recorder after the rolling window fills.
+    #[test]
+    fn phase_stats_keeps_a_cumulative_count_after_rolling_history_eviction() {
+        let clock = TickClock::new();
+        let total = TICK_HISTORY_LEN + 7;
+        for ms in 1..=total as u64 {
+            clock.record_phase(TickPhase::MobsAndItems, Duration::from_millis(ms));
+        }
+
+        let stats = clock.phase_stats(TickPhase::MobsAndItems);
+        assert_eq!(stats.sample_count, TICK_HISTORY_LEN as u64);
+        assert_eq!(stats.total_sample_count, total as u64);
+        assert_eq!(stats.max_ms, total as f64);
+        assert_eq!(clock.phase_stats(TickPhase::WeatherAndSleep).total_sample_count, 0);
+    }
+
     /// [`PHASE_SOFT_BUDGET`] is 10ms (20% of the 50ms tick period). Feed
     /// exactly three samples over it and two under, interleaved, and require
     /// the counter to land on exactly 3 — a magnitude check, not a "the
@@ -3968,6 +4009,41 @@ mod tests {
         let worst = clock.worst_phase_window().expect("still recorded");
         assert_eq!(worst.phase, TickPhase::MobsAndItems);
         assert_eq!(worst.micros, 25_000);
+    }
+
+    /// `TickClock::stats` is the public snapshot a caller can read without
+    /// retaining the clock. Its phase values must be the same values as the
+    /// direct phase queries, rather than empty placeholders that make a
+    /// healthy-looking snapshot unable to identify the costly phase.
+    #[test]
+    fn stats_snapshots_every_phase_and_the_recorded_worst_window() {
+        let clock = TickClock::new();
+        clock.record_phase(TickPhase::MobsAndItems, Duration::from_millis(7));
+        clock.record_phase(TickPhase::WeatherAndSleep, Duration::from_millis(12));
+        clock.record_phase(TickPhase::ScheduledAndPhysics, Duration::from_millis(25));
+
+        let stats = clock.stats();
+        assert_eq!(stats.mobs_and_items, clock.phase_stats(TickPhase::MobsAndItems));
+        assert_eq!(stats.weather_and_sleep, clock.phase_stats(TickPhase::WeatherAndSleep));
+        assert_eq!(
+            stats.scheduled_and_physics,
+            clock.phase_stats(TickPhase::ScheduledAndPhysics)
+        );
+        assert_eq!(stats.worst_phase_window, clock.worst_phase_window());
+
+        // These controls make a zero/default snapshot observably wrong even
+        // if the direct-query comparisons above were accidentally weakened.
+        assert_eq!(stats.mobs_and_items.sample_count, 1);
+        assert_eq!(stats.weather_and_sleep.over_budget_count, 1);
+        assert_eq!(stats.scheduled_and_physics.max_ms, 25.0);
+        assert_eq!(
+            stats.worst_phase_window,
+            Some(WorstPhaseWindow {
+                phase: TickPhase::ScheduledAndPhysics,
+                micros: 25_000,
+                tick_count: 0,
+            })
+        );
     }
 
     /// **Validation control for the instrument itself.** An idle world with

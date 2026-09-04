@@ -618,7 +618,10 @@ pub use server::serve_connection_with_access;
 pub use server::serve_connection_with_access_and_state;
 #[cfg(not(target_arch = "wasm32"))]
 pub use server::{OnlineModeConfig, serve_connection_with_online_mode};
-pub use tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
+pub use tick::{
+    BlockTickFeed, ExplosionFeed, PhaseStats, TickClock, TickPhase, TickStats, WorstPhaseWindow,
+    TICK_HISTORY_LEN,
+};
 pub use ticket::{
     BLOCK_TICKING_LEVEL, ChunkStatus, ENTITY_TICKING_LEVEL, FULL_CHUNK_LEVEL, MAX_LEVEL,
     TicketDelta, TicketKind, TicketOwner, TicketStore, TicketStoreHandle, TicketType, ticket_type,

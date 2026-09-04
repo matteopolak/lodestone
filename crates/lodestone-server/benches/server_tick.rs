@@ -71,7 +71,10 @@ use std::time::{Duration, Instant};
 
 use criterion::{Criterion, criterion_group, criterion_main};
 
-use lodestone_server::{ChunkColumn, ChunkSource, IntegratedServer};
+use lodestone_model::{ResourceKey, Vec3};
+use lodestone_server::{
+    ChunkColumn, ChunkSource, IntegratedServer, TickPhase, WorstPhaseWindow, TICK_HISTORY_LEN,
+};
 use lodestone_v26_2::server_protocol::V770ServerProtocol;
 
 /// One server tick period. Advancing the paused clock by exactly this much
@@ -85,6 +88,14 @@ const TICK_PERIOD: Duration = Duration::from_millis(50);
 /// finish before a block tick can trigger generation -- with enough ticks
 /// after it that the steady state, not the warm-up, dominates the average.
 const TICKS: u64 = 200;
+
+/// The non-empty arm's exact population. Keeping this separate from its
+/// description and assertion makes removing fixture seeding observable.
+const POPULATED_MOBS: usize = 48;
+
+/// Cooperative polls allowed for the constructor's off-thread reseed before
+/// the fixture uses the live mob handle. The clock stays paused throughout.
+const RESEED_POLLS: usize = 100_000;
 
 /// Exclusive top of the fixture world's solid floor. The one place the floor's
 /// extent is written down, so `column()` and `block_state()` cannot disagree
@@ -154,6 +165,7 @@ impl ChunkSource for CountingFlatWorld {
 struct TickRun {
     ticks: u64,
     overruns: u64,
+    roster: usize,
     column_calls: u64,
     block_reads: u64,
     /// Wall time of the whole advance loop, measured *outside* the paused
@@ -161,6 +173,58 @@ struct TickRun {
     wall: Duration,
     /// What the tick loop's own clock believed, for the side-by-side above.
     reported_mspt_avg_ms: f64,
+    /// Each phase's bounded percentile-window sample count.
+    mobs_and_items_rolling_samples: u64,
+    weather_and_sleep_rolling_samples: u64,
+    scheduled_and_physics_rolling_samples: u64,
+    /// Each phase's cumulative sample count since the clock was created.
+    mobs_and_items_total_samples: u64,
+    weather_and_sleep_total_samples: u64,
+    scheduled_and_physics_total_samples: u64,
+    /// Longest phase interval observed during this sweep point.
+    worst_phase: WorstPhaseWindow,
+}
+
+/// Waits until the in-memory world's asynchronous reseed has installed the
+/// real simulation, then inserts this sweep point's exact population through
+/// the public server surface.
+///
+/// The constructor's configured demo population is deliberately zero: it is
+/// environment-gated, while a benchmark fixture must be self-contained.
+async fn seed_fixture_mobs(server: &IntegratedServer, mob_count: usize) -> usize {
+    let mobs = server
+        .mobs()
+        .expect("open_in_memory_with_mobs exposes its live mob handle");
+    let mut reseeded = false;
+    for _ in 0..RESEED_POLLS {
+        if mobs.with(|sim| sim.next_id()) >= 1000 {
+            reseeded = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        reseeded,
+        "the asynchronous fixture reseed did not finish after {RESEED_POLLS} cooperative polls"
+    );
+
+    let species: ResourceKey = "minecraft:pig"
+        .parse()
+        .expect("the fixture's species key is valid");
+    for index in 0..mob_count {
+        let x = (index % 8) as f64 + 0.5;
+        let z = (index / 8) as f64 + 0.5;
+        server
+            .spawn_mob(species.clone(), Vec3::new(x, FLOOR_TOP as f64, z))
+            .expect("open_in_memory_with_mobs accepts a spawned fixture mob");
+    }
+
+    let roster = mobs.with(|sim| sim.iter().count());
+    assert_eq!(
+        roster, mob_count,
+        "fixture seeding must leave exactly the requested roster after reseed"
+    );
+    roster
 }
 
 fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
@@ -181,8 +245,26 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
             world,
             mob_area,
             (0, 0),
-            mob_count,
+            0,
             view_radius,
+        );
+
+        let roster = seed_fixture_mobs(&server, mob_count).await;
+
+        // The asynchronous install fetches the fixture's complete 5x5 area.
+        // That setup work establishes a live simulation but is not work done
+        // by the driven ticks, so discard it before taking per-tick counts.
+        columns.store(0, Ordering::Relaxed);
+        block_reads.store(0, Ordering::Relaxed);
+        assert_eq!(
+            columns.load(Ordering::Relaxed),
+            0,
+            "the measured column counter must start after fixture setup"
+        );
+        assert_eq!(
+            block_reads.load(Ordering::Relaxed),
+            0,
+            "the measured block-read counter must start after fixture setup"
         );
 
         // A spawned task is never polled synchronously, so the tick task has
@@ -204,10 +286,20 @@ fn run_ticks(mob_count: usize, view_radius: i32, area: i32) -> TickRun {
         let out = TickRun {
             ticks: stats.tick_count,
             overruns: stats.overrun_count,
+            roster,
             column_calls: columns.load(Ordering::Relaxed),
             block_reads: block_reads.load(Ordering::Relaxed),
             wall,
             reported_mspt_avg_ms: stats.mspt_avg_ms,
+            mobs_and_items_rolling_samples: stats.mobs_and_items.sample_count,
+            weather_and_sleep_rolling_samples: stats.weather_and_sleep.sample_count,
+            scheduled_and_physics_rolling_samples: stats.scheduled_and_physics.sample_count,
+            mobs_and_items_total_samples: stats.mobs_and_items.total_sample_count,
+            weather_and_sleep_total_samples: stats.weather_and_sleep.total_sample_count,
+            scheduled_and_physics_total_samples: stats.scheduled_and_physics.total_sample_count,
+            worst_phase: stats
+                .worst_phase_window
+                .expect("every completed tick records every phase, so the worst window exists"),
         };
         server.shutdown().await;
         out
@@ -219,8 +311,8 @@ fn tick_cost(c: &mut Criterion) {
     // populated one. A single point would be a number with nothing to compare
     // it against, which is the shape this workspace's rules single out as
     // unfalsifiable.
-    let empty = run_ticks(0, 2, 1);
-    let populated = run_ticks(48, 2, 2);
+    let empty = run_ticks(0, 2, 2);
+    let populated = run_ticks(POPULATED_MOBS, 2, 2);
 
     assert_eq!(
         empty.ticks, TICKS,
@@ -235,10 +327,46 @@ fn tick_cost(c: &mut Criterion) {
         empty.overruns, 0,
         "a healthy loop under a paused clock never falls behind schedule"
     );
+    assert_eq!(empty.roster, 0, "the empty sweep point's roster");
+    assert_eq!(
+        populated.roster, POPULATED_MOBS,
+        "the populated sweep point must retain its exact seeded roster"
+    );
+    assert_ne!(
+        populated.roster, 0,
+        "the populated sweep point must not silently become empty"
+    );
+
+    for (label, run) in [("empty", &empty), ("populated", &populated)] {
+        let expected_rolling_samples = TICKS.min(TICK_HISTORY_LEN as u64);
+        assert_eq!(run.mobs_and_items_total_samples, TICKS, "{label}: mobs-and-items total samples");
+        assert_eq!(run.weather_and_sleep_total_samples, TICKS, "{label}: weather-and-sleep total samples");
+        assert_eq!(
+            run.scheduled_and_physics_total_samples, TICKS,
+            "{label}: scheduled-and-physics total samples"
+        );
+        assert_eq!(
+            run.mobs_and_items_rolling_samples, expected_rolling_samples,
+            "{label}: mobs-and-items rolling samples"
+        );
+        assert_eq!(
+            run.weather_and_sleep_rolling_samples, expected_rolling_samples,
+            "{label}: weather-and-sleep rolling samples"
+        );
+        assert_eq!(
+            run.scheduled_and_physics_rolling_samples, expected_rolling_samples,
+            "{label}: scheduled-and-physics rolling samples"
+        );
+        assert_eq!(
+            run.worst_phase.phase,
+            TickPhase::MobsAndItems,
+            "{label}: the paused clock gives every phase a zero duration, so the first recorded phase owns the tied worst window"
+        );
+    }
 
     // The control that the instrument sees the simulation at all. If a world
-    // with 48 mobs over a wider area does not touch the chunk source more than
-    // an empty one, the counter is wired to something that is not the tick.
+    // with POPULATED_MOBS mobs does not touch the chunk source more than an empty one in
+    // the same area, the counter is wired to something that is not the tick.
     assert!(
         populated.column_calls + populated.block_reads
             > empty.column_calls + empty.block_reads,
@@ -253,18 +381,28 @@ fn tick_cost(c: &mut Criterion) {
 
     for (label, run) in [("empty", &empty), ("populated", &populated)] {
         println!(
-            "[server_tick] {label}: {} ticks, {} column() calls, {} block_state() reads, \
+            "[server_tick] {label}: {} ticks, roster={}, {} column() calls, {} block_state() reads, \
              {:.3} ms wall for the whole loop (measured outside the paused clock), \
-             loop's own mspt_avg {:.3} ms (paused clock -- not a cost figure)",
+             loop's own mspt_avg {:.3} ms (paused clock -- not a cost figure), \
+             phase samples rolling={}/{}/{} total={}/{}/{}, worst={}us ({:?})",
             run.ticks,
+            run.roster,
             run.column_calls,
             run.block_reads,
             run.wall.as_secs_f64() * 1e3,
             run.reported_mspt_avg_ms,
+            run.mobs_and_items_rolling_samples,
+            run.weather_and_sleep_rolling_samples,
+            run.scheduled_and_physics_rolling_samples,
+            run.mobs_and_items_total_samples,
+            run.weather_and_sleep_total_samples,
+            run.scheduled_and_physics_total_samples,
+            run.worst_phase.micros,
+            run.worst_phase.phase,
         );
     }
 
-    let empty_scene = "flat in-memory world, mobs=0 area=3x3 view_radius=2";
+    let empty_scene = "flat in-memory world, mobs=0 area=5x5 view_radius=2";
     let populated_scene = "flat in-memory world, mobs=48 area=5x5 view_radius=2";
 
     // Counts: comparable across machines, so these are what a stored baseline
@@ -283,6 +421,60 @@ fn tick_cost(c: &mut Criterion) {
             scene,
             value: run.block_reads as f64 / run.ticks as f64,
             unit: "calls",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "mobs_and_items_rolling_samples",
+            scene,
+            value: run.mobs_and_items_rolling_samples as f64,
+            unit: "samples",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "weather_and_sleep_rolling_samples",
+            scene,
+            value: run.weather_and_sleep_rolling_samples as f64,
+            unit: "samples",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "scheduled_and_physics_rolling_samples",
+            scene,
+            value: run.scheduled_and_physics_rolling_samples as f64,
+            unit: "samples",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "mobs_and_items_total_samples",
+            scene,
+            value: run.mobs_and_items_total_samples as f64,
+            unit: "samples",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "weather_and_sleep_total_samples",
+            scene,
+            value: run.weather_and_sleep_total_samples as f64,
+            unit: "samples",
+        });
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: "scheduled_and_physics_total_samples",
+            scene,
+            value: run.scheduled_and_physics_total_samples as f64,
+            unit: "samples",
+        });
+        let worst_phase_metric = match run.worst_phase.phase {
+            TickPhase::MobsAndItems => "worst_phase_mobs_and_items_us",
+            TickPhase::WeatherAndSleep => "worst_phase_weather_and_sleep_us",
+            TickPhase::ScheduledAndPhysics => "worst_phase_scheduled_and_physics_us",
+        };
+        support::record(support::Record {
+            bench: "server_tick",
+            metric: worst_phase_metric,
+            scene,
+            value: run.worst_phase.micros as f64,
+            unit: "us",
         });
     }
 
@@ -308,7 +500,7 @@ fn tick_cost(c: &mut Criterion) {
         support::record(support::Record {
             bench: "server_tick",
             metric: "populated_vs_empty_wall_ratio",
-            scene: "48 mobs over 5x5 versus an empty 3x3",
+            scene: "48 mobs over 5x5 versus an empty 5x5",
             value: populated_us / empty_us,
             unit: "x",
         });

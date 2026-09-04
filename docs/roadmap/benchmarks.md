@@ -428,11 +428,15 @@ resident section count grows, which is exactly what the render-submit sub-issues
   [`../benchmark-regression-gate.md`](../benchmark-regression-gate.md) for the split and
   for what a count gate cannot catch (a regression that keeps every count identical while
   making each call more expensive).
-- **The per-phase server tick split is not reachable from outside `lodestone-server`.**
-  `TickClock::phase_stats` already computes p50/p95/p99/max and an over-budget count per
-  phase; `IntegratedServer` exposes `tick_stats()` but not the clock, so
-  `benches/server_tick.rs` records whole-tick figures only. One forwarding accessor would
-  turn "which third of a tick dominates" into a tracked metric.
+- **The server-tick benchmark snapshots each phase through `TickStats`.** The snapshot carries
+  p50/p95/p99/max and an over-budget count for every phase, plus the named worst window; the
+  bench asserts each phase's cumulative count for every driven tick while preserving a rolling
+  count capped by `TICK_HISTORY_LEN`, and records both deterministic values. Its paused runtime
+  makes phase durations tied at zero, so the captured worst phase is a wiring control rather than
+  a timing result. Its equal-area population sweep waits for the live simulation to install and
+  asserts exact empty and populated rosters before comparing work; it resets source counters after
+  installation so setup generation cannot enter per-tick metrics. A live or real-time profile is
+  still needed to rank phase cost.
 - **`benches/support.rs` exists in eight byte-identical copies.** `lodestone-testsupport`
   is already a dev-dependency of most of the crates involved and is the natural home; the
   move is a cross-crate change of its own.

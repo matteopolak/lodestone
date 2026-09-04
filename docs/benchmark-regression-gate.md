@@ -251,59 +251,38 @@ and whose meaninglessness is invisible in the value. The bench measures with a p
 `std::time::Instant` around the advance loop instead, and prints both side by side and
 labelled so the difference is on the record.
 
-Its own control that it measures anything is a population sweep: an empty world and one
-with 48 mobs over a wider area must not do the same amount of chunk-source work. If they
-do, the counter is wired to something that is not the simulation, and the bench fails
-saying so rather than recording a tidy number.
+Its own control that it measures anything is a population sweep: after the constructor's
+asynchronous world install completes, the fixture seeds the live server surface with exactly
+zero or 48 mobs in the same 5x5 area. It asserts those exact rosters before requiring the
+populated arm to do more chunk-source work. That avoids configuration-dependent demo population
+and makes removed fixture seeding fail before it can make the work comparison vacuous. The fixture
+resets its source counters after that setup, so the recorded per-tick counts exclude asynchronous
+world installation.
 
-### First measured numbers
+### Fixture limits
 
-| | empty world | 48 mobs |
-|---|---|---|
-| scene | flat in-memory world, mobs=0, area 3x3, view radius 2 | flat in-memory world, mobs=48, area 5x5, view radius 2 |
-| ticks | 200 | 200 |
-| `ChunkSource::column` calls | 9 | 27 |
-| `ChunkSource::block_state` reads | 0 | 0 |
-| wall per tick, outside the paused clock | **9.20 µs** | **28.56 µs** |
-| the loop's own `mspt_avg_ms` | 0.000 ms | 0.000 ms |
-
-Conditions: macbook.local, aarch64 macOS, `cargo bench` profile (`lto=thin`,
-`codegen-units=1`, `debug=2`), sha `2156c72`, with several other agents building on the
-same machine — so treat these as samples, which is exactly why the gate does not hold
-them.
-
-Three things worth carrying forward, and one caveat that is larger than all of them:
-
-- **A 48-mob tick costs about 29 µs against a 50 ms budget — under 0.1% of it.** That is
-  the number the regionised-ticking question needs first, and it argues for measuring a
-  realistic world before committing to a partition, not for partitioning.
-- **The population sweep moved by 3.10×** for a 48-mob, wider-area world versus an empty
-  one, which is what makes the figures above measurements rather than noise: the
-  instrument responds to the input it is supposed to respond to.
-- **`mspt_avg_ms` reads 0.000 in both arms**, which is the paused clock reporting itself
-  and not a cost. It is printed precisely so nobody quotes it.
-- **The caveat**: this is a *floor*, not a representative tick. The fixture is a flat
-  four-layer world with no terrain, no redstone, no block entities and no real chunk
-  churn — `block_state` is never called at all, and 200 ticks touch nine columns. A
-  production-shaped number needs a generator-backed or region-backed source, which would
-  fold column generation into the figure and needs its own design. Do not read 29 µs as
-  "the server tick is free"; read it as "the simulation skeleton is free, and whatever is
-  expensive is not in the skeleton".
+Both sweep points use a flat, four-layer in-memory world with no terrain, redstone, block
+entities, or real chunk churn. It is a deterministic simulation-floor fixture, not a
+production-shaped cost sample. A generator-backed or region-backed source would fold column
+generation into the first cold access and needs its own scene definition before its duration can
+be compared. Do not infer a production tick cost from this fixture's wall-clock result.
 
 Not in the CI gated set: it builds `lodestone-server`, `lodestone-v26-2` and their graph
-for a job that would otherwise build only the render path, and its counts depend on
-spawn RNG rather than being a pure function of the fixture. Run it directly:
+for a job that would otherwise build only the render path. Run it directly:
 
 ```bash
 cargo bench -p lodestone-server --bench server_tick
 ```
 
-**Known gap, stated rather than left to be discovered**: the per-phase split
-(`TickClock::phase_stats`, which already computes p50/p95/p99/max and an over-budget count
-per phase) is not reachable from outside the crate — `IntegratedServer` exposes
-`tick_stats()` but not the clock. A `pub fn phase_stats(&self, phase) -> Option<PhaseStats>`
-on `IntegratedServer`, forwarding to the `clock` field it already holds, is all that is
-needed, and would turn "which third of a tick dominates" into a recorded metric.
+`TickStats` includes the three per-phase summaries and the worst recorded phase window, so
+the bench can read them through `IntegratedServer::tick_stats()` without exposing its clock.
+Each sweep asserts a cumulative phase count of 200 and a rolling phase count of
+`min(200, TICK_HISTORY_LEN)` for every phase, then records both values with a metric named for
+the worst phase. The cumulative count proves every driven tick reached the recorder; the rolling
+count preserves the percentile window's bounded semantics. Under the paused runtime the phase
+durations are tied at zero, so the first phase owns that diagnostic window; it proves the phase
+recorder is wired, but is not a cost measurement. The wall-clock figures remain the cost figures
+for this fixture.
 
 ## Dependencies
 
