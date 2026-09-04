@@ -1,0 +1,13 @@
+[package]
+name = "lodestone-jni-invocation-spike"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+jni = { version = "=0.22.4", features = ["invocation"] }
+lodestone-jvm-bridge = { path = "../.." }
+
+# This is an executable experiment, not another production workspace member.
+[workspace]
+

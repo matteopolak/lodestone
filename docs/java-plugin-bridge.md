@@ -22,8 +22,9 @@ reentrancy design, the ABI decision, the object-identity design, and — the mea
 estimate turns on — the **NMS reference census**, run against a real Paper jar.
 
 The bridge itself is not built. What is built is `crates/plugins/lodestone-jvm-bridge` (the
-JVM-independent host machinery), `crates/lodestone-nms-census` (the scanner), and an executed
-classload-interception spike.
+JVM-independent host machinery), `crates/lodestone-nms-census` (the scanner), an executed
+classload-interception spike, and a separate JNI-invocation spike that drives one native method
+through the real `WorldPort`/`PortServicer` pair.
 
 ---
 
@@ -359,9 +360,12 @@ actually had, and needs no carve-out in a shared manifest.
 
 - **Async plugin threads.** Bukkit's scheduler has async tasks and JNI requires
   `AttachCurrentThread`. `WorldPort` is `Clone + Send` so each attached thread can hold its own, and
-  the port's semantics are already thread-safe. What is unproven is the *JVM-side* lifecycle — thread
-  attach/detach around a port, and what happens to an outstanding request when a plugin thread dies
-  mid-call. This needs the JNI spike.
+  the port's semantics are already thread-safe. The invocation spike proves that a Rust-created
+  thread can attach, call Java, and receive a Java-to-Rust callback. It uses a permanent attachment;
+  the worker terminates immediately after the call and JNI releases the attachment at thread exit.
+  It does not prove scoped detachment while a worker remains alive. Still unproven is the lifecycle
+  of arbitrary plugin-created async threads, and what happens to an outstanding request when one
+  dies mid-call.
 - **Reentrancy in the other direction** — Rust calling Java calling Rust calling Java. The port
   bounds Rust-side lock acquisition, but nothing yet bounds *stack depth* across the boundary.
 - **Ordering guarantees.** Bukkit promises handlers run in listener-priority order on the main
@@ -412,6 +416,48 @@ class loader as parent, not the system one. With the system loader as parent, or
 delegation finds whichever `Level` is on the application classpath and the test arm silently answers
 `REAL` — an interception that appears to fail for a reason unrelated to interception.
 
+### 4.1 JNI invocation and port round trip — the mechanism, executed
+
+The classloader spike remains isolated at `crates/plugins/lodestone-jvm-bridge/spike/`. The next
+mechanism is a standalone Cargo workspace under `spike/invocation/`; it is intentionally not part of
+the production bridge crate and is the only place in this subsystem that depends on `jni` with its
+invocation feature.
+
+The Rust process creates one JVM, starts a named Rust invocation thread, attaches that thread, and
+registers the Java plugin's static `nativeScore(int, int, int)` method with `RegisterNatives`. The
+Java method calls back into Rust. That callback holds the existing `WorldPort`, sends the three
+integers plus its Rust thread identity, and blocks only up to the port deadline. A different named
+Rust thread owns `PortServicer`, evaluates `x * 31 + y * 7 - z * 5 + 17`, and includes its own thread
+identity in the response. Inputs `(11, 7, -3)` therefore have the independently predicted result
+**422**. The callback rejects a same-thread response, and the successful run prints both unequal
+thread identities.
+
+Every arm starts the executable afresh because JNI permits one live JVM per process. The runner
+executes these observations under an outer 15-second process timeout:
+
+```text
+scenario=Success RESULT:422
+callback_thread=ThreadId(3) service_thread=ThreadId(2) distinct=PASS
+scenario=Unregistered ERROR:UnsatisfiedLinkError:...
+scenario=Dropped ERROR:RuntimeException:Rust error: world port failure: the world servicer is no longer running
+scenario=TimedOut ERROR:RuntimeException:Rust error: world port failure: the world servicer did not answer within 150ms
+scenario=Panicked ERROR:RuntimeException:Rust panic: deliberate callback panic after service response
+callback_thread=ThreadId(3) service_thread=ThreadId(2) distinct=PASS
+INVOCATION SPIKE PASSED
+```
+
+The unregistered arm is the control proving the JVM truly needs native registration. The dropped and
+silent-servicer arms exercise the `Closed` and `TimedOut` `PortError` variants and return to Java
+without a hang; `Saturated` is not exercised here. The panic arm first completes a real port round
+trip, then panics inside the callback; `EnvUnowned::with_env` catches the unwind and
+`ThrowRuntimeExAndDefault` translates it to a Java `RuntimeException`, so no Rust unwind crosses the
+FFI boundary.
+
+This is a mechanism test using a stand-in plugin class. It does not start Paper, touch
+`lodestone-server`, exercise global references, prove nested Java/Rust reentrancy bounds, or measure
+production marshalling cost. Its result is narrower: invocation, registration, thread attachment,
+the port hand-off, and loud error translation all work together in one process.
+
 ---
 
 ## 5. The ABI decision
@@ -449,9 +495,11 @@ be revisited then rather than assumed now.
 
 `crates/plugins/lodestone-jvm-bridge/tests/zero_cost_graph.rs`:
 
-- **no crate in the workspace names the bridge** (a manifest scan across every `Cargo.toml` under
-  `crates/` and `xtask/`), with a control that finds `lodestone-ecs`'s many dependents using the same
-  parser — because a parser that read nothing would certify the bridge as unreferenced forever;
+- **no crate in the workspace names the bridge** (a manifest scan across workspace-member
+  `Cargo.toml` files under `crates/` and `xtask/`), with one control that finds `lodestone-ecs`'s many
+  dependents and another that proves the standalone invocation workspace really names the bridge but
+  is not classified as a production member — because a parser that read nothing would certify the
+  bridge as unreferenced forever;
 - **the bridge names no unconditional JVM-linking crate**, permitting `optional = true` only, which
   is the shape the JNI layer must land in.
 
@@ -510,6 +558,10 @@ pairs with `release()`. That needs a JVM to develop against.
 - **Do not wire the bridge into any crate's default dependencies.** When it is wired, it goes behind
   an optional dependency and a default-off feature, and `zero_cost_graph.rs` should be *updated to
   assert that shape* rather than deleted.
+- **Keep the two spikes separate.** `spike/run.sh` proves classload interception without a native
+  library. `spike/invocation/run.sh` proves JVM invocation and native callbacks without involving
+  classloader interception or production server state. Combining them would make a failure
+  ambiguous again.
 - **When re-running the census, re-pin.** Paper publishes several builds a week and the counts move.
   `scripts/fetch-paper.sh` carries the pin (version, build, sha256) so a number in this document can
   be traced to an exact input; update the pin and the numbers together.
@@ -525,6 +577,9 @@ pairs with `release()`. That needs a JVM to develop against.
   `.cache/paper/26.2/paper.jar`, which is outside git.
 - `lodestone_jvm_bridge::port::DEFAULT_REQUEST_DEADLINE` — how long a Java-side call waits for the
   tick thread.
+- `lodestone_jni_invocation_spike::REQUEST_DEADLINE` — the prototype's 150 ms deadline, chosen to
+  make the silent servicer control fast while the runner's outer 15-second timeout remains an
+  independent hang gate.
 - `nms-census --prefix / --internal / --no-recurse / --top / --all` — see `--help`.
 
 ## 9. Dependencies
@@ -533,5 +588,10 @@ pairs with `release()`. That needs a JVM to develop against.
   with no Java, which is this one.
 - `crates/plugins/lodestone-jvm-bridge` — `lodestone-ecs` only, plus `lodestone-plugin-support` as a
   dev-dependency for the reentrancy harness. **No `jni`, no `libjvm`.**
-- The spike and the paperclip step need Apple `container` and an `eclipse-temurin` image — see
-  `docs/oracle-runtimes.md`. The host needs no `java`.
+- The classloader spike and the paperclip step need Apple `container` and an `eclipse-temurin` image
+  — see `docs/oracle-runtimes.md`. The host needs no `java`.
+- The invocation spike is its own Cargo workspace and uses `jni` 0.22.4 with `invocation`. Its
+  `Containerfile` pins the Rust/`cc` base image by digest, installs the repository's dated nightly
+  and matching Cranelift component, and checksum-locks Temurin 25.0.3+9 for both supported container
+  architectures. The checkout is mounted read-only; Java classes, Cargo caches and target artefacts
+  stay inside the ephemeral container.
