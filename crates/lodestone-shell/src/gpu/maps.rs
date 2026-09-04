@@ -487,8 +487,6 @@ struct FramedMapProjectionState {
 
 #[derive(Clone, Copy, Debug)]
 struct FramedMapProjectionPoint {
-    map_eye_z: f32,
-    comparison_eye_z: f32,
     map_clip: [f32; 4],
     comparison_clip: [f32; 4],
 }
@@ -742,9 +740,7 @@ fn framed_map_track_candidate(
 
 fn framed_map_projection(
     draw: &EntityDraw,
-    map_eye: Mat4,
     map_view_projection: Mat4,
-    frame_eye: Mat4,
     frame_view_projection: Mat4,
 ) -> (FramedMapProjectionState, FramedMapProjectionSnapshot) {
     let pose = framed_map_pose(
@@ -772,14 +768,12 @@ fn framed_map_projection(
             if draw.invisible { 1.0 } else { 15.001 / 16.0 },
         ));
         let map_clip = clip_point(map_view_projection, map_world);
-        let (comparison_eye, comparison_clip) = if draw.invisible {
-            (map_eye, clip_point(map_view_projection, comparison_world))
+        let comparison_clip = if draw.invisible {
+            clip_point(map_view_projection, comparison_world)
         } else {
-            (frame_eye, clip_point(frame_view_projection, comparison_world))
+            clip_point(frame_view_projection, comparison_world)
         };
         FramedMapProjectionPoint {
-            map_eye_z: map_eye.transform_point3(map_world).z,
-            comparison_eye_z: comparison_eye.transform_point3(comparison_world).z,
             map_clip,
             comparison_clip,
         }
@@ -1293,9 +1287,7 @@ impl RenderState {
         queue: &wgpu::Queue,
         camera: &lodestone_render::Camera,
         entities: &[EntityDraw],
-        map_eye: Mat4,
         map_view_projection: Mat4,
-        frame_eye: Mat4,
         frame_view_projection: Mat4,
     ) -> Vec<PreparedMap> {
         const SITE: &str = "item frame";
@@ -1329,9 +1321,7 @@ impl RenderState {
         let projection = selected.map(|draw| {
             framed_map_projection(
                 draw,
-                map_eye,
                 map_view_projection,
-                frame_eye,
                 frame_view_projection,
             )
         });
