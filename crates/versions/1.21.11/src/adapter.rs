@@ -1855,7 +1855,7 @@ impl V774Adapter {
                 })
                 .transpose()?;
             updated.push(PlayerListEntry {
-                uuid: entry.uuid,
+                uuid: Some(entry.uuid),
                 name: entry.name,
                 game_mode,
                 latency: entry.latency,

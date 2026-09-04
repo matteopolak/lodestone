@@ -576,6 +576,7 @@ fn player_info_add_then_remove() {
     match directives.as_slice() {
         [Directive::Emit(ClientEvent::PlayerListUpdate { entries })] => {
             assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0].uuid, Some(uuid));
             assert_eq!(entries[0].name.as_deref(), Some("Steve"));
             assert_eq!(entries[0].game_mode, Some(GameMode::Creative));
             assert_eq!(entries[0].latency, Some(42));

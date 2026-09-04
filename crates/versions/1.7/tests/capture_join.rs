@@ -312,40 +312,21 @@ fn the_flat_worlds_floor_reads_back_as_canonical_blocks() {
     );
 }
 
-/// The player-list packet carries no UUID, so the adapter derives one. This
-/// pins that derivation against the UUID the *server* independently computed
-/// for the same name and sent in its own login-success packet — two different
-/// packets in the same recording, so neither side of the comparison comes from
-/// this crate.
+/// The capture is the control for the absence: it contains the complete packet
+/// body a real server sent, and the protocol decoder reaches a player-list
+/// event without finding an identity field that is not there.
 #[test]
-fn the_derived_player_uuid_matches_the_servers_own_login_success() {
-    use lodestone_core::{Ctx, Decode, Reader};
-
-    let packets = read_capture();
-    let success = packets
+fn the_player_list_does_not_invent_a_profile_uuid() {
+    let outcome = replay();
+    let entry = outcome
+        .events
         .iter()
-        .find(|packet| {
-            packet.state == ConnectionState::Login
-                && packet.id == lodestone_v1_7::packet_ids::login::clientbound::SUCCESS
+        .find_map(|event| match event {
+            ClientEvent::PlayerListUpdate { entries } => entries.first(),
+            _ => None,
         })
-        .expect("the capture has no login success packet");
-    let mut reader = Reader::new(&success.payload);
-    let profile = lodestone_v1_7::packets::login::LoginSuccess::decode(
-        &mut reader,
-        Ctx {
-            version: lodestone_v1_7::PROTOCOL,
-        },
-    )
-    .expect("login success decodes at protocol 5");
-
-    let server_uuid: uuid::Uuid = profile.uuid.parse().expect("the server sent a dashed UUID");
-    assert_eq!(
-        lodestone_v1_7::adapter::offline_player_uuid(&profile.username),
-        server_uuid,
-        "the adapter's offline-mode derivation for {:?} disagrees with the one the server itself \
-         computed and sent; every player-list entry in this era is keyed on that derivation",
-        profile.username
-    );
+        .expect("the capture has no player-list update");
+    assert_eq!(entry.uuid, None, "wire absence must remain canonical absence");
 }
 
 // ---------------------------------------------------------------------------

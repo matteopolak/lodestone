@@ -3475,8 +3475,8 @@ fn resolve_entity_facts(
 ) -> Option<EntityFacts> {
     use lodestone_ecs::entity::{
         Baby, CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, EntityFlags,
-        EntityKind, EntityUuid, Equipment, HeadYaw, OnGround, Position, Rotation, Variant,
-        Velocity,
+        EntityKind, EntityUuid, Equipment, HeadYaw, OnGround, PlayerProfileName, Position,
+        Rotation, Variant, Velocity,
     };
 
     let type_key = entity.get::<EntityKind>()?.0.clone();
@@ -3682,6 +3682,15 @@ fn resolve_entity_facts(
     // their text.
     let is_player = type_key.path() == "player";
     let uuid = entity.get::<EntityUuid>().map(|uuid| uuid.0);
+    let profile_name = entity
+        .get::<PlayerProfileName>()
+        .map(|name| name.0.as_str());
+    let player_entry = if is_player {
+        uuid.and_then(|id| tab_list.get(&id))
+            .or_else(|| profile_name.and_then(|name| tab_list.get_by_name(name)))
+    } else {
+        None
+    };
     let flags = entity.get::<EntityFlags>().map(|f| f.0);
     let custom_name = entity
         .get::<CustomName>()
@@ -3691,7 +3700,9 @@ fn resolve_entity_facts(
     // used for the tag. Other entities use their UUID string. This is the same
     // holder mapping the collision team gate uses in `sim/collide.rs`.
     let scoreboard_holder = if is_player {
-        uuid.and_then(|id| tab_list.get(&id).map(|entry| entry.profile.name.clone()))
+        player_entry
+            .map(|entry| entry.profile.name.clone())
+            .or_else(|| profile_name.map(str::to_owned))
     } else {
         uuid.map(|id| id.to_string())
     };
@@ -3709,7 +3720,7 @@ fn resolve_entity_facts(
     let name_tag: Option<Text> = if !name_tag_visible {
         None
     } else if is_player {
-        uuid.and_then(|id| match tab_list.get(&id) {
+        match player_entry {
             Some(entry) => {
                 let styled = entry.effective_name();
                 let plain = styled.to_plain_string();
@@ -3725,7 +3736,9 @@ fn resolve_entity_facts(
                     // the tag. The remembered fallback is plain text — see
                     // the `None` arm below for why that is an acceptable,
                     // disclosed narrowing rather than a silent one.
-                    crate::remote_skins::remember_name(id, &plain);
+                    if let Some(id) = uuid {
+                        crate::remote_skins::remember_name(id, &plain);
+                    }
                     Some(styled)
                 }
             }
@@ -3739,8 +3752,8 @@ fn resolve_entity_facts(
             // is narrower than the metadata-flattening bug this fix closes:
             // it only degrades a tag on the specific frame a tab-list entry
             // is transiently missing, not on every frame for every entity.
-            None => crate::remote_skins::last_known_name(&id).map(Text::literal),
-        })
+            None => uuid.and_then(|id| crate::remote_skins::last_known_name(&id).map(Text::literal)),
+        }
     } else {
         match &custom_name {
             Reported::Reported(Some(text))
@@ -4779,7 +4792,8 @@ mod tests {
     use super::*;
     use lodestone_ecs::entity::{
         CreeperSwellDir, CustomName, CustomNameVisible, DisplayItem, Equipment, EntityKind,
-        EntityFlags, EntityUuid, HeadYaw, OnGround, Position, Rotation, Variant, Velocity,
+        EntityFlags, EntityUuid, HeadYaw, OnGround, PlayerProfileName, Position, Rotation, Variant,
+        Velocity,
     };
 
     /// Test-only ingest builder replacing the deleted `EntitySnapshot` (issue
@@ -5809,6 +5823,30 @@ mod tests {
                 facts.name_tag.map(|t| t.text.to_plain_string()),
                 Some("Steve".to_string()),
                 "a visible player entity must show its tab-list name"
+            );
+        }
+
+        /// A legacy player-list row is keyed by name because its wire format
+        /// carries no UUID. The spawned player still carries its entity UUID,
+        /// so the ingest profile name is the bridge to the visible row.
+        #[test]
+        fn a_legacy_player_entitys_tag_uses_its_name_keyed_tab_list_row() {
+            let id = Uuid::from_u128(7);
+            let mut tabs = lodestone_game::tablist::TabList::new();
+            tabs.insert(lodestone_game::tablist::PlayerListEntry::new(
+                lodestone_game::tablist::GameProfile::new(None::<Uuid>, "Legacy"),
+            ));
+
+            let mut world = World::new();
+            let entity = bare_player_entity(&mut world, id);
+            world
+                .entity_mut(entity)
+                .insert(PlayerProfileName("Legacy".into()));
+            let facts = facts_for(&world, entity, &tabs);
+            assert_eq!(
+                facts.name_tag.map(|t| t.text.to_plain_string()),
+                Some("Legacy".to_string()),
+                "a legacy player entity must resolve its name-keyed tab-list row"
             );
         }
 

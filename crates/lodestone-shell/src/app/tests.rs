@@ -3034,7 +3034,7 @@ fn drive_ui_from_session_refreshes_the_social_roster_from_the_real_tab_list() {
         .ingest_session_event(ClientEvent::PlayerListUpdate {
             entries: vec![
                 PlayerListEntry {
-                    uuid: bob,
+                    uuid: Some(bob),
                     name: Some("Bob".into()),
                     game_mode: Some(GameMode::Creative),
                     latency: Some(20),
@@ -3046,7 +3046,7 @@ fn drive_ui_from_session_refreshes_the_social_roster_from_the_real_tab_list() {
                     hat_visible: None,
                 },
                 PlayerListEntry {
-                    uuid: alice,
+                    uuid: Some(alice),
                     name: Some("Alice".into()),
                     game_mode: Some(GameMode::Survival),
                     latency: Some(10),

@@ -1255,6 +1255,18 @@ async fn record_neighbour(oracle: &Oracle) {
     eprintln!("wrote {} ({} packets)", path.display(), recorded.len());
 }
 
+#[test]
+fn recorded_player_info_preserves_its_supplied_uuid() {
+    let expected = uuid::Uuid::parse_str("9e1db9bb-a979-3dab-902a-4f123f9ea813")
+        .expect("fixture UUID is valid");
+    let outcome = replay(&ERA);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        ClientEvent::PlayerListUpdate { entries }
+            if entries.iter().any(|entry| entry.uuid == Some(expected))
+    )), "the UUID supplied by the recorded player-info packet must reach the canonical event");
+}
+
 #[tokio::test]
 #[ignore = "records the lower neighbour: ./scripts/live-oracles/legacy.sh 1.18.2"]
 async fn record_1_18_2() {

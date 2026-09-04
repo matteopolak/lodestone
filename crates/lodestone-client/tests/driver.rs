@@ -1508,7 +1508,7 @@ async fn incoming_signed_chat_is_verified_against_the_announced_public_key() {
             PLAYER_INFO,
             vec![Directive::Emit(ClientEvent::PlayerListUpdate {
                 entries: vec![lodestone_model::event::PlayerListEntry {
-                    uuid: sender,
+                    uuid: Some(sender),
                     name: Some("Signer".to_string()),
                     game_mode: None,
                     latency: None,

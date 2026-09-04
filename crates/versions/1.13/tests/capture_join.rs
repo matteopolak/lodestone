@@ -913,6 +913,18 @@ fn decode_leading_var_int(payload: &[u8]) -> i32 {
     value
 }
 
+#[test]
+fn recorded_player_info_preserves_its_supplied_uuid() {
+    let expected = uuid::Uuid::parse_str("a87f152e-1a65-34f4-b5db-fc9f329cf498")
+        .expect("fixture UUID is valid");
+    let outcome = replay(SELF_ORACLE.minecraft);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        ClientEvent::PlayerListUpdate { entries }
+            if entries.iter().any(|entry| entry.uuid == Some(expected))
+    )), "the UUID supplied by the recorded player-info packet must reach the canonical event");
+}
+
 #[tokio::test]
 #[ignore = "records against a live 1.13.2 server: ./scripts/live-oracles/legacy.sh 1.13.2"]
 async fn record_1_13_2() {

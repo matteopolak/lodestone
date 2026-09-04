@@ -67,6 +67,14 @@ pub struct MinecraftEntityId(pub i32);
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EntityUuid(pub Uuid);
 
+/// A player entity's profile name when its spawn packet supplied one.
+///
+/// This is distinct from [`CustomName`]: it is the account/profile name used
+/// to correlate a player entity with a name-keyed tab-list row, not entity
+/// metadata that can be hidden or cleared.
+#[derive(Component, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PlayerProfileName(pub String);
+
 /// The entity type's canonical key (`minecraft:pig`, `minecraft:item`, …).
 #[derive(Component, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EntityKind(pub ResourceKey);

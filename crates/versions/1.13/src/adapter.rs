@@ -1754,7 +1754,7 @@ impl V404Adapter {
         let mut removed = Vec::new();
         for entry in body.entries {
             let blank = || PlayerListEntry {
-                uuid: entry.uuid,
+                uuid: Some(entry.uuid),
                 name: None,
                 game_mode: None,
                 latency: None,

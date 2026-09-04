@@ -1241,8 +1241,12 @@ pub struct EntityEquipment {
 /// One entry in a player list update.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerListEntry {
-    /// Player profile UUID.
-    pub uuid: Uuid,
+    /// Player profile UUID, when the protocol carries one.
+    ///
+    /// Protocol 5 identifies player-list rows only by display name. `None`
+    /// preserves that wire-level absence instead of presenting an offline-mode
+    /// derivation as the authenticated identity of an online-mode player.
+    pub uuid: Option<Uuid>,
     /// Player name when present in the update.
     pub name: Option<String>,
     /// Current game mode when present in the update.
@@ -1894,6 +1898,18 @@ pub enum ClientEvent {
         /// Spawn velocity when known.
         velocity: Option<Vec3>,
     },
+    /// A player entity's profile name was supplied with its spawn identity.
+    ///
+    /// Protocol 5 carries this beside the remote player's UUID in its named
+    /// spawn packet. Keeping it separate from [`ClientEvent::PlayerListUpdate`]
+    /// preserves the only wire-authored correlation between that UUID-bearing
+    /// entity and this era's name-keyed player-list row.
+    PlayerProfileNamed {
+        /// Server-assigned entity id receiving the profile name.
+        entity_id: i32,
+        /// Profile name exactly as supplied by the entity spawn packet.
+        profile_name: String,
+    },
     /// An entity moved or rotated.
     EntityMoved {
         /// Entity id.
@@ -2544,6 +2560,14 @@ pub enum ClientEvent {
     PlayerListRemove {
         /// Removed player profile ids.
         profile_ids: Vec<Uuid>,
+    },
+    /// One or more name-keyed entries were removed from the player list.
+    ///
+    /// Protocol 5 has no profile UUID in either its add or remove shape, so its
+    /// display name is the only identity available for correlating the pair.
+    PlayerListRemoveByName {
+        /// Removed player display names, exactly as received on the wire.
+        profile_names: Vec<String>,
     },
     /// The main title text changed.
     TitleText {
@@ -3951,6 +3975,7 @@ pub fn route(event: &ClientEvent) -> Route {
             shell_conditional: true,
             ..Route::NOWHERE
         },
+        ClientEvent::PlayerProfileNamed { .. } => INGEST,
 
         // ---- local-player and session scalars --------------------------------
         ClientEvent::HealthChanged { .. }
@@ -3987,6 +4012,7 @@ pub fn route(event: &ClientEvent) -> Route {
         | ClientEvent::TeamUpdate { .. }
         | ClientEvent::PlayerListUpdate { .. }
         | ClientEvent::PlayerListRemove { .. }
+        | ClientEvent::PlayerListRemoveByName { .. }
         | ClientEvent::BossBarUpdate { .. } => SESSION,
         // menus / containers
         ClientEvent::ScreenOpened { .. }

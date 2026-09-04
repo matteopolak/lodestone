@@ -1647,7 +1647,7 @@ mod tests {
             &mut app,
             ClientEvent::PlayerListUpdate {
                 entries: vec![PlayerListEntry {
-                    uuid: alice,
+                    uuid: Some(alice),
                     name: Some("Alice".into()),
                     game_mode: Some(GameMode::Survival),
                     latency: Some(12),
@@ -3570,6 +3570,9 @@ mod tests {
         }));
         assert!(handles_event(&ClientEvent::PlayerListRemove {
             profile_ids: Vec::new()
+        }));
+        assert!(handles_event(&ClientEvent::PlayerListRemoveByName {
+            profile_names: Vec::new()
         }));
         assert!(handles_event(&ClientEvent::BossBarUpdate {
             id: Uuid::from_u128(1),

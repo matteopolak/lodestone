@@ -305,7 +305,7 @@ fn with_map<K, V, R>(
 ///
 /// `None` covers three cases that are all normal and none of which is an error:
 /// the profile carries no `textures` property at all (**every** offline-mode
-/// server, since the UUID is derived from the username), the property is not
+/// server, since that era carries no profile UUID), the property is not
 /// decodable, or it decodes to a payload with no `SKIN` entry (an account that
 /// has never set one — vanilla picks one of eight built-ins by UUID hash there,
 /// which we do not model).
@@ -313,10 +313,11 @@ fn with_map<K, V, R>(
 pub fn skin_for_profile(profile: &lodestone_game::tablist::GameProfile) -> Option<RemoteSkin> {
     let value = profile.skin_texture()?;
     let mut skin = skin_for_textures_property(value)?;
+    let id = profile.id?;
     // The uuid-hash identity, stamped here rather than inside the decode: see
     // [`RemoteSkin::default_sheet`] for why the memoised decode structurally
     // cannot know it.
-    skin.default_sheet = default_sheet_for_uuid(profile.id);
+    skin.default_sheet = default_sheet_for_uuid(id);
     Some(skin)
 }
 
@@ -806,6 +807,16 @@ mod tests {
         assert!(skin_for_profile(&profile_with("not base64 at all !!!")).is_none());
         // Well-formed, but no `SKIN` entry: the skinless account.
         assert!(skin_for_profile(&profile_with(&base64_encode(b"{\"textures\":{}}"))).is_none());
+    }
+
+    #[test]
+    fn a_profile_without_a_wire_uuid_does_not_invent_a_default_skin_identity() {
+        let mut profile = profile_with(&payload(
+            Some("slim"),
+            "https://textures.minecraft.net/texture/legacy",
+        ));
+        profile.id = None;
+        assert!(skin_for_profile(&profile).is_none());
     }
 
     /// `request` is idempotent per URL, which is what lets the per-frame call

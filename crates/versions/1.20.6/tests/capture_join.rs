@@ -1010,6 +1010,18 @@ async fn record(oracle: &Oracle) {
     );
 }
 
+#[test]
+fn recorded_player_info_preserves_its_supplied_uuid() {
+    let expected = uuid::Uuid::parse_str("975e8951-b8d7-3c32-acf9-f58b975788b3")
+        .expect("fixture UUID is valid");
+    let outcome = replay(&ERA);
+    assert!(outcome.events.iter().any(|event| matches!(
+        event,
+        ClientEvent::PlayerListUpdate { entries }
+            if entries.iter().any(|entry| entry.uuid == Some(expected))
+    )), "the UUID supplied by the recorded player-info packet must reach the canonical event");
+}
+
 #[tokio::test]
 #[ignore = "records against a live 1.20.6 server: ./scripts/live-oracles/legacy.sh 1.20.6"]
 async fn record_1_20_6() {

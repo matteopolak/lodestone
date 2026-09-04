@@ -1,6 +1,6 @@
 //! The protocol 5 `player_info` packet.
 //!
-//! # The one concept in this era with no canonical equivalent
+//! # Name-keyed identity in the canonical player list
 //!
 //! Every later protocol keys the player list by profile UUID. Protocol 5 does
 //! not have one. The whole packet is three fields:
@@ -17,11 +17,10 @@
 //! texture cannot be obtained from this packet at all, because the mechanism
 //! that carries it does not exist yet.
 //!
-//! The canonical `PlayerListEntry` requires a `Uuid`, so translating this
-//! packet means supplying one that the wire never sent. This module does not
-//! decide that; it decodes what is there and leaves the choice to
-//! [`crate::adapter`], where the reasoning and its limits are recorded next to
-//! the code that makes it.
+//! The canonical `PlayerListEntry` keeps its UUID optional, so translating
+//! this packet preserves the absence. The adapter also emits name-keyed
+//! removal because the corresponding `online = false` packet has no other
+//! identity to carry.
 //!
 //! One further consequence worth stating because it is easy to miss: the name
 //! field is a *display* name. It may carry section-sign colour codes and it is

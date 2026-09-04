@@ -24,7 +24,7 @@ fn skin_texture_reads_textures_property() {
 fn partial_update_mutates_only_targeted_fields() {
     let mut tl = TabList::new();
     let p = profile("alice");
-    let id = p.id;
+    let id = p.id.expect("fixture has a UUID");
     tl.insert(PlayerListEntry::new(p));
 
     // UPDATE_LATENCY-style partial edit.

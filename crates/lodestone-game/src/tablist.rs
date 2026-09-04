@@ -50,8 +50,8 @@ pub struct ProfileProperty {
 /// A Mojang game profile: identity plus signed properties.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GameProfile {
-    /// The player UUID.
-    pub id: Uuid,
+    /// The player UUID, when the protocol supplied one.
+    pub id: Option<Uuid>,
     /// The player name.
     pub name: String,
     /// Signed properties (textures, etc.).
@@ -61,9 +61,9 @@ pub struct GameProfile {
 impl GameProfile {
     /// Creates a profile with no properties.
     #[must_use]
-    pub fn new(id: Uuid, name: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<Option<Uuid>>, name: impl Into<String>) -> Self {
         Self {
-            id,
+            id: id.into(),
             name: name.into(),
             properties: Vec::new(),
         }
@@ -160,7 +160,10 @@ impl PlayerListEntry {
 /// The full tab list.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TabList {
-    entries: HashMap<Uuid, PlayerListEntry>,
+    // Keeping the identity domains separate lets name-keyed protocols use
+    // HashMap<String, _>'s borrowed `str` lookup without allocating per read.
+    uuid_entries: HashMap<Uuid, PlayerListEntry>,
+    name_entries: HashMap<String, PlayerListEntry>,
     /// Header shown above the list.
     pub header: Option<Text>,
     /// Footer shown below the list.
@@ -176,40 +179,58 @@ impl TabList {
 
     /// Inserts or replaces an entry (the `add_player` action).
     pub fn insert(&mut self, entry: PlayerListEntry) {
-        self.entries.insert(entry.profile.id, entry);
+        match entry.profile.id {
+            Some(id) => {
+                self.uuid_entries.insert(id, entry);
+            }
+            None => {
+                self.name_entries.insert(entry.profile.name.clone(), entry);
+            }
+        }
     }
 
     /// Removes an entry by id (the `player_info_remove` packet).
     pub fn remove(&mut self, id: &Uuid) {
-        self.entries.remove(id);
+        self.uuid_entries.remove(id);
+    }
+
+    /// Removes a name-keyed entry.
+    pub fn remove_name(&mut self, name: &str) {
+        self.name_entries.remove(name);
     }
 
     /// Looks up an entry.
     #[must_use]
     pub fn get(&self, id: &Uuid) -> Option<&PlayerListEntry> {
-        self.entries.get(id)
+        self.uuid_entries.get(id)
     }
 
     /// Mutable access to an entry, for applying a partial update action.
     pub fn get_mut(&mut self, id: &Uuid) -> Option<&mut PlayerListEntry> {
-        self.entries.get_mut(id)
+        self.uuid_entries.get_mut(id)
+    }
+
+    /// Looks up a name-keyed entry.
+    #[must_use]
+    pub fn get_by_name(&self, name: &str) -> Option<&PlayerListEntry> {
+        self.name_entries.get(name)
     }
 
     /// Number of entries (listed and unlisted).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.entries.len()
+        self.uuid_entries.len() + self.name_entries.len()
     }
 
     /// Whether the list is empty.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.uuid_entries.is_empty() && self.name_entries.is_empty()
     }
 
     /// All entries, unordered.
     pub fn iter(&self) -> impl Iterator<Item = &PlayerListEntry> {
-        self.entries.values()
+        self.uuid_entries.values().chain(self.name_entries.values())
     }
 
     /// The listed entries in render order, matching vanilla's comparator:
@@ -230,14 +251,14 @@ impl TabList {
     #[must_use]
     pub fn ordered_by<'a, F>(&'a self, team_of: F) -> Vec<&'a PlayerListEntry>
     where
-        F: Fn(&Uuid) -> &'a str,
+        F: Fn(&str) -> &'a str,
     {
-        let mut v: Vec<&PlayerListEntry> = self.entries.values().filter(|e| e.listed).collect();
+        let mut v: Vec<&PlayerListEntry> = self.iter().filter(|e| e.listed).collect();
         v.sort_by(|a, b| {
             b.list_order
                 .cmp(&a.list_order)
                 .then_with(|| spectator_rank(a).cmp(&spectator_rank(b)))
-                .then_with(|| team_of(&a.profile.id).cmp(team_of(&b.profile.id)))
+                .then_with(|| team_of(&a.profile.name).cmp(team_of(&b.profile.name)))
                 .then_with(|| {
                     a.profile
                         .name
@@ -288,6 +309,12 @@ impl TabList {
                 }
                 true
             }
+            ClientEvent::PlayerListRemoveByName { profile_names } => {
+                for name in profile_names {
+                    self.remove_name(name);
+                }
+                true
+            }
             // The header/footer text, from `ClientboundTabListPacket`. This was
             // a genuine island, and it stayed one for longer than this comment
             // used to admit. The old wording — "read downstream by `hud.rs`'s
@@ -316,10 +343,19 @@ impl TabList {
     }
 
     /// Merges one model entry: updates the present (`Some`) fields of an existing
-    /// entry, or creates a new one keyed by uuid. A brand-new entry with no name
-    /// in the update falls back to an empty profile name.
+    /// entry, or creates a new one keyed by UUID or name. An update with neither
+    /// identity is unusable and ignored.
     fn fold_entry(&mut self, e: &m::PlayerListEntry) {
-        match self.get_mut(&e.uuid) {
+        let existing = match e.uuid {
+            Some(id) => self.uuid_entries.get_mut(&id),
+            None => {
+                let Some(name) = e.name.as_deref() else {
+                    return;
+                };
+                self.name_entries.get_mut(name)
+            }
+        };
+        match existing {
             Some(existing) => {
                 if let Some(gm) = e.game_mode {
                     existing.game_mode = gm;
@@ -414,7 +450,7 @@ mod fold_tests {
 
     fn add_entry(id: Uuid, name: &str, mode: GameMode, latency: i32) -> m::PlayerListEntry {
         m::PlayerListEntry {
-            uuid: id,
+            uuid: Some(id),
             name: Some(name.to_string()),
             game_mode: Some(mode),
             latency: Some(latency),
@@ -441,6 +477,37 @@ mod fold_tests {
         assert!(entry.listed);
     }
 
+    #[test]
+    fn a_name_only_entry_supports_borrowed_lookup_and_removal() {
+        let mut tabs = TabList::new();
+        assert!(tabs.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![m::PlayerListEntry {
+                uuid: None,
+                name: Some("Legacy".into()),
+                game_mode: None,
+                latency: Some(37),
+                display_name: None,
+                listed: Some(true),
+                properties: None,
+                chat_session: None,
+                list_order: None,
+                hat_visible: None,
+            }],
+        }));
+
+        let surrounding = String::from("prefix-Legacy-suffix");
+        let borrowed_name = &surrounding[7..13];
+        let entry = tabs
+            .get_by_name(borrowed_name)
+            .expect("borrowed name lookup reaches the name-only entry");
+        assert_eq!(entry.profile.id, None);
+        assert_eq!(entry.profile.name, "Legacy");
+        assert_eq!(entry.latency, 37);
+
+        tabs.remove_name(borrowed_name);
+        assert!(tabs.is_empty(), "the name-only removal must reach the same entry");
+    }
+
     /// `UPDATE_LIST_ORDER`/`UPDATE_HAT` used to be decoded and discarded in
     /// the protocol crate, so `PlayerListEntry::list_order`/`show_hat` here
     /// never left their constructor defaults (`0`/`true`) no matter what a
@@ -452,7 +519,7 @@ mod fold_tests {
         let id = uid(30);
         tabs.apply(&ClientEvent::PlayerListUpdate {
             entries: vec![m::PlayerListEntry {
-                uuid: id,
+                uuid: Some(id),
                 name: Some("Frank".into()),
                 game_mode: Some(GameMode::Survival),
                 latency: Some(1),
@@ -472,7 +539,7 @@ mod fold_tests {
         // constructor defaults -- same merge rule as every other field here.
         tabs.apply(&ClientEvent::PlayerListUpdate {
             entries: vec![m::PlayerListEntry {
-                uuid: id,
+                uuid: Some(id),
                 name: None,
                 game_mode: None,
                 latency: Some(2),
@@ -499,7 +566,7 @@ mod fold_tests {
         // A latency-only delta must not wipe the name or game mode.
         tabs.apply(&ClientEvent::PlayerListUpdate {
             entries: vec![m::PlayerListEntry {
-                uuid: id,
+                uuid: Some(id),
                 name: None,
                 game_mode: None,
                 latency: Some(250),
@@ -528,7 +595,7 @@ mod fold_tests {
         let id = uid(9);
         tabs.apply(&ClientEvent::PlayerListUpdate {
             entries: vec![m::PlayerListEntry {
-                uuid: id,
+                uuid: Some(id),
                 name: Some("Dana".into()),
                 game_mode: Some(GameMode::Survival),
                 latency: Some(1),
@@ -553,7 +620,7 @@ mod fold_tests {
         // A latency ping: `properties` absent.
         tabs.apply(&ClientEvent::PlayerListUpdate {
             entries: vec![m::PlayerListEntry {
-                uuid: id,
+                uuid: Some(id),
                 name: None,
                 game_mode: None,
                 latency: Some(99),
@@ -577,7 +644,7 @@ mod fold_tests {
         // The control for the distinction: an explicit empty set *does* clear.
         tabs.apply(&ClientEvent::PlayerListUpdate {
             entries: vec![m::PlayerListEntry {
-                uuid: id,
+                uuid: Some(id),
                 name: None,
                 game_mode: None,
                 latency: None,
@@ -611,7 +678,7 @@ mod fold_tests {
         let public_key = vec![1, 2, 3, 4];
         tabs.apply(&ClientEvent::PlayerListUpdate {
             entries: vec![m::PlayerListEntry {
-                uuid: id,
+                uuid: Some(id),
                 name: Some("Eve".into()),
                 game_mode: Some(GameMode::Survival),
                 latency: Some(1),
@@ -636,7 +703,7 @@ mod fold_tests {
         // A latency-only delta: `chat_session` absent, must not clear it.
         tabs.apply(&ClientEvent::PlayerListUpdate {
             entries: vec![m::PlayerListEntry {
-                uuid: id,
+                uuid: Some(id),
                 name: None,
                 game_mode: None,
                 latency: Some(50),
@@ -662,7 +729,7 @@ mod fold_tests {
         let id = uid(3);
         tabs.apply(&ClientEvent::PlayerListUpdate {
             entries: vec![m::PlayerListEntry {
-                uuid: id,
+                uuid: Some(id),
                 name: Some("Cara".into()),
                 game_mode: Some(GameMode::Adventure),
                 latency: Some(5),

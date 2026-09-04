@@ -35,9 +35,8 @@
 //!   widths depending on the packet ([`packets::position`]). The packed
 //!   64-bit block position arrives with protocol 47.
 //! - **The player list carries no profile UUID** ([`packets::player_info`]),
-//!   which is the one concept here that cannot be mapped into canonical state
-//!   without inventing something. That module's docs state exactly what is
-//!   invented and how it is checked.
+//!   so canonical player-list identity remains absent and name-keyed removal
+//!   stays name-keyed.
 //!
 //! Like every version crate this one can be removed by deleting its folder
 //! plus its dependency and feature lines in `lodestone-registry`.

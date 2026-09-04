@@ -1046,9 +1046,9 @@ impl SharedState {
     /// **Derived, not stored** — the same one-directional intermediate Stage 1
     /// established for [`EntityView`]: the [`SessionTabList`] component is the
     /// only copy and this rebuilds the model struct for callers that still speak
-    /// it. Every field is `Some` because a folded entry *has* a value for each
-    /// (the `Option`s on the wire mean "this delta did not mention the field",
-    /// and the fold has already merged them).
+    /// it. Delta fields are `Some` because a folded entry has a value for each;
+    /// the profile UUID remains `None` for protocol families whose player-list
+    /// wire format identifies entries by name alone.
     #[must_use]
     pub(crate) fn players(&self) -> Vec<PlayerListEntry> {
         self.tab_list()
@@ -1435,6 +1435,35 @@ mod tests {
             "DifficultyChanged must reach ServerDifficulty through the real \
              SharedState::apply path, not just through a hand-run schedule"
         );
+    }
+
+    #[test]
+    fn name_only_player_identity_reaches_and_leaves_the_public_read_model() {
+        let state = SharedState::default();
+        state.apply(&ClientEvent::PlayerListUpdate {
+            entries: vec![PlayerListEntry {
+                uuid: None,
+                name: Some("Legacy".into()),
+                game_mode: None,
+                latency: Some(37),
+                display_name: None,
+                listed: Some(true),
+                properties: None,
+                chat_session: None,
+                list_order: None,
+                hat_visible: None,
+            }],
+        });
+
+        let players = state.players();
+        assert_eq!(players.len(), 1);
+        assert_eq!(players[0].uuid, None);
+        assert_eq!(players[0].name.as_deref(), Some("Legacy"));
+
+        state.apply(&ClientEvent::PlayerListRemoveByName {
+            profile_names: vec!["Legacy".into()],
+        });
+        assert!(state.players().is_empty());
     }
 
     /// The second: `BlockDestruction` reached
