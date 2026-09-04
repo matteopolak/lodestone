@@ -71,6 +71,13 @@ right elsewhere. Test gotcha: never use a component about to be modelled as a
 test's "unmodelled" stand-in, and a single-item fixture cannot see a list
 caller that ignores the decode verdict.
 
+The clientbound container encoders preserve the top-level `minecraft:custom_data`
+component when its model bytes are one complete compound-root network-NBT value.
+They emit it as component id `0`, before book entries, byte-for-byte; malformed,
+non-compound, or trailing-byte values are omitted so they cannot consume a
+neighboring component's payload. Other modeled component fields remain absent
+from outbound patches until their complete stream-codec writers are available.
+
 ### Item nesting is sender-chosen, so the decoders bound it
 
 Container-shaped components hold item stacks, and a contained stack declares its

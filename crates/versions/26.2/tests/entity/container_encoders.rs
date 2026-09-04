@@ -13,7 +13,8 @@
 
 use lodestone_core::Nbt;
 use lodestone_model::{
-    ClientEvent, ConnectionState, Directive, ItemStack, ResourceKey, VersionAdapter,
+    ClientEvent, ConnectionState, Directive, ItemComponents, ItemStack, ResourceKey,
+    VersionAdapter,
 };
 use lodestone_server::{ServerDirective, ServerProtocol};
 use lodestone_v26_2::V770Adapter;
@@ -206,6 +207,96 @@ fn encode_container_slot_round_trips_one_changed_slot() {
     // comment for why this compares (item, count) rather than the full
     // `ItemStack`.
     assert_eq!(id_and_count(decoded), some("minecraft:iron_ingot", 1));
+}
+
+/// A non-empty custom-data component is emitted before the existing book
+/// component entries, with its network-NBT bytes kept verbatim. The expected
+/// body is written independently: window/state/slot, count `1`, writable-book
+/// id `1250`, then custom-data component id `0` before writable-book component
+/// id `54`.
+#[test]
+fn encode_container_slot_emits_custom_data_as_component_zero() {
+    let proto = V770ServerProtocol;
+    let item = ItemStack {
+        components: ItemComponents {
+            custom_data: Some(vec![
+                0x0a, 0x03, 0x00, 0x02, b'i', b'd', 0x00, 0x00, 0x13, 0x37, 0x00,
+            ]),
+            writable_book_content: Some(vec!["page one".to_owned()]),
+            ..ItemComponents::default()
+        },
+        ..stack("writable_book", 1)
+    };
+    let ServerDirective::Send { packet_id, payload } =
+        proto.encode_container_slot(5, 8, 2, Some(&item))
+    else {
+        panic!("expected a Send directive");
+    };
+    assert_eq!(
+        packet_id,
+        lodestone_v26_2::packet_ids::play::clientbound::CONTAINER_SET_SLOT
+    );
+    assert_eq!(
+        payload,
+        vec![
+            0x05, 0x08, 0x00, 0x02, 0x01, 0xe2, 0x09, 0x02, 0x00, 0x00, 0x0a, 0x03, 0x00,
+            0x02, b'i', b'd', 0x00, 0x00, 0x13, 0x37, 0x00, 0x36, 0x01, 0x08, b'p', b'a',
+            b'g', b'e', b' ', b'o', b'n', b'e', 0x00,
+        ],
+        "custom data must be the first added component in the complete slot body"
+    );
+
+    let events = decode_events(packet_id, &payload);
+    let ClientEvent::ContainerSlot { item: Some(decoded), .. } = &events[0] else {
+        panic!("expected a populated ContainerSlot event");
+    };
+    assert_eq!(
+        decoded.components.custom_data.as_deref(),
+        item.components.custom_data.as_deref(),
+        "the adapter must decode the verbatim network-NBT bytes"
+    );
+    assert_eq!(
+        decoded.components.writable_book_content.as_deref(),
+        Some(["page one".to_owned()].as_slice()),
+        "the component after custom data must remain decodable"
+    );
+}
+
+/// A malformed custom-data value is omitted without changing a neighboring
+/// valid book component in the same patch.
+#[test]
+fn encode_container_slot_skips_malformed_custom_data_but_keeps_book() {
+    let proto = V770ServerProtocol;
+    for invalid in [
+        vec![0x0a],
+        vec![0x03, 0x00, 0x00, 0x00, 0x01],
+        vec![0x0a, 0x00, 0x00],
+    ] {
+        let item = ItemStack {
+            components: ItemComponents {
+                custom_data: Some(invalid),
+                writable_book_content: Some(vec!["page one".to_owned()]),
+                ..ItemComponents::default()
+            },
+            ..stack("writable_book", 1)
+        };
+        let ServerDirective::Send { packet_id, payload } =
+            proto.encode_container_slot(5, 8, 2, Some(&item))
+        else {
+            panic!("expected a Send directive");
+        };
+
+        let events = decode_events(packet_id, &payload);
+        let ClientEvent::ContainerSlot { item: Some(decoded), .. } = &events[0] else {
+            panic!("expected a populated ContainerSlot event");
+        };
+        assert!(decoded.components.custom_data.is_none());
+        assert_eq!(
+            decoded.components.writable_book_content.as_deref(),
+            Some(["page one".to_owned()].as_slice()),
+            "invalid custom data must not corrupt the valid book entry"
+        );
+    }
 }
 
 /// **Control**: clearing a slot (the shape a furnace's output emptying out
