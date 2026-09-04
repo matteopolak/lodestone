@@ -481,14 +481,16 @@ impl FluidSectionView for SceneView<'_> {
         if self.models.layer(id) != lodestone_render::RenderLayer::Solid {
             return SelfOcclusion::default();
         }
-        let Some(boxes) = lodestone_data::outline_shapes::outline_boxes(id) else {
+        let Some(state) = lodestone_data::block_states::StateId::new(id) else {
             return SelfOcclusion::default();
         };
+        let boxes = lodestone_data::outline_shapes::outline_boxes(state);
         lodestone_assets::fluid::self_occlusion(boxes)
     }
 
     fn partial_occluder_y_range_at(&self, x: i32, y: i32, z: i32) -> Option<(f32, f32)> {
-        let boxes = lodestone_data::outline_shapes::outline_boxes(self.state(x, y, z))?;
+        let state = lodestone_data::block_states::StateId::new(self.state(x, y, z))?;
+        let boxes = lodestone_data::outline_shapes::outline_boxes(state);
         lodestone_assets::fluid::full_footprint_y_range(boxes)
     }
 

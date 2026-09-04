@@ -414,8 +414,9 @@ fn the_fixture_is_a_stair_and_a_water_source_in_one_cell() {
         "the `canOcclude` stand-in: oak planks are fully opaque"
     );
 
-    let boxes = lodestone_data::outline_shapes::outline_boxes(stair)
-        .expect("oak_stairs is in the outline census");
+    let boxes = lodestone_data::outline_shapes::outline_boxes(
+        lodestone_data::block_states::StateId::new(stair).expect("oak stairs exists"),
+    );
     println!("oak_stairs[facing=north,half=bottom] outline boxes ({}):", boxes.len());
     for b in boxes {
         println!("  min {:?} max {:?}", b.min, b.max);
@@ -446,8 +447,10 @@ fn the_fixture_is_a_stair_and_a_water_source_in_one_cell() {
     );
     assert!(models.fluid(dry).is_none());
     assert_eq!(
-        lodestone_data::outline_shapes::outline_boxes(dry),
-        Some(boxes),
+        lodestone_data::outline_shapes::outline_boxes(
+            lodestone_data::block_states::StateId::new(dry).expect("dry oak stairs exists"),
+        ),
+        boxes,
         "the two states must differ only in the fluid, or the dry control is measuring \
          a different shape"
     );
@@ -590,8 +593,9 @@ fn a_waterlogged_block_emits_no_fluid_face_its_own_geometry_already_covers() {
         "minecraft:oak_leaves",
         &[("distance", "7"), ("persistent", "true"), ("waterlogged", "true")],
     );
-    let leaf_boxes = lodestone_data::outline_shapes::outline_boxes(leaves)
-        .expect("oak_leaves is in the outline census");
+    let leaf_boxes = lodestone_data::outline_shapes::outline_boxes(
+        lodestone_data::block_states::StateId::new(leaves).expect("oak leaves exists"),
+    );
     let leaf_geometry_would_cull = lodestone_assets::fluid::self_occlusion(leaf_boxes);
     println!("leaves outline self_occlusion (before the layer gate): {leaf_geometry_would_cull:?}");
     if leaf_geometry_would_cull.is_empty() {

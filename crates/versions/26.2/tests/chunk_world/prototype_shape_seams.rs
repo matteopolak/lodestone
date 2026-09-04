@@ -97,13 +97,14 @@ fn shape_seams_agree_with_the_version_tables_for_every_state() {
     // would pass every spot check above and fail here.
     let adapter = seam();
     for id in 0..outline_shapes::STATE_COUNT {
-        let direct = outline_shapes::outline_boxes(id).expect("table resolves");
+        let state = block_states::StateId::new(id).expect("table state exists");
+        let direct = outline_shapes::outline_boxes(state);
         let through = adapter.block_outline(id).expect("seam resolves");
         assert!(
             std::ptr::eq(direct, through),
             "outline seam disagrees with the version table at state {id}"
         );
-        let direct = outline_shapes::interaction_boxes(id).expect("table resolves");
+        let direct = outline_shapes::interaction_boxes(state);
         let through = adapter.block_interaction(id).expect("seam resolves");
         assert!(
             std::ptr::eq(direct, through),

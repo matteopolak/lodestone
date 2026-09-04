@@ -81,30 +81,28 @@
 
 use lodestone_model::BlockAabb;
 
-use crate::generated_outline_shapes as table;
+use crate::{block_states::StateId, generated_outline_shapes as table};
 
 pub use table::STATE_COUNT;
 
-/// The **outline** boxes for block-state `id`, or `None` if `id` is not in
-/// `0..`[`STATE_COUNT`].
+/// The **outline** boxes for a validated block-state `id`.
 ///
 /// An empty slice is a valid, meaningful result: the state exists and cannot be
 /// targeted (air, water, lava, `light`, `moving_piston`, a connectionless wall).
 /// Zero-heap — returns a `&'static [BlockAabb]` straight from rodata.
 #[must_use]
-pub fn outline_boxes(id: u32) -> Option<&'static [BlockAabb]> {
-    let &shape = table::STATE_OUTLINE.get(id as usize)?;
-    Some(table::OUTLINE_SHAPES[shape as usize])
+pub fn outline_boxes(id: StateId) -> &'static [BlockAabb] {
+    let shape = table::STATE_OUTLINE[id.raw() as usize];
+    table::OUTLINE_SHAPES[shape as usize]
 }
 
-/// The **interaction** boxes for block-state `id`, or `None` if `id` is not in
-/// `0..`[`STATE_COUNT`].
+/// The **interaction** boxes for a validated block-state `id`.
 ///
 /// Empty for all but the cauldron family, hoppers, scaffolding and composters —
 /// and empty is the meaningful "no face override" answer, not a miss. See the
 /// module docs for why this is a face refinement rather than a clip target.
 #[must_use]
-pub fn interaction_boxes(id: u32) -> Option<&'static [BlockAabb]> {
-    let &shape = table::STATE_INTERACTION.get(id as usize)?;
-    Some(table::INTERACTION_SHAPES[shape as usize])
+pub fn interaction_boxes(id: StateId) -> &'static [BlockAabb] {
+    let shape = table::STATE_INTERACTION[id.raw() as usize];
+    table::INTERACTION_SHAPES[shape as usize]
 }

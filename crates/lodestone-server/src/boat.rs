@@ -430,7 +430,9 @@ fn fluid_surface_height(
 /// name is not the block's *lowest* state id.
 fn outline_boxes_for(state: &str) -> &'static [lodestone_model::BlockAabb] {
     let id = crate::mobs::block_state_id(state).or_else(|| block_states::state_id(state));
-    id.and_then(outline_shapes::outline_boxes).unwrap_or(&[])
+    id.and_then(block_states::StateId::new)
+        .map(outline_shapes::outline_boxes)
+        .unwrap_or(&[])
 }
 
 /// The **collision** boxes of a full block-state string, for the obstruction
