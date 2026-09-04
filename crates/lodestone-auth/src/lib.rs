@@ -10,12 +10,12 @@
 //! * the session-server [`join_server`] call that proves ownership of the shared
 //!   secret, and its server-side mirror [`has_joined`], which a *hosting* server
 //!   uses to check that a connecting client really made that call;
-//! * multi-account storage (issue #64, native only): [`store`] holds the
+//! * multi-account storage (native only): [`store`] holds the
 //!   long-lived Microsoft **refresh** token in the real OS keychain, keyed by
 //!   profile UUID; [`metadata`] holds everything else (username, profile UUID,
 //!   skin URL, last-used time, which account is selected) in a plain JSON
 //!   file so an account switcher can draw its list without unlocking the
-//!   keychain; [`cache`]/[`migrate`] carry a pre-#64 plaintext cache forward
+//!   keychain; [`cache`]/[`migrate`] carry the legacy plaintext cache forward
 //!   into the keychain exactly once, then delete it.
 //!
 //! The actual cipher (AES-128-CFB8), shared-secret generation and RSA wrapping
@@ -134,15 +134,17 @@ pub mod paths;
 /// for why a browser's `localStorage` is a strictly weaker protection than an
 /// OS keychain, not a drop-in equivalent of one.
 pub mod store;
-/// Fetching a skin/cape texture under authlib's own `TextureUrlChecker` host
-/// restriction (issue #62). Native-only — unlike [`flow`], nothing here has a
-/// wasm32 caller yet (`lodestone-shell`'s own skin fetch is a separate,
-/// unrelated module).
+/// Fetching a skin/cape texture under the same allowed-host restriction the
+/// vanilla client enforces for texture URLs. Native-only — unlike [`flow`],
+/// nothing here has a wasm32 caller yet (`lodestone-shell`'s own skin fetch
+/// is a separate, unrelated module).
 #[cfg(not(target_arch = "wasm32"))]
 pub mod texture;
-/// The process-default rustls crypto provider (issue #446). Native-only, for the
-/// same reason as the modules above: reqwest's rustls stack is itself
-/// `cfg(not(wasm32))`, so a browser build has no provider to select.
+/// The process-default rustls crypto provider, needed because `reqwest`'s
+/// `rustls` feature requires the application to select one explicitly (see
+/// `crate::tls`). Native-only, for the same reason as the modules above:
+/// reqwest's rustls stack is itself `cfg(not(wasm32))`, so a browser build
+/// has no provider to select.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod tls;
 

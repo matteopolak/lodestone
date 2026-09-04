@@ -9,7 +9,7 @@
 //!
 //! ## Why it has to exist
 //!
-//! Issue #446. `reqwest`'s `rustls` feature hard-wires the provider to
+//! `reqwest`'s `rustls` feature hard-wires the provider to
 //! `aws-lc-rs`, whose `aws-lc-sys` vendors roughly 1,500 C translation units and
 //! is compiled by a build script — so `sccache` (which wraps rustc, not a build
 //! script's C toolchain) cannot cache it, and it is rebuilt from scratch in
@@ -50,7 +50,7 @@
 //! `rustls` with `default-features = false, features = ["ring", "std",
 //! "tls12"]`. Turning rustls' default features back on would re-enable both
 //! `aws_lc_rs` and `prefer-post-quantum` (which itself enables `aws_lc_rs`) and
-//! silently undo issue #446 through feature unification.
+//! silently reintroduce the `aws-lc-sys` build through feature unification.
 
 use std::sync::Once;
 

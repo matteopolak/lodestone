@@ -1,12 +1,12 @@
-//! The **legacy** on-disk token cache (pre-issue-#64) and its one-time
-//! migration into the OS keychain.
+//! The **legacy** on-disk token cache and its one-time migration into the OS
+//! keychain.
 //!
-//! Before issue #64, this module was the crate's only refresh-token storage:
-//! `default_cache_path()` returned one fixed filename
-//! (`<data_dir>/lodestone/ms_token.json`), so a second account was impossible
-//! by construction, and `save()` wrote the token — a long-lived Microsoft
-//! **refresh token** — to that file as plain JSON. Both problems are why this
-//! work exists; see `docs/accounts.md`.
+//! This module was the crate's original refresh-token storage:
+//! `default_cache_path()` returns one fixed filename
+//! (`<data_dir>/lodestone/ms_token.json`), so it cannot hold more than one
+//! account, and `save()` wrote the token — a long-lived Microsoft **refresh
+//! token** — to that file as plain JSON. Both properties are why it has been
+//! superseded by the keychain-backed store; see `docs/accounts.md`.
 //!
 //! Ongoing storage is [`crate::store::AccountSecrets`] now. This module keeps
 //! only what a one-time migration needs: reading the old file
@@ -24,7 +24,9 @@ use crate::error::Result;
 use crate::flow::MsToken;
 
 /// Returns the legacy cache file path
-/// (`<data_dir>/lodestone/ms_token.json`) this module used before issue #64.
+/// (`<data_dir>/lodestone/ms_token.json`) — the crate's original
+/// single-account plaintext token location, now superseded by the OS
+/// keychain.
 ///
 /// Kept only so existing callers/tests that named this function directly
 /// still resolve; prefer [`crate::paths::legacy_token_cache_path`] (which this
@@ -36,10 +38,10 @@ pub fn default_cache_path() -> PathBuf {
 
 /// Writes `token` to `path` as plain JSON, creating parent directories as
 /// needed. **Legacy format, test-only** — nothing in this crate calls this in
-/// production any more (that is the bug this work fixes); it exists purely so
-/// tests can fabricate a legacy file to exercise the migration path, and so
-/// the shape of the pre-#64 format stays documented in one place rather than
-/// re-derived ad hoc in each test.
+/// production any more; it exists purely so tests can fabricate a legacy
+/// file to exercise the migration path, and so the shape of the superseded
+/// format stays documented in one place rather than re-derived ad hoc in each
+/// test.
 ///
 /// # Errors
 /// Returns [`crate::AuthError::Cache`] on any filesystem error and

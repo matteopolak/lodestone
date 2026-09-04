@@ -1,4 +1,4 @@
-//! Gate for the `rustls-no-provider` + `ring` switch (issue #446).
+//! Gate for the `rustls-no-provider` + `ring` switch.
 //!
 //! ## What this is for
 //!
@@ -108,8 +108,9 @@ fn installed_provider_is_ring_and_not_a_post_quantum_aws_lc_build() {
 /// The provider is not merely present but *usable* by the code path production
 /// uses.
 ///
-/// This is the test that would have caught issue #446's real risk. A default
-/// `reqwest::Client` build walks exactly the branch the panic lives on:
+/// This is the test that catches the real risk of a missing provider install:
+/// a default `reqwest::Client` build walks exactly the branch the panic lives
+/// on:
 /// `CryptoProvider::get_default()`, then `ClientConfig::builder_with_provider`,
 /// then `rustls_platform_verifier::Verifier::new(provider)` — so it also settles
 /// the open question of whether the platform verifier needs a provider of its own
