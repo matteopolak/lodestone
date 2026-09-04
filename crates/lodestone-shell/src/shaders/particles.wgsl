@@ -8,8 +8,8 @@ struct Camera {
 @group(0) @binding(0) var<uniform> camera: Camera;
 // Two stitches, two samplers. `Instance.atlas` picks between them per
 // particle: 0 = the block-model atlas the terrain samples, 1 = the stitched
-// particle sheet. Binding only the first is issue #45 — flame and smoke then
-// sample block texels at particle-sheet coordinates.
+// particle sheet. Both bindings are required: particle-sheet coordinates must
+// remain paired with the particle sheet rather than the block atlas.
 @group(1) @binding(0) var block_atlas: texture_2d<f32>;
 @group(1) @binding(1) var block_sampler: sampler;
 @group(1) @binding(2) var sheet_atlas: texture_2d<f32>;
