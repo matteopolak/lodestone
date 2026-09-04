@@ -50,7 +50,7 @@ xxhash-rust = { version = "0.8", default-features = false, features = [
 # and bevy_ecs through the server graph); the correctness is worth it.
 #
 # `redstone-counters` on: `tests/redstone_benchmark.rs` (the schematic-driven
-# benchmark harness, `docs/redstone-benchmark-harness.md`) reads
+# benchmark harness, `docs/oracles-and-benchmarks.md`) reads
 # `lodestone_server::redstone_counters::snapshot()`, which is a silent
 # always-zero no-op without this feature — see that module's own doc comment.
 lodestone-server = { path = "../lodestone-server", features = ["redstone-counters"] }

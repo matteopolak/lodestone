@@ -115,17 +115,17 @@ pub struct SchematicBlock {
 /// One `PendingBlockTicks` entry recovered from a Litematica region — a
 /// captured mid-cycle scheduled tick (a repeater between its own delay and
 /// firing, a lit fire block waiting to spread), in the schematic's own local
-/// coordinate space. `docs/redstone-benchmark-harness.md`'s own findings
-/// record why this matters: a schematic stamped with
+/// coordinate space. The benchmark's measurement notes record why this
+/// matters: a schematic stamped with
 /// `ChunkSource::set_block` alone carries no perturbation, so a contraption's
 /// *ongoing* redstone cost reads as zero regardless of the engine's real
 /// per-notification cost — re-injecting these is what lets a caller resume a
 /// captured circuit instead of only measuring an inert one.
 ///
 /// Only `PendingBlockTicks` is read here, not `PendingFluidTicks` — every
-/// fixture this parser has been checked against (`docs/redstone-benchmark-harness.md`'s
-/// provenance table) carries an empty fluid-tick list, so there is no real
-/// example to validate a fluid-tick reader against yet; add one when a
+/// fixture this parser has been checked against carries an empty fluid-tick
+/// list, so there is no real example to validate a fluid-tick reader against
+/// yet; add one when a
 /// fixture actually needs it rather than guessing the schema unchecked.
 #[derive(Debug, Clone)]
 pub struct SchematicPendingTick {
