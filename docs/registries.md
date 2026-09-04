@@ -105,6 +105,14 @@ match, default-plus-named-overrides, default alone — and the default is delibe
 simply "the lowest id"; do not hand-roll a copy of this fallback, which has silently drifted
 from the real one before.
 
+The sound-event registry keeps one canonical id-indexed name column rather than duplicating
+those names beside entry metadata. Optional fixed audible ranges are a sparse `(u32, f32)`
+table sorted by registry id; absence means the ordinary volume-derived range. The 26.2 report
+has 1,968 names and zero fixed-range rows, while the generator still emits any future rows
+present in the report. `sound_events::sound_event` bounds-checks the name table first and then
+joins the sparse metadata, preserving the same `(name, Option<range>)` API without storing a
+second set of 1,968 string pointers.
+
 ### `lodestone-data`: the crate these censuses live in
 
 Owns roughly twenty generated 26.2 game-data tables — block states, hardness, collision
@@ -139,6 +147,11 @@ protocol, which is not a second copy of the canonical census.
 - **Every generated file in this cluster is generated — never hand-edit one.** Regenerate
   with `LODESTONE_REGEN=1 cargo test -p <crate> --test <name> <fn> -- --ignored --nocapture`;
   each test file's own header carries the exact invocation.
+- **Registry-report tables** use
+  `cargo xtask gen-registries --version 26.2 --protocol 776`; run
+  `cargo xtask gen-registries --version 26.2 --protocol 776 --check` to detect drift without
+  writing. The sound-event generator derives the sparse fixed-range keys from each entry's
+  protocol id, so adding a range requires no parallel hand-maintained table.
 - **Adding a field to a typed registry struct** (e.g. `DimensionType`): add it to the wire
   struct, to the version-free carrier in `lodestone-model` if a version-free consumer needs
   it, and to the adapter that builds the carrier. Watch for a field that moved into a generic

@@ -6673,30 +6673,33 @@ pub fn generate_registry_source(
         table.spec.count_const
     )?;
     source.push('\n');
+    if let Some(fixed_ranges) = &table.fixed_ranges {
+        let ranges_const = table.spec.names_const.replace("_NAMES", "_FIXED_RANGES");
+        let present_count = fixed_ranges.iter().filter(|range| range.is_some()).count();
+        writeln!(
+            source,
+            "/// Fixed audible ranges keyed by network registry id, sorted by id."
+        )?;
+        writeln!(
+            source,
+            "/// An absent id uses the sound system's volume-derived range."
+        )?;
+        writeln!(
+            source,
+            "pub static {ranges_const}: [(u32, f32); {present_count}] = ["
+        )?;
+        for (id, fixed_range) in fixed_ranges.iter().enumerate() {
+            if let Some(range) = fixed_range {
+                writeln!(source, "    ({id}, {range}),")?;
+            }
+        }
+        source.push_str("];\n\n");
+    }
     writeln!(
         source,
         "/// Canonical {} identifier, indexed by network registry id.",
         table.spec.noun
     )?;
-    if let Some(fixed_ranges) = &table.fixed_ranges {
-        let entries_const = table.spec.names_const.replace("_NAMES", "_ENTRIES");
-        writeln!(
-            source,
-            "pub static {entries_const}: [(&str, Option<f32>); {count}] = ["
-        )?;
-        for (name, fixed_range) in table.names.iter().zip(fixed_ranges) {
-            match fixed_range {
-                Some(range) => writeln!(source, "    ({name:?}, Some({range})),")?,
-                None => writeln!(source, "    ({name:?}, None),")?,
-            }
-        }
-        source.push_str("];\n\n");
-        writeln!(
-            source,
-            "/// Canonical {} identifier only, indexed by network registry id.",
-            table.spec.noun
-        )?;
-    }
     writeln!(
         source,
         "pub static {}: [&str; {count}] = [",
@@ -12421,15 +12424,49 @@ reason = "fixture has no shipped binary root"
 
         let source = generate_registry_source(&tables[0], "26.2", 776)?;
         assert!(source.contains("pub const SOUND_EVENT_COUNT: u32 = 2;"));
-        assert!(source.contains("pub static SOUND_EVENT_ENTRIES: [(&str, Option<f32>); 2]"));
+        assert!(source.contains("pub static SOUND_EVENT_FIXED_RANGES: [(u32, f32); 1]"));
         assert!(source.contains("pub static SOUND_EVENT_NAMES: [&str; 2]"));
-        assert!(source.contains("(\"minecraft:block.note_block.bell\", Some(16.0))"));
+        assert!(source.contains("(1, 16.0)"));
+        assert!(!source.contains("SOUND_EVENT_ENTRIES"));
         assert!(source.contains("\"minecraft:entity.allay.ambient_with_item\""));
         let item_source =
             generate_registry_source(registry_table(&tables, "minecraft:item")?, "26.2", 776)?;
         assert!(item_source.contains("pub const ITEM_COUNT: u32 = 2;"));
         assert!(item_source.contains("pub static ITEM_NAMES: [&str; 2]"));
         assert!(item_source.contains("\"minecraft:stone\""));
+        Ok(())
+    }
+
+    #[test]
+    fn sound_registry_metadata_is_sparse_and_keeps_registry_ids() -> Result<()> {
+        let report = r#"{
+            "minecraft:sound_event": {
+                "entries": {
+                    "minecraft:block.note_block.bell": {"protocol_id": 3, "fixed_range": 16.0},
+                    "minecraft:entity.allay.ambient_with_item": {"protocol_id": 0},
+                    "minecraft:entity.allay.ambient_without_item": {"protocol_id": 1},
+                    "minecraft:entity.allay.death": {"protocol_id": 2}
+                }
+            }
+        }"#;
+        let spec = default_registry_specs()
+            .into_iter()
+            .find(|spec| spec.registry_key == "minecraft:sound_event")
+            .expect("sound-event registry spec");
+        let tables = parse_registry_report(report, &[spec])?;
+
+        let source = generate_registry_source(&tables[0], "26.2", 776)?;
+
+        assert!(source.contains("pub static SOUND_EVENT_FIXED_RANGES: [(u32, f32); 1]"));
+        assert!(source.contains("(3, 16.0)"));
+        assert!(!source.contains("SOUND_EVENT_ENTRIES"));
+        assert_eq!(source.matches("minecraft:block.note_block.bell").count(), 1);
+        assert_eq!(
+            source
+                .matches("minecraft:entity.allay.ambient_with_item")
+                .count(),
+            1
+        );
         Ok(())
     }
 
