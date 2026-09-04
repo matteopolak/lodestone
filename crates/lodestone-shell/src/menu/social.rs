@@ -1,27 +1,19 @@
 //! The Social Interactions screen, reached from the pause
-//! menu's Player Reporting icon button — vanilla's `SocialInteractionsScreen`.
+//! menu's Player Reporting icon button.
 //!
 //! ## What this is
 //!
 //! An online-player list with a per-player **Hide in Chat**/**Show in Chat**
-//! toggle (`gui.socialInteractions.hide`/`.show` — vanilla's own terms; this
-//! is not "mute", which is not a string vanilla uses here) and a **Report**
-//! button that is present and permanently disabled, because the report flow
-//! needs secure chat signing (`ChatSession`/message signatures) and this
-//! client has none — `/usr/bin/grep -rn 'SecureChat\|ChatSession\|signed_chat'`
-//! over `crates/` turns up nothing. Issue that fix's own scope is explicit that
-//! this is the real dependency, not a stub to fill in casually: "do not build
-//! a fake/unsigned report path".
+//! toggle and a **Report** button that remains visible but inactive because
+//! this client does not expose the report-specific workflow and data it would
+//! need. On native connected sessions, the client Driver enables live
+//! `ChatSession` signing and verification by default (with an environment
+//! opt-out); those capabilities are separate from the missing report flow.
 //!
-//! Vanilla gates the whole screen on session kind
-//! (`multiplayer.socialInteractions.not_available = "Social Interactions are
-//! only available in Multiplayer worlds"`, vanilla's own social-interactions
-//! screen's
-//! own singleplayer branch) — this client's only "world" is the bundled
-//! singleplayer one today, so [`frame`]'s early-return "unavailable"
-//! branch (guarded by [`available_for`]) is the one a player reaches every
-//! time until real multiplayer sessions carry a populated
-//! [`lodestone_game::tablist::TabList`] here.
+//! Availability follows session kind: [`available_for`] exposes the live
+//! player list in multiplayer and returns the localized unavailable notice
+//! otherwise. While connected, [`app::session`] refreshes the list from
+//! `Sim::tab_list()` every frame, excluding the local player.
 //!
 //! ## Wired vs. decorative
 //!
@@ -31,29 +23,24 @@
 //!   per-row Hide/Show ([`SocialNav::click_row`]/[`SocialNav::enter`] persist
 //!   immediately through [`crate::config::HiddenPlayers`], the same
 //!   eager-persistence rule `docs/keybindings.md` documents for rebinding).
-//! - **Decorative**: the Report button, always inactive — the real dependency
-//!   named above, not filled in by this issue.
-//! - **Wired since this patch — Hide in Chat now has a consumer.**
-//!   This section used to read "hiding a player has no consumer yet". A
+//! - **Decorative**: the Report button remains inactive because no
+//!   report-specific workflow or server-provided report data is exposed.
+//! - **Hide in Chat has an end-to-end consumer.** A
 //!   `sender: Option<Uuid>` field now threads from `ClientEvent::Chat` through
 //!   `net.rs::forward`'s `NetUpdate::Chat` to the sim's chat arm, which
 //!   consults [`should_show_message`] against the persisted
 //!   [`crate::config::HiddenPlayers`] set this screen writes. Only signed v770
 //!   player chat carries a sender; system/disguised/action-bar chat and every
-//!   legacy-family player message are `None` and always show — vanilla's Hide
+//!   legacy-family player message are `None` and always show — the Hide
 //!   in Chat filters signed player chat and nothing else.
-//! - **Wired since `2453c0f` — the list itself.** This section used to say
-//!   "nothing calls [`SocialNav::refresh`] yet, because feeding it the live
-//!   `TabList` needs a per-frame call from `app.rs`"; that patch has landed.
-//!   `app.rs`'s `drive_ui_from_session` now calls [`entries_from_tablist`]
-//!   off `Sim`'s own tab list every frame while connected and feeds the
-//!   result to `MenuNav::refresh_social`, so the roster
-//!   shown is the real, live tab list with the local player excluded. See
-//!   `docs/social-interactions.md`'s "Wired since" note for the full chain.
+//! - **The list is refreshed from the live session.** While connected,
+//!   [`app::session`] reads `Sim::tab_list()`, calls
+//!   [`entries_from_tablist`] and feeds the result to
+//!   `MenuNav::refresh_social` every frame; the local player is excluded.
 //!
 //! ## What is deliberately not built
 //!
-//! Vanilla's screen has three tabs (All/Hidden/Blocked — `gui.socialInteractions.tab_*`).
+//! The reference screen has three tabs (All/Hidden/Blocked — `gui.socialInteractions.tab_*`).
 //! **Blocked** is Microsoft-account-managed (`gui.socialInteractions.blocking_hint`
 //! = "Manage with Microsoft account") — decorative in the same way the Online
 //! settings page's seven controls are (no account social graph behind it) — so
@@ -70,14 +57,14 @@ use super::options::{self, Placement};
 use super::render::{Align, MenuFrame, MenuLabel, MenuNotice, MenuRow, Origin, Slot};
 use super::widget;
 
-/// Vanilla's `gui.socialInteractions.title`.
+/// The localized title for this screen.
 pub const TITLE: &str = "Social Interactions";
 /// `multiplayer.socialInteractions.not_available`.
 pub const NOT_AVAILABLE: &str = "Social Interactions are only available in Multiplayer worlds";
 
-/// One row's worth of vanilla's `PlayerEntry` — just enough to draw the row
+/// One row's worth of player data — just enough to draw the row
 /// and act on it. Not [`PlayerListEntry`] directly: this module needs `id`
-/// and a display name and nothing else about vanilla's tab-list record
+/// and a display name and nothing else about the tab-list record
 /// (latency, game mode, skin), so it holds its own narrow copy rather than
 /// depending on every field [`PlayerListEntry`] happens to carry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,14 +83,13 @@ impl SocialEntry {
     }
 }
 
-/// Lowers a live [`TabList`] into [`SocialEntry`] rows, vanilla's own display
-/// order (`TabList::ordered`), excluding `exclude` (the local player — vanilla
-/// never lists you against yourself, `SocialInteractionsPlayerList`'s own
-/// construction skips `Minecraft.player`'s UUID).
+/// Lowers a live [`TabList`] into [`SocialEntry`] rows, preserving tab-list display
+/// order (`TabList::ordered`), excluding `exclude` (the local player). The
+/// local player's UUID is never offered as an action target.
 ///
 /// `app.rs`'s `drive_ui_from_session` calls this every frame while connected
 /// to feed [`SocialNav::refresh`] via `MenuNav::refresh_social` — see the
-/// module docs' "Wired since" note. Free-standing and pure so it is testable
+/// module docs. Free-standing and pure so it is testable
 /// without a live session, the same shape [`crate::tablist::tab_list_view`]
 /// already is for the HUD overlay. Rows without a wire-supplied UUID remain
 /// visible in that overlay but are omitted here because hide/report actions
@@ -142,22 +128,11 @@ impl SocialControl {
 /// Where one [`SocialControl`] sits, mirroring [`super::key_binds::KeyPlacement`]'s
 /// shape: every content-list variant shares `{row, scroll}`, only the x differs.
 ///
-/// **`scroll` is pixels, and this screen was the last to get there.**
-/// This doc used to read: *"Still a row index... blocked on a `ListSpec` change,
-/// not on this screen: this list's rows are full-width and left-anchored, while
-/// `ListSpec::row_left` is `floor(width / 2) - floor(row_w / 2)` — a centred,
-/// fixed-width row. There is no constant `row_w` that makes `row_right` land in
-/// this screen's right margin at every canvas width."* That was correct, and it
-/// was the right call to wait: the primitive gained
-/// [`super::widget::RowBand::Inset`] first, and
-/// `widget::tests::no_constant_row_width_can_express_a_full_width_row` now
-/// carries the arithmetic that paragraph asserted in prose — a constant tuned
-/// exact at 854 px is off by 107 px at 640 and 533 at 1920, because a centred row
-/// edge moves at half the canvas edge's rate.
-///
-/// The one visible consequence of adopting it is in [`RIGHT_MARGIN`]: the row's
-/// right gutter had to grow from 10 px to 14 to make room for the scrollbar,
-/// which is what "this screen has a bar now" costs.
+/// **`scroll` is measured in pixels.** Full-width rows use the inset row band,
+/// whose edges remain anchored to the canvas at every width. A centred fixed
+/// width cannot provide that invariant: tuning it at 854 px misses by 107 px
+/// at 640 and 533 px at 1920. The right gutter reserves 14 px for the
+/// scrollbar, leaving the controls inside the canvas.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SocialPlacement {
     Name { row: u16, scroll: f32 },
@@ -165,30 +140,20 @@ pub enum SocialPlacement {
     Report { row: u16, scroll: f32 },
 }
 
-/// Row height. Not vanilla-sourced (vanilla's `PlayerEntry` is 36 px with a
-/// head icon this module does not draw — see the module docs' scope note);
-/// this reuses [`options::WIDGET_H`], the same flat-row convention
+/// Row height. The flat row omits the head icon used by the reference client,
+/// so it reuses [`options::WIDGET_H`], the same flat-row convention
 /// [`super::key_binds`] uses for its own non-`OptionsList` rows.
 pub const ROW_H: f32 = options::WIDGET_H;
 /// Column widths, in the shell's existing button-width vocabulary.
 pub const HIDE_BUTTON_W: f32 = 110.0;
 pub const REPORT_BUTTON_W: f32 = options::SMALL_BUTTON_WIDTH;
 const BUTTON_GAP: f32 = 5.0;
-/// The row's right gutter — **and since that fix it is the scrollbar's, not a
-/// decorative margin**.
+/// The row's right gutter reserves space for the scrollbar, not a decorative
+/// margin. [`super::widget::RowBand::Inset`] requires
+/// 14 px beyond the row content: the bar sits outside the row with a 2 px
+/// separation, and a second scrollbar width is needed to keep it on-canvas.
 ///
-/// This was a flat `10.0`. [`super::widget::RowBand::Inset`] requires
-/// `SCROLLBAR_WIDTH + 2 + SCROLLBAR_WIDTH` = 14 px beyond where the row's own
-/// content ends, because `AbstractSelectionList` overrides `scrollBarX()` to
-/// `getRowRight() + scrollbarWidth() + 2` — the bar sits *outside* the row and
-/// nothing clamps it to the canvas, so a 10 px gutter put it 4 px off the right
-/// edge, silently (an off-canvas rect simply does not draw). Measured, not
-/// assumed: `widget::tests::an_inset_rows_right_gutter_must_reserve_room_for_the_
-/// scrollbar` observes 10 px failing and pins 14 as the boundary.
-///
-/// A centred list gets this gutter for free from the canvas margin either side.
-/// A full-width one has to declare it, which is why the Hide/Report buttons moved
-/// 4 px left when this screen adopted the primitive.
+/// A full-width list must declare this gutter explicitly.
 const RIGHT_MARGIN: f32 = super::widget::SCROLLBAR_WIDTH + 2.0 + super::widget::SCROLLBAR_WIDTH;
 const NAME_LEFT_INSET: f32 = 4.0;
 
@@ -246,10 +211,9 @@ pub fn placement_anchor(placement: SocialPlacement, width: f32, _height: f32) ->
         | SocialPlacement::Hide { row, scroll }
         | SocialPlacement::Report { row, scroll } => (row, scroll),
     };
-    // Pixel scrolling: the row's absolute offset minus the scroll, so no
-    // `checked_sub` to underflow and no off-canvas sentinel — a row above the
-    // band resolves above it and `render::draw` clips it. `scroll.floor()` is
-    // vanilla's `(int)scrollAmount`.
+    // Pixel scrolling uses the row's absolute offset minus the scroll. A row
+    // above the band resolves above it and `render::draw` clips it; flooring
+    // once keeps placement consistent with the list model.
     let row_y = options::SUB_HEADER_HEIGHT + options::LIST_TOP_INSET + f32::from(row) * ROW_H
         - scroll.floor();
     match placement {
@@ -259,19 +223,18 @@ pub fn placement_anchor(placement: SocialPlacement, width: f32, _height: f32) ->
     }
 }
 
-/// Whether a session kind shows the real list or vanilla's unavailable
-/// message — `multiplayer.socialInteractions.not_available`'s own condition.
+/// Whether a session kind shows the player list or the unavailable message.
 #[must_use]
 pub fn available_for(kind: Option<super::SessionKind>) -> bool {
     matches!(kind, Some(super::SessionKind::Multiplayer))
 }
 
 /// Whether a chat message from `sender` should be shown given the hidden set
-/// — the consumer this screen's Hide/Show toggle was missing.
+/// — the consumer for this screen's Hide/Show toggle.
 ///
 /// `None` is always shown: system and disguised chat, action-bar messages, and
-/// every legacy-family player message carry no sender on the wire, and vanilla's
-/// Hide in Chat only ever suppresses signed player chat. `Some(id)` shows unless
+/// every legacy-family player message carry no sender on the wire, and Hide in
+/// Chat only suppresses signed player chat. `Some(id)` shows unless
 /// `id` is in `hidden`.
 ///
 /// The caller is `sim/net_apply.rs`'s chat arm, re-reading the set from the file
@@ -294,8 +257,7 @@ pub fn should_show_message(
 pub struct SocialNav {
     entries: Vec<SocialEntry>,
     cursor: usize,
-    /// Scroll offset in **pixels**, not a row index. `Eq` went with
-    /// the change — see [`SocialPlacement`]'s doc.
+    /// Scroll offset in **pixels**, not a row index.
     scroll: f32,
     hidden: crate::config::HiddenPlayers,
     hidden_path: std::path::PathBuf,
@@ -343,9 +305,9 @@ impl SocialNav {
         } else if self.cursor >= len {
             self.cursor = len - 1;
         }
-        // Re-clamp the pixel offset against the new, possibly shorter list. Done
-        // through the primitive rather than by hand: `ListSpec::model` runs
-        // `set_scroll`, which is the one place the clamp lives.
+        // Re-clamp the pixel offset against the new, possibly shorter list.
+        // The list model owns this boundary, so keyboard, wheel and refresh
+        // paths cannot drift apart.
         if let Some(list) = self.model(crate::config::MIN_SCALED_HEIGHT as f32) {
             self.scroll = list.scroll();
         } else {
@@ -413,10 +375,8 @@ impl SocialNav {
     /// [`super::key_binds::controls`].
     #[must_use]
     pub fn visible(&self) -> Vec<(SocialControl, Slot)> {
-        // **Every** row, not a `visible_range()` window: clipping to
-        // the band is `render::draw`'s job now, so a half-scrolled row draws its
-        // visible half instead of vanishing. `selected_row` matches on the
-        // control, not the index, so it is indifferent.
+        // Emit every row; the renderer clips each row to the list band, so a
+        // half-scrolled row contributes its visible portion.
         let mut out = Vec::new();
         for row in 0..self.entries.len() {
             out.push((
@@ -488,11 +448,10 @@ impl SocialNav {
             SocialControl::HideToggle(r) | SocialControl::Report(r) => r,
             SocialControl::Done => return,
         };
-        // `ScrollList::scroll_to_entry` moves the MINIMUM pixels — vanilla's
-        // `ensureVisible` — where the loop this replaced stepped a whole ROW_H at
-        // a time. `MIN_SCALED_HEIGHT` for the reason `stats::step` records: a
-        // keypress has no canvas in hand, and the smallest canvas can only
-        // over-scroll into a region a larger one also shows.
+        // Reveal the minimum number of pixels needed to show the row. A
+        // keypress has no canvas in hand, so the smallest supported canvas is
+        // the conservative bound and can only over-scroll into a region a
+        // larger canvas also shows.
         let Some(mut list) = self.model(crate::config::MIN_SCALED_HEIGHT as f32) else {
             return;
         };
@@ -511,10 +470,8 @@ impl SocialNav {
         }
     }
 
-    /// Activates the control at visible row `row` — That fix's shape, same
-    /// resolve-the-row-directly rule every other list in this tree follows
-    /// (see [`super::key_binds::KeyBindsNav::click_row`]'s own doc for why
-    /// this does not route through Enter).
+    /// Activates the control at visible row `row` by resolving that row
+    /// directly, rather than routing the click through keyboard Enter.
     pub fn click_row(&mut self, row: usize) -> SocialOutcome {
         let visible = self.visible();
         let Some(&(control, _)) = visible.get(row) else {
@@ -773,9 +730,9 @@ mod tests {
 
     /// `None` — system/disguised/action-bar chat and every legacy-family
     /// player message — has no sender key to filter on, so it must always
-    /// show, even with a non-empty hidden set. This is the negative control
-    /// that keeps the predicate from becoming a mute-all: vanilla's Hide in
-    /// Chat filters signed player chat and nothing else.
+    /// show, even with a non-empty hidden set. This negative control keeps the
+    /// predicate from becoming a mute-all: Hide in Chat filters signed player
+    /// chat and nothing else.
     #[test]
     fn senderless_chat_is_never_suppressed() {
         let mut nav = with_three("suppress-none");
@@ -894,7 +851,8 @@ mod tests {
 
     #[test]
     fn a_click_acts_on_the_row_it_landed_on_and_nothing_else() {
-        // That fix's shape, on this screen too.
+        // Resolve the clicked control directly; neighboring rows must remain
+        // untouched.
         let mut nav = with_three("click-precision");
         let visible = nav.visible();
         let bob_hide = visible
@@ -995,11 +953,9 @@ mod tests {
     /// width**.
     ///
     /// Two expressions from two modules required to agree, at four widths, with no
-    /// tolerance. This is the gate that would have been impossible before the
-    /// primitive grew a canvas-relative edge — and
-    /// `widget::tests::no_constant_row_width_can_express_a_full_width_row`
-    /// measures how badly the centred alternative misses (107 px at 640, 533 at
-    /// 1920), so the pair together is the argument rather than either alone.
+    /// tolerance. A canvas-relative edge is required: a centred fixed-width row
+    /// cannot keep both edges aligned at every width. The paired geometry
+    /// assertions therefore check the invariant directly at four widths.
     #[test]
     fn the_declared_band_tracks_this_screens_own_right_anchored_buttons() {
         for w in [640.0_f32, 854.0, 1280.0, 1920.0] {
@@ -1073,8 +1029,8 @@ mod tests {
              what snap-to-row produces"
         );
 
-        // The keyboard half: `scroll_to_entry` moves the minimum pixels, so it too
-        // can land off a row top — the loop it replaced never could.
+        // The keyboard path also moves by the minimum pixels, so it can land
+        // off a row top.
         nav.reset();
         let mut moved = false;
         for _ in 0..nav.all_controls().len() {

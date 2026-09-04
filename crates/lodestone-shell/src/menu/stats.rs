@@ -1,32 +1,21 @@
 //! The Statistics screen, reached from the pause menu's
-//! Statistics button — vanilla's `StatsScreen`.
+//! Statistics button.
 //!
 //! ## What is and is not built
 //!
-//! Vanilla's screen has three tabs: **General** (`Stats.CUSTOM`, 77 fixed
-//! stats — `StatsScreen.GeneralStatisticsList`), **Items**
-//! (`ContainerObjectSelectionList` over every `Item` with a non-zero
-//! mined/crafted/used/picked-up/dropped count), **Mobs** (same shape, over
-//! `EntityType`). Only **General** is built here as a real scrollable list.
+//! The reference screen has three tabs: **General** (77 fixed statistics),
+//! **Items** (per-item counters), and **Mobs** (per-entity counters). Only
+//! **General** is built here as a real scrollable list.
 //! Items and Mobs are present-and-inactive tab buttons, for a reason that is
 //! not a scope cut so much as already-correct behaviour:
-//! `StatsScreen.setTabActiveStateAndTooltip` (`:124-133`) disables a tab
-//! itself, with a `"gui.stats.none_found"` tooltip, whenever its list is
-//! empty (`!statsTab.list.children().isEmpty()`) — and see the next section
-//! for why every Items/Mobs row is unconditionally empty here. So the
-//! disabled state these two tabs show is exactly the state vanilla's own
-//! screen would show given the same (zero) underlying data, not an
-//! approximation of it.
+//! The Items and Mobs tabs are disabled when their lists are empty. Every row
+//! in those lists is empty here because this screen has no per-item or
+//! per-entity projection, so the disabled state is intentional.
 //!
-//! ## Where the numbers come from — **this section used to say they were all zero**
+//! ## Where the numbers come from
 //!
-//! It was true when written: nothing decoded `award_stats`, so
-//! `StatsSnapshot::default()` was not a placeholder standing in for real data,
-//! it was *the* data. That changed, and the moment it did the empty literal
-//! `menu::render::dispatch` passed in became an island — the counters arrived in
-//! `lodestone_ecs::SessionStatistics` and this screen kept drawing zeros.
-//!
-//! The live path now:
+//! Statistics are folded into the session model and projected onto the fixed
+//! General-tab table once per frame. The live path is:
 //!
 //! ```text
 //! award_stats -> lodestone_game::progress::Statistics (SessionStatistics)
@@ -42,31 +31,24 @@
 //! not (`docs/settings-screen.md`'s departure 1). What is no longer true is that
 //! zero is the *only* state reachable.
 //!
-//! **The Items and Mobs tabs are still present-and-inactive**, and that part is
-//! unchanged: they need per-block and per-entity id tables this screen's flat
+//! **The Items and Mobs tabs are present-and-inactive**: they need per-block and
+//! per-entity id tables this screen's flat
 //! 77-row model does not have, so a `minecraft:mined` counter is deliberately
 //! dropped by the projection rather than squeezed onto a General row.
 //!
-//! Consequently Items and Mobs are always empty too: both are filtered to
-//! non-zero counts (`ItemStatisticsList`'s own constructor loop, `:0` skips
-//! anything with a zero count in every one of its five columns), and with no
-//! stat ever above zero, an empty list is the *correct* output of that
-//! filter — not a stand-in for one this module never wrote.
+//! Consequently Items and Mobs are empty: their rows require data that this
+//! projection deliberately drops, rather than inventing values for a different
+//! category.
 //!
 //! ## Wired vs. decorative
 //!
 //! - **Wired**: reaching the screen from the pause menu and back
-//!   (Escape/Done), the General tab's real vanilla structure (77 stats,
-//!   vanilla's own captions, vanilla's own three format rules — `DEFAULT`,
-//!   `DIVIDE_BY_TEN`, `DISTANCE`, `TIME`, transcribed from
-//!   vanilla's own stat-formatter declarations and tested against known non-zero inputs, not only
-//!   the trivial zero case), and the census (`GENERAL_STATS.len() == 77`,
-//!   matching vanilla's own stats declarations' own count of `makeCustomStat` calls).
-//! - **Decorative**: every value shown, because nothing decodes the packet
-//!   that would populate one — see above. Enabling the pause button
-//!   ([`super::nav::PauseButton::Statistics`]) reflects that this screen now
-//!   exists and shows the honest (zero) state, per own scope,
-//!   which asks for exactly that once the screen exists.
+//!   (Escape/Done), the General tab's 77 rows, captions and four format rules
+//!   (`DEFAULT`, `DIVIDE_BY_TEN`, `DISTANCE`, `TIME`), tested against known
+//!   non-zero inputs and an explicit row-count census.
+//! - **Decorative**: Items and Mobs values, because their source counters are
+//!   not projected into this screen. General values are live when a session
+//!   supplies them and zero outside a session.
 //!
 //! ## Geometry
 //!
@@ -83,21 +65,14 @@ use super::widget;
 /// `gui.stats`.
 pub const TITLE: &str = "Statistics";
 
-/// `StatsScreen.GENERAL_BUTTON`/`ITEMS_BUTTON`/`MOBS_BUTTON` — `stat.
-/// generalButton`/`stat.itemsButton`/`stat.mobsButton`, verbatim from
-/// `en_us.json`. This screen's tab bar.
+/// Labels for this screen's three tabs.
 pub const TAB_LABELS: [&str; 3] = ["General", "Items", "Mobs"];
 /// [`TAB_LABELS`]'s index of the only tab this screen builds a real list for
 /// (see the module docs above) — General.
 pub const GENERAL_TAB: usize = 0;
 
-/// The pixel rect of tab `index` (into [`TAB_LABELS`]) at canvas `width` —
-/// vanilla's `MenuTabBar.arrangeElements`, via the shared
-/// [`layout::tab_bar_row_rect`] (generalisation: this screen's own
-/// wrapper used to inline the arithmetic directly, which is what
-/// [`super::render::row_rect`]'s `MenuRow::tab` arm called into by name —
-/// harmless while Statistics was the only consumer, and a hard-coded
-/// dependency the moment Create New World became a second one). See
+/// The pixel rect of tab `index` (into [`TAB_LABELS`]) at canvas `width`, via
+/// the shared [`layout::tab_bar_row_rect`]. See
 /// [`super::render::TabEntryView::index`]'s own doc on why a `Slot` cannot
 /// express this row's *width*, let alone its `x`.
 #[must_use]
@@ -105,38 +80,32 @@ pub fn tab_row_rect(index: usize, width: f32) -> (f32, f32, f32, f32) {
     layout::tab_bar_row_rect(index, TAB_LABELS.len(), width)
 }
 
-/// The row index of Done — vanilla's `layout.addToFooter(Button.builder(
-/// GUI_DONE, …))`. Was this screen's only [`MenuRow`]
-/// before issue #564 gave it three tab rows too; still `0` and still first,
-/// since the tabs are appended after it (see [`frame`]).
+/// The row index of Done. It remains first because the tab rows are appended
+/// after it (see [`frame`]).
 ///
 /// Named rather than written as a bare `0` at three sites, because "row 0" and
 /// "the Done button" being the same number is exactly what made the focus bug
 /// in [`StatsNav::focused`] read as harmless.
 pub const DONE_ROW: usize = 0;
 
-/// Vanilla's own stat-formatter declarations' four formatters, transcribed. `DEFAULT` is
-/// the JDK's own integer number format for the US locale — thousands-grouped, no
-/// decimals.
+/// The four display formats used by the General tab. `Default` is a
+/// thousands-grouped integer with no decimals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatFormat {
     Default,
-    /// `DECIMAL_FORMAT.format(value * 0.1)` — always two decimal places, no
+    /// Multiplies by `0.1` and emits two decimal places, with no
     /// thousands grouping (`"########0.00"`).
     DivideByTen,
-    /// Centimetres in, `km`/`m`/`cm` out — `StatFormatter.DISTANCE`.
+    /// Converts centimetres to `km`, `m` or `cm` using the measured thresholds.
     Distance,
-    /// Redstone ticks (1/20 s) in, the largest whole unit over 0.5 out —
-    /// `StatFormatter.TIME`. The `< 0.5 min` branch is `seconds + " s"` on a
-    /// raw `f64`, **not** through `DECIMAL_FORMAT` — vanilla's own code, not
-    /// an inconsistency introduced here.
+    /// Converts redstone ticks (1/20 s) to the largest unit over `0.5`. The
+    /// `< 0.5 min` branch uses the raw seconds value.
     Time,
 }
 
 impl StatFormat {
-    /// `DECIMAL_FORMAT`'s pattern (`"########0.00"`): always exactly two
-    /// decimal places, no thousands grouping, at least one digit before the
-    /// point.
+    /// Emits exactly two decimal places, no thousands grouping, and at least
+    /// one digit before the point.
     fn decimal(value: f64) -> String {
         format!("{value:.2}")
     }
@@ -162,14 +131,13 @@ impl StatFormat {
         out
     }
 
-    /// Formats a raw stat value exactly as vanilla's `Stat::format` would.
+    /// Formats a raw statistic value according to [`Self`].
     #[must_use]
     pub fn format(self, value: i32) -> String {
         match self {
             StatFormat::Default => Self::grouped(i64::from(value)),
             StatFormat::DivideByTen => Self::decimal(f64::from(value) * 0.1),
             StatFormat::Distance => {
-                // `StatFormatter.DISTANCE`, `cm` is `int` in vanilla too.
                 let cm = value;
                 let meters = f64::from(cm) / 100.0;
                 let kilometers = meters / 1000.0;
@@ -196,9 +164,8 @@ impl StatFormat {
                 } else if minutes > 0.5 {
                     format!("{} min", Self::decimal(minutes))
                 } else {
-                    // Vanilla's own inconsistency, preserved: a raw `f64`
-                    // through Java's default `Double` `toString`-via-`+`,
-                    // not `DECIMAL_FORMAT` — see `StatFormat::Time`'s doc.
+                    // Preserve the raw seconds representation for values below
+                    // one minute; whole values keep a visible `.0` suffix.
                     format!("{} s", java_double_to_string(seconds))
                 }
             }
@@ -206,15 +173,13 @@ impl StatFormat {
     }
 }
 
-/// Java's `Double.toString` for the one place this module needs it
-/// (`StatFormatter.TIME`'s `< 0.5 min` branch, `seconds + " s"` where
-/// `seconds` is a raw `double`): unlike Rust's own `f64` `Display`, Java
-/// always shows at least one digit after the point — `29.0`, never `29`.
+/// Formats the raw seconds value used below one minute. Unlike Rust's default
+/// `f64` display, whole values retain one digit after the point (`29.0`).
 /// Every value this is called with is an exact multiple of `1.0 / 20.0`
 /// (redstone ticks), so the fractional part (when there is one) is a simple
 /// terminating decimal and Rust's own shortest round-trip formatting already
-/// agrees with Java's there; the only correction needed is forcing the `.0`
-/// suffix Rust omits for a whole number.
+/// agrees with the reference formatter there; the only correction needed is
+/// forcing the `.0` suffix Rust omits for a whole number.
 fn java_double_to_string(v: f64) -> String {
     if v.fract() == 0.0 {
         format!("{v:.1}")
@@ -223,13 +188,9 @@ fn java_double_to_string(v: f64) -> String {
     }
 }
 
-/// Vanilla's own stats declarations' 77 `makeCustomStat` calls, in declaration order — id, the
-/// verbatim `en_us.json` caption at `stat.minecraft.<id>`, and its
-/// [`StatFormat`]. Declaration order does not matter for display (vanilla
-/// sorts by *translated* caption, vanilla's own stats-screen rendering,
-/// `Comparator.comparing(k -> I18n.get(...))`) — see [`general_rows`], which
-/// sorts at call time instead of requiring this table pre-sorted, so adding a
-/// stat here never has to also get its alphabetical position right.
+/// The 77 General-tab statistics in source declaration order: id, caption and
+/// [`StatFormat`]. Display sorting happens in [`general_rows`], so new entries
+/// need not be inserted alphabetically here.
 pub static GENERAL_STATS: &[(&str, &str, StatFormat)] = &[
     ("leave_game", "Games Quit", StatFormat::Default),
     ("play_time", "Time Played", StatFormat::Time),
@@ -312,22 +273,21 @@ pub static GENERAL_STATS: &[(&str, &str, StatFormat)] = &[
 
 /// The statistic category every id in [`GENERAL_STATS`] lives in.
 ///
-/// Vanilla's General tab is `Stats.CUSTOM` — a `StatType` whose registry is
-/// `minecraft:custom_stat` — so `"sleep_in_bed"` on the screen is the wire's
+/// The General tab uses the `minecraft:custom` category. Thus
+/// `"sleep_in_bed"` on the screen maps to the wire key
 /// `StatKey { category: "minecraft:custom", value: "minecraft:sleep_in_bed" }`.
-/// The category id is the **stat type's** registry name, not the tab's.
+/// The category id is the registry name, not the tab label.
 const CUSTOM_STAT_CATEGORY: &str = "minecraft:custom";
 
 /// The live values behind [`GENERAL_STATS`]. A sparse map (not a `[i32; 77]`)
 /// so only the ids the server has actually awarded are stored, exactly
-/// mirroring vanilla's own `StatsCounter`, which is sparse for the same reason.
+/// mirroring the sparse session counter used as its input.
 ///
-/// **This is no longer always empty.** `award_stats` is decoded and folded into
+/// A populated snapshot comes from decoded `award_stats` folded into
 /// `lodestone_ecs::SessionStatistics`, and
-/// [`from_statistics`](Self::from_statistics) is the projection onto this
-/// screen's fixed 77 ids; `app::session`'s per-frame reconciliation pushes it in
-/// through `MenuNav::refresh_stats`. The module docs above describe the state
-/// before that and are corrected there.
+/// [`from_statistics`](Self::from_statistics) projects onto this screen's fixed
+/// 77 ids; `app::session`'s per-frame reconciliation pushes it through
+/// `MenuNav::refresh_stats`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StatsSnapshot {
     values: std::collections::HashMap<&'static str, i32>,
@@ -387,7 +347,7 @@ impl StatsSnapshot {
     }
 }
 
-/// One row: caption plus formatted value, in vanilla's **display** order —
+/// One row: caption plus formatted value, in **display** order —
 /// sorted by the translated caption, not by
 /// [`GENERAL_STATS`]'s declaration order.
 #[must_use]
@@ -402,27 +362,13 @@ pub fn general_rows(snapshot: &StatsSnapshot) -> Vec<(&'static str, String)> {
 
 // -- geometry: a flat list, same departure key_binds.rs/social.rs make ------
 
-/// `GeneralStatisticsList`'s own `itemHeight` (vanilla's own stats-screen rendering:
-/// `super(minecraft, StatsScreen.this.width, StatsScreen.this.layout.
-/// getContentHeight(), 33, 14)` — the last constructor argument). **Not**
-/// [`options::WIDGET_H`] (20 px) — that was this constant's previous value,
-/// reused from every other non-`OptionsList` list in this tree on the
-/// assumption that this screen had no real vanilla row height to port; it
-/// does, and it is smaller, which issue #564 named directly.
-///
-/// [`ITEMS_ROW_H`]/[`MOBS_ROW_H`] are the other two tabs' own heights, ported
-/// alongside this one even though neither tab has a real list yet (see the
-/// module docs) — so a future `ItemStatisticsList`/`MobsStatisticsList`
-/// conversion has the right constant already sitting here rather than a
-/// second archaeology pass through the jar.
+/// Height of a General-tab row. It is 14 px, distinct from the 20 px button
+/// height used by [`options::WIDGET_H`]. The inactive tabs retain their own
+/// measured row heights for a future per-category projection.
 pub const ROW_H: f32 = 14.0;
-/// `ItemStatisticsList`'s own `itemHeight` (vanilla's own stats-screen rendering: `super(…,
-/// 33, 22)`). Not yet consumed — see [`ROW_H`]'s own doc.
+/// Measured row height reserved for the Items tab.
 pub const ITEMS_ROW_H: f32 = 22.0;
-/// `MobsStatisticsList`'s own `itemHeight` (vanilla's own stats-screen rendering: `super(…,
-/// 33, 9 * 4)` — four lines of the 9 px font, ported as the expression rather
-/// than the literal `36` so a font-size change would not silently desync it).
-/// Not yet consumed — see [`ROW_H`]'s own doc.
+/// Measured row height reserved for the Mobs tab: four 9 px text lines.
 pub const MOBS_ROW_H: f32 = 9.0 * 4.0;
 /// Half the list's column width — the name column runs from
 /// [`Origin::ScreenTop`]`- COLUMN_HALF_W + NAME_LEFT_INSET` to centre, the
@@ -433,15 +379,10 @@ const NAME_LEFT_INSET: f32 = 4.0;
 
 /// This screen's header height — **not**
 /// [`options::SUB_HEADER_HEIGHT`], which is `HeaderAndFooterLayout`'s default
-/// 33 px title band and is not what this screen uses. `StatsScreen.
-/// repositionElements` calls `this.layout.setHeaderHeight(tabAreaTop)`, where
-/// `tabAreaTop` is the tab bar's own `getRectangle().bottom()` — a fixed
-/// [`layout::TAB_BAR_HEIGHT`] (24 px), since `MenuTabBar` is `y = 0` height
-/// `HEIGHT = 24`. Using the *default* 33 px header
-/// here is exactly what put the General list's own top separator 9 px below
-/// where the tab row's underline sits — close enough to look plausible, far
-/// enough to still collide with a tab label drawn at `dy: 28`, which was the
-/// owner's reported symptom.
+/// 33 px title band and is not what this screen uses. The tab bar occupies
+/// [`layout::TAB_BAR_HEIGHT`] (24 px) at the top, so the list begins directly
+/// beneath that band. Using a 33 px header would place the separator 9 px too
+/// low and collide with the tab labels.
 pub const HEADER_HEIGHT: f32 = layout::TAB_BAR_HEIGHT;
 
 pub const LIST_WINDOW_PX: f32 =
@@ -459,8 +400,8 @@ pub fn band_top() -> f32 {
 /// `top` is [`HEADER_HEIGHT`] rather than [`band_top`]: the spec's band is the
 /// *window*, and [`widget::ScrollList`] adds [`widget::LIST_CONTENT_PADDING`]
 /// itself as `first_entry_y`. Passing the already-inset value would inset
-/// twice, which is the one arithmetic slip this conversion can make and still
-/// look right at scroll zero.
+/// twice, which is the one arithmetic slip that can still look right at scroll
+/// zero.
 #[must_use]
 pub fn list_spec(len: usize, scroll: f32) -> widget::ListSpec {
     widget::ListSpec::uniform(
@@ -473,26 +414,22 @@ pub fn list_spec(len: usize, scroll: f32) -> widget::ListSpec {
     .at(scroll)
 }
 
-/// This screen has no per-row control (a stat row is not clickable — vanilla
-/// itself only narrates it), so there is nothing to place beyond the row's
+/// This screen has no per-row control (a stat row is not clickable), so there is
+/// nothing to place beyond the row's
 /// own text: every row is a pair of [`super::render::MenuLabel`]s at this y,
 /// not a [`super::render::MenuRow`]/[`Slot`].
 ///
-/// **The offset is pixels**. This used to be
-/// `band_top + (row - first) * ROW_H` against a `first: usize` row index,
-/// which structurally could not express a half-scrolled row. `scroll.floor()`
-/// matches [`widget::ScrollList::row_top`]'s single `(int)` truncation —
-/// vanilla truncates the offset once, not per entry.
+/// **The offset is pixels**. `scroll.floor()` applies one
+/// truncation before placement, matching [`widget::ScrollList::row_top`].
 #[must_use]
 pub fn row_label_y(row: u16, scroll: f32) -> f32 {
     band_top() - scroll.floor() + f32::from(row) * ROW_H
 }
 
-/// `GeneralStatisticsList.Entry.extractContent`'s zebra striping
-///: `index % 2 == 0 ? -1 : -4539718` — opaque white
+/// Zebra striping uses `index % 2 == 0 ? -1 : -4539718` — opaque white
 /// on an even displayed row, `0xFFBABABA` on an odd one. `index` is the row's
 /// position in the **already-sorted** list ([`general_rows`]'s output order),
-/// matching vanilla's `children().indexOf(this)`.
+/// matching the index in [`general_rows`]'s displayed order.
 #[must_use]
 pub fn general_row_colour(index: usize) -> [f32; 4] {
     if index % 2 == 0 {
@@ -502,63 +439,24 @@ pub fn general_row_colour(index: usize) -> [f32; 4] {
     }
 }
 
-/// This screen's own scroll cursor. No selection/activation at all on the
-/// General list (vanilla's own rows are not buttons); only Done is a real
-/// control.
+/// This screen's own scroll cursor. General rows are not buttons; only Done is
+/// a real control.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct StatsNav {
     /// Scroll offset in **pixels**, not a row index.
     ///
-    /// `Eq` came off this derive when the field changed type, and that is the
-    /// point rather than a cost: a row-index offset is always a multiple of
+    /// A row-index offset would always be a multiple of
     /// [`ROW_H`], which is precisely the snap-to-row behaviour the wheel work
     /// exists to remove. See [`widget::ListSpec`]'s own doc.
     scroll: f32,
     /// Whether Done — the screen's only control — currently holds keyboard
-    /// focus. **`false` on open, and that is the whole of a player report**
-    /// (2026-08-04, "the Statistics menu always has the 'Done' button focused
-    /// for some reason").
-    ///
-    /// [`frame`] used to hard-code `selected: 0` on a frame whose only row *is*
-    /// Done, so the button was drawn focused the instant the screen appeared.
-    /// Vanilla focuses nothing here, and the jar is unusually explicit about
-    /// it in two independent ways:
-    ///
-    /// - `Screen.init` calls `setInitialFocus()`, whose
-    ///   base implementation (`:161-169`) is wrapped entirely in
-    ///   `if (this.minecraft.getLastInputType().isKeyboard())`. This screen is
-    ///   reached by **clicking** the pause menu's Statistics button, so the
-    ///   last input type is a mouse and the whole body is skipped — nothing is
-    ///   focused at all. `StatsScreen` does not override `setInitialFocus`
-    ///   (grepped: it appears in eight screens, none of them this one).
-    /// - Even opened from the keyboard, Done would still not be it. `StatsScreen.init`
-    ///   (`:79-98`) adds the `MenuTabBar` **first** and then puts the footer's
-    ///   Done in `setTabOrderGroup(1)`, which sorts it *after* every default-group
-    ///   widget — so the first tab stop is the General tab, not Done.
-    ///
-    /// So a focused Done is wrong under both input types, which is why this is
-    /// a plain `false` default rather than a modelled `lastInputType` (nothing
-    /// in this shell tracks one, and no reachable path would make it keyboard).
-    /// Tab is what grants focus — see [`Self::focus_next`] — and a click grants
-    /// it too, because `ContainerEventHandler.mouseClicked` focuses the child it
-    /// hit before calling its `onClick`.
-    ///
-    /// Note this is the same shape as, but a *different mechanism* from, the
-    /// earlier "hovering should not focus it" report on the server list: that
-    /// one was hover writing into selection, and was fixed by splitting
-    /// `hovered` from `selected`. This one is the initial value of the
-    /// selection itself, which that split did not touch — so the two had to be
-    /// found separately.
+    /// focus. It starts false because opening the screen by mouse does not
+    /// focus a child, and keyboard traversal reaches the tab bar before the
+    /// footer. A click or Tab explicitly grants focus.
     focused: bool,
-    /// Whether the mouse is over Done — the same "no `Screen::Statistics` arm
-    /// in `MenuNav::hover`" gap issue #567 found and fixed on Create New
-    /// World, found here while auditing this screen for the same defect
-    /// shape: [`frame`] never set `MenuFrame::hovered`, so Done never drew a
-    /// hover outline regardless of where the mouse was. The tab bar itself
-    /// needs no equivalent field — see [`hover_row`]'s own doc, the same
-    /// reasoning `create_world.rs`'s `CreateWorldNav::hover_row` documents:
-    /// a `MenuRow::tab` row derives its hover straight from `MenuFrame::cursor`
-    /// at draw time.
+    /// Whether the mouse is over Done. The tab bar derives its hover directly
+    /// from `MenuFrame::cursor`, while Done needs this explicit field so the
+    /// renderer can draw its outline.
     hovered: Option<usize>,
 }
 
@@ -614,17 +512,14 @@ impl StatsNav {
         self.focused
     }
 
-    /// Tab traversal: `Screen.keyPressed`'s `TabNavigation`
-    ///, which on this screen has exactly one focusable
-    /// child to land on. With one child, forward Tab focuses it and stays
-    /// there — vanilla's wrap is `clearFocus()`-then-retry, which re-finds the
-    /// same child — so this is idempotent rather than a toggle.
+    /// Tab traversal has exactly one focusable child on this screen, so
+    /// forward Tab focuses Done and remains there rather than toggling it.
     pub fn focus_next(&mut self) {
         self.focused = true;
     }
 
-    /// `ContainerEventHandler.mouseClicked`: a click on a widget focuses it
-    /// *and then* activates it. Hover does not — see [`Self::focused`].
+    /// A click on a widget focuses it *and then* activates it. Hover does not —
+    /// see [`Self::focused`].
     pub fn focus_done(&mut self) {
         self.focused = true;
     }
@@ -651,38 +546,20 @@ impl StatsNav {
 
 /// Builds the whole Statistics frame.
 ///
-/// ## No "Statistics" title label — second half
-///
-/// The owner: *"'Statistics' is [not] even supposed to be in the UI at all"*.
-/// Vanilla's `TITLE` (`gui.stats`) is passed to `Screen`'s constructor for
-/// narration only; nothing in `StatsScreen.extractRenderState`/
-/// `extractMenuBackground` ever draws it — the header **is** the tab bar
-/// (`extractMenuBackground` blits `CreateWorldScreen.TAB_HEADER_BACKGROUND`
-/// behind it, then the content below), and there is no second heading above
-/// that. This used to draw `TITLE` as a centred label at `dy: 12`, which the
-/// tab row then drew straight through at `dy: 28`, 9 px below where the real
-/// header ends at [`HEADER_HEIGHT`] (24) — close enough to look like a
-/// heading, and exactly what put every tab label crossing the divider a
-/// screen used to draw at `y = 33` (`options::SUB_HEADER_HEIGHT`, this
-/// screen's *old*, wrong header height).
+/// The title is retained for narration, but the frame draws no separate title
+/// label: the tab bar is the complete header and the content begins below it.
 #[must_use]
 pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
     let stats = general_rows(snapshot);
 
-    // **Every** row is emitted, not a `[first..end]` window. The
-    // slice was what made a partially-scrolled row impossible to express: a
-    // row either fitted wholly or was absent. `list_labels` is clipped to the
-    // band by `render::draw`, so a row straddling the bottom now paints its
-    // visible half instead of vanishing.
+    // Emit every row and let `render::draw` clip `list_labels` to the band, so
+    // a row straddling the bottom contributes its visible half.
     let scroll = nav.scroll();
     let mut list_labels = Vec::with_capacity(stats.len() * 2);
     for (i, (caption, value)) in stats.iter().enumerate() {
         let y = row_label_y(i as u16, scroll);
-        // Zebra striping — `GeneralStatisticsList.Entry.
-        // extractContent`: both the name and the
-        // value get the *same* `color`, computed once per row from the
-        // row's own displayed index (this loop's `i`, matching vanilla's
-        // `children().indexOf(this)` in the already-sorted list).
+        // Zebra striping: both labels in a row share one colour computed from
+        // the displayed index.
         let colour = general_row_colour(i);
         list_labels.push(MenuLabel {
             text: (*caption).to_string(),
@@ -716,13 +593,11 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
         }),
         ..Default::default()
     }];
-    // Vanilla's real tab widget, one [`MenuRow`] per
-    // [`TAB_LABELS`] entry rather than a `MenuLabel` each — see [`tab_row_rect`]
+    // One [`MenuRow`] per [`TAB_LABELS`] entry rather than a `MenuLabel` each —
+    // see [`tab_row_rect`]
     // for why `slot` cannot express its geometry. Only General is `enabled`:
-    // `StatsScreen.setTabActiveStateAndTooltip` disables a tab whose list is
-    // empty (`:124-133`), and Items/Mobs are unconditionally empty here — see
-    // the module docs on why that is already-correct behaviour, not a
-    // shortcut.
+    // Only General is enabled; Items and Mobs have no projected rows, as
+    // described in the module docs.
     rows.extend(TAB_LABELS.iter().enumerate().map(|(index, &label)| MenuRow {
         label: label.to_string(),
         enabled: index == GENERAL_TAB,
@@ -737,18 +612,13 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
     MenuFrame {
         rows,
         // `usize::MAX` is `MenuFrame::selected`'s documented "highlights
-        // nothing" sentinel (the same value `command_block`'s frame uses), not
-        // an out-of-range accident. It used to be a hard `0`, i.e. Done, which
-        // is the player report [`StatsNav::focused`] documents.
+        // nothing" sentinel, not an out-of-range accident.
         selected: if nav.focused() { DONE_ROW } else { usize::MAX },
-        // The same gap issue #567 found and fixed on Create New World: this
-        // used to be left at its `..Default::default()` of `None`
-        // unconditionally, so Done never drew a hover outline no matter where
-        // the cursor was.
+        // Carry the explicit Done hover state so the renderer can outline the
+        // button when the cursor is over it.
         hovered: nav.hovered(),
         vanilla: true,
-        // No `labels` — this screen draws no separate heading; see this
-        // function's own doc on why vanilla has none either.
+        // No `labels`: the tab bar is the complete header.
         list_labels,
         ..Default::default()
     }
@@ -758,7 +628,7 @@ pub fn frame(nav: &StatsNav, snapshot: &StatsSnapshot) -> MenuFrame<'static> {
 mod tests {
     use super::*;
 
-    // -- StatFormat, against known vanilla arithmetic (not just zero) -------
+    // -- StatFormat, against known reference arithmetic (not just zero) -----
 
     #[test]
     fn default_format_groups_thousands_like_vanillas_number_format() {
@@ -770,8 +640,7 @@ mod tests {
 
     #[test]
     fn divide_by_ten_always_shows_two_decimals() {
-        // `DECIMAL_FORMAT.format(value * 0.1)` — half-damage-point precision,
-        // e.g. 47 tenths of a heart is 4.70.
+        // Half-damage-point precision: 47 tenths of a heart is 4.70.
         assert_eq!(StatFormat::DivideByTen.format(0), "0.00");
         assert_eq!(StatFormat::DivideByTen.format(47), "4.70");
         assert_eq!(StatFormat::DivideByTen.format(100), "10.00");
@@ -800,9 +669,8 @@ mod tests {
         assert_eq!(StatFormat::Time.format(20 * 31), "0.52 min", "over 0.5 min promotes");
         assert_eq!(StatFormat::Time.format(20 * 60 * 60), "1.00 h");
         assert_eq!(StatFormat::Time.format(20 * 60 * 60 * 13), "0.54 d");
-        // One redstone tick — the fractional branch of `java_double_to_string`,
-        // where Rust's own shortest round-trip formatting already agrees
-        // with Java's (no `.0`-forcing needed, unlike the whole-second case).
+        // One redstone tick exercises the fractional branch; no `.0` suffix is
+        // needed when the value is already fractional.
         assert_eq!(StatFormat::Time.format(1), "0.05 s");
     }
 
@@ -835,9 +703,9 @@ mod tests {
 
     #[test]
     fn a_populated_snapshot_reaches_the_row_the_same_way_a_decoder_eventually_will() {
-        // Proves the plumbing end to end with a synthetic value, standing in
-        // for the decoder this issue does not build — an expected value from
-        // outside the code under test (hand-computed, not round-tripped).
+        // Proves the plumbing end to end with a synthetic value. Use a
+        // hand-computed expected value from outside the code under test,
+        // rather than relying on a round trip through the same projection.
         let mut snapshot = StatsSnapshot::default();
         snapshot.set("jump", 42);
         let rows = general_rows(&snapshot);
@@ -845,13 +713,13 @@ mod tests {
         assert_eq!(jump_row.1, "42");
     }
 
-    /// The projection off the real folded store, which is what the screen now
-    /// draws from. The load-bearing part is the **key shape**: the screen's ids
+    /// The projection reads the folded session store that supplies the frame.
+    /// The load-bearing part is the **key shape**: the screen's ids
     /// are bare paths, and the wire key is
     /// `minecraft:custom` / `minecraft:<path>`. Writing the category as the *tab*
     /// name, or leaving the value's namespace off, misses every lookup — and a
     /// total miss is indistinguishable from "the server awarded nothing", which
-    /// is exactly the state this screen was stuck in before.
+    /// is the state an empty session produces.
     #[test]
     fn the_projection_reads_the_custom_category_and_the_namespaced_value() {
         use lodestone_game::progress::{StatKey, Statistics};
@@ -907,16 +775,14 @@ mod tests {
         assert_eq!(f.rows[DONE_ROW].label, "Done");
         assert!(f.rows[DONE_ROW].enabled);
         assert!(f.rows[DONE_ROW].tab.is_none(), "Done is not a tab row");
-        // No "Statistics" heading — vanilla draws none; see `frame`'s own doc.
+        // No separate "Statistics" heading; the tab bar is the complete header.
         assert!(
             !f.labels.iter().any(|l| l.text == TITLE),
             "vanilla draws no separate title label on this screen"
         );
 
-        // Every row is emitted now, not a window — the slice is what made a
-        // half-scrolled row inexpressible. The last alphabetical row is present
-        // at rest; whether it is *visible* is the primitive's question, asked
-        // below.
+        // Every row is emitted; the last alphabetical row is present at rest,
+        // while the list model determines whether it is visible.
         let last_caption = general_rows(&snapshot).last().unwrap().0;
         assert!(
             f.list_labels.iter().any(|l| l.text == last_caption),
@@ -967,10 +833,8 @@ mod tests {
 
     // -- Done's hover outline -------------------------------------------------
 
-    /// The same defect shape issue #567 found and fixed on Create New World:
-    /// `frame` never set `MenuFrame::hovered`, so Done never drew its hover
-    /// outline no matter where the cursor was. `hover_row` is `MenuNav::hover`'s
-    /// `Screen::Statistics` arm, wired in `nav.rs`.
+    /// Hovering Done is carried into the frame so the renderer can draw its
+    /// outline; tab-row hover is derived from the frame cursor instead.
     #[test]
     fn hovering_done_reaches_the_frame() {
         let mut nav = StatsNav::default();
@@ -1024,13 +888,12 @@ mod tests {
     #[test]
     fn general_row_colour_alternates_and_the_two_shades_are_vanillas_own_argb() {
         // Expected values originate outside this function: `-1`/`-4539718` are
-        // vanilla's own stats-screen rendering's own literals, unpacked by the shared
-        // `argb_to_rgba` rather than restated as a second pair of floats.
+        // the measured ARGB row colours, unpacked by shared `argb_to_rgba`.
         assert_eq!(general_row_colour(0), widget::argb_to_rgba(-1));
         assert_eq!(general_row_colour(1), widget::argb_to_rgba(-4_539_718));
         assert_eq!(general_row_colour(2), widget::argb_to_rgba(-1), "alternates back");
         // The discriminating control: the two shades must actually differ, and
-        // an all-white implementation (the pre-#564 behaviour) must not pass —
+        // an all-white implementation must not pass —
         // exercised directly on the frame with a discriminating (odd) row.
         assert_ne!(general_row_colour(0), general_row_colour(1));
         let snapshot = StatsSnapshot::default();
@@ -1038,7 +901,7 @@ mod tests {
         let rows = general_rows(&snapshot);
         // Row 1 (odd) is the discriminating input — row 0 passes under a
         // solid-white implementation too, so asserting only the first row
-        // would not have caught the pre-#564 bug.
+        // would not distinguish the two row colours.
         let (odd_caption, _) = rows[1];
         let odd_label = f
             .list_labels
@@ -1054,8 +917,8 @@ mod tests {
     }
 
     /// **The magnitude assertion, not the sign.** "It scrolled" is satisfied by
-    /// a snap-to-row implementation, which is exactly what this conversion
-    /// removed — so the predicted value is computed from this screen's own
+    /// a snap-to-row implementation, so the predicted value is computed from
+    /// this screen's own
     /// `ROW_H` and the rival hypotheses are named and excluded.
     #[test]
     fn one_notch_is_half_a_row_in_pixels_and_lands_on_no_row_top() {
@@ -1109,8 +972,8 @@ mod tests {
         for _ in 0..1000 {
             nav.step(true);
         }
-        // The clamp is vanilla's `maxScrollAmount() = contentHeight() - height`,
-        // computed here from the outside rather than read back off the nav.
+        // Compute the clamp independently as content height minus band height,
+        // rather than reading it back from the navigation model.
         let content = GENERAL_STATS.len() as f32 * ROW_H + 2.0 * widget::LIST_CONTENT_PADDING;
         let band = canvas - options::FOOTER_HEIGHT - HEADER_HEIGHT;
         assert_eq!(

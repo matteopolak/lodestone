@@ -1,52 +1,41 @@
-//! A multi-line, word-wrapping text field — vanilla's `MultilineTextField`
-//! (vanilla's own multiline-text-field type), the model
-//! `MultiLineEditBox` wraps for `BookEditScreen`'s page editor.
+//! A multi-line, word-wrapping text field for book pages and other long text.
 //!
 //! ## What it is
 //!
-//! Before this, every text-editing surface in this shell was
-//! [`super::edit_box::EditBox`] — a **single** line. Issue #613's `EditBook`
-//! remainder needs a book page: free-flowing text that wraps at a fixed
+//! [`super::edit_box::EditBox`] handles **single** lines. A book page needs
+//! free-flowing text that wraps at a fixed
 //! width, spans multiple visual lines, and still supports a caret, a
 //! selection and Up/Down-by-visual-line the way a real text editor does.
 //! [`TextArea`] is that widget, kept independent of [`super::menu::Screen`]
 //! and [`super::render`] the same way `EditBox` is, so a sign editor or any
-//! other text-heavy screen can reuse it later — see this module's own doc for
-//! why the sign editor does not yet (four fixed lines, no wrapping, a
-//! different shape entirely).
+//! other text-heavy screen can reuse it; the sign editor remains a separate
+//! four-line, non-wrapping surface.
 //!
-//! ## Word-wrap is the fixed-advance approximation, not `Font.Splitter`
+//! ## Word-wrap uses a fixed-advance approximation
 //!
-//! Vanilla wraps by real glyph width (its own font-splitter's split-lines call). This
-//! widget has no `Font` — the same "pure data, no renderer dependency" rule
-//! [`super::edit_box::EditBox`]'s own module doc states and justifies at
-//! length — so [`TextArea::wrap_chars`] is a **character count**, not a pixel
-//! width, and wrapping is greedy word-wrap against that count. A `TextArea`
-//! sized from [`super::edit_box::MENU_TEXT_ADVANCE`] wraps close to where a
-//! real font would, and exactly the way an [`super::edit_box::EditBox`]'s own
-//! horizontal scroll already approximates a proportional font — see that
-//! module's doc for the shape of the same deviation and why it is accepted
-//! here for the same reason: threading a `Font` through this layer would put
-//! the renderer inside the input layer.
+//! The reference renderer wraps by measured glyph width. This widget has no
+//! font — the same "pure data, no renderer dependency" rule used by
+//! [`super::edit_box::EditBox`] — so [`TextArea::wrap_chars`] is a **character
+//! count**, not a pixel width, and wrapping is greedy word-wrap against that
+//! count. A value derived
+//! from [`super::edit_box::MENU_TEXT_ADVANCE`] stays close to measured glyph
+//! widths while keeping rendering out of the input layer.
 //!
 //! ## Indices are `char`s, not UTF-16 code units
 //!
 //! Same convention as [`super::edit_box::EditBox`] — see that module's doc.
 //! [`StringView`] positions are `char` indices into [`TextArea::value`].
 //!
-//! ## How to change it
+//! ## Input behavior
 //!
-//! [`TextArea::handle_key`] is a direct transcription of
-//! `MultilineTextField.keyPressed`'s `switch`, GLFW key code for GLFW key
-//! code, so a diff against the jar stays legible. Enter (`257`) inserts a
-//! literal `\n` rather than doing anything screen-level — a book page's Enter
+//! [`TextArea::handle_key`] handles the supported GLFW key codes directly.
+//! Enter (`257`) inserts a literal `\n` rather than doing anything screen-level —
+//! a book page's Enter
 //! key is a newline, unlike [`super::edit_box::EditBox`], which has no
 //! concept of one. PageUp/PageDown (`266`/`267`, "jump to document
-//! start/end") are the two vanilla cases this port omits: nothing in this
-//! shell's [`super::focus::KeyEvent`] carries those GLFW codes yet (no
-//! `KEY_PAGE_UP`/`KEY_PAGE_DOWN` constant exists), and no screen has asked for
-//! them — add the constants to [`super::focus`] first if a caller ever needs
-//! them, rather than inventing new key codes here.
+//! start/end") are intentionally unsupported because this shell does not yet
+//! expose those key codes through [`super::focus::KeyEvent`]. Add shared
+//! constants there before adding handling here.
 //!
 //! ## Dependencies
 //!
@@ -58,9 +47,7 @@
 
 use super::focus::{KeyEvent, KEY_BACKSPACE, KEY_DELETE, KEY_DOWN, KEY_END, KEY_ENTER, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_UP};
 
-/// The GLFW code for the numpad Enter key (`KP_ENTER`), which
-/// `MultilineTextField.keyPressed`'s `case 257: case 335:` treats identically
-/// to the main Enter key.
+/// The GLFW code for the numpad Enter key, treated the same as main Enter.
 pub const KEY_KP_ENTER: i32 = 335;
 
 /// A half-open `[begin, end)` span of **`char` indices** into a [`TextArea`]'s
@@ -89,8 +76,7 @@ impl StringView {
     }
 }
 
-/// `MultilineTextField.Whence` — how [`TextArea::seek_cursor`] interprets its
-/// offset.
+/// How [`TextArea::seek_cursor`] interprets its offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Whence {
     /// An absolute `char` index, clamped to the value's length.
@@ -166,7 +152,7 @@ impl TextArea {
         field
     }
 
-    /// `setCharacterLimit`.
+    /// Sets the maximum number of characters, if any.
     pub fn set_character_limit(&mut self, limit: Option<usize>) {
         self.character_limit = limit;
     }
@@ -178,7 +164,7 @@ impl TextArea {
         self
     }
 
-    /// `setLineLimit`.
+    /// Sets the maximum number of wrapped lines, if any.
     pub fn set_line_limit(&mut self, limit: Option<usize>) {
         self.line_limit = limit;
     }
@@ -214,11 +200,10 @@ impl TextArea {
         self.cursor
     }
 
-    /// `setValue(value, allowOverflowLineLimit)`: truncates to the character
-    /// limit, then applies unless it would overflow the line limit (unless
-    /// `allow_overflow_line_limit`). Returns whether the value was applied —
-    /// vanilla's own method returns `void` and simply no-ops, but a caller
-    /// here (the page-turn button) needs to know whether to advance.
+    /// Replaces the value, truncating to the character limit, then applies it
+    /// unless it would overflow the line limit (unless
+    /// `allow_overflow_line_limit`). Returns whether the value was applied so
+    /// a page-turn caller can decide whether to advance.
     pub fn set_value(&mut self, value: impl AsRef<str>, allow_overflow_line_limit: bool) -> bool {
         let truncated = self.truncate_full_text(value.as_ref());
         if allow_overflow_line_limit || !self.overflows_line_limit(&truncated) {
@@ -263,13 +248,13 @@ impl TextArea {
         }
     }
 
-    /// `hasSelection()`.
+    /// Whether the value contains a non-empty selection.
     #[must_use]
     pub fn has_selection(&self) -> bool {
         self.select_cursor != self.cursor
     }
 
-    /// `getSelected()`.
+    /// Returns the selected span as character indices.
     #[must_use]
     pub fn selected(&self) -> StringView {
         StringView {
@@ -278,18 +263,17 @@ impl TextArea {
         }
     }
 
-    /// `getSelectedText()`.
+    /// Returns the selected text.
     #[must_use]
     pub fn selected_text(&self) -> String {
         let sel = self.selected();
         self.value.chars().skip(sel.begin).take(sel.len()).collect()
     }
 
-    /// `insertText(String)`: replace the selection (or insert at the caret)
+    /// Replaces the selection (or inserts at the caret)
     /// with `input`, filtered through
     /// [`super::edit_box::is_allowed_chat_character`] and truncated to
-    /// whatever the character limit still allows. Vanilla's own filter
-    /// (its own string-util filter-text helper applied to `(input, true)`) passes `allowNewlines = true`,
+    /// whatever the character limit still allows. Newlines are allowed here,
     /// unlike [`super::edit_box::filter_text`]'s single-line callers — a
     /// pasted multi-line block keeps its newlines here.
     pub fn insert_text(&mut self, input: &str) {
@@ -313,7 +297,7 @@ impl TextArea {
         }
     }
 
-    /// `deleteText(int)`.
+    /// Deletes forward or backward by `dir`, or removes the selection.
     pub fn delete_text(&mut self, dir: i32) {
         if !self.has_selection() {
             self.select_cursor = self.offset_cursor(self.cursor, dir);
@@ -329,7 +313,7 @@ impl TextArea {
         }
     }
 
-    /// `seekCursor(Whence, int)`.
+    /// Moves the caret according to `whence`, optionally extending selection.
     pub fn seek_cursor(&mut self, whence: Whence, offset: i32, extend_selection: bool) {
         let target = match whence {
             Whence::Absolute => offset.max(0) as usize,
@@ -342,21 +326,20 @@ impl TextArea {
         }
     }
 
-    /// `getLineCount()`.
+    /// Number of wrapped visual lines.
     #[must_use]
     pub fn line_count(&self) -> usize {
         self.display_lines.len()
     }
 
-    /// `iterateLines()`.
+    /// The wrapped visual-line spans.
     #[must_use]
     pub fn lines(&self) -> &[StringView] {
         &self.display_lines
     }
 
-    /// `getLineAtCursor()`. `-1` (no containing line, which should not
-    /// happen after a `reflow`) reads as the last line, matching vanilla's
-    /// own logged-error fallback (`getCursorLineView`).
+    /// Index of the visual line containing the caret. A missing containing
+    /// line falls back to the final line after a reflow.
     #[must_use]
     pub fn line_at_cursor(&self) -> usize {
         self.display_lines
@@ -365,18 +348,16 @@ impl TextArea {
             .unwrap_or_else(|| self.display_lines.len().saturating_sub(1))
     }
 
-    /// `getLineView(int)`, clamped.
+    /// Returns a clamped visual-line span.
     #[must_use]
     pub fn line_view(&self, index: usize) -> StringView {
         let clamped = index.min(self.display_lines.len().saturating_sub(1));
         self.display_lines.get(clamped).copied().unwrap_or(StringView::EMPTY)
     }
 
-    /// `seekCursorLine(int)`: move the caret up/down one *visual* line,
+    /// Moves the caret up/down one *visual* line,
     /// preserving its column as best the fixed-advance approximation allows
-    /// (a straight column index rather than vanilla's pixel-position
-    /// re-measure, since there is no [`super::edit_box::EditBox::measure`]
-    /// font behind this widget either).
+    /// using a straight column index rather than pixel remeasurement.
     pub fn seek_cursor_line(&mut self, line_offset: i32, extend_selection: bool) {
         if line_offset == 0 {
             return;
@@ -449,8 +430,8 @@ impl TextArea {
         }
     }
 
-    /// `MultilineTextField.keyPressed`. `extend_selection` is Shift, threaded
-    /// in rather than read off `event` a second time, matching
+    /// Handles keyboard editing. `extend_selection` is Shift, threaded in
+    /// rather than read off `event` a second time, matching
     /// [`super::edit_box::EditBox::handle_key`]'s own convention.
     pub fn handle_key(&mut self, event: KeyEvent) -> bool {
         let extend = event.has_shift_down();
@@ -550,8 +531,8 @@ impl TextArea {
         }
     }
 
-    /// `charTyped`, matching [`super::edit_box::EditBox::handle_char`]'s
-    /// shape.
+    /// Handles one printable character, matching
+    /// [`super::edit_box::EditBox::handle_char`]'s shape.
     pub fn handle_char(&mut self, ch: char) -> bool {
         if super::edit_box::is_allowed_chat_character(ch) {
             self.insert_text(&ch.to_string());
@@ -699,13 +680,12 @@ mod tests {
     fn line_limit_rejects_an_overflowing_insert() {
         // wrap=5, line_limit=1: "hello world" would wrap onto two lines, so
         // the character that overflows must be refused, not silently
-        // truncated — matching `overflowsLineLimit`'s all-or-nothing gate.
+        // truncated — the line-limit check is all-or-nothing.
         let mut t = TextArea::new(5).with_line_limit(1);
         typed(&mut t, "hello");
         assert_eq!(t.value(), "hello");
-        // `handle_char` returns whether the character passed the *filter*,
-        // matching vanilla's own `EditBox.charTyped` — a length-rejected
-        // insert is a silent no-op there too (`insertText`'s budget check).
+        // `handle_char` reports whether the character passed the *filter*;
+        // an insertion rejected by the line budget is a silent no-op.
         // The observable rejection is the value staying put.
         t.handle_char(' ');
         assert_eq!(t.value(), "hello", "an insert that would overflow the line limit must be refused");
