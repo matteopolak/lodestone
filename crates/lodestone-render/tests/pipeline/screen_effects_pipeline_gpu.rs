@@ -1,5 +1,5 @@
 //! GPU-requiring pixel gate for the underwater/fire overlay pass
-//! ([`ScreenEffectRenderer`]), issues #108 and #112.
+//! ([`ScreenEffectRenderer`]).
 //!
 //! `#[ignore]`d so the default `cargo test` run stays hermetic and headless —
 //! run with `cargo test -p lodestone-render --test screen_effects_pipeline_gpu
@@ -57,24 +57,24 @@ fn manager() -> ResourceManager {
         "assets/minecraft/textures/misc/pumpkinblur.png".to_string(),
         png(16, 16, [40, 200, 40, 255]),
     );
-    // Opaque light-blue freeze vignette (#139).
+    // Opaque light-blue freeze vignette.
     src.insert(
         "assets/minecraft/textures/misc/powder_snow_outline.png".to_string(),
         png(256, 256, [200, 230, 255, 255]),
     );
-    // Opaque grey spyglass lens (#154) — distinct from black so the lens vs.
+    // Opaque grey spyglass lens — distinct from black so the lens vs.
     // letterbox-bar split is unambiguous.
     src.insert(
         "assets/minecraft/textures/misc/spyglass_scope.png".to_string(),
         png(256, 256, [180, 180, 180, 255]),
     );
-    // Opaque white nausea texture (#144) so the tint's own colour (green-biased,
+    // Opaque white nausea texture so the tint's own colour (green-biased,
     // see `confusion_overlay_triangles`) is what shows up, not the texture's.
     src.insert(
         "assets/minecraft/textures/misc/nausea.png".to_string(),
         png(256, 256, [255, 255, 255, 255]),
     );
-    // Opaque magenta 32-frame portal strip (#149).
+    // Opaque magenta 32-frame portal strip.
     src.insert(
         "assets/minecraft/textures/block/nether_portal.png".to_string(),
         png(16, 16 * 32, [200, 40, 200, 255]),
@@ -160,7 +160,7 @@ fn underwater_overlay_paints_the_whole_frame() {
 
 /// The fire overlay, drawn onto a black target, must paint rows matching
 /// its real two-quad geometry's predicted vertical extent
-/// (`fire_overlay_vertical_extent`, issue #420) — not the old design's
+/// (`fire_overlay_vertical_extent`) — not the old design's
 /// hardcoded bottom-35% strip, and genuinely untouched above that real
 /// extent. A frame-average check could not tell "painted in the right
 /// place" from "a full-screen tint at a lower intensity" — see `CLAUDE.md`'s
@@ -280,7 +280,7 @@ fn fire_overlay_paints_its_predicted_extent_not_the_old_bottom_strip() {
     );
 }
 
-/// The pumpkin overlay (issue #185), drawn once onto a black target, must
+/// The pumpkin overlay, drawn once onto a black target, must
 /// cover the whole frame like the underwater overlay — it is also a static
 /// full-NDC quad (`pumpkin_overlay_triangles`'s doc), but untinted (opaque
 /// white vertex colour) rather than a 0.1-alpha tint, so it should paint
@@ -336,7 +336,7 @@ fn pumpkin_overlay_paints_the_whole_frame_at_full_strength() {
     );
 }
 
-/// The freeze overlay (issue #139), drawn at `percent_frozen = 0.5` onto a
+/// The freeze overlay, drawn at `percent_frozen = 0.5` onto a
 /// black target, covers the whole frame (same static full-NDC shape as
 /// pumpkin — see `freeze_overlay_triangles`'s doc) but at half the opacity a
 /// full `1.0` would give. Magnitude, not just sign: the source is opaque
@@ -399,7 +399,7 @@ fn freeze_overlay_paints_the_whole_frame_at_the_predicted_half_alpha() {
     );
 }
 
-/// The spyglass overlay (issue #154), drawn onto a black target at a 16:9
+/// The spyglass overlay, drawn onto a black target at a 16:9
 /// aspect, must paint the whole frame (lens + letterbox bars together tile
 /// the full screen, see `spyglass_letterbox_triangles`'s doc) with two
 /// visually distinct regions: the centre (lens, opaque grey `(180,180,180)`)
@@ -458,7 +458,7 @@ fn spyglass_overlay_paints_a_grey_lens_surrounded_by_black_bars() {
     );
 }
 
-/// The confusion overlay (issue #144, screen-space half), drawn onto a black
+/// The confusion overlay (screen-space half), drawn onto a black
 /// target at maximum strength, must cover the whole frame (see
 /// `confusion_overlay_triangles`'s doc: `size >= 1.0` always) with the
 /// predicted green-biased tint — magnitude, not just "some colour appeared":
@@ -511,7 +511,7 @@ fn confusion_overlay_paints_the_whole_frame_with_a_green_biased_tint() {
     );
 }
 
-/// The portal overlay (issue #149, screen-space half), drawn onto a black
+/// The portal overlay (screen-space half), drawn onto a black
 /// target at full intensity, must cover the whole frame and select the
 /// requested animation frame from the 32-frame strip (same shape as the fire
 /// overlay's own frame-selection gate).

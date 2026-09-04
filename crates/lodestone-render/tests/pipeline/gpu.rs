@@ -325,7 +325,7 @@ fn block_pass_renders_a_textured_cube() {
         camera.view_projection().to_cols_array_2d(),
         lodestone_render::fog::FogUniform::disabled(),
     );
-    // The packed path's group-0 binding 1 (issue #76): one origin slot, at zero
+    // The packed path's group-0 binding 1: one origin slot, at zero
     // — this scene's geometry is already section-local to the origin.
     let origin_buf = lodestone_render::section_origin_buffer(device, [0.0, 0.0, 0.0]);
 
@@ -473,7 +473,7 @@ fn greedy_merged_quad_stays_within_its_sprite() {
         camera.view_projection().to_cols_array_2d(),
         lodestone_render::fog::FogUniform::disabled(),
     );
-    // The packed path's group-0 binding 1 (issue #76): one origin slot, at zero
+    // The packed path's group-0 binding 1: one origin slot, at zero
     // — this scene's geometry is already section-local to the origin.
     let origin_buf = lodestone_render::section_origin_buffer(device, [0.0, 0.0, 0.0]);
 
@@ -533,8 +533,8 @@ fn greedy_merged_quad_stays_within_its_sprite() {
     //
     // Absolute brightness is *mostly* irrelevant here — the exposed face samples
     // the empty neighbour's zero light, so red arrives dim — but the floor below
-    // is not an arbitrary "dim is fine" number, because issue #400 fixed exactly
-    // this shader's shade multiply to run in gamma space rather than linear. This
+    // is not an arbitrary "dim is fine" number, because this shader's shade
+    // multiply runs in gamma space rather than linear. This
     // scene's shade is `ao(1.0) * light_term(0.2 floor, zero sky/block light)` —
     // no neighbours (`SectionNeighborhood::centre_only`), so corners are
     // unoccluded and the light sits at the mesher's zero-light floor — and the
@@ -556,7 +556,7 @@ fn greedy_merged_quad_stays_within_its_sprite() {
         assert!(
             (5..=14).contains(&p[0]) && p[0] > p[2] * 4,
             "face pixel at x={sx} sampled the wrong sprite (bled into blue), or the packed \
-             shader's gamma-space shade multiply (issue #400) regressed: {p:?}, expected \
+             shader's gamma-space shade multiply regressed: {p:?}, expected \
              red in 5..=14"
         );
     }
@@ -691,7 +691,7 @@ fn real_chunk_section_renders_terrain() {
         camera.view_projection().to_cols_array_2d(),
         lodestone_render::fog::FogUniform::disabled(),
     );
-    // The packed path's group-0 binding 1 (issue #76): one origin slot, at zero
+    // The packed path's group-0 binding 1: one origin slot, at zero
     // — this scene's geometry is already section-local to the origin.
     let origin_buf = lodestone_render::section_origin_buffer(device, [0.0, 0.0, 0.0]);
 
@@ -833,7 +833,7 @@ fn translucent_quads_blend_in_sorted_order() {
         camera.view_projection().to_cols_array_2d(),
         lodestone_render::fog::FogUniform::disabled(),
     );
-    // The packed path's group-0 binding 1 (issue #76): one origin slot, at zero
+    // The packed path's group-0 binding 1: one origin slot, at zero
     // — this scene's geometry is already section-local to the origin.
     let origin_buf = lodestone_render::section_origin_buffer(device, [0.0, 0.0, 0.0]);
     let pipeline = BlockPipeline::for_layer(device, format, RenderLayer::Translucent);
