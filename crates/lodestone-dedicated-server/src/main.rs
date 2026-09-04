@@ -527,6 +527,38 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn dedicated_scheduler_runs_delayed_work_on_the_persistent_primary_world() {
+        use lodestone_server::ecs::ServerTaskScheduler;
+
+        let temp = tempfile::tempdir().expect("temporary server world");
+        let observed = Arc::new(AtomicU64::new(0));
+        let observer = Arc::clone(&observed);
+        let server_app = ServerApp::bootstrap_with(|app| {
+            app.insert_resource(FixtureTickCount(observer));
+            app.world_mut().resource_mut::<ServerTaskScheduler>()
+                .schedule_repeating(2, 3, |world, id| {
+                    let count = world.resource::<FixtureTickCount>().0.fetch_add(1, Ordering::Relaxed);
+                    if count == 1 {
+                        assert!(world.resource_mut::<ServerTaskScheduler>().cancel(id));
+                    }
+                });
+        });
+        let protocol = lodestone_registry::server_protocol_for_protocol(776).expect("host protocol");
+        let (server, client, _world) = open_persistent_server(
+            protocol, temp.path(), AirWorld, (0..=0, 0..=0), (0, 0), 1, server_app,
+        ).expect("persistent fixture world");
+        drop(client);
+        assert_eq!(observed.load(Ordering::Relaxed), 0, "boot must not run scheduled work");
+        tokio::task::yield_now().await;
+        for (index, expected) in [0, 1, 1, 1, 2, 2, 2, 2].into_iter().enumerate() {
+            tokio::time::advance(Duration::from_millis(50)).await;
+            wait_for_completed_ticks(&server, index as u64 + 1).await;
+            assert_eq!(observed.load(Ordering::Relaxed), expected, "tick {}", index + 1);
+        }
+        server.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn dedicated_open_runs_a_native_plugin_on_the_persistent_primary_world() {
         const TICKS: u64 = 4;
 

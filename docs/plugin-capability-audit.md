@@ -13,7 +13,7 @@ The headline: **the client's native tier is at or near parity for every capabili
 wire-level packet mutation, the client's WASM tier remains substantially narrower, and the server's
 bevy-shaped plugin surface now reaches in-memory and persistent primary worlds, including the
 standalone binary's compile-time application builder**. Native systems run on the real `GameTick`,
-but event adjudication, commands, permissions, scheduling, and runtime plugin discovery remain
+but event adjudication, commands, permissions, async hand-back, and runtime plugin discovery remain
 gaps. Since real Bukkit/Paper plugins are overwhelmingly server plugins, the answer for the
 deployment that matters most remains "not yet".
 
@@ -85,7 +85,7 @@ piece named) · **gap** (nothing) · **ceiling** (will not exist by design; stat
 | cancel an event (`setCancelled`) | **done** — `ActionVetoes` for all six declared verbs, all asked in production | **gap** — no verdict-shaped export | **gap** — `TickSet::Adjudicate` runs but has no proposal or verdict systems; `CraftingStationHooks` is the one Allow/Deny/Replace hook |
 | priority order across plugins | **done** — `EventPriority::{Lowest..Monitor}` chained into all four schedules | partial — manifest `priority` orders guests; nothing else | **gap** |
 | `MONITOR` read-only | **done** — checked against bevy's per-system access set; blind to deferred `Commands` | **gap** | **gap** |
-| sync delayed/repeating tasks | **done** — `TaskScheduler::{schedule_once, schedule_repeating, cancel}` | **done** — `scheduler::{schedule-once, schedule-repeating, cancel}` returns guest-local handles and dispatches `on-task` on host ticks | partial — native systems can run every `GameTick`, but there is no server `TaskScheduler` with delayed/repeating handles and cancellation |
+| sync delayed/repeating tasks | **done** — `TaskScheduler::{schedule_once, schedule_repeating, cancel}` | **done** — `scheduler::{schedule-once, schedule-repeating, cancel}` returns guest-local handles and dispatches `on-task` on host ticks | **done, native** — `ServerTaskScheduler::{schedule_once, schedule_repeating, cancel}`, drained by `ServerCorePlugin` on the production primary world's `GameTick` |
 | async task + main-thread hand-back | **done** — `AsyncTaskPool::{spawn, spawn_with_handback}`; inline on wasm32 | **ceiling** — single-threaded guest by design | **gap** |
 | register a command | **done** — `CommandRegistry`/`PluginCommand`, `PluginCommandsPlugin` in `Sim::client_app`, reached from the wire through the shell's `EcsCommandSink` | partial — `send-command` invokes; nothing registers | partial — `CommandSink` seam exists; the dedicated server installs `CommandDispatch::none()`, so every plugin command is refused there |
 | tab completion / argument types | **done** — `lodestone-command` argument types, `commands::suggest` | **gap** | as above |
@@ -118,7 +118,8 @@ verdicts, intents, commands, world/entity access, drawing, and durable writes.
 The server column has real capability in exactly the rows where a hand-built registry could be
 bolted onto plain function calls — worldgen, entity spawn, crafting hooks, plugin channels, player
 registry — plus native per-tick systems in explicitly configured in-memory and persistent primary
-worlds. It still lacks the event, cancellation, scheduler, and command surfaces those systems need
+worlds, including delayed/repeating task handles and cancellation. It still lacks the event,
+event-cancellation, async hand-back, and command surfaces those systems need
 for a broadly portable server plugin.
 
 ### Events and cancellation, the hard half
@@ -206,8 +207,12 @@ same-tick callbacks run in handle order. The async half remains a ceiling for a 
 `IntegratedServer::open_in_memory_with_mobs_and_server_app`; the tick task owns the extracted
 `World` and runs the system in deterministic schedule order. Persistent embedders and the
 standalone binary use the corresponding application-injection leaf and the same primary tick path.
-This provides a safe per-tick callback without another thread, but it is not delayed/repeating task
-scheduling: no server resource issues handles, tracks deadlines, or supports cancellation.
+`ServerCorePlugin` installs `ServerTaskScheduler` and `run_server_tasks` in `TickSet::Drain`.
+Callbacks receive the tick task's own `&mut World` and an opaque cancellation handle (**omitted**:
+no second world lock is exposed). Delays exclude `ServerBoot`, zero delay/period normalize to one,
+and equal deadlines run in registration order. A callback can cancel another due callback, stop its
+own repetition, or enqueue work for a later tick. The scheduler remains a resource throughout
+dispatch. Native async hand-back remains absent; the synchronous scheduler does not create threads.
 
 ### Commands and permissions
 
@@ -473,8 +478,8 @@ plan, not a sprint.
    `BlockTickFeed`. Server, native. Medium, and independent of 1–2.
 5. **Server: player entities with a plugin-reachable inventory.** `PlayerRegistry`'s scalars plus
    `PlayerInventory` become components on a player entity. Server, native. Large.
-6. **Server: scheduler and async hand-back**, as a port of `TaskScheduler`/`AsyncTaskPool` onto the
-   server `World`. Server, native. Small once 1 and 3 land.
+6. **Server: async hand-back** onto the server `World`. Delayed/repeating synchronous callbacks and
+   cancellation already run through `ServerTaskScheduler`; worker completion delivery remains absent.
 7. **Server: plugin commands and node permissions on the dedicated server** — a `CommandSink`
    backed by a server-side `CommandRegistry` rather than the client's `World`. Server, native.
    Medium; depends on 3.

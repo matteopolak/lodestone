@@ -14,6 +14,36 @@ hooks already discovered available to everything else, instead of being reinvent
 
 ## How it works
 
+### Native tick scheduling
+
+`lodestone_server::ecs::ServerTaskScheduler` is a resource installed by `ServerCorePlugin`.
+Native plugins register callbacks during `ServerApp::bootstrap_with` or from a system's
+`ResMut<ServerTaskScheduler>`. The primary world tick task runs `run_server_tasks` in
+`TickSet::Drain` on both in-memory and persistent worlds, including the dedicated binary.
+Callbacks receive `&mut World` and their `ServerTaskId`; no shared world lock is exposed.
+
+`schedule_once(delay, callback)` fires after `max(delay, 1)` scheduler passes.
+`schedule_repeating(delay, period, callback)` subsequently fires every `max(period, 1)` passes.
+Boot does not advance this clock. A delay of 2 and period of 3 registered at startup therefore fires
+on gameplay ticks 2, 5, 8. Equal deadlines preserve registration order. Deadlines use an ordered
+queue, so a tick does not scan callbacks whose deadlines are still in the future.
+
+`cancel(id)` returns whether the handle was live. It can cancel another callback due on the same
+tick or the calling task itself, preventing its next repetition. The scheduler resource stays in
+the world while callbacks run; work registered inside a callback starts no earlier than the next
+pass. One-shot handles expire after execution. Tasks are transient and dropped with the world;
+there is no persistence, runtime plugin unloading, async worker pool, or panic isolation.
+
+```rust,ignore
+ServerApp::bootstrap_with(|app| {
+    app.world_mut().resource_mut::<ServerTaskScheduler>()
+        .schedule_repeating(2, 3, |world, id| {
+            // Read or mutate the world's plugin resources here.
+            let _ = world.resource_mut::<ServerTaskScheduler>().cancel(id);
+        });
+})
+```
+
 ### The client's doctrine, restated as five questions
 
 `docs/plugin-api.md`'s intent doctrine is five clauses. Read as questions a capability answers:
@@ -118,6 +148,13 @@ outside this session's file ownership.
 
 ## How to change it
 
+The synchronous scheduler lives in `ecs/scheduler.rs`; registration and its schedule anchor live in
+`ServerCorePlugin`. Systems sharing resources with scheduled callbacks must order themselves before
+or after `run_server_tasks` if they also occupy `TickSet::Drain`. Keep the resource installed during
+callback execution so nested scheduling and cancellation remain valid. The dedicated binary's
+`dedicated_scheduler_runs_delayed_work_on_the_persistent_primary_world` test asserts exact observed
+counts at every tick, including cancellation before a would-be third repetition.
+
 ### The recommendation
 
 **Do not build a sixth, bespoke adjudication mechanism for entity spawn/despawn (or for whatever
@@ -191,7 +228,9 @@ Nothing above requires touching `spawn_mob`/`despawn_mob`'s existing signatures 
 
 ## Configuration
 
-None. This document proposes no new crate, dependency, or runtime flag — `ServerProposal`/
+Scheduling uses integer gameplay-tick delays and periods; no environment variable or runtime flag
+is required. Delays, repeats, and handles reject `u64` overflow rather than wrapping.
+The adjudication proposal adds no crate, dependency, or runtime flag — `ServerProposal`/
 `ProposalVerdict` would live in `crate::ecs` (or a small new sibling module) in `lodestone-server`,
 the same crate every capability in the table above already lives in.
 

@@ -109,6 +109,7 @@ impl Plugin for ServerCorePlugin {
         // own clocks.
         app.init_resource::<ServerTick>();
         app.init_resource::<ServerTickWitness>();
+        app.init_resource::<super::ServerTaskScheduler>();
 
         app.init_schedule(ServerBoot);
         app.add_systems(ServerBoot, advance_server_tick);
@@ -136,6 +137,7 @@ impl Plugin for ServerCorePlugin {
         // `TickStats::tick_count`) is counting the same thing the rest of the
         // tick body will live in.
         app.add_systems(GameTick, advance_server_tick.in_set(TickSet::Simulate));
+        app.add_systems(GameTick, super::run_server_tasks.in_set(TickSet::Drain));
     }
 }
 
