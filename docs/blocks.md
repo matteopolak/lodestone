@@ -108,6 +108,13 @@ never fires against a real server.
 
 ### Outline and interaction shapes
 
+`lodestone_data::outline_shapes::{outline_boxes, interaction_boxes}` accept a validated
+`block_states::StateId` and return static box slices directly. Every valid state has both entries;
+an empty slice means no outline or no interaction-face override. Raw chunk and version-adapter
+boundaries validate with `StateId::new` before either lookup, preserving `None` or empty geometry
+for unknown input. Extend the paired census and its committed-dump tests together, keeping its
+state count equal to the block-state table; there is no configuration or external runtime lookup.
+
 Per-state outline (`getShape`, what block **selection** uses) and interaction
 (`getInteractionShape`, refines the hit *face* only, never adds a hit) shapes,
 dumped and committed the same way as collision shapes — see [Registries](./registries.md). The

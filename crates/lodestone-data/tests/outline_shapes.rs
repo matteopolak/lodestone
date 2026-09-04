@@ -423,6 +423,10 @@ fn states_named(name: &str) -> impl Iterator<Item = u32> + '_ {
     (0..block_states::STATE_COUNT).filter(move |&id| block_states::block_name(id) == Some(name))
 }
 
+fn validated(id: u32) -> block_states::StateId {
+    block_states::StateId::new(id).expect("known census state")
+}
+
 /// The strongest check: every box the shipped accessors return equals the
 /// narrowed `f32` of the exact `double` the real server produced, for both
 /// families, for all 32,366 states. Non-vacuous by construction.
@@ -437,8 +441,8 @@ fn committed_tables_match_the_committed_dump() {
     for state in 0..dump.state_count {
         let id = state as u32;
         let expected_outline: Vec<[f32; 6]> = dump.outline(state).iter().map(narrow).collect();
-        let actual_outline = outline_shapes::outline_boxes(id)
-            .unwrap_or_else(|| panic!("outline for state {id} missing"));
+        let state_id = block_states::StateId::new(id).expect("dump state exists");
+        let actual_outline = outline_shapes::outline_boxes(state_id);
         assert_eq!(
             actual_outline.len(),
             expected_outline.len(),
@@ -462,8 +466,7 @@ fn committed_tables_match_the_committed_dump() {
         }
 
         let expected_inter: Vec<[f32; 6]> = dump.interaction(state).iter().map(narrow).collect();
-        let actual_inter = outline_shapes::interaction_boxes(id)
-            .unwrap_or_else(|| panic!("interaction shape for state {id} missing"));
+        let actual_inter = outline_shapes::interaction_boxes(state_id);
         assert_eq!(
             actual_inter.len(),
             expected_inter.len(),
@@ -516,22 +519,28 @@ fn count_matches_block_state_table() {
 }
 
 #[test]
-fn ids_are_contiguous_and_out_of_range_is_none() {
+fn validated_shape_lookups_are_total() {
+    type Lookup = fn(block_states::StateId) -> &'static [lodestone_model::BlockAabb];
+    let outline: Lookup = outline_shapes::outline_boxes;
+    let interaction: Lookup = outline_shapes::interaction_boxes;
+    let air = block_states::StateId::new(block_states::air_state_id()).expect("air exists");
+    assert!(outline(air).is_empty());
+    assert!(interaction(air).is_empty());
+    let stone = validated(first_id_named("minecraft:stone"));
+    assert_eq!(outline(stone).len(), 1);
+    assert!(interaction(stone).is_empty());
+}
+
+#[test]
+fn validated_ids_cover_both_tables_and_invalid_raw_ids_stop_at_boundary() {
     let count = outline_shapes::STATE_COUNT;
     for id in 0..count {
-        assert!(
-            outline_shapes::outline_boxes(id).is_some(),
-            "outline for id {id} did not resolve"
-        );
-        assert!(
-            outline_shapes::interaction_boxes(id).is_some(),
-            "interaction shape for id {id} did not resolve"
-        );
+        let state = block_states::StateId::new(id).expect("every census id validates");
+        let _ = outline_shapes::outline_boxes(state);
+        let _ = outline_shapes::interaction_boxes(state);
     }
-    assert!(outline_shapes::outline_boxes(count).is_none());
-    assert!(outline_shapes::outline_boxes(u32::MAX).is_none());
-    assert!(outline_shapes::interaction_boxes(count).is_none());
-    assert!(outline_shapes::interaction_boxes(u32::MAX).is_none());
+    assert!(block_states::StateId::new(count).is_none());
+    assert!(block_states::StateId::new(u32::MAX).is_none());
 }
 
 /// The measured cost of storing `f32` instead of the game's `f64`: four
@@ -579,7 +588,7 @@ fn outline_differs_from_collision_for_half_of_all_states() {
     let mut empty_collision_real_outline = 0usize;
     let mut real_collision_empty_outline = 0usize;
     for id in 0..outline_shapes::STATE_COUNT {
-        let outline = outline_shapes::outline_boxes(id).expect("outline resolves");
+        let outline = outline_shapes::outline_boxes(validated(id));
         let collision = collision_shapes::collision_boxes(id).expect("collision resolves");
         let same = outline.len() == collision.len()
             && outline.iter().zip(collision).all(|(a, b)| {
@@ -641,7 +650,7 @@ fn air_and_fluids_have_an_empty_outline() {
     ] {
         for id in states_named(name) {
             assert!(
-                outline_shapes::outline_boxes(id).expect("resolves").is_empty(),
+                outline_shapes::outline_boxes(validated(id)).is_empty(),
                 "{name} (state {id}) must have an empty outline"
             );
         }
@@ -658,7 +667,7 @@ fn air_and_fluids_have_an_empty_outline() {
 fn kelp_outlines_to_nine_sixteenths_and_collides_with_nothing() {
     for id in states_named("minecraft:kelp") {
         assert_eq!(
-            only_box(outline_shapes::outline_boxes(id).expect("resolves")),
+            only_box(outline_shapes::outline_boxes(validated(id))),
             [0.0, 0.0, 0.0, 1.0, 0.5625, 1.0],
             "kelp (state {id}) outline"
         );
@@ -677,7 +686,7 @@ fn kelp_outlines_to_nine_sixteenths_and_collides_with_nothing() {
 fn seagrass_outlines_to_twelve_sixteenths_inset() {
     let id = first_id_named("minecraft:seagrass");
     assert_eq!(
-        only_box(outline_shapes::outline_boxes(id).expect("resolves")),
+        only_box(outline_shapes::outline_boxes(validated(id))),
         [0.125, 0.0, 0.125, 0.875, 0.75, 0.875],
         "seagrass outline"
     );
@@ -692,7 +701,7 @@ fn seagrass_outlines_to_twelve_sixteenths_inset() {
 fn cobweb_outlines_to_a_full_cube_and_collides_with_nothing() {
     let id = first_id_named("minecraft:cobweb");
     assert_eq!(
-        only_box(outline_shapes::outline_boxes(id).expect("resolves")),
+        only_box(outline_shapes::outline_boxes(validated(id))),
         FULL_CUBE,
         "cobweb outline"
     );
@@ -711,7 +720,7 @@ fn cobweb_outlines_to_a_full_cube_and_collides_with_nothing() {
 fn slabs_outline_to_a_half_block() {
     let mut seen: Vec<[u32; 6]> = Vec::new();
     for id in states_named("minecraft:stone_slab") {
-        let key = only_box(outline_shapes::outline_boxes(id).expect("resolves")).map(f32::to_bits);
+        let key = only_box(outline_shapes::outline_boxes(validated(id))).map(f32::to_bits);
         if !seen.contains(&key) {
             seen.push(key);
         }
@@ -729,7 +738,7 @@ fn slabs_outline_to_a_half_block() {
     for want in expected {
         assert!(
             states_named("minecraft:stone_slab")
-                .any(|id| only_box(outline_shapes::outline_boxes(id).expect("resolves")) == want),
+                .any(|id| only_box(outline_shapes::outline_boxes(validated(id))) == want),
             "no stone_slab state outlines to {want:?}"
         );
     }
@@ -749,7 +758,7 @@ fn wall_outlines_stop_at_one_while_collision_reaches_one_and_a_half() {
     let mut collision_top = 0.0f32;
     let mut empty_outlines = 0usize;
     for id in states_named("minecraft:cobblestone_wall") {
-        let outline = outline_shapes::outline_boxes(id).expect("resolves");
+        let outline = outline_shapes::outline_boxes(validated(id));
         if outline.is_empty() {
             empty_outlines += 1;
         }
@@ -778,25 +787,22 @@ fn wall_outlines_stop_at_one_while_collision_reaches_one_and_a_half() {
 fn light_blocks_outline_to_nothing_because_the_census_holds_no_item() {
     for id in states_named("minecraft:light") {
         assert!(
-            outline_shapes::outline_boxes(id).expect("resolves").is_empty(),
+            outline_shapes::outline_boxes(validated(id)).is_empty(),
             "light (state {id}) outlines to nothing without a light item in hand"
         );
     }
     // `barrier`, by contrast, really is a full cube with no context involved —
     // so "invisible" is not the discriminator, the holding-item check is.
     assert_eq!(
-        only_box(
-            outline_shapes::outline_boxes(first_id_named("minecraft:barrier")).expect("resolves")
-        ),
+        only_box(outline_shapes::outline_boxes(validated(first_id_named("minecraft:barrier")))),
         FULL_CUBE,
         "barrier outline"
     );
     // …and `structure_void` is a small centred cube, not a full one.
     assert_eq!(
-        only_box(
-            outline_shapes::outline_boxes(first_id_named("minecraft:structure_void"))
-                .expect("resolves")
-        ),
+        only_box(outline_shapes::outline_boxes(validated(first_id_named(
+            "minecraft:structure_void",
+        )))),
         [0.3125, 0.3125, 0.3125, 0.6875, 0.6875, 0.6875],
         "structure_void outline"
     );
@@ -810,10 +816,7 @@ fn light_blocks_outline_to_nothing_because_the_census_holds_no_item() {
 fn only_four_block_families_have_an_interaction_shape() {
     let mut with_shape = std::collections::BTreeSet::new();
     for id in 0..outline_shapes::STATE_COUNT {
-        if !outline_shapes::interaction_boxes(id)
-            .expect("resolves")
-            .is_empty()
-        {
+        if !outline_shapes::interaction_boxes(validated(id)).is_empty() {
             with_shape.insert(block_states::block_name(id).expect("named"));
         }
     }
@@ -838,7 +841,7 @@ fn only_four_block_families_have_an_interaction_shape() {
 fn most_states_are_not_a_full_cube() {
     let cubes = (0..outline_shapes::STATE_COUNT)
         .filter(|&id| {
-            let boxes = outline_shapes::outline_boxes(id).expect("resolves");
+            let boxes = outline_shapes::outline_boxes(validated(id));
             boxes.len() == 1 && only_box(boxes) == FULL_CUBE
         })
         .count();
@@ -856,7 +859,7 @@ fn outline_boxes_escape_the_unit_cube() {
     let mut lowest = 0.0f32;
     let mut highest = 1.0f32;
     for id in 0..outline_shapes::STATE_COUNT {
-        for b in outline_shapes::outline_boxes(id).expect("resolves") {
+        for b in outline_shapes::outline_boxes(validated(id)) {
             for axis in 0..3 {
                 lowest = lowest.min(b.min[axis]);
                 highest = highest.max(b.max[axis]);

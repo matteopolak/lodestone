@@ -1038,14 +1038,16 @@ impl VersionAdapter for V770Adapter {
         // homed in `lodestone-data`; zero-copy out of rodata. See
         // `lodestone_data::outline_shapes` for why half of all states disagree
         // with `block_collision`.
-        lodestone_data::outline_shapes::outline_boxes(state_id)
+        lodestone_data::block_states::StateId::new(state_id)
+            .map(lodestone_data::outline_shapes::outline_boxes)
     }
 
     fn block_interaction(&self, state_id: u32) -> Option<&'static [BlockAabb]> {
         // Vanilla's own block-state interaction shape — empty for all but four
         // block families, and a *face* refinement on top of the outline hit
         // rather than a clip target of its own.
-        lodestone_data::outline_shapes::interaction_boxes(state_id)
+        lodestone_data::block_states::StateId::new(state_id)
+            .map(lodestone_data::outline_shapes::interaction_boxes)
     }
 
     fn item_prototype(&self, item: &str) -> Option<ItemPrototype> {

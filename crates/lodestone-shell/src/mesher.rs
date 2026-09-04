@@ -1496,7 +1496,8 @@ impl FluidSectionView for SnapshotFluidView<'_> {
             return None;
         }
         let id = self.snapshot.at(dx, dy, dz).get_block(lx, ly, lz);
-        let boxes = lodestone_data::outline_shapes::outline_boxes(id)?;
+        let state = lodestone_data::block_states::StateId::new(id)?;
+        let boxes = lodestone_data::outline_shapes::outline_boxes(state);
         lodestone_assets::fluid::full_footprint_y_range(boxes)
     }
 
@@ -1541,9 +1542,10 @@ impl FluidSectionView for SnapshotFluidView<'_> {
         if self.models.layer(id) != lodestone_render::RenderLayer::Solid {
             return SelfOcclusion::default();
         }
-        let Some(boxes) = lodestone_data::outline_shapes::outline_boxes(id) else {
+        let Some(state) = lodestone_data::block_states::StateId::new(id) else {
             return SelfOcclusion::default();
         };
+        let boxes = lodestone_data::outline_shapes::outline_boxes(state);
         lodestone_assets::fluid::self_occlusion(boxes)
     }
 
