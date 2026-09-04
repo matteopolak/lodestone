@@ -7,6 +7,7 @@ publish = false
 
 [dependencies]
 jni = { version = "=0.22.4", features = ["invocation"] }
+lodestone-ecs = { path = "../../../../lodestone-ecs" }
 lodestone-jvm-bridge = { path = "../.." }
 
 # This is an executable experiment, not another production workspace member.

@@ -18,7 +18,7 @@ public final class BridgeLoader {
                 new URL[] {first.toURI().toURL(), new File(app).toURI().toURL()},
                 ClassLoader.getPlatformClassLoader());
         caller = Class.forName("org.example.Caller", true, loader);
-        return Class.forName("net.minecraft.world.level.Level", true, loader);
+        return Class.forName("org.example.target.World", true, loader);
     }
 
     public static String invoke(String method) throws Exception {

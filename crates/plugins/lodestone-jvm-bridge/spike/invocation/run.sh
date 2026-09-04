@@ -31,9 +31,9 @@ container run --rm \
     javac -d /work/classes \
       /repo/crates/plugins/lodestone-jvm-bridge/spike/invocation/java/org/example/InvocationPlugin.java
     javac -d /work/real \
-      /repo/crates/plugins/lodestone-jvm-bridge/spike/real/net/minecraft/world/level/Level.java
+      /repo/crates/plugins/lodestone-jvm-bridge/spike/real/org/example/target/World.java
     javac -d /work/shim \
-      /repo/crates/plugins/lodestone-jvm-bridge/spike/shim/net/minecraft/world/level/Level.java
+      /repo/crates/plugins/lodestone-jvm-bridge/spike/shim/org/example/target/World.java
     javac -cp /work/real -d /work/app \
       /repo/crates/plugins/lodestone-jvm-bridge/spike/app/org/example/Caller.java
     javac -d /work/harness \

@@ -109,8 +109,9 @@ interception; lossless item components — the second is fixable by opening `Ite
 first remains an open design question). A Rust *mechanism* exists behind roughly
 five of the fourteen (block write, mob sim, container sync, typed packet send, the tick loop),
 but in every case it is crate-internal, veto-free, and reachable by nothing outside
-`lodestone-server`. **No JNI exists anywhere in the workspace** — no `jni`/`jni-sys` crate, no
-`libjvm` link; the JVM tier starts from zero.
+`lodestone-server`. A standalone JNI invocation spike now exists under
+`crates/plugins/lodestone-jvm-bridge/spike/invocation/`; it is deliberately excluded from the
+production workspace. The production bridge still has no JVM linkage or startup path.
 
 ## The cut line: where Paper's bytecode stops and ours starts
 
@@ -270,10 +271,27 @@ Every bucket-(b) row depends on the same server capabilities. Build them in this
 5. A decision on raw packet interception. The JVM tier inherits that native boundary and adds
    nothing to it.
 
-The JVM tier adds an in-process host, bytecode-census-driven shim generation, an
+The JVM tier will add an in-process host, bytecode-census-driven shim generation, an
 interning/handle registry, event construction, class-loader interception, and a behaviour-diff
 harness against real Paper. This is strictly additive work for one payoff native plugins cannot
 provide: running *unmodified Java jars*. Deferring it does not delay any native prerequisite.
+
+### Executed mechanism slice
+
+The standalone invocation spike at
+`crates/plugins/lodestone-jvm-bridge/spike/invocation/` now exercises the smallest JNI-to-Rust
+world round trip without entering the production graph. A synthetic plugin is loaded through a
+platform-parented class loader, its native method is registered at runtime, and the callback is
+serviced through `service_with_world` while a real ECS world is borrowed for one request. The
+returned value includes a seeded world fact (`WORLD:present`); after the JVM call, the harness acquires
+the same world's write guard again. That pair is the executable proof that the callback saw the
+real world and did not leave its guard held across the foreign call.
+
+The control and failure arms remain part of the same runner: real-versus-shim class loading,
+unregistered native methods, a dropped or silent servicer, callback panic translation, opaque
+handle invalidation, and bounded nested callbacks. Run it with
+`crates/plugins/lodestone-jvm-bridge/spike/invocation/run.sh`; the ordinary production workspace
+continues to link no JVM and starts no Java runtime.
 
 ## Verdict, and the dispatchable next step
 
@@ -292,17 +310,18 @@ public patch file). Event and cancellation semantics must therefore be built nat
 the `Adjudicate`
 window, regardless of whether a JVM ever attaches.
 
-**Dispatchable now:** build the native prerequisites above. Do not decompose the compatibility
-layer until the bytecode census exists.
+**Dispatchable now:** build the native prerequisites above. The bytecode census and a standalone
+classloader/JNI/port invocation spike now exist, so the remaining work can be decomposed into
+measured mechanism slices without wiring a JVM into the production graph.
 
-**Then run the bytecode-use census:** obtain a real Paper jar for
+**The next measurement:** obtain a real Paper jar for
 the current line plus 3–5 real plugin jars (one protection, one economy, one kitchen-sink); walk
 each method's `Code` instructions for internal member operations, retain constant-pool symbols as
 separate descriptor/bootstrap context, and rank static instruction sites by count and field direction. Check
 the result against this document's seam table. First verify that Paper has a 26.2 release using
 its current runtime naming scheme; the local runtime bundle cannot establish that.
 
-**The smallest end-to-end vertical slice, when prerequisites exist:** one real, unmodified
+**The smallest production vertical slice, when prerequisites exist:** one real, unmodified
 protection-style plugin jar (compiled against the Bukkit API, *not* against our shims — evidence
 must originate outside the code under test) whose `BlockBreakEvent` listener cancels breaks
 inside a region. JVM in-process, Paper's plugin loader and event bus running Paper's own
@@ -326,7 +345,7 @@ access, no crate-private back door — the API is demonstrated sufficient by con
 Java tier is just one more plugin. If it cannot, the API is not finished, and we will have found
 that out on a subsystem we control, with Rust error messages, instead of three layers deep in a
 JNI stack trace under someone else's plugin jar. Sequence the conversion of one internal system
-into a plugin *before* the first line of JVM code; treat any privilege it turns out to need as a
+into a plugin *before* wiring production JVM code; treat any privilege it turns out to need as a
 defect in the surface, per the doctrine's own rule.
 
 ## Sources
