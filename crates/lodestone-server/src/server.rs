@@ -68,7 +68,8 @@ use lodestone_entity::item_entity::DEFAULT_MAX_STACK_SIZE;
 use lodestone_entity::{DamageFlags, ItemLifecycle};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, EntityAttributeSnapshot, GameMode, ItemStack,
-    ResourceKey, Rotation, Text, TextContent, Vec3, Vec3f, WrittenBookContent,
+    ResourceKey, ResourcePackResponseKind, Rotation, Text, TextContent, Vec3, Vec3f,
+    WrittenBookContent,
 };
 use lodestone_data::{block::Block, block_items, item::Item};
 use lodestone_net::{Connection, NetError, Transport};
@@ -2081,8 +2082,19 @@ fn encode_column<P: ServerProtocol>(
 /// exactly one connection task per feed instance. A push is broadcast-shaped
 /// in vanilla (every connection must receive it), so this is the documented
 /// limitation the other single-consumer feeds share, not a new one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourcePackResponseRecord {
+    /// Id of the resource pack this response concerns.
+    pub id: uuid::Uuid,
+    /// Outcome reported by the client.
+    pub response: ResourcePackResponseKind,
+}
+
 #[derive(Debug, Clone, Default)]
-pub struct ResourcePackPushFeed(Arc<Mutex<Vec<ResourcePackPush>>>);
+pub struct ResourcePackPushFeed(
+    Arc<Mutex<Vec<ResourcePackPush>>>,
+    Arc<Mutex<Vec<ResourcePackResponseRecord>>>,
+);
 
 impl ResourcePackPushFeed {
     /// Records one push for every consumer to learn about on their next
@@ -2098,6 +2110,26 @@ impl ResourcePackPushFeed {
     /// struct doc comment for why this is safe only for exactly one consumer.
     pub fn drain_all(&self) -> Vec<ResourcePackPush> {
         std::mem::take(&mut *self.0.lock().expect("resource pack feed lock poisoned"))
+    }
+
+    /// Records a response received from a client for host-side policy or
+    /// telemetry. Recording does not enforce acceptance or disconnect on any
+    /// particular outcome.
+    pub fn record_response(&self, response: ResourcePackResponseRecord) {
+        self.1
+            .lock()
+            .expect("resource pack response feed lock poisoned")
+            .push(response);
+    }
+
+    /// Drains responses received since the last call.
+    pub fn drain_responses(&self) -> Vec<ResourcePackResponseRecord> {
+        std::mem::take(
+            &mut *self
+                .1
+                .lock()
+                .expect("resource pack response feed lock poisoned"),
+        )
     }
 }
 
@@ -3891,6 +3923,7 @@ where
             | ServerBound::ContainerClicked { .. }
             | ServerBound::RecipePlaced { .. }
             | ServerBound::RecipeBookSettingsChanged { .. }
+            | ServerBound::ResourcePackResponse { .. }
             | ServerBound::ContainerClosed { .. }
             | ServerBound::Attack { .. }
             | ServerBound::InteractEntity { .. }
@@ -10060,6 +10093,9 @@ async fn dispatch_play_packet<T, P, S>(
     // needs to ask the world tick loop for a neighbour-update fan-out that
     // outlives this packet — see that function's own parameter comment.
     block_ticks: &BlockTickFeed,
+    // Responses to server-pushed resource packs are recorded here for the
+    // host; policy decisions remain outside the protocol loop.
+    resource_packs: &ResourcePackPushFeed,
     // This connection's composter roll source — seeded once in
     // `serve_play`, advanced once per right-click (see
     // [`apply_composter_use`]'s `roll` parameter).
@@ -10644,6 +10680,9 @@ where
             filtering,
         } => {
             inventory.set_recipe_book_settings(book_type, open, filtering);
+        }
+        ServerBound::ResourcePackResponse { id, response } => {
+            resource_packs.record_response(ResourcePackResponseRecord { id, response });
         }
         ServerBound::ContainerClosed { window_id } => {
             // Closing returns carried items and virtual crafting/workstation
@@ -12538,6 +12577,7 @@ where
                     &mut chat_session,
                     entities.players(),
                     block_ticks,
+                    resource_packs,
                     &mut composter_rng,
                     &mut bone_meal_rng,
                     &mut experience,
@@ -14899,6 +14939,7 @@ where
             &mut chat_session,
             entities.players(),
             block_ticks,
+            _resource_packs,
             &mut composter_rng,
             &mut bone_meal_rng,
             &mut experience,

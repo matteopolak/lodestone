@@ -12,7 +12,8 @@ use lodestone_core::State;
 use lodestone_model::command_tree::{CommandSuggestionsResponse, CommandTree};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
-    ItemStack, RecipeBookType, ResourceKey, Rotation, SoundCategory, Text, Vec3, Vec3f,
+    ItemStack, RecipeBookType, ResourceKey, ResourcePackResponseKind, Rotation, SoundCategory,
+    Text, Vec3, Vec3f,
 };
 use uuid::Uuid;
 
@@ -1066,6 +1067,16 @@ pub enum ServerBound {
         open: bool,
         /// Whether the tab shows only craftable recipes.
         filtering: bool,
+    },
+    /// The client reported the outcome of a server-pushed resource pack.
+    /// The connection loop records this in the shared resource-pack feed so a
+    /// host can decide what the report means without coupling the protocol
+    /// decoder to a policy such as requiring acceptance.
+    ResourcePackResponse {
+        /// Id of the resource pack this response concerns.
+        id: Uuid,
+        /// Outcome reported by the client.
+        response: ResourcePackResponseKind,
     },
     /// The client closed a container screen (`ServerboundContainerClosePacket`).
     /// `window_id` is the id the client had open — vanilla's

@@ -27,6 +27,13 @@ fully-tested function — answers auto-accept, auto-decline, or prompt.
 — vanilla will not silently drop a player over a pack they never personally
 answered.
 
+On the server side, a response is decoded into the version-free
+`ServerBound::ResourcePackResponse` value and recorded by the shared
+`ResourcePackPushFeed`. Hosts can drain `ResourcePackPushFeed::drain_responses`
+to observe the pack id and outcome. Recording is deliberately policy-neutral:
+it does not accept, reject, or disconnect a client, and malformed or unknown
+wire ordinals remain ignored rather than becoming a misleading status.
+
 ### The prompt
 
 A second, independent confirm-style overlay, reusing shared geometry helpers
