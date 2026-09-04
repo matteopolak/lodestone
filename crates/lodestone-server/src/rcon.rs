@@ -36,7 +36,7 @@
 //!   [`handle_connection`]; the packet-type constants at the top of the module
 //!   are keyed to the protocol's packet type values.
 //! * **What a command does:** the **built-in tree** in [`crate::commands`] is
-//!   consulted first, with the console identity (see [`rcon_caller`]) at
+//!   consulted first, with the console identity (`RCON_NAME` and a nil UUID) at
 //!   permission level 4; only a root it does not own falls through to the host
 //!   [`CommandDispatch`](crate::CommandDispatch) seam `crate::server`'s
 //!   `ChatCommand` arm uses. That ordering is the same one the chat arm applies,
@@ -560,17 +560,6 @@ pub(crate) fn run_command_as(
     }
 }
 
-/// The identity commands executed over RCON present to the host sink.
-///
-/// The RCON console has **no player** behind it. This crate's seam carries no
-/// permissions — the host [`CommandSink`](crate::CommandSink) resolves them
-/// from the identity — so the name marks the console before player lookup;
-/// the nil uuid cannot collide with a real player.
-#[must_use]
-fn rcon_caller() -> CommandCaller {
-    CommandCaller::new(Uuid::nil(), RCON_NAME)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,12 +599,5 @@ mod tests {
         assert!(chunks[0].is_char_boundary(chunks[0].len()));
         assert_eq!(chunks[0].chars().count(), MAX_RESPONSE_CHARS);
         assert_eq!(chunks[1].chars().count(), 1);
-    }
-
-    #[test]
-    fn the_console_caller_is_vanillas_rcon_name_with_a_nil_uuid() {
-        let caller = rcon_caller();
-        assert_eq!(caller.username, "Rcon");
-        assert_eq!(caller.uuid, Uuid::nil());
     }
 }
