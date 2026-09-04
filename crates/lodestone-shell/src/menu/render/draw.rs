@@ -24,15 +24,12 @@ use super::server_list::{SERVER_ENTRY_BAD, SERVER_ENTRY_DIM, SERVER_ENTRY_ICON, 
 /// centre, so one flat quad is the whole of it. Decoded straight out of the 26.2
 /// `client.jar`. `pub(super)` so the draw's gate can assert the box by colour.
 pub(super) const TOOLTIP_BG: [f32; 4] = [16.0 / 255.0, 0.0, 16.0 / 255.0, 240.0 / 255.0];
-/// Inset of a resource-pack row's content box from the entry's own edges (issue
-/// #415) — `AbstractSelectionList.Entry.CONTENT_PADDING` (`:436`), the same 2 px
-/// every other selection list here insets by. It is what makes a 36 px row's
-/// content box exactly 32 px tall, which is exactly
-/// `TransferableSelectionList.PackEntry.ICON_SIZE`.
+/// Inset of a resource-pack row's content box from the entry's own edges. The
+/// same 2 px inset is used by every selection list here, making a 36 px row's
+/// content box exactly 32 px tall.
 pub(super) const PACK_ROW_PAD: f32 = 2.0;
-/// `PackEntry.ICON_SIZE` — and the [`ICON`]
-/// 32 the account and server lists already draw their mosaics at, so there is one
-/// mosaic size on this pass and not three.
+/// The 32 px icon size used by the account and server lists as well, so this
+/// pass has one mosaic size rather than three.
 pub(super) const PACK_ICON: f32 = 32.0;
 /// `nameWidget.setPosition(getContentX() + 32 + 2, …)` /
 /// `descriptionWidget.setPosition(getContentX() + 32 + 2, …)` (`:214,217`) — the
@@ -492,7 +489,7 @@ pub fn build(
             }
             continue;
         }
-        // An account row (#66/#402) is the same kind of thing one screen over: a
+        // An account row is the same kind of thing one screen over: a
         // 36 px selection-list entry with a head icon and two small text columns,
         // not a button. Tested before `slot` for the same reason — it carries
         // none.
@@ -515,20 +512,15 @@ pub fn build(
             }
             continue;
         }
-        // A world-list row (the save list, #468's reading 2) is the third of the
+        // A world-list row (the save list) is the third of the
         // same kind: a 36 px selection-list entry with an icon column and three
         // text lines, not a button. Tested before `slot` for the same reason — it
         // carries none.
         //
-        // **Clipped to the band since #541, and the clip is required rather than
-        // tidy.** This comment used to say the opposite, and said why: with no
-        // scroll model `world_list_row_visible` rejected every row that was not
-        // *wholly* inside the band, so there was nothing left to cut — and it
-        // ended "if scrolling lands, the clip has to land with it — a
-        // pixel-granular offset without one paints over the footer buttons."
-        // Scrolling landed; this is that clip. At any offset that is not a
-        // multiple of 36 a row straddles the band's bottom edge, which is the
-        // normal case and not an edge one.
+        // **Clipped to the band, and the clip is required rather than tidy.**
+        // `world_list_row_visible` allows partial overlap, so at any offset that
+        // is not a multiple of 36 a row straddles the band's bottom edge. Without
+        // the clip, that normal case would paint over the footer buttons.
         //
         // The rect is the band the spec derived, not a restated one, so the clip
         // and the row placement cannot disagree.
@@ -544,27 +536,19 @@ pub fn build(
             }
             continue;
         }
-        // A tab-bar row (issues #564/#567) is tested here, before the
+        // A tab-bar row is tested here, before the
         // `row.slot.is_some()` gate below, rather than nested inside it —
-        // **that nesting was a real, pre-existing island**: a tab row never
+        // **that nesting would make the draw unreachable**: a tab row never
         // carries a `slot` (its rect comes from `row.tab`'s own dedicated
         // `row_rect` arm, not a generic `Slot`), so `row.slot.is_some()` is
-        // always `false` for one and the whole `draw_tab` call this used to
-        // gate on it was dead code from the moment it landed — every tab row
-        // silently fell through to the *un-slotted* "centred stack" path
-        // several dozen lines below and drew as a plain `draw_widget` button
-        // sized to the tab's own (correctly resolved) rect, with none of
-        // `draw_tab`'s sprite selection, underline or label-drop. That is
-        // the shape of the owner's report ("way too big... not designed the
-        // same way as vanilla") much better than a missing separator does,
-        // and it is exactly `CLAUDE.md`'s island pattern: individually
-        // correct, registered, and reaching zero of its own pixels because
-        // nothing on the only path that could reach it was true for it.
-        // Caught by `render/tests.rs`'s own point-sampled tab-mesh gates,
-        // which is what a frame-construction-only test (`stats.rs`'s/
-        // `create_world.rs`'s own `#[cfg(test)]`s) structurally cannot see —
-        // they build a `MenuFrame` and never ask `draw`/`geometry` to
-        // rasterise it.
+        // always `false` for tab rows, so the whole `draw_tab` call would be
+        // dead code — every tab row would silently fall through to the *un-slotted*
+        // "centred stack" path and draw as a plain `draw_widget` button sized
+        // to the tab's own (correctly resolved) rect, with none of `draw_tab`'s
+        // sprite selection, underline or label-drop. The point-sampled tab-mesh
+        // gates exercise this draw path;
+        // frame-construction tests only build a `MenuFrame` and cannot detect
+        // missing pixels.
         if let Some(tab) = row.tab.as_ref() {
             if let Some((x, y, w, h)) = row_rect(&frame.rows, i, width, height) {
                 let hovered = frame
@@ -656,7 +640,7 @@ pub fn build(
             continue;
         };
         let selected = i == frame.selected;
-        // A row carrying a live `EditBox` (#395) draws through the widget: it
+        // A row carrying a live `EditBox` draws through the widget: it
         // owns the caret, the selection and the horizontal scroll, none of which
         // are derivable from a `MenuRow`. Its `detail` hint still draws
         // underneath, at the same offset the pre-widget path used.
@@ -935,8 +919,8 @@ fn draw_server_entry(
     let Some(view) = row.entry.as_ref() else { return None };
     // `extractListItems` only draws the rows inside the band (`:346-352`); this is
     // that test, standing in for the scissor this pipeline has no equivalent of.
-    // `row_rect` below now performs the same check on the way to its rect
-    // (#402), so this one is a fast-out, not the only guard.
+    // `row_rect` below performs the same check on the way to its rect, so this
+    // one is a fast-out, not the only guard.
     if !server_row_visible(view.index, height, view.scroll) {
         return None;
     }
@@ -1454,9 +1438,8 @@ fn draw_account_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32,
 /// world with no icon.
 ///
 /// Every string is clipped to [`world_list_text_width`] with the same
-/// [`clip_measured`] the account row uses, which is `StringWidget.setMaxWidth`
-/// (`:418`, `:436`, `:441`) — vanilla additionally attaches a tooltip when it
-/// clips, still unported for #393's reason (nothing tracks hover dwell time).
+/// [`clip_measured`] the account row uses. Clipped text would normally need an
+/// interactive tooltip, but this renderer has no hover-dwell state.
 fn draw_world_entry(b: &mut Quads<'_>, rows: &[MenuRow], i: usize, width: f32, height: f32) {
     let Some(row) = rows.get(i) else { return };
     let Some(view) = row.world.as_ref() else {
@@ -1650,7 +1633,7 @@ fn draw_pack_entry(
     }
 }
 
-/// Draws one vanilla widget: its `widget/button*` nine-slice background, then
+/// Draws one menu widget: its `widget/button*` nine-slice background, then
 /// either its centred label or its centred 15×15 icon sprite.
 ///
 /// **This is [`widget::Widget`]'s consumer.** Nothing about which sprite or which
@@ -1658,19 +1641,14 @@ fn draw_pack_entry(
 /// from the row's own `enabled`/`selected` and then *asked*
 /// ([`Widget::background_sprite`], [`Widget::message_colour`]), so the title
 /// screen, the pause menu, the death screen and the account screen's action row
-/// share one copy of vanilla's rules instead of a three-way `if` per screen. That
-/// is the whole point of #393: the fourth screen must not write the blit a fourth
-/// time.
+/// share one copy of the widget rules instead of a three-way `if` per screen.
 ///
 /// The rect still comes from [`row_rect`] rather than from the widget, and
 /// deliberately: that function is also `app.rs`'s hit-test, so it stays the single
-/// definition of where a row is until #394 gives the layout containers somewhere
-/// to write positions *to*.
+/// definition of where a row is until the layout containers own those positions.
 ///
-/// Mirrors `AbstractButton.extractDefaultSprite` +
-/// `Button.Plain.extractContents` (vanilla's own abstract-button base,
-/// its own button type) and, for icons,
-/// `SpriteIconButton.CenteredIcon.extractContents`.
+/// The widget layer selects the background and label state; this function only
+/// emits the selected sprite or icon and centres the corresponding label.
 /// **`server_scroll_list` is gone.** It rebuilt the multiplayer list's geometry per
 /// frame for the scrollbar, and it was the by-name call that made this file's
 /// scrollbar the *multiplayer* list's rather than the active screen's. Its job now
@@ -1722,12 +1700,9 @@ fn draw_widget(
     // title screen, the pause menu, the death screen and the account screen
     // `hovered` is always `false`, because those still have a *single* row cursor
     // that both the keyboard and `MenuNav::hover` move — there is no second fact
-    // to record. #395 split the two flags on `Widget` for the screens that do have
-    // real focus (`Screen::ServerEdit`'s fields), and #397's `Screen::WorldSelect`
-    // is the first screen to carry *both* through a frame, via
-    // `MenuFrame::hovered`. Vanilla's sprite argument is `isHoveredOrFocused()`,
-    // and that `||` lives in `Widget::is_hovered_or_focused`; do not re-derive it
-    // in this function.
+    // to record. Screens with a separate pointer/focus fact carry it through
+    // `MenuFrame::hovered`. The widget's combined hover/focus predicate selects
+    // the sprite; do not re-derive it in this function.
     //
     // Built per frame, so the message is copied per frame. That is the same cost
     // the row itself already pays — `frame_for` and `pause_frame` both rebuild
@@ -2053,28 +2028,19 @@ fn draw_arrow(b: &mut Quads<'_>, arrow: Arrow, x: f32, y: f32, w: f32, h: f32, c
 ///
 /// The widget lives in [`super::nav::EditForm`] and outlives the frame;
 /// `frame_for` takes `&MenuNav`, so the row carries a *copy* and this function
-/// moves the copy into `(x, y, w, h)` before reading it. That is
-/// `OptionsSubScreen.init`'s build → reposition order (`:28-34`) rather than
-/// `PauseScreen`'s build → arrange, which is the switch #394 predicted would
-/// happen "once a widget holds state". The seeded geometry in `EditForm` is what
-/// the *input* side measures against; see [`field_row_rects`].
+/// moves the copy into `(x, y, w, h)` before reading it. The copy is positioned
+/// after construction and before its state is read. The seeded geometry in
+/// `EditForm` is what the *input* side measures against; see [`field_row_rects`].
 ///
-/// ## Two deliberate departures from the jar
+/// ## Two deliberate departures from reference rendering
 ///
-/// - **The caret and the selection used to be 14 px tall, not 11.** This
-///   bullet used to justify that against [`TEXT_SCALE`] `2.0` — but a player
-///   report (2026-08-04) caught that this function was the *only* thing on a
-///   vanilla-positioned screen still drawing at that scale, against
-///   `9`-tall vanilla glyphs in a 20 px box: a 0.70 fill
-///   ratio where every sibling widget (`draw_widget`'s buttons, at `1.0`)
-///   sits at 0.45. Fixed by [`EDIT_TEXT_SCALE`] `1.0`, so a glyph is
-///   `GLYPH_H * 1 = 7` tall — see that constant's own doc. The *horizontal*
-///   arithmetic in the widget (`edit_box::MENU_TEXT_ADVANCE`) has to move in
-///   lockstep or the caret advance disagrees with the glyphs it steps over;
-///   that half is `edit_box.rs`'s, not this function's.
-/// - **The append caret is a bar, not an `_` glyph.** `extractAppendCursor`
-///   draws the underscore character, and the
-///   jar-less fallback font here has no guaranteed `_`. Drawing a baseline bar
+/// - **The caret and selection are 11 px tall.** [`EDIT_TEXT_SCALE`] stays at
+///   `1.0`, so a glyph is `GLYPH_H * 1 = 7` px tall inside the 20 px field. The
+///   *horizontal* arithmetic in the widget (`edit_box::MENU_TEXT_ADVANCE`) has
+///   to move in lockstep or the caret advance disagrees with the glyphs it
+///   steps over; that half is `edit_box.rs`'s, not this function's.
+/// - **The append caret is a bar, not an `_` glyph.** The fallback font here has
+///   no guaranteed `_`. Drawing a baseline bar
 ///   keeps the insert/append distinction visible without depending on a glyph
 ///   that may not exist, and the distinction itself
 ///   ([`edit_box::EditBoxDraw::insert_cursor`]) is asserted in `edit_box`'s own
@@ -2564,8 +2530,9 @@ impl Quads<'_> {
             // Clipped: draw into scratch, then cut the emitted quads in NDC.
             //
             // `VanillaFont::draw` takes a concrete `ColourStream` (it is a struct,
-            // not a trait), so there is no seam to inject
-            // a clipping stream through, and `hud/` is not this change's to edit.
+            // not a trait), so there is no seam to inject a clipping stream
+            // through. Post-processing keeps the clipping logic local to this
+            // renderer.
             // Post-processing works because every glyph reaches the stream as an
             // **axis-aligned** quad — one per horizontal ink run per texel row
             // (`VanillaFont::draw_ink`) — so a bounding box over its six
