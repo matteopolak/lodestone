@@ -13,9 +13,10 @@ differential-fuzzing *harness* against a real vanilla oracle, for the class of
 bug Track A structurally cannot see — wrong behaviour that never panics (the
 motivating example: breaking a waterlogged block used to destroy the water
 too, which is not the real mechanic). Track B is a narrow slice rather than a
-finished fuzzer — one fixed action script, one compared dimension, no
-generation and no shrinking — but it does run that comparison end to end
-against a live vanilla server, and doing so found a real divergence. Its own
+finished fuzzer: fixed scripts run end to end against a live vanilla server,
+while bounded generated scripts and semantic shrinking are proven only against
+fresh in-memory oracles. Generated live runs remain deliberately unwired until
+their reset and tick-boundary semantics can be made trustworthy. Its own
 section below says exactly what is and is not there.
 
 This complements, not replaces, `crates/lodestone-fuzz`'s existing
@@ -224,12 +225,11 @@ was discovered only because a codegen change surfaced it.
 
 ### Track B: the differential-fuzzing harness (`differential.rs`)
 
-**Status: two live comparisons, no generation.** What exists:
+**Status: two fixed live comparisons, plus hermetic generation and shrinking.**
+What exists:
 
-- [`Action`]/[`ScriptStep`]/[`Script`] — a fixed, hand-written action sequence
-  type. **No generation or shrinking over the alphabet** — proving the harness
-  agrees (or disagrees, for a stated reason) on a *fixed* script comes first,
-  and that is as far as this has got.
+- [`Action`]/[`ScriptStep`]/[`Script`] — the shared action-sequence type used
+  by both hand-written live scripts and the hermetic generator.
 - [`WorldOracle`] — the trait a "side" of the comparison implements:
   `apply`/`advance_tick`/`block_state`.
 - [`run_differential`] — the actual tick-alignment mechanism: applies every
@@ -285,11 +285,49 @@ was discovered only because a codegen change surfaced it.
 - `differential::state_matches` — gives the in-process side the vanilla side's
   matching semantics, so `minecraft:water` matches `minecraft:water[level=3]`
   on both and the two sides answer in one alphabet.
+- `tests/support/differential_generation.rs` — a test-only generator and
+  shrink driver over a finite position/state alphabet supplied by the caller
+  outside the model under test. "External" describes that ownership boundary;
+  the alphabet may be a small independently justified test domain and does
+  not need a live fixture. It emits only `Action::SetBlock`: random raw
+  commands would overwhelmingly be invalid, and the in-process oracles
+  intentionally do not interpret them. Steps carry bounded tick gaps and are
+  mapped to nondecreasing absolute ticks, beginning at tick 0.
+
+  Generation uses `proptest`'s structured strategies and `ValueTree`, with a
+  fixed ChaCha seed and fixed case/shrink-attempt budgets. The driver does not
+  use an elapsed-time shrink limit. Every candidate gets a newly-created pair
+  of oracles, an oracle failure aborts the search, and a shrink is accepted
+  only when it preserves the original `(position, left state, right state)`
+  divergence class. The tick may shrink because compacting idle time is part
+  of making a reproducer useful.
+
+  Before sampling or creating an oracle, the driver checks the domain's
+  worst-case execution length, computed as `(max_steps - 1) * max_tick_gap +
+  settle_ticks + 1`. The final `1` accounts for the inclusive tick-zero
+  iteration.
+  Arithmetic overflow and horizons above 4,096 oracle ticks are explicit
+  configuration errors. Replay performs the same check against the decoded
+  script, so hostile or stale JSON cannot turn into an overflow or an
+  effectively unbounded run.
+
+  A found case serializes as versioned JSON containing the scenario name,
+  explicit minimal script, comparison region, settle ticks, seed/case
+  provenance, and observed divergence. The explicit script is the durable
+  reproducer; a seed alone can change meaning when a strategy or dependency is
+  upgraded. The hermetic control deserializes that artifact, runs its explicit
+  script against another fresh oracle pair, and requires the recorded
+  divergence to recur. Unknown format versions are rejected.
+
+  This does **not** use `arbitrary`. `Arbitrary` constructs typed values from a
+  byte stream, but its structured `shrink` method no longer exists;
+  libFuzzer's raw-input minimization is not semantic action deletion, tick
+  compaction, or state/position minimization.
 - **Two live runs, against a real vanilla 26.2 server**, both `#[ignore]`d.
   `crates/lodestone-fuzz/tests/differential_live_fluid_spread.rs` pairs
   `FluidModelOracle` with `RconOracle` over a water front spreading down a
-  closed stone channel, and found a real divergence on the first tick either
-  side ran. `differential_live_redstone_contraption.rs` pairs
+  closed stone channel and requires agreement throughout the complete spread.
+  `differential_live_redstone_contraption.rs` pairs
   `RedstoneModelOracle` with `RconOracle` over a repeater chain crossing two
   chunk seams, out to fourteen ticks, and agrees. See the two "live finding"
   sections below.
@@ -328,13 +366,13 @@ direction, where a broken rig reports agreement.
   consecutive `/tick freeze` + `/tick step 1` pairs**. The folklore is
   confirmed, not void.
 
-  So there is no exact single-tick primitive on the vanilla side, and
-  `RconOracle::advance_tick` sleeps one real tick (`differential::TICK_MILLIS`,
-  50 ms) instead. Real-time alignment measured better than expected: cell *N*
-  first read as water at **249·*N* ms** across two independent trials against
-  a 250·*N* ms prediction, i.e. good to well under a tick. A single RCON probe
-  round-trips in ~1.2 ms, so a handful of positions can be read inside one
-  tick window.
+  So there is no exact single-tick primitive on the vanilla side.
+  `RconOracle::advance_tick` polls `time query gametime` until the server's own
+  counter reaches the next nominal tick; `differential::TICK_MILLIS` supplies
+  only the poll cadence, not the verdict that a tick happened. Overshoots are
+  recorded by `missed_deadlines` rather than silently adopted. The earlier
+  direct measurement remains useful context: cell *N* first read as water at
+  **249·*N* ms** across two independent trials against a 250·*N* ms prediction.
 
   `lodestone-server` still has no `/tick` command of its own, so an
   RCON-driven comparison of *our* server would face the same constraint — one
@@ -425,30 +463,28 @@ regressing; the layout and the predictions are shared between the two files
 (`crates/lodestone-fuzz/tests/contraption/mod.rs`) so neither can drift from
 the other.
 
-### Track B's first live finding: our water front starts four ticks early
+### Track B's live fluid-cadence comparison
 
-The external expectation, measured before any of the comparison code existed:
-with a water source at one end of a closed channel, vanilla's front reaches
-cell *N* on tick 5·*N*.
+The external expectation was measured before the comparison code existed:
+with a water source at one end of a closed channel, the reference front reaches
+cell *N* on tick 5·*N*. The in-process model follows the same schedule: an edit
+seeds only positions that already hold fluid, using each fluid's own tick
+delay, and newly wetted cells schedule their later work through the normal
+fluid queue.
 
-Our model reaches cell 1 (and cell 2) after **one** elapsed tick.
-`lodestone_server::fluid::ticks_after_edit` schedules the edited position *and
-its six neighbours* at delay 1, so a neighbour runs its own fluid tick in the
-very same drain that first wrote it. That function's own doc already describes
-this as "one cell of flow starting four ticks early once"; the live comparison
-supplies the external number it is early *against*, and shows it is two cells
-rather than one.
-
-`our_fluid_model_starts_a_water_front_four_ticks_ahead_of_vanilla` pins that
-as an assertion rather than printing it, so the divergence is tracked: when
-the seeding is corrected, that test fails and says so.
+`our_fluid_model_matches_vanilla_s_water_front` compares every channel cell
+after every tick through the complete spread and requires agreement. The live
+result is accepted only when `RconOracle::missed_deadlines()` is zero, so a
+host that bursts through unobserved reference ticks cannot manufacture either
+agreement or disagreement.
 
 ### What Track B still does not do
 - **No validation against a reverted historical fix** — revert a committed fix
   in a scratch worktree and require the harness to rediscover it (flowing
-  water waterlogging a slab, a door dropping nothing, …). That needs an action
-  alphabet rich enough to reach each reverted code path, which needs
-  generation first.
+  water waterlogging a slab, a door dropping nothing, …). Each target still
+  needs a caller-owned action alphabet and independently sourced expected
+  values, plus deterministic reset/tick control before generated scripts can
+  be trusted against a live oracle.
 - **No client-state comparison.** Comparing what our own *client* believes
   about blocks/entities/inventory after replaying a packet stream (rather than
   comparing rendered pixels, which two different renderers will differ on in
@@ -504,6 +540,14 @@ the seeding is corrected, that test fails and says so.
   and the fakes in the self-check test) — `Action::RunCommand` is the escape
   hatch for anything not worth its own variant yet, and is deliberately a
   no-op on the in-process side rather than a second command parser.
+- **Extend generated scripts through their `GenerationDomain` first.** Keep
+  positions and states finite and caller-owned, order entries from simplest to
+  most specific so shrinking has a useful direction, and repeat an entry when
+  it needs more generation weight. The state list and comparison candidates
+  must be selected outside the model under test; a small independently
+  justified test domain is sufficient, while a generated report or measured
+  fixture is useful when the scenario needs one. Raw `RunCommand` remains
+  replayable but is not generated.
 - **Add another `WorldOracle`** by implementing the trait directly. Answer in
   the caller's candidate alphabet via `differential::state_matches` even when
   you have a real read primitive, or the two sides of a comparison will
@@ -527,9 +571,17 @@ the seeding is corrected, that test fails and says so.
   participates. Whichever one you use needs `pause-when-empty-seconds=0` —
   with nobody logged in, a paused world runs no scheduled block ticks and the
   comparison reports agreement on a frozen world.
-- **`differential::TICK_MILLIS`** — the real-time sleep `RconOracle::advance_tick`
-  uses per tick, currently `50` (vanilla's own tick length).
-  **`rcon-oracle` Cargo feature** on `lodestone-fuzz` — gates the
+- **`differential::TICK_MILLIS`** — the poll cadence used while
+  `RconOracle::advance_tick` waits for the server's own game-time counter,
+  currently `50` ms. The counter, not elapsed wall clock, decides whether the
+  next nominal tick exists.
+- **`SearchBudget`** in the generated-script test support — `seed`, `cases`,
+  and `shrink_attempts` are all explicit integers. Its proptest configuration
+  fixes the RNG to ChaCha, disables failure-persistence-by-seed, and sets
+  `max_shrink_time` to zero; the versioned explicit JSON case is the replay
+  artifact. `MAX_ORACLE_TICKS` caps each generated or replayed candidate at
+  4,096 oracle ticks after checked horizon arithmetic.
+- **`rcon-oracle` Cargo feature** on `lodestone-fuzz` — gates the
   `differential::rcon` module and its `lodestone-testsupport` dependency; off
   by default, unlike the four protocol-family features, because it pulls in a
   network-reaching dependency edge `cargo test --workspace` must not need
@@ -556,7 +608,8 @@ the seeding is corrected, that test fails and says so.
 - **A live vanilla 26.2 oracle under Apple `container`** — Track B's
   `#[ignore]`d live tests only. See `docs/oracles-and-benchmarks.md` and
   `scripts/live-oracles/`.
-- **`proptest`** — only via `crates/lodestone-fuzz`'s existing dependency;
-  Track A does not use it (see `docs/fuzz-harness.md` for why that harness uses
-  `proptest` rather than `cargo-fuzz`, a decision this doc's own existence
-  makes narrower than it used to be: both now coexist deliberately).
+- **`proptest`** — a dev dependency used by the existing decoder properties
+  and by Track B's hermetic structured generator/shrinker. Track A does not use
+  it. `serde` and `serde_json` are also dev-only here and encode the explicit
+  replay case; they are not pulled into the differential library or cargo-fuzz
+  targets.
