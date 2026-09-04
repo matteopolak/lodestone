@@ -524,16 +524,57 @@ impl WindowApp {
     // physical-to-logical conversion `menu_row_at_in` performs for its own
     // hit-test.
     //
-    // Click dispatch is not defined here either. Reaching one needs a caller
-    // in `app/lifecycle.rs`'s `MouseInput` handler, alongside
-    // `dispatch_book_page_click`'s own call — a dispatcher with no such
-    // caller would be unreachable from anywhere `#[cfg(test)]` does not
-    // reach, the exact shape this codebase treats as a defect. Everything a
-    // future caller needs is already on the shelf: `death_run_at`'s
-    // `.span.click`, filtered to
-    // `lodestone_model::text::ClickAction::OpenUrl` (vanilla's own
-    // restriction on this screen), dispatched through
-    // `Self::dispatch_click_action`.
+    // Click dispatch *is* a `&mut self` method — see
+    // [`Self::dispatch_death_click_under_cursor`] below. It borrow-checks
+    // where the hit-test above does not because its only caller is
+    // `app/lifecycle.rs`'s `MouseInput` handler, which holds no render
+    // borrow at all.
+
+    /// Runs the death message's own click action under the cursor, if the
+    /// run there carries one. Returns whether anything was consumed, so the
+    /// caller can fall through to the widgets beneath.
+    ///
+    /// **Only `OpenUrl` is honoured.** The death screen is reachable while
+    /// the server can still address the client, so a `run_command` there
+    /// would let a hostile message run a command the player never typed by
+    /// dressing a link as a button; vanilla restricts this screen to links
+    /// for the same reason. A run carrying any other action consumes
+    /// nothing and the click falls through, which is what leaves the
+    /// Respawn and Title Screen buttons clickable through a message that
+    /// covers them.
+    ///
+    /// Inert without a render target: a frame that has not been drawn has no
+    /// canvas to hit-test against.
+    pub(super) fn dispatch_death_click_under_cursor(&mut self) -> bool {
+        if !self.ui.is_death() {
+            return false;
+        }
+        let Some((fb_w, fb_h)) = self.target.as_ref().map(RenderTarget::size) else {
+            return false;
+        };
+        let gui_scale = self.nav.gui_scale();
+        let (w, h) = crate::menu::render::logical_canvas(gui_scale, fb_w, fb_h);
+        let scale = crate::config::calculate_gui_scale(gui_scale, fb_w, fb_h).max(1) as f32;
+        let Some(click) = self
+            .sim
+            .death_message()
+            .and_then(|message| {
+                crate::menu::render::death_run_at(
+                    message,
+                    self.cursor.0 / scale,
+                    self.cursor.1 / scale,
+                    w,
+                    h,
+                )
+            })
+            .and_then(|run| run.span.click)
+            .filter(|click| click.action == lodestone_model::text::ClickAction::OpenUrl)
+        else {
+            return false;
+        };
+        self.dispatch_click_action(&click);
+        true
+    }
 
     /// The slider track fraction for `row` at physical cursor `(x, y)`.
     ///
