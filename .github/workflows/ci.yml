@@ -510,6 +510,19 @@ jobs:
     # cache. The benches themselves run in criterion's --test mode -- one
     # iteration each -- and take seconds; the build dominates.
     timeout-minutes: 60
+    env:
+      # The root Cargo.toml carries `[profile.release] debug = 2` so `samply`
+      # can symbolize a local profiling run, and the `bench` profile inherits
+      # it. Nothing in this job symbolizes anything -- it reads counts out of a
+      # JSONL file -- so the DWARF is pure link time and disk. Turning it off
+      # changes no codegen and no measured count, unlike an opt-level or
+      # feature change, which is why it is safe to vary here and would not be
+      # safe to vary in a job that published timings.
+      CARGO_PROFILE_BENCH_DEBUG: 0
+      # Same reasoning for the dependency graph: `cargo bench` builds this job's
+      # ~200 dependency crates with the `release` profile, and that is where the
+      # DWARF volume actually is.
+      CARGO_PROFILE_RELEASE_DEBUG: 0
     steps:
       - uses: actions/checkout@v4
       # No apt step: neither lodestone-render nor lodestone-world reaches
