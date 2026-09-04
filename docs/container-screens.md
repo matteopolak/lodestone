@@ -89,11 +89,13 @@ container moves backwards into the player inventory (hotbar first) and forwards 
 table tries to load its grid before falling back to the main/hotbar hop; the player's own inventory
 screen has an eight-step order (result → craft grid → armour → auto-equip armour/offhand → main↔hotbar
 → everything else) where auto-equip must be reachable from every source slot, including the off-hand,
-or armor silently stops auto-equipping from one direction. Two menu kinds (furnace family, brewing
-stand) route shift-clicks by item kind rather than region in vanilla, and are deliberately left on the
-generic region-based order here because the data needed to replicate the real routing (recipe/fuel
-registries) doesn't exist client-side yet — a wrong guess just costs one visible flicker before the
-server's own correction lands, which is safer than inventing routing.
+or armor silently stops auto-equipping from one direction. The furnace family receives one narrow
+item-kind override: when the server's recipe-book sync declares the source item's numeric registry id
+in that screen's cooking-input property set, the shell resolves it to an identifier and prediction
+targets slot 0 only. It does not guess fuel routing: non-input items and a missing property set retain
+generic region order, while an input that cannot fit remains for server reconciliation rather than
+spilling into the fuel slot. Brewing stand routing is still generic because no equivalent complete
+input classification is available.
 
 The screen's own input protocol (press/drag/release/keyPress, `MenuInput` in `container.rs`) is a
 separate layer from the click predictor above and has its own defect class: the machine can be
@@ -221,8 +223,10 @@ does not consult.
 - **A server-initiated container close needs its own reconciliation**, separate from the screen state
   machine — closing only the menu model without a matching screen transition leaves the screen drawing
   a stale player inventory once the real window's state is gone.
-- **Furnace/brewing-stand/merchant item-kind routing, if ever added, needs registry data threaded
-  through as a `Menu`-level descriptor**, not hardcoded slot numbers — don't guess it.
+- **Furnace input routing is driven only by the live server property set.** Keep numeric-id resolution
+  at the shell boundary and carry identifiers through `PlayerCtx`; do not add a data dependency to
+  `lodestone-game` or infer fuel eligibility. Brewing-stand and merchant item-kind routing still need
+  their own authoritative inputs rather than hardcoded slot numbers.
 
 ## Configuration
 

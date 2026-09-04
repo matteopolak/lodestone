@@ -1748,6 +1748,24 @@ impl Sim {
         })
     }
 
+    /// The current member of a server-declared recipe property set.
+    ///
+    /// This is deliberately narrower than [`Self::known_recipes`]: a click
+    /// predictor needs at most one input-id list, so copying the complete
+    /// recipe-book state (unlocks, ghost, every property set and stonecutter
+    /// results) would make ordinary container interaction scale with unrelated
+    /// session data.
+    #[must_use]
+    pub fn recipe_property_set(&self, key: &lodestone_model::Identifier) -> Option<Vec<i32>> {
+        self.read(|w| {
+            w.get::<lodestone_ecs::session::SessionRecipeBook>(self.local)
+                .expect("the local player always carries SessionRecipeBook")
+                .0
+                .property_set(key)
+                .map(ToOwned::to_owned)
+        })
+    }
+
     /// Report the recipe-book panel's open/filter state for one book type —
     /// vanilla's `ServerboundRecipeBookChangeSettingsPacket`.
     ///

@@ -69,12 +69,21 @@ impl WindowApp {
         // borrow valid.
         let shared = net.shared_handle();
         let Some(handle) = shared.get() else { return };
+        let furnace_input_items = self.active_container_menu().and_then(|menu| {
+            let key = furnace_input_property_key(&menu)?;
+            self.sim
+                .recipe_property_set(&key)
+                .map(|item_ids| furnace_input_items(&item_ids))
+        });
+        let ctx = furnace_input_items.map_or_else(PlayerCtx::survival, |items| {
+            PlayerCtx::survival().with_furnace_input_items(items)
+        });
         // `Sim` has no game-mode accessor to source a real `PlayerCtx` from
         // (see the report on this change) — hardcoded survival, matching the
         // only existing production-shaped precedent
         // (`container.rs`'s own click-driving tests use `PlayerCtx::survival()`
         // /`::creative()` explicitly rather than reading one off anything).
-        let _ = handle.menu_click(click, PlayerCtx::survival());
+        let _ = handle.menu_click(click, ctx);
     }
 
     /// Resolve a click at the current cursor against the recipe-book panel and
@@ -858,6 +867,112 @@ impl WindowApp {
             .and_then(|handle| handle.game_mode());
         if let Some(action) = offhand_swap_action(game_mode) {
             net.send_action(action);
+        }
+    }
+}
+
+/// The server property-set key that belongs to this furnace-family `menu`.
+///
+/// This gate deliberately runs before the session read in
+/// [`WindowApp::send_menu_click`], so every other container click avoids even
+/// copying a property-set member.
+fn furnace_input_property_key(menu: &Menu) -> Option<lodestone_model::Identifier> {
+    let key = match menu.special_layout() {
+        Some(lodestone_game::menu::SpecialLayout::Furnace) => "minecraft:furnace_input",
+        Some(lodestone_game::menu::SpecialLayout::BlastFurnace) => {
+            "minecraft:blast_furnace_input"
+        }
+        Some(lodestone_game::menu::SpecialLayout::Smoker) => "minecraft:smoker_input",
+        _ => return None,
+    };
+    Some(key.parse().expect("the static property-set key is valid"))
+}
+
+/// Resolves a server numeric cooking-input property set into the identifier
+/// representation the version-free click predictor owns.
+///
+/// This is deliberately a shell-boundary conversion: recipe sync keeps wire
+/// registry ids, while `ItemStack` in `lodestone-game` keeps identifiers.
+/// Malformed ids are ignored rather than becoming invented item identities.
+fn furnace_input_items(item_ids: &[i32]) -> Vec<lodestone_model::Identifier> {
+    item_ids
+        .iter()
+        .filter_map(|item_id| lodestone_data::items::item_name(*item_id))
+        .filter_map(|item_name| item_name.parse().ok())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lodestone_game::{menu::SpecialLayout, recipe_sync::RecipeBookSync};
+    use lodestone_model::event::ClientEvent;
+
+    #[test]
+    fn furnace_input_property_set_resolves_numeric_ids_at_the_shell_boundary() {
+        let mut recipe_sync = RecipeBookSync::new();
+        // `crates/lodestone-data/tests/support/item_prototype_jvm.txt` records
+        // protocol item id 931 as `minecraft:raw_iron` independently of this resolver.
+        const RAW_IRON: i32 = 931;
+        recipe_sync.apply(&ClientEvent::RecipePropertySetsUpdated {
+            item_sets: vec![(("minecraft:furnace_input").parse().unwrap(), vec![RAW_IRON])],
+            stonecutter_results: Vec::new(),
+        });
+
+        let menu = Menu::furnace(SpecialLayout::Furnace);
+        let key = furnace_input_property_key(&menu)
+            .expect("a furnace must request its cooking-input property set");
+        let input_items = furnace_input_items(
+            recipe_sync
+                .property_set(&key)
+                .expect("the declared property set must be carried into click prediction"),
+        );
+
+        assert_eq!(
+            input_items,
+            vec![("minecraft:raw_iron").parse().unwrap()],
+            "the numeric property-set member resolves to the stack identifier"
+        );
+        assert!(
+            furnace_input_property_key(&Menu::generic(9)).is_none(),
+            "unrelated menus must not read recipe-book property data"
+        );
+    }
+
+    #[test]
+    fn furnace_family_uses_each_screen_specific_property_key() {
+        // The same captured item-prototype fixture fixes 931 as raw iron and
+        // 932 as iron ingot. An off-by-one registry mapping produces two
+        // different identifiers.
+        const RAW_IRON: i32 = 931;
+        const IRON_INGOT: i32 = 932;
+
+        for (layout, property_key) in [
+            (SpecialLayout::Furnace, "minecraft:furnace_input"),
+            (SpecialLayout::BlastFurnace, "minecraft:blast_furnace_input"),
+            (SpecialLayout::Smoker, "minecraft:smoker_input"),
+        ] {
+            let mut recipe_sync = RecipeBookSync::new();
+            recipe_sync.apply(&ClientEvent::RecipePropertySetsUpdated {
+                item_sets: vec![(property_key.parse().unwrap(), vec![RAW_IRON, IRON_INGOT])],
+                stonecutter_results: Vec::new(),
+            });
+
+            let key = furnace_input_property_key(&Menu::furnace(layout))
+                .expect("each furnace-family layout selects a property key");
+            assert_eq!(key, property_key.parse().unwrap());
+            assert_eq!(
+                furnace_input_items(
+                    recipe_sync
+                        .property_set(&key)
+                        .expect("the menu-specific set must be selected"),
+                ),
+                vec![
+                    ("minecraft:raw_iron").parse().unwrap(),
+                    ("minecraft:iron_ingot").parse().unwrap(),
+                ],
+                "{property_key} must reach its matching furnace-family layout"
+            );
         }
     }
 }

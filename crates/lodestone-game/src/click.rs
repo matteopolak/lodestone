@@ -27,6 +27,10 @@
 //! button number packs a 2-bit header (start/add/end) and 2-bit type; see
 //! [`quick_craft_mask`].
 
+use std::sync::Arc;
+
+use lodestone_model::Identifier;
+
 use crate::{
     item::ItemStack,
     menu::{Menu, OFFHAND_NATIVE, OUTSIDE_SLOT},
@@ -90,7 +94,7 @@ pub fn quick_craft_type(mask: i32) -> i32 {
 }
 
 /// Player state a click depends on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlayerCtx {
     /// Whether the player has infinite materials (creative): enables clone and
     /// the creative drag type.
@@ -107,6 +111,10 @@ pub struct PlayerCtx {
     /// `lodestone-shell`'s `app.rs::send_menu_click`, which hardcodes
     /// `PlayerCtx::survival()` for the same reason it hardcodes game mode).
     pub selected_hotbar_slot: usize,
+    /// The current furnace-family input property set, resolved from the
+    /// server's numeric item ids at the application boundary. `None` means the
+    /// server has not declared one, so quick-move keeps its generic behavior.
+    pub furnace_input_items: Option<Arc<[Identifier]>>,
 }
 
 impl Default for PlayerCtx {
@@ -115,6 +123,7 @@ impl Default for PlayerCtx {
             infinite_materials: false,
             can_drop: true,
             selected_hotbar_slot: 0,
+            furnace_input_items: None,
         }
     }
 }
@@ -133,7 +142,18 @@ impl PlayerCtx {
             infinite_materials: true,
             can_drop: true,
             selected_hotbar_slot: 0,
+            furnace_input_items: None,
         }
+    }
+
+    /// Attaches the server-declared furnace-family input items to this click.
+    #[must_use]
+    pub fn with_furnace_input_items(
+        mut self,
+        items: impl Into<Arc<[Identifier]>>,
+    ) -> Self {
+        self.furnace_input_items = Some(items.into());
+        self
     }
 }
 
@@ -212,7 +232,7 @@ impl Menu {
                 if slot_index == OUTSIDE_SLOT {
                     self.do_drop_cursor(action, &mut outcome);
                 } else if input == ContainerInput::QuickMove {
-                    self.do_quick_move(slot_index);
+                    self.do_quick_move(slot_index, ctx.furnace_input_items.as_deref());
                 } else {
                     self.do_pickup(slot_index, action);
                 }
@@ -254,7 +274,7 @@ impl Menu {
         }
     }
 
-    fn do_quick_move(&mut self, slot_index: i32) {
+    fn do_quick_move(&mut self, slot_index: i32, furnace_input_items: Option<&[Identifier]>) {
         let Ok(index) = usize::try_from(slot_index) else {
             return;
         };
@@ -276,7 +296,7 @@ impl Menu {
         // `ClientMenu::reconcile` folds in. Predicting more than one craft here
         // would mean matching the recipe locally — a guess overwriting the one
         // slot the server owns outright.
-        while let Some(template) = self.quick_move(index) {
+        while let Some(template) = self.quick_move_with_furnace_input_items(index, furnace_input_items) {
             match self.slot_item(index) {
                 Some(current) if ItemStack::is_same_item(current, &template) => continue,
                 _ => break,
@@ -926,14 +946,14 @@ impl Menu {
             OUTSIDE_SLOT,
             quick_craft_mask(drag_header::START, kind),
             ContainerInput::QuickCraft,
-            ctx,
+            ctx.clone(),
         );
         for &slot in slots {
             let add = self.do_click(
                 slot as i32,
                 quick_craft_mask(drag_header::ADD, kind),
                 ContainerInput::QuickCraft,
-                ctx,
+                ctx.clone(),
             );
             outcome.dropped.extend(add.dropped);
         }
