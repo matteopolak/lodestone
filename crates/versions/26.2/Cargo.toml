@@ -1,5 +1,6 @@
 [package]
 name = "lodestone-v26-2"
+autobenches = false
 version.workspace = true
 edition.workspace = true
 license.workspace = true
