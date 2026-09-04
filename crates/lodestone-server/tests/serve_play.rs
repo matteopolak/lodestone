@@ -3,17 +3,15 @@
 //! in-memory `Connection`/`Transport` path `integrated_memory.rs` already
 //! exercises for the join sequence.
 //!
-//! This uses a small stand-in [`ServerProtocol`] (own wire format, not
-//! vanilla 26.2's — the real-protocol counterpart of these same three things
-//! lives in `crates/protocol/v770/tests/server_liveness.rs`) so the
-//! assertions here are about `lodestone-server`'s own scheduling logic
+//! This uses a small stand-in [`ServerProtocol`] with its own wire format, so
+//! the assertions here are about `lodestone-server`'s own scheduling logic
 //! (`ViewTracker`, `serve_play`'s keep-alive/time-sync timers), not about
 //! wire-layout fidelity.
 //!
 //! # Controls
 //!
-//! Per `CLAUDE.md`'s evidence standard, an assertion of an absence needs a
-//! control proving the detector actually fires:
+//! An assertion of an absence needs a control proving the detector actually
+//! fires:
 //!
 //! * [`silent_client_is_disconnected_after_keep_alive_timeout`] is the
 //!   **positive** control — the keep-alive mechanism actually firing and
@@ -71,11 +69,11 @@ const FORGET_LEVEL_CHUNK_S2C: i32 = 45;
 const AIR_SUPPLY_S2C: i32 = 46;
 const SET_HEALTH_S2C: i32 = 47;
 const CHANGE_DIFFICULTY_C2S: i32 = 48;
-/// Issue #336's refusal, so the disconnect reason is readable from the client side.
+/// A refusal packet whose reason is readable from the client side.
 const DISCONNECT_S2C: i32 = 90;
 const CHANGE_DIFFICULTY_S2C: i32 = 49;
-// Issue #270's four newly-connected packets (creative-slot writes reuse
-// #266's existing `PlayerInventory`/`apply_menu_slot_change` path and so need
+// The four additional packets (creative-slot writes reuse
+// `PlayerInventory`/`apply_menu_slot_change` and so need
 // no new wire id of their own beyond the slot write itself).
 const SET_CREATIVE_MODE_SLOT_C2S: i32 = 50;
 const CLIENT_COMMAND_C2S: i32 = 51;
@@ -83,7 +81,7 @@ const CLIENT_INFORMATION_C2S: i32 = 52;
 const CHUNK_BATCH_RECEIVED_C2S: i32 = 53;
 const GAME_RULE_VALUES_S2C: i32 = 54;
 const GAME_EVENT_S2C: i32 = 55;
-/// Issue #337: this stand-in format's block-break packet (a destroy ordinal
+/// This stand-in format's block-break packet (a destroy ordinal
 /// plus x/y/z) and the server-initiated window-slot write a pickup produces.
 const BLOCK_ACTION_C2S: i32 = 56;
 const CONTAINER_SET_SLOT_S2C: i32 = 57;
@@ -98,17 +96,15 @@ const LOCAL_PLAYER_ENTITY_ID: i32 = 1;
 const REMOVE_ENTITIES_S2C: i32 = 59;
 const TAKE_ITEM_ENTITY_S2C: i32 = 60;
 /// Stand-in `set_passengers`: a VarInt vehicle id then a VarInt-prefixed
-/// VarInt array, matching the real wire shape `encode_set_passengers`'s own
-/// doc comment describes. Dismounting is this packet with an empty array.
+/// VarInt array. Dismounting is this packet with an empty array.
 const SET_PASSENGERS_S2C: i32 = 61;
 /// Stand-in post-join position sync: `f64` x/y/z then `f32` yaw/pitch.
 const PLAYER_POSITION_S2C: i32 = 62;
-/// A stand-in `change_game_mode` (one byte ordinal). Needed because
-/// `SET_CREATIVE_MODE_SLOT` is gated on creative mode server-side — vanilla's own
-/// `hasInfiniteMaterials()` check — so a test that gives itself an item has to be
-/// in creative for the write, exactly as a real client would be.
+/// A stand-in `change_game_mode` (one byte ordinal). A creative-mode slot write
+/// is accepted only while the connection is in creative mode, so the item-giving
+/// test enters that mode first.
 const CHANGE_GAME_MODE_C2S: i32 = 58;
-/// A stand-in `set_game_rule` (issue #327): one VarInt entry count, then a
+/// A stand-in `set_game_rule`: one VarInt entry count, then a
 /// key/value string pair each.
 const SET_GAME_RULE_C2S: i32 = 59;
 
@@ -118,15 +114,12 @@ const SET_GAME_RULE_C2S: i32 = 59;
 /// reads (hunger's per-block exhaustion, `crate::food`).
 const PLAYER_INPUT_C2S: i32 = 60;
 
-/// A stand-in `ping_request`: one big-endian `i64`, matching the real
-/// packet's only field. `dispatch_play_packet`'s `PingRequest` arm calls
+/// A stand-in `ping_request`: one big-endian `i64`, matching the packet's only
+/// field. `dispatch_play_packet`'s `PingRequest` arm calls
 /// `encode_pong_response`, so this exercises the dispatch-and-consumer half
-/// of that wiring — the wire-shape half is covered separately, against the
-/// real `V770ServerProtocol`, in `crates/protocol/v770/src/server_protocol.rs`'s
-/// own `play_ping_request_tests`.
+/// without requiring a full protocol implementation.
 const PING_REQUEST_C2S: i32 = 91;
-/// `ClientboundPongResponsePacket`'s stand-in — the `time` echoed back
-/// unchanged.
+/// Stand-in pong response — the `time` value is echoed back unchanged.
 const PONG_RESPONSE_S2C: i32 = 92;
 
 /// A [`ChunkSource`] that hands out an all-air column instantly — these
@@ -161,7 +154,7 @@ impl ChunkSource for AirSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). Explicit rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -210,7 +203,7 @@ impl ChunkSource for WaterSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). Explicit rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -218,7 +211,7 @@ impl ChunkSource for WaterSource {
 
 /// Stand-in protocol: the same login/configuration wire format
 /// `integrated_memory.rs` uses, plus the four new keep-alive/time/view
-/// encoders and the two new serverbound decodes this task adds.
+/// encoders and the serverbound decodes under test.
 struct FakeProtocol;
 
 impl ServerProtocol for FakeProtocol {
@@ -258,19 +251,15 @@ impl ServerProtocol for FakeProtocol {
                     // producing a multi-tick accumulated fall).
                     on_ground: true,
                     // Likewise: this stand-in format carries no angles, and
-                    // `None` is the honest lowering of that — the same value
-                    // the real `move_player_pos` arm produces. Player-facing
-                    // is gated in `tests/player_rotation.rs` against the real
-                    // v770 decoder instead.
+                    // `None` is the honest lowering of that. Player-facing
+                    // rotation has its own protocol-level coverage.
                     rotation: None,
                 }
             }
-            // Issue #268: a minimal stand-in wire format for the
-            // difficulty round trip — a single byte ordinal, matching the
-            // real protocol's semantics (0..=3) but not its VarInt framing,
-            // since this file's whole point is testing `lodestone-server`'s
-            // own scheduling/consumer logic, not wire fidelity (that lives
-            // in `crates/protocol/v770/src/server_protocol.rs`'s own tests).
+            // A minimal stand-in wire format for the difficulty round trip —
+            // a single byte ordinal with the protocol's 0..=3 semantics, but
+            // not its VarInt framing. This file tests `lodestone-server`'s
+            // scheduling and consumer logic, not wire fidelity.
             State::Play if packet_id == CHANGE_DIFFICULTY_C2S => {
                 let mut r = Reader::new(payload);
                 let difficulty = match r.u8().expect("difficulty ordinal") {
@@ -310,8 +299,8 @@ impl ServerProtocol for FakeProtocol {
                 };
                 ServerBound::ChangeGameMode { mode }
             }
-            // Issue #266/#270: minimal stand-in wire formats for the four
-            // newly-connected packets — same "test scheduling, not wire
+            // Minimal stand-in wire formats for the four
+            // additional packets — same "test scheduling, not wire
             // fidelity" rationale as `CHANGE_DIFFICULTY_C2S` above.
             State::Play if packet_id == SET_CREATIVE_MODE_SLOT_C2S => {
                 let mut r = Reader::new(payload);
@@ -343,11 +332,10 @@ impl ServerProtocol for FakeProtocol {
                     desired_chunks_per_tick: r.f32().expect("desired rate"),
                 }
             }
-            // Issue #337: a minimal stand-in for `PLAYER_ACTION`'s three
+            // A minimal stand-in for the three block-action
             // destroy ordinals — same "test the server's own consumer logic,
             // not wire fidelity" rationale as `CHANGE_DIFFICULTY_C2S`. The
-            // ordinals match vanilla's (`START_DESTROY_BLOCK` 0,
-            // `ABORT_DESTROY_BLOCK` 1, `STOP_DESTROY_BLOCK` 2) because
+            // ordinals 0, 1, and 2 represent start, abort, and stop because
             // `apply_block_action`'s behaviour is defined in terms of them.
             State::Play if packet_id == BLOCK_ACTION_C2S => {
                 let mut r = Reader::new(payload);
@@ -429,8 +417,8 @@ impl ServerProtocol for FakeProtocol {
         }
     }
 
-    /// Issue #336: the login refusal has to reach the wire for its reason to be
-    /// assertable at all. The stand-in's own id, like every other here.
+    /// The login refusal has to reach the wire for its reason to be assertable
+    /// at all. The stand-in's own id, like every other here.
     fn encode_disconnect(&self, _state: State, reason: &lodestone_model::Text) -> ServerDirective {
         let mut w = Writer::default();
         w.string(&reason.to_plain_string());
@@ -524,12 +512,12 @@ impl ServerProtocol for FakeProtocol {
         }
     }
 
-    /// Issue #270's `REQUEST_GAMERULE_VALUES` confirmation — encodes only the
+    /// The `REQUEST_GAMERULE_VALUES` confirmation — encodes only the
     /// entry count (the tests below only need to distinguish "a reply
     /// arrived, with N entries" from "no reply", not round-trip the actual
     /// key/value strings).
     fn encode_game_rule_values(&self, entries: &[(String, String)]) -> ServerDirective {
-        // Issue #327: the entries themselves, not just the count. The count alone
+        // The entries themselves, not just the count. The count alone
         // cannot tell a rule that was *validated and stored* from one echoed back
         // verbatim, which is the whole distinction the gate below tests.
         let mut w = Writer::default();
@@ -544,8 +532,8 @@ impl ServerProtocol for FakeProtocol {
         }
     }
 
-    /// Issue #324. Mirrors the real v770 wire shape (`writeByte` event +
-    /// `writeFloat` param) so the weather-drain gate can assert on actual
+    /// Mirrors the real v770 wire shape (a byte event plus a float parameter)
+    /// so the weather-drain gate can assert on actual
     /// bytes, not just on "a packet arrived".
     fn encode_game_event(&self, kind: u8, value: f32) -> ServerDirective {
         let mut w = Writer::default();
@@ -557,9 +545,9 @@ impl ServerProtocol for FakeProtocol {
         }
     }
 
-    /// Issue #337: a pickup tells the client which window-0 slot changed. This
+    /// A pickup tells the client which window-0 slot changed. This
     /// stand-in carries `(slot, present, item key, count)` — enough for the
-    /// pickup gate to assert *which* slot was announced and what landed in it,
+    /// pickup gate to assert *which* slot was announced and what was stored in it,
     /// which is the part `lodestone-server` decides. The real wire layout is
     /// `v770`'s concern.
     fn encode_container_slot(
@@ -683,8 +671,7 @@ async fn drive_login_and_join(
         .await
         .expect("finish configuration");
 
-    // The join-time full clock sync precedes chunk streaming, mirroring
-    // vanilla's own `PlayerList.sendLevelInfo`.
+    // The join-time full clock sync precedes chunk streaming.
     let (id, _payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(
         id, SET_TIME_S2C,
@@ -732,7 +719,7 @@ async fn drain_join_view<T: Transport>(
             batches.push(reported);
         }
     }
-    // The marker closing the batch the last column landed in.
+    // The marker closing the batch containing the last column.
     let (id, payload) = client.read_packet().await.expect("read").expect("packet");
     assert_eq!(id, CHUNK_BATCH_FINISHED, "the last batch must be closed");
     let reported = Reader::new(&payload).var_i32().unwrap();
@@ -749,9 +736,9 @@ async fn drain_join_view<T: Transport>(
 /// `crates/lodestone-net/src/connection.rs` already proves, and the 50ms
 /// budget is well below the 1s time-sync interval, so draining never
 /// accidentally waits long enough to pick up a periodic broadcast that was
-/// not actually due. `VITALS_TICK_INTERVAL` is *also* 50ms (matching
-/// vanilla's own per-tick cadence — see `crate::vitals`'s module docs, not
-/// duplicated here since this crate is `lodestone-server`'s *caller*), so
+/// not actually due. `VITALS_TICK_INTERVAL` is *also* 50ms (matching the
+/// per-tick cadence — see `crate::vitals`'s module docs, not duplicated here
+/// since this crate is `lodestone-server`'s *caller*), so
 /// under paused-clock auto-advance this races the timeout against the
 /// server's own next vitals tick at the same virtual instant; that race
 /// still resolves correctly for a control (dry, or at full air) because that
@@ -783,7 +770,7 @@ async fn send_player_moved(client: &mut Connection<DuplexStream>, x: f64, y: f64
         .expect("send move");
 }
 
-/// Sends one block-break phase (issue #337). `ordinal` is vanilla's destroy
+/// Sends one block-break phase. `ordinal` is the destroy
 /// ordinal — `0` start, `1` abort, `2` stop.
 async fn send_block_action(
     client: &mut Connection<DuplexStream>,
@@ -824,8 +811,8 @@ fn container_slot_writes(packets: &[(i32, Vec<u8>)]) -> Vec<(i32, String, i32)> 
 /// Sends a `SET_CREATIVE_MODE_SLOT`-equivalent write. `item` mirrors the real
 /// packet's `None` = clear-the-slot case.
 async fn send_creative_slot(client: &mut Connection<DuplexStream>, slot: i16, item: Option<&ItemStack>) {
-    // `SET_CREATIVE_MODE_SLOT` is creative-only server-side (vanilla's
-    // `hasInfiniteMaterials()`), so the write is bracketed by a switch into
+    // `SET_CREATIVE_MODE_SLOT` is creative-only server-side, so the write is
+    // bracketed by a switch into
     // creative and straight back out. Back out matters: creative also changes
     // block breaking and damage immunity, and every caller of this helper is
     // testing survival behaviour.
@@ -889,7 +876,7 @@ async fn send_game_mode(client: &mut Connection<DuplexStream>, ordinal: u8) {
 }
 
 /// Sends a `CLIENT_COMMAND`-equivalent request (`0` = respawn, `2` = request
-/// current game-rule values — the two ordinals issue #270's consumer acts on).
+/// current game-rule values — the two ordinals the consumer acts on).
 async fn send_client_command(client: &mut Connection<DuplexStream>, action: i32) {
     let mut w = Writer::default();
     w.var_i32(action);
@@ -912,8 +899,8 @@ async fn send_client_information(client: &mut Connection<DuplexStream>, view_dis
 
 /// Sends a `CHUNK_BATCH_RECEIVED`-equivalent acknowledgement — the flow-
 /// control gate every one of the recentring tests below now has to satisfy to
-/// see a *second* batch, matching vanilla's real "one batch in flight" wire
-/// contract (see `ViewTracker`/`send_view_update`'s own doc comments).
+/// see a *second* batch, matching the "one batch in flight" wire contract
+/// (see `ViewTracker`/`send_view_update`'s own doc comments).
 async fn send_chunk_batch_received(client: &mut Connection<DuplexStream>, desired_chunks_per_tick: f32) {
     let mut w = Writer::default();
     w.f32(desired_chunks_per_tick);
@@ -1092,18 +1079,15 @@ async fn time_of_day_anchors_at_join_then_broadcasts_periodically() {
     client.read_packet().await.unwrap().unwrap(); // the one CHUNK
     client.read_packet().await.unwrap().unwrap(); // CHUNK_BATCH_FINISHED
 
-    // Now in `serve_play`: collect the periodic broadcasts. **Issue #323**: each
+    // Collect the periodic broadcasts. Each
     // one reports the *world's* clock, and this server has no tick loop, so that
     // clock is zero and stays zero. Three broadcasts arrive, proving the 1-second
     // `TIME_SYNC_INTERVAL` timer fires repeatedly, and all three carry the same
     // value.
     //
-    // A *rising* value here was the bug. The old broadcast sent
-    // `ticks_since(play_start)` — wall-clock elapsed since this connection joined —
-    // with no anchor, and this test asserted exactly that, which is why every link
-    // in the chain read green while the number on the wire was not the world's
-    // time. So the assertion is inverted on purpose: if someone reintroduces an
-    // elapsed-time source, `game_time` climbs and this fails.
+    // A *rising* value would indicate that the broadcast uses connection elapsed
+    // time instead of the world's clock. The assertion is intentionally exact:
+    // an elapsed-time source would make `game_time` climb and fail here.
     for broadcast in 0..3 {
         let (id, payload) = client.read_packet().await.unwrap().unwrap();
         assert_eq!(id, SET_TIME_S2C);
@@ -1127,9 +1111,9 @@ async fn time_of_day_anchors_at_join_then_broadcasts_periodically() {
     let _ = server.await.unwrap();
 }
 
-/// View streaming is vacuous if the player never actually crosses a chunk
+/// View streaming is unobserved if the player never actually crosses a chunk
 /// boundary. This moves through three states — no change, a jump far enough
-/// that the old and new windows share nothing, then a one-column shift — and
+/// that the current and new windows share nothing, then a one-column shift — and
 /// asserts on **which** columns were sent and dropped each time, not just a
 /// count.
 #[tokio::test(start_paused = true)]
@@ -1155,7 +1139,7 @@ async fn player_moved_streams_view_across_several_chunk_boundaries() {
     let mut client = Connection::new(client_end);
     drive_login_and_join(&mut client, "Walker", 9).await;
 
-    // Issue #270's chunk-batch flow-control gate (`ServerBound::
+    // The chunk-batch flow-control gate (`ServerBound::
     // ChunkBatchAcknowledged`) now holds a *second* batch until the first is
     // acknowledged — see `chunk_batch_is_held_until_acknowledged_then_flushed`
     // below for a test of that gate itself. This test is about the view diff
@@ -1164,9 +1148,8 @@ async fn player_moved_streams_view_across_several_chunk_boundaries() {
     // the jump/shift batches below would be silently queued instead of sent.
     send_chunk_batch_received(&mut client, 10.0).await;
 
-    // Same-chunk movement: must touch nothing, matching vanilla's own guard
-    // (`ChunkMap::updateChunkTracking` only recomputes the view when the 2D
-    // chunk position actually changes).
+    // Same-chunk movement must touch nothing: the view is recomputed only when
+    // the two-dimensional chunk position actually changes.
     send_player_moved(&mut client, 1.0, 64.0, 1.0).await;
     let noop = drain_available(&mut client).await;
     assert!(
@@ -1174,7 +1157,7 @@ async fn player_moved_streams_view_across_several_chunk_boundaries() {
         "same-chunk movement must not touch the view: {noop:?}"
     );
 
-    // A jump to chunk (10, 0): far enough that the old 3x3 (centered (0,0))
+    // A jump to chunk (10, 0): far enough that the initial 3x3 (centered (0,0))
     // and new 3x3 (centered (10,0)) windows share no columns at all.
     send_player_moved(&mut client, 160.0, 64.0, 0.0).await;
     let jump = drain_available(&mut client).await;
@@ -1222,7 +1205,7 @@ async fn player_moved_streams_view_across_several_chunk_boundaries() {
 ///
 /// | ordering | first column sent |
 /// |---|---|
-/// | lexicographic (`sort_unstable`, the old behaviour) | `(4, -1)` — distance **3**, a corner behind the player |
+/// | lexicographic (`sort_unstable`) | `(4, -1)` — distance **3**, a corner behind the player |
 /// | distance-first (`join_scheduler::view_order_key`) | distance **2** |
 ///
 /// So the assertion is on the first column's distance *and* on monotonicity: the
@@ -1337,23 +1320,21 @@ async fn read_until_health_update(client: &mut Connection<DuplexStream>) -> (Vec
 }
 
 /// **Subject**: a player whose eye is submerged the whole time must lose air
-/// on the exact vanilla cadence (`crate::vitals`'s module doc comment,
-/// mirrored from `LivingEntity.baseTick`/`decreaseAirSupply`/
-/// `shouldTakeDrowningDamage`) and take the first drowning hit at exactly
+/// on the exact cadence (`crate::vitals`'s module doc comment) and take the
+/// first drowning hit at exactly
 /// tick 320 (300 ticks = 15s to empty from full, then 20 more ticks = 1s to
 /// cross the `<= -20` threshold) — not some rounder or approximated number.
 /// [`WaterSource`] fills the *entire* column, so the player is genuinely
-/// submerged throughout (the "world" species of vacuous test this guards
-/// against: a player who never actually gets wet would prove nothing).
+/// submerged throughout; a test that never exposes the drowning condition would
+/// prove nothing because a player who never gets wet cannot exercise the gate.
 ///
 /// This test spans 320 vitals ticks (16s of virtual time) to the first hit,
 /// then a further 20 ticks (1s) to the second — 340 real tick-cadence steps
 /// in total, all resolved by `tokio`'s paused-clock auto-advance in a
 /// fraction of a second of wall time, the same mechanism the keep-alive
 /// tests above already rely on for their 15s+ spans. This is deliberately
-/// **not** a short window: the "duration" species of vacuous test
-/// (`CLAUDE.md`) would pass a test that only ran a handful of ticks even if
-/// the real cadence were wrong, since nothing would yet distinguish "1 tick"
+/// **not** a short window: a test that only ran a handful of ticks would pass
+/// even if the cadence were wrong, since nothing would yet distinguish "1 tick"
 /// from "20 ticks" from "300 ticks". Spanning past two full hits is what
 /// proves the cadence repeats rather than being a one-off.
 #[tokio::test(start_paused = true)]
@@ -1371,7 +1352,7 @@ async fn submerged_player_loses_air_and_takes_drowning_damage_on_vanilla_cadence
     drive_login_and_join(&mut client, "Diver", 1).await;
 
     // **Natural regeneration off, and this is load-bearing rather than tidying.**
-    // Once hunger landed, a hurt player with a full food bar heals on the fast
+    // With hunger integration active, a hurt player with a full food bar heals on the fast
     // regeneration arm every 10 ticks — so the very next `SetHealth` after the first
     // drowning hit is a *heal*, not the second hit, and this gate's "the next health
     // update is the second hit" premise stopped holding. Turning the rule off keeps
@@ -1431,8 +1412,8 @@ async fn submerged_player_loses_air_and_takes_drowning_damage_on_vanilla_cadence
 /// **Control**: a player who is never submerged (an all-air world, matching
 /// `AirSource`) must receive **zero** air-supply or health updates, even
 /// across a window (20s) comfortably longer than the 16s the subject test
-/// above takes to reach its first drowning hit. Per `CLAUDE.md`'s evidence
-/// standard this is the control that proves the submersion test actually
+/// above takes to reach its first drowning hit. This is the control that proves
+/// the submersion test actually
 /// gates the tick — not merely that the subject test happened to show
 /// numbers going down, which alone would not rule out air draining
 /// regardless of water.
@@ -1467,11 +1448,9 @@ async fn dry_player_keeps_full_air_and_takes_no_damage() {
     let _ = server.await.unwrap();
 }
 
-/// Issue #268's actual consumer, exercised through the real scheduling loop
-/// (`dispatch_play_packet`/`apply_difficulty_change`) rather than just at the
-/// `V770ServerProtocol` decode/encode layer (which
-/// `crates/protocol/v770/src/server_protocol.rs`'s own `world_admin_tests`
-/// already pins). A `ServerBound::DifficultyChanged` sent over a real
+/// The actual consumer, exercised through the real scheduling loop
+/// (`dispatch_play_packet`/`apply_difficulty_change`) rather than only at a
+/// protocol decode/encode layer. A `ServerBound::DifficultyChanged` sent over a real
 /// connection must produce exactly one confirmation back, carrying the
 /// requested difficulty — proof `WorldAdminState` is real, connected state
 /// and not a struct nothing calls into.
@@ -1513,13 +1492,12 @@ async fn difficulty_change_is_confirmed_back_to_the_connection() {
     let _ = server.await.unwrap();
 }
 
-/// **The flow-control gate itself** (issue #270's real fix): a second chunk
+/// **The flow-control gate itself**: a second chunk
 /// batch must not be sent while the first is still unacknowledged — it is
 /// queued instead — and must flush the moment the acknowledgement arrives.
-/// Before this landing, `crate::server` started a fresh batch on every
-/// `recenter` regardless of any outstanding ack (the issue's own "never reads
-/// this reply" gap); this is the test that would fail against that old
-/// behaviour, since nothing would ever be queued at all.
+/// `recenter` must queue a fresh batch while an earlier batch is outstanding,
+/// then flush it after the acknowledgement arrives. This keeps the connection
+/// from sending overlapping batches.
 #[tokio::test(start_paused = true)]
 async fn chunk_batch_is_held_until_acknowledged_then_flushed() {
     let view_radius = 1; // 3x3 = 9 columns
@@ -1572,15 +1550,13 @@ async fn chunk_batch_is_held_until_acknowledged_then_flushed() {
     let _ = server.await.unwrap();
 }
 
-/// Issue #266's actual consumer for `SET_CREATIVE_MODE_SLOT`: a write to menu
+/// The actual consumer for `SET_CREATIVE_MODE_SLOT`: a write to menu
 /// slot 9 (main storage — native index 9 too, see
 /// `PlayerInventory::apply_menu_slot_change`'s own table) must land in the
 /// real `PlayerInventory` the connection closes with, not just decode
 /// cleanly. No confirmation packet is expected either — see
-/// `ServerBound::CreativeModeSlotSet`'s own doc comment for why (vanilla's
-/// `handleSetCreativeModeSlot` sends none either, once the shift into
-/// `AbstractContainerMenu::setRemoteSlot`/`broadcastChanges` is accounted
-/// for — the client already predicted this write locally).
+/// `ServerBound::CreativeModeSlotSet`'s own doc comment for why no response is
+/// sent: the client predicts this write locally.
 #[tokio::test(start_paused = true)]
 async fn creative_mode_slot_write_lands_in_the_real_inventory() {
     let (client_end, server_end) = memory_pair();
@@ -1612,19 +1588,12 @@ async fn creative_mode_slot_write_lands_in_the_real_inventory() {
     );
 }
 
-/// The play-state `ServerBound::PingRequest` arm added to
-/// `dispatch_play_packet`: previously this variant sat in the "unreachable
-/// here by construction" catch-all alongside `Handshake`/`LoginStart`/etc,
-/// so even after the decode arm stopped discarding it, the reply would
-/// still never have been sent. This is the dispatch-and-consumer half of
-/// that fix (`encode_pong_response` actually gets called); the wire-shape
-/// half is `crates/protocol/v770/src/server_protocol.rs`'s own
-/// `play_ping_request_tests`, against the real `V770ServerProtocol`, per
-/// `CLAUDE.md`'s note that a `FakeProtocol` test proves dispatch and
-/// consumer but never decode.
+/// The play-state `ServerBound::PingRequest` arm in
+/// `dispatch_play_packet` must call `encode_pong_response`; this is the
+/// dispatch-and-consumer half of the behavior. The stand-in wire shape is
+/// deliberately simple, so the assertion does not depend on adapter details.
 ///
-/// The time value is echoed unchanged (`ClientboundPongResponsePacket`
-/// carries the same field, un-transformed) — asserted by value, not just by
+/// The time value is echoed unchanged — asserted by value, not just by
 /// "a reply arrived", so a consumer that answered with the wrong field (or a
 /// constant) cannot pass.
 #[tokio::test(start_paused = true)]
@@ -1694,7 +1663,7 @@ async fn creative_mode_slot_write_to_the_crafting_output_is_dropped() {
     }
 }
 
-/// Issue #270's `PERFORM_RESPAWN` consumer: once a player has actually died
+/// The `PERFORM_RESPAWN` consumer: once a player has actually died
 /// (drowned to exactly `0.0` health, the same cadence
 /// `submerged_player_loses_air_and_takes_drowning_damage_on_vanilla_cadence`
 /// pins — 10 hits of 2.0 damage from 20.0, at tick 320 then every 20 ticks
@@ -1740,8 +1709,7 @@ async fn respawn_after_death_refills_health_and_air() {
 }
 
 /// **Control**: a respawn request from a player who is not dead must be a
-/// no-op, mirroring vanilla's own `getHealth() > 0.0F` early return — proof
-/// the health/air refill above is gated on death, not unconditional.
+/// no-op, proving the health/air refill is gated on death, not unconditional.
 #[tokio::test(start_paused = true)]
 async fn respawn_request_while_alive_is_a_no_op() {
     let (client_end, server_end) = memory_pair();
@@ -1771,7 +1739,7 @@ async fn respawn_request_while_alive_is_a_no_op() {
     let _ = server.await.unwrap();
 }
 
-/// Issue #270's other `client_command` ordinal: requesting current game-rule
+/// The other `client_command` ordinal: requesting current game-rule
 /// values must reply — even with zero rules ever set — proving
 /// `apply_client_command` actually calls through to
 /// `ServerProtocol::encode_game_rule_values` rather than only doing so when
@@ -1805,15 +1773,12 @@ async fn request_game_rule_values_replies_even_with_no_rules_set() {
     let _ = server.await.unwrap();
 }
 
-/// **Issue #327 end to end**: `SET_GAME_RULE` writes into the world's typed store,
+/// **The game-rule path end to end**: `SET_GAME_RULE` writes into the world's typed store,
 /// and an unknown key is *rejected* rather than stored.
 ///
-/// The camelCase name is the load-bearing half. 26.2 renamed every rule
-/// (vanilla's own game-rules registration table), so `randomTickSpeed` is not a rule any more — and the
-/// old store kept every `(String, String)` verbatim, so it was accepted, echoed
-/// back to the client, and then never read by anything, because the reader asks for
-/// `random_tick_speed`. The player saw their rule confirmed and no behaviour
-/// change, with nothing reporting a problem.
+/// The spelling is the load-bearing half: `random_tick_speed` is the accepted
+/// rule key. The test ensures the typed store validates that spelling
+/// and does not echo an unknown key back to the client.
 ///
 /// Both directions are asserted from the same connection: the reply to the valid
 /// rule carries it, and the reply to the invalid one is empty.
@@ -1865,7 +1830,7 @@ async fn a_set_game_rule_is_validated_and_a_renamed_key_is_refused() {
     let _ = server.await.unwrap();
 }
 
-/// Issue #270's `CLIENT_INFORMATION` consumer: a settings change mid-session
+/// The `CLIENT_INFORMATION` consumer: a settings change mid-session
 /// must resize the streamed view around the connection's own tracked
 /// center — shrinking forgets exactly the outer ring, and growing back
 /// (clamped at the server's own configured cap, not the client's raw
@@ -1928,11 +1893,11 @@ async fn client_information_view_distance_resizes_the_streamed_view() {
     let _ = server.await.unwrap();
 }
 
-/// **The island gate for issue #441's player feed.**
+/// **The player-feed integration gate.**
 ///
 /// Every other gate for the perception feed calls `MobSim::set_players`
 /// *itself*, so all of them would pass with no producer anywhere — which is
-/// exactly the state `nearest_player`/`temptation` were in before this: seam
+/// exactly the state `nearest_player`/`temptation` start in: seam
 /// present, feed present, nothing calling it. This test never touches
 /// `set_players`. It drives a real `PLAYER_MOVED` packet through
 /// `serve_connection` and asserts the perception arrived, so it fails if the one
@@ -2040,7 +2005,7 @@ async fn a_player_moved_packet_feeds_mob_perception_through_the_real_connection(
 }
 
 // ---------------------------------------------------------------------------
-// Issue #453: the join view must arrive nearest-first, encoded as it is
+// The join view must arrive nearest-first, encoded as it is
 // generated — not raster-order from the far corner after all of it exists.
 // ---------------------------------------------------------------------------
 
@@ -2050,19 +2015,18 @@ async fn a_player_moved_packet_feeds_mob_perception_through_the_real_connection(
 /// The count is the load-bearing half of this gate. Ordering alone is not
 /// enough: generating all 361 columns and *then* encoding them nearest-first
 /// would satisfy every ordering assertion while leaving time-to-first-chunk
-/// exactly as bad as before. So [`ProbeProto`] stamps this counter into each
+/// unchanged. So [`ProbeProto`] stamps this counter into each
 /// chunk packet, and the assertion is about **how much had been generated when
 /// the player's own column reached the wire**.
 ///
 /// # Why there is a floor, and why that is not a convenience
 ///
-/// This served bare air until issue #329 gave `serve_connection` a real world
-/// spawn *search* ahead of the ring loop. Against an air column
-/// `get_level_respawn_pos` finds no solid block anywhere, so every one of the
-/// spiral's 121 candidates is invalid and the search walks the whole ±5-chunk box
+/// A bare-air source exercises an invalid-origin path: the spawn *search*
+/// finds no solid block anywhere, so every one of the spiral's 121 candidates is
+/// invalid and the search walks the whole ±5-chunk box
 /// before a single chunk is encoded — measured at **123** columns before the first
 /// encode (1 fallback query + 121 spiral + ring 0), which reads exactly like the
-/// pre-#453 "generate everything first" defect and is not it.
+/// "generate everything first" ordering, which is not the join path under test.
 ///
 /// So the air fixture was a *world*-species vacuity in the making: it exercised
 /// the pathological invalid-origin path, not the one a joining player takes. A
@@ -2114,13 +2078,13 @@ impl ChunkSource for CountingAirSource {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). Explicit rather than inherited.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
 }
 
-/// [`FakeProtocol`] with one method changed: `encode_chunk` appends the
+/// [`FakeProtocol`] with `encode_chunk` appending the
 /// generation counter's current value to the packet, so the test can read
 /// "columns generated by the time this chunk was encoded" straight off the wire
 /// rather than inferring it.
@@ -2205,22 +2169,21 @@ fn chebyshev(cx: i32, cz: i32) -> i32 {
 /// `(cx, cz, columns_generated_when_encoded)` for [`check_proximity_stream`], and
 /// `batch_sizes` is what each `CHUNK_BATCH_FINISHED` marker *reported*.
 ///
-/// # Why this replaced a positional read
+/// # Why this reads until the complete view is present
 ///
-/// The join no longer finishes before the play loop starts: the innermost rings go
-/// out inline and the rest streams from `serve_play` beside everything else it
-/// sends, in batches of `JOIN_STREAM_BATCH_COLUMNS`. So the two things the old
-/// loop assumed — that chunk packets are contiguous, and that one begin/end pair
-/// wraps the lot — are gone *by design*, and a gate asserting them would be
-/// asserting the absence of the fix.
+/// The innermost rings go out inline and the rest streams from `serve_play` beside
+/// everything else it
+/// sends, in batches of `JOIN_STREAM_BATCH_COLUMNS`. So the two things a
+/// positional read could assume — contiguous chunk packets and one begin/end pair
+/// around the whole view — do not hold for this streaming protocol.
 ///
 /// What still has to hold is asserted here rather than dropped:
 ///
 /// * every chunk arrives **inside** an open batch (a stray chunk outside a
 ///   begin/end pair would break a real client's flow-control accounting);
 /// * each marker's reported size equals the columns actually inside that batch;
-/// * the chunk *order* is untouched, which the caller checks with the same
-///   [`check_proximity_stream`] the pre-fix control is judged by.
+/// * the chunk *order* is preserved, which the caller checks with the same
+///   [`check_proximity_stream`] used by the ordering control.
 async fn collect_join_chunks<T: Transport>(
     client: &mut Connection<T>,
     expected: usize,
@@ -2274,16 +2237,15 @@ async fn collect_join_chunks<T: Transport>(
 }
 
 /// The detector, factored out so the **same** code judges the real join and the
-/// synthesised pre-fix sequence below.
+/// synthesised incorrect sequence below.
 ///
 /// `observed` is `(cx, cz, columns_generated_when_this_was_encoded)` in wire
 /// order. Returns the first violation as an `Err`, so a failure names *which*
 /// entry broke *which* rule rather than reporting a bare fraction.
 ///
-/// Three rules, each aimed at one of issue #453's three compounding orderings:
+/// Three rules, each aimed at one of the three compounding orderings:
 ///
-/// 1. the player's own column `(0, 0)` is encoded **first** — it used to be item
-///    ~180 of 361;
+/// 1. the player's own column `(0, 0)` is encoded **first**;
 /// 2. Chebyshev distance from the centre never decreases — terrain grows
 ///    outward from the player instead of inward from a corner;
 /// 3. the first chunk was encoded after **at most two columns** of
@@ -2293,21 +2255,21 @@ async fn collect_join_chunks<T: Transport>(
 ///
 /// | column | why |
 /// |---|---|
-/// | 1 | the world spawn search (#329/#461) resolves the origin column's surface before the batch opens, and reuses that one column for the spiral's `(0, 0)` candidate — `world_spawn::a_valid_origin_column_is_generated_exactly_once` |
+/// | 1 | the world spawn search resolves the origin column's surface before the batch opens, and reuses that one column for the spiral's `(0, 0)` candidate — `world_spawn::a_valid_origin_column_is_generated_exactly_once` |
 /// | 2 | ring 0 asks the source for the same column again; the fixture has no `ChunkStore`, so it is a second generation |
 ///
 /// So 2 is the player's own column plus one infra query, not the full view, and
 /// the wrong hypothesis is 361.
 ///
-/// Two ways this bound has been wrong, both worth keeping because both fail in the
+/// Two near-miss sequences are worth keeping because both fail in the
 /// *safe*-looking direction — a number just over the bound reads as a mild
-/// ordering regression:
+/// ordering violation:
 ///
-/// * before the origin-column reuse landed, the search generated `(0, 0)` twice,
-///   making the honest figure 3 and this bound unreachable;
+/// * generating `(0, 0)` twice makes the honest figure 3 and this bound
+///   unreachable;
 /// * with an all-air fixture the search finds no valid spawn anywhere and walks
 ///   all 121 spiral candidates first, for a figure of **123** — which looks like
-///   issue #453 undone and is not. [`CountingAirSource`] has a floor for exactly
+///   full-view ordering and is not. [`CountingAirSource`] has a floor for exactly
 ///   that reason.
 fn check_proximity_stream(observed: &[(i32, i32, usize)], view_radius: i32) -> Result<(), String> {
     let expected_total = ((2 * view_radius + 1) * (2 * view_radius + 1)) as usize;
@@ -2350,7 +2312,7 @@ fn check_proximity_stream(observed: &[(i32, i32, usize)], view_radius: i32) -> R
     Ok(())
 }
 
-/// **Issue #453's gate.** A real join must stream the view outward from the
+/// **The join-ordering gate.** A real join must stream the view outward from the
 /// player's own column, encoding each ring as it is generated.
 ///
 /// `view_radius = 9` deliberately — the shell's own singleplayer value, so this
@@ -2431,16 +2393,14 @@ async fn join_streams_the_view_outward_from_the_players_own_column() {
 
 /// **The control, and it must fail the assertion above.**
 ///
-/// This synthesises the sequence the *pre-fix* code produced — raster order from
+/// This synthesises the incorrect sequence — raster order from
 /// `(-view_radius, -view_radius)`, with the whole view already generated before
 /// the first encode — and requires [`check_proximity_stream`] to reject it.
 ///
 /// It is written out as a literal `cz`-outer/`cx`-inner walk rather than
-/// described, because that walk *was* the defect: `serve_connection` built
-/// exactly this `Vec`, awaited one `generate` over all of it, and only then
-/// began encoding. A detector that passes this is measuring nothing, and the
-/// specific violations it must catch are named below so a future change that
-/// weakens one rule cannot quietly go green on the others.
+/// described, because that walk generates the full `Vec`, waits for every column,
+/// and only then begins encoding. A detector that passes this is measuring
+/// nothing, so each specific violation is checked independently below.
 #[test]
 fn control_the_old_raster_order_fails_the_proximity_assertion() {
     let view_radius = 9;
@@ -2468,7 +2428,7 @@ fn control_the_old_raster_order_fails_the_proximity_assertion() {
     );
 
     // The distance rule must fire independently of the first-column rule, so a
-    // future relaxation of one cannot silently disarm the other. Rotate the
+    // Relaxing one rule cannot silently disarm the other. Rotate the
     // raster walk so it *starts* at (0, 0) and check it is still rejected.
     let centre = raster
         .iter()
@@ -2501,9 +2461,8 @@ fn control_the_old_raster_order_fails_the_proximity_assertion() {
 /// **branches on that**: `Borrowed` awaits one `generate_columns_parallel` per ring,
 /// while `Shared` spawns each of the ring's columns into the blocking pool
 /// individually and awaits the handles in ring order. Two different loop bodies,
-/// one of them untested — the `world` species of vacuous test (`DESIGN.md` §12.43),
-/// where the source is exemplary and the flaw is which implementation the test's
-/// transport resolves to.
+/// one of them untested: a source can be correct while the test exercises the
+/// other transport-resolution branch.
 ///
 /// `serve_connection_shared` is `pub(crate)` and deliberately not re-exported, so
 /// this reaches the arm the way the shell does: through the public
@@ -2518,7 +2477,7 @@ fn control_the_old_raster_order_fails_the_proximity_assertion() {
 /// presence, which `chunk_store.rs` already owns.
 ///
 /// `bind` also spawns `run_tick_loop` over a 5×5 tick area, which would inflate the
-/// counter — except that issue #481 defers its first random-tick pass for 40 ticks
+/// counter — except that the first random-tick pass is deferred for 40 ticks
 /// (2.0 s), and a 361-column air view served from a store completes long before
 /// that. Rule 3 reads only `observed[0]`, so even a slow run cannot be corrupted by
 /// tick-loop generation that happens after the first encode.
@@ -2589,13 +2548,12 @@ async fn the_shared_arm_streams_the_view_outward_too() {
     server.shutdown().await;
 }
 
-/// **The owner's report, as a counter: "I can't break blocks, take damage, etc.
-/// until it finishes."**
+/// **The join responsiveness gate.** A play packet must be serviced while the
+/// join view is still streaming, so interaction does not wait for the full burst.
 ///
 /// A play packet sent the instant the client finishes configuration must be
-/// *serviced* — replied to — while the join view is still streaming. Measured on
-/// the production arm (`SourceRef::Shared`, over a real loopback socket) because
-/// the arm is the thing that changed.
+/// *serviced* — replied to — while the join view is still streaming. This uses
+/// the production arm (`SourceRef::Shared`, over a real loopback socket).
 ///
 /// # Why a counter and not a stopwatch
 ///
@@ -2607,8 +2565,8 @@ async fn the_shared_arm_streams_the_view_outward_too() {
 ///
 /// | hypothesis | count |
 /// |---|---|
-/// | the join burst blocks the play loop (the defect) | **361** — the reply cannot precede the last chunk, because the loop that produces it has not started |
-/// | the burst is deferred past `JOIN_PRESTREAM_RADIUS` (the fix) | **12–24**, measured over three runs — the nine pre-streamed columns plus however many of the deferred stream `select!` emitted before it happened to poll the socket read first |
+/// | the join burst blocks the play loop | **361** — the reply cannot precede the last chunk, because the loop that produces it has not started |
+/// | the burst is deferred past `JOIN_PRESTREAM_RADIUS` | **12–24**, measured over three runs — the nine pre-streamed columns plus however many of the deferred stream `select!` emitted before it happened to poll the socket read first |
 ///
 /// The bound is 40 — comfortably above the second and nowhere near the first, so
 /// it cannot be satisfied by a scheduler that merely reordered the burst. It is a
@@ -2617,7 +2575,7 @@ async fn the_shared_arm_streams_the_view_outward_too() {
 /// either starving the other; the floor of 9 is the deterministic part. And the
 /// view still has to arrive **whole and in order** afterwards, which the tail of
 /// this test asserts with the same [`check_proximity_stream`] the two ordering
-/// gates use: a "fix" that dropped the rest of the view would otherwise pass.
+/// gates use: dropping the rest of the view would otherwise pass.
 #[tokio::test]
 async fn a_play_packet_is_serviced_before_the_last_join_chunk() {
     let view_radius = 9;
@@ -2713,18 +2671,14 @@ async fn a_play_packet_is_serviced_before_the_last_join_chunk() {
     server.shutdown().await;
 }
 
-/// **The same instrument, pointed at a *move* instead of a join — the half the
-/// join fix did not cover.**
+/// **The same instrument, pointed at a *move* instead of a join.**
 ///
-/// [`a_play_packet_is_serviced_before_the_last_join_chunk`] above proves the join
-/// burst no longer stands in front of the play loop. It says nothing about the
-/// steady state, and the steady state had the identical defect for a different
-/// reason: `ViewTracker::recenter` used to `await` the generation *and* encode of
-/// every newly-visible column inside `dispatch_play_packet`, so one movement packet
-/// occupied the connection task for the whole strip. **That is a `world`-species
-/// blind spot in the join gate rather than a missing assertion in it** — the gate is
-/// exemplary and simply cannot reach a code path that only runs after the join has
-/// drained.
+/// [`a_play_packet_is_serviced_before_the_last_join_chunk`] covers the join burst.
+/// Steady-state recentering has the same scheduling requirement: generating and
+/// encoding every newly-visible column inline would occupy the connection task for
+/// the whole strip. **That is a `world`-species blind spot in the join gate rather
+/// than a missing assertion in it** — a join-only gate cannot reach the recenter
+/// path.
 ///
 /// # The counter, and why this jump
 ///
@@ -2734,8 +2688,8 @@ async fn a_play_packet_is_serviced_before_the_last_join_chunk() {
 ///
 /// | hypothesis | chunks of the strip that precede the reply |
 /// |---|---|
-/// | the move generates the strip inline (the defect) | **361** — the loop cannot read the next packet until the last column is encoded |
-/// | the strip is enqueued and streamed (the fix) | a handful — the socket read and the column stream interleave |
+/// | the move generates the strip inline | **361** — the loop cannot read the next packet until the last column is encoded |
+/// | the strip is enqueued and streamed | a handful — the socket read and the column stream interleave |
 ///
 /// The bound is 40, matching the join gate's, and it is nowhere near 361. A
 /// one-axis step would not do: its added set is 19 columns, close enough to the
@@ -2743,8 +2697,8 @@ async fn a_play_packet_is_serviced_before_the_last_join_chunk() {
 ///
 /// Ordering is `select!`'s random choice between a ready column and a ready packet,
 /// which is the property that stops either starving the other — so this asserts a
-/// *bound*, and separately asserts the strip still arrives whole, because a "fix"
-/// that dropped the newly-visible columns would otherwise sail through.
+/// *bound*, and separately asserts the strip still arrives whole, because dropped
+/// newly-visible columns would otherwise sail through.
 #[tokio::test]
 async fn a_play_packet_is_serviced_before_the_last_chunk_of_a_move() {
     let view_radius = 9;
@@ -2864,7 +2818,7 @@ async fn a_play_packet_is_serviced_before_the_last_chunk_of_a_move() {
     server.shutdown().await;
 }
 
-/// Issue #324 / `docs/plans/world-state.md` W1, gate (c)'s serve half:
+/// `docs/plans/world-state.md` W1, gate (c)'s serve half:
 /// `serve_play`'s `container_sync_tick` arm must actually drain the
 /// [`WeatherFeed`] and turn each transition into an `encode_game_event`
 /// broadcast — the piece with no inbound packet driving it, exactly like the
@@ -2937,9 +2891,9 @@ async fn weather_feed_transitions_reach_the_client_as_game_event_bytes() {
 /// A [`ChunkSource`] that records every coordinate it is asked to generate.
 ///
 /// Exists for [`generation_is_anchored_at_the_player_not_at_the_origin`]: the
-/// owner's own hypothesis for the walk-away-from-spawn slowdown was that the
-/// server enumerates from `(0, 0)` outward rather than from the player, so
-/// walking further makes each recenter do more work. That is a claim about
+/// comparison is between enumerating from `(0, 0)` outward and enumerating from
+/// the player, which would make each recenter do more work as the player moves.
+/// That is a claim about
 /// *which coordinates are generated*, and nothing that counts columns can answer
 /// it — only something that records the coordinates themselves.
 struct RecordingSource {
@@ -2972,15 +2926,15 @@ impl ChunkSource for RecordingSource {
     }
 
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
-        // No storage; edits are discarded by design (issue #440: explicit).
+        // No storage; edits are discarded by design.
     }
 }
 
 /// **Generation is anchored at the player, not at `(0, 0)`** — instrumented on
 /// the real `serve_connection` path at a coordinate 80,000 blocks from spawn.
 ///
-/// This is the direct falsification of the owner's hypothesis for the
-/// "exponentially slower as I walk away from spawn" report.
+/// This distinguishes player-anchored generation from origin-anchored
+/// generation at a coordinate 80,000 blocks from spawn.
 /// [`player_moved_streams_view_across_several_chunk_boundaries`] already gates
 /// the exact-diff shape, but it does so at chunk 10–11 (160 blocks), which is
 /// close enough to the origin that an origin-anchored enumeration and a
@@ -2997,7 +2951,7 @@ impl ChunkSource for RecordingSource {
 ///   the whole rectangle between the origin and the player would satisfy the
 ///   first half for its final columns while doing 5,000× the work.
 ///
-/// The count half is the one that matters, and it is a magnitude assertion, not
+/// The count half is a magnitude assertion, not
 /// a direction: the expected value is derived from the view radius (`(2r+1)²`)
 /// rather than read off a measurement.
 #[tokio::test]
@@ -3031,7 +2985,8 @@ async fn generation_is_anchored_at_the_player_not_at_the_origin() {
     // the far recenter's own coordinate set is read in isolation.
     seen.lock().expect("recording lock").clear();
 
-    // Chunk (5000, 0) — 80,000 blocks out, the scale the owner's report is about.
+    // Chunk (5000, 0) — 80,000 blocks from the origin, where the two strategies
+    // have sharply different generation costs.
     const FAR_CHUNK: i32 = 5000;
     send_player_moved(&mut client, f64::from(FAR_CHUNK) * 16.0, 64.0, 0.0).await;
     let far = drain_available(&mut client).await;
@@ -3084,9 +3039,9 @@ async fn generation_is_anchored_at_the_player_not_at_the_origin() {
 
 /// A [`ChunkSource`] of solid `minecraft:stone` — the block-drop tests' subject
 /// world, chosen because `assets/loot_table/blocks/stone.json` is one of the five
-/// bundled block tables and its `alternatives`/`match_tool` shape is the
-/// non-trivial one (a bare hand must fall through the silk-touch branch to
-/// cobblestone, so a fixture of stone proves the fall-through actually happens
+/// bundled block tables and its alternative-entry shape is the non-trivial one
+/// (a bare hand must fall through the tool-specific branch to cobblestone, so a
+/// fixture of stone proves the fall-through actually happens
 /// rather than that "an item dropped").
 struct StoneSource;
 
@@ -3143,16 +3098,13 @@ const BARE_HANDED_DIG: std::time::Duration = std::time::Duration::from_millis(80
 /// Puts a plain diamond pickaxe in the selected hand, breaks `pos`, and then
 /// **empties the hand again**.
 ///
-/// The pickaxe is required since issue #539: stone `requiresCorrectToolForDrops`,
-/// so `Player.hasCorrectToolForDrops` is false bare-handed and vanilla never
-/// rolls the table at all (asserted by
+/// The pickaxe is required because stone requires the correct tool for drops,
+/// so a bare hand produces no drop (asserted by
 /// `bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops`). It is
-/// deliberately *unenchanted*, so the silk-touch `match_tool` branch of stone's
-/// `alternatives` still fails and the expected drop is `cobblestone` exactly as
-/// before.
+/// deliberately *unenchanted*, so the expected drop is `cobblestone`.
 ///
-/// Emptying the hand afterwards is not tidiness: `Inventory.add` searches
-/// selected → off-hand → `0..36` and `getFreeSlot` scans `items` in order, so a
+/// Emptying the hand afterwards is not tidiness: inventory insertion searches
+/// selected → off-hand → `0..36` and scans the item slots in order, so a
 /// pickaxe left in native slot 0 would send the collected cobblestone to native
 /// slot 1 (menu slot 10) and change *which slot the pickup announces*. Clearing
 /// it keeps the pickup gates asserting menu slot 36, the property they exist to
@@ -3172,11 +3124,10 @@ async fn break_with_a_pickaxe(client: &mut Connection<DuplexStream>, ordinal: u8
     send_creative_slot(client, 36, None).await;
 }
 
-/// **Issue #337's acceptance gate, first half: a broken block drops.**
+/// **The first block-drop gate: a broken block drops.**
 ///
-/// Before this, `apply_block_action`'s `StopDestroy` arm set the block to air and
-/// nothing else — `crate::loot`'s 1,551 lines had zero production callers, which
-/// is why #337 was reopened as a confirmed island. This drives the *real*
+/// `apply_block_action`'s `StopDestroy` arm must set the block to air and emit
+/// exactly one drop. This must drive the *real*
 /// `serve_connection` path (not `drop_block_loot` directly, which would pass
 /// whether or not the server ever called it) and asserts the exact drop.
 ///
@@ -3189,13 +3140,9 @@ async fn break_with_a_pickaxe(client: &mut Connection<DuplexStream>, ordinal: u8
 ///    through its silk-touch `alternatives` branch under the empty loot context.
 ///    A port that took the *first* alternative would produce `minecraft:stone`
 ///    here, and "a stone-ish item dropped" reads as success;
-/// 3. the entity streams with entity type **`minecraft:item`**. This is the
-///    regression guard for a real shipped bug: `MobSim::snapshots` used to set
-///    `entity_type` to the *item's* key, so a dropped `minecraft:cobblestone`
-///    streamed as entity type `minecraft:cobblestone` — which is not in the
-///    entity-type registry, and `v770`'s `entity_type_id(name).unwrap_or(0)`
-///    resolves a miss to network id `0`, `minecraft:acacia_boat`. Every wire on
-///    that path read green while the value travelling it was a boat.
+/// 3. the entity streams with entity type **`minecraft:item`**. The item key is
+///    metadata, not the entity type; checking both fields prevents a correctly
+///    positioned but unrenderable entity from passing this gate.
 #[tokio::test(start_paused = true)]
 async fn breaking_stone_drops_exactly_one_cobblestone_item_entity() {
     let (client_end, server_end) = memory_pair();
@@ -3243,11 +3190,11 @@ async fn breaking_stone_drops_exactly_one_cobblestone_item_entity() {
         "a dropped item is entity type `minecraft:item`; the item's own key here \
          means `entity_type_id` misses and the client draws `minecraft:acacia_boat`"
     );
-    // Issue #537: and the *stack* travels as metadata, which is what decides
+    // The *stack* travels as metadata, which is what decides
     // whether the drop draws at all. `entity_type` alone gets a correctly
     // positioned, correctly typed, completely **invisible** item entity onto
-    // the client — vanilla's `ItemEntityRenderer.submit` returns early on
-    // `state.item.isEmpty()` and this project's client does the same. Asserted
+    // the client — an item entity with the wrong type cannot be rendered.
+    // The exact metadata list is asserted
     // as the exact field list, not `!is_empty()`: a `MetadataField::Item`
     // carrying the wrong key (`minecraft:stone`, had the silk-touch branch
     // won) or the wrong count would satisfy a non-emptiness check.
@@ -3266,23 +3213,15 @@ async fn breaking_stone_drops_exactly_one_cobblestone_item_entity() {
 
 /// **The wire assertion every other drop gate in this file omits.**
 ///
-/// Every drop/pickup test above (and `a_dropped_item_is_collected_into_the_hotbar_and_announced`
-/// and friends below) passes `entities: &NoEntities` — this file's own
-/// `encode_add_entity` doc comment names that directly: "inert for every other
-/// test in this file... `stream_pass` produces nothing and these are never
-/// called." So the whole corpus proves a break rolls the right loot into the
-/// right `MobSim`, and proves pickup/inventory side effects, but **none of it
-/// proves a connected client is ever told the drop exists.** That is exactly
-/// the browser's own production gap: `IntegratedServer::open_in_memory` (the
-/// `wasm32` singleplayer entry — see `crates/lodestone-shell/src/net.rs`'s
-/// `#[cfg(target_arch = "wasm32")]` arm) passes `NoEntities` too, so a block
-/// break there rolls loot, spawns a real item entity into a real `MobHandle`,
-/// and never once reaches the wire — zero pixels, no error anywhere.
+/// Every other drop/pickup test passes `entities: &NoEntities`, so those tests
+/// verify loot, inventory, and simulation state without proving that a connected
+/// client receives the spawned entity. This gate supplies the same `MobHandle`
+/// as both `entities` and `mobs`, allowing the next streaming pass to expose the
+/// item on the wire.
 ///
-/// This gate closes the gap the cheap way: pass the **same** `MobHandle` as
-/// both `entities` and `mobs`, exactly what
-/// [`lodestone_server::IntegratedServer::open_in_memory_with_items`] now does
-/// for the browser build. `MobHandle` is already a legitimate `EntitySource`
+/// This gate passes the **same** `MobHandle` as both `entities` and `mobs`, as
+/// [`lodestone_server::IntegratedServer::open_in_memory_with_items`] does
+/// for the browser build. `MobHandle` is a legitimate `EntitySource`
 /// on its own (see that impl's own doc comment) for a caller that mutates the
 /// sim directly and needs no ticked republish — which is exactly
 /// `destroy_block`'s access pattern, no tick loop involved.
@@ -3297,7 +3236,8 @@ async fn breaking_stone_streams_add_entity_when_the_mob_handle_is_its_own_source
             &mut conn,
             &FakeProtocol,
             &StoneSource,
-            // The fix: the same handle as `mobs` below, not `&NoEntities`.
+            // The entity source is the same handle as `mobs` below, not
+            // `&NoEntities`.
             &mobs_for_server,
             0,
             &BlockEntityHandle::default(),
@@ -3330,7 +3270,7 @@ async fn breaking_stone_streams_add_entity_when_the_mob_handle_is_its_own_source
 
 /// A [`ChunkSource`] like [`StoneSource`] but with **one persisted cell**: every
 /// other block is stone (discarded on write, exactly as [`StoneSource`]), while
-/// [`BREAK_POS`] alone remembers whatever it was last set to. Issue #550's
+/// [`BREAK_POS`] alone remembers whatever it was last set to. This
 /// fixture needs a real write to survive the break so the test can read back
 /// *what* replaced the broken block, not merely that something did.
 #[derive(Clone)]
@@ -3383,16 +3323,16 @@ impl ChunkSource for SingleBlockSource {
     }
 }
 
-/// **Issue #550's discriminating pair, through the real `serve_connection`
+/// **The discriminating pair, through the real `serve_connection`
 /// path**: breaking a waterlogged block leaves its water source behind, and
 /// breaking the identical block *without* `waterlogged` leaves air.
 ///
 /// Either arm alone passes under a wrong rule — the dry arm passes under
 /// "always keep the fluid" too (a dry block's fluid state is `None`, so both
-/// rules answer air), and the wet arm alone would pass under a bug that always
-/// wrote a water source. Only running both against the same break sequence
-/// separates `Level.removeBlock`'s real rule
-/// (`fluidState.createLegacyBlock()`) from "write air unconditionally".
+/// rules answer air), and the wet arm alone would pass under an implementation
+/// that always wrote a water source. Only running both against the same break sequence
+/// separates the fluid-preservation rule (retain the block's fluid state) from
+/// "write air unconditionally".
 ///
 /// `oak_slab` rather than a plain waterlogged block because a slab drops loot
 /// (exercising the same `destroy_block` path the cobblestone gate above does)
@@ -3426,7 +3366,7 @@ async fn breaking_a_waterlogged_block_leaves_water_and_a_dry_one_leaves_air() {
         // needs `divider = 100` and ~140 ticks to clear `STOP_DESTROY_PROGRESS`
         // — far more than `drain_available`'s single 50ms idle window lets
         // through. Creative's `StartDestroy` breaks synchronously
-        // (`apply_block_action`'s `creative` branch), and this fix is about
+        // (`apply_block_action`'s `creative` branch), and this test is about
         // *what replaces the cell*, not about drops or dig timing, so
         // creative exercises the exact same `destroy_block` write path with
         // none of that noise.
@@ -3451,12 +3391,12 @@ async fn breaking_a_waterlogged_block_leaves_water_and_a_dry_one_leaves_air() {
     );
 }
 
-/// Stone everywhere except one column of dirt at [`DIRT_POS`], for issue #539's
+/// Stone everywhere except one column of dirt at [`DIRT_POS`], for the
 /// correct-tool gate.
 ///
-/// The *world*-species guard for that gate: `Player.hasCorrectToolForDrops` is
-/// `!state.requiresCorrectToolForDrops() || tool.isCorrectToolForDrops(state)`,
-/// and a fixture of **only stone** exercises exactly one side of that `||`.
+/// The *world*-species guard for that gate: a correct-tool requirement applies
+/// to stone but not dirt, and a fixture containing both exercises both sides of
+/// that distinction.
 /// Every block in [`StoneSource`] requires a correct tool, so a gate
 /// mis-implemented as "you need a tool" would pass every stone assertion and
 /// fail only here.
@@ -3502,23 +3442,20 @@ impl ChunkSource for StoneWithDirtSource {
     }
 }
 
-/// **Issue #539's correct-tool gate, through the real `serve_connection` path:
+/// **The correct-tool gate, through the real `serve_connection` path:
 /// stone broken bare-handed drops nothing, and dirt still does.**
 ///
-/// Vanilla's `ServerPlayerGameMode.destroyBlock` (`:295`) consults
-/// `Player.hasCorrectToolForDrops` and, when it is false, never calls
-/// `playerDestroy` → `dropResources` at all. Stone
-/// `requiresCorrectToolForDrops`, so a bare hand breaks it and yields nothing —
-/// before #539 it dropped a cobblestone, the most visible wrong behaviour in the
-/// whole block-drop chain.
+/// The server checks whether the held tool is valid before rolling drops. Stone
+/// requires a correct tool, so a bare hand breaks it and yields nothing — an
+/// incorrect implementation could drop cobblestone.
 ///
 /// The stone half is an **absence**, so it is only worth what the evidence that
 /// the detector fires is worth. Three things supply that here rather than a
 /// description of it:
 ///
 /// 1. the *same* packets with a pickaxe in slot 36 do produce a drop — that is
-///    `breaking_stone_drops_exactly_one_cobblestone_item_entity` above, which had
-///    to have the pickaxe added to keep passing;
+///    `breaking_stone_drops_exactly_one_cobblestone_item_entity` above, which
+///    provides the corresponding positive drop case;
 /// 2. **dirt, bare-handed, in the same session, still drops dirt.** A gate that
 ///    swallowed the whole `StopDestroy` arm, or that read "you need a tool",
 ///    would report "no drop" for stone too and fail here;
@@ -3562,7 +3499,7 @@ async fn bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops() {
     // bare hand.
     //
     // A held dig between the two ordinals, and only in this test, because it is
-    // the only one that breaks **bare-handed**: since issue #531 the server
+    // the only one that breaks **bare-handed**: the server
     // prices the dig (`crate::block_breaking`) and refuses a `StopDestroy` that
     // arrives too early, and a bare hand on stone is the slowest dig in the
     // file. Without the advance both packets land on one server tick, the break
@@ -3572,9 +3509,9 @@ async fn bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops() {
     // single tick, which is why every other break gate here still holds.
     //
     // `sleep`, **not** `tokio::time::advance`: `advance` jumps the clock before
-    // yielding, so the server had not yet read the `StartDestroy` and stamped it
-    // with the *old* tick — both packets then landed on one tick anyway and the
-    // break was still refused. A paused-clock `sleep` lets the runtime drain the
+    // yielding, so the server may not have read the `StartDestroy` and stamped it
+    // with the same tick — both packets then land together and the break is
+    // refused. A paused-clock `sleep` lets the runtime drain the
     // start packet first and only auto-advances once everything is idle.
     send_block_action(&mut client, 0, BREAK_POS).await;
     tokio::time::sleep(BARE_HANDED_DIG).await;
@@ -3615,8 +3552,7 @@ async fn bare_handed_stone_drops_nothing_while_bare_handed_dirt_still_drops() {
 struct StoneWithFlowerSource;
 
 /// The dandelion in [`StoneWithFlowerSource`] — a zero-hardness block, so
-/// `progress_per_tick` is `+inf` and vanilla's `"insta mine"` branch fires on the
-/// `StartDestroy`.
+/// `progress_per_tick` is `+inf`, so `StartDestroy` completes immediately.
 const FLOWER_POS: BlockPos = BlockPos::new(8, 9, 4);
 
 impl ChunkSource for StoneWithFlowerSource {
@@ -3658,8 +3594,8 @@ impl ChunkSource for StoneWithFlowerSource {
 /// **The one-shot-block gate, end to end: a `StartDestroy` with no `StopDestroy`
 /// after it pops a flower.**
 ///
-/// This is the behaviour issue #531's commit introduced and whose only test was a
-/// unit assertion on `progress_per_tick >= 1.0` — a closed loop that says nothing
+/// This requires a dedicated integration assertion; a unit assertion on
+/// `progress_per_tick >= 1.0` is a closed loop that says nothing
 /// about whether `apply_block_action` reaches `destroy_block` on the start
 /// ordinal. A real client that knows a block is instant sends *only* the start
 /// action, so this is the whole packet sequence for pulling grass.
@@ -3725,13 +3661,12 @@ async fn a_start_action_alone_pops_a_one_shot_flower_but_not_stone() {
     let _ = server.await.expect("server task panicked");
 }
 
-/// **The regression gate for ordinary block breaking: a `StopDestroy` that
+/// **The deferred-progress gate for ordinary block breaking: a `StopDestroy` that
 /// arrives on the same tick as its `StartDestroy` still breaks the block, a
 /// tick or two later.**
 ///
-/// This is what #531 broke. That commit refused a shortfall outright, but
-/// vanilla's shortfall branch arms `hasDelayedDestroy` and keeps accruing
-/// progress in `ServerPlayerGameMode.tick` until the block is fully earned.
+/// A shortfall must not be refused outright: the deferred path keeps accruing
+/// progress until the block is fully earned.
 /// A local integrated server reads both
 /// packets off one buffer, so *every* non-instant block took the shortfall path
 /// and nothing but flowers could be broken at all.
@@ -3782,7 +3717,7 @@ async fn a_same_tick_stop_breaks_the_block_a_few_ticks_later() {
     );
 
     // The subject: start then stop, back to back, with no wait between them —
-    // both land on one server tick, which is the case #531 refused.
+    // both land on one server tick, which exercises the deferred-progress path.
     send_block_action(&mut client, 0, DIRT_POS).await;
     send_block_action(&mut client, 2, DIRT_POS).await;
     let _ = drain_available(&mut client).await;
@@ -3819,8 +3754,8 @@ async fn a_same_tick_stop_breaks_the_block_a_few_ticks_later() {
 /// **The control for the gate above, and it must fail the same assertion.**
 ///
 /// Same world, same block, same packets — except the second phase is
-/// `AbortDestroy` (ordinal `1`) instead of `StopDestroy`. Vanilla's
-/// `pos.equals(this.destroyPos)` bookkeeping means an aborted dig breaks nothing,
+/// `AbortDestroy` (ordinal `1`) instead of `StopDestroy`. Position bookkeeping
+/// means an aborted dig breaks nothing,
 /// so nothing may drop.
 ///
 /// Without this, `breaking_stone_drops_exactly_one_cobblestone_item_entity` would
@@ -3865,11 +3800,11 @@ async fn an_aborted_dig_drops_nothing() {
     let _ = server.await.expect("server task panicked");
 }
 
-/// **Issue #337's acceptance gate, second half: the drop can be picked up, and
+/// **The second block-drop gate: the drop can be picked up, and
 /// the pickup reaches the client.**
 ///
-/// The chain under test is `Player.aiStep` → `ItemEntity.playerTouch` →
-/// `Inventory.add` → a window-0 `container_set_slot`. Two assertions that a
+/// The chain under test is the player update → item pickup → inventory write →
+/// a window-0 `container_set_slot`. Two assertions that a
 /// weaker gate would omit:
 ///
 /// * the item entity is **gone** from the sim afterwards — a pickup that credits
@@ -3881,8 +3816,8 @@ async fn an_aborted_dig_drops_nothing() {
 ///   a native index instead of a menu index puts cobblestone in the player's
 ///   *main storage* row on screen while the server thinks it is in the hand.
 ///
-/// `tick_for(10)` before the walk is not incidental: `popResource` calls
-/// `setDefaultPickUpDelay()` (10 ticks), so the drop is deliberately
+/// `tick_for(10)` before the walk is required: the spawn path assigns a
+/// 10-tick pickup delay, so the drop is deliberately
 /// uncollectable when it spawns. See the control below.
 #[tokio::test(start_paused = true)]
 async fn a_dropped_item_is_collected_into_the_hotbar_and_announced() {
@@ -3909,12 +3844,11 @@ async fn a_dropped_item_is_collected_into_the_hotbar_and_announced() {
     let _ = drain_available(&mut client).await;
     assert_eq!(mobs.with(|sim| sim.item_count()), 1, "precondition: a drop exists");
 
-    // Let the 10-tick pickup delay elapse. `MobSim::tick` is what production's
-    // `run_tick_loop` calls every 50 ms; driving it here rather than
-    // `ItemLifecycle::tick` keeps the delay's advancement on the real path.
+    // Let the 10-tick pickup delay elapse through the simulation's normal tick
+    // path rather than advancing the lifecycle in isolation.
     mobs.with(|sim| sim.tick_for(12));
 
-    // Stand on the block that was broken. `popResource` scatters the drop within
+    // Stand on the block that was broken. The drop scatters within
     // ±0.25 of the block centre, and the pickup volume reaches 1.425 blocks
     // horizontally, so the centre is comfortably inside it from any roll.
     send_player_moved(
@@ -3999,20 +3933,17 @@ fn take_and_remove_indices(
     (takes, remove_at)
 }
 
-/// **Matthew's report: "the pickup animation for items is missing on the integrated
-/// server".** The client half was already complete — the v770 adapter decodes
-/// `TAKE_ITEM_ENTITY` into `ClientEvent::ItemPickup` and `lodestone-shell`'s
-/// `entities.rs` carries the lerp — and our server never sent the packet. An island
-/// in the **outbound** direction, the mirror of `ClientAction::SetFlying`.
+/// **The pickup animation is an outbound integration path.** The client consumes
+/// `TAKE_ITEM_ENTITY`, while the server must emit it before removing the item.
 ///
 /// # The claim, and why it needs a *full* pickup
 ///
-/// **The take must precede the `REMOVE_ENTITIES` for the same entity.** Vanilla's
-/// `ItemEntity.playerTouch` calls `player.take(this, orgCount)` and only then
-/// `this.discard()`, because the client deliberately keeps the entity alive to
-/// interpolate it toward the collector and removes it when the animation ends. A
+/// **The take must precede the `REMOVE_ENTITIES` for the same entity.** The client
+/// keeps the entity alive to interpolate it toward the collector and removes it
+/// when the animation ends. A
 /// server that removes first produces **no animation at all** with the packet present
-/// and correct on the wire — precisely the way this lands looking fixed and is not.
+/// and correct on the wire — precisely the way a superficially correct wire trace
+/// can still omit the animation.
 /// Asserted as an index comparison, which is a counter.
 ///
 /// The pickup is therefore **full**: a partial one leaves the entity alive by
@@ -4156,17 +4087,16 @@ async fn a_pickup_announces_the_take_before_removing_the_item_entity() {
     let _ = server.await.expect("server task panicked");
 }
 
-/// **`amount` is `orgCount`, not the amount banked — and only a partial pickup can
+/// **`amount` is the original stack count, not the amount banked — and only a partial pickup can
 /// tell them apart.**
 ///
-/// Vanilla captures `int orgCount = itemStack.getCount()` *before*
-/// `player.getInventory().add(itemStack)`, which shrinks the stack in place, and then
-/// passes `orgCount` to `player.take`. On a **full** pickup the two coincide, so that
+/// The server records the stack count *before* adding it to the inventory, which
+/// shrinks the stack in place. On a **full** pickup the two counts coincide, so that
 /// case measures only that the code runs — the same corollary that made `oak_leaves`
 /// the wrong choice for the item-collision gates.
 ///
-/// The inventory is filled so exactly 2 of a 5-stack fit: `orgCount` is `5`, banked is
-/// `2`, and the assertion is `5`. The surviving entity's count is checked too, because
+/// The inventory is filled so exactly 2 of a 5-stack fit: the original count is `5`,
+/// banked is `2`, and the assertion is `5`. The surviving entity's count is checked too, because
 /// that is what establishes the pickup really was partial — without it a full pickup
 /// would satisfy the `amount == 5` assertion and prove nothing.
 #[tokio::test(start_paused = true)]
@@ -4258,9 +4188,8 @@ async fn a_partial_pickup_announces_the_original_stack_count_not_the_amount_bank
 /// **The control for the `banked > 0` gate: a pickup that fits nowhere announces
 /// nothing.**
 ///
-/// Vanilla's guard is `player.getInventory().add(itemStack)` returning true —
-/// `playerTouch` only calls `take` when something actually went in. With every slot
-/// full of a different item, a cobblestone drop fits nowhere, so there is no take and
+/// A pickup is announced only when adding to the inventory returns true. With every
+/// slot full of a different item, a cobblestone drop fits nowhere, so there is no take and
 /// the entity stays. Without this, an implementation that announced a take on every
 /// overlap would pass the gate above.
 #[tokio::test(start_paused = true)]
@@ -4341,12 +4270,12 @@ async fn a_pickup_into_a_full_inventory_announces_no_take() {
 /// **The control for the pickup gate: the delay is real.**
 ///
 /// Identical to the test above but with **no** `tick_for`, so the drop still
-/// carries its full 10-tick `setDefaultPickUpDelay`. The player stands exactly on
+/// carries its full 10-tick pickup delay. The player stands exactly on
 /// it and must collect nothing.
 ///
 /// This is the control that matters most here, because its absence is invisible:
 /// a server that ignored `pickup_delay` entirely would pass the positive gate
-/// (the item is collected — just a few ticks early), and the only symptom would
+/// (the item is collected — just a few ticks early), and the observable failure would
 /// be that a player mining in survival never sees a drop bounce, because they
 /// re-absorb it on the spawning tick. It also proves the pickup sweep is
 /// genuinely gated rather than firing on every movement packet regardless.
@@ -4404,14 +4333,13 @@ async fn a_freshly_popped_drop_is_not_collectable_before_its_delay_elapses() {
 /// **The other control on the pickup volume: distance is real.**
 ///
 /// The delay has elapsed and the drop is collectable, but the player walks to a
-/// position well outside `Player.aiStep`'s inflated box (10 blocks away). Nothing
+/// position well outside the pickup sweep's inflated box (10 blocks away). Nothing
 /// may be collected.
 ///
 /// Without this, the positive pickup gate is satisfied by a server that collects
 /// every drop in the world on any movement packet — which would look completely
-/// correct in the one scene where the only drop is the one at your feet. That is
-/// this repo's *world* species: the flaw would live in the fixture, not the
-/// assertion.
+/// correct in the one scene where the only drop is the one at your feet. The
+/// separated position control prevents the fixture from hiding that broad rule.
 #[tokio::test(start_paused = true)]
 async fn a_drop_outside_the_pickup_volume_is_not_collected() {
     let (client_end, server_end) = memory_pair();
@@ -4466,8 +4394,8 @@ async fn a_drop_outside_the_pickup_volume_is_not_collected() {
 }
 
 
-/// **Issue #336: a banned uuid is refused at login**, before `login_success`, with
-/// vanilla's own translation key on the wire — and the identical connection is
+/// **A banned uuid is refused at login**, before `login_success`, with
+/// the canonical refusal translation key on the wire — and the identical connection is
 /// admitted once the ban is lifted.
 ///
 /// The lifted-ban arm is the control: without it, a test that only asserts the
@@ -4586,8 +4514,7 @@ async fn a_banned_uuid_is_refused_at_login_and_admitted_once_pardoned() {
 ///
 /// Deliberately not a thread-id comparison: a thread id would have to be captured
 /// somewhere and compared somewhere else, and the capture site is exactly what a
-/// future refactor would move. A flag set by `decode` itself cannot be wrong about
-/// what a connection thread is.
+/// A flag set by `decode` itself directly identifies a connection thread.
 thread_local! {
     static HAS_DECODED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -4595,11 +4522,11 @@ thread_local! {
 /// Where column encode actually happened, counted by site.
 #[derive(Debug, Default)]
 struct EncodeSites {
-    /// Encodes that ran on a thread which has served inbound packets — the
-    /// defect. Every one of these is ≈2.4 ms / 62 M instructions the player's
+    /// Encodes that ran on a thread which has served inbound packets — work that
+    /// blocks the player's next interaction. Every one is ≈2.4 ms / 62 M instructions.
     /// next interaction waits behind.
     on_connection_thread: std::sync::atomic::AtomicUsize,
-    /// Encodes that ran on a blocking-pool thread. The fix.
+    /// Encodes that ran on a blocking-pool thread.
     off_connection_thread: std::sync::atomic::AtomicUsize,
 }
 
@@ -4654,10 +4581,10 @@ fn encode_site_chunk(cx: i32, cz: i32, _column: &ChunkColumn) -> ServerDirective
 /// offers an off-task [`lodestone_server::ChunkEncoder`] at all.
 ///
 /// `off_task: false` is the **live negative control**: it is not a neutered copy
-/// of the fixed arm, it is the shape every protocol without a `ChunkEncoder`
+/// of the off-task arm, it is the shape every protocol without a `ChunkEncoder`
 /// still has (the trait method defaults to `None`), driven through the same
 /// `serve_connection` body. So the control cannot rot, and it must show the
-/// defect.
+/// and therefore exercises the fallback path.
 struct EncodeSiteProto {
     sites: std::sync::Arc<EncodeSites>,
     off_task: bool,
@@ -4799,8 +4726,8 @@ async fn measure_encode_sites(
 /// sit between a play packet and its reply.**
 ///
 /// `crate::protocol::ChunkEncoder`'s measurement is 62 M instructions / ≈2.4 ms
-/// per column, and until this landed every one of those ran on the connection
-/// task — the task that owes the acting player an answer. A wall clock cannot
+/// per column. Running that work on the connection task delays the acting
+/// player's answer. A wall clock cannot
 /// state that here (this machine's timings reproduce to ~10.8% and several agents
 /// compile concurrently), so the instrument is a **count of encodes that ran on a
 /// thread which has served an inbound packet**; see [`HAS_DECODED`] for why that
@@ -4808,8 +4735,8 @@ async fn measure_encode_sites(
 ///
 /// | arm | encodes on the connection thread |
 /// |---|---|
-/// | no `ChunkEncoder` (the defect, and the live control below) | **every column of the view** — 361 at `view_radius = 9` |
-/// | encode moved into the generating worker (the fix) | **0** |
+/// | no `ChunkEncoder` (the live control below) | **every column of the view** — 361 at `view_radius = 9` |
+/// | an off-task `ChunkEncoder` | **0** |
 ///
 /// The two arms differ in one thing: whether the protocol answers
 /// `chunk_encoder()` with `Some`. Same server body, same source, same wire.
@@ -4817,7 +4744,7 @@ async fn measure_encode_sites(
 /// The exact-zero is what makes this a magnitude assertion rather than a
 /// direction one: it is not "fewer", and no reordering of the burst can satisfy
 /// it. And the view still has to arrive whole, which the last assertion checks —
-/// a "fix" that dropped columns would otherwise trivially pass.
+/// dropping columns would otherwise trivially pass.
 #[tokio::test]
 async fn column_encode_never_runs_on_the_connection_task() {
     let view_radius = 9;
@@ -4851,7 +4778,7 @@ async fn column_encode_never_runs_on_the_connection_task() {
 /// this workspace does — drives the identical `serve_connection` body down the
 /// on-task encode path. If this arm ever reported zero on-task encodes, the gate
 /// beside it would be measuring nothing: an encode site that is *never* on the
-/// connection task regardless of the fix.
+/// connection task regardless of the selected encoder.
 ///
 /// Asserted as "every column", not "some": the fallback path encodes the whole
 /// view on the connection task, so a partial count would mean the two paths had
@@ -4881,7 +4808,7 @@ async fn control_without_an_off_task_encoder_every_column_is_encoded_on_the_conn
     assert_eq!(observed, expected, "the whole view must still arrive");
 }
 
-/// **The island gate for hunger** (issue #258): a sprinting player's exhaustion
+/// **The hunger integration gate**: a sprinting player's exhaustion
 /// reaches the wire as a falling `saturation`, then a falling `food`, on the real
 /// `serve_connection` path — not just inside `crate::food`'s own unit tests, which
 /// would be entirely green with nothing calling them.
@@ -4972,8 +4899,7 @@ async fn a_sprinting_player_loses_saturation_then_food_on_the_wire() {
 
 /// **The control**, and the reason the gate above is about *sprinting* rather than
 /// about "moving costs food": the identical 250-block step with the sprint flag off
-/// must cost **nothing at all**. Vanilla's walking branch is a literal `0.0F`
-/// multiply.
+/// must cost **nothing at all**. Walking contributes a literal `0.0F` multiplier.
 ///
 /// Asserted as an absence, so it needs the detector to be known-working — and it is,
 /// by construction: the gate above uses the same harness, the same source and the
@@ -5069,13 +4995,14 @@ impl ChunkSource for LavaSource {
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
 }
 
-/// **The island gate for burning** (issue #269): a player standing in lava takes
+/// **The burning integration gate**: a player standing in lava takes
 /// lava's damage on the real `serve_connection` path, and dies to it.
 ///
 /// # The prediction, derived from the constants
 ///
-/// `Entity.lavaHurt` is **`4.0` per tick**, and the burn tick's own `1.0` is suppressed
-/// by `baseTick`'s `!isInLava()` guard. So from full health the sequence on the wire is
+/// Contact with lava deals **`4.0` per tick**, and the generic burn tick's own
+/// `1.0` is suppressed while the player remains in lava. From full health the
+/// sequence on the wire is
 /// `16.0, 12.0, 8.0, 4.0, 0.0` — **five ticks to death**, and every value a multiple
 /// of 4.
 ///
@@ -5188,30 +5115,19 @@ async fn a_player_standing_in_air_never_burns() {
     let _ = server.await.unwrap();
 }
 
-/// **The boat-dismount gate — the last open symptom tracked by issue #11.**
+/// **The boat-dismount gate.**
 ///
-/// The chain that was broken: the client already sent the sneak bit every
-/// tick, `server_protocol.rs`'s `PLAYER_INPUT` decode arm only read bit
-/// `0x40` (sprint) and never `0x20` (shift), `ServerBound::PlayerInput` had
-/// no field to carry it, and `MobSim::dismount_rider` — the mechanism that
-/// actually removes a rider — had zero callers anywhere in the tree. This
-/// drives the real `dispatch_play_packet` path (not `dismount_rider`
-/// directly, which would pass whether or not the server ever called it) and
-/// asserts both the sim state and the wire.
+/// The input carries separate sprint (`0x40`) and shift (`0x20`) flags. This
+/// drives the real `dispatch_play_packet` path, where the shift flag reaches
+/// `MobSim::dismount_rider`, and asserts both the simulation state and the wire.
 ///
 /// Mounting goes through the real `MobSim` API rather than a wire-level
-/// `INTERACT_ENTITY` (this file's stand-in protocol has no decode arm for
-/// that packet, and boarding wiring is pre-existing, not part of this fix) —
-/// only the dismount half is under test.
+/// `INTERACT_ENTITY` (this file's stand-in protocol has no decode arm for that
+/// packet) — only the dismount half is under test.
 ///
-/// `Player.rideTick`'s `wantsToStopRiding()` is exactly `isShiftKeyDown()`, a
-/// **level** check run every tick a passenger is aboard, not an edge. That is
-/// safe here (does not lock a sneaking player out of re-boarding) only
-/// because `AbstractBoat.interact`/`mount_vehicle`'s own
-/// `using_secondary_action` gate already refuses to board while sneaking —
-/// ported and checked in `mount_vehicle`'s own tests. This gate's own
-/// precondition assertion (`boarded` while *not* sneaking) is the other half
-/// of that argument holding.
+/// The passenger check is a **level** check run every tick, not an edge. The
+/// gate's precondition (`boarded` while *not* sneaking) keeps this test focused
+/// on dismounting and leaves boarding behavior to `mount_vehicle`.
 #[tokio::test(start_paused = true)]
 async fn sneaking_dismounts_a_boat_on_the_wire() {
     let (client_end, server_end) = memory_pair();
@@ -5255,7 +5171,7 @@ async fn sneaking_dismounts_a_boat_on_the_wire() {
     );
     let _ = drain_available(&mut client).await;
 
-    // The fix under test: a real `PLAYER_INPUT` with `shift: true`, through
+    // A real `PLAYER_INPUT` with `shift: true`, through
     // the real dispatch path.
     send_player_input(&mut client, false, true, false).await;
 

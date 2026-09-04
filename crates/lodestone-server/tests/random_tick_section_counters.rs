@@ -1,4 +1,4 @@
-//! Issue #507's real fix, gated: `ChunkColumn`'s incrementally maintained
+//! `ChunkColumn`'s incrementally maintained
 //! per-section random-tick counters must agree with the definitional scan they
 //! replaced, at every step of a mutation storm and across both construction
 //! entry points, and the O(1) decision must leave the position LCG on exactly
@@ -10,7 +10,7 @@
 //! against `ChunkColumn`'s two raw accessors
 //! (`append_section_cells`/`raw_palette`) and
 //! the public `is_randomly_ticking` predicate — deliberately **not** by calling
-//! `random_tick`'s own scan helpers. A shared bookkeeping bug cannot then pass
+//! `random_tick`'s own scan helpers. A shared bookkeeping error cannot then pass
 //! both arms. The predicate itself *is* shared, disclosed: it is the spec's
 //! definition of "randomly ticking", and the thing under test is the
 //! bookkeeping, not the classification.
@@ -20,8 +20,8 @@
 //! (`(y_in_section * 16 + z) * 16 + x`) rather than reusing production's own
 //! section walk, so an arithmetic slip in production's section indexing shows up
 //! here as a disagreement instead of being copied. It also reads the sections
-//! back in a **separate** loop from production's, which matters more since issue
-//! #551: the grid is now bit-packed per section, so a packing bug that dropped or
+//! back in a **separate** loop from production's, which matters because the
+//! grid is bit-packed per section, so a packing error that dropped or
 //! shifted cells would show up here as a counter disagreement too.
 //!
 //! # The three controls, and what each proves
@@ -47,11 +47,10 @@ const SECTION_ROWS: i32 = 16;
 /// mutates anything. That makes it the one ticking state a draw-sequence gate
 /// can plant freely without the column changing underneath the replay.
 const INERT_TICKING: &str = "minecraft:oak_sapling[stage=1]";
-/// Grass with something **solid** above dies to dirt on its first hit and, because
-/// `canStayAlive` is false, draws zero behaviour values and never spreads — one
-/// event, no new ticking states anywhere.
+/// Grass with something **solid** above dies to dirt on its first hit and draws
+/// zero behaviour values without spreading — one event, no new ticking states.
 ///
-/// "Solid" is load-bearing since issue #544: `canStayAlive` is
+/// "Solid" is load-bearing because the survival rule is
 /// `dampening(above) < 15`, not "above is air", so a `short_grass` cap would leave
 /// this grass **alive** and spending 12 behaviour draws per hit. Every fixture
 /// below caps with [`STONE`] for that reason.
@@ -194,8 +193,8 @@ fn plant_a_named_mutation_source(column: &mut ChunkColumn) {
             .find(|&y| column.block_state(lx, y, lz).starts_with("minecraft:grass_block"))
     };
 
-    // Trigger 1: stone directly above grass. `canStayAlive` is false for a full
-    // solid (dampening 15), so each of these dies to dirt on its first hit —
+    // Trigger 1: stone directly above grass. A full solid has dampening 15, so
+    // each grass cell dies to dirt on its first hit —
     // zero behaviour draws, one event.
     //
     // A **6x6 patch**, not three cells, and the size is a probability argument
@@ -264,7 +263,7 @@ fn assert_fixture_can_exercise_the_counters(column: &ChunkColumn, what: &str) {
 /// NBT round trip, the maintained counters must equal the independent recount.
 ///
 /// The storm's coverage is asserted, not assumed — each transition sets a flag
-/// and the flags are checked at the end, so a future edit that accidentally
+/// and the flags are checked at the end, so an accidental change that
 /// drops (say) the `1 -> 0` crossing fails here instead of silently narrowing
 /// the gate.
 ///
@@ -287,7 +286,7 @@ fn incremental_counters_match_an_independent_recount_through_a_mutation_storm() 
     // crossings. Picked from the recount, so it is the *definition* choosing it,
     // and deliberately **not** the bottom or top window: those two are the
     // subjects of the partial-window arm at the end, and if all three arms
-    // landed on one section index the storm would never exercise the section
+    // used one section index for every arm, the storm would never exercise the section
     // arithmetic it exists to exercise. (Measured: a generated surface column
     // has exactly one ticking section, so this is a real constraint rather than
     // a theoretical one — `position(|c| c == 0)` alone returns index 0.)
@@ -503,10 +502,10 @@ fn gate_b_fixture() -> ChunkColumn {
 /// flipping a section `0 -> 1` (before tick 6) and `1 -> 0` (before tick 16)
 /// between ticks.
 ///
-/// `tick_speed = 7`, not `DEFAULT_RANDOM_TICK_SPEED`, on purpose: issue #508
-/// (the `random_tick_speed` game rule is still inert — `tick.rs:1166` passes the
-/// hardcoded default) is a separate, multi-file wiring task, and nothing here may
-/// assume 3. When #508 lands, only the value's *source* changes.
+/// `tick_speed = 7`, not `DEFAULT_RANDOM_TICK_SPEED`, on purpose: the
+/// `random_tick_speed` game rule is not consulted by this scheduler path, so
+/// nothing here may assume 3. Changing the source of this value must not alter
+/// the draw-sequence property.
 ///
 /// # Why an equal LCG state is the whole property
 ///
@@ -663,25 +662,15 @@ fn a_wrong_draw_count_does_not_reproduce_the_lcg_stream() {
 /// a future in-file mutation path that forgets the counters and a silently
 /// non-ticking world — actually discriminates. `debug_assert!` is compiled out
 /// in a release build, so in that configuration the same corruption is asserted
-/// to change the *decision* instead, which is the defect the tripwire exists to
-/// catch.
+/// to change the *decision* instead, which the tripwire must catch.
 ///
 /// # Why this uses `#[should_panic]` and not a nested `catch_unwind`
 ///
-/// It used to wrap the `tick_chunk` call in its own `std::panic::catch_unwind`
-/// and inspect the payload. Measured 2026-08-16: under this workspace's default
-/// debug codegen backend (`.cargo/config.toml`'s `profile.dev.codegen-backend =
-/// "cranelift"`), that *nested* `catch_unwind` does not catch the panic — it
-/// escapes past the nested boundary and the test fails outright, reporting the
-/// raw panic text with no `expect_err` ever running. The same test, byte-for-byte,
-/// passes under the LLVM backend (`CARGO_PROFILE_DEV_CODEGEN_BACKEND=llvm`), and
-/// in both cases the panic itself fires at the same place with the same message —
-/// so the tripwire and the counter maintenance it guards are correct; only the
-/// *nested* `catch_unwind` is unreliable under Cranelift. libtest's own *outer*
-/// catch around each `#[test]` fn is unaffected (proven by the very fact that the
-/// broken nested version was reported as a clean "1 failed" rather than the whole
-/// binary aborting), so `#[should_panic(expected = ..)]` — which relies on that
-/// outer catch alone — sidesteps the bug rather than working around it blind.
+/// The workspace's default Cranelift debug backend does not reliably contain a
+/// panic across a nested `catch_unwind` boundary. The test therefore lets the
+/// panic reach the test harness, whose outer boundary is stable across the
+/// supported codegen backends; `#[should_panic(expected = ..)]` checks the
+/// section-specific message at that boundary.
 #[test]
 #[cfg_attr(
     debug_assertions,
@@ -701,7 +690,7 @@ fn corrupting_a_counter_trips_the_consumption_site_tripwire() {
     let section_min_y = column.min_y + quiet_index as i32 * SECTION_ROWS;
 
     if cfg!(debug_assertions) {
-        // `gate_b_fixture` is fixed, so the quiet section the corruption lands on
+        // `gate_b_fixture` is deterministic, so the quiet section the corruption lands on
         // is deterministic, not merely observed: section 0 (y 0..16) never holds
         // ticking content there (see the fixture's own doc comment). The
         // `should_panic` literal above hardcodes `section_min_y 0` for exactly
@@ -749,19 +738,15 @@ fn corrupting_a_counter_trips_the_consumption_site_tripwire() {
 /// from the production generator, so it exercises mutation shapes (spread into a
 /// neighbouring section, cascades through `propagate_and_react`) that a scripted
 /// column would not contain.
-/// # Why the mutation source is now planted rather than assumed (issue #544)
+/// # Why the mutation source is planted rather than assumed
 ///
-/// This arm used to rely on "whatever the surface actually holds" producing
-/// mutations, and that premise **silently became false**. Before #544, grass died
-/// to dirt under *any* non-air block, and vanilla's own vegetation step covers
-/// grass with `short_grass` — so a generated surface column mutated constantly, by
-/// accident, because of a bug. With `canStayAlive` modelled properly the surface
-/// is stable: grass under short grass survives, and there is no exposed dirt next
-/// to it to spread onto. Twenty-four ticks produced **zero** events and the
-/// assertion below fired.
+/// Relying on "whatever the surface actually holds" does not guarantee a
+/// mutation. Grass survives beneath a non-solid vegetation cover, and a
+/// generated surface can contain no exposed dirt beside it. Twenty-four ticks
+/// can therefore produce **zero** events, leaving the assertion untested.
 ///
-/// That is a premise-false control, so the fix is to make the source explicit and
-/// assert it, not to weaken the assertion: the helper caps a few surface grass
+/// The helper instead makes the source explicit and asserts it, without
+/// weakening the gate: it caps a few surface grass
 /// blocks with stone (a configuration a player creates constantly) and exposes a
 /// dirt cell beside another, each checked as a precondition. The terrain is still
 /// the production generator's; only the trigger is named.

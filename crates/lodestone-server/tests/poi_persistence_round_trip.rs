@@ -1,15 +1,11 @@
-//! `crate::poi_storage` against the real save path, plus its one real consumer
-//! today: `crate::portal::PortalIndex` (issue
-//! [#303](https://github.com/matteopolak/lodestone/issues/303)'s second half).
+//! `crate::poi_storage` against the real save path, plus its consumer
+//! `crate::portal::PortalIndex`.
 //!
-//! `poi_storage`'s own unit tests already cover NBT round-tripping and the
-//! occupancy predicate in isolation. What this file proves is the thing an
-//! in-crate unit test cannot: that `crate::portal`'s existing, real POI-manager
-//! stand-in — `PortalIndex`, whose own doc names "not persisted" as the one real
-//! gap — actually produces and consumes this module's records, through the real
-//! region-file save path, not an in-memory shortcut. Wiring the two calls this
-//! file makes into world open/shutdown is what remains, and it lives in
-//! `crate::integrated`, outside this change's file ownership.
+//! `poi_storage`'s unit tests cover NBT round-tripping and the occupancy
+//! predicate in isolation. This file additionally proves that `PortalIndex`
+//! produces and consumes these records through the region-file save path,
+//! rather than an in-memory shortcut. World open/shutdown integration belongs
+//! to `crate::integrated`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -75,9 +71,8 @@ fn a_portal_index_round_trips_through_the_poi_store() {
     let nether_records = poi_records_for_index(&index, Dimension::Nether);
     assert_eq!(overworld_records.len(), overworld_cells.len());
     assert_eq!(nether_records.len(), nether_cells.len());
-    // A portal record is never claimable — vanilla's own nether-portal POI-type registration
-    // `maxTickets 0` — so every converted record starts fully "occupied" in
-    // the ticket sense, which is correct: it is not a workstation.
+    // Portal records have no free tickets, so every converted record starts
+    // fully occupied in the ticket sense.
     for record in overworld_records.iter().chain(nether_records.iter()) {
         assert_eq!(record.free_tickets, 0);
         assert_eq!(record.poi_type.path(), "nether_portal");
