@@ -1,5 +1,5 @@
 //! Where the Microsoft **refresh** token, and the session derived from it,
-//! actually live (issue #64, extended for the session cache below).
+//! actually live (extended here to include the session cache below).
 //!
 //! The Minecraft services access token is short-lived (its real lifetime
 //! comes back with it — see [`crate::flow::Session::expires_at`] — typically,
@@ -249,8 +249,8 @@ pub trait SecretStore: std::fmt::Debug + Send + Sync {
 }
 
 /// How [`AccountSecrets`] is actually protecting tokens right now. Exists so
-/// a caller (the account-switcher UI, issue #63) can say so — a fallback the
-/// user cannot see is exactly the "silent leave-behind" this work exists to
+/// a caller (the account-switcher UI) can say so — a fallback the user
+/// cannot see is exactly the "silent leave-behind" this work exists to
 /// avoid.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageMode {
@@ -701,14 +701,14 @@ impl AccountSecrets {
     }
 }
 
-/// Issue #73: without this, `AccountSecrets` — the façade every real caller
-/// actually holds — could not be handed to [`crate::login::finish_interactive`]
-/// or [`crate::login::try_cached_session`], both of which take
-/// `secrets: &dyn SecretStore`. That gap is exactly why `menu/accounts.rs`
-/// hand-rolled a second copy of `finish_interactive`'s
-/// derive-session-then-save-token composition instead of calling it; see
-/// `docs/accounts.md`'s "`finish_interactive`, not a hand-rolled copy (issue
-/// #73)" for the history. The body here is identical to the inherent methods
+/// `AccountSecrets` — the façade every real caller actually holds — must
+/// implement `SecretStore` so it can be handed to
+/// [`crate::login::finish_interactive`] or
+/// [`crate::login::try_cached_session`], both of which take
+/// `secrets: &dyn SecretStore`. Without this impl, code that only holds an
+/// `AccountSecrets` has no way to reach those functions and would have to
+/// hand-roll `finish_interactive`'s derive-session-then-save-token
+/// composition itself. The body here is identical to the inherent methods
 /// above (both simply forward to `self.backend`), so this adds no new
 /// behaviour — it only makes the existing behaviour reachable through the
 /// trait object callers need.
@@ -774,10 +774,9 @@ mod tests {
         assert_eq!(store.load_refresh_token(id).unwrap(), None);
     }
 
-    /// Issue #73's actual gap: this must *compile* — `AccountSecrets` did not
-    /// implement `SecretStore` before this test existed, so nothing could pass
-    /// one to `login::finish_interactive`/`try_cached_session`, both of which
-    /// take `secrets: &dyn SecretStore`. Also checks the trait path and the
+    /// Proves `AccountSecrets` implements `SecretStore` and so can be passed
+    /// as `&dyn SecretStore` to `login::finish_interactive`/
+    /// `try_cached_session`. Also checks the trait path and the
     /// inherent-method path agree, which they must since both simply forward
     /// to the same boxed backend.
     #[test]

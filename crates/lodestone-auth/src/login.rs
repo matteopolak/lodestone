@@ -1,18 +1,17 @@
-//! Composing `flow` + `store` + `metadata` into an actual login (issue #65).
+//! Composing `flow` + `store` + `metadata` into an actual login.
 //!
-//! `docs/accounts.md` sketched this exact composition when issue #64 landed
-//! ("None of that is built yet; this crate only provides the pieces") — this
-//! module is that consumer, so a connect path (or a UI driving one) has a
-//! single entry point instead of re-deriving the refresh-then-fallback
-//! sequence at every call site.
+//! `docs/accounts.md` sketches this exact composition — this module is that
+//! consumer, so a connect path (or a UI driving one) has a single entry point
+//! instead of re-deriving the refresh-then-fallback sequence at every call
+//! site.
 //!
 //! Nothing here blocks: [`try_cached_session`] either returns a session
 //! immediately or reports that no usable cached token exists, and completing
 //! an interactive sign-in is left to the caller driving the existing
 //! [`crate::flow::PendingLogin`] (poll-based already) however its front end
-//! wants — a terminal prints the prompt and calls `.wait()`; a GUI (issue
-//! #66) shows the code and calls `.poll_once()` from a timer. This module
-//! does not add a second poll loop on top of that one.
+//! wants — a terminal prints the prompt and calls `.wait()`; a GUI shows the
+//! code and calls `.poll_once()` from a timer. This module does not add a
+//! second poll loop on top of that one.
 
 use crate::error::{AuthError, Result};
 use crate::flow::{self, MsToken, Session};
@@ -440,12 +439,11 @@ pub async fn finish_interactive(
     metadata.upsert(AccountProfile {
         profile_id: session.profile.id,
         username: session.profile.name.clone(),
-        // Issue #62: this field existed with nothing ever writing it. The profile
-        // response's `skins` array is now kept (`flow::fetch_profile`), so the
-        // pointer is recorded here — verbatim, unscreened. The host allow list
-        // (`crate::texture`) is applied at *fetch* time, not at persist time, so
-        // a URL that later becomes disallowed cannot be laundered by already
-        // being in `profiles.json`.
+        // `skin_url` is recorded verbatim from the profile response's
+        // `skins` array (`flow::fetch_profile`), unscreened at persist time.
+        // The host allow list (`crate::texture`) is applied at *fetch* time
+        // instead, so a URL that later becomes disallowed cannot be
+        // laundered by already being in `profiles.json`.
         skin_url: session.profile.skin.as_ref().map(|s| s.url.clone()),
         last_used: unix_now(),
     });
@@ -512,8 +510,9 @@ mod tests {
     /// relies on.
     #[tokio::test]
     async fn no_selected_account_is_no_cached_token_with_no_network_call() {
-        // Issue #446: `Client::new()` panics without an installed rustls crypto
-        // provider, which makes this test an incidental provider canary too.
+        // `Client::new()` panics without an installed rustls crypto provider
+        // (see `crate::tls`), which makes this test an incidental provider
+        // canary too.
         crate::install_crypto_provider();
         let client = reqwest::Client::new();
         let secrets = MemoryStore::new();

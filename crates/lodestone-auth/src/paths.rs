@@ -20,20 +20,18 @@
 //! **beside** `servers.json`/`options.json`, so approximating the directory
 //! would silently break that.
 //!
-//! # Issue #67's "hoist to `lodestone-core`" is stale
+//! # Why this lives in `lodestone-auth`, not a shared crate
 //!
-//! That issue proposed `lodestone-core` as the shared home because "both
-//! crates already depend on it" — checked against the committed
-//! `Cargo.toml`s and that is false today: neither `lodestone-auth` nor
-//! `lodestone-shell` depends on `lodestone-core`, which is a narrowly-scoped
-//! protocol-codec crate (VarInt/NBT, `Encode`/`Decode`) with no reason to grow
-//! platform-directory logic. What *is* true, and wasn't when #67 was filed, is
-//! simpler: `lodestone-shell` depends on `lodestone-auth` (see
-//! `lodestone-shell/Cargo.toml`), so this module is already the correct
-//! one-implementation home — the remaining work is deleting the shell's copy
-//! in favour of calling [`data_dir`] here, not inventing a third crate. That
-//! edit lives in `crates/lodestone-shell/src/menu/servers.rs`, which is
-//! outside this crate's ownership.
+//! `lodestone-core` is not the right shared home: neither `lodestone-auth`
+//! nor `lodestone-shell` depends on it, and it is a narrowly-scoped
+//! protocol-codec crate (VarInt/NBT, `Encode`/`Decode`) with no reason to
+//! grow platform-directory logic. `lodestone-shell` does depend on
+//! `lodestone-auth` (see `lodestone-shell/Cargo.toml`), so this module is
+//! already the correct one-implementation home — the remaining work is
+//! deleting the shell's copy in favour of calling [`data_dir`] here, not
+//! inventing a third crate. That edit lives in
+//! `crates/lodestone-shell/src/menu/servers.rs`, which is outside this
+//! crate's ownership.
 
 use std::ffi::OsStr;
 use std::path::PathBuf;
@@ -102,7 +100,7 @@ pub fn profiles_path() -> PathBuf {
 }
 
 /// The legacy plaintext refresh-token cache this crate wrote before accounts
-/// moved into the OS keychain (issue #64). Only consulted by
+/// moved into the OS keychain. Only consulted by
 /// [`crate::cache::load_legacy_cache`] / [`crate::cache::delete_legacy_cache`]
 /// / [`crate::migrate::migrate_legacy_cache`] for one-time migration; nothing
 /// should write to this path again.
