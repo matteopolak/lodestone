@@ -61,8 +61,9 @@ pub trait NavView {
 ///
 /// Storage is a **dense grid**, not a `HashMap`. The key space is bounded and
 /// known at construction, and the search asks `state_at` for every candidate cell
-/// of every expanded node — `lodestone_shell::collision::LiveCollision` made
-/// exactly this change for exactly this reason (a hash per queried cell).
+/// of every expanded node — `lodestone_shell::collision::LiveCollision` uses the
+/// same dense-grid layout for exactly this reason (a `HashMap` would cost a hash
+/// per queried cell).
 #[derive(Debug)]
 pub struct SnapshotView {
     /// `[(cz - origin_cz) * width_x + (cx - origin_cx)] * section_count + si`.

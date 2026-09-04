@@ -1,5 +1,4 @@
-//! A reusable reentrancy-deadlock test harness for third-party plugin authors —
-//! issue #179.
+//! A reusable reentrancy-deadlock test harness for third-party plugin authors.
 //!
 //! # What it is
 //!
@@ -51,7 +50,9 @@
 //!
 //! If `lodestone_ecs`'s reentrancy ledger (`hold_read`/`hold_write`'s panic
 //! path) is ever extended to intercept raw `handle.read()`/`.write()` calls too
-//! (closing issue #20), [`ReentrancyFailure::Wedged`] becomes unreachable for
+//! (routing every direct call site through the tracked guards, so a reentrant
+//! call reached through a raw accessor panics instead of hanging silently),
+//! [`ReentrancyFailure::Wedged`] becomes unreachable for
 //! any caller going through this module — which would be worth a follow-up
 //! doc note here rather than deleting the watchdog outright, since a plugin
 //! could still capture a handle and call `.read()` from off any tracked

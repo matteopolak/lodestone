@@ -1,13 +1,15 @@
-//! Issue #301's consumer: a plugin that learns the **server's** brand from the
-//! `minecraft:brand` plugin channel.
+//! A plugin that learns the **server's** brand from the `minecraft:brand`
+//! plugin channel.
 //!
 //! # What it is
 //!
 //! A ~60-line plugin that declares one [`PluginChannel`], decodes its payload,
-//! and folds it into one resource. It exists because #301's real defect was not
-//! a missing decode — `custom_payload` has decoded since long before the issue
-//! was filed — but that **no plugin could be the consumer**. This is the
-//! smallest honest thing that is one.
+//! and folds it into one resource. It exists because the real defect in custom
+//! payload handling was never a missing decode — `custom_payload` has decoded
+//! plugin channel bytes for a long time — it was that **no plugin could be
+//! the consumer**, since there was no channel registry or dispatch layer
+//! routing a decoded channel to anything. This is the smallest honest thing
+//! that is one.
 //!
 //! # Why `minecraft:brand` specifically
 //!
