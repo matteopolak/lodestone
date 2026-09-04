@@ -16,7 +16,7 @@
 //!     --test differential_live_redstone_contraption -- --ignored --nocapture
 //! ```
 //!
-//! `LODESTONE_DIFFERENTIAL_RCON` overrides the endpoint (`host:port`). The rig
+//! `LODESTONE_DIFFERENTIAL_RCON` overrides the endpoint (`IP:port`). The rig
 //! is built from scratch with `/fill` and `/setblock`, so any oracle world
 //! works; the coordinates are disjoint from the fluid rig's, so both can run
 //! against one live server.

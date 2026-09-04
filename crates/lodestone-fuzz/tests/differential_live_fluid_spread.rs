@@ -17,7 +17,7 @@
 //!     --test differential_live_fluid_spread -- --ignored --nocapture
 //! ```
 //!
-//! `LODESTONE_DIFFERENTIAL_RCON` overrides the endpoint (`host:port`) for a
+//! `LODESTONE_DIFFERENTIAL_RCON` overrides the endpoint (`IP:port`) for a
 //! run against a different live oracle — every oracle script in
 //! `scripts/live-oracles/` exposes RCON on its own port with the same
 //! password, and the rig below is `/fill`ed from scratch, so any of them

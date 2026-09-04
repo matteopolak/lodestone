@@ -73,12 +73,14 @@
 //!
 //! ## What this module does not do yet
 //!
-//! - **Generated scripts are hermetic only.** The test-support layer in
-//!   `tests/support/differential_generation.rs` generates bounded
-//!   `SetBlock`-only scripts and semantically shrinks them against fresh
-//!   in-memory oracles. It is deliberately not wired to the live RCON oracle:
-//!   a replayable live candidate needs deterministic reset and tick-boundary
-//!   control before repeated shrink attempts can be trusted.
+//! - **Generated live scripts currently cover fluids only.** The test-support
+//!   layer in `tests/support/differential_generation.rs` generates bounded
+//!   `SetBlock`-only scripts and semantically shrinks them while preserving
+//!   the complete first-divergence signature, including tick.
+//!   `tests/differential_live_generated_fluid.rs` evaluates those candidates
+//!   through this module's production fluid and RCON oracles. It clears and
+//!   drains a dedicated live lane, verifies its baseline and re-anchors tick
+//!   timing before every generated, shrink or replay candidate.
 //! - **No validation against a reverted historical fix** — revert a committed
 //!   fix in a scratch worktree and require the harness to rediscover it. That
 //!   needs an action corpus rich enough to reach the reverted code path,
@@ -160,6 +162,14 @@ impl Script {
 pub trait WorldOracle {
     type Error: std::fmt::Display;
 
+    /// Classifies an operation error for callers that need to separate an
+    /// unavailable or stalled instrument from a gameplay disagreement.
+    /// Implementations whose error type carries no timeout signal can keep
+    /// the default.
+    fn classify_error(_error: &Self::Error) -> OracleFailureKind {
+        OracleFailureKind::Failure
+    }
+
     fn apply(&mut self, action: &Action) -> Result<(), Self::Error>;
     fn advance_tick(&mut self) -> Result<(), Self::Error>;
     /// Returns the state string at `pos` if it matches any of `candidates`
@@ -197,7 +207,16 @@ pub struct Divergence {
 pub struct OracleFailure {
     pub tick: u64,
     pub side: Side,
+    /// Separates a stalled/timed-out instrument from other transport or
+    /// protocol failures. Neither kind is a gameplay divergence.
+    pub kind: OracleFailureKind,
     pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OracleFailureKind {
+    Failure,
+    Timeout,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -215,6 +234,16 @@ pub enum DifferentialOutcome {
     Agreed,
     Diverged(Divergence),
     OracleFailed(OracleFailure),
+}
+
+fn oracle_failure<O: WorldOracle>(tick: u64, side: Side, error: O::Error) -> DifferentialOutcome {
+    let kind = O::classify_error(&error);
+    DifferentialOutcome::OracleFailed(OracleFailure {
+        tick,
+        side,
+        kind,
+        message: error.to_string(),
+    })
 }
 
 /// Runs `script` against `left` and `right` in lockstep, comparing every
@@ -242,55 +271,31 @@ pub fn run_differential<L: WorldOracle, R: WorldOracle>(
     for tick in 0..=total_ticks {
         for action in script.steps_at(tick) {
             if let Err(e) = left.apply(action) {
-                return DifferentialOutcome::OracleFailed(OracleFailure {
-                    tick,
-                    side: Side::Left,
-                    message: e.to_string(),
-                });
+                return oracle_failure::<L>(tick, Side::Left, e);
             }
             if let Err(e) = right.apply(action) {
-                return DifferentialOutcome::OracleFailed(OracleFailure {
-                    tick,
-                    side: Side::Right,
-                    message: e.to_string(),
-                });
+                return oracle_failure::<R>(tick, Side::Right, e);
             }
         }
 
         if let Err(e) = left.advance_tick() {
-            return DifferentialOutcome::OracleFailed(OracleFailure {
-                tick,
-                side: Side::Left,
-                message: e.to_string(),
-            });
+            return oracle_failure::<L>(tick, Side::Left, e);
         }
         if let Err(e) = right.advance_tick() {
-            return DifferentialOutcome::OracleFailed(OracleFailure {
-                tick,
-                side: Side::Right,
-                message: e.to_string(),
-            });
+            return oracle_failure::<R>(tick, Side::Right, e);
         }
 
         for (pos, candidates) in region {
             let left_state = match left.block_state(*pos, candidates) {
                 Ok(s) => s,
                 Err(e) => {
-                    return DifferentialOutcome::OracleFailed(OracleFailure {
-                        tick,
-                        side: Side::Left,
-                        message: e.to_string(),
-                    });
+                    return oracle_failure::<L>(tick, Side::Left, e);
                 }
             };
             let right_state = match right.block_state(*pos, candidates) {
                 Ok(s) => s,
                 Err(e) => {
-                    return DifferentialOutcome::OracleFailed(OracleFailure {
-                        tick,
-                        side: Side::Right,
-                        message: e.to_string(),
-                    });
+                    return oracle_failure::<R>(tick, Side::Right, e);
                 }
             };
             if left_state != right_state {
@@ -325,6 +330,12 @@ pub const TICK_MILLIS: Duration = Duration::from_millis(50);
 /// thing this timeout is meant to catch.
 pub const MAX_TICK_WAIT: Duration = Duration::from_secs(20);
 
+/// Maximum wall-clock time for one RCON connection attempt or complete frame
+/// read or write. Every command in a live differential candidate is therefore
+/// interruptible even when the remote endpoint accepts a socket and then
+/// stops responding.
+pub const RCON_IO_TIMEOUT: Duration = Duration::from_secs(5);
+
 #[cfg(feature = "rcon-oracle")]
 pub mod rcon {
     //! [`RconOracle`]: a [`super::WorldOracle`] over any Source-RCON
@@ -332,14 +343,199 @@ pub mod rcon {
     //! against our own [`lodestone_server::IntegratedServer::start_rcon`]
     //! identically, since both speak the same wire protocol — this is what
     //! lets one oracle type serve both sides of the comparison.
-    use super::{Action, WorldOracle};
-    use lodestone_testsupport::RconClient;
-    use std::net::ToSocketAddrs;
-    use std::time::Instant;
+    use super::{Action, OracleFailureKind, WorldOracle};
+    use lodestone_testsupport::rcon_frame;
+    use std::io::{Read, Write};
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::{Duration, Instant};
+
+    const TYPE_COMMAND: i32 = 2;
+    const TYPE_AUTH: i32 = 3;
+    const MAX_RESPONSE_BYTES: i32 = 4 * 1024 * 1024;
+
+    #[derive(Debug)]
+    struct TimedRconClient {
+        stream: TcpStream,
+        next_id: i32,
+        io_timeout: Duration,
+    }
+
+    impl TimedRconClient {
+        fn connect(
+            addr: SocketAddr,
+            password: &str,
+            timeout: Duration,
+        ) -> std::io::Result<Self> {
+            if timeout.is_zero() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "RCON I/O timeout must be positive",
+                ));
+            }
+            let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "RCON I/O timeout is too large for a monotonic deadline",
+                )
+            })?;
+            let remaining = Self::remaining(deadline, "connection")?;
+            let stream = TcpStream::connect_timeout(&addr, remaining)
+                .map_err(Self::normalize_timeout)?;
+            let mut client = Self {
+                stream,
+                next_id: 1,
+                io_timeout: timeout,
+            };
+            let id = client.send(TYPE_AUTH, password)?;
+            let (response_id, _) = client.read_response()?;
+            if response_id != id {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "RCON authentication failed",
+                ));
+            }
+            Ok(client)
+        }
+
+        fn normalize_timeout(error: std::io::Error) -> std::io::Error {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+            ) {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("RCON I/O exceeded the configured socket timeout: {error}"),
+                )
+            } else {
+                error
+            }
+        }
+
+        fn operation_deadline(&self) -> std::io::Result<Instant> {
+            Instant::now().checked_add(self.io_timeout).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "RCON I/O timeout is too large for a monotonic deadline",
+                )
+            })
+        }
+
+        fn remaining(deadline: Instant, operation: &str) -> std::io::Result<Duration> {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    format!("RCON {operation} exceeded its full-operation deadline"),
+                ))
+            } else {
+                Ok(remaining)
+            }
+        }
+
+        fn write_all_until(
+            stream: &mut TcpStream,
+            mut bytes: &[u8],
+            deadline: Instant,
+        ) -> std::io::Result<()> {
+            while !bytes.is_empty() {
+                let remaining = Self::remaining(deadline, "frame write")?;
+                stream.set_write_timeout(Some(remaining))?;
+                match stream.write(bytes) {
+                    Ok(0) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::WriteZero,
+                            "RCON frame write returned zero bytes",
+                        ));
+                    }
+                    Ok(written) => bytes = &bytes[written..],
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(Self::normalize_timeout(error)),
+                }
+            }
+            Self::remaining(deadline, "frame write").map(|_| ())
+        }
+
+        fn read_exact_until(
+            stream: &mut TcpStream,
+            bytes: &mut [u8],
+            deadline: Instant,
+        ) -> std::io::Result<()> {
+            let mut filled = 0;
+            while filled < bytes.len() {
+                let remaining = Self::remaining(deadline, "frame read")?;
+                stream.set_read_timeout(Some(remaining))?;
+                match stream.read(&mut bytes[filled..]) {
+                    Ok(0) => {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::UnexpectedEof,
+                            "RCON response ended before the complete frame arrived",
+                        ));
+                    }
+                    Ok(read) => filled += read,
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(Self::normalize_timeout(error)),
+                }
+            }
+            Self::remaining(deadline, "frame read").map(|_| ())
+        }
+
+        fn send(&mut self, packet_type: i32, payload: &str) -> std::io::Result<i32> {
+            let id = self.next_id;
+            self.next_id += 1;
+            let deadline = self.operation_deadline()?;
+            Self::write_all_until(
+                &mut self.stream,
+                &rcon_frame(id, packet_type, payload),
+                deadline,
+            )?;
+            Ok(id)
+        }
+
+        fn read_response(&mut self) -> std::io::Result<(i32, String)> {
+            let deadline = self.operation_deadline()?;
+            let mut len_buf = [0; 4];
+            Self::read_exact_until(&mut self.stream, &mut len_buf, deadline)?;
+            let len = i32::from_le_bytes(len_buf);
+            if !(10..=MAX_RESPONSE_BYTES).contains(&len) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("invalid RCON frame length {len}"),
+                ));
+            }
+            let mut body = vec![0; len as usize];
+            Self::read_exact_until(&mut self.stream, &mut body, deadline)?;
+            if body[len as usize - 2..] != [0, 0] {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "RCON response is missing its two terminator bytes",
+                ));
+            }
+            let response_id = i32::from_le_bytes(body[0..4].try_into().expect("four-byte response id"));
+            let payload = String::from_utf8(body[8..len as usize - 2].to_vec()).map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("RCON response is not UTF-8: {error}"),
+                )
+            })?;
+            Ok((response_id, payload))
+        }
+
+        fn command(&mut self, command: &str) -> std::io::Result<String> {
+            let id = self.send(TYPE_COMMAND, command)?;
+            let (response_id, body) = self.read_response()?;
+            if response_id != id {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "RCON response id mismatch",
+                ));
+            }
+            Ok(body)
+        }
+    }
 
     #[derive(Debug)]
     pub struct RconOracle {
-        client: RconClient,
+        client: TimedRconClient,
         /// Prefixed to every position this oracle touches, so two oracles
         /// backed by the *same* running world can be driven side by side at
         /// disjoint coordinate ranges without one script's actions
@@ -392,8 +588,36 @@ pub mod rcon {
         /// Connects and authenticates. `origin` is added to every position an
         /// [`Action`]/`block_state` query names, so the same script can run
         /// at two disjoint locations in one shared world.
-        pub fn connect<A: ToSocketAddrs>(addr: A, password: &str, origin: (i32, i32, i32)) -> std::io::Result<Self> {
-            let mut client = RconClient::connect(addr, password)?;
+        pub fn connect(
+            addr: impl AsRef<str>,
+            password: &str,
+            origin: (i32, i32, i32),
+        ) -> std::io::Result<Self> {
+            Self::connect_with_io_timeout(addr, password, origin, super::RCON_IO_TIMEOUT)
+        }
+
+        /// Connects with an explicit hard bound for each connection attempt
+        /// and complete frame operation.
+        ///
+        /// `addr` must be a numeric IP address and port. Rejecting hostnames
+        /// before any connection work keeps name resolution from sitting
+        /// outside the enforceable connection deadline.
+        /// The ordinary live path uses [`super::RCON_IO_TIMEOUT`]; the
+        /// parameterized form keeps the stalled-peer control fast and proves
+        /// that a blocking frame read cannot bypass timeout classification.
+        pub fn connect_with_io_timeout(
+            addr: impl AsRef<str>,
+            password: &str,
+            origin: (i32, i32, i32),
+            io_timeout: Duration,
+        ) -> std::io::Result<Self> {
+            let addr = addr.as_ref().parse::<SocketAddr>().map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("RCON endpoint must be a numeric IP address and port: {error}"),
+                )
+            })?;
+            let mut client = TimedRconClient::connect(addr, password, io_timeout)?;
             // Read the counter now, before the caller applies a single
             // action, rather than lazily on the first `advance_tick` call.
             // Capturing it late used to hide exactly the gap this oracle
@@ -429,9 +653,12 @@ pub mod rcon {
         /// flags a real tick *overshooting* the nominal ladder, not the
         /// ladder having started early. Call this once, right after
         /// rig-building and right before the script's first action, so the
-        /// ladder starts at the same moment the comparison does.
+        /// ladder starts at the same moment the comparison does. This also
+        /// clears [`Self::missed_deadlines`], because setup and reset time is
+        /// outside the candidate whose timing that counter diagnoses.
         pub fn reset_baseline(&mut self) -> std::io::Result<()> {
             self.baseline_gametime = Some(self.query_gametime()?);
+            self.missed_deadlines = 0;
             Ok(())
         }
 
@@ -446,7 +673,7 @@ pub mod rcon {
 
         /// Free-function form of [`Self::query_gametime`], for
         /// [`Self::connect`] to call before `Self` exists to be borrowed.
-        fn query_gametime_over(client: &mut RconClient) -> std::io::Result<i64> {
+        fn query_gametime_over(client: &mut TimedRconClient) -> std::io::Result<i64> {
             let response = client.command("time query gametime")?;
             response
                 .split_whitespace()
@@ -473,6 +700,14 @@ pub mod rcon {
 
     impl WorldOracle for RconOracle {
         type Error = std::io::Error;
+
+        fn classify_error(error: &Self::Error) -> OracleFailureKind {
+            if error.kind() == std::io::ErrorKind::TimedOut {
+                OracleFailureKind::Timeout
+            } else {
+                OracleFailureKind::Failure
+            }
+        }
 
         fn apply(&mut self, action: &Action) -> Result<(), Self::Error> {
             match action {
@@ -519,7 +754,7 @@ pub mod rcon {
                     return Ok(());
                 }
                 if Instant::now() >= deadline {
-                    return Err(std::io::Error::other(format!(
+                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, format!(
                         "`time query gametime` did not advance past {baseline} within \
                          {:?} — the world is not ticking (check \
                          pause-when-empty-seconds=0) rather than merely slow",

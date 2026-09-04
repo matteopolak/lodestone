@@ -14,10 +14,11 @@ use std::rc::Rc;
 
 use differential_generation::{
     GenerationDomain, MAX_ORACLE_TICKS, ReplayCase, SearchBudget, SearchOutcome, sample_scripts,
-    search_and_shrink,
+    retry_oracle_timeouts, search_and_shrink, search_and_shrink_with,
 };
 use lodestone_fuzz::differential::{
-    Action, DifferentialOutcome, Script, ScriptStep, WorldOracle, run_differential,
+    Action, DifferentialOutcome, OracleFailure, OracleFailureKind, Script, ScriptStep, Side,
+    WorldOracle, run_differential,
 };
 
 const AIR: &str = "minecraft:air";
@@ -252,7 +253,7 @@ fn generated_scripts_are_bounded_ordered_and_set_block_only() {
 }
 
 #[test]
-fn the_fault_control_shrinks_to_one_replayable_trigger_at_tick_zero() {
+fn the_fault_control_shrinks_to_a_replayable_trigger_at_the_original_tick() {
     let mut factory_calls = 0_u32;
     let outcome = search_and_shrink(&domain(), search_budget(), &region(), 0, || {
         factory_calls += 1;
@@ -273,16 +274,18 @@ fn the_fault_control_shrinks_to_one_replayable_trigger_at_tick_zero() {
     assert!(!found.original_script.steps.is_empty());
     assert!(found.shrink_attempts > 0);
     assert!(found.shrink_attempts <= search_budget().shrink_attempts);
-    assert_script_eq(
-        &found.minimal_script,
-        &Script::new(vec![lodestone_fuzz::differential::ScriptStep {
-            tick: 0,
-            action: Action::SetBlock {
-                pos: TARGET,
-                state: WATER.to_owned(),
-            },
-        }]),
+    assert!(
+        found.minimal_script.steps.iter().any(|step| {
+            step.tick == found.original_divergence.tick
+                && step.action
+                    == (Action::SetBlock {
+                        pos: TARGET,
+                        state: WATER.to_owned(),
+                    })
+        }),
+        "the minimized script must retain the triggering edit"
     );
+    assert_eq!(found.original_divergence.tick, found.minimal_divergence.tick);
     assert_eq!(found.original_divergence.pos, found.minimal_divergence.pos);
     assert_eq!(found.original_divergence.left, found.minimal_divergence.left);
     assert_eq!(found.original_divergence.right, found.minimal_divergence.right);
@@ -312,6 +315,21 @@ fn the_fault_control_shrinks_to_one_replayable_trigger_at_tick_zero() {
         .expect("the minimized replay has a bounded tick horizon");
     let DifferentialOutcome::Diverged(replayed_divergence) = replayed else {
         panic!("the decoded replay must reproduce its recorded divergence: {replayed:?}");
+    };
+    assert_eq!(replayed_divergence, decoded.expected_divergence());
+
+    let replayed_through_owned_setup = decoded
+        .replay_with(|script, region, settle_ticks| {
+            let mut left = FakeWorld::default();
+            let mut right = FakeWorld {
+                fault: Some(Fault::WaterAtTargetBecomesStone),
+                ..FakeWorld::default()
+            };
+            run_differential(script, region, &mut left, &mut right, settle_ticks)
+        })
+        .expect("the minimized live-shaped replay has a bounded tick horizon");
+    let DifferentialOutcome::Diverged(replayed_divergence) = replayed_through_owned_setup else {
+        panic!("the caller-owned evaluator must reproduce the replay: {replayed_through_owned_setup:?}");
     };
     assert_eq!(replayed_divergence, decoded.expected_divergence());
 }
@@ -371,6 +389,64 @@ fn shrink_candidates_with_a_different_divergence_class_are_rejected() {
     assert_eq!(found.original_divergence.left, found.minimal_divergence.left);
     assert_eq!(found.original_divergence.right, found.minimal_divergence.right);
     assert!(found.minimal_script.steps.len() >= 2);
+}
+
+#[test]
+fn shrinking_preserves_the_first_divergence_tick_as_part_of_the_failure_class() {
+    let domain = GenerationDomain::new(
+        vec![OTHER_TARGET, TARGET],
+        vec![WATER.to_owned()],
+        8,
+        5,
+    )
+    .expect("valid domain");
+    let (seed, original_tick) = (0..10_000)
+        .find_map(|seed| {
+            let scripts = sample_scripts(
+                &domain,
+                SearchBudget {
+                    seed,
+                    cases: 1,
+                    shrink_attempts: 0,
+                },
+            )
+            .expect("sample one script");
+            let script = &scripts[0];
+            let first_target = script.steps.iter().find(|step| {
+                matches!(step.action, Action::SetBlock { pos: TARGET, .. })
+            })?;
+            (first_target.tick > 0).then_some((seed, first_target.tick))
+        })
+        .expect("the finite seed search must find a delayed target edit");
+
+    let outcome = search_and_shrink(
+        &domain,
+        SearchBudget {
+            seed,
+            cases: 1,
+            shrink_attempts: 256,
+        },
+        &region(),
+        0,
+        || {
+            (
+                FakeWorld::default(),
+                FakeWorld {
+                    fault: Some(Fault::WaterAtTargetBecomesStone),
+                    ..FakeWorld::default()
+                },
+            )
+        },
+    );
+
+    let SearchOutcome::Found(found) = outcome else {
+        panic!("the delayed fault must be found, got {outcome:?}");
+    };
+    assert_eq!(found.original_divergence.tick, original_tick);
+    assert_eq!(
+        found.minimal_divergence.tick, found.original_divergence.tick,
+        "a minimized replay must preserve the first-divergence tick, not only its states"
+    );
 }
 
 #[test]
@@ -615,6 +691,108 @@ fn an_unsupported_replay_format_version_is_rejected() {
 }
 
 #[test]
+fn live_replay_policy_rejects_untrusted_fields_before_oracle_setup() {
+    let outcome = search_and_shrink(&domain(), search_budget(), &region(), 0, || {
+        (
+            FakeWorld::default(),
+            FakeWorld {
+                fault: Some(Fault::WaterAtTargetBecomesStone),
+                ..FakeWorld::default()
+            },
+        )
+    });
+    let SearchOutcome::Found(found) = outcome else {
+        panic!("the deliberately faulty world must be found: {outcome:?}");
+    };
+    let expected_scenario = "live-fluid-policy-control";
+    let expected_region = region();
+    let replay = ReplayCase::from_found(
+        expected_scenario,
+        search_budget().seed,
+        0,
+        expected_region.clone(),
+        &found,
+    );
+    let original: serde_json::Value = serde_json::from_str(
+        &replay.to_json_pretty().expect("serialize replay"),
+    )
+    .expect("parse replay JSON");
+
+    let mut mutations = Vec::new();
+    let mut wrong_scenario = original.clone();
+    wrong_scenario["scenario"] = serde_json::json!("another-scenario");
+    mutations.push((wrong_scenario, "scenario"));
+
+    let mut wrong_region = original.clone();
+    wrong_region["region"][0]["pos"] = serde_json::json!([99, 0, 0]);
+    mutations.push((wrong_region, "probe region"));
+
+    let mut wrong_settle = original.clone();
+    wrong_settle["settle_ticks"] = serde_json::json!(1);
+    mutations.push((wrong_settle, "settle ticks"));
+
+    let mut command = original.clone();
+    command["steps"][0]["action"] = serde_json::json!({
+        "kind": "run_command",
+        "command": "fill 0 0 0 100 100 100 minecraft:lava"
+    });
+    mutations.push((command, "RunCommand"));
+
+    let mut out_of_lane = original.clone();
+    out_of_lane["steps"][0]["action"]["pos"] = serde_json::json!([99, 0, 0]);
+    mutations.push((out_of_lane, "position"));
+
+    let mut wrong_state = original.clone();
+    wrong_state["steps"][0]["action"]["state"] = serde_json::json!("minecraft:lava");
+    mutations.push((wrong_state, "state"));
+
+    let mut wrong_divergence = original;
+    wrong_divergence["divergence"]["pos"] = serde_json::json!([99, 0, 0]);
+    mutations.push((wrong_divergence, "divergence position"));
+
+    let mut oracle_setups = 0;
+    for (json, expected_error_fragment) in mutations {
+        let decoded = ReplayCase::from_json(&serde_json::to_string(&json).expect("serialize mutation"))
+            .expect("the malicious input still uses replay format v1");
+        let error = decoded
+            .replay_generated_with(
+                expected_scenario,
+                &domain(),
+                &expected_region,
+                0,
+                |_script, _region, _settle_ticks| {
+                    oracle_setups += 1;
+                    DifferentialOutcome::Agreed
+                },
+            )
+            .expect_err("untrusted live replay content must be rejected");
+        assert!(
+            error.contains(expected_error_fragment),
+            "unexpected policy error {error:?} for {expected_error_fragment}"
+        );
+    }
+    assert_eq!(oracle_setups, 0, "rejected replay input must not reach RCON setup");
+
+    let accepted = replay
+        .replay_generated_with(
+            expected_scenario,
+            &domain(),
+            &expected_region,
+            0,
+            |_script, _region, _settle_ticks| {
+                oracle_setups += 1;
+                DifferentialOutcome::Agreed
+            },
+        )
+        .expect("the matching generated replay policy must admit its own artifact");
+    assert!(matches!(accepted, DifferentialOutcome::Agreed));
+    assert_eq!(
+        oracle_setups, 1,
+        "the valid control must prove the evaluator is reachable"
+    );
+}
+
+#[test]
 fn an_overflowing_replay_horizon_is_rejected_before_oracle_creation() {
     let outcome = search_and_shrink(&domain(), search_budget(), &region(), 0, || {
         (
@@ -660,11 +838,10 @@ fn a_non_overflowing_replay_above_the_cap_is_rejected_before_oracle_creation() {
     let SearchOutcome::Found(found) = outcome else {
         panic!("the deliberately faulty world must be found: {outcome:?}");
     };
-    assert_eq!(found.minimal_script.last_tick(), 0, "the control replay must start at tick zero");
     let replay = ReplayCase::from_found("horizon-cap-control", search_budget().seed, 0, region(), &found);
     let mut json: serde_json::Value =
         serde_json::from_str(&replay.to_json_pretty().expect("serialize replay")).expect("parse JSON value");
-    json["settle_ticks"] = serde_json::json!(MAX_ORACLE_TICKS);
+    json["settle_ticks"] = serde_json::json!(MAX_ORACLE_TICKS - found.minimal_script.last_tick());
     let decoded = ReplayCase::from_json(&serde_json::to_string(&json).expect("serialize changed JSON"))
         .expect("the replay format remains valid");
     let mut factory_calls = 0;
@@ -680,6 +857,104 @@ fn a_non_overflowing_replay_above_the_cap_is_rejected_before_oracle_creation() {
         error,
         "replay differential horizon of 4097 ticks exceeds the 4096-tick cap"
     );
+}
+
+#[test]
+fn evaluator_setup_failure_aborts_before_it_can_become_a_counterexample() {
+    let mut evaluations = 0;
+    let outcome = search_and_shrink_with(
+        &domain(),
+        search_budget(),
+        &region(),
+        0,
+        |_script, _region, _settle_ticks| {
+            evaluations += 1;
+            DifferentialOutcome::OracleFailed(OracleFailure {
+                tick: 0,
+                side: Side::Right,
+                kind: OracleFailureKind::Failure,
+                message: "candidate reset failed".to_owned(),
+            })
+        },
+    );
+
+    let SearchOutcome::OracleFailed {
+        case_index,
+        during_shrink,
+        failure,
+    } = outcome
+    else {
+        panic!("setup failure must stop the generated search, got {outcome:?}");
+    };
+    assert_eq!(evaluations, 1);
+    assert_eq!(case_index, 0);
+    assert!(!during_shrink);
+    assert_eq!(failure.kind, OracleFailureKind::Failure);
+    assert_eq!(failure.message, "candidate reset failed");
+}
+
+#[test]
+fn only_timing_failures_are_retried_and_each_attempt_is_bounded() {
+    let divergence = lodestone_fuzz::differential::Divergence {
+        tick: 3,
+        pos: TARGET,
+        left: Some(AIR.to_owned()),
+        right: Some(STONE.to_owned()),
+    };
+    let mut attempts = 0;
+    let recovered = retry_oracle_timeouts(3, || {
+        attempts += 1;
+        if attempts == 1 {
+            DifferentialOutcome::OracleFailed(OracleFailure {
+                tick: 3,
+                side: Side::Right,
+                kind: OracleFailureKind::Timeout,
+                message: "missed a tick boundary".to_owned(),
+            })
+        } else {
+            DifferentialOutcome::Diverged(divergence.clone())
+        }
+    });
+    assert_eq!(attempts, 2);
+    assert!(matches!(recovered, DifferentialOutcome::Diverged(found) if found == divergence));
+
+    let mut failures = 0;
+    let not_retried = retry_oracle_timeouts(3, || {
+        failures += 1;
+        DifferentialOutcome::OracleFailed(OracleFailure {
+            tick: 0,
+            side: Side::Right,
+            kind: OracleFailureKind::Failure,
+            message: "authentication failed".to_owned(),
+        })
+    });
+    assert_eq!(failures, 1);
+    assert!(matches!(
+        not_retried,
+        DifferentialOutcome::OracleFailed(OracleFailure {
+            kind: OracleFailureKind::Failure,
+            ..
+        })
+    ));
+
+    let mut timeouts = 0;
+    let exhausted = retry_oracle_timeouts(3, || {
+        timeouts += 1;
+        DifferentialOutcome::OracleFailed(OracleFailure {
+            tick: 1,
+            side: Side::Right,
+            kind: OracleFailureKind::Timeout,
+            message: "still overloaded".to_owned(),
+        })
+    });
+    assert_eq!(timeouts, 3);
+    assert!(matches!(
+        exhausted,
+        DifferentialOutcome::OracleFailed(OracleFailure {
+            kind: OracleFailureKind::Timeout,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -708,6 +983,7 @@ fn an_oracle_failure_aborts_instead_of_becoming_a_counterexample() {
         } => {
             assert_eq!(case_index, 0);
             assert!(!during_shrink);
+            assert_eq!(failure.kind, OracleFailureKind::Failure);
             assert_eq!(failure.message, "instrument disconnected");
         }
         other => panic!("an instrument failure must abort the search, got {other:?}"),
