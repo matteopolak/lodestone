@@ -616,10 +616,6 @@ file = "docs/roadmap/server-simulation.md"
 owner = "issue-553"
 reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
 
-[[allow]]
-file = "web/README.md"
-owner = "issue-553"
-reason = "pre-existing comment-voice debt as of the guard's introduction; not yet swept"
 
 [[allow]]
 file = "xtask/src/lib.rs"
