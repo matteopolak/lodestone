@@ -424,7 +424,9 @@ fn generate_block_enum(dump: &Dump) -> String {
     // or duplicated default from becoming a wrong `Block::default_state`.
     let mut default_state: Vec<Option<u32>> = vec![None; block_count];
     for state in 0..block_states::STATE_COUNT {
-        if lodestone_data::snow_support::is_default_state(state) == Some(true) {
+        let typed = lodestone_data::block_states::StateId::new(state)
+            .expect("generated state-table index is valid");
+        if typed.is_default() {
             let name = block_states::block_name(state)
                 .unwrap_or_else(|| panic!("block-state {state} has no name"));
             let block = block_id(dump, name) as usize;

@@ -12,7 +12,7 @@ use lodestone_core::State;
 use lodestone_model::command_tree::{CommandSuggestionsResponse, CommandTree};
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
-    ItemStack, ResourceKey, Rotation, SoundCategory, Text, Vec3, Vec3f,
+    ItemStack, RecipeBookType, ResourceKey, Rotation, SoundCategory, Text, Vec3, Vec3f,
 };
 use uuid::Uuid;
 
@@ -1055,6 +1055,17 @@ pub enum ServerBound {
         /// `useMaxItems` — shift-clicking the recipe, which fills as many rounds as
         /// the inventory allows.
         use_max_items: bool,
+    },
+    /// The player changed one recipe-book tab's open/filter state. The server
+    /// keeps this per connection so the setting is available to the player's
+    /// recipe-book state without confusing it with the crafting grid.
+    RecipeBookSettingsChanged {
+        /// Which recipe-book tab changed.
+        book_type: RecipeBookType,
+        /// Whether the tab is open.
+        open: bool,
+        /// Whether the tab shows only craftable recipes.
+        filtering: bool,
     },
     /// The client closed a container screen (`ServerboundContainerClosePacket`).
     /// `window_id` is the id the client had open — vanilla's

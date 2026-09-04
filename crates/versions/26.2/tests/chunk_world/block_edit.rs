@@ -93,7 +93,10 @@ fn resolve_state(state: &str) -> u32 {
         if block_name(id) != Some(name) {
             continue;
         }
-        if lodestone_data::snow_support::is_default_state(id) == Some(true) {
+        if lodestone_data::block_states::StateId::new(id)
+            .expect("generated state-table index is valid")
+            .is_default()
+        {
             jar_default = Some(id);
         }
         let mut have: Vec<(&str, &str)> = properties(id).unwrap_or(&[]).to_vec();

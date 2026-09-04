@@ -124,7 +124,7 @@ impl StateId {
     /// Whether this is its block's own default-block-state. Total, O(1).
     #[must_use]
     pub fn is_default(self) -> bool {
-        crate::snow_support::is_default_state(self.0) == Some(true)
+        crate::snow_support::is_default_state(self)
     }
 }
 
@@ -221,7 +221,8 @@ fn block_state_index() -> &'static BlockStateIndex {
             let (block, _) = table::STATES[id as usize];
             let block = block as usize;
             counts[block] += 1;
-            let is_default = crate::snow_support::is_default_state(id) == Some(true);
+            let state = StateId::new(id).expect("generated state-table index is valid");
+            let is_default = crate::snow_support::is_default_state(state);
             match &mut spans[block] {
                 Some(span) => {
                     span.last = id;

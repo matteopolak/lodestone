@@ -66,8 +66,8 @@ use lodestone_model::command_tree::{
 };
 use lodestone_model::{
     BlockActionKind, BlockFace, BlockPos, Difficulty, EntityAttributeSnapshot, GameMode,
-    ItemComponents, ItemStack, ResourceKey, Rotation, SoundCategory, Text, TextContent, Vec3,
-    Vec3f, WrittenBookContent,
+    ItemComponents, ItemStack, RecipeBookType, ResourceKey, Rotation, SoundCategory, Text,
+    TextContent, Vec3, Vec3f, WrittenBookContent,
 };
 use lodestone_server::{
     Abilities, ChunkColumn as ServerChunkColumn, ChunkEncoder, EntitySnapshot, HOTBAR_SIZE,
@@ -3954,8 +3954,23 @@ impl ServerProtocol for V770ServerProtocol {
                 }
             }
             State::Play if packet_id == play::serverbound::RECIPE_BOOK_CHANGE_SETTINGS => {
-                let _ = decode_full::<RecipeBookChangeSettings>(payload);
-                ServerBound::Ignored
+                match decode_full::<RecipeBookChangeSettings>(payload).and_then(|p| {
+                    let book_type = match p.book_type {
+                        0 => RecipeBookType::Crafting,
+                        1 => RecipeBookType::Furnace,
+                        2 => RecipeBookType::BlastFurnace,
+                        3 => RecipeBookType::Smoker,
+                        _ => return None,
+                    };
+                    Some(ServerBound::RecipeBookSettingsChanged {
+                        book_type,
+                        open: p.is_open,
+                        filtering: p.is_filtering,
+                    })
+                }) {
+                    Some(update) => update,
+                    None => ServerBound::Ignored,
+                }
             }
             State::Play if packet_id == play::serverbound::RECIPE_BOOK_SEEN_RECIPE => {
                 let _ = decode_full::<RecipeBookSeenRecipe>(payload);
@@ -6787,7 +6802,9 @@ mod block_edit_tests {
         let jar_default = (0..lodestone_data::block_states::STATE_COUNT)
             .find(|&id| {
                 block_name(id) == Some("minecraft:grass_block")
-                    && lodestone_data::snow_support::is_default_state(id) == Some(true)
+                    && lodestone_data::block_states::StateId::new(id)
+                        .expect("generated state-table index is valid")
+                        .is_default()
             })
             .expect("no default grass_block state in the jar-derived column");
 

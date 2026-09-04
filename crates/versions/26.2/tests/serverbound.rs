@@ -17,6 +17,8 @@ mod serverbound_ping_spectator;
 mod serverbound_protocol_hygiene;
 #[path = "serverbound/serverbound_recipe_bundle.rs"]
 mod serverbound_recipe_bundle;
+#[path = "serverbound/serverbound_recipe_settings_decode.rs"]
+mod serverbound_recipe_settings_decode;
 #[path = "serverbound/serverbound_spectator_action_decode.rs"]
 mod serverbound_spectator_action_decode;
 #[path = "serverbound/serverbound_swing_decode.rs"]

@@ -69,7 +69,10 @@ fn resolve_state_id_legacy(state: &str) -> u32 {
         }
         first_id.get_or_insert(id);
         last_id = Some(id);
-        if lodestone_data::snow_support::is_default_state(id) == Some(true) {
+        if lodestone_data::block_states::StateId::new(id)
+            .expect("generated state-table index is valid")
+            .is_default()
+        {
             default_id = Some(id);
         }
         let have_raw = properties(id).unwrap_or(&[]);
@@ -338,9 +341,10 @@ fn palette_state_ids_agree_with_the_jar_derived_dump() {
             );
             let have = properties(id).expect("resolved id is in range");
             if raw_props.is_empty() {
-                assert_eq!(
-                    lodestone_data::snow_support::is_default_state(id),
-                    Some(true),
+                assert!(
+                    lodestone_data::block_states::StateId::new(id)
+                        .expect("resolved id is in the generated state table")
+                        .is_default(),
                     "bare {state} resolved to id {id}, which the jar does not mark as \
                      {name}'s default state (properties {have:?})"
                 );
