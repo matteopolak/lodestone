@@ -486,8 +486,6 @@ pub struct PanoramaRenderer {
     /// Kept alive because the bind group's view is derived from it.
     #[allow(dead_code)]
     texture: wgpu::Texture,
-    /// Side length of one face, for diagnostics and gates.
-    size: u32,
     /// [`PanoramaFaces::from_object_store`], carried through so a gate can assert
     /// it is bound to the real art rather than the jar's flat stubs.
     from_object_store: usize,
@@ -716,7 +714,6 @@ impl PanoramaRenderer {
             uniform,
             verts,
             texture,
-            size,
             from_object_store: faces.from_object_store,
             spin: 0.0,
             speed: DEFAULT_SPIN_SPEED,
