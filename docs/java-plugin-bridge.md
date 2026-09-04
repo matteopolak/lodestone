@@ -4,7 +4,8 @@
 
 A design, a measurement, and a foundation crate for running **real, unmodified
 Bukkit/Spigot/Paper plugin jars** against this server, with **zero cost when no Java plugin is
-loaded**.
+loaded**. The crate's JVM runtime boundary is opt-in; the complete plugin bridge remains future
+work.
 
 The approach is not "reimplement the Bukkit API in Rust". Bukkit is only the *API*;
 Paper/CraftBukkit is the *implementation* that bridges Bukkit interfaces onto vanilla's own
@@ -21,10 +22,11 @@ This document covers what has been **settled and built**: the licensing decision
 reentrancy design, the ABI decision, the object-identity design, and — the measurement the whole
 estimate turns on — the **NMS reference census**, run against a real Paper jar.
 
-The bridge itself is not built. What is built is `crates/plugins/lodestone-jvm-bridge` (the
-JVM-independent host machinery), `crates/lodestone-nms-census` (the scanner), an executed
-classload-interception spike, and a separate JNI-invocation spike that drives native methods
-through the real `WorldPort`/`PortServicer` pair.
+The complete bridge itself is not built. What is built is `crates/plugins/lodestone-jvm-bridge`
+(the JVM-independent host machinery plus an opt-in `jvm` runtime boundary),
+`crates/lodestone-nms-census` (the scanner), an executed classload-interception spike, and a
+separate JNI-invocation spike that drives native methods through the real
+`WorldPort`/`PortServicer` pair.
 
 ---
 
@@ -425,9 +427,10 @@ delegation finds whichever `Level` is on the application classpath and the test 
 ### 4.1 JNI invocation and port round trip — the mechanism, executed
 
 The classloader spike remains isolated at `crates/plugins/lodestone-jvm-bridge/spike/`. The next
-mechanism is a standalone Cargo workspace under `spike/invocation/`; it is intentionally not part of
-the production bridge crate and is the only place in this subsystem that depends on `jni` with its
-invocation feature.
+mechanism is a standalone Cargo workspace under `spike/invocation/`; it remains intentionally
+separate from the production host. The production crate also names `jni`, but only as an optional
+dependency compiled by its default-off `jvm` feature; the spike keeps the end-to-end gate isolated
+from ordinary Rust tests.
 
 The Rust process creates one JVM, starts a named Rust invocation thread, attaches that thread, and
 registers the Java plugin's static `nativeScore(int, int, int)` method with `RegisterNatives`. The
@@ -483,6 +486,17 @@ checks the JNI attachment counter returns to its pre-call value, proving detach 
 fixture is exercised by `spike/invocation/run.sh`; `tests/invocation_spike.rs` is an ignored live gate
 because it requires the checksum-pinned container runtime rather than the ordinary Rust test environment.
 
+### 4.3 Opt-in production runtime boundary
+
+With `lodestone-jvm-bridge --features jvm`, a host can construct `runtime::JvmConfig`, explicitly
+call `runtime::JvmRuntime::start`, and use `with_attached_thread` for a scoped JNI environment.
+The default feature set is empty: depending on the crate or constructing a config does not load a
+JVM, and no server host currently enables it. The attachment callback receives no ECS handle or
+world guard; world access remains the bounded `WorldPort` request/response path serviced by the
+tick side. Callback errors map to `JvmError`, while the existing port retains its timeout and
+panic/error mapping. This is the host-callable runtime seam, not broad event compatibility or a
+Paper redistribution.
+
 ---
 
 ## 5. The ABI decision
@@ -525,8 +539,8 @@ be revisited then rather than assumed now.
   dependents and another that proves the standalone invocation workspace really names the bridge but
   is not classified as a production member — because a parser that read nothing would certify the
   bridge as unreferenced forever;
-- **the bridge names no unconditional JVM-linking crate**, permitting `optional = true` only, which
-  is the shape the JNI layer must land in.
+- **the bridge names no unconditional JVM-linking crate**, permitting `optional = true` only, and
+  asserts that the `jvm` feature is absent from the default feature set.
 
 **One trap here was measured and is worth not rediscovering: a `Cargo.lock` grep is the wrong
 instrument.** `jni` 0.22.4 is *already* in this workspace's lockfile, via `android-activity`,
@@ -629,8 +643,10 @@ counter while unwinding, so the over-limit control cannot poison later callbacks
 
 - `crates/lodestone-nms-census` — `zip`, `anyhow`. **No JVM**, deliberately: it must run on a machine
   with no Java, which is this one.
-- `crates/plugins/lodestone-jvm-bridge` — `lodestone-ecs` only, plus `lodestone-plugin-support` as a
-  dev-dependency for the reentrancy harness. **No `jni`, no `libjvm`.**
+- `crates/plugins/lodestone-jvm-bridge` — `lodestone-ecs` by default, plus
+  `lodestone-plugin-support` as a dev-dependency for the reentrancy harness. The optional `jni`
+  invocation dependency is compiled only with the default-off `jvm` feature; ordinary builds have
+  no `libjvm` linkage.
 - The classloader spike and the paperclip step need Apple `container` and an `eclipse-temurin` image
   — see `docs/oracle-runtimes.md`. The host needs no `java`.
 - The invocation spike is its own Cargo workspace and uses `jni` 0.22.4 with `invocation`. Its

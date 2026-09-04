@@ -9,9 +9,10 @@
 //! the whole design: the licensing decision, the measured census that sizes the
 //! work, the ABI decision, and the threading model this crate implements.
 //!
-//! This crate is the **foundation tranche**, not the bridge. What is here is the
-//! part that is JVM-independent, testable today, and load-bearing for
-//! everything after it:
+//! This crate is the **foundation tranche**, not the complete bridge. Its
+//! default build is JVM-independent, while the opt-in `jvm` feature exposes a
+//! small runtime owner that a host can explicitly start and attach threads to.
+//! What is here is testable and load-bearing for everything after it:
 //!
 //! - [`port`] — the request/response seam that makes the `EcsHandle`
 //!   reentrancy deadlock **unrepresentable** from a JNI callback, rather than
@@ -21,17 +22,18 @@
 //!   entity.
 //! - [`callback`] — thread-local callback-depth guards, so a recursive
 //!   Java/Rust cycle fails before it can overflow or wedge.
+//! - [`runtime`] (with `jvm`) — explicit JVM startup and scoped thread
+//!   attachment, with no ECS guard or world handle in the callback API.
 //!
 //! ## What is deliberately not here
 //!
-//! **No `jni` dependency and no `libjvm` linkage.** Not "not enabled yet" —
-//! not present. The JNI entry points land with the spike that can execute them;
-//! writing them now would put untestable code in the tree, and this repo's
-//! standing rule is to wire code or delete it, never to leave a third state.
-//! `tests/zero_cost_graph.rs` guards the boundary so that when they do land
-//! they land behind a feature, and it explains why a `Cargo.lock` grep is the
-//! wrong instrument for checking this (the lockfile already contains `jni`, via
-//! Android transitives that reach no host build).
+//! **The `jvm` feature is off by default.** Ordinary builds have no `jni`
+//! dependency or `libjvm` linkage. A host that opts in gets [`runtime`], whose
+//! [`runtime::JvmRuntime::start`] method is the only startup operation; merely
+//! depending on this crate or constructing [`runtime::JvmConfig`] does not
+//! start a JVM. `tests/zero_cost_graph.rs` guards this boundary and explains
+//! why a `Cargo.lock` grep is the wrong instrument for checking it (the lockfile
+//! already contains `jni` through unrelated target-specific transitives).
 //!
 //! **No speculative NMS request enum.** The census measures ~6,991 distinct
 //! members that Paper's Bukkit layer reaches for; enumerating them ahead of the
@@ -74,6 +76,9 @@
 pub mod callback;
 pub mod identity;
 pub mod port;
+
+#[cfg(feature = "jvm")]
+pub mod runtime;
 
 pub use callback::{
     CallbackDepthError, CallbackDepthGuard, DEFAULT_CALLBACK_DEPTH_LIMIT,
