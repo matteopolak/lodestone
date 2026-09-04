@@ -1240,6 +1240,9 @@ impl WindowApp {
         // already returns `PlayerState` by value, so this needs no new `Sim`
         // accessor. See `docs/screen-overlays.md`'s "Freeze" section.
         let freeze_percent = self.sim.player().percent_frozen();
+        // Sample once so the visual consumer and HUD diagnostic describe the
+        // same state even if a future producer becomes time-dependent.
+        let border_warning = self.sim.world_border_warning();
         let screen_effects = crate::gpu::ScreenEffects {
             eye_in_water: self.sim.player().eye_in_water,
             on_fire,
@@ -1270,6 +1273,7 @@ impl WindowApp {
             // world-projection warp — which is why the pass takes the raw
             // intensity rather than a pre-multiplied strength.
             portal_intensity: self.sim.portal_effect_intensity(),
+            border_warning_strength: border_warning.map_or(0.0, |(_, _, strength)| strength),
         };
         // Route the progressive-mining crack overlay(s): the local
         // player's own dig plus one slot for every *other* player's overlay the
@@ -1858,13 +1862,9 @@ impl WindowApp {
             .recipe_book
             .as_ref()
             .map(|book| (book.len(), book.tags().len()));
-        // The `SessionWorldBorder`/`SessionSpawnPoint` folds reaching
-        // the screen. Both were folded, reset on quit-to-title and gated
-        // through the real `SharedState::apply` path with **no reader
-        // anywhere in the shell**; these two lines are the first. See
-        // `HudFrame::border_debug` for why this is the debug overlay and not
-        // yet the vignette tint vanilla draws.
-        hud_frame.border_debug = self.sim.world_border_warning();
+        // The HUD diagnostic reuses the exact tuple sampled for the vignette
+        // above, while the spawn point remains diagnostic-only.
+        hud_frame.border_debug = border_warning;
         hud_frame.spawn_debug = self.sim.spawn_point().pos();
         // The `SessionMaps` fold reaching the screen. A diagnostic and
         // not the map's own picture — see `HudFrame::map_debug` for what is still
@@ -2128,9 +2128,8 @@ impl WindowApp {
             // reading it unconditionally here costs nothing when no ghost is
             // showing.
             let ghost_window_id = open_menu.as_ref().map_or(0, |open| open.window_id);
-            let recipe_ghost_stack = self
-                .sim
-                .known_recipes()
+            let known_recipes = self.sim.known_recipes();
+            let recipe_ghost_stack = known_recipes
                 .ghost()
                 .filter(|ghost| ghost.window_id == ghost_window_id)
                 .and_then(recipe_panel::ghost_result_stack);
@@ -2141,14 +2140,13 @@ impl WindowApp {
             // store carries it at all. An empty vector is the honest answer off
             // a non-stonecutter screen and for an input with no cuts, and the
             // grid draws nothing in both cases.
-            let stonecutter_matches = container_menu
-                .and_then(|menu| menu.slot_item(crate::container::stonecutter::INPUT_SLOT))
-                .and_then(|input| lodestone_data::items::item_id(&input.item().to_string()))
-                .map_or_else(Vec::new, |input_item_id| {
-                    crate::container::stonecutter::server_matches(
-                        self.sim.known_recipes().stonecutter_results_for(input_item_id),
-                    )
-                });
+            let stonecutter_matches = container_menu.map_or_else(Vec::new, |menu| {
+                crate::container::stonecutter::server_results_for_menu(menu, &known_recipes)
+            });
+            let stonecutter_start_index = crate::container::stonecutter::start_index_for_scroll(
+                self.stonecutter_scroll,
+                stonecutter_matches.len(),
+            );
             // The live drag preview. `drag_paint` is the
             // *same* paint set `MenuInput::release` will turn into the
             // QUICK_CRAFT sequence, and the counts drawn from it come out of
@@ -2189,7 +2187,7 @@ impl WindowApp {
                 .with_menu_type(open_menu.as_ref().map(|open| &open.menu_type))
                 .with_recipe_book(self.recipe_book.as_ref())
                 .with_recipe_ghost(recipe_ghost_stack.as_ref())
-                .with_stonecutter_matches(&stonecutter_matches)
+                .with_stonecutter_matches(&stonecutter_matches, stonecutter_start_index)
                 // The inventory avatar's **live pose**. Vanilla poses the real
                 // render state, so a player who opens their inventory during the
                 // tail of a swing sees that swing. Without this line

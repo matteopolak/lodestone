@@ -2200,6 +2200,15 @@ impl RenderState {
                         stats.confusion_overlay_drawn = true;
                     }
                 }
+                if screen_effects.border_warning_active() {
+                    fx.draw_border_warning(
+                        queue,
+                        &mut encoder,
+                        view,
+                        screen_effects.border_warning_strength,
+                    );
+                    stats.border_warning_overlay_drawn = true;
+                }
             }
         }
 

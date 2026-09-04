@@ -1,11 +1,10 @@
-//! The two full-screen overlay textures vanilla's own screen-effect renderer
-//! draws every frame: the underwater tint texture and the fire-overlay sprite
-//! strip.
+//! Plain-texture loaders for the full-screen and near-full-screen effects.
 //!
-//! Both are loaded as plain, unatlased [`Image`]s, the same way [`crate::sky::load_cloud_texture`]
-//! loads `clouds.png` — each is sampled with its own wraparound/strip addressing
-//! that an atlas's per-sprite padding would break, and there is exactly one of
-//! each, so there is nothing to stitch either with.
+//! They are loaded as plain, unatlased [`Image`]s, the same way
+//! [`crate::sky::load_cloud_texture`] loads `clouds.png`. The renderer can then
+//! choose tiling, strip, or clamp sampling per effect without atlas padding or
+//! shared addressing rules. Each effect has exactly one source image, so there
+//! is nothing to stitch.
 
 use crate::error::ScreenEffectAssetError;
 use crate::manager::ResourceManager;
@@ -181,6 +180,23 @@ pub fn load_portal_overlay_texture(manager: &ResourceManager) -> Result<Image, S
     )
 }
 
+/// Loads `textures/misc/vignette.png` (256x256), the full-screen mask used by
+/// the world-border warning. It remains a standalone image because its
+/// multiply blend is separate from both the GUI atlas and the alpha-blended
+/// screen effects.
+///
+/// # Errors
+///
+/// Returns [`ScreenEffectAssetError`] if the texture is missing or fails to
+/// decode.
+pub fn load_vignette_texture(manager: &ResourceManager) -> Result<Image, ScreenEffectAssetError> {
+    load_plain(
+        manager,
+        "assets/minecraft/textures/misc/vignette.png",
+        "minecraft:misc/vignette",
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -231,6 +247,10 @@ mod tests {
         src.insert(
             "assets/minecraft/textures/block/nether_portal.png".to_string(),
             png(16, 512, [140, 20, 200, 255]),
+        );
+        src.insert(
+            "assets/minecraft/textures/misc/vignette.png".to_string(),
+            png(256, 256, [255, 255, 255, 255]),
         );
         ResourceManager::new(vec![Box::new(src)])
     }
@@ -298,5 +318,18 @@ mod tests {
         let image = load_portal_overlay_texture(&manager()).expect("load");
         assert_eq!((image.width, image.height), (16, 512));
         assert_eq!(fire_frame_count(&image), 32);
+    }
+
+    #[test]
+    fn border_vignette_texture_loads_as_a_plain_256x256_image() {
+        let image = load_vignette_texture(&manager()).expect("load");
+        assert_eq!((image.width, image.height), (256, 256));
+    }
+
+    #[test]
+    fn missing_border_vignette_texture_is_reported() {
+        let mgr = ResourceManager::new(vec![Box::new(MemorySource::new("empty"))]);
+        let err = load_vignette_texture(&mgr).expect_err("must fail closed");
+        assert!(matches!(err, ScreenEffectAssetError::Missing { .. }), "{err:?}");
     }
 }

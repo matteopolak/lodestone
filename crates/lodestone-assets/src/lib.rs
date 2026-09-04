@@ -153,7 +153,7 @@ pub use profile::AssetProfile;
 pub use screen_effects::{
     FIRE_FRAME_SIZE, fire_frame_count, load_fire_texture, load_freeze_overlay_texture,
     load_nausea_overlay_texture, load_portal_overlay_texture, load_pumpkin_overlay_texture,
-    load_spyglass_scope_texture, load_underwater_texture,
+    load_spyglass_scope_texture, load_underwater_texture, load_vignette_texture,
 };
 pub use skin::{
     DefaultSkin, PlayerModelType, ProfileTextures, SkinTexture, SkinTextureError, default_skin,

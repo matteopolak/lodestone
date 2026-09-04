@@ -1,5 +1,5 @@
-//! Per-frame input to [`super::RenderState`]'s underwater/fire overlay pass
-//! — see `docs/screen-overlays.md`.
+//! Per-frame input to [`super::RenderState`]'s screen-effect passes — see
+//! `docs/screen-effects.md`.
 //!
 //! Unlike [`super::EntityLightSource`]/[`super::SkyDarkenSource`] and friends,
 //! this is **not** a source: those exist because `RenderState` has no way to
@@ -11,7 +11,7 @@
 //! exactly like `outline: Option<[i32; 3]>` — rather than a second
 //! install-once seam for state that was never hard to reach.
 
-/// Per-frame state the underwater/fire overlay pass needs, gathered by the
+/// Per-frame state the screen-effect passes need, gathered by the
 /// caller (`app.rs`) at each `render`/`render_with_crack` call — see the
 /// module doc for why this is a plain argument rather than a `*Source`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -83,6 +83,10 @@ pub struct ScreenEffects {
     /// proximity tracker exists in this codebase yet — see
     /// `docs/screen-overlays.md`. **Not first-person-gated.**
     pub portal_intensity: f32,
+    /// Strength of the world-border warning vignette, `0.0..=1.0`, sampled
+    /// from [`crate::sim::Sim::world_border_warning`] once per redraw. This is
+    /// screen-level state: camera mode and spectator mode do not suppress it.
+    pub border_warning_strength: f32,
 }
 
 impl ScreenEffects {
@@ -114,7 +118,9 @@ impl ScreenEffects {
     /// spectator", and nothing here has reason to be the first exception.
     #[must_use]
     pub fn any_active(&self, first_person: bool) -> bool {
-        self.first_person_group_active(first_person) || self.camera_agnostic_group_active()
+        self.first_person_group_active(first_person)
+            || self.camera_agnostic_group_active()
+            || self.border_warning_active()
     }
 
     /// The first-person-gated group — see [`Self::any_active`]'s doc.
@@ -131,6 +137,14 @@ impl ScreenEffects {
     #[must_use]
     pub fn camera_agnostic_group_active(&self) -> bool {
         !self.spectator && (self.freeze_percent > 0.0 || self.nausea_intensity > 0.0 || self.portal_intensity > 0.0)
+    }
+
+    /// Whether the world-border warning vignette should draw. Kept separate
+    /// from both player-body gate groups because it describes the world limit,
+    /// not an effect attached to the player's body or camera.
+    #[must_use]
+    pub fn border_warning_active(&self) -> bool {
+        self.border_warning_strength > 0.0
     }
 }
 
@@ -281,6 +295,29 @@ mod tests {
         };
         assert!(!fx.any_active(true));
         assert!(!fx.any_active(false));
+    }
+
+    #[test]
+    fn border_warning_activates_in_every_camera_mode_and_for_spectators() {
+        let fx = ScreenEffects {
+            border_warning_strength: 0.25,
+            spectator: true,
+            ..ScreenEffects::default()
+        };
+        assert!(fx.any_active(true));
+        assert!(fx.any_active(false));
+        assert!(fx.border_warning_active());
+    }
+
+    #[test]
+    fn zero_border_warning_strength_does_not_activate() {
+        let fx = ScreenEffects {
+            border_warning_strength: 0.0,
+            ..ScreenEffects::default()
+        };
+        assert!(!fx.any_active(true));
+        assert!(!fx.any_active(false));
+        assert!(!fx.border_warning_active());
     }
 
     #[test]

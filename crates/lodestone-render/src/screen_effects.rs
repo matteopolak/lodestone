@@ -1,19 +1,12 @@
-//! The two full-screen overlays vanilla draws in its screen-effect renderer's
-//! submit function (26.2 decompile):
-//! the underwater tint + scrolling texture, and the looping fire overlay.
+//! Full-screen and near-full-screen effects drawn after the hand and before
+//! the HUD.
 //!
-//! # One pass, two textures
+//! # Shared layout, effect-specific blending
 //!
-//! Both are a textured, alpha-blended, depth-less quad drawn late in the
-//! frame (after the world and the first-person hand, before the HUD) — see
-//! vanilla's level-render function, which calls the screen-effect renderer's
-//! submit function
-//! immediately after the held-item render step and before the feature-render dispatch step.
-//! Vanilla's two pipelines (`BLOCK_SCREEN_EFFECT`, `FIRE_SCREEN_EFFECT`) are
-//! textually identical builds of the same `GUI_TEXTURED_SNIPPET` base
-//! — position+uv+colour, `TRANSLUCENT` blend,
-//! no depth attachment — so one pipeline here draws both, parameterised only
-//! by which texture bind group is active.
+//! Every effect uses a textured, depth-less quad. Most use one shared
+//! alpha-blended pipeline; the world-border warning uses a second pipeline
+//! with multiply blending. Both have the same shader and one-bind-group
+//! layout, parameterised by the active texture.
 //!
 //! # Bind groups: one, not four
 //!
@@ -87,6 +80,7 @@ use lodestone_assets::{
     ResourceManager, ScreenEffectAssetError, fire_frame_count, load_fire_texture,
     load_freeze_overlay_texture, load_nausea_overlay_texture, load_portal_overlay_texture,
     load_pumpkin_overlay_texture, load_spyglass_scope_texture, load_underwater_texture,
+    load_vignette_texture,
 };
 
 // ---------------------------------------------------------------------------
@@ -330,6 +324,25 @@ pub fn pumpkin_overlay_triangles() -> [ScreenOverlayVertex; 6] {
         vertex([1.0, -1.0], [1.0, 1.0], PUMPKIN_TINT),
         vertex([1.0, 1.0], [1.0, 0.0], PUMPKIN_TINT),
         vertex([-1.0, 1.0], [0.0, 0.0], PUMPKIN_TINT),
+    ];
+    [q[0], q[1], q[2], q[2], q[3], q[0]]
+}
+
+/// Builds the world-border warning's full-screen vignette quad. The warning
+/// strength changes only the red component of the source tint: under the
+/// pass's `ZERO` / `ONE_MINUS_SRC_COLOR` blend, reducing that component lets
+/// progressively more red from the destination survive at the vignette edge.
+/// The ambient-light contribution to the same vignette is intentionally not
+/// modelled here, so its settled brightness input is `1.0`.
+#[must_use]
+pub fn border_warning_overlay_triangles(strength: f32) -> [ScreenOverlayVertex; 6] {
+    let strength = strength.clamp(0.0, 1.0);
+    let color = [1.0 - strength, 1.0, 1.0, 1.0];
+    let q = [
+        vertex([-1.0, -1.0], [0.0, 1.0], color),
+        vertex([1.0, -1.0], [1.0, 1.0], color),
+        vertex([1.0, 1.0], [1.0, 0.0], color),
+        vertex([-1.0, 1.0], [0.0, 0.0], color),
     ];
     [q[0], q[1], q[2], q[2], q[3], q[0]]
 }
@@ -684,6 +697,7 @@ fn build_pipeline(
     label: &str,
     layout: &wgpu::BindGroupLayout,
     color_format: wgpu::TextureFormat,
+    blend: wgpu::BlendState,
 ) -> wgpu::RenderPipeline {
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
@@ -717,7 +731,7 @@ fn build_pipeline(
             entry_point: Some("fs_main"),
             targets: &[Some(wgpu::ColorTargetState {
                 format: color_format,
-                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                blend: Some(blend),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
             compilation_options: wgpu::PipelineCompilationOptions::default(),
@@ -749,6 +763,7 @@ fn vertex_buffer(device: &wgpu::Device, label: &str, verts: &[ScreenOverlayVerte
 #[derive(Debug)]
 pub struct ScreenEffectRenderer {
     pipeline: wgpu::RenderPipeline,
+    border_warning_pipeline: wgpu::RenderPipeline,
     underwater_bind_group: wgpu::BindGroup,
     fire_bind_group: wgpu::BindGroup,
     pumpkin_bind_group: wgpu::BindGroup,
@@ -764,6 +779,8 @@ pub struct ScreenEffectRenderer {
     nausea_bind_group: wgpu::BindGroup,
     /// The portal overlay — `nether_portal.png`.
     portal_bind_group: wgpu::BindGroup,
+    /// The world-border warning mask — `vignette.png`.
+    border_warning_bind_group: wgpu::BindGroup,
     fire_frame_count: u32,
     /// [`load_portal_overlay_texture`]'s strip is a different image from the
     /// fire strip (different frame content, same shape), so it gets its own
@@ -777,6 +794,7 @@ pub struct ScreenEffectRenderer {
     spyglass_bars_vbuf: wgpu::Buffer,
     nausea_vbuf: wgpu::Buffer,
     portal_vbuf: wgpu::Buffer,
+    border_warning_vbuf: wgpu::Buffer,
 }
 
 impl ScreenEffectRenderer {
@@ -799,11 +817,36 @@ impl ScreenEffectRenderer {
         let spyglass_image = load_spyglass_scope_texture(manager)?;
         let nausea_image = load_nausea_overlay_texture(manager)?;
         let portal_image = load_portal_overlay_texture(manager)?;
+        let border_warning_image = load_vignette_texture(manager)?;
         let portal_frame_count = fire_frame_count(&portal_image);
         let fire_frame_count = fire_frame_count(&fire_image);
 
         let layout = texture_bind_group_layout(device, "lodestone-screen-effect-tex-bgl");
-        let pipeline = build_pipeline(device, "lodestone-screen-effect-pipeline", &layout, color_format);
+        let pipeline = build_pipeline(
+            device,
+            "lodestone-screen-effect-pipeline",
+            &layout,
+            color_format,
+            wgpu::BlendState::ALPHA_BLENDING,
+        );
+        let border_warning_pipeline = build_pipeline(
+            device,
+            "lodestone-border-warning-pipeline",
+            &layout,
+            color_format,
+            wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                    operation: wgpu::BlendOperation::Add,
+                },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::Zero,
+                    dst_factor: wgpu::BlendFactor::One,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            },
+        );
 
         let (uw_view, uw_sampler) = upload_plain_texture(
             device,
@@ -958,6 +1001,24 @@ impl ScreenEffectRenderer {
             &portal_sampler,
         );
 
+        let (border_warning_view, border_warning_sampler) = upload_plain_texture(
+            device,
+            queue,
+            "lodestone-border-warning-texture",
+            border_warning_image.width,
+            border_warning_image.height,
+            &border_warning_image.rgba,
+            wgpu::AddressMode::ClampToEdge,
+            wgpu::FilterMode::Linear,
+        );
+        let border_warning_bind_group = texture_bind_group(
+            device,
+            &layout,
+            "lodestone-border-warning-texture-bg",
+            &border_warning_view,
+            &border_warning_sampler,
+        );
+
         let underwater_vbuf = vertex_buffer(
             device,
             "lodestone-underwater-vbuf",
@@ -979,9 +1040,15 @@ impl ScreenEffectRenderer {
             "lodestone-portal-vbuf",
             &portal_overlay_triangles(0, portal_frame_count, 0.0),
         );
+        let border_warning_vbuf = vertex_buffer(
+            device,
+            "lodestone-border-warning-vbuf",
+            &border_warning_overlay_triangles(0.0),
+        );
 
         Ok(Self {
             pipeline,
+            border_warning_pipeline,
             underwater_bind_group,
             fire_bind_group,
             pumpkin_bind_group,
@@ -990,6 +1057,7 @@ impl ScreenEffectRenderer {
             white_bind_group,
             nausea_bind_group,
             portal_bind_group,
+            border_warning_bind_group,
             fire_frame_count,
             portal_frame_count,
             underwater_vbuf,
@@ -1000,6 +1068,7 @@ impl ScreenEffectRenderer {
             spyglass_bars_vbuf,
             nausea_vbuf,
             portal_vbuf,
+            border_warning_vbuf,
         })
     }
 
@@ -1258,6 +1327,41 @@ impl ScreenEffectRenderer {
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &self.portal_bind_group, &[]);
         pass.set_vertex_buffer(0, self.portal_vbuf.slice(..));
+        pass.draw(0..verts.len() as u32, 0..1);
+    }
+
+    /// Draws the world-border warning vignette with the dedicated multiply
+    /// blend pipeline. `strength` is clamped by
+    /// [`border_warning_overlay_triangles`]; the caller owns the `> 0.0` gate
+    /// so zero strength opens no pass at all.
+    pub fn draw_border_warning(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        strength: f32,
+    ) {
+        let verts = border_warning_overlay_triangles(strength);
+        queue.write_buffer(&self.border_warning_vbuf, 0, bytemuck::cast_slice(&verts));
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("lodestone-border-warning-pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.border_warning_pipeline);
+        pass.set_bind_group(0, &self.border_warning_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.border_warning_vbuf.slice(..));
         pass.draw(0..verts.len() as u32, 0..1);
     }
 }
@@ -1526,6 +1630,30 @@ mod tests {
         assert_eq!(us.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
         assert_eq!(vs.iter().cloned().fold(f32::INFINITY, f32::min), 0.0);
         assert_eq!(vs.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+    }
+
+    #[test]
+    fn border_warning_vignette_covers_the_full_ndc_screen() {
+        let tris = border_warning_overlay_triangles(0.25);
+        let xs: Vec<f32> = tris.iter().map(|v| v.position[0]).collect();
+        let ys: Vec<f32> = tris.iter().map(|v| v.position[1]).collect();
+        assert_eq!(xs.iter().cloned().fold(f32::INFINITY, f32::min), -1.0);
+        assert_eq!(xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+        assert_eq!(ys.iter().cloned().fold(f32::INFINITY, f32::min), -1.0);
+        assert_eq!(ys.iter().cloned().fold(f32::NEG_INFINITY, f32::max), 1.0);
+    }
+
+    #[test]
+    fn border_warning_vignette_tint_tracks_clamped_strength() {
+        for vertex in border_warning_overlay_triangles(0.25) {
+            assert_eq!(vertex.color, [0.75, 1.0, 1.0, 1.0]);
+        }
+        for vertex in border_warning_overlay_triangles(-1.0) {
+            assert_eq!(vertex.color, [1.0, 1.0, 1.0, 1.0]);
+        }
+        for vertex in border_warning_overlay_triangles(2.0) {
+            assert_eq!(vertex.color, [0.0, 1.0, 1.0, 1.0]);
+        }
     }
 
     /// Vanilla's own "mirrored corner mapping" (its sprite-quad builder passes

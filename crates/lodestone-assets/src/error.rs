@@ -300,8 +300,7 @@ pub enum TrimAtlasError {
     Source(#[from] AtlasSourceError),
 }
 
-/// Errors produced while loading the screen-overlay textures (`textures/misc/underwater.png`,
-/// `textures/block/fire_1.png`).
+/// Errors produced while loading the required screen-overlay textures.
 #[derive(Debug, thiserror::Error)]
 pub enum ScreenEffectAssetError {
     /// A required overlay texture was not present in any pack.

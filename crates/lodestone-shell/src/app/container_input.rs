@@ -462,11 +462,11 @@ impl WindowApp {
             return false;
         }
         let Some(open) = self.sim.open_menu() else { return false };
-        let Some(book) = self.recipe_book.as_ref() else { return false };
-        let Some(input) = menu.slot_item(crate::container::stonecutter::INPUT_SLOT) else {
-            return false;
-        };
-        let recipe_count = crate::container::stonecutter::matches(book, input.item()).len();
+        let results = crate::container::stonecutter::server_results_for_menu(
+            menu,
+            &self.sim.known_recipes(),
+        );
+        let recipe_count = results.len();
         if recipe_count == 0 {
             return false;
         }
@@ -506,11 +506,11 @@ impl WindowApp {
         if menu.special_layout() != Some(lodestone_game::menu::SpecialLayout::Stonecutter) {
             return false;
         }
-        let Some(book) = self.recipe_book.as_ref() else { return false };
-        let Some(input) = menu.slot_item(crate::container::stonecutter::INPUT_SLOT) else {
-            return false;
-        };
-        let recipe_count = crate::container::stonecutter::matches(book, input.item()).len();
+        let results = crate::container::stonecutter::server_results_for_menu(
+            &menu,
+            &self.sim.known_recipes(),
+        );
+        let recipe_count = results.len();
         if recipe_count == 0 {
             return false;
         }

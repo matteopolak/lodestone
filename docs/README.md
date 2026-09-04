@@ -481,12 +481,10 @@ Subsystem documentation. See also [`architecture.md`](./architecture.md)
   underwater tint and scroll, fire, a carved-pumpkin vignette, freezing in powder
   snow, the spyglass scope, the nausea "confusion" swirl, and the nether/end portal
   swirl (portal wins when both are active), plus the world-border warning's cyan
-  vignette tint. In vanilla these come from two different mechanisms — its own
-  screen-effect submission for underwater/fire, and its own camera-overlay extraction
-  for the rest — but all share one "textured, alpha-blended, screen-space quad after
-  the hand pass" shape, so this port draws all of them through one pipeline. Confusion
-  and portal additionally drive a world-space projection warp that lives in
-  `camera.rs`, not in this pass.
+  vignette tint. In vanilla these come from several extraction paths. Most share one
+  textured alpha-blended pipeline; the border warning uses the same vertex and texture
+  layout but a dedicated multiply-blend pipeline. Confusion and portal additionally
+  drive a world-space projection warp that lives in `camera.rs`, not in this pass.
 - [Screenshots](./screenshots.md) — The harness that produces the README's in-game
   images under `docs/images/`. Every PNG is this client rendering a real, live session
   against the flat creative 26.2 oracle — no mock-ups, no compositing, no editing.
