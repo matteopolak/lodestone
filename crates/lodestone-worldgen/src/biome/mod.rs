@@ -590,12 +590,16 @@ impl ClimateSampler {
     pub fn new(settings: &Value, builder: &Builder) -> Self {
         let router = &settings["noise_router"];
         Self {
-            temperature: builder.build(&router["temperature"]),
-            humidity: builder.build(&router["vegetation"]),
-            continentalness: builder.build(&router["continents"]),
-            erosion: builder.build(&router["erosion"]),
-            depth: builder.build(&router["depth"]),
-            weirdness: builder.build(&router["ridges"]),
+            temperature: builder
+                .build(&router["temperature"])
+                .expect("bundled temperature density-function document"),
+            humidity: builder.build(&router["vegetation"]).expect("bundled vegetation density-function document"),
+            continentalness: builder
+                .build(&router["continents"])
+                .expect("bundled continents density-function document"),
+            erosion: builder.build(&router["erosion"]).expect("bundled erosion density-function document"),
+            depth: builder.build(&router["depth"]).expect("bundled depth density-function document"),
+            weirdness: builder.build(&router["ridges"]).expect("bundled ridges density-function document"),
         }
     }
 
