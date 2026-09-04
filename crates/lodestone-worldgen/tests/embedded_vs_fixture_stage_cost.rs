@@ -1,6 +1,6 @@
-//! Controlled A/B check for the stage-dominance claim in
-//! `docs/tick-and-worldgen-profiling.md` ("vegetation is ~68% of worldgen
-//! cost and ore ~13%, everything else <=8%").
+//! Controlled A/B check for the cache-cold, fixture-backed stage split:
+//! vegetation measured ~68% of total time, ore ~13%, and every other stage
+//! at most ~8%.
 //!
 //! That figure and `bench_vegetation_walk_cost`'s tracked `embedded_stage_*`
 //! baseline (`bench-results/generation.jsonl`, `lodestone-server`'s real
@@ -35,8 +35,8 @@
 //! what this test exists to measure, not to assume. Run with
 //! `--nocapture` to read the numbers; re-run in a quiet window
 //! (`pgrep -l 'rustc|cargo'` empty) before using a specific figure for a
-//! decision, per the same doc's own machine-state caveat — this is a shared
-//! checkout with a live multi-agent swarm.
+//! decision. The profiling guidance in `docs/tick-scheduling.md` explains
+//! why a result from this scene cannot stand in for steady-state play.
 
 use lodestone_worldgen::profile::{StageDistribution, profile_columns};
 
@@ -171,9 +171,9 @@ fn resolver_completeness_alone_changes_the_dominant_stage() {
     if fixture_dominant != embedded_dominant {
         println!(
             "CONFIRMED: resolver completeness alone changes which stage dominates a \
-             cache-cold column — docs/tick-and-worldgen-profiling.md's 'vegetation ~68%' \
-             figure describes the fixture tree's inert-biome-search scene, not production \
-             behaviour. See docs/tick-and-worldgen-profiling.md's correction section."
+             cache-cold column — the fixture measurement's vegetation-heavy split describes \
+             an inert-biome-search scene, not production behaviour. The profiling guidance \
+             in docs/tick-scheduling.md explains why scenes must be named."
         );
     }
 

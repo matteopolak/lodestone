@@ -4108,9 +4108,9 @@ mod tests {
     /// unavoidable per-phase floor cost (scheduling, `tokio::spawn`/`.await`
     /// overhead, the mutex takes) on real hardware — not a loaded server's
     /// actual cost, just the cost of the loop existing at all. Printed with
-    /// `--nocapture`, and read together with the machine-state note in
-    /// `docs/tick-and-worldgen-profiling.md` for what else was running on
-    /// this box when the numbers were captured; not asserted on for a
+    /// `--nocapture`. Interpret the output using the measurement guidance in
+    /// `docs/tick-scheduling.md#profiling-the-tick-loop-and-world-generation`;
+    /// it is not asserted on for a
     /// specific magnitude, only for internal consistency (samples recorded,
     /// percentile ordering holds), because a specific millisecond figure
     /// here would be exactly the "duration gathered while other agents
