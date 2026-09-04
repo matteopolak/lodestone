@@ -1,4 +1,6 @@
-//! **The registration gate** (issue #436's "declared islands", item 2).
+//! **The registration gate**: this crate is consumed only by its own test, by
+//! design, but that test must actually prove the plugin is reachable from a
+//! real session rather than only from a hand-written producer.
 //!
 //! `tests/observes_the_game_event_bus.rs` — this crate's other test — registers
 //! the plugin correctly and then writes its own events with
@@ -127,7 +129,9 @@ impl ChunkSource for FlatAir {
     }
 
     // No storage: this fixture serves fresh columns and edits are discarded by
-    // design. Explicit rather than inherited — issue #440.
+    // design. Written out explicitly rather than left to the trait default,
+    // since a default `set_block` that silently discards a write is
+    // indistinguishable at the call site from one that persisted it.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }

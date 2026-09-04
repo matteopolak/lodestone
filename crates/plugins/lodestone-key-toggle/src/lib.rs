@@ -1,23 +1,25 @@
 //! A toy input-interception plugin: the first consumer of
 //! `lodestone_ecs::input`'s `PluginKeybinds`/`PluginKeyEvent` registration
-//! point (issue #162).
+//! point.
 //!
 //! # What this is
 //!
 //! On construction, [`KeyTogglePlugin`] claims one physical key in
 //! [`lodestone_ecs::KeyInterceptMode::Consume`] and flips a shared boolean
 //! every time the shell reports that key pressed — a minimal, real stand-in
-//! for the class of client mod issue #162 names (a custom hotkey a plugin
-//! wants exclusive use of, e.g. a macro tool or a HUD toggle vanilla has no
-//! binding for). It exists to prove the substrate end to end — registration
+//! for the class of client mod the input-interception API targets (a custom
+//! hotkey a plugin wants exclusive use of, e.g. a macro tool or a HUD toggle
+//! vanilla has no binding for). It exists to prove the substrate end to end
+//! — registration
 //! reaches `resolve_key`'s precedence chain, a queued raw key event reaches
 //! a plugin's `MessageReader` through a real [`lodestone_ecs::GameTick`]
 //! tick.
 //!
 //! While the flag is set, [`extract_marker_when_enabled`] also pushes one
 //! world-space [`lodestone_ecs::PluginBillboard`] above the local player's
-//! own head every `Extract` — issue #161's channel, paired with #162's key
-//! so the toggle does something a plugin author would actually want a
+//! own head every `Extract` — the billboard draw channel, paired with the
+//! key-interception registration point, so the toggle does something a
+//! plugin author would actually want a
 //! hotkey for, not just an internal bool a test can see and nothing else
 //! can. See that function's doc for the pairing.
 //!
@@ -178,8 +180,8 @@ const MARKER_COLOR: [f32; 4] = [1.0, 0.15, 0.9, 0.9];
 
 /// `Extract` / `ExtractSet::Debug`: while [`KeyToggleTarget::flag`] is set,
 /// push one [`PluginBillboard`] above the local player's own head — the
-/// pairing issue #162's own brief asks for once a billboard channel exists
-/// (issue #161): the claimed key does not just flip an internal bool no one
+/// pairing the key-interception registration point and the billboard draw
+/// channel enable together: the claimed key does not just flip an internal bool no one
 /// outside a test could observe, it toggles something a plugin author
 /// actually wants a hotkey for (a personal marker, a "here" flag for a
 /// screen recording, the shape any real HUD-toggle mod needs). One plugin,

@@ -285,7 +285,9 @@ mod tests {
     /// **The gate.** Submitting a break job through the public queue must
     /// itself, through a real `GameTick`, write a real `BreakIntent` onto
     /// the local player entity — the exact fact this crate exists to
-    /// establish (issue #436's "zero production call sites" complaint).
+    /// establish: `BreakIntent`/`PlaceIntent` are the sanctioned write-side
+    /// route, and this is a real production consumer rather than a component
+    /// with only test call sites.
     #[test]
     fn submitting_a_break_job_installs_a_real_break_intent() {
         let (mut app, entity) = app_with_player();

@@ -7,9 +7,9 @@
 //! The live oracles (`docs/plugin-api.md`'s brief) prove the whole client end
 //! to end, but registering this plugin into the running shell's `App` happens
 //! in `lodestone_shell::sim::Sim::new` (`crates/lodestone-shell/src/sim.rs`),
-//! a file outside this crate's ownership for this change — see the commit
-//! message and `docs/autonomous-navigation.md` for the patch handed to the
-//! file's owner. This test is the next best thing and a meaningfully strong
+//! a file outside this crate's ownership — see `docs/autonomous-navigation.md`
+//! for the patch handed to the file's owner. This test is the next best thing
+//! and a meaningfully strong
 //! one: it builds a real `bevy_ecs` `App` with `lodestone_ecs::CorePlugin` +
 //! `lodestone_ecs::player::LocalPlayerPlugin` + [`AutopilotPlugin`] — the
 //! *actual* `player_physics` system, the *actual* `TickSet::Intent`/`Physics`
@@ -163,9 +163,11 @@ impl CollisionSource for FlatFloor {
 /// **planning** world `lodestone_nav::SnapshotView` reads. `min_y = 0`,
 /// 4 sections (0..64), matching a short walk test's needs.
 ///
-/// Returns the issue #423 **pair** — the read handle the planner reads, plus the
-/// write handle the one test that breaks a block needs, on the same `Arc`. Only
-/// `app_on_flat_floor` consumes it; everything else in this file reads.
+/// Returns the read/write **pair** — the read handle the planner reads, plus the
+/// write handle the one test that breaks a block needs — on the same `Arc`, so a
+/// direct write and the planner's read always observe the same store rather than
+/// two independently constructed ones. Only `app_on_flat_floor` consumes the write
+/// handle; everything else in this file reads.
 fn flat_chunk_world(radius: i32) -> (ChunkWorld, ChunkWorldWrite) {
     let mut world = World::new();
     let block_kind = PaletteKind::block_states();
@@ -234,9 +236,9 @@ fn app_on_flat_floor(chunk_radius: i32) -> (App, bevy_ecs::entity::Entity) {
     app.add_plugins((lodestone_ecs::CorePlugin, LocalPlayerPlugin, AutopilotPlugin));
 
     app.insert_resource(PlayerCollision::View(Arc::new(FlatFloor)));
-    // Issue #423: install the *pair*, so the test that breaks a block under a
-    // committed plan has a sanctioned write route on the same store the planner
-    // reads.
+    // Install the read/write *pair*, so the test that breaks a block under a
+    // committed plan writes into the same store the planner reads, rather than
+    // a separately constructed one.
     let (chunk_world, chunk_world_write) = flat_chunk_world(chunk_radius);
     app.insert_resource(chunk_world);
     app.insert_resource(chunk_world_write);
@@ -295,7 +297,8 @@ fn a_nearby_goal_is_reached_through_the_real_physics_seam() {
     );
 }
 
-/// Issue #161's producer-side proof: while a real plan is being driven, the
+/// The producer-side proof for the textured/billboard world-space draw channel:
+/// while a real plan is being driven, the
 /// same `Extract` schedule the shell's renderer runs every frame carries one
 /// [`lodestone_ecs::PluginBillboard`] per remaining edge — real waypoint
 /// telemetry reaching the one channel a plugin has to reach the screen with,
@@ -593,9 +596,10 @@ fn a_block_broken_under_a_committed_plan_forces_a_replan_around_it() {
 ///
 /// This section re-runs the happy path over **real, jar-derived collision
 /// data** — `lodestone_data::collision_shapes`/`block_states`/`block_solidity`,
-/// the exact tables `lodestone_v26_2::adapter::V770Adapter` itself reads (issue
-/// #361's census, dumped from the real 26.2 server's
-/// `Block.BLOCK_STATE_REGISTRY`) — and, critically, includes one **real bottom
+/// the exact tables `lodestone_v26_2::adapter::V770Adapter` itself reads (the
+/// canonical game-data census, describing the game rather than the wire format,
+/// dumped by walking the real 26.2 server's block-state registry) — and,
+/// critically, includes one **real bottom
 /// slab** (`minecraft:oak_slab[type=bottom]`, true collision top `0.5`, not a
 /// full block) astride the walked path. `lodestone-nav`'s own unit tests
 /// (`graph::tests::a_bottom_slab_is_walkable_and_reports_the_slab_surface`)

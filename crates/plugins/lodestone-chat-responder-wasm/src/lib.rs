@@ -7,10 +7,11 @@
 //!
 //! # The counter is the point
 //!
-//! `SEEN` is not decoration. Issue #173 left open whether "guest state can persist
-//! across calls (needed for anything resumable) or whether the host owns all state
-//! and the guest is purely stateless request/response". This plugin answers it by
-//! demonstration: the host keeps one `Store` per guest, so linear memory — and
+//! `SEEN` is not decoration. The WASM capability ABI has to settle whether guest
+//! state can persist across calls (needed for anything resumable) or whether the
+//! host owns all state and the guest is purely stateless request/response. This
+//! plugin answers it by demonstration: the host keeps one `Store` per guest, so
+//! linear memory — and
 //! therefore this counter — survives from tick to tick, and the reply text carries
 //! the count so a test can assert it from outside. A stateless request/response
 //! design would make a resumable computation inside a guest impossible, which is
@@ -65,9 +66,10 @@ impl Guest for ChatResponder {
 }
 
 /// THE PREEMPTION FIXTURE. A native plugin doing this hangs the game with no
-/// recourse — issue #168's honest answer for that tier. Here the host's fuel budget
-/// turns it into a trap and the guest is marked permanently failed, which is the
-/// isolation the wasm tier exists to provide.
+/// recourse: a panicking native plugin runs on the same thread and inside the
+/// same schedule call as every internal system, with no isolation boundary. Here
+/// the host's fuel budget turns it into a trap and the guest is marked
+/// permanently failed, which is the isolation the wasm tier exists to provide.
 ///
 /// `black_box` keeps the optimiser from deleting an observably-pure infinite loop.
 #[cfg(feature = "spin")]

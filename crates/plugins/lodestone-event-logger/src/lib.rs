@@ -1,6 +1,8 @@
 //! A toy `EventPriority::Monitor` reader plugin: the first consumer of
-//! `lodestone_ecs`'s plugin event bus (issue #104), and a worked example of
-//! issue #110's read-only tier.
+//! `lodestone_ecs`'s bevy `Message`-based plugin event bus (`RawPacket`/
+//! `GameEvent`), and a worked example of the monitor-priority read-only tier:
+//! a handler guaranteed to run after every other priority, including
+//! cancellation, and structurally unable to mutate state.
 //!
 //! # What this is
 //!
@@ -14,9 +16,8 @@
 //!
 //! # What consumes it, and why that is deliberately not the shipped client
 //!
-//! Issue #436 listed this crate as a declared island: "consumed only by its own
-//! test... nothing in the shipped client registers it". The second half is still
-//! true **and is the intended design**, not the outstanding half of the work.
+//! This crate is consumed only by its own test — nothing in the shipped client
+//! registers it. That **is the intended design**, not an outstanding wiring gap.
 //!
 //! A logger plugin is in the same category as `lodestone-autopilot`, which
 //! `lodestone_shell::sim::build` removed from the shipped client on purpose and
@@ -151,7 +152,7 @@ impl Plugin for EventLoggerPlugin {
             app.add_plugins(GameEventBusPlugin);
         }
 
-        // Issue #110: checked, not assumed. A closure over an `Arc<Mutex<_>>`
+        // Monitor-priority read-only is checked, not assumed. A closure over an `Arc<Mutex<_>>`
         // captured by value has no ECS-visible parameters of its own beyond
         // `MessageReader<GameEvent>`, which is read-only (see
         // `lodestone_ecs::events`'s doc), so this call should never panic for

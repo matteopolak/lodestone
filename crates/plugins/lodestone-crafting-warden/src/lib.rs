@@ -1,10 +1,10 @@
-//! The reference plugin for issue #150's crafting-station hook seam
+//! The reference plugin for the crafting-station hook seam
 //! (`lodestone_server::plugin_crafting`): two small, real hooks proving a
 //! plugin can allow, deny, or replace a station's result before a player
 //! ever sees it.
 //!
-//! [`AnvilBlessing`] demonstrates [`StationVerdict::Replace`] — the "renames
-//! an anvil result" example from the issue itself: any anvil operation that
+//! [`AnvilBlessing`] demonstrates [`StationVerdict::Replace`] — "renames
+//! an anvil result": any anvil operation that
 //! already produces a custom-named result gets `"[Blessed] "` prepended to
 //! that name, tweaking the *real* vanilla-computed result
 //! ([`StationInputs::computed`]) rather than reimplementing

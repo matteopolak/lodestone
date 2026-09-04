@@ -1,5 +1,5 @@
-//! Issue #301's end-to-end gate: **real wire bytes reach a real plugin's
-//! resource.**
+//! The end-to-end gate for custom-payload plugin channels: **real wire bytes
+//! reach a real plugin's resource.**
 //!
 //! # Why this file is shaped the way it is
 //!
@@ -11,7 +11,8 @@
 //! `PluginChannel`, `add_plugin_channel`, `PluginChannelState`, or
 //! `dispatch_plugin_channel` again. A test that reached into the registry and
 //! called the fold directly would pass against a seam no plugin can actually
-//! use — the shape issue #467 hid behind.
+//! use — the shape a seam can hide behind even after it is proven end to end:
+//! nothing installs it in production, so no real player ever reaches it.
 //!
 //! **2. The bytes are not ours.** `FIXTURE` is hand-derived from the 26.2 wire
 //! specification (see the file's own provenance header) and is decoded by the

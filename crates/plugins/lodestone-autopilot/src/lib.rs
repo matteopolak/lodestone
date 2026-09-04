@@ -504,8 +504,10 @@ const WAYPOINT_SIZE: [f32; 2] = [0.4, 0.4];
 const WAYPOINT_COLOR: [f32; 4] = [0.1, 0.9, 1.0, 0.9];
 
 /// `Extract` / `ExtractSet::Debug`: one [`PluginBillboard`] per **remaining**
-/// edge of the active plan — the producer half of issue #161's billboard
-/// channel. `lodestone_ecs::plugin_draw`'s own module doc names "a
+/// edge of the active plan — the producer half of the textured/billboard
+/// world-space draw channel (a generalization of the debug-line pipeline that
+/// still never lets a `wgpu::Device` cross the plugin boundary).
+/// `lodestone_ecs::plugin_draw`'s own module doc names "a
 /// pathfinder's planned route" as the channel's reason to exist; before this
 /// system, nothing in the tree actually pushed one (every reference was
 /// infrastructure — the render pipeline, the resource, the wire — with zero
