@@ -53,7 +53,9 @@
 #[cfg(test)]
 mod chunk_encode_identity;
 
-use lodestone_core::{Ctx, Decode, Encode, Nbt, NbtTag, Reader, Writer, write_network_nbt};
+use lodestone_core::{
+    Ctx, Decode, Encode, Nbt, NbtTag, Reader, Writer, read_network_nbt, write_network_nbt,
+};
 // The command tree's *encode* side. `CommandTree` is aliased because this module
 // already deals in `lodestone_world`/`lodestone_server` column types with short
 // names and an unqualified `CommandTree` here would read as a server-side
@@ -2198,8 +2200,11 @@ fn component_type_id(name: &str) -> Option<i32> {
 /// added-component count, a VarInt removed-component count, then the added
 /// `(type id, payload)` entries.
 ///
-/// **Scope.** Only the two book components used by the book-edit path
-/// (`writable_book_content`/`written_book_content`) are written here.
+/// **Scope.** The top-level `custom_data` component and the two book
+/// components used by the book-edit path (`writable_book_content`/
+/// `written_book_content`) are written here. Custom data is emitted only when
+/// it is one complete compound-root network-NBT value; malformed values are
+/// omitted without changing the valid book entries that follow.
 /// `removed` is always `0` because this crate only adds components to stacks
 /// it produces; it never removes one from a stack already held by a client.
 /// Every other modeled [`ItemComponents`] field (`custom_name`,
@@ -2207,7 +2212,12 @@ fn component_type_id(name: &str) -> Option<i32> {
 /// outbound stream-codec writer is implemented and checked against the
 /// protocol's reference bytes.
 fn write_item_component_patch(w: &mut Writer, components: &ItemComponents) {
-    let count = i32::from(components.writable_book_content.is_some())
+    let custom_data = components
+        .custom_data
+        .as_deref()
+        .filter(|bytes| valid_custom_data(bytes));
+    let count = i32::from(custom_data.is_some())
+        + i32::from(components.writable_book_content.is_some())
         + i32::from(components.written_book_content.is_some());
     // The wire format writes both counts up front: the added-component count
     // followed by the removed-component count, before any entry. This order
@@ -2217,12 +2227,25 @@ fn write_item_component_patch(w: &mut Writer, components: &ItemComponents) {
     // appear to succeed.
     w.var_i32(count);
     w.var_i32(0); // removed components: this crate never sends a removal.
+    if let Some(bytes) = custom_data {
+        w.var_i32(0); // minecraft:custom_data is the first component registry entry.
+        w.bytes(bytes);
+    }
     if let Some(pages) = &components.writable_book_content {
         write_writable_book_content_entry(w, pages);
     }
     if let Some(content) = &components.written_book_content {
         write_written_book_content_entry(w, content);
     }
+}
+
+/// Accepts only one complete compound-root network-NBT value. Component
+/// payloads are not length-prefixed, so emitting a malformed value would make
+/// the client consume the following component entries as part of this one.
+fn valid_custom_data(bytes: &[u8]) -> bool {
+    let mut reader = Reader::new(bytes);
+    matches!(read_network_nbt(&mut reader), Ok(Nbt::Compound(_)))
+        && reader.ensure_empty().is_ok()
 }
 
 /// One added `minecraft:writable_book_content` entry: the component type id,
