@@ -97,9 +97,11 @@ use bevy_ecs::world::World;
 mod gate;
 pub(crate) mod plugin;
 pub(crate) mod schedules;
+mod scheduler;
 
 pub use plugin::{ServerCorePlugin, ServerTick, ServerTickWitness, advance_server_tick};
 pub use schedules::{GameTick, IngestSet, NetIngest, ServerBoot, TickSet};
+pub use scheduler::{ServerTaskId, ServerTaskScheduler, run_server_tasks};
 
 /// Builder for the server's `World`: install plugins here, then call
 /// [`into_world`](Self::into_world) to hand the tick task what it owns.
