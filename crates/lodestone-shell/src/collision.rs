@@ -1057,9 +1057,9 @@ impl LiveCollision {
     /// Override the version data [`new`](Self::new) was built with, after
     /// construction.
     ///
-    /// `new` already requires `version` as a constructor parameter (issue
-    /// That fix), so the only remaining use for this builder is *changing* it on an
-    /// existing view — chiefly the "degraded view" test fixtures, which build
+    /// `new` already requires `version` as a constructor parameter, so the only
+    /// remaining use for this builder is *changing* it on an existing view —
+    /// chiefly the "degraded view" test fixtures, which build
     /// a view with real data and then call `with_version_data(None)` to
     /// exercise the no-census fallback on the same states. Cheap either way —
     /// the adapter is shared by `Arc` and every lookup through it returns
@@ -1156,11 +1156,11 @@ impl LiveCollision {
     /// full block's shape only while the viewer holds a light item, and an
     /// empty shape otherwise
     ///, dumped with no item held — so light is now
-    /// **un**pickable, matching what vanilla does for every player who is not
-    /// holding a light item. This is the correct default-case answer, and
-    /// implementing the held-item exception would need the held stack
-    /// threaded down from `Sim::update_target` (out of this module's reach —
-    /// `sim.rs` is not in scope for this change); it is not implemented here.
+    /// **un**pickable, matching the default case for a player who is not
+    /// holding a light item. Implementing the held-item exception would need
+    /// the held stack threaded down from `Sim::update_target`, but that data is
+    /// not available at this layer, so the empty-shape result remains the only
+    /// supported case.
     /// `minecraft:barrier` is unaffected: its outline is a real,
     /// context-free unit cube (`BarrierBlock` sets no shape override), so it
     /// stays targetable exactly as before. Bake failures (a model that failed
@@ -1292,8 +1292,7 @@ impl LiveCollision {
     /// The **degraded** tier still works and still targets: with no version
     /// census `outline_of` hands back a full cube for anything with baked model
     /// geometry, so a build with no version family compiled in picks blocks
-    /// exactly as coarsely as it did before this change — never "no target at
-    /// all".
+    /// with its coarse full-cube picking fallback — never "no target at all".
     pub fn pick_boxes(&self, x: i32, y: i32, z: i32, out: &mut Vec<PickBox>) {
         if let Some(shape) = self.pick_outline(x, y, z) {
             out.extend(shape.iter().map(pick_box));
@@ -2339,11 +2338,10 @@ mod tests {
         );
     }
 
-    /// **The visible half of this change.** Before the outline census, every
-    /// pickable cell was drawn as a full unit-cube selection box; a bottom slab's
-    /// box should be a half-height box like its own collision shape
-    /// (vanilla's own slab block class's bottom shape: a 16-wide, 0-to-8-tall column), not the
-    /// full cell.
+    /// **Selection-box coverage.** The selection box is sourced from the
+    /// outline census rather than drawing every pickable cell as a full
+    /// unit-cube box. A bottom slab therefore reports a half-height box like
+    /// its recorded collision shape (16 wide and 8/16 high), not the full cell.
     ///
     /// Stone is the control: a state whose outline genuinely *is* a full unit
     /// cube must still report one, so "the outline boxes are always smaller now"
