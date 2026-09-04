@@ -304,12 +304,11 @@ for this fixture.
 - [`oracles-and-benchmarks.md`](./oracles-and-benchmarks.md) — live oracles and the
   worldgen sweeps.
 
-## A duplication worth fixing next
+## Shared recorder and local policy
 
-`benches/support.rs` now exists in eight copies (worldgen, world, render, shell, entity,
-physics, the 26.2 protocol family, and now server). They share a recording schema while
-retaining crate-specific behavior, including worldgen's counter-poisoning filter. The
-modules are duplicated because a `benches/` module cannot be imported across crates.
-`lodestone-testsupport` is already a dev-dependency of most of these crates and is the
-natural home; moving it is a cross-crate API change rather than a side effect of adding a
-bench.
+The common JSONL recorder now lives in the native-only, opt-in
+`lodestone-testsupport::bench_record` module. The seven ordinary benchmark families
+reach it through tiny `benches/support.rs` re-export shims; worldgen retains a small
+local wrapper for its counter-poisoning policy. That wrapper must fail closed for new
+units, because the counter instrumentation changes timing and work-performed
+measurements.

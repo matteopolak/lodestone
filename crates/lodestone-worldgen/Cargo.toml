@@ -68,6 +68,7 @@ lodestone-core = { workspace = true }
 flate2 = { workspace = true }
 
 [dev-dependencies]
+lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 serde_json = { workspace = true }
 # Direct dependency (not a workspace alias), per the harness decision in
 # `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion

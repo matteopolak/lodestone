@@ -3,6 +3,7 @@ use std::{
     str::FromStr,
 };
 
+use smol_str::SmolStr;
 use thiserror::Error;
 
 const DEFAULT_NAMESPACE: &str = "minecraft";
@@ -14,8 +15,8 @@ const DEFAULT_NAMESPACE: &str = "minecraft";
 /// belong to protocol adapters.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Identifier {
-    namespace: String,
-    path: String,
+    namespace: SmolStr,
+    path: SmolStr,
 }
 
 impl Identifier {
@@ -38,7 +39,25 @@ impl Identifier {
         validate_namespace(&namespace)?;
         validate_path(&path)?;
 
-        Ok(Self { namespace, path })
+        Ok(Self {
+            namespace: SmolStr::from(namespace),
+            path: SmolStr::from(path),
+        })
+    }
+
+    /// Creates an identifier from borrowed namespace and path components.
+    ///
+    /// This is the allocation-avoiding constructor for parser and generated
+    /// static-table call sites. The components are copied into the compact
+    /// owned representation, but no temporary `String`s are created first.
+    pub fn new_borrowed(namespace: &str, path: &str) -> Result<Self, ParseIdentifierError> {
+        validate_namespace(namespace)?;
+        validate_path(path)?;
+
+        Ok(Self {
+            namespace: SmolStr::new(namespace),
+            path: SmolStr::new(path),
+        })
     }
 
     /// Returns the identifier namespace.
@@ -78,7 +97,7 @@ impl FromStr for Identifier {
             None => (DEFAULT_NAMESPACE, value),
         };
 
-        Self::new(namespace, path)
+        Self::new_borrowed(namespace, path)
     }
 }
 
@@ -141,3 +160,20 @@ pub type DimensionId = ResourceKey;
 
 /// A canonical dimension identifier.
 pub type Dimension = DimensionId;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_constructor_preserves_long_values_and_storage_type() {
+        let path = "a/very-long-generated-registry-path-that-exceeds-inline-storage";
+        let id = Identifier::new_borrowed("lodestone", path).expect("valid borrowed identifier");
+
+        let _: SmolStr = id.namespace.clone();
+        let _: SmolStr = id.path.clone();
+        assert_eq!(id.namespace(), "lodestone");
+        assert_eq!(id.path(), path);
+        assert_eq!(id.to_string(), format!("lodestone:{path}"));
+    }
+}

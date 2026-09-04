@@ -21,7 +21,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-lodestone-testsupport = { workspace = true }
+lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 # Direct dependency (not a workspace alias), per the harness decision in
 # `docs/roadmap/benchmarks.md`: pure in-memory, no-GPU benches use criterion
 # for its statistically-robust sampling and free local `--baseline` diffing.

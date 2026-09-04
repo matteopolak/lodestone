@@ -229,7 +229,7 @@ lodestone-anvil = { path = "../lodestone-anvil" }
 # the live oracle tests use against vanilla at our own listener — the
 # verification the issue body calls for. `lodestone-testsupport` does not
 # depend on `lodestone-server`, so this adds no cycle.
-lodestone-testsupport = { workspace = true }
+lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 # `tests/worldgen_structure_corpus.rs` (issue #484) hashes the 1606 bundled
 # structure-corpus assets against a jar-derived SHA-256 manifest. Dev-only: the
 # manifest is a test anchor, nothing in `src/` hashes anything. Same

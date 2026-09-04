@@ -86,7 +86,7 @@ rayon.workspace = true
 pollster.workspace = true
 png.workspace = true
 lodestone-model.workspace = true
-lodestone-testsupport.workspace = true
+lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 # `lodestone-data` moved to a real dependency above (issue #523); this
 # `model_ao_corner_gate`/census-reading use is unaffected, it just no longer
 # needs its own dev-only entry.

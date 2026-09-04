@@ -402,7 +402,7 @@ pub fn find_and_claim_workstation(
         let Some(profession) = profession_for_poi_type(poi_path) else {
             continue;
         };
-        let poi_type = ResourceKey::from_str(&format!("minecraft:{poi_path}"))
+        let poi_type = ResourceKey::new_borrowed("minecraft", poi_path)
             .expect("a table-derived POI path is always a valid identifier");
         if claims.try_claim(pos, poi_type) {
             return Some((pos, profession));

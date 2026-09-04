@@ -77,6 +77,14 @@ per-family baked table instead, since 1.16.5 already speaks a flat state-id spac
 
 ### Registry types: generated enums instead of strings
 
+`lodestone_model::Identifier` keeps its namespace and path in private `SmolStr`
+fields. `Identifier::new` continues to accept the owned `Into<String>` inputs used
+by existing callers, while `Identifier::new_borrowed` is the allocation-avoiding
+entry point for parser and generated/static paths. `FromStr` uses the borrowed
+constructor directly, so parsing does not first build a temporary formatted
+string. Generated registry tables remain `&'static str`; they are not converted
+into an eagerly allocated identifier table.
+
 `lodestone_data::block::Block`, `item::Item`, and `entity_type::EntityType` are each a
 generated `#[repr(u16)]`/`#[repr(u8)]` enum whose discriminant **is** the registry id a
 `Holder<T>` carries on the wire — no lookup, no branch, and a per-entry census is a plain

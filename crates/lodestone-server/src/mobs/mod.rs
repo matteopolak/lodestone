@@ -223,7 +223,7 @@ mod piston_shove;
 /// explicitly present — mirrors [`AttributeMap::value`]'s own fallback so a
 /// caller never has to special-case an absent key.
 fn attr(attrs: &AttributeMap, path: &str) -> f64 {
-    Identifier::from_str(&format!("minecraft:{path}"))
+    Identifier::new_borrowed("minecraft", path)
         .ok()
         .and_then(|id| attrs.value(&id))
         .unwrap_or(0.0)
@@ -251,7 +251,7 @@ fn attr(attrs: &AttributeMap, path: &str) -> f64 {
 /// `control_the_attribute_lookup_misses_to_the_registry_default_not_zero` pins
 /// both readings so this distinction cannot quietly collapse.
 fn attr_present(attrs: &AttributeMap, path: &str) -> Option<f64> {
-    Identifier::from_str(&format!("minecraft:{path}"))
+    Identifier::new_borrowed("minecraft", path)
         .ok()
         .and_then(|id| attrs.get(&id))
         .map(lodestone_entity::attribute::AttributeInstance::value)
@@ -1136,9 +1136,7 @@ const MELEE_DEFAULT_KNOCKBACK_POWER: f64 = 0.4;
 /// stale. An unparseable path answers "not hostile", which lands on the documented
 /// `0` fallback.
 fn hostile_probe(path: &str) -> ResourceKey {
-    format!("minecraft:{path}")
-        .parse()
-        .unwrap_or_else(|_| item_entity_type())
+    ResourceKey::new_borrowed("minecraft", path).unwrap_or_else(|_| item_entity_type())
 }
 
 /// One draw from [`ANGER_TICKS`] using inclusive uniform-int sampling:

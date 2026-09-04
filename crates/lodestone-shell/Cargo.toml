@@ -350,7 +350,7 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 # `#[cfg(test)] mod tests` inside `src/` still sees it — unit tests are part of
 # the lib *test* target, which links dev dependencies — so `net.rs`'s,
 # `app/tests.rs`'s and `sim/tests.rs`'s live gates are unaffected.
-lodestone-testsupport = { workspace = true }
+lodestone-testsupport = { workspace = true, features = ["bench-record"] }
 # Builds an in-memory zip fixture for `resources.rs`'s server-resource-pack
 # tests — a real archive `ZipSource::from_bytes` opens, not a hand-rolled
 # byte string, so the test exercises the same parser production does. Dev
