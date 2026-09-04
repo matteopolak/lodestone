@@ -576,11 +576,11 @@ fn a_mob_in_shadow_is_darker_than_the_same_mob_in_sunlight() {
 
 /// **The `0.2` floor is replaced by vanilla's, which is `0.0935` — not zero.**
 ///
-/// Issue #386 named the `0.2` floor as the mechanism and was right, but the first
-/// fix overshot: `get_brightness(0)` is indeed `0`, yet `lightmap.fsh` seeds its
+/// The `0.2` floor is the right mechanism to target, but a first fix can
+/// overshoot: `get_brightness(0)` is indeed `0`, yet `lightmap.fsh` seeds its
 /// accumulator with `max(AmbientColor, nightVisionColor)` *before* adding either
-/// light half, and the overworld's `AMBIENT_LIGHT_COLOR` is `0x0A0A0A`
-/// (`DimensionTypes`'s own decompiled source), not black. After the `notGamma` mix an unlit
+/// light half, and the overworld's ambient light colour is `0x0A0A0A`, not
+/// black. After the `notGamma` mix an unlit
 /// surface reads `0.0935`. So a mob at light 0 is *very dark but not black*.
 ///
 /// This asserts a **band**, because there are three live hypotheses and a

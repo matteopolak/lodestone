@@ -1,4 +1,5 @@
-//! Offscreen gate for issue #383's **mechanism 1**: the entity/arm diffuse term.
+//! Offscreen gate for the entity/arm diffuse term: it must sum two
+//! non-negative directional lights like vanilla, not one light through `abs()`.
 //!
 //! # The defect this exists to catch
 //!

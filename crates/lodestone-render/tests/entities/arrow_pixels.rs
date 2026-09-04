@@ -1,8 +1,8 @@
-//! Prove **arrows reach pixels, pointed the way they are flying** (issue #380).
+//! Prove **arrows reach pixels, pointed the way they are flying**.
 //!
 //! `lodestone-entity`'s `projectile.rs` has modelled arrow motion in detail for a
-//! long time — gravity `0.05`, air inertia `0.99`, the different in-water step
-//! order per `AbstractArrow.tick` — and drew exactly zero pixels, because no
+//! long time — gravity `0.05`, air inertia `0.99`, an in-water step order distinct
+//! from the in-air one — and drew exactly zero pixels, because no
 //! renderer existed. That is this project's dominant defect class: a subsystem
 //! that is individually built, individually tested, and nothing consumes. So the
 //! bar for closing it is not "the rig bakes" (a corpus test already sweeps that)
@@ -39,8 +39,8 @@
 //!    *wrong* answer is a real function in the tree: `EntityInstance::new` puts
 //!    the model origin `MODEL_FEET_OFFSET` = 1.501 blocks **above** the reported
 //!    position and mirrors it. (Above, not below — the lift is applied before
-//!    `LivingEntityRenderer`'s `scale(-1, -1, 1)`, so it comes back out positive.
-//!    #380's notes said below, and so did this file's first draft; see
+//!    the mob placement's `scale(-1, -1, 1)` flip, so it comes back out positive.
+//!    This is easy to get backwards — this file's first draft did too; see
 //!    `entity.rs`'s `reusing_the_mob_matrix_would_lift_an_arrow_and_reverse_it`.)
 //!    Rendering the same arrow both ways and requiring the mob-placed one to land
 //!    *outside* the projectile rect makes the pre-fix build its own negative
@@ -61,9 +61,9 @@
 //!
 //! # What this gate cannot distinguish, and why that is not a gap
 //!
-//! **A Y flip.** #380's issue text asked for a two-direction long-axis test and
-//! warned, correctly, that such a test cannot see a wrong `scale(1, -1, 1)`. The
-//! answer is stronger than the warning: on this rig a Y flip changes **no pixel at
+//! **A Y flip.** A two-direction long-axis test alone cannot see a wrong
+//! `scale(1, -1, 1)`. The
+//! answer is stronger than that warning: on this rig a Y flip changes **no pixel at
 //! all**, so no pixel gate and no live oracle could settle it — a vanilla frame
 //! and a Y-flipped frame are the same frame. That is proved, in two places, rather
 //! than argued here:
@@ -773,7 +773,7 @@ fn the_shaft_follows_yaw_and_pitch() {
 /// placement as its own negative control.
 ///
 /// `EntityInstance::new` is the wrong answer and it is a real function in the
-/// tree: it applies `LivingEntityRenderer`'s `scale(-1, -1, 1)` and its
+/// tree: it applies the mob placement's `scale(-1, -1, 1)` and its
 /// `translate(0, -1.501, 0)`. So this renders the identical mesh both ways and
 /// requires the mob-placed arrow to fall *outside* the projectile arrow's rect —
 /// 1.5 blocks at this framing is most of the frame height, so the two cannot

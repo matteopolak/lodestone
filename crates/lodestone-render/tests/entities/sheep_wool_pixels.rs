@@ -1,4 +1,4 @@
-//! Prove the sheep wool layer reaches pixels (issue #53) — not just that
+//! Prove the sheep wool layer reaches pixels — not just that
 //! [`sheep_wool_model`] bakes and that `sheep_wool_tint` returns the right
 //! bytes, which `lodestone-assets`' hermetic tests already cover.
 //!
@@ -277,7 +277,7 @@ fn render_sheep(gpu: &Gpu, models: &EntityModelSet, wool_tint: Option<[u8; 3]>) 
                             &[world],
                             &batch.lights[..1],
                             // `InstanceTint::rgb` is the no-overlay tint: this gate
-                            // measures the dye multiply, not issue #98's hurt blend.
+                            // measures the dye multiply, not the hurt-overlay blend.
                             &[InstanceTint::rgb(tint)],
                         )
                     {

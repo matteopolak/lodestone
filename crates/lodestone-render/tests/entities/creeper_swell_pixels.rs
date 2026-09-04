@@ -19,8 +19,8 @@
 //!
 //! # The predictions, stated before the run
 //!
-//! * [`UNFIXED_AREA_RATIO`] — what the build *before* this change produces:
-//!   `pose_swelling` ignoring its argument leaves the two frames identical, so
+//! * [`UNFIXED_AREA_RATIO`] — what a build where `pose_swelling` ignores its
+//!   argument produces: the two frames stay identical, so
 //!   the ratio is exactly `1.0`. The gate band must exclude it.
 //! * [`PREDICTED_AREA_RATIO`] — what the ported formula predicts: at
 //!   [`MAX_SWELL`] the horizontal factor is ~1.415 and the vertical ~1.11, so a
@@ -192,8 +192,8 @@ fn framing_camera() -> Camera {
 ///
 /// The instance is assembled by hand rather than through
 /// [`EntityModelSet::resolve`] because that path calls `Skeleton::pose`, which
-/// has no swell parameter — threading one through it is the wiring this change
-/// was scoped out of. Note also that the instance keeps the AABB
+/// has no swell parameter — threading one through it is separate, unfinished
+/// wiring. Note also that the instance keeps the AABB
 /// `EntityInstance::new` computed from the **rest** bounds: a swelling creeper
 /// is drawn larger than its own culling box, which is why this gate centres it
 /// in frame instead of letting the culler decide.
