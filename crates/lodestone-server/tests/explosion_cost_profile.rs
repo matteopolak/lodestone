@@ -342,8 +342,10 @@ fn explosion_instruction_profile() {
     });
     let lookup_instructions = measure(|| {
         for i in 0..PROBES {
+            let state = block_states::StateId::new(probe_ids[i % probe_ids.len()])
+                .expect("profile state id is valid");
             sink = sink.wrapping_add(u64::from(
-                block_blast::explosion_resistance_for_state_id(probe_ids[i % probe_ids.len()])
+                block_blast::explosion_resistance_for_state_id(state)
                     .unwrap_or(0.0)
                     .to_bits(),
             ));
