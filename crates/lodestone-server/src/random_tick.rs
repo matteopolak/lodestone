@@ -1,8 +1,8 @@
-//! The random-tick scheduler (issue #307): which block positions get picked
+//! The random-tick scheduler: which block positions get picked
 //! for a random tick, how many per section per world tick, and the selection
 //! loop every per-block-family handler dispatches from — grass turning to
 //! dirt (and back), the block modeled here directly, plus crop growth,
-//! sapling growth, and leaf decay (issue #310, `crate::growth_tick`), which
+//! sapling growth, and leaf decay (`crate::growth_tick`), which
 //! [`RandomTickScheduler::tick_chunk`]'s dispatch (see
 //! `tick_randomly_ticking_block`) fans out to. Every one of these reaches a
 //! real client through the same [`RandomTickEvent`]/`BlockTickFeed` path —
@@ -27,7 +27,7 @@
 //! picked there is itself randomly-ticking — run its random tick.
 //!
 //! Two things worth being exact about, because "a wrong number of draws
-//! desynchronises everything downstream" (this issue's own brief):
+//! desynchronises everything downstream" (the scheduler's central invariant):
 //!
 //! 1. **The position pick happens exactly `tickSpeed` times per
 //!    randomly-ticking section, unconditionally** — whether or not the
@@ -51,7 +51,7 @@
 //! [`RandomTickScheduler::tick_chunk`]'s gate is
 //! `ChunkColumn::section_is_randomly_ticking`, an integer compare.
 //!
-//! It was a scan until `bdf93a28`+1. The history is worth keeping, because the
+//! The counter definition is the correctness reference; the measurement is useful because the
 //! scan is still the *definition*: `is_randomly_ticking` ran on all 4096 blocks
 //! of every section, of every column, on every tick, as a **string** predicate
 //! — `sample(1)` put **97.6%** of the integrated server's tick thread in it.
@@ -66,7 +66,7 @@
 //! streamed view instead and reported 761 ms / 15.2×. Those two numbers are
 //! wrong and must not be requoted — the conclusion they supported is not.)
 //! Chunk delivery starved badly enough that rings 5-8 of the 289-column view
-//! never arrived (issue #507, `docs/mesh-fill-rate.md`).
+//! never arrived (`docs/mesh-fill-rate.md`).
 //!
 //! The interim fix classified the palette once per tick and scanned palette
 //! *indices*, 54× cheaper but still O(blocks) per column per tick. The counter
@@ -105,7 +105,7 @@
 //! [`grass_can_stay_alive`]. It used to be proxied by "the block directly above
 //! is bare air", which killed grass under **any** non-air block including
 //! `minecraft:short_grass`, so every patch of grass the generator decorated
-//! turned to dirt on its first random tick (issue #544). The proxy existed
+//! turned to dirt on its first random tick. The proxy existed
 //! because there was no per-state light-dampening census; `lodestone_data::light_props`
 //! is that census, and the predicate is `dampening(above) < 15` with the
 //! snow-layer-1 and full-fluid special cases ahead of it.
@@ -243,8 +243,8 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 ///
 /// # The proxy this replaces, and why it was a bug
 ///
-/// Until issue #544 this module used `is_air_variant(above)` for `canStayAlive`,
-/// so **any** non-air block above killed the grass. `minecraft:short_grass` is
+/// The earlier `is_air_variant(above)` proxy for `canStayAlive` meant
+/// **any** non-air block above killed the grass. `minecraft:short_grass` is
 /// non-air, and vanilla's own vegetation step places short grass on top of grass
 /// blocks — so every patch of grass the generator decorated turned to dirt on its
 /// first random tick, which is exactly what the owner reported seeing. The
@@ -253,7 +253,7 @@ fn property_of<'s>(state: &'s str, key: &str) -> Option<&'s str> {
 /// vanilla does.
 ///
 /// The proxy existed because there was no dampening census. There is one now
-/// (`lodestone_data::light_props`, landed in `3f26be21`), so this is the real
+/// (`lodestone_data::light_props`), so this is the intended
 /// predicate:
 ///
 /// 1. Read the block state directly above.
@@ -364,7 +364,7 @@ pub(crate) fn is_snowy_family(base: &str) -> bool {
 /// Mirrors `BlockState.isRandomlyTicking()`
 /// (vanilla's own default implementation) — grass/mycelium-family spreading (see
 /// [`GRASS_BLOCK`]'s doc comment for why dirt is deliberately excluded), plus
-/// the three families issue #310 added: crop growth, sapling growth, and
+/// the three families added: crop growth, sapling growth, and
 /// leaf decay, all cited in `crate::growth_tick`'s own module doc comment.
 #[must_use]
 pub fn is_randomly_ticking(block_state: &str) -> bool {
@@ -380,7 +380,7 @@ pub fn is_randomly_ticking(block_state: &str) -> bool {
 /// An instrument, not a mechanism: how many times [`is_randomly_ticking`] has
 /// been evaluated on **this thread**.
 ///
-/// Issue #507's fix is a claim about an operation *count*, and this repo's
+/// This gate is a claim about an operation *count*, and this repo's
 /// evidence rule says to measure a count rather than a duration (this machine's
 /// wall clock reproduces to 10.8% at best, and one stage swung 22% across three
 /// runs of an identical binary). The two competing hypotheses are computable
@@ -466,10 +466,10 @@ pub enum GrassOutcome {
 /// computes with [`grass_can_stay_alive`]. It used to be the parameter
 /// `above_is_air`, a proxy that killed grass under *any* non-air block —
 /// including `minecraft:short_grass`, which vanilla's own vegetation step
-/// places on top of grass blocks. That is issue #544.
+/// places on top of grass blocks. The predicate below preserves that distinction.
 ///
 /// **`can_stay_alive` still doubles as the `getMaxLocalRawBrightness(pos.above())
-/// >= 9` gate**, which is a *different* simplification from the one #544 removed
+/// >= 9` gate**, which is a *different* simplification from the one removed
 /// and remains: this crate's random-tick driver holds a `ChunkColumn`, not a light
 /// map, so the exact brightness is unavailable rather than approximated. The
 /// consequence is that a live grass block always attempts a spread regardless of
@@ -521,7 +521,7 @@ pub fn grass_random_tick(
 /// which is the real "is the target still the base block" check at the call
 /// site.
 ///
-/// Before issue #544 this was `is_air_variant(above_target_state)`, which
+/// The earlier condition was `is_air_variant(above_target_state)`, which
 /// collapsed both conditions into the same proxy [`grass_can_stay_alive`]
 /// documents.
 #[must_use]
@@ -572,7 +572,7 @@ impl RandomTickScheduler {
     /// section, tick) boolean is the *only* input that decides whether draws
     /// happen, an equal final state is proof that the O(1) counter decision put
     /// the LCG on the same sequence the definitional scan would have — which is
-    /// the real compatibility requirement of issue #507's fix, not merely that
+    /// the real compatibility requirement, not merely that
     /// the same blocks changed.
     #[must_use]
     pub fn position_state(&self) -> i32 {
@@ -583,7 +583,7 @@ impl RandomTickScheduler {
     /// randomly-ticking 16-block section — mirrors vanilla's own per-chunk tick's
     /// block-ticking loop (this crate does not
     /// model the `iceandsnow`/`tickPrecipitation` loop above it, which is
-    /// weather, out of scope for #307/#308).
+    /// weather, out of scope here).
     ///
     /// `column` is read fresh from `source.column(cx, cz)` by the caller and
     /// passed in as `&mut` so within-call mutations (a grass block spreading
@@ -597,13 +597,13 @@ impl RandomTickScheduler {
     ///
     /// The per-position dispatch (`tick_randomly_ticking_block`) fans out to
     /// grass (this module) or crop/sapling/leaves (`crate::growth_tick`,
-    /// issue #310) — every family returns through this same `Vec`, so this
+    /// — every family returns through this same `Vec`, so this
     /// function's caller (`tick::run_tick_loop`) needed zero changes to gain
     /// the new families: it already forwards whatever `tick_chunk` hands
     /// back, generically, one block-state string at a time.
     ///
-    /// `block_ticks`/`current_tick` (issue #314's own extension of this call
-    /// site) are threaded through to [`propagate_and_react`] so a mutation
+    /// `block_ticks`/`current_tick` are threaded through to
+    /// [`propagate_and_react`] so a mutation
     /// adjacent to a redstone torch/repeater/comparator/observer can
     /// schedule a delayed recheck — see that function's own doc comment.
     /// `tick::run_tick_loop` (the real caller) passes its own persistent
@@ -626,7 +626,7 @@ impl RandomTickScheduler {
         let min_z = cz * 16;
         // Vanilla's `tickingBlockCount > 0`, now an O(1) integer compare
         // against the counter `ChunkColumn` maintains on every mutation
-        // (issue #507's real fix). Nothing here reads the index grid at all:
+        // (the counter path). Nothing here reads the index grid at all:
         // the whole-column early exit below is at most 24 compares, and the
         // per-section decision is one.
         //
@@ -703,8 +703,8 @@ impl RandomTickScheduler {
 
     /// Dispatches a position already confirmed eligible by
     /// [`is_randomly_ticking`] to the right per-block-family handler — grass
-    /// (this module) or crop/sapling/leaves (`crate::growth_tick`, issue
-    /// #310). One dispatch point keeps `tick_chunk`'s own selection loop
+    /// (this module) or crop/sapling/leaves (`crate::growth_tick`). One
+    /// dispatch point keeps `tick_chunk`'s own selection loop
     /// ignorant of which families exist, exactly like vanilla's single
     /// `blockState.randomTick(...)` virtual call fanning out to whichever
     /// `Block` subclass is actually at that position.
@@ -737,12 +737,12 @@ impl RandomTickScheduler {
             Vec::new()
         };
 
-        // Issue #311/#314: every mutation above notifies its six neighbours,
+        // every mutation above notifies its six neighbours,
         // mirroring vanilla's own `setBlockAndUpdate` (this is
         // `NeighborPropagator`'s first real production call — see
         // `crate::gravity_tick`'s module doc). Two reactions are modeled
         // today: a gravity block settling once its support disappears, and
-        // the redstone family (#314/#315/#317) recomputing dust power or
+        // the redstone family recomputing dust power or
         // scheduling a torch/diode/observer recheck.
         let mutated: Vec<(i32, i32, i32)> = events.iter().map(|e| e.pos).collect();
         for (ex, ey, ez) in mutated {
@@ -912,7 +912,7 @@ impl RandomTickScheduler {
         events
     }
 
-    /// Crop growth (issue #310) — see `crate::growth_tick`'s module doc for
+    /// Crop growth — see `crate::growth_tick`'s module doc for
     /// the jar citation. Reads the block directly above as the light-check
     /// proxy (same convention grass uses), draws through the shared
     /// `behavior_rng`, and on a hit persists the new age into `column`.
@@ -946,7 +946,7 @@ impl RandomTickScheduler {
         }
     }
 
-    /// Sapling growth (issue #310) — see `crate::growth_tick`'s module doc
+    /// Sapling growth — see `crate::growth_tick`'s module doc
     /// for the jar citation, including why an already-stage-1 hit is a
     /// named no-op (no tree feature exists in this crate to grow into).
     fn tick_sapling_block(
@@ -979,7 +979,7 @@ impl RandomTickScheduler {
         }
     }
 
-    /// Leaf decay (issue #310) — see `crate::growth_tick`'s module doc for
+    /// Leaf decay — see `crate::growth_tick`'s module doc for
     /// why this draws **zero** RNG values: `is_randomly_ticking` already
     /// proved `leaves_should_decay`, and vanilla's own `randomTick` for
     /// `LeavesBlock` has no `random.nextInt` call at all, only the
@@ -1023,7 +1023,7 @@ impl RandomTickScheduler {
         let lx = x - min_x;
         let lz = z - min_z;
         let above = column.block_state(lx, y + 1, lz).to_string();
-        // Issue #544: vanilla's real `canStayAlive`, not the old
+        // The light-dampening predicate, rather than the old
         // `is_air_variant` proxy. The proxy killed grass under *any* non-air
         // block, and vanilla's own vegetation step puts `minecraft:short_grass`
         // on top of grass blocks — so every decorated patch turned to dirt on
@@ -1053,7 +1053,7 @@ impl RandomTickScheduler {
                     return false;
                 }
                 let ty = y + dy;
-                // `block_state` takes LOCAL x/z (issue #472): passing the
+                // `block_state` takes LOCAL x/z: passing the
                 // absolute `tz` here tripped `ChunkColumn::index`'s
                 // `debug_assert` on every singleplayer session, and in
                 // release silently aliased onto a different cell — the
@@ -1175,8 +1175,8 @@ pub(crate) struct GravitySettle {
 /// This used to move the block: `set_block(y, AIR)` plus
 /// `set_block(landing_y, state)` in one step, returning both as
 /// [`RandomTickEvent`]s. That was the whole of the reported *"it just teleports to
-/// its final place at the bottom instead of falling down and landing"* — a real,
-/// documented simplification standing in for the `FallingBlockEntity` that did not
+/// its final place at the bottom instead of falling down and landing"* — a
+/// documented simplification standing in for a falling-block entity that did not
 /// exist. It does now, so the teleport is gone and this function answers the
 /// question rather than acting on it.
 ///
@@ -1229,7 +1229,7 @@ pub(crate) fn settle_gravity_at(
 ///
 /// # Why the second layer is not a corner case
 ///
-/// An earlier landing implemented centre 0 only and described the omission as
+/// An earlier version handled centre 0 only and described the omission as
 /// "a diagonal-over-conductor corner update". It is not: the geometry the
 /// first layer alone cannot reach is the **standard torch-inverter** — dust
 /// sitting on top of a block with a torch on that block's side. The torch is
@@ -1265,20 +1265,20 @@ fn wire_update_fan_out(pos: BlockPos) -> Vec<Notification> {
 }
 
 /// Notifies the six neighbours of a just-mutated position `(x, y, z)` via
-/// `NeighborPropagator` (issue #308's own primitive) and dispatches every
+/// [`NeighborPropagator`] and dispatches every
 /// reaction this crate models to a neighbour notification:
 ///
-/// 1. **Gravity (#311)** — settles any neighbour that is an unsupported
+/// 1. **Gravity** — settles any neighbour that is an unsupported
 ///    gravity block; a settled block's *old* position is re-notified from
 ///    directly above so a stacked column collapses one at a time,
-///    depth-first. Unchanged from the #311 landing.
-/// 2. **Redstone dust (#314)** — recomputes the neighbour's target power
+///    depth-first.
+/// 2. **Redstone dust** — recomputes the neighbour's target power
 ///    strength (`crate::redstone_wire::calculate_target_strength`); if it
 ///    changed, writes the new power and re-fans-out through
 ///    [`wire_update_fan_out`], which is
 ///    `DefaultRedstoneWireEvaluator.updatePowerStrength`'s **complete**
 ///    update set (vanilla's own default wire evaluator), both layers.
-/// 3. **Redstone torches/repeaters/comparators/observers (#314/#315/#317)**
+/// 3. **Redstone torches, repeaters, comparators, and observers**
 ///    — schedule a delayed recheck into `block_ticks` when the neighbour's
 ///    steady-state condition disagrees with its current state (torch:
 ///    `LIT == hasSignal`; diode: `POWERED != shouldTurnOn`; observer: the
@@ -1289,8 +1289,8 @@ fn wire_update_fan_out(pos: BlockPos) -> Vec<Notification> {
 ///
 /// Neighbours outside this column's 16×16 footprint are skipped — the same
 /// cross-chunk limitation `tick_grass_block`'s own spread already accepts.
-/// [`propagate_and_react`], preceded by the reaction the **placed block itself**
-/// owes (issue #465).
+/// [`propagate_and_react`], preceded by the reaction owed by the **placed
+/// block itself**.
 ///
 /// # Why this is a separate entry point and not a flag on the one above
 ///
@@ -1384,7 +1384,7 @@ pub fn react_at_placement_with_entities(
             let state = columns.raw_state(pos);
             // Vanilla's own hopper-block on-place hook calls the same
             // `checkPoweredState` its `neighborChanged` does, so a hopper placed
-            // into an already-powered cell must come up locked (issue #321). The
+            // into an already-powered cell must come up locked. The
             // neighbour pass cannot do this: it never notifies the origin.
             if redstone::is_hopper(&state) {
                 let should_be_on =
@@ -1545,7 +1545,7 @@ fn apply_tripwire_result(
 /// replacement state, so it cannot go through the ordinary `Option<String>`
 /// dispatch chain every diode/torch/observer arm uses).
 ///
-/// `world` extends this cross-chunk (issue #548), the same way
+/// `world` extends this cross-chunk, the same way
 /// [`propagate_and_react_with_entities_across_chunks`] does — an
 /// already-loaded neighbour is reachable rather than truncating the recheck
 /// at the home column's own edge.
@@ -1641,7 +1641,7 @@ pub(crate) fn react_at_removal(
 }
 
 /// A cascade-scoped, multi-column read/write view over one redstone
-/// notification chain (issue #548's cross-chunk propagation): the home
+/// notification chain (cross-chunk propagation): the home
 /// column a caller already holds `&mut`, plus any *already-loaded*
 /// neighbouring column a cascade actually reaches.
 ///
@@ -1972,7 +1972,7 @@ fn propagate_and_react_over(
     // a single `updateNeighborsAt(pos)`; a dust power change instead runs
     // `DefaultRedstoneWireEvaluator.updatePowerStrength`'s seven-centre set —
     // and that applies to the origin exactly as it applies to a wire reached
-    // mid-cascade, which is the half an earlier landing missed.
+    // mid-cascade, which an earlier version omitted.
     //
     // `raw_state`, not `state`: this mirrors the direct (uncounted)
     // `ChunkColumn::block_state` read the single-column version of this
@@ -2005,9 +2005,8 @@ fn react_to_notification(
     block_entities: Option<&BlockEntityHandle>,
 ) -> Vec<Notification> {
     {
-        // Issue #548: this used to be a single-column bounds check
-        // (`n.pos` inside `column`'s own 16×16 footprint, or bail). It is
-        // now "is `n.pos` reachable at all" — home column or an
+        // Reachability is not a single-column bounds check: `n.pos` may be in
+        // the home column or an
         // already-loaded resident neighbour — which is [`RedstoneColumns`]'s
         // own boundary; see its doc comment for why an unloaded neighbour
         // still truncates the cascade exactly as before.
@@ -2079,7 +2078,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 1b. `snowy` upkeep (#546). Vanilla's own snowy-block update-shape hook
+        // 1b. `snowy` upkeep. Recompute the property when the block above changes.
         // recomputes `snowy` from the block above
         // whenever that neighbour changes, so placing or breaking snow on grass
         // flips it in both directions. Nothing did this before, so `snowy` was
@@ -2108,7 +2107,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 2. Redstone dust (#314).
+        // 2. Redstone dust.
         if class == crate::redstone_graph::ReactionClass::Wire {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Dust);
             crate::redstone_counters::bump_wire_recompute();
@@ -2123,7 +2122,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3a. Redstone torches (#314).
+        // 3a. Redstone torches.
         if class == crate::redstone_graph::ReactionClass::Torch {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Torch);
             let has_signal = redstone_torch::has_neighbor_signal(&redstone::make_columns_lookup(columns), n.pos, &state);
@@ -2143,7 +2142,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3b. Repeaters (#315).
+        // 3b. Repeaters.
         if class == crate::redstone_graph::ReactionClass::Repeater {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Repeater);
             let facing = redstone::diode_facing(&state);
@@ -2177,7 +2176,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3b-bis. Pistons (#316). `PistonBaseBlock.neighborChanged` calls
+        // 3b-bis. Pistons. The neighbour-update dispatch calls
         // `checkIfExtend`, which is **immediate** — it fires a block event rather
         // than scheduling a tick, so the move happens in the same neighbour pass
         // that noticed the signal. That is why this arm mutates here and returns a
@@ -2196,9 +2195,9 @@ fn react_to_notification(
         // produce immediately — and in between, a client has a `moving_piston` cell
         // and a block entity to animate.
         //
-        // What is still missing is interruption (a pending commit runs to
-        // completion, so no 0-tick pulse) and entity shoving. Both are named in
-        // `crate::piston`'s module doc; #316 stays open on them.
+        // A pending commit can still run to completion instead of being
+        // interrupted by a zero-tick pulse, and entity shoving is not modeled.
+        // `crate::piston` documents both limitations.
         if class == crate::redstone_graph::ReactionClass::Piston {
             let facing = crate::piston::piston_facing(&state);
             let extended = crate::piston::piston_extended(&state);
@@ -2207,7 +2206,7 @@ fn react_to_notification(
             if want_extended != extended {
                 let sticky = crate::piston::is_sticky_piston(&state);
 
-                // Interruption (part of #316's "update order" residue).
+                // Finish a matching pending commit before applying a retraction.
                 // `PistonBaseBlock.triggerEvent`'s retract branch always looks at
                 // the piston's *own arm cell* (`pos.relative(direction)`, never a
                 // cell further out a run may have carried a block to) for a still
@@ -2219,7 +2218,7 @@ fn react_to_notification(
                 // live-verified against the 26.2 oracle in
                 // `redstone_piston_order_oracle_gate.rs`. This is what a piston
                 // caught mid-extend and immediately retracted needs to never show a
-                // head, the specific "update-order quirk" #316 is named for.
+                // head, the specific "update-order quirk" is named for.
                 //
                 // `take_matching` both finds *and removes* the pending commit, so
                 // the ordinary drain can never also fire it later against a cell
@@ -2358,8 +2357,8 @@ fn react_to_notification(
                         // happen — and the commit must not be scheduled either, or a
                         // cell that never animated would still be rewritten two ticks
                         // late. Same border limit the module doc already records for
-                        // the whole redstone family (issue #548 moved where the
-                        // border sits, not whether one exists).
+                        // every redstone reaction has: the boundary moves with
+                        // the loaded columns, but remains enforced.
                         continue;
                     }
                     // A pending commit is scheduled even when the state write is a
@@ -2391,7 +2390,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3c. Comparators (#315).
+        // 3c. Comparators.
         if class == crate::redstone_graph::ReactionClass::Comparator {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Comparator);
             let facing = redstone::diode_facing(&state);
@@ -2414,7 +2413,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3c-bis. Hoppers (#321). Vanilla's own hopper-block powered-state check,
+        // 3c-bis. Hoppers. Recompute their powered state when a neighbour changes.
         // reached from `neighborChanged`
         // and `onPlace`:
         //
@@ -2445,7 +2444,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3d. Observers (#317).
+        // 3d. Observers.
         if class == crate::redstone_graph::ReactionClass::Observer {
             crate::redstone_counters::bump_reaction(crate::redstone_counters::ReactionKind::Observer);
             let watch = redstone_observer::watch_direction(&state);
@@ -2465,7 +2464,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3e. Redstone-openable blocks (#319): doors, trapdoors and fence
+        // 3e. Redstone-openable blocks: doors, trapdoors and fence
         // gates. `DoorBlock.neighborChanged` / `TrapDoorBlock.neighborChanged` /
         // `FenceGateBlock.neighborChanged` read whether the block is
         // redstone-powered and, when that differs from the stored `powered`,
@@ -2516,7 +2515,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3f. Note blocks (issue #322's first fixture). Vanilla's own note-block
+        // 3f. Note blocks. Their neighbour update
         // neighbor-changed hook — immediate, like the hopper/openable arms
         // above, not scheduled. See `crate::redstone_note_block`'s own module
         // doc for the client-visible "pulse" half this crate cannot transport
@@ -2540,7 +2539,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3g. Powered/activator rails (issue #318's rail half — detector
+        // 3g. Powered/activator rails (rail half — detector
         // rail's own producer is still unbuilt, see `crate::redstone_rail`'s
         // module doc). `PoweredRailBlock.updateState`, reached through
         // `BaseRailBlock.neighborChanged` (`:80-92`) since neither block
@@ -2566,7 +2565,7 @@ fn react_to_notification(
             return Vec::new();
         }
 
-        // 3h. Dispensers/droppers (issue #320) — the `TRIGGERED` state
+        // 3h. Dispensers/droppers — the `TRIGGERED` state
         // machine only. Vanilla's own dispenser-block neighbor-changed hook;
         // see `crate::redstone_dispenser`'s
         // own module doc for exactly why the actual fire (the scheduled tick
@@ -2636,8 +2635,7 @@ fn react_to_notification(
         // string every other arm here mutates, and most callers of
         // [`propagate_and_react`] (every oracle gate, every unit test in this
         // crate) have no registry to hand it. Those callers take the `None`
-        // branch and this arm is a no-op for them, exactly as before this
-        // landed.
+        // branch and this arm is a no-op for them.
         if let Some(block_entities) = block_entities {
             if class == crate::redstone_graph::ReactionClass::CommandBlock {
                 // `hasNeighborSignal`, not `getBestOwnOrNeighbourSignal`: a
@@ -2670,7 +2668,7 @@ fn react_to_notification(
                             let conditional = crate::command_block::is_conditional(&state);
                             // The predecessor read reaches an already-loaded
                             // neighbour column exactly like every other read
-                            // in this function (issue #548): a conditional
+                            // in this function: a conditional
                             // command block whose predecessor sits in a
                             // resident neighbour column now sees it. Only a
                             // predecessor in a chunk that is not currently
@@ -2774,8 +2772,8 @@ fn section_has_randomly_ticking_block(
     section_min_y: i32,
     mask: &[bool],
 ) -> bool {
-    // Section-indexed rather than y-row-indexed since issue #551 packed the grid
-    // per section (`crate::chunk_blocks`): `section_min_y` is a section boundary by
+    // Section-indexed rather than y-row-indexed: the grid is packed per
+    // section (`crate::chunk_blocks`), and `section_min_y` is a section boundary by
     // construction at every call site, so this is the same 4,096 cells the y-row
     // walk covered, reached through the accessor that now exists.
     let y_local = section_min_y - column.min_y;
@@ -3016,7 +3014,7 @@ mod tests {
         assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
     }
 
-    /// **Issue #544: which above-block kills grass, predicted from vanilla's
+    /// **Which above-block kills grass, predicted from the documented rules:**
     /// record and the dampening census rather than from this crate's answer.**
     ///
     /// `SpreadingSnowyBlock.canStayAlive` is, in order: snow with `LAYERS == 1`
@@ -3167,12 +3165,12 @@ mod tests {
         );
     }
 
-    /// **The end-to-end half of #544, through the real `tick_chunk` driver:**
+    /// **End to end through the real `tick_chunk` driver:**
     /// grass under short grass must survive, and the draw count must be the
     /// *live* one (12 behaviour draws), not the die branch's zero.
     ///
     /// This is a paired assertion on purpose. "It did not die" alone is also
-    /// satisfied by the position pick never landing on the block, so the second
+    /// satisfied by the position pick never reaching the block, so the second
     /// half — that the behaviour RNG advanced — is what proves the tick actually
     /// ran and took the live branch. The companion
     /// `a_covered_grass_block_becomes_dirt_after_one_tick_chunk_call` (stone
@@ -3200,7 +3198,7 @@ mod tests {
         }
         assert_eq!(column.block_state(3, 5, 3), GRASS_BLOCK);
         // The tick really ran: with `tick_speed = 200` over 3,000 calls the
-        // position pick lands on this cell ~146 times, and each landing costs
+        // position pick lands on this cell ~146 times, and each visit costs
         // 12 behaviour draws on the live branch and 0 on the die branch. So a
         // behaviour RNG that never moved would mean either "never picked"
         // (P ~ e^-146) or "took the die branch".
@@ -3240,7 +3238,7 @@ mod tests {
         assert!(spread, "an eligible adjacent dirt block must eventually turn to grass");
     }
 
-    /// #546, the two halves of `snowy`. The tag is `#minecraft:snow` — three
+    /// the two halves of `snowy`. The tag is `#minecraft:snow` — three
     /// blocks, so `snow_block` counts and this is not a `minecraft:snow` check
     /// — and `SnowyBlock.updateShape` moves the property in both directions
     /// when the block above changes.
@@ -3290,7 +3288,7 @@ mod tests {
         assert_eq!(DEFAULT_RANDOM_TICK_SPEED, 3);
     }
 
-    // # Issue #310 end-to-end: crop growth, sapling growth, leaf decay
+    // End-to-end: crop growth, sapling growth, leaf decay
     // through `tick_chunk` against a real `ChunkColumn` — the same level of
     // proof `a_covered_grass_block_becomes_dirt_after_one_tick_chunk_call`
     // gives grass, above. The pure per-branch draw-pattern proofs live in
@@ -3376,7 +3374,7 @@ mod tests {
     /// A stage-1 sapling never produces an event at all: the "grow a tree"
     /// branch is a named no-op (`growth_tick::SaplingOutcome::TreeGrowthNotModeled`),
     /// not a silent mutation — pinned here at the `tick_chunk` level so a
-    /// future tree feature landing changes this test, loudly, rather than
+    /// future tree-generation support changes this test loudly, rather than
     /// this crate quietly starting to fabricate trees unnoticed.
     #[test]
     fn a_stage_one_sapling_never_produces_an_event() {
@@ -3612,7 +3610,7 @@ mod tests {
         assert_eq!(column.block_state(6, 6, 5), "minecraft:gravel", "no teleport");
     }
 
-    // # Issue #472: local vs absolute `z` in grass propagation
+    // Local versus absolute `z` in grass propagation
     //
     // Every other test in this module ticks chunk `(0, 0)`, where `min_z` is
     // 0 and so local `z` == absolute `z`. That makes the two coordinates
@@ -3638,7 +3636,7 @@ mod tests {
     // release genuinely misreads rather than panicking on a slice bound.
     // The two cells are stocked deliberately in each gate below.
 
-    /// #472, forward direction: an eligible dirt block must still be found
+    /// forward direction: an eligible dirt block must still be found
     /// when the chunk's `min_z` is non-zero. The two cells the absolute-`z`
     /// misread aliases onto are stocked with stone, so under the bug
     /// `can_propagate_onto("minecraft:stone", ..)` is false and the spread
@@ -3683,7 +3681,7 @@ mod tests {
             column.block_state(6, 5, 5),
             column.block_state(6, 8, 5),
         );
-        // `snowy=false` explicitly (#546): the spread write sets the property
+        // `snowy=false` explicitly: the spread write sets the property
         // vanilla's `SpreadingSnowyBlock.randomTick` sets, air being above.
         assert_eq!(column.block_state(6, 5, 5), "minecraft:grass_block[snowy=false]", "at local (6, 5, 5)");
         // Nothing may have been written at the alias cells.
@@ -3691,7 +3689,7 @@ mod tests {
         assert_eq!(column.block_state(6, 9, 5), "minecraft:stone", "at alias cell local (6, 9, 5)");
     }
 
-    /// #472, misread direction: the *write* at the end of `tick_grass_block`
+    /// misread direction: the *write* at the end of `tick_grass_block`
     /// always used the local `tlz` — only the probe read was wrong — so the
     /// bug converts a block that is not dirt, at the correct coordinate,
     /// having consulted a cell three y-levels up. Here local `(6, 5, 5)` is
@@ -3731,7 +3729,7 @@ mod tests {
         assert_eq!(column.block_state(6, 8, 5), DIRT_BLOCK, "at alias cell local (6, 8, 5)");
     }
 
-    // # Issue #319 end-to-end: redstone-openable blocks through
+    // End-to-end: redstone-openable blocks through
     // `propagate_and_react` — the production reaction dispatch (the same call
     // site `tick::run_tick_loop` uses after a scheduled redstone flip or a
     // random-tick mutation). The pure per-family decisions live in
@@ -3889,7 +3887,7 @@ mod tests {
         );
     }
 
-    // ---- Issue #507: the counter is O(1), proven as a count ---------------
+    // ---- the counter is O(1), proven as a count ---------------
 
     /// **U3-b, the O(1) claim as a count.** The section *decision* evaluates
     /// [`is_randomly_ticking`] zero times, so `tick_chunk`'s per-tick predicate
@@ -4094,7 +4092,7 @@ mod tests {
         );
     }
 
-    /// The second interrupt (sticky retraction only, issue #316's own
+    /// The second interrupt (sticky retraction only)
     /// "update-order quirk"): `piston::relative_n(pos, facing, 2)` — a
     /// *different* cell from the arm the first interrupt already covers — is
     /// checked too, and a still-**extending** `moving_piston` entity found
@@ -4118,7 +4116,7 @@ mod tests {
         // West of the piston, i.e. *not* the push direction (East) — a valid
         // direct neighbour signal source, mirroring
         // `redstone_piston_order_oracle_gate.rs`'s own `piston_rig()`. The
-        // piston never reacts to a notification landing on its **own**
+        // piston never reacts to a notification on its **own**
         // position (`NeighborPropagator::propagate` notifies a centre's
         // neighbours, never the centre itself) — it must be notified via one
         // of its own neighbours, exactly as production always reaches it.
@@ -4182,7 +4180,7 @@ mod tests {
                 block_ticks.iter().all(|t| t.pos != (two_pos.x, two_pos.y, two_pos.z)),
                 "the interrupted commit must be removed, not merely superseded"
             );
-            // The interrupt's own write landed: a non-source entity writes its
+            // The interrupt's write is observable: a non-source entity writes its
             // `moved_state` — exactly the block scenario A started from.
             assert_eq!(
                 column.block_state(two_pos.x, two_pos.y, two_pos.z),
@@ -4303,7 +4301,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Issue #548: cross-chunk propagation.
+    // cross-chunk propagation.
     // -----------------------------------------------------------------
 
     /// A minimal multi-column [`ChunkSource`] for the tests below: an
@@ -4395,11 +4393,11 @@ mod tests {
     ///
     /// The predicted value, 15, is **not** derived from this fix's own
     /// code: it is `redstone_wire::calculate_target_strength` — an
-    /// already-oracle-tested function this change never touches — run over
+    /// already-oracle-tested function the cross-chunk path never touches — run over
     /// the *same two cells placed inside one single column*
     /// (`single_column_reference`, below), the pre-existing,
     /// independently-validated code path this crate has used for wire
-    /// power since #314. The only variable between that reference and the
+    /// power for this subsystem. The only variable between that reference and the
     /// cross-chunk case is whether an arbitrary administrative chunk
     /// boundary happens to fall between the two cells — real Minecraft
     /// redstone has no such concept, so the two numbers must agree if this

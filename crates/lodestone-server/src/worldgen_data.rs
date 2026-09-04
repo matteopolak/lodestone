@@ -10,7 +10,7 @@
 //! # Where this belongs long-term, and why it does not move to a version crate
 //!
 //! An earlier version of this doc said the data "eventually lives in the
-//! version crate" (issue #407's original scope: move `assets/worldgen/` into
+//! version crate": it moves `assets/worldgen/` into
 //! `crates/protocol/v770`). That was checked against the tree and does not
 //! fit — not as a style preference, as a hard `cargo` cycle:
 //! `crates/protocol/v770/Cargo.toml` already depends on `lodestone-server`
@@ -42,15 +42,13 @@
 //! # Honest scope
 //!
 //! [`OverworldGenerator`] composes shape + the **real** aquifer + surface
-//! rules + real multi-noise biome assignment (issue #405) + real carvers
-//! and ore features (issue #295, the real 3×3 `blockStateWriteRadius(1)`
-//! driver) + grass/flower/tree vegetal decoration (issue #406 — **the real
-//! 3×3 driver and a real JVM oracle both landed** in `a27abce`/`04bfb57`
-//! (#427), superseding this comment's former "single-chunk only … no oracle
-//! yet"; the remaining gaps are enumerated per biome in
-//! [`KNOWN_VEGETATION_GAPS`] and in
-//! `lodestone_worldgen::feature::vegetation`'s own module doc) + snow layers
-//! and surface ice (issue #404's U2, `freeze_top_layer` — bit-exact against
+//! rules + real multi-noise biome assignment + real carvers
+//! and ore features (the real 3×3 block-write-radius-1
+//! driver) + grass/flower/tree vegetal decoration, exercised by a 3×3
+//! driver and a JVM oracle, with remaining gaps enumerated per biome in
+//! [`KNOWN_VEGETATION_GAPS`] and
+//! `lodestone_worldgen::feature::vegetation`'s module documentation) + snow
+//! layers and surface ice (`freeze_top_layer` — bit-exact against
 //! the real server at four fixtures; see `docs/worldgen-freeze-top-layer.md`
 //! and the `top_layer_parity` module below) — real terrain shape, surface,
 //! biome variety,
@@ -58,7 +56,7 @@
 //! oracle exists for the stage (`docs/worldgen-parity.md`'s harness
 //! measures the composed subset directly; vegetation has no such oracle
 //! yet — see that module's doc). Structures are still unbuilt anywhere in
-//! this repo (`#136`).
+//! this repository.
 
 use std::sync::OnceLock;
 
@@ -103,16 +101,16 @@ pub fn embedded_structure_template_ids() -> impl Iterator<Item = &'static str> {
 }
 
 /// The fallback biome [`OverworldGenerator`] would use if [`EmbeddedResolver`]
-/// supplied no biome-parameter table — it does (see [`EmbeddedResolver::biome_parameters`]),
-/// so real per-column biome variety (issue #405) is what this generator
+/// supplied no biome-parameter table. [`EmbeddedResolver::biome_parameters`]
+/// supplies one, so real per-column biome variety is what this generator
 /// actually produces; these two constants only document "what it used to
 /// always be" and are the value a future resolver with no biome data still
 /// gets. Plains has snow disabled, matching `cold_enough_to_snow == false`.
 const DEFAULT_BIOME: &str = "minecraft:plains";
 const DEFAULT_BIOME_SNOWS: bool = false;
 
-/// The worldgen data scope the embedded `assets/worldgen/` bundle satisfies
-/// (issue #407): the only data this crate embeds is 26.2 (protocol 776).
+/// The worldgen data scope satisfied by the embedded `assets/worldgen/` bundle.
+/// This crate embeds only 26.2 data (protocol 776).
 ///
 /// The version gate is [`bundled_worldgen_serves`] compared against the
 /// hosting protocol's own report
@@ -127,7 +125,7 @@ const DEFAULT_BIOME_SNOWS: bool = false;
 pub const BUNDLED_WORLDGEN_SCOPE: WorldgenScope = WorldgenScope::V26_2;
 
 /// Whether the embedded worldgen bundle can serve a hosting protocol that
-/// reports `scope` — the version gate itself (issue #407).
+/// reports `scope` — the version gate itself.
 ///
 /// True for exactly [`BUNDLED_WORLDGEN_SCOPE`]. A protocol reporting
 /// [`WorldgenScope::None`] — no worldgen, or a family whose data this crate
@@ -163,7 +161,7 @@ impl std::fmt::Display for WorldgenScopeMismatch {
 impl std::error::Error for WorldgenScopeMismatch {}
 
 /// [`overworld_chunk_source`], gated by [`bundled_worldgen_serves`] — the
-/// checked construction entry point issue #407 asks for: a hosting family
+/// Checked construction requires a hosting family
 /// whose [`crate::protocol::ServerProtocol::worldgen_scope`] does not match
 /// [`BUNDLED_WORLDGEN_SCOPE`] is refused here rather than silently handed
 /// 26.2 terrain it never declared it could serve.
@@ -214,7 +212,7 @@ impl EmbeddedResolver {
     }
 
     /// Like [`Self::raw`], but a missing key returns `None` instead of
-    /// panicking — for the issue #295 composition lookups
+    /// panicking during composition lookups
     /// (`biome_document`/`configured_carver`/`configured_feature`/
     /// `placed_feature`/`block_tag`), where a name absent from the embedded
     /// table (e.g. a `mineable/*` tool tag never bundled, or a biome id the
@@ -259,7 +257,7 @@ impl Resolver for EmbeddedResolver {
         }
     }
 
-    /// Real multi-noise biome assignment (issue #405). Overriding this
+    /// Real multi-noise biome assignment. Overriding this
     /// (default is an empty array, per [`Resolver::biome_parameters`]'s own
     /// doc) is what switches [`OverworldGenerator`] from its old
     /// single-fixed-biome behaviour to real per-column variety — see
@@ -277,12 +275,12 @@ impl Resolver for EmbeddedResolver {
         self.json("biome_parameters/overworld_temperature")
     }
 
-    /// Full `worldgen/biome/<name>.json` documents (issue #295 composition):
+    /// Full `worldgen/biome/<name>.json` documents for composition:
     /// carvers + `UNDERGROUND_ORES` feature lists, for
     /// `crate::worldgen_data`'s bundled generator to compose carvers into
     /// [`OverworldGenerator::column`]. 66 files, copied verbatim from
     /// `.cache/mc/26.2/src/data/minecraft/worldgen/biome/` (Mojang's own
-    /// generated data, CLAUDE.md data-source #1).
+    /// generated data, the repository's primary data source).
     fn biome_document(&self, id: &str) -> Value {
         let name = id.strip_prefix("minecraft:").unwrap_or(id);
         self.try_json(&format!("biome/{name}"))
@@ -296,11 +294,9 @@ impl Resolver for EmbeddedResolver {
         self.try_json(&format!("configured_carver/{name}"))
     }
 
-    /// `worldgen/configured_feature/<name>.json` — 226 files, copied
-    /// verbatim from `.cache/mc/26.2/src/data/minecraft/worldgen/
-    /// configured_feature/` (issue #295's ore-composition increment; the
-    /// non-ore entries are bundled too, ready for epic #404 Phase 3's
-    /// vegetation features rather than filtered out here).
+    /// `worldgen/configured_feature/<name>.json` — 226 bundled documents for
+    /// ore composition, vegetation, and other feature families. The resolver
+    /// keeps every document rather than filtering to currently executed ones.
     fn configured_feature(&self, id: &str) -> Value {
         let name = id.strip_prefix("minecraft:").unwrap_or(id);
         self.try_json(&format!("configured_feature/{name}"))
@@ -314,15 +310,15 @@ impl Resolver for EmbeddedResolver {
     }
 
     /// `tags/block/<name>.json` — 261 files, needed to resolve
-    /// `#overworld_carver_replaceables`' recursive closure (issue #295), and
+    /// `#overworld_carver_replaceables`' recursive closure, and
     /// `#cannot_support_snow_layer`/`#support_override_snow_layer` for
-    /// `freeze_top_layer` (issue #404's U2).
+    /// `freeze_top_layer`.
     fn block_tag(&self, id: &str) -> Value {
         let name = id.strip_prefix("minecraft:").unwrap_or(id);
         self.try_json(&format!("tags/block/{name}"))
     }
 
-    /// Every bundled `worldgen/structure_set/*.json` id (issue #514's S1).
+    /// Every bundled `worldgen/structure_set/*.json` id.
     ///
     /// **This method is the entry point to the whole structure engine.** The
     /// default is an empty list, and a resolver returning nothing here places no
@@ -378,9 +374,9 @@ impl Resolver for EmbeddedResolver {
             .map(|i| EMBEDDED_STRUCTURE_TEMPLATES[i].1.to_vec())
     }
 
-    /// `worldgen/template_pool/<name>.json` — 188 files (issue #514's S4).
+    /// `worldgen/template_pool/<name>.json` — 188 files.
     ///
-    /// **The third entry point to the structure engine**, and it fails exactly the
+    /// **An entry point to the structure engine**, and it fails exactly the
     /// way the other two do: the trait default is `Value::Null`, and a resolver
     /// taking it makes every *jigsaw* structure demote to `Unsupported` and land
     /// on the ledger — the five villages, `pillager_outpost`, `ancient_city`,
@@ -410,8 +406,8 @@ impl Resolver for EmbeddedResolver {
         self.try_json(&format!("tags/worldgen/biome/{name}"))
     }
 
-    /// The five per-block-state predicates `freeze_top_layer` needs (issue
-    /// #404's U2), built from [`lodestone_data`]'s jar-dumped censuses rather
+    /// The five per-block-state predicates `freeze_top_layer` needs, built from
+    /// [`lodestone_data`]'s jar-dumped censuses rather
     /// than from an embedded JSON asset.
     ///
     /// **This is deliberately not a datapack asset**, unlike every other method
@@ -619,7 +615,7 @@ impl Resolver for NetherResolver {
 }
 
 /// Which bundled overworld `noise_settings` + density functions a generator
-/// uses (issue #519). `Overworld` is the default and is exactly what every
+/// uses. `Overworld` is the default and is exactly what every
 /// pre-existing call site ([`overworld_generator`]/[`overworld_chunk_source`])
 /// still gets — nothing changes for them.
 ///
@@ -643,9 +639,9 @@ impl Resolver for NetherResolver {
 /// `Resolver::biome_parameters` widening is needed for either preset.
 ///
 /// `single_biome_surface` and `debug_all_block_states` are also **not** a
-/// `WorldType` variant, but for a different reason than below: both now have
-/// their own entry points ([`single_biome_generator`]/[`debug_generator`],
-/// issue #519's fourth and fifth landings), yet neither reuses
+/// `WorldType` variant, but for a different reason: both have
+/// their own entry points ([`single_biome_generator`]/[`debug_generator`]),
+/// yet neither reuses
 /// `overworld_generator_of_type`'s `noise_settings`-keyed shape.
 /// `single_biome_surface` turned out to need no new generator at all —
 /// [`OverworldGenerator::new`]'s existing fixed-biome fallback (`dynamic_biome:
@@ -657,8 +653,8 @@ impl Resolver for NetherResolver {
 /// [`lodestone_worldgen::debug`].
 ///
 /// `flat`/`flat_all_dimensions` are **not** a `WorldType` variant even though
-/// their generator now exists ([`lodestone_worldgen::flat::FlatLevelSource`],
-/// issue #519's third landing) — they were never blocked on the same axis as
+/// their generator exists ([`lodestone_worldgen::flat::FlatLevelSource`]) —
+/// they are not parameter variants of
 /// `Amplified`/`LargeBiomes`. Both of those are still [`OverworldGenerator`]s,
 /// just parameterised by a different `noise_settings` document; a flat world
 /// is a structurally different generator (no noise router, no seed, no
@@ -751,7 +747,7 @@ pub fn overworld_generator(seed: i64) -> OverworldGenerator {
 
 /// Builds the bundled overworld generator for `seed`, using `world_type`'s
 /// noise settings and density functions in place of the plain overworld's
-/// (issue #519). This is the parameter [`overworld_generator`] hardcodes to
+/// This is the parameter [`overworld_generator`] uses to
 /// [`WorldType::Overworld`]; a world-creation UI selecting Amplified or Large
 /// Biomes calls this instead, threading the choice through to persistence the
 /// same way it already threads a seed.
@@ -809,7 +805,7 @@ pub fn overworld_chunk_source(seed: i64) -> crate::chunk::OverworldChunkSource {
 }
 
 /// Builds the bundled overworld [`ChunkSource`](crate::ChunkSource) for `seed`
-/// using `world_type` (issue #519) — the server/worldgen boundary a
+/// using `world_type` — the server/worldgen boundary where a
 /// world-creation UI needs: it persists a [`WorldType`] alongside the seed and
 /// passes it here (and to [`overworld_generator_of_type`]) instead of calling
 /// the `Overworld`-only entry points.
@@ -821,7 +817,7 @@ pub fn overworld_chunk_source_of_type(
     crate::chunk::OverworldChunkSource::new(overworld_generator_of_type(seed, world_type))
 }
 
-/// [`Resolver`] for `single_biome_surface` (issue #519's fourth gap):
+/// [`Resolver`] for `single_biome_surface`:
 /// identical to [`EmbeddedResolver`] except it does **not** override
 /// [`Resolver::biome_parameters`]/[`Resolver::biome_temperatures`], so it
 /// takes the trait's own empty defaults instead of the real 7594-row overworld
@@ -900,7 +896,7 @@ pub fn world_preset_single_biome_default_biome() -> String {
         .to_string()
 }
 
-/// Builds the `single_biome_surface` generator (issue #519's fourth gap):
+/// Builds the `single_biome_surface` generator:
 /// every column answers `biome`, vanilla's `FixedBiomeSource` selected
 /// deliberately rather than as a degradation — see [`SingleBiomeResolver`].
 ///
@@ -977,7 +973,7 @@ pub fn flat_level_generator_preset_settings(
 /// also names flat settings for its own Nether/End dimensions
 /// (`world_preset/flat_all_dimensions.json`'s `dimensions` map has all
 /// three), which stay unreachable here for the same reason multi-dimension
-/// travel is out of scope for issue #519 (see #485/#330).
+/// travel is out of scope here.
 #[must_use]
 pub fn world_preset_flat_settings(
     all_dimensions: bool,
@@ -1010,9 +1006,9 @@ pub fn flat_generator(
 }
 
 /// The [`ChunkSource`](crate::chunk::ChunkSource) a superflat world serves —
-/// issue #519's scope item 4 ("Superflat … as separate `ChunkSource`
-/// implementations") for the one preset family whose generator this module
-/// now has. Lives here rather than in `chunk.rs` (this crate's other
+/// The superflat `ChunkSource` implementation is available for the one preset
+/// family whose generator this module now has. It lives here rather than in
+/// `chunk.rs` (this crate's other
 /// `ChunkSource` implementors' home) because [`lodestone_worldgen::flat`] is
 /// this file's dependency to add, not `chunk.rs`'s — the trait itself is
 /// public and implementable from any module in this crate, so this needed no
@@ -1258,8 +1254,8 @@ fn all_block_states_ordered() -> &'static [String] {
     })
 }
 
-/// Builds the `debug_all_block_states` generator (issue #519's fifth and
-/// final gap): every registered block state laid out on a fixed grid — see
+/// Builds the `debug_all_block_states` generator: every registered block state
+/// laid out on a fixed grid — see
 /// [`lodestone_worldgen::debug`] for the layout. Deterministic and seed-free,
 /// like [`flat_generator`]; uses the bundled overworld `noise_settings`' own
 /// `min_y`/`height` for the vertical bounds, same reasoning as that function.
@@ -1438,7 +1434,7 @@ mod tests {
     use super::*;
     use crate::chunk::ChunkSource;
 
-    /// The wiring-layer discriminator issue #330 asks for: at the same seed and
+    /// The wiring-layer discriminator asks for: at the same seed and
     /// the same chunk coordinates, [`end_chunk_source`] must produce terrain that
     /// actually differs from [`overworld_chunk_source`]'s — an implementation
     /// that silently routed both through the same generator (or built
@@ -1542,7 +1538,7 @@ mod tests {
     }
 
     /// Coordinate sweep used to *choose* the `freeze_top_layer` fixtures rather
-    /// than guess them (issue #404's U2). `#[ignore]`d: it is a several-minute
+    /// than guess them. `#[ignore]`d: it is a several-minute
     /// release-profile scan, and its output is a report, not an assertion.
     ///
     /// ```text
@@ -1606,7 +1602,7 @@ mod tests {
     }
 
     /// Release-profile cost of the `TOP_LAYER_MODIFICATION` stage as a share of
-    /// the whole composed `column()` call (issue #404's U2).
+    /// the whole composed `column` call.
     ///
     /// **This is the first release-profile figure for the composed pipeline.**
     /// `docs/plans/worldgen-parity.md` §6 records that every number on file for
@@ -1743,7 +1739,7 @@ mod tests {
         );
     }
 
-    /// Issue #407's version gate, driven end to end: a protocol reporting the
+    /// Version gate, driven end to end: a protocol reporting the
     /// 26.2 scope is served the bundled data; a protocol reporting no scope (a
     /// family without worldgen, or one whose data this crate does not embed)
     /// is refused — the refused half is plan §4's load-bearing "`None` means
@@ -1832,27 +1828,20 @@ mod tests {
     }
 
     /// The exact, named vegetal-decoration gap surface for every biome
-    /// reachable via the real overworld biome-parameter table (issue #406's
-    /// "loud, not silent" gate). Each entry is `(biome, sorted deduped
-    /// reasons)`, where a reason is a
+    /// reachable through the overworld biome-parameter table. Each entry is
+    /// `(biome, sorted deduplicated reasons)`, where each reason is emitted by
     /// `lodestone_worldgen::feature::vegetation::ConfiguredFeature::Unsupported`
-    /// string that biome's `VEGETAL_DECORATION` step actually reaches —
-    /// `multiface_growth` (glow lichen, `MultifaceGrowthFeature` — never in
-    /// #406's scope, present in nearly every biome), `tree: unsupported
-    /// trunk/foliage/size/provider` (a trunk/foliage/root placer combination
-    /// this engine has no `TrunkPlacerCfg`/`FoliagePlacerCfg`/`RootPlacerCfg`
-    /// variant for — now empty; mangrove and cherry, the last two biomes
-    /// that hit it, both closed), plus a shrinking tail of features #406
-    /// never claimed (coral, `bamboo`,
-    /// `huge_*_mushroom`, `root_system`, cave-only `lush_caves` features,
-    /// `simple_block: unsupported to_place`). Measured by running every
-    /// reachable biome through `lodestone_worldgen::compose::build_biome_vegetation`
-    /// + `vegetation::collect_unsupported` and transcribing the result — see
-    /// [`vegetation_placer_gaps_are_named_not_silent`] below, whose failure
-    /// output prints the measured list per biome, which is what to paste in
-    /// rather than editing a row by hand.
+    /// for a feature reached by that biome's `VEGETAL_DECORATION` step.
+    /// `multiface_growth` is present in many biomes; other possible reasons
+    /// cover unsupported tree configuration or feature forms such as coral,
+    /// bamboo, large mushrooms, root systems, cave vegetation, and simple
+    /// block placement. The table is generated by running every reachable biome
+    /// through `lodestone_worldgen::compose::build_biome_vegetation` and
+    /// `vegetation::collect_unsupported`. See
+    /// [`vegetation_placer_gaps_are_named_not_silent`] below: its failure output
+    /// prints the complete per-biome list for updating this table.
     ///
-    /// **Issue #513 (`d102eb1d`) moved 16 rows, and one of them got *longer*.**
+    /// Implemented feature forms are deliberately absent from this table.
     /// `kelp`, `seagrass`, `sea_pickle`, `vines`, `vegetation_patch` and
     /// `random_boolean_selector` are all implemented now and dropped off. But
     /// `minecraft:mushroom_fields` **gained** `huge_brown_mushroom` and
@@ -1887,8 +1876,8 @@ mod tests {
     /// in BOTH directions: a biome producing a reason NOT listed here (a new
     /// silent gap — the exact failure mode this gate exists to catch) or a
     /// listed biome/reason no longer occurring (this table gone stale after
-    /// a fix landed — prune the entry, don't leave it). Before cacti/sugar
-    /// cane (`BlockColumnFeature`) landed, `minecraft:desert`'s own entry
+    /// a stale entry is removed rather than retained. If cacti or sugar-cane
+    /// column placement were unsupported, `minecraft:desert`'s own entry
     /// here would have needed `"block_column: unsupported layer/direction
     /// /predicate"` in addition to `multiface_growth` — this table's job is
     /// to force that kind of entry to be written down, not to auto-shrink.
@@ -1897,7 +1886,7 @@ mod tests {
         // bamboo_jungle/jungle/sparse_jungle's `"tree: unsupported..."` entry
         // is gone: fancy oak (`d102eb1d`) closed the 10%-weight
         // `fancy_oak_checked` branch every jungle variant's RandomSelector
-        // also carries, on top of issue #428's `TrunkPlacerCfg::MegaJungle`/
+        // also carries, on top of `mega-jungle trunk configuration`/
         // `FoliagePlacerCfg::MegaJungle` (mega_jungle_tree, 33.3% of
         // trees_jungle) and `FoliagePlacerCfg::Bush` (jungle_bush, 50%).
         ("minecraft:bamboo_jungle", &["bamboo", "multiface_growth"]),
@@ -1907,7 +1896,7 @@ mod tests {
         ("minecraft:cold_ocean", &["multiface_growth"]),
         // dark_forest's `"tree: unsupported..."` entry is gone: fancy oak
         // (`d102eb1d`) closed the 10%-weight `fancy_oak_leaf_litter` branch,
-        // on top of issue #428's `DarkOakTrunkPlacer`/`DarkOakFoliagePlacer`
+        // on top of `dark-oak trunk configuration`/`dark-oak foliage configuration`
         // for the 66.7%-weight dark_oak branch.
         ("minecraft:dark_forest", &["huge_brown_mushroom", "huge_red_mushroom", "multiface_growth"]),
         ("minecraft:deep_cold_ocean", &["multiface_growth"]),
@@ -1940,21 +1929,21 @@ mod tests {
         ("minecraft:old_growth_birch_forest", &["multiface_growth"]),
         // old_growth_pine_taiga/old_growth_spruce_taiga's `mega_pine`/
         // `mega_spruce` configured features use `giant_trunk_placer` +
-        // `mega_pine_foliage_placer` — issue #428's `TrunkPlacerCfg::Giant`/
+        // `mega_pine_foliage_placer` — `giant trunk configuration`/
         // `FoliagePlacerCfg::MegaPine` close the "tree: unsupported..."
         // entry for both; the fallen-tree family (`dc637859`) closed
         // `fallen_tree`.
         ("minecraft:old_growth_pine_taiga", &["multiface_growth"]),
         ("minecraft:old_growth_spruce_taiga", &["multiface_growth"]),
         // pale_garden's `"tree: unsupported..."` entry closed with the same
-        // issue #428 change — pale_oak/pale_oak_creaking reuse the dark oak
+        // change — pale_oak/pale_oak_creaking reuse the dark oak
         // trunk/foliage placers with their own providers.
         ("minecraft:pale_garden", &["multiface_growth"]),
         ("minecraft:plains", &["multiface_growth"]),
         ("minecraft:river", &["multiface_growth"]),
         // savanna/savanna_plateau/windswept_savanna all resolve through
         // trees_savanna's RandomSelector (oak_checked default, acacia_checked
-        // 80%, fallen_oak_tree 1.25%) — issue #428's `TrunkPlacerCfg::Forking`/
+        // 80%, fallen_oak_tree 1.25%) — `forking trunk configuration`/
         // `FoliagePlacerCfg::Acacia` closes the "tree: unsupported..." entry
         // for all three; the fallen-tree family (`dc637859`) closed
         // `fallen_tree`.
@@ -2010,7 +1999,7 @@ mod tests {
     /// Measures the real gap surface once (via `EmbeddedResolver`, the same
     /// data the bundled generator serves) and asserts it matches
     /// [`KNOWN_VEGETATION_GAPS`] exactly, in both directions. This is the
-    /// issue #406 gate: a biome whose declared `VEGETAL_DECORATION` step
+    /// The gate fails when a biome's declared `VEGETAL_DECORATION` step
     /// includes a placer this crate doesn't implement, and which isn't
     /// already named above, now fails a required check instead of quietly
     /// generating a biome with fewer trees than vanilla.
@@ -2086,7 +2075,7 @@ mod tests {
         );
     }
 
-    /// Issue #478's magnitude gate: the number of positions `patch_grass_plain`
+    /// The magnitude gate checks that the number of positions `patch_grass_plain`
     /// pushes into its own trailing survivability predicate must equal the
     /// product of the constants in **its own bundled placement JSON**, not
     /// merely be "more than zero".
@@ -2218,7 +2207,7 @@ mod tests {
 
         // The count alone does not prove blocks were written — a pipeline that
         // produces every position and then writes nowhere is exactly the
-        // `VegGrid` absolute-vs-local regression this module's history records.
+        // `VegGrid` absolute-vs-local regression documented above.
         assert!(
             c.simple_block > 0 && c.writes > 0,
             "positions reached the predicate but no short_grass was written \
@@ -2326,7 +2315,7 @@ mod tests {
         VEGETATION_SUBSTRINGS.iter().any(|s| base.contains(s))
     }
 
-    /// Issue #478's **island** gate: the composed production pipeline
+    /// **island** gate: the composed production pipeline
     /// (`EmbeddedResolver`'s bundled data -> real generated terrain -> the 3x3
     /// vegetal-decoration driver -> the fold back into a `GeneratedColumn`) must
     /// put real vegetation blocks into served columns.
@@ -2457,7 +2446,7 @@ mod tests {
         // each, and would carry the total on their own. A tree exercises
         // `TreeConfig` -- trunk placer, foliage placer, leaf-distance update --
         // an entirely separate code path whose absence is precisely what issue
-        // #478 reported.
+        // guards against.
         let logs: usize = per_biome
             .values()
             .flat_map(|(_, _, states)| states.iter())
@@ -2549,7 +2538,7 @@ mod tests {
     }
 
     /// Exact biome-id parity against vanilla's own `RandomState.sampler()` +
-    /// `MultiNoiseBiomeSourceParameterList.findValueBruteForce` (issue #405).
+    /// `MultiNoiseBiomeSourceParameterList.findValueBruteForce`.
     ///
     /// Ground truth: `scripts/worldgen-oracle/BiomeOracle.java` `sample`
     /// mode, seed 42, at each column's own quart-aligned corner and its own
@@ -2747,7 +2736,7 @@ mod tests {
     /// column `ServerProtocol::encode_chunk` sends), not just the raw
     /// generator — closing the island CLAUDE.md's rule 1 warns about. Two
     /// adjacent-ish chunks at seed 42 are known (the fixtures above) to
-    /// carry different biomes; this proves that survives the
+    /// carry different biomes; this proves that variety survives the
     /// `OverworldChunkSource` wrapper the wire encoder actually reads from.
     #[test]
     fn served_chunk_source_carries_real_biome_variety() {
@@ -2782,7 +2771,7 @@ mod tests {
         // World (0, -50, 0) — chunk (0, 0), local (0, 0) — is deep enough
         // that this carver-less generator (`worldgen_data`'s own "no caves"
         // scope note) always fills it: real generated content, not
-        // already-air, so an "edit" that landed on existing air could not
+        // already-air, so an edit applied to existing air could not
         // pass this test by accident.
         let pre = source.block_state(0, -50, 0);
         assert_eq!(
@@ -2813,7 +2802,7 @@ mod tests {
 
     /// **Diagnostic control** for `crate::chunk::tests
     /// ::parallel_generation_is_deterministic_and_matches_serial` (issue
-    /// #414), which failed after issue #295's ore composition landed. That
+    /// which distinguishes value determinism from palette-order determinism. That
     /// test compares serialised bytes (palette order included) across
     /// independent `column()` calls, so a byte mismatch could mean either
     /// "the actual blocks differ" or "the same blocks, a different palette
@@ -2842,7 +2831,7 @@ mod tests {
     /// lifetimes must generate the same chunk from the same seed.
     ///
     /// If this passes, `OverworldGenerator::column` is a pure function of
-    /// `(self.seed_and_settings, cx, cz)` as designed and the #414 failure
+    /// `(self.seed_and_settings, cx, cz)` as designed and the failure
     /// is not a value-determinism bug in ore composition itself.
     #[test]
     fn column_is_byte_identical_across_two_independently_constructed_generators() {
@@ -2879,7 +2868,7 @@ mod tests {
 
     /// End-to-end: real vegetation reaches the **served** column for a
     /// known plains chunk — closing the exact island CLAUDE.md's rule 1
-    /// warns about, and the specific one this issue's own composition hit:
+    /// warns about, and the specific coordinate-translation failure it catches:
     /// `crate::feature::vegetation::VegGrid` used to store *and expose*
     /// chunk-local coordinates while every position the placement engine
     /// computes is absolute — so vegetation composed at construction time,
@@ -2915,9 +2904,9 @@ mod tests {
         );
     }
 
-    /// The issue's own requested gate (`#406`: "an aggregate-statistics
-    /// gate (tree count per biome type within an expected band)"),
-    /// predicted from the embedded placement JSON itself rather than a live
+    /// An aggregate-statistics gate checks tree count per biome against an
+    /// expected band. The band is predicted from the embedded placement JSON
+    /// rather than a live
     /// vanilla dump (no JVM oracle for vegetation exists yet — see
     /// `crate::feature::vegetation`'s module doc). Two independent
     /// predictions, both computed *before* looking at the measured numbers
@@ -2942,9 +2931,9 @@ mod tests {
     ///   *isolated, single-chunk* expected oak-log count per chunk is
     ///   `0.05 * 0.6579 * (4..6) ≈ 0.132..0.197`, i.e. **not zero, and not
     ///   large** — over a 64-chunk sweep, `8.4..12.6` logs. Measured under
-    ///   the pre-#427 single-chunk-only engine: `12`, inside that band.
+    /// a single-chunk simulation baseline: `12`, inside that band.
     ///
-    ///   **After issue #427's real 3×3 driver, measured: `6` — a real drop,
+    /// **The 3×3 driver measures `6` logs — a real drop,
     ///   not a regression.** The isolated prediction above assumes each
     ///   swept chunk's tree placement reads only its OWN terrain; the real
     ///   3×3 driver now lets an edge-adjacent tree's space-check
@@ -2960,7 +2949,7 @@ mod tests {
     ///   this mechanism, not an unrelated defect, by re-running this exact
     ///   sweep with `LODESTONE_VEG_SINGLE_SOURCE_DEBUG=1` (the debug escape
     ///   hatch in `OverworldGenerator::vegetation_stage` that reverts to the
-    ///   pre-#427 single-source-only pass): that reproduces `12`, exactly
+    /// single-source-only control): that reproduces `12`, exactly
     ///   the old measurement, with no other code changed — the entire delta
     ///   is attributable to the 3×3 driver's real neighbour reads, per
     ///   CLAUDE.md's evidence standard ("a control's premise" — here, that
@@ -3046,12 +3035,12 @@ mod tests {
         // chunks.
         let isolated_min = 0.05 * 0.6579 * 4.0 * sweep_chunks as f64;
         let isolated_max = 0.05 * 0.6579 * 6.0 * sweep_chunks as f64;
-        // Issue #427: the real 3×3 driver's edge-adjacent space-check now
+        // The 3×3 driver's edge-adjacent space-check
         // reads TRUE neighbour terrain (see this test's own doc comment for
         // the mechanism and the `LODESTONE_VEG_SINGLE_SOURCE_DEBUG=1`
         // control that isolated it), which can legitimately reject a tree
         // the old clamped approximation always let through — measured `6`,
-        // half the pre-#427 measurement of `12`. The floor is loosened to
+        // half the single-source control's measurement of `12`. The floor is loosened to
         // `0.25x` the isolated-model's own minimum (not lowered to the bare
         // `> 0` anti-vacuity floor above, which would make this assertion
         // vacuous against a real regression that drove logs to near-zero)
@@ -3141,8 +3130,8 @@ mod tests {
     /// `#substrate_overworld` -> `#grass_blocks` chain ever stopped
     /// resolving (a tag file renamed, a resolver regression), every grass/
     /// flower placement in the real embedded data would silently reject at
-    /// the `canSurvive` check, exactly as the coordinate-translation bug
-    /// this issue's own history section describes did — this test exists
+    /// the `canSurvive` check, exactly as the coordinate-translation failure
+    /// described above did. This test exists
     /// so *that* failure mode has a direct, fast-failing check instead of
     /// only being visible through a 64-chunk sweep's aggregate count.
     #[test]
@@ -3158,12 +3147,12 @@ mod tests {
         assert!(!tags.cannot_replace_below_tree_trunk.is_empty());
     }
 
-    /// Issue #480's **regression gate**: dark_forest must decorate with its
+    /// **Regression gate:** dark_forest must decorate with its
     /// OWN vegetation feature list, not lush_caves'.
     ///
     /// # What it catches, and why the other gates could not
     ///
-    /// Before the fix, [`OverworldGenerator::vegetation_stage`]
+    /// When the behavior was incorrect, the vegetation stage
     /// (`lodestone_worldgen`) resolved each source chunk's feature list
     /// through `biome_for_carver_source`, which samples climate at **y = 0** —
     /// the `crate::biome` module doc's "y = 0 trap": at y=0 the `depth`
@@ -3171,7 +3160,7 @@ mod tests {
     /// surface dark_forest chunk resolved as lush_caves and decorated with
     /// lush_caves' feature list (vines, vegetation_patch, root_system — all
     /// silent no-ops). dark_forest produced ~zero grass and ~zero trees even
-    /// after the dark oak placer landed (issue #428's 66.7%-weight
+    /// though the dark-oak tree placer is supported (66.7%-weight
     /// `dark_oak_leaf_litter` branch never dispatched because the wrong
     /// biome's list was chosen). The resolve-side gates
     /// ([`vegetation_placer_gaps_are_named_not_silent`],
@@ -3180,10 +3169,9 @@ mod tests {
     ///
     /// # Coordinates and anti-vacuity
     ///
-    /// The same fixed stride-9 5x5 lattices from chunks (-40,-40) and (0,0) at
-    /// seed 42 this issue's own measurements used (the issue's second sweep
-    /// already fixed (-40,-40); the mirrored (0,0)-origin lattice was this
-    /// issue's own additional probe). Stride 9 so no two centres share a 3x3
+    /// Fixed stride-9 5x5 lattices at seed 42 cover chunks (-40,-40) and a
+    /// mirrored (0,0)-origin lattice, providing two probes. Stride 9 ensures
+    /// no two centres share a 3x3
     /// neighbourhood. The gate first asserts the lattice actually CONTAINS
     /// dark_forest chunks — CLAUDE.md's "world" vacuous-test species: a lattice
     /// with zero dark_forest chunks would pass every "> 0" assertion by both
@@ -3192,10 +3180,10 @@ mod tests {
     ///
     /// # The floors
     ///
-    /// Measured at the fix's landing state: 5 dark_forest chunks over the two
+    /// Measured after the corrected biome selection: 5 dark_forest chunks over the two
     /// lattices, **714 dark_oak_log** and **3000** total vegetation blocks
-    /// (2304 + 696, dominated by dark_oak_leaves). The issue measured the same
-    /// sweeps at the broken state as **0 tree logs and 3 veg blocks**. The
+    /// (2304 + 696, dominated by dark_oak_leaves). A configuration that selects
+    /// the wrong biome feature list yields **0 tree logs and 3 veg blocks**. The
     /// `dark_oak_log > 0` assertion is the load-bearing one — a plain "some
     /// vegetation" count would be satisfied by grass alone, but the 66.7%-weight
     /// dark oak branch only runs when dark_forest's OWN step is selected. The
@@ -3264,8 +3252,7 @@ mod tests {
     }
 }
 
-/// Bit-exact `freeze_top_layer` parity against the real 26.2 server (issue
-/// #404's U2).
+/// Bit-exact `freeze_top_layer` parity against the real 26.2 server.
 ///
 /// # Why a *worldgen* parity gate lives in `lodestone-server`
 ///
@@ -3882,8 +3869,8 @@ mod top_layer_parity {
     }
 }
 
-/// Issue #518 part 2/4: the `SPAWN` stage against the **real** bundled
-/// generator, not a hand-built fixture — the biome document -> `BiomeSpawners`
+/// The `SPAWN` stage runs against the **real** bundled generator, not a
+/// hand-built fixture: the biome document -> `BiomeSpawners`
 /// -> `SPAWN` stage -> `GeneratedColumn` link, exercised end to end with
 /// procedurally-placed terrain rather than a synthetic column.
 ///
@@ -3997,7 +3984,7 @@ mod generation_spawn_reaches_a_real_chunk {
         );
     }
 
-    /// The discriminating assertion issue #519 asks for: at the same seed and
+    /// The discriminating assertion asks for: at the same seed and
     /// the same column, [`flat_chunk_source`] must produce `world_preset/flat`'s
     /// exact layer stack, and that stack must differ from what
     /// [`overworld_chunk_source`] produces at the identical column — proving
@@ -4007,7 +3994,7 @@ mod generation_spawn_reaches_a_real_chunk {
     ///
     /// The default arm's own values below were **measured**, not guessed: a
     /// throwaway probe (`eprintln!` over `overworld_chunk_source(4242)
-    /// .column(0, 0)`, since deleted — see the module history) read them off
+    /// column(0, 0)`) read them off
     /// the real generator before this assertion was written. At seed 4242,
     /// chunk (0, 0), local (0, 0), the plain overworld returns
     /// `minecraft:bedrock` at y = -63, -62 and -61, and
@@ -4290,10 +4277,10 @@ mod generation_spawn_reaches_a_real_chunk {
     }
 }
 
-/// Issue #519's fourth and fifth (final) gaps: `single_biome_surface` and
-/// `debug_all_block_states`. Both discriminating gates below follow the
-/// pattern `flat_world_produces_the_exact_layer_stack_and_differs_from_default_overworld_at_the_same_column`
-/// set for the third gap — a specific, re-derived value from each arm,
+/// `single_biome_surface` and `debug_all_block_states` each have a
+/// discriminating gate below. Both follow the
+/// pattern `flat_world_produces_the_exact_layer_stack_and_differs_from_default_overworld_at_the_same_column`:
+/// a specific, re-derived value from each arm,
 /// asserted to differ from the other arm's own measured value at the
 /// identical seed/column, not a bare "is different" (CLAUDE.md's *magnitude*
 /// species).
@@ -4334,7 +4321,7 @@ mod single_biome_and_debug_world_selection {
     /// coincide with default overworld's terrain by chance.
     ///
     /// All six values below were measured by running the real generator (a
-    /// throwaway probe, since deleted — see the module history), not
+    /// throwaway probe), not
     /// predicted: at seed 4242, `single_biome_chunk_source(seed,
     /// "minecraft:desert")` reports biome `minecraft:desert` and surface
     /// `minecraft:sand` at y=63 at all three sampled chunks; the default

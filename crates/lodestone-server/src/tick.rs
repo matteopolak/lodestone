@@ -1,4 +1,4 @@
-//! The unified server tick clock (issue #284/#285): a single 20 Hz loop that
+//! The unified server tick clock: a single 20 Hz loop that
 //! ticks world state independently of any client connection, plus MSPT/TPS
 //! accounting and vanilla-shaped overrun handling.
 //!
@@ -8,7 +8,7 @@
 //! existed, each a local `tokio::time::interval`/`Duration` literal, each
 //! reinventing "one vanilla tick is 50ms" on its own:
 //!
-//! | timer | file:line (pre-#284) | cadence |
+//! | timer | former location | cadence |
 //! |---|---|---|
 //! | `MOB_TICK_INTERVAL` | `mobs.rs` (`run_mob_tick_loop`) | 50ms |
 //! | `BLOCK_ENTITY_TICK_INTERVAL` | `block_entities.rs` (`run_block_entity_tick_loop`) | 50ms |
@@ -173,7 +173,7 @@ pub(crate) const TICK_PHASE_NAMES: [&str; TICK_PHASE_COUNT] =
     ["mobs_and_items", "weather_and_sleep", "scheduled_and_physics"];
 
 /// Above this, one phase in one tick counts as "over budget" rather than
-/// only contributing a sample to that phase's percentile history — 20% of
+/// only contributing a sample to that phase's percentile record — 20% of
 /// the 50ms tick period. One threshold shared by all three phases rather
 /// than three tuned constants: nothing has established a real per-phase
 /// budget yet, and an unjustified separate number per phase would be
@@ -210,7 +210,7 @@ pub struct PhaseStats {
     pub sample_count: u64,
     /// Total samples recorded for this phase since the clock was created.
     /// Unlike [`Self::sample_count`], this counter is never limited by the
-    /// percentile history window.
+    /// percentile record window.
     pub total_sample_count: u64,
     pub p50_ms: f64,
     pub p95_ms: f64,
@@ -228,7 +228,7 @@ pub struct PhaseStats {
 const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
 
 /// How many ticks after world open to defer the first random-tick pass
-/// (issue #481). The seed task in
+/// The seed task in
 /// [`crate::IntegratedServer::open_in_memory_with_mobs`] runs
 /// `generate_columns_offloaded` on the blocking pool — that call fans the
 /// `mob_area` columns (49 at the shell's `view_radius.clamp(1, 3)`) out over
@@ -253,7 +253,7 @@ const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
 /// `pub(crate)` because it is *observable*: a gate counting column generations
 /// over N ticks sees `N - INITIAL_RANDOM_TICK_DEFERRAL_TICKS` random-tick
 /// passes, not N. Three gates hardcoded the pre-deferral assumption that every
-/// tick is a pass and reported **zero** columns when this landed
+/// tick is a pass and reported **zero** columns when the deferral was introduced
 /// (`chunk_store`'s pair and `tests/lan_world_tick.rs`). A gate must derive its
 /// tick count from this constant rather than restate `40`, so raising the
 /// deferral moves the expectations with it instead of silently voiding them.
@@ -274,7 +274,7 @@ const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
 ///   constant covers** — `chunk_store::tests`'
 ///   `without_retention_a_remote_hopper_is_a_cold_column_every_single_tick`.
 ///   Past `DEFAULT_CAPACITY` that reaches **610 cold columns per tick**; see
-///   `docs/block-entity-tick-distance.md` and issue #503.
+/// [`docs/block-entity-tick-distance.md`](../../../docs/block-entity-tick-distance.md).
 ///
 /// A gate that counts `world.column()` calls over this loop must therefore say
 /// which caller it is attributing them to. `chunk_store`'s pair is only clean
@@ -282,7 +282,7 @@ const MAX_SCHEDULED_TICKS_PER_TICK: usize = 65536;
 pub(crate) const INITIAL_RANDOM_TICK_DEFERRAL_TICKS: u64 = 40;
 
 /// Seeds for [`RandomTickScheduler`]'s two independent generators (issue
-/// #307). Vanilla seeds its position LCG (`Level.randValue`) from an
+/// The position LCG is seeded from a level-local state value,
 /// arbitrary thread-local draw at level creation — this crate has no
 /// per-world seed store to draw a "real" one from yet, so these are fixed
 /// literals rather than derived from the world seed. Picking a different
@@ -302,8 +302,8 @@ const RANDOM_TICK_BEHAVIOR_SEED: u64 = 0x5EED_5678;
 const LIGHTNING_RAND_VALUE_SEED: i32 = 0x5EED_4C49u32 as i32;
 
 /// A shared feed of block changes the world tick loop wants every connection
-/// to learn about (issue #307/#308's one real producer reaching a client
-/// today: grass ↔ dirt, via `crate::random_tick`). Mirrors [`LiveMobSource`]'s
+/// to learn about. The current producer is grass ↔ dirt via
+/// `crate::random_tick`. Mirrors [`LiveMobSource`]'s
 /// publish shape — "world state that changes independently of any one
 /// connection, and every connection must notice" is the exact problem
 /// `LiveMobSource` already solves for mob positions; this is the same idiom
@@ -319,9 +319,8 @@ const LIGHTNING_RAND_VALUE_SEED: i32 = 0x5EED_4C49u32 as i32;
 /// because it spawns **exactly one** connection task per feed instance (the
 /// in-memory singleplayer duplex).
 ///
-/// **[`IntegratedServer::bind`] (LAN) now does spawn a tick loop** — issue
-/// #439; this doc comment previously said it did not, and that it therefore
-/// never constructed one of these. It does. It does *not*, however, hand the
+/// **[`IntegratedServer::bind`] (LAN) spawns a tick loop** and relays its hub
+/// feed to every active connection. It does *not*, however, hand the
 /// same instance to several connections, which is what would actually break:
 /// each LAN connection gets its **own** feed pair and a relay arm in `bind`'s
 /// accept loop drains the tick loop's hub feed and re-publishes into all of
@@ -330,7 +329,7 @@ const LIGHTNING_RAND_VALUE_SEED: i32 = 0x5EED_4C49u32 as i32;
 /// recommend — the cursor is still the better shape (it needs no copy per
 /// subscriber), and it is what to build if the subscriber count ever grows
 /// past a handful.
-/// # The inbound half (issue #465)
+/// # The inbound half
 ///
 /// Field `.1` runs the *other* way: a connection publishes the block ticks its
 /// own mutation scheduled, and [`run_tick_loop`] rebases them onto its own
@@ -365,7 +364,7 @@ const LIGHTNING_RAND_VALUE_SEED: i32 = 0x5EED_4C49u32 as i32;
 /// relays the hub's *outbound* changes into them. Nothing relays the inbound
 /// direction, so a request published on a per-connection feed is dropped and
 /// LAN placement of a delayed component still does nothing. The fix is one
-/// line in `integrated.rs`, whose owner is not this change's:
+/// line in `integrated.rs`, which is maintained independently:
 /// build each `LanSubscriber`'s feed with
 /// [`subscriber`](BlockTickFeed::subscriber) on the hub instead of
 /// `BlockTickFeed::default()`, which shares the inbound queue while keeping
@@ -377,11 +376,11 @@ const LIGHTNING_RAND_VALUE_SEED: i32 = 0x5EED_4C49u32 as i32;
 #[derive(Debug, Clone, Default)]
 pub struct BlockTickFeed(
     Arc<Mutex<Vec<(i32, i32, i32, String)>>>,
-    /// Issue #465: block ticks a connection's own mutation scheduled, waiting
+    /// block ticks a connection's own mutation scheduled, waiting
     /// to be rebased onto the tick loop's counter and hosted in its
     /// `block_ticks` queue. `trigger_tick` is a relative delay.
     Arc<Mutex<Vec<ScheduledTick<String>>>>,
-    /// Issue #530: sounds, particles and level events the world tick produced —
+    /// sounds, particles and level events the world tick produced —
     /// see [`crate::effects`].
     ///
     /// **A third lane here rather than a feed of its own**, because a feed is
@@ -417,7 +416,7 @@ impl BlockTickFeed {
         std::mem::take(&mut *self.0.lock().expect("block tick feed lock poisoned"))
     }
 
-    /// Records one world effect (issue #530) for every player to learn about on
+    /// Records one world effect for every player to learn about on
     /// their next [`drain_effects_for`](Self::drain_effects_for) — vanilla's
     /// `except == null`.
     pub(crate) fn publish_effect(&self, effect: crate::effects::WorldEffect) {
@@ -474,7 +473,7 @@ impl BlockTickFeed {
 
     /// A feed with its **own** outbound queue and this one's **shared**
     /// inbound queue — the shape a LAN per-connection subscriber needs (issue
-    /// #465). See the struct doc comment: outbound must be per-connection
+    /// See the struct doc comment: outbound must be per-connection
     /// because it is drain-all, inbound must be shared because the tick loop
     /// is the only drainer.
     ///
@@ -487,11 +486,11 @@ impl BlockTickFeed {
     }
 
     /// Hands the tick loop block ticks a caller wants resumed against a live
-    /// world — production-internal use is issue #465's connection-triggered
+    /// world — production-internal use is connection-triggered
     /// placement path (`crate::server`), and this is also the hook a
     /// captured-contraption benchmark re-injects a schematic's own
     /// `PendingBlockTicks` through (`crates/lodestone-anvil/tests/redstone_benchmark.rs`,
-    /// `docs/redstone-benchmark-harness.md`) — a schematic stamped with a raw
+    /// `docs/oracles-and-benchmarks.md`) — a schematic stamped with a raw
     /// [`crate::ChunkSource::set_block`] carries no scheduled tick of its
     /// own, so this is the only way to resume a captured circuit mid-cycle
     /// instead of only measuring an inert, perfectly-settled one.
@@ -519,11 +518,11 @@ impl BlockTickFeed {
 }
 
 /// A shared feed of detonations the world tick loop wants every connection
-/// to learn about (issue #425) — the exact same idiom [`BlockTickFeed`]
+/// to learn about — the exact same idiom [`BlockTickFeed`]
 /// already establishes just above, applied to
 /// [`MobSim::take_detonations`]'s own drain instead of a random-ticked block
 /// change. `MobSim::tick` already discards its `explode` return entirely
-/// before this (issue #213's exposure/damage maths had two production
+/// before this. Exposure and damage calculations had two production
 /// callers, both direct-explosion tests calling `MobSim::explode` by hand,
 /// and zero path from "a creeper's fuse completed" to anything a client
 /// could see) — this is what [`run_tick_loop`] publishes into so
@@ -532,7 +531,7 @@ impl BlockTickFeed {
 /// [`BlockTickFeed`]'s random-tick changes.
 ///
 /// Same single-consumer caveat as [`BlockTickFeed`], and the same resolution
-/// for LAN (issue #439): singleplayer has exactly one connection task per feed
+/// for LAN: singleplayer has exactly one connection task per feed
 /// instance, and `IntegratedServer::bind` gives each connection its own
 /// instance behind a relay. See [`BlockTickFeed`]'s doc comment.
 #[derive(Debug, Clone, Default)]
@@ -597,7 +596,7 @@ fn apply_falling_block_effect<W: ChunkSource>(
 }
 
 /// Publishes the open/close sound for a state transition, if it was one (issue
-/// #530). A no-op for every other block, so call sites need no guard of their own.
+/// A no-op for every other block, so call sites need no guard of their own.
 ///
 /// `game_tick` stands in for vanilla's `random.nextFloat() * 0.1F + 0.9F` pitch
 /// draw: this loop's per-tick RNG is owned by the random-tick scheduler and a
@@ -617,8 +616,8 @@ fn publish_openable_sound(out: &BlockTickFeed, pos: BlockPos, from: &str, to: &s
 /// every one of this file's four `propagate_and_react_with_entities`
 /// consumers, so every code path that can trigger a note block (a rising
 /// redstone edge, wherever it originates) reaches an allay's ear the same
-/// way. `world.block_state` is read **after** this event's own write already
-/// landed, matching every other post-write consumer in this file
+/// way. `world.block_state` is read **after** this event's write has completed,
+/// matching every other post-write consumer in this file
 /// (`publish_moving_piston` reads the committed state the same way) — the
 /// block above the note block is unaffected by that write either way.
 fn post_note_block_vibration<W: crate::chunk::ChunkSource>(
@@ -684,7 +683,7 @@ fn publish_moving_piston(
     });
 }
 
-/// Issue #694's entity-aware reaction surface: shoves every mob standing in
+/// entity-aware reaction surface: shoves every mob standing in
 /// a moving piston cell's own swept path, the instant that cell first
 /// appears. Called at the same four `propagate_and_react_with_entities`
 /// consumers [`publish_moving_piston`] already is, and reads the identical
@@ -780,7 +779,7 @@ struct OverloadEvent {
 }
 
 /// The pure overload-detection step behind [`run_tick_loop`]'s "do not try to
-/// catch up indefinitely" behavior (issue #285), extracted specifically so it
+/// catch up indefinitely" behavior, extracted specifically so it
 /// can be tested with hand-built [`tokio::time::Instant`]s rather than through
 /// tokio's virtual clock — see this function's own test module for why
 /// `tokio::time::advance` cannot exercise this branch **at all**: it fires
@@ -839,7 +838,7 @@ fn resolve_overload(
     }
 }
 
-/// MSPT/TPS/overrun accounting for one [`run_tick_loop`] (issue #285).
+/// MSPT/TPS/overrun accounting for one [`run_tick_loop`].
 ///
 /// Every field is an [`AtomicU64`] (plus a [`Mutex`]-guarded ring buffer for
 /// the rolling average) rather than anything requiring `&mut` — the loop
@@ -852,8 +851,8 @@ pub struct TickClock {
     last_mspt_micros: AtomicU64,
     overrun_count: AtomicU64,
     history: Mutex<VecDeque<u64>>,
-    /// Per-[`TickPhase`] rolling duration history, same shape and cap as
-    /// `history` above, indexed by the phase's discriminant.
+    /// Per-[`TickPhase`] rolling duration record, same shape and cap as
+    /// `record` above, indexed by the phase's discriminant.
     phase_history: [Mutex<VecDeque<u64>>; TICK_PHASE_COUNT],
     /// Per-phase cumulative sample counts. This remains separate from the
     /// bounded histories so callers can prove a long-running clock reached
@@ -861,7 +860,7 @@ pub struct TickClock {
     phase_sample_count: [AtomicU64; TICK_PHASE_COUNT],
     /// Per-phase "exceeded [`PHASE_SOFT_BUDGET`]" counts — a counter, not a
     /// duration, so it stays cheap and load-invariant to read even after
-    /// millions of ticks, unlike re-deriving it from the (bounded) history.
+    /// millions of ticks, unlike re-deriving it from the (bounded) record.
     phase_over_budget: [AtomicU64; TICK_PHASE_COUNT],
     /// The largest single phase duration ever recorded, and which phase.
     worst_phase: Mutex<Option<WorstPhaseWindow>>,
@@ -874,7 +873,7 @@ impl Default for TickClock {
 }
 
 impl TickClock {
-    /// A fresh clock: zero ticks, zero overruns, empty history.
+    /// A fresh clock: zero ticks, zero overruns, empty record.
     #[must_use]
     pub fn new() -> Self {
         Self {
@@ -1033,7 +1032,7 @@ impl TickClock {
     }
 }
 
-/// A point-in-time snapshot of [`TickClock`]'s accounting (issue #285).
+/// A point-in-time snapshot of [`TickClock`]'s accounting.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct TickStats {
     /// Real world ticks run so far (never counts a skipped/forgiven tick).
@@ -1106,7 +1105,7 @@ fn run_command_block_command(
         players: &[],
         state: world_state,
         mobs: Some(mobs),
-        // Issue #580: not threaded to this helper — a command block running
+        // not threaded to this helper — a command block running
         // `/worldborder` is a real but niche case, and this function already
         // accepts a comparable gap for `PlayerRegistry` (see its own doc
         // comment) rather than widening its signature for it. `None` is the
@@ -1149,7 +1148,7 @@ fn run_command_block_command(
     outcome.response.is_ran()
 }
 
-/// The unified 20 Hz world-tick loop (issue #284): ticks the live [`MobSim`]
+/// The unified 20 Hz world-tick loop: ticks the live [`MobSim`]
 /// and every registered block entity once per [`TICK_PERIOD`], forever,
 /// independently of whether any client is connected — replacing the two
 /// separate background loops (`mobs::run_mob_tick_loop`,
@@ -1200,7 +1199,7 @@ fn run_command_block_command(
 /// that never ran is never counted by [`TickClock::record_tick`], so
 /// `tick_count` reflects real work done, not wall-clock elapsed / 50ms.
 ///
-/// # Scheduled ticks and random ticks (issues #307/#308)
+/// # Scheduled ticks and random ticks
 ///
 /// Each iteration additionally drains the block-tick queue, then the
 /// fluid-tick queue, then runs random ticks over `tick_area` — in exactly
@@ -1216,11 +1215,11 @@ fn run_command_block_command(
 /// `fluid_ticks` below are drained every iteration (proving the *order* is
 /// wired: block before fluid before random, every tick), but no producer in
 /// this crate calls [`ScheduledTickQueue::schedule`] on them today. Stated
-/// plainly, per this issue's own brief: the scheduled-tick *queue* (#308) is
+/// plainly: the scheduled-tick *queue* is
 /// real and tested in isolation (`crate::scheduled_tick`'s own test module),
 /// but is an acknowledged island here until a block behaviour (fluid flow
-/// #309, gravity blocks #311, redstone #314-322) schedules into it. Random
-/// ticks (#307) are **not** an island: [`RandomTickScheduler::tick_chunk`]
+/// gravity blocks, redstone) schedules into it. Random
+/// ticks are **not** an island: [`RandomTickScheduler::tick_chunk`]
 /// runs against `world` (the same [`ChunkSource`] the connection this loop
 /// shares a server with actually serves), and every resulting change is
 /// both persisted (`ChunkSource::set_block`) and published through
@@ -1263,20 +1262,20 @@ pub(crate) async fn run_tick_loop<W>(
 ) where
     W: ChunkSource,
 {
-    // Issue #324 / `docs/plans/world-state.md` W1. Forwards to the real body
+    // Compatibility wrapper for world-state behavior. Forwards to the real body
     // with a fresh, permanently-drained-by-nobody [`WeatherFeed`] — the same
     // compatibility shape every `serve_connection*` wrapper uses for a
     // feed it does not carry, and for the same reason: the world-loop's
     // non-weather callers (`crate::chunk_store`'s gate,
     // `crate::redstone_placement_gate`, and this module's own tests) are not
-    // this issue's to edit, so the weather feed is additive rather than a
+    // maintained outside this module, so the weather feed is additive rather than a
     // tenth parameter. The weather *still advances* here — `WeatherState` is
     // ticked either way — it just publishes into a feed no connection reads.
     // Production (`crate::IntegratedServer::open_in_memory_with_mobs`, and
-    // `bind` since #439) calls the `_with_weather` variant with a real feed.
+    // `bind` calls the `_with_weather` variant with a real feed.
     //
-    // The same applies to the night-skip vote (issue #325): a fresh
-    // [`SleepVote`] and [`SleepFeed`] no connection reads. The vote's
+    // The same applies to the night-skip vote: fresh [`SleepVote`] and
+    // [`SleepFeed`] values that no connection reads. The vote's
     // arithmetic still runs here — a `SleepState` is ticked either way, so
     // the loop shape is identical — it just never passes. This is the loop
     // `bind`'s LAN worlds run on, which is why LAN does not yet skip the
@@ -1295,14 +1294,14 @@ pub(crate) async fn run_tick_loop<W>(
         explosion_out,
         WeatherFeed::default(),
         WeatherState::default(),
-        // Issue #325: see the wrapper doc above.
+        // see the wrapper doc above.
         &SleepVote::new(),
         &SleepFeed::default(),
         scheduled,
         // A fresh, unshared world state — the same compatibility shape as the
         // weather feed above. Rules still *apply* here (this loop reads them
         // every tick), they are just at their defaults with nothing able to
-        // change them, which is exactly the behaviour before #327.
+        // change them, preserving the wrapper's default behavior.
         crate::world_state::WorldStateHandle::default(),
         follow,
         // Same compatibility shape as every feed above: a fresh, unshared
@@ -1320,7 +1319,7 @@ pub(crate) async fn run_tick_loop<W>(
 /// second, differently-named function exists instead of adding `weather_out`
 /// to [`run_tick_loop`]'s own signature (it would break the world-loop's
 /// non-weather call sites in `crate::chunk_store`/`crate::redstone_placement_gate`,
-/// which are not this issue's to edit). Issue #325's [`SleepVote`]/[`SleepFeed`]
+/// which this module does not edit). [`SleepVote`]/[`SleepFeed`]
 /// follow the same `_with_weather` shape for the same reason, so the sleep
 /// wiring lives here too.
 #[cfg(not(target_arch = "wasm32"))]
@@ -1333,7 +1332,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     block_tick_out: BlockTickFeed,
     tick_area: (RangeInclusive<i32>, RangeInclusive<i32>),
     explosion_out: ExplosionFeed,
-    // Issue #324 / `docs/plans/world-state.md` W1: the weather transitions
+    // Weather transitions are world-state behavior. This loop
     // this loop publishes into (`WeatherState::tick`'s return), drained by
     // the connection — `serve_play`'s `container_sync_tick` arm — into real
     // `GAME_EVENT` packets. Same single-consumer snapshot-feed shape as
@@ -1345,11 +1344,11 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // here on (a plain struct, with no lock — see `crate::weather`'s module
     // doc). Production passes `WeatherState::default()`; passing it in rather
     // than constructing it here is what lets a world seed drive the cycle
-    // when #437 lands a per-world seed store, and what lets this module's own
+    // when a per-world seed store exists, and what lets this module's
     // test start a world already mid-cycle instead of waiting out a
     // 12k-180k-tick rain delay.
     weather: WeatherState,
-    // Issue #325 / `docs/plans/world-state.md` S1: the night-skip vote.
+    // The night-skip vote is world-state behavior.
     // `sleep_vote` is the shared roster and voter count — connections call
     // `lay_down`/`get_up` on it (the `UseItemOn` bed arm and the
     // `PlayerCommand` arm in `server.rs`) — and this loop reads it via
@@ -1359,13 +1358,13 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // `open_in_memory_with_mobs` spawns; a vote the wrapper's discarded
     // default (no connection calls) can never pass.
     sleep_vote: &SleepVote,
-    // Issue #325: where a passed vote publishes its [`SleepEvent::SkippedNight`]
+    // This feed publishes a passed vote's [`SleepEvent::SkippedNight`]
     // broadcast, drained by the connection — `serve_play`'s
     // `container_sync_tick` arm — into a real `encode_set_time` so the
     // client's day clock jumps to the morning. Snapshot-feed, like
     // `weather_out`, with the same single-consumer caveat.
     sleep_feed: &SleepFeed,
-    // Issue #468's last wire. The two scheduled-tick queues used to be locals
+    // Persisted scheduled-tick queues. Keeping the two queues out of local state
     // here, so the queues the persistence path reads were always empty in
     // production and a pending repeater tick was lost on quit — the schema
     // (`chunk_nbt::SavedTick`) and the save/load halves were both built and both
@@ -1373,7 +1372,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     //
     // The game tick they are measured against travels with them, because it must
     // come from *this* counter and not be re-derived. A second clock here is
-    // issue #323's bug in a new place: `SET_TIME` decoded, really did darken the
+    // prevents a clock-domain mismatch: `SET_TIME` decoded and really darkened the
     // sky, every link in the wire green, while the value was wall-clock
     // elapsed-since-join rather than the tick counter.
     scheduled: crate::region_source::ScheduledTickHandle,
@@ -1387,7 +1386,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // plus the shared player-anchor set, which together turn `tick_area` from the
     // whole simulated world into a fallback for when no player is in it.
     follow: crate::tick_area::TickFollow,
-    // Issue #326's remainder (#580): the world border, now the *shared* handle
+    // The world border is a shared handle:
     // a `/worldborder` command mutates through `BorderFeed::with` and every
     // connection reads through `BorderFeed::get` — see `crate::border`'s
     // module doc for the "interim shape" this replaces. Before this
@@ -1412,30 +1411,29 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     let mut next_tick_at = tokio::time::Instant::now();
     let mut last_overload_warning_at: Option<tokio::time::Instant> = None;
     let mut game_tick: u64 = 0;
-    // Issue #325 / `docs/plans/world-state.md` S1: the day clock, advanced one
+    // The day clock is world-state behavior, advanced one
     // per tick in lockstep with `game_tick` until a night skip jumps it — the
     // `dayTime` counter of vanilla's `ServerLevel.tickTime` (which increments
     // both `gameTime` and `dayTime` as two counters). Owned by this thread with
     // no lock, exactly like `game_tick`. `i64` because the night skip lands on
     // `SleepState::morning_after`'s multiples of `DAY_LENGTH_TICKS`.
     let mut day_time: i64 = 0;
-    // Issue #324 / `docs/plans/world-state.md` W1: the weather cycle, owned
+    // The weather cycle is world-state behavior, owned
     // by the tick thread with no lock, exactly like `game_tick`/`block_ticks`
     // — the plain-struct shape the ECS migration (shape A) turns into a
     // `Resource` mechanically later. Seeded by the caller (see the parameter
     // comment); this binding is what makes it mutable for the loop.
     let mut weather = weather;
-    // Issue #325 / `docs/plans/world-state.md` S1: the night-skip vote's
+    // The night-skip vote's state is world-state behavior,
     // state, owned by this loop with no lock, exactly like `weather` — the
     // shared [`SleepVote`] holds the roster, but who has been *deep* asleep is
     // measured here against this thread's own `game_tick`, and the loop is
     // what decides a pass (see `crate::sleep`'s module doc).
     let mut sleep_state = SleepState::default();
-    // #308: one queue per vanilla queue (`ServerLevel.blockTicks`/
-    // `fluidTicks`, vanilla's own scheduled-tick fields). Owned by `scheduled` rather
-    // than by this function since #468, which is what lets them be saved; they
+    // One queue per persisted scheduled-tick class: block and fluid. Owned by
+    // `scheduled` rather than this function, which lets them be saved; they
     // are borrowed out of it once per tick below.
-    // #307.
+    //
     let mut random_ticks = RandomTickScheduler::new(RANDOM_TICK_POSITION_SEED, RANDOM_TICK_BEHAVIOR_SEED);
     // `crate::fluid`'s per-dimension constants, resolved **lazily** on the first
     // fluid tick rather than here.
@@ -1446,7 +1444,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // world asks for `min_y - 1`, and `ChunkColumn::block_state` panics there.
     // Every test double in this crate is shorter than 384 rows.
     //
-    // Lazy because #481's whole point is that a `world.column()` call before the
+    // Resolve lazily because a `world.column()` call before the
     // background seeding task has run costs a full generation on this thread. A
     // world with no fluid ticks never pays for this at all, and one that has them
     // pays a single column clone — the same cost the block drain above already
@@ -1469,8 +1467,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     let mut fire_env: Option<(i32, i32)> = None;
     let mut fire_changes: Vec<(BlockPos, String)> = Vec::new();
     let mut fire_primed_tnt: Vec<BlockPos> = Vec::new();
-    // `crate::lightning`'s two independent streams (issue #223/#233's
-    // shared blocker, #269's own module doc): strike target-selection and a
+    // `crate::lightning`'s two independent streams: strike target selection and a
     // bolt's own life/flashes/ignition state machine, kept on separate
     // streams for `LIGHTNING_BOLT_SEED`'s documented reason — a strike
     // decision must never shift which roll an already-live bolt's state
@@ -1535,7 +1532,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // never pays for a snapshot at all.
     let mut spawn_terrain: Option<std::sync::Arc<crate::mobs::ChunkWorld>> = None;
     let mut spawn_terrain_built_at: u64 = 0;
-    // Issues #221/#222: the natural-spawn driver. Long-lived rather than built
+    // The natural-spawn driver is long-lived rather than built
     // per tick because it owns the per-column light cache — see
     // `crate::natural_spawn`'s module doc for the per-cycle budget and the TTL
     // that keep a 49-column area inside the 50 ms tick budget.
@@ -1556,8 +1553,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // `Mth.nextInt(random, 7, 40) * Mth.nextInt(random, -1, 1)` offset draws.
     // On its own stream, the same reason every other spawn-time RNG here is.
     let mut reinforcement_rng = crate::mob_spawn::SpawnRng::new(NATURAL_SPAWN_SEED ^ 0x5245_494E);
-    // Issue #326 / #580: the world border, ticked first each loop (per
-    // `ServerLevel.tick`'s order). `border` is now the shared handle passed
+    // The world border ticks first each loop. `border` is the shared handle passed
     // in — see this function's own parameter comment.
 
     loop {
@@ -1602,8 +1598,8 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // returns, which is what keeps a chunk-boundary crossing from putting a
         // whole area's worth of column fetches inside one unserviced window.
         let area_moved = area.recompute();
-        // Issue #326 B1 / #580: border ticks first, per `ServerLevel.tick`'s
-        // order (`WorldBorder.tick` then the rest of the level's tick) — now
+        // Tick the border before the rest of the world tick, matching the
+        // required order. The shared feed means
         // against the shared feed, so a `/worldborder` resize's lerp actually
         // advances tick over tick.
         border.with(WorldBorder::tick);
@@ -1631,7 +1627,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // the player standing there.
         {
             let world = Arc::clone(&world);
-            // Issue #231: the villager schedule's real clock.
+            // Supply the villager schedule's world clock.
             // `world_state.time()` (read-only — `tick_time()` is what
             // actually advances the clock, called later this same loop
             // iteration) rather than a second `tick_time()` call, which
@@ -1643,7 +1639,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             let day_time = (world_state.time().day_time.rem_euclid(24_000)) as i32;
             mobs.with(|sim| {
                 sim.set_day_time(day_time);
-                // Issue #229: last tick's sleep roster (this tick's own
+                // Use the previous tick's sleep roster; this tick's
                 // `sleep_state.reconcile` runs later in this loop, in
                 // vanilla's own `tickSleepingPlayers` position — see that
                 // call's own comment) — a one-tick lag, the same shape
@@ -1659,11 +1655,11 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 sim.tick_with_terrain(&|x, y, z| world.block_state(x, y, z));
             });
         }
-        // Issue #328's first real enforcement: **Peaceful removes monsters.**
+        // **Peaceful removes monsters.**
         // Vanilla does it in `Mob.checkDespawn`, which discards any
         // `MobCategory.MONSTER` entity when
         // `level.getDifficulty() == Difficulty.PEACEFUL`; a difficulty that is
-        // stored, broadcast and read by nothing is what #328 reported.
+        // is stored and broadcast but not read by the simulation, monsters remain.
         //
         // Also the `mob_drops` rule's carrier: `MobSim` has no handle on the world
         // store (it is version-free and holds only a `ChunkWorld`), so the loop
@@ -1676,8 +1672,8 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 sim.remove_monsters();
             }
         });
-        // Issue #223: the `DifficultyInstance` inputs every spawn this tick
-        // needs. `MobSim::set_spawn_difficulty` and its two readers — the
+        // Set the regional-difficulty inputs needed by every spawn this tick.
+        // `MobSim::set_spawn_difficulty` and its two readers — the
         // zombie/husk/zombie_villager door-breaking coin flip
         // (`species_shape`'s caller in `spawn_species`) and
         // `lodestone_entity::spawn_equipment`'s armour/weapon roll — have
@@ -1709,7 +1705,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             // reinforcement-roll gate alongside the `hard` flag just above.
             sim.set_spawn_monsters_enabled(world_state.spawn_mobs());
         });
-        // Issues #221/#222: **the natural spawn cycle, and the despawn pass.**
+        // **the natural spawn cycle, and the despawn pass.**
         // Both engines were complete and driverless — `MobSim::run_spawn_cycle`
         // and `MobSim::despawn_pass` had no production caller at all, so a world
         // held exactly the mobs `seed_demo_mobs` put in it, forever.
@@ -1789,7 +1785,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             let nearest = mobs.with(|sim| sim.players().first().map(|p| p.perception.position));
             mobs.with(|sim| sim.despawn_pass(nearest, &mut despawn_rng));
         }
-        // Issue #241a: pillager patrols. Same live, player-following terrain
+        // Pillager patrols use the same live, player-following terrain
         // snapshot the natural spawner above used — see
         // `MobSim::run_patrol_spawn_cycle`'s own doc comment for why it must
         // not be `MobSim`'s own static `self.world`. Called every tick
@@ -1822,7 +1818,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 );
             });
         }
-        // Issue #240: the wandering trader spawn cycle. Same live,
+        // The wandering-trader spawn cycle uses the same live,
         // player-following terrain snapshot and the same "only once
         // `spawn_terrain` exists" gate as the patrol block just above, for
         // the same reason — see `MobSim::run_wandering_trader_spawn_cycle`'s
@@ -1843,7 +1839,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // see `LiveMobSource::publish_boss_bars`'s own doc for why this is a
         // second call rather than folded into `publish` itself.
         mob_out.publish_boss_bars(mobs.with(|sim| sim.boss_bars()));
-        // Issue #425: `MobSim::tick` already calls `MobSim::explode` the
+        // `MobSim::tick` already calls `MobSim::explode` for the
         // tick a creeper's own fuse completes (`1feed17`/`614acb8`), but
         // until now nothing read the detonation back out of the sim — see
         // `ExplosionFeed`'s own doc comment just above for why this is the
@@ -1921,7 +1917,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             }
             explosion_out.publish(detonation);
         }
-        // Issue #456: the world half of a grazing sheep, and the same shape as
+        // Apply the world half of a grazing sheep, using the same shape as
         // the detonation drain above for the same structural reason —
         // `MobSim::tick` holds `world: &'w ChunkWorld` **immutably**, so it can
         // only record the eat as an intent; this loop is the one place that owns
@@ -1954,7 +1950,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 EatenBlock::AtFeet => (pos, "minecraft:air"),
                 EatenBlock::Below => (BlockPos::new(pos.x, pos.y - 1, pos.z), "minecraft:dirt"),
             };
-            // Issue #530: `EatBlockGoal` sends level event 2001 for the break
+            // The grazing action sends level event 2001 for the break
             // particles (`crate::mobs::MobSim::take_grazes`'s own doc says so),
             // which is a server-caused effect no client predicts. The *old* state
             // is what the particles are made of, so it is read before the write.
@@ -1965,7 +1961,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             world.set_block(target.x, target.y, target.z, state);
             block_tick_out.publish(target.x, target.y, target.z, state.to_owned());
         }
-        // Issue #530: mob hurt and death sounds. `MobSim::apply_damage` already
+        // Mob hurt and death sounds. `MobSim::apply_damage` already
         // damaged and killed mobs with no audible result at all — the sim records
         // the vocalisation for the same reason it records a detonation (it holds
         // the world immutably and owns no connection).
@@ -1979,7 +1975,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         for effect in mobs.with(MobSim::take_ambient_sounds) {
             block_tick_out.publish_effect(effect);
         }
-        // Issue #322: target-block projectile impacts. Drained here (outside
+        // Drain target-block projectile impacts here, outside
         // the `scheduled.with` region below) because `MobSim` is the only
         // thing that saw the hit; resolved *inside* it further down because a
         // target's power write needs `block_ticks` (for
@@ -1987,7 +1983,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // schedule the decay) and the live `world`, neither of which `MobSim`
         // holds — see `crate::mobs::ProjectileBlockHit`'s own doc comment.
         let projectile_block_hits = mobs.with(MobSim::take_projectile_block_hits);
-        // Issue #321: the hopper redstone lock. `tick_all`'s unlocked shorthand
+        // Apply the hopper redstone lock. `tick_all`'s unlocked shorthand
         // would tick every hopper as `enabled: true` forever, which is what this
         // line used to do — see `BlockEntityRegistry::tick_all_with_hopper_lock`,
         // and note this is the **only** production caller holding both a
@@ -2001,7 +1997,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // `HopperBlockEntity` then simply obeys it. Recomputing would duplicate
         // the signal walk and could disagree with what the client was told.
         //
-        // Issue #504: `is_loaded` gates the scan by chunk residency *before*
+        // `is_loaded` gates the scan by chunk residency *before*
         // `enabled` ever reaches `world.block_state` — `ChunkStore::block_state`
         // regenerates a whole column on a miss, and this closure used to run
         // that for every registered hopper, every tick, forever (the registry
@@ -2030,7 +2026,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             }
         }
 
-        // Issue #224 (the spawner half): `minecraft:spawner` block entities.
+        // Spawner block entities.
         // `tick_all_with_hopper_lock` above deliberately does not advance one —
         // `crate::mob_spawner::SpawnerState::tick` needs the player list and the
         // live entity set to decide anything, and `BlockEntityRegistry` has a
@@ -2055,7 +2051,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 })
                 .collect();
             for pos in positions {
-                // Issue #504's residency gate, reused: a spawner outside every
+                // residency gate, reused: a spawner outside every
                 // loaded chunk must not cost a worldgen call just to be told no.
                 if !world.is_column_resident(pos.x.div_euclid(16), pos.z.div_euclid(16)) {
                     continue;
@@ -2124,7 +2120,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             });
         }
 
-        // Issue #223/#691: `Zombie.hurtServer`'s reinforcement call, the
+        // The zombie reinforcement check uses the
         // placement half — `MobSim::attack_from_player` already decided
         // *whether* to call one in (`ReinforcementCall`'s own doc explains
         // the split); this is `Zombie.hurtServer`'s own 50-candidate search
@@ -2189,12 +2185,12 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         let t_mobs_end = tokio::time::Instant::now();
         clock.record_phase(TickPhase::MobsAndItems, t_mobs_end.duration_since(tick_start));
 
-        // Issue #323. The clock is the **world's**, not this loop's: one
+        // The clock is the **world's**, not this loop's: one
         // `tick_time` advances `game_time` unconditionally and `day_time` only
         // under the `advance_time` rule (`ServerLevel.tickTime`, where `setDayTime`
         // is gated and `gameTime` is not). The locals below are still the loop's
         // arithmetic, but they are *sourced* here rather than incremented — which
-        // is the whole of #323's fix, because the connection's periodic
+        // is the complete explanation, because the connection's periodic
         // `encode_set_time` now reads the same store instead of wall-clock
         // elapsed-since-join.
         let world_time = world_state.tick_time();
@@ -2243,14 +2239,14 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 });
             }
         }
-        // Issue #324 / `docs/plans/world-state.md` W1: the weather cycle is
+        // The weather cycle is world-state behavior and is
         // world-global state, so it belongs to the world tick (not to any
         // connection — the straddle the world-state plan's migration exists
         // to delete). `advance_weather()` stands in for the R1 game rule.
         for event in weather.tick(advance_weather()) {
             weather_out.publish(event);
         }
-        // Issue #325 / `docs/plans/world-state.md` S1: the night-skip vote, in
+        // The night-skip vote is world-state behavior and runs in
         // vanilla's own position — `ServerLevel.tick` runs
         // `tickSleepingPlayers` right after the weather-cycle timers.
         // Snapshot the shared roster, fold it
@@ -2284,7 +2280,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             sleep_state.wake_all();
             sleep_vote.clear();
         }
-        // Issue #468: the tick every pending `trigger_tick` is relative to, so a
+        // Store the tick every pending `trigger_tick` is relative to, so a
         // saved queue can be rebased on load. One relaxed atomic store — the
         // tick-thread cost is a count of one, no I/O and no encoding.
         scheduled.set_game_tick(game_tick);
@@ -2296,7 +2292,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         let t_weather_end = tokio::time::Instant::now();
         clock.record_phase(TickPhase::WeatherAndSleep, t_weather_end.duration_since(t_mobs_end));
 
-        // Issue #468: both queues are borrowed out of `scheduled` for the whole
+        // both queues are borrowed out of `scheduled` for the whole
         // scheduled-tick and random-tick section, and every use site inside is
         // textually unchanged — deliberately a wrapper rather than a rewrite,
         // because this is the function the redstone work lives in.
@@ -2317,7 +2313,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         scheduled.with(|queues| {
         let mut block_ticks = &mut queues.block;
         let fluid_ticks = &mut queues.fluid;
-        // Issue #465: adopt the block ticks a player's own mutation scheduled.
+        // Adopt the block ticks scheduled by a player's mutation.
         // `server::propagate_placement` runs the fan-out inline at packet time
         // (like vanilla) and cannot host what it schedules, because the queue
         // those land in lives here. So it hands them over with relative delays
@@ -2359,7 +2355,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             );
         }
 
-        // Issue #322: resolve each target-block hit `MobSim::resolve_projectile_impacts`
+        // Resolve each target-block hit from `MobSim::resolve_projectile_impacts`.
         // found this tick — see the drain above for why this has to happen
         // inside this closure rather than there. A hit at a position that is
         // no longer (or never was) a `minecraft:target` by the time this runs
@@ -2408,12 +2404,12 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             }
         }
 
-        // #308, block before fluid (vanilla's own per-tick queue order). Draining
+        // Block before fluid. Draining
         // (rather than iterating a live queue) is what keeps a tick
         // scheduled *by* one of these callbacks out of this same pass — see
         // `ScheduledTickQueue::drain_due`'s own doc comment.
         //
-        // Issue #314/#315/#317: `block_ticks` now has real producers —
+        // `block_ticks` has producers —
         // redstone torches/repeaters/comparators/observers schedule into it
         // from `crate::random_tick::propagate_and_react` whenever a
         // neighbour notification finds one of them out of steady state (see
@@ -2591,7 +2587,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             // container (`block_entities`) and the mob simulation (`mobs`),
             // neither of which the `Option<String>` chain below has in scope.
             //
-            // Issue #320's remainder: a dropper always either pushes into a
+            // A dropper always either pushes into a
             // container ahead or plain-tosses, never consulting the item
             // table below (`DropperBlock.getDispenseMethod` hardcodes
             // `DefaultDispenseItemBehavior` regardless of item); a dispenser
@@ -2762,9 +2758,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                                 None => consumed = false,
                             }
                         } else if let Some(entity_type) = crate::redstone_dispenser::arrow_entity_type(&item_str) {
-                            // `ProjectileDispenseBehavior` — issue #578's
-                            // projectile half. `ArrowItem`/`TippedArrowItem`/
-                            // `SpectralArrowItem` all use the same default
+                            // Projectile dispensing: arrow item variants all use the same default
                             // power/uncertainty; see `arrow_entity_type`'s own
                             // doc for why a tipped arrow's potion is not
                             // modelled here.
@@ -2924,8 +2918,8 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 continue;
             }
 
-            // `crate::command_block::TICK_COMMAND_BLOCK` — issue #48's
-            // remainder, second hop. Same shape as the dispenser-fire arm
+            // `crate::command_block::TICK_COMMAND_BLOCK` is handled here.
+            // It has the same live-state requirements as the dispenser-fire arm
             // just above and for the same reason: this needs the live
             // `block_entities` container, plus (new here) a real command
             // dispatcher, neither of which the `Option<String>` chain below
@@ -3106,9 +3100,8 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
                 }
             }
         }
-        // Fluid spread — `crate::fluid`, the port of `FlowingFluid.tick`. This
-        // loop was an empty acknowledgement until that module landed; it is now
-        // the only thing that makes a placed or exposed liquid actually move.
+        // Fluid spread — `crate::fluid`. This loop is the production path that
+        // makes a placed or exposed liquid actually move.
         //
         // Unlike the block drain above, this runs against `world` in **world
         // coordinates** rather than against one `ChunkColumn`: fluid spread
@@ -3147,10 +3140,10 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             }
         }
 
-        // #307, after both scheduled-tick queues (vanilla's own chunk-cache tick
-        // runs after `ServerLevel`'s own `blockTicks`/`fluidTicks.tick`).
+        // Run random ticks after both scheduled-tick queues, preserving the
+        // block, fluid, then random ordering.
         //
-        // #481: the random-tick pass is deferred for the first few ticks
+        // The random-tick pass is deferred for the first few ticks
         // after world open, so the background column-seeding task has time to
         // populate the shared [`ChunkStore`] before any `world.column()` call
         // pays the full per-column generation cost on the core thread. See
@@ -3163,8 +3156,8 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             for &(cx, cz) in area.chunks() {
                 {
                     let mut column = world.column(cx, cz);
-                    // Issue #508: the *rule*, not `DEFAULT_RANDOM_TICK_SPEED`.
-                    // The getter has existed and been tested since #327; this line
+                    // Read the current game rule, not `DEFAULT_RANDOM_TICK_SPEED`.
+                    // The getter is already covered by tests; this line
                     // is the reader it was missing, and `/gamerule
                     // random_tick_speed 0` now really does stop crop growth.
                     let events =
@@ -3180,8 +3173,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             }
         }
 
-        // Issue #223/#233's shared blocker, closed: `ServerLevel.tickThunder`,
-        // one per-chunk decision per tick, over the same follow area and
+        // Make one per-chunk thunder decision per tick over the same follow area and
         // startup-deferral window as the random-tick pass just above. Gated
         // on `thundering` alone — vanilla's own gate is `raining &&
         // isThundering()`, independent of `randomTickSpeed`, which only
@@ -3288,7 +3280,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
             // on demand — a landing is rare, unlike the per-tick step.
             apply_falling_block_effect(&*world, &block_tick_out, None, &effect);
             if let crate::gravity_tick::FallingBlockEffect::Placed { pos, .. } = &effect {
-                // `setBlock(pos, blockState, 3)`'s flag-1 half, at the landing
+                // The neighbour-notification half of a write, at the landing
                 // cell: the placed block notifies its neighbours, which is what
                 // lets a pile settle rather than one block land on top of something
                 // that should also have fallen. Column fetched *after* the
@@ -3370,7 +3362,7 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
         // same shape and same reason as `tick_dragons` immediately above: no
         // block reads needed, and without this line a summoned wither (once
         // something spawns one) is inert the same way an un-ticked dragon
-        // was before the line above landed.
+        // would otherwise remain inert.
         mobs.with(super::mobs::MobSim::tick_withers);
         });
 
@@ -3393,10 +3385,10 @@ mod tests {
     // warns on imports that only tests touch).
     use crate::weather::{LEVEL_STEP, WeatherEvent};
     use crate::mobs::ChunkWorld;
-    // No longer imported at module scope: `run_tick_loop` borrows its queues out
-    // of `ScheduledTickHandle` since #468 and names the type nowhere.
+    // `run_tick_loop` borrows its queues from `ScheduledTickHandle` internally,
+    // so tests import only `ScheduledTickQueue` here.
     use crate::scheduled_tick::ScheduledTickQueue;
-    // For `ResourceKey::from_str` in the issue-#456 graze gates below.
+    // For `ResourceKey::from_str` in the grazing gates below.
     use std::str::FromStr;
 
     fn handles() -> (MobHandle, LiveMobSource, BlockEntityHandle) {
@@ -3409,10 +3401,10 @@ mod tests {
 
     /// A minimal [`ChunkSource`] for tests that only need `run_tick_loop` to
     /// have *something* to random-tick against — every column is bare air,
-    /// so #307's random ticks run (proving the loop's own ordering/timing)
+    /// so random ticks run (proving the loop's ordering and timing)
     /// but never produce an event (nothing eligible), which is exactly what
     /// the MSPT/overrun tests in this module want: zero interference from
-    /// #307/#308 with the clock behaviour they actually assert on.
+    /// with the clock behaviour they actually assert on.
     struct EmptyWorld;
     impl ChunkSource for EmptyWorld {
         fn column(&self, _cx: i32, _cz: i32) -> crate::chunk::ChunkColumn {
@@ -3442,14 +3434,14 @@ mod tests {
         // `run_tick_loop` can forward grazing/random-tick mutations to this
         // (tick.rs's own `world.set_block`), so it must not panic; but the
         // source has no storage, so the edit is deliberately discarded.
-        // Explicit rather than inherited (issue #440).
+        // Explicit rather than inherited.
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
             // No storage; edits are discarded by design for this fixture.
         }
     }
 
     /// `(world, block_tick_out, tick_area)` — the three new `run_tick_loop`
-    /// arguments (issues #307/#308), factored out because every existing
+    /// arguments, factored out because every existing
     /// clock/overrun test in this module needs them but does not care what
     /// they are.
     fn world_tick_args() -> (Arc<EmptyWorld>, BlockTickFeed, (RangeInclusive<i32>, RangeInclusive<i32>)) {
@@ -3572,7 +3564,7 @@ mod tests {
         queue.drain_due(u64::MAX, usize::MAX)
     }
 
-    /// Issue #465's LAN shape, asserted at the type level so the remaining gap
+    /// LAN shape, asserted at the type level so the remaining gap
     /// is provably nothing more than one call site in `integrated.rs`.
     ///
     /// A `LanSubscriber`'s feed must split the two directions: the **outbound**
@@ -3821,7 +3813,7 @@ mod tests {
         );
     }
 
-    /// The rolling history caps at [`TICK_HISTORY_LEN`] samples: pushing far more
+    /// The rolling record caps at [`TICK_HISTORY_LEN`] samples: pushing far more
     /// than that must not let the average drift toward the oldest (discarded)
     /// samples. Feed 100 slow ticks, then 100 fast ones; the average must
     /// land near the fast figure, not halfway between the two.
@@ -4101,7 +4093,8 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Issue #456: the graze drain. Before this, `MobSim::take_grazes` had no
+    // The graze drain connects `MobSim::take_grazes` to the live world.
+    // Without it, the simulation has no
     // consumer anywhere — a sheep ran a real `EatBlockGoal`, recorded a real
     // eat, and the world never changed. These gates drive the **production
     // loop**, so they fail if the drain is removed from `run_tick_loop` rather
@@ -4447,7 +4440,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Issue #324 / `docs/plans/world-state.md` W1: weather reaches the feed.
+    // Weather state reaches the feed through the world tick.
     // These gate the **production loop**, so they fail if the weather drain
     // is removed from `run_tick_loop` rather than merely if `WeatherState`
     // regresses — the `crate::weather` unit gates and this one would be
@@ -4478,7 +4471,7 @@ mod tests {
         weather.thunder_time = i32::MAX;
         weather.rain_level = 0.5;
 
-        // Issue #325: a fresh night-skip vote no connection calls — the
+        // Use a fresh night-skip vote that no connection calls. The
         // `_with_weather` body ticks a `SleepState` either way, so the loop
         // shape is identical, but an empty roster can never pass. Wrapped in
         // `async move` because the loop borrows the vote/feed, and
@@ -4622,7 +4615,7 @@ mod tests {
         weather.thunder_time = i32::MAX;
         weather.rain_level = 0.0;
 
-        // Issue #325: a fresh night-skip vote no connection calls (see the
+        // a fresh night-skip vote no connection calls (see the
         // other weather gate's comment — the loop shape is identical, the
         // vote just cannot pass). `async move` so the borrow survives
         // `tokio::spawn`'s `'static` bound; the feed the loop writes is
@@ -4689,9 +4682,9 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Issue #223/#233: lightning reaches the production loop. Before this,
-    // neither `crate::lightning::tick_thunder_for_chunk` nor
-    // `MobSim::tick_lightning` had a single production caller — every
+    // Lightning reaches the production loop through both
+    // `crate::lightning::tick_thunder_for_chunk` and `MobSim::tick_lightning`.
+    // Test-only callers would otherwise leave every
     // gate for the mechanism (`crate::lightning`'s own module, and
     // `crate::mobs::lightning`'s sidecar) drove the pieces directly, which
     // is exactly the "hermetic green, island red" pair CLAUDE.md's rule 1
@@ -4704,8 +4697,8 @@ mod tests {
     /// `spawn_lightning_bolts`/`tick_lightning` directly.
     ///
     /// The production stream is a **fixed** seed
-    /// (`crate::lightning::LIGHTNING_STRIKE_SEED`), so this predicts —
-    /// rather than guesses — exactly which tick strikes: with one chunk
+    /// (`crate::lightning::LIGHTNING_STRIKE_SEED`), so the test predicts
+    /// exactly which tick strikes: with one chunk
     /// ticked per eligible tick, `should_attempt_strike` draws exactly once
     /// per tick from that same fixed stream, so replaying it here (the
     /// identical draw the production loop will make) finds the exact draw
@@ -4792,7 +4785,7 @@ mod tests {
         assert_eq!(bolts.len(), 1, "the bolt must reach the same snapshot stream every other entity does");
     }
 
-    /// Gate for issue #325's wiring through the **production** loop, not at
+    /// Gate for wiring through the **production** loop, not at
     /// `SleepState` directly (its arithmetic is already pinned by
     /// `crate::sleep`'s own tests): a singleplayer-shaped vote — nobody calls
     /// `set_active`, so `active` stays `0` and [`SleepState::sleepers_needed`]'s
@@ -5023,7 +5016,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // Issue #320: the dispenser fire arm. `crate::redstone_dispenser`'s own
+    // The dispenser fire arm. `crate::redstone_dispenser`'s
     // tests gate `random_slot`/`plain_toss` in isolation; this one gates the
     // *wiring* — that the drain actually reaches a live container and mob
     // simulation through the production `run_tick_loop`, the island shape
@@ -5031,7 +5024,7 @@ mod tests {
     // callers). Before this arm existed, `TICK_DISPENSER_FIRE` was scheduled
     // and never drained, so a dispenser filled with cobblestone sat there
     // forever. Cobblestone rather than an arrow: arrows now dispense as a
-    // projectile (issue #578's remainder), which this plain-toss gate is not
+    // projectile, which this plain-toss gate is not
     // testing — see `the_loop_dispenses_an_arrow_as_a_real_projectile` below
     // for that arm.
     // ---------------------------------------------------------------------
@@ -5288,11 +5281,10 @@ mod tests {
         );
     }
 
-    /// Issue #578's projectile half: a dispenser loaded with arrows must put a
+    /// Projectile dispensing: a dispenser loaded with arrows must put a
     /// real `minecraft:arrow` **projectile** on the wire, not a plain-tossed
-    /// item entity — the negative control the assertion above (`item_count`
-    /// staying `0`) proves, since a pre-#578 implementation would have this
-    /// exact stack fall through to `plain_toss` and pass as an item instead.
+    /// item entity. The negative control (`item_count` staying `0`) proves the
+    /// stack takes the projectile path rather than falling through to `plain_toss`.
     #[tokio::test(start_paused = true)]
     async fn the_loop_dispenses_an_arrow_as_a_real_projectile() {
         let pos = (11, 6, 9);
@@ -5397,7 +5389,7 @@ mod tests {
         );
     }
 
-    /// Issue #578's fluid-bucket half. Two arms in one test, sharing a
+    /// Fluid-bucket dispensing. Two arms in one test share a
     /// dispenser position but run as two independent scenarios (each its own
     /// fresh world/handles), matching this crate's own habit of keeping
     /// ordering and `amount`-shaped discriminators in separate cases: filling
@@ -5559,7 +5551,7 @@ mod tests {
         assert_eq!(slot0.map(|s| s.count), Some(1));
     }
 
-    /// Issue #230: `post_note_block_vibration` is what makes every one of
+    /// `post_note_block_vibration` is what makes every one of
     /// this file's four `propagate_and_react_with_entities` consumers reach
     /// an allay's ear — see this function's own doc for the previously-
     /// disclosed (now re-verified false) blocker it closes. A rising-edge
@@ -5622,7 +5614,7 @@ mod tests {
         );
     }
 
-    /// Issue #694, driven through the real production shape: a lit torch
+    /// Piston entity shoving is driven through the production shape: a lit torch
     /// triggers a real `crate::random_tick::propagate_and_react` piston
     /// extension (the same call `crate::piston`'s own oracle gate uses to
     /// build a real rig, not a hand-fabricated one), and this file's own
@@ -5690,7 +5682,7 @@ mod tests {
         );
     }
 
-    /// Issue #694, item 4: the same real rig as
+    /// The same real rig as
     /// [`a_real_piston_extension_shoves_a_mob_standing_in_its_path`], but
     /// checking [`shove_entities_from_piston`]'s other production effect —
     /// the [`crate::effects::WorldEffect::PistonPlayerPush`] a connection
