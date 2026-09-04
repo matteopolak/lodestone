@@ -48,16 +48,16 @@ const SEARCH_BOTTOM: i32 = -64;
 /// thing that fails on a loaded machine.
 const DEADLINE: Duration = Duration::from_secs(240);
 
-/// The owner-configured render distance this test exists for, plus the
+/// The configured render distance under test, plus the
 /// mesher's buffer ring — the exact arithmetic
 /// `app::session::tick_render_distance` and the launch path both apply
 /// (`render_distance + 1`), so this is the radius a real session at
 /// `"render_distance": 32` asks the server for.
 const OWNER_VIEW_RADIUS: i32 = 33;
 
-/// The small radius every pre-existing singleplayer gate shares. Present as
-/// the control: if both arms fail the defect is not radius-dependent, and if
-/// only the large arm fails the radius *is* the discriminator.
+/// The small radius shared by the other singleplayer gates. It is the control:
+/// if both arms fail the defect is not radius-dependent, and if only the large
+/// arm fails the radius *is* the discriminator.
 const SMALL_VIEW_RADIUS: i32 = 1;
 
 fn open_session(seed: i64, view_radius: i32, world_dir: Option<PathBuf>) -> Option<NetClient> {
@@ -118,8 +118,8 @@ fn pump_until(net: &NetClient, what: &str, mut ready: impl FnMut(&NetClient) -> 
 }
 
 /// The whole point: a loaded chunk that is *entirely air* is exactly what the
-/// owner-reported "world loads completely empty" looks like from here, and a
-/// count of arriving chunks cannot tell the two apart.
+/// A loaded chunk that is *entirely air* is the observable form of an empty-world
+/// failure from here, and a count of arriving chunks cannot tell the two apart.
 fn assert_spawn_column_has_terrain(net: &NetClient, radius: i32) {
     let air = net
         .block_at(BlockPos::new(SPAWN_X, DEFINITELY_AIR_Y, SPAWN_Z))
@@ -167,10 +167,9 @@ fn a_singleplayer_world_arrives_with_terrain_at_the_owners_render_distance() {
     assert_spawn_column_has_terrain(&net, OWNER_VIEW_RADIUS);
 }
 
-/// Issue #592's item 1: `WorldTypePreset::Amplified` reaching
-/// `NetClient::open_singleplayer` all the way from a create-world config must
-/// actually change the served terrain, not just carry a differently-named
-/// generator that the wire never uses.
+/// `WorldTypePreset::Amplified` must reach `NetClient::open_singleplayer` from a
+/// create-world configuration and change the served terrain, not merely carry a
+/// differently named generator that the wire never uses.
 ///
 /// The expected values are not derived here — they are read from
 /// `crates/lodestone-server/tests/world_type_selection.rs`'s own
@@ -179,11 +178,10 @@ fn a_singleplayer_world_arrives_with_terrain_at_the_owners_render_distance() {
 /// column at `(8, 8)` a couple of blocks over, which is a different noise
 /// sample and would not reproduce either number). That file already proves
 /// `overworld_generator_of_type` itself is a real, effective parameter one
-/// layer down; this test's only job is the layer this issue actually
-/// threaded — `Origin::Integrated`'s new `world_type` field reaching the
-/// `overworld_chunk_source_of_type` call in `net.rs`'s `run_async`, and the
-/// live session serving what it built rather than something byte-identical
-/// to the default.
+/// layer down; this test covers the integration layer: `Origin::Integrated`'s
+/// `world_type` field reaches the `overworld_chunk_source_of_type` call in
+/// `net.rs`'s `run_async`, and the live session serves what it built rather than
+/// something byte-identical to the default.
 #[test]
 fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
     const SEED: i64 = 4242;
@@ -246,11 +244,8 @@ fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
     );
 }
 
-/// Issue #592's item 2: the four presets that were blocked on
-/// `lodestone-server`'s `lib.rs` re-exporting `single_biome_chunk_source`/
-/// `flat_chunk_source`/`debug_chunk_source` (landed on `main` ahead of this
-/// pass) must also reach the wire through `net.rs`'s `preset_chunk_source`,
-/// not just compile.
+/// The four world presets exposed by the singleplayer entry point must reach the
+/// wire through `net.rs`'s `preset_chunk_source`, not merely compile.
 ///
 /// `Flat`/`DebugAllBlockStates` get a **strong**, externally-sourced check —
 /// the exact block states `crates/lodestone-server/src/worldgen_data.rs`'s
@@ -260,12 +255,12 @@ fn a_singleplayer_world_honours_the_selected_world_type_end_to_end() {
 /// column's `(0, -61, 0)` is `minecraft:grass_block[snowy=false]`; the debug
 /// grid's `(1, 60, 1)` is `minecraft:barrier`) — reused here rather than
 /// re-derived, and now asked of a **live session** instead of a bare
-/// `ChunkSource`, which is the layer this issue actually threaded.
+/// `ChunkSource`, which is the integration layer this test exercises.
 /// `SingleBiomeSurface` gets the same weak-but-real "terrain arrived" check
 /// [`open_session`] uses: there is no independently measured oracle value for
 /// it reachable from this crate (its default biome, `minecraft:plains`, has
 /// no fixed sea-level surface block asserted anywhere this crate can cite
-/// without re-deriving vanilla's biome/surface rules), so this stops at
+/// without re-deriving the external biome and surface rules), so this stops at
 /// proving the session reaches real, non-air terrain rather than guessing a
 /// stronger assertion.
 #[test]
@@ -330,8 +325,8 @@ fn the_four_newly_wired_presets_serve_their_own_generator_end_to_end() {
 }
 
 /// One full section face is `16 * 16 = 256` quads; a real terrain column is
-/// thousands. The floor is the same one `live_world_mesh.rs` uses against the
-/// vanilla oracle, for the same reason: it separates "meshed something" from
+/// thousands. The floor matches the one `live_world_mesh.rs` uses against its
+/// external terrain oracle, for the same reason: it separates "meshed something" from
 /// "meshed a single stray face".
 const MIN_QUADS: usize = 256;
 
@@ -345,7 +340,7 @@ const MIN_QUADS: usize = 256;
 /// Deliberately **not** a GPU gate: it stops at the quads, because everything
 /// past that point needs an adapter and this must run in the ordinary suite.
 #[test]
-// `BlockResources::load(true)` finding no vanilla atlas is the empty-world
+// `BlockResources::load(true)` finding no terrain atlas is the empty-world
 // symptom this gate exists to catch, so it fails loudly rather than skipping
 // — which also means it cannot run where there is no `.cache/mc/<version>/`.
 // The two gates above it in this file need no jar and still run everywhere.
@@ -358,7 +353,7 @@ fn a_singleplayer_spawn_column_meshes_into_real_geometry() {
     let resources = BlockResources::load(true);
     let Some(_atlas) = resources.vanilla_atlas.as_ref() else {
         // `Sim::refresh_mesh_policy` sets `MeshPolicy::id_spaces_agree` from
-        // exactly this `Option`, and a live session with no vanilla atlas
+        // exactly this `Option`, and a live session with no terrain atlas
         // drops **every** column. So a missing atlas is the empty-world
         // symptom itself, not a reason to skip.
         panic!(
@@ -414,10 +409,10 @@ fn a_singleplayer_spawn_column_meshes_into_real_geometry() {
 ///
 /// The discriminating input is again `render_distance`: every other `Sim`-level
 /// gate in this crate runs at 8 (`live_camera_follows_server_spawn`'s
-/// `live_config`), and 8 is a value the empty-world report does *not* come
+/// `live_config`), and 8 is a value the empty-world failure does *not* come
 /// from.
 #[test]
-// Same jar precondition as its sibling above: with no vanilla atlas,
+// Same resource-pack precondition as its sibling above: with no terrain atlas,
 // `Sim::refresh_mesh_policy` sets `id_spaces_agree = false` and every column
 // is dropped unmeshed, so the drain is empty for an environmental reason
 // rather than a code one.
@@ -434,7 +429,7 @@ fn a_sim_at_the_owners_render_distance_drains_real_terrain_meshes() {
     let config = Config {
         mode: Mode::Window,
         protocol,
-        // The owner's persisted `"render_distance": 32`. The streamed radius is
+        // The configured persisted `"render_distance": 32`. The streamed radius is
         // this + 1, the same arithmetic `app/session.rs` applies.
         render_distance: 32,
         ..Config::default()

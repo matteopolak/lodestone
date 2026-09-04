@@ -1,15 +1,13 @@
 //! Singleplayer worlds actually save — driven through the **shell's own**
 //! session path, not through `IntegratedServer`.
 //!
-//! # Why this exists when that fix already gates persistence
+//! # Why a shell-level gate is needed
 //!
-//! That fix built world save/load and evidenced it in both directions
-//! against a real Mojang 26.2 server. It reached **zero players**, because
-//! `net.rs` opened every session through the *non-persistent* constructor.
-//! That is this repo's dominant defect class — the island — one layer above
-//! the code, and a server-side gate structurally cannot see it: the server
-//! test constructs the persistent server itself, so it proves the thing it
-//! constructs works, never that anything constructs it.
+//! Server-side save/load coverage can pass while the shell selects a different
+//! constructor: that coverage constructs the persistent server directly, so it
+//! proves the object it creates works, not that the product's session path creates
+//! it. These tests cover that missing link from the shell entry point through the
+//! wire and shutdown sequence.
 //!
 //! So these gates start at [`NetClient::open_singleplayer`] — the same
 //! function `app::launch_singleplayer` calls — and go through the real
@@ -30,10 +28,10 @@
 //!
 //! # Negative control
 //!
-//! Both gates were observed to fail with `net.rs` pointed back at
-//! `open_in_memory_with_mobs`; see the commit message for the measured
-//! output. That control is not automatable here without editing `net.rs` from
-//! a test, which is worse than the thing it would prove.
+//! A useful negative control is the in-memory constructor: it cannot preserve a
+//! world directory across sessions. The test does not mutate production source
+//! to install that control; the assertions instead make the required persistent
+//! directory and reopen behavior explicit.
 //!
 //! # Gotchas if you change these
 //!
@@ -199,9 +197,9 @@ fn sample_columns(cx: i32, cz: i32) -> Vec<(i32, i32)> {
 /// of its 8 KiB header.
 ///
 /// The header is 1024 big-endian `u32` location entries; a nonzero entry means
-/// that column is present (`RegionFile`'s own decompiled source's own emptiness test). Parsed by
+/// that column is present according to the region-file header occupancy rule. Parsed by
 /// hand here rather than through `lodestone-anvil`, which is not a dependency
-/// of this crate — and adding one would edit `Cargo.lock`, which this change
+/// of this crate — and adding one would edit `Cargo.lock`, which this test
 /// has no business touching.
 fn saved_column_count(region_file: &Path) -> usize {
     let bytes = std::fs::read(region_file).expect("region file is readable");
@@ -283,8 +281,8 @@ impl Drop for TempWorld {
 
 /// **Gate 1.** A block broken in one session is still broken in the next.
 ///
-/// The whole of that fix in one assertion, at the layer the issue is about:
-/// no `IntegratedServer` is named here, only `NetClient`.
+/// The assertion crosses the shell boundary through `NetClient`; it does not
+/// inspect an `IntegratedServer` or another server-side handle directly.
 #[test]
 fn a_block_broken_in_one_session_is_still_broken_in_the_next() {
     let world = TempWorld::new("blocks");
@@ -438,17 +436,16 @@ fn the_stored_seed_governs_chunks_the_first_session_never_generated() {
 /// asserting only "fewer than nine" would be the *magnitude* species of
 /// vacuous test, satisfied by a save that wrote eight.
 ///
-/// This does not re-derive that fix's "a tick that mutates nothing writes nothing",
-/// which is gated server-side. What it adds is that reaching the save path
-/// through the **shell** did not change the proportionality.
+/// This does not repeat the server-side invariant that a tick which mutates
+/// nothing writes nothing. It verifies that reaching the save path through the
+/// **shell** preserves the same mutation-based proportionality.
 ///
-/// # A false premise this gate used to carry, and what replaced it
+/// # Why the bound spans every region file
 ///
-/// Until now it asserted `region_files().len() == 1`, "every column of a
-/// radius-1 view is inside region (0,0)". **That is false**, and it made the
-/// gate fail on roughly two runs in five in a way that looked exactly like
-/// That fix's harness race — which is the trap, because retrying or widening the
-/// bound would have made it green while measuring nothing.
+/// A radius-1 view is not contained in one region: it crosses the zero boundary.
+/// Counting only one region would therefore conflate a valid file layout with a
+/// persistence failure, and widening that count would stop checking the saved
+/// column total.
 ///
 /// A region index is an **arithmetic shift**, `chunk >> 5`
 /// (`lodestone_anvil::region::region_and_local`), so `-1 >> 5 == -1`: a
@@ -458,12 +455,11 @@ fn the_stored_seed_governs_chunks_the_first_session_never_generated() {
 /// a random tick happened to touch, and that is the whole of the
 /// intermittency.
 ///
-/// The replacement derives the expected region set from the same shift the
-/// code uses rather than restating a constant, and — the part that matters
-/// more — counts saved columns across **every** region file instead of only
-/// `r.0.0.mca`. The old form could be satisfied by a residency-proportional
-/// save that happened to spread its nine columns over four regions, leaving
-/// four or fewer in the one file it looked at.
+/// The expected region set is derived from the same shift the code uses rather
+/// than restating a constant, and saved columns are counted across **every**
+/// region file instead of only `r.0.0.mca`. A residency-proportional save could
+/// otherwise spread its nine columns over four regions and evade a one-file
+/// check.
 #[test]
 fn a_session_saves_columns_in_proportion_to_mutation_not_residency() {
     const VIEW_RADIUS: i32 = 1;

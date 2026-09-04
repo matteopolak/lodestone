@@ -1,14 +1,11 @@
-//! **The gate the offline-identity fix exists for: the same account every
-//! launch.**
+//! **The offline-identity stability gate: the same account every launch.**
 //!
 //! # What it is
 //!
 //! Two *independent* constructions of the offline join identity must produce the
-//! same username and the same UUID. That is the property the owner's report was
-//! about — *"I keep spawning in the air even if I rejoin"* — and the property the
-//! pre-fix expression could not have: `lodestone_testsupport::unique_username()`
-//! cannot return the same name twice by construction, and `Uuid::new_v4()` is
-//! random.
+//! same username and the same UUID. A generated username and a random UUID cannot
+//! satisfy that contract: `lodestone_testsupport::unique_username()` cannot return
+//! the same name twice by construction, and `Uuid::new_v4()` is random.
 //!
 //! # How it works
 //!
@@ -18,15 +15,14 @@
 //!   come from the persisted file the test wrote and from UUIDs computed outside
 //!   this workspace (CPython's `hashlib.md5` over the documented
 //!   `nameUUIDFromBytes` rule), never from a second call to the code under test;
-//! * to the pre-fix expression, which must be **unstable** — the control, without
-//!   which "the two matched" is equally consistent with a predicate that matches
+//! * to a deliberately unstable expression, which is the control: without it,
+//!   "the two matched" is equally consistent with a predicate that matches
 //!   anything.
 //!
-//! Both *worlds* are exercised, because the fallback is where the generated name
-//! used to live: a directory with a stored name, and a directory with no file at
-//! all. Each arm asserts which one it is in — `path.exists()` either way — rather
-//! than skipping, so neither can pass vacuously on a machine where the fixture
-//! failed to appear.
+//! Both *worlds* are exercised: a directory with a stored name, and a directory
+//! with no file at all, which selects the default fallback. Each arm asserts which
+//! one it is in — `path.exists()` either way — rather than skipping, so neither
+//! can pass vacuously if the fixture failed to appear.
 //!
 //! Nothing here reads or writes the developer's real data directory: every call
 //! uses the `_from`/`_to` twins with a temp path. The end-to-end half — that
@@ -41,14 +37,13 @@
 //! keys are ignored and absent ones default), but add an arm for it. **Do not
 //! replace the hand-written UUIDs with `offline_uuid(..)` calls** — that turns
 //! the strongest assertion in the file into a tautology, and it is the only thing
-//! standing between the vanilla derivation and the plausible-but-wrong
-//! `Uuid::new_v3` namespaced reading.
+//! standing between the published offline derivation and the plausible-but-wrong
+//! `Uuid::new_v3` namespaced interpretation.
 //!
 //! # Dependencies
 //!
 //! `lodestone::offline_identity`, and `lodestone_testsupport::unique_username`
-//! for the control (a dev dependency — production cannot reach it, which is the
-//! other half of this change).
+//! for the instability control (a dev dependency — production cannot reach it).
 
 use std::path::{Path, PathBuf};
 
@@ -137,8 +132,8 @@ fn a_persisted_offline_name_is_the_same_identity_on_every_construction() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **World 2: no file at all** — a fresh install, and the arm the generated name
-/// used to live in. It must be just as stable, and equal to the placeholder.
+/// **World 2: no file at all** — a fresh install and the generated-name fallback
+/// path. It must be just as stable, and equal to the placeholder.
 #[test]
 fn a_missing_file_still_yields_one_fixed_identity_rather_than_a_fresh_one() {
     let dir = temp_dir("absent");
@@ -165,9 +160,9 @@ fn a_missing_file_still_yields_one_fixed_identity_rather_than_a_fresh_one() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// **The control.** The same predicate, applied to the expression `net.rs` used
-/// before this change, must report a disagreement — and the reason is printed so
-/// the failure it *would* have produced is on the record rather than described.
+/// **The control.** The same predicate, applied to a deliberately unstable
+/// expression, must report a disagreement. The reason is printed so a failure
+/// includes the actual mismatch rather than only a generic assertion message.
 ///
 /// ```text
 /// username: unique_username(),
@@ -187,15 +182,10 @@ fn the_pre_fix_expression_fails_the_same_stability_predicate() {
         )
     };
     let verdict = stability_verdict(&pre_fix(), &pre_fix());
-    // Observed failing before the fix landed, with this exact text (the probe was
-    // `verdict.expect(..)` on the line below, and the run is quoted in
-    // `DESIGN.md` §12.121):
-    //
-    //     the two constructions produced different usernames:
-    //     "E0_172dq2y" then "E1_172dq2y" — a new offline account every launch
-    //
-    // `E0_`/`E1_` is the atomic counter in the first field, which is why the two
-    // differ within one process and not merely across runs.
+    // The generated-name helper prefixes each value with an atomic counter, so
+    // two calls in one process necessarily produce different usernames. Keeping
+    // this control beside the stable cases proves the predicate detects that
+    // mismatch rather than accepting every pair.
     let reason = verdict.expect_err(
         "the pre-fix expression must fail this predicate, or the gates above \
          prove nothing about stability",
@@ -216,8 +206,8 @@ fn the_pre_fix_expression_fails_the_same_stability_predicate() {
     );
     println!("control: name half alone rejected — {reason}");
 
-    // And the uuid half alone, with the name held fixed — the case a
-    // name-only fix would have shipped, and the one singleplayer actually hit.
+    // And the UUID half alone, with the name held fixed. Both components are
+    // independently required for the session identity contract.
     let name = DEFAULT_USERNAME.to_owned();
     let uuid_only = stability_verdict(
         &(name.clone(), Uuid::new_v4()),
