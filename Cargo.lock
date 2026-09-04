@@ -3189,6 +3189,7 @@ dependencies = [
  "lodestone-worldgen",
  "reqwest",
  "rsa",
+ "serde",
  "serde_json",
  "sha2",
  "thiserror 2.0.19",
@@ -3381,12 +3382,15 @@ dependencies = [
 name = "lodestone-v1-17"
 version = "0.1.0"
 dependencies = [
+ "lodestone-client",
  "lodestone-core",
  "lodestone-data",
  "lodestone-macros",
  "lodestone-model",
  "lodestone-net",
  "lodestone-protocol-common",
+ "lodestone-registry",
+ "lodestone-server",
  "lodestone-testsupport",
  "lodestone-world",
  "serde_json",

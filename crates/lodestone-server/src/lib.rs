@@ -140,6 +140,7 @@ mod brewing;
 /// `chat` packet through. See this module's own doc for what it does and
 /// does not verify.
 pub mod chat_session;
+pub mod heavy_scene;
 mod chunk;
 /// Bit-packed per-section block storage for [`chunk::ChunkColumn`] — unit U8 of
 /// `docs/plans/chunk-lifecycle.md`. Private: the representation is an
