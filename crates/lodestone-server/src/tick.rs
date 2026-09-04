@@ -66,82 +66,21 @@ use lodestone_model::BlockPos;
 /// not world-derived.
 const NATURAL_SPAWN_SEED: u64 = 0x5350_4157_4E45_5221;
 
-/// Vanilla's `mobGriefing` game rule, which gates whether a mob may change the
-/// world — here, whether a grazing sheep's eat actually removes the block
-/// (vanilla's own eat-block goal; `GameRules.RULE_MOBGRIEFING`, default
-/// **true**).
+/// Whether the weather cycle's timers advance.
 ///
-/// A function returning vanilla's default rather than a real rule lookup, and
-/// that is a disclosed gap, not an oversight: this crate has **no `GameRules`
-/// registry**. The nearest thing is `crate::server::WorldAdminState`'s
-/// `game_rules: HashMap<String, String>`, which is per-*connection* state owned
-/// by `serve_play` — the wrong side of the world for a tick loop that runs with
-/// no connection at all, and which that type's own doc comment already
-/// describes as a confirmation echo rather than a rule store. Wiring the real
-/// rule means a world-level `GameRules` the tick loop and every connection
-/// share; when that exists, this function is the only call site to change.
-///
-/// Returning the default is the conservative choice for the *observable*
-/// behaviour: vanilla ships `mobGriefing` on, so a sheep eating grass is what a
-/// player expects to see, and modelling it as off would hide the feature behind
-/// a rule nobody can currently turn back on.
-fn mob_griefing() -> bool {
-    true
-}
-
-/// Vanilla's `advanceWeather` game rule, which gates whether the weather
-/// cycle's timers advance at all — issue #324 / `docs/plans/world-state.md`
-/// W1, read by [`crate::weather::WeatherState::tick`]. Vanilla's
-/// `GameRules.ADVANCE_WEATHER` defaults to **true**
-/// (vanilla's own per-tick world update gates `advanceWeatherCycle`'s timer block on it).
-///
-/// A function returning vanilla's default rather than a real rule lookup, and
-/// that is the same disclosed gap as [`mob_griefing`] just above: this crate
-/// has **no world-level `GameRules` registry** (R1 of the world-state plan).
-/// The nearest thing, `crate::server::WorldAdminState`'s `game_rules`, is
-/// per-*connection* state owned by `serve_play` — the wrong side of the
-/// world for a tick loop that runs with no connection at all. When R1 lands
-/// a world-level `GameRules` every connection shares, this function is the
-/// only call site to change.
-///
-/// Returning the default is the conservative choice for the *observable*
-/// behaviour: vanilla ships `advanceWeather` on, so rain and thunder actually
-/// cycle, and modelling it as off would freeze the sky behind a rule nobody
-/// can currently turn back on.
+/// The tick loop does not yet read this rule from the shared
+/// [`crate::world_state::WorldStateHandle`], so it uses the default value of
+/// `true`. Keeping the fallback behind this function gives the stored rule one
+/// call site to replace.
 fn advance_weather() -> bool {
     true
 }
 
-/// Issue #325 / `docs/plans/world-state.md` S1: whether a passed night-skip
-/// vote may actually jump the clock. Vanilla's own `ServerLevel.advanceTime`
-/// — the rule checked inside `tickSleepingPlayers`
-/// after a vote passes — returns true only when the weather has not ended a
-/// thunder storm this tick (the world is not allowed to "skip" while a
-/// thunderstorm is being resolved).
+/// The fraction of players whose vote is required to skip the night.
 ///
-/// Same shape as [`advance_weather`] just above: a function returning a
-/// constant is the disclosed gap this crate has **no world-level `GameRules`
-/// registry** (R1 of the world-state plan), and when R1 lands a world-level
-/// `GameRules`, this function is the only call site to change.
-///
-/// Returning the default is the conservative choice for the *observable*
-/// behaviour: vanilla ships `doDaylightCycle` (and weather resolution) on, so
-/// night skips past, and modelling the rule as off would freeze the day
-/// forever behind a toggle nobody can currently turn back on.
-fn advance_time() -> bool {
-    true
-}
-
-/// Issue #325 / `docs/plans/world-state.md` S1: the fraction of players whose
-/// vote is required to skip the night — the `playersSleepingPercentage` of
-/// `ServerLevel`'s `sleepStatus` (vanilla's own `SleepStatus`, defaulting to
-/// `sleepingPercentage=100` in `ServerLevel`'s own constructor).
-///
-/// Another R1-shaped constant: vanilla's `GameRules.PLAYERS_SLEEPING_PERCENTAGE`
-/// ships at 100 (every player must be in bed) and is command-tunable. This
-/// crate has no world-level game-rules registry (see the R1 gaps above), so
-/// 100 is hard-coded and [`SleepState::sleepers_needed`]'s `max(1, …)` floor
-/// still makes singleplayer require exactly one sleeper.
+/// The tick loop does not yet read this setting from the shared world-rule
+/// store, so `100` is used until it does. [`SleepState::sleepers_needed`]'s
+/// `max(1, …)` floor still makes singleplayer require exactly one sleeper.
 fn players_sleeping_percentage() -> u32 {
     100
 }
@@ -1438,12 +1377,11 @@ pub(crate) async fn run_tick_loop_with_weather<W>(
     // sky, every link in the wire green, while the value was wall-clock
     // elapsed-since-join rather than the tick counter.
     scheduled: crate::region_source::ScheduledTickHandle,
-    // Issues #327/#328/#323. The world's shared game rules, difficulty and clock
-    // — the same handle every connection reads (see `crate::world_state`). Four
-    // of this module's own constant-returning stubs (`mob_griefing`,
-    // `advance_weather`, `advance_time`, `players_sleeping_percentage`) existed
-    // *because* there was no registry here; three of them now read this instead,
-    // and the clock is no longer two locals.
+    // The world's shared game rules, difficulty and clock use the same handle
+    // every connection reads (see `crate::world_state`). Mob griefing and time
+    // advancement read it directly; weather advancement and the required
+    // sleeper percentage remain local defaults until this loop reads their
+    // stored values.
     world_state: crate::world_state::WorldStateHandle,
     // See [`run_tick_loop`]'s own parameter comment: the dimension this loop serves
     // plus the shared player-anchor set, which together turn `tick_area` from the

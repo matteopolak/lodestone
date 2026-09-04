@@ -8556,9 +8556,8 @@ impl<'w> MobSim<'w> {
     /// deciding what to pick up reads `self.item_state` while mutating
     /// `self.mobs` would need it held mutably too.
     ///
-    /// **Disclosed narrowing**: this sim has no live block-mutation rule value at this
-    /// seam (the same cut `tick.rs`'s own `mob_griefing` stub already
-    /// discloses); every eligible allay always picks up.
+    /// **Disclosed narrowing**: this simulation has no access to the shared
+    /// block-mutation rule at this seam, so every eligible allay picks up.
     fn allay_pick_up_items(&mut self) {
         struct Candidate {
             mob_index: usize,
