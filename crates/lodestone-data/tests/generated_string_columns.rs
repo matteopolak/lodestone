@@ -43,23 +43,19 @@ enum Kind {
     /// the debt.** Each one should become a typed id; the note says which
     /// registry it should key on.
     CrossReference,
-    /// A second copy of a registry's names, in a different order. Should resolve
-    /// through the canonical column plus a permutation instead.
-    DuplicateNames,
 }
 
-use Kind::{CanonicalNames, CrossReference, DuplicateNames, OpenStringSpace};
+use Kind::{CanonicalNames, CrossReference, OpenStringSpace};
 
 /// Every `&str`-typed generated column, with its verdict.
 ///
 /// Adding a generated string column means adding a row here, which is the point:
-/// classifying it is a deliberate act. `CrossReference` and `DuplicateNames`
-/// rows are the migration queue, in table-size order.
+/// classifying it is a deliberate act. `CrossReference` rows are the migration
+/// queue, in table-size order.
 const ALLOWED: &[(&str, &str, Kind, &str)] = &[
     ("attribute_types.rs", "ATTRIBUTE_NAMES", CanonicalNames, "the minecraft:attribute registry"),
     ("block_entity_types.rs", "TYPE_NAMES", CanonicalNames, "the minecraft:block_entity_type registry"),
     ("block_registry.rs", "BLOCK_REGISTRY_NAMES", CanonicalNames, "the minecraft:block registry, in registration order; Block::name reads this"),
-    ("block_states.rs", "BLOCK_NAMES", DuplicateNames, "a second, name-sorted copy of the block names; should become a permutation over BLOCK_REGISTRY_NAMES"),
     ("block_states.rs", "PROPERTY_SETS", OpenStringSpace, "block property keys and values are not a registry"),
     ("damage_types.rs", "DAMAGE_TYPE_NAMES", CanonicalNames, "the minecraft:damage_type registry"),
     ("damage_types.rs", "DAMAGE_TYPE_MESSAGE_IDS", OpenStringSpace, "translation keys, not registry entries"),
@@ -183,7 +179,7 @@ fn every_generated_string_column_is_classified() {
     // Report the migration queue rather than staying silent about it.
     let debt: Vec<&(&str, &str, Kind, &str)> = ALLOWED
         .iter()
-        .filter(|(_, _, kind, _)| matches!(kind, CrossReference | DuplicateNames))
+        .filter(|(_, _, kind, _)| matches!(kind, CrossReference))
         .collect();
     eprintln!(
         "classified {} generated string columns; {} still carry registry entries as strings:",
@@ -195,7 +191,7 @@ fn every_generated_string_column_is_classified() {
     }
     assert_eq!(
         debt.len(),
-        2,
+        1,
         "the count of untyped registry columns changed; if it went down, update this number \
          and delete the ALLOWED row — it is meant to reach zero"
     );

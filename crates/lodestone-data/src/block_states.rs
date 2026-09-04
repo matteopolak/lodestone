@@ -17,10 +17,11 @@
 //! the generated table (in [`crate::generated_block_states`]) is **pure rodata,
 //! zero heap**:
 //!
-//! * block names are 1,196 interned `&'static str`;
+//! * block names stay in the one registry-order canonical column, reached from
+//!   the state table's name-sorted block index through a generated permutation;
 //! * property sets are de-duplicated to the 6,454 that are actually distinct,
 //!   each a `&'static [(&'static str, &'static str)]`;
-//! * each state is a `(u16, u16)` pair — an index into the block-name table and
+//! * each state is a `(u16, u16)` pair — an alphabetical block-name index and
 //!   an index into the property-set table.
 //!
 //! Lookup is O(1) indexing (ids are contiguous `0..STATE_COUNT`), not searching.
@@ -51,6 +52,19 @@ pub use crate::generated_block_registry::BLOCK_COUNT;
 pub use table::STATE_COUNT;
 
 use crate::block::Block;
+
+/// Resolves a block-state table's **alphabetical** block index through the
+/// generated name-order permutation into the canonical registry-order names.
+///
+/// `STATES` deliberately keeps this index: it is the order of the name-keyed
+/// report that supplies the state rows. The canonical name column deliberately
+/// keeps registration order: it is the wire's block-type registry-id order. The
+/// permutation is the only bridge; treating either index as the other silently
+/// changes the block a state names.
+fn block_name_at_alphabetical_index(index: u16) -> &'static str {
+    let registry_id = crate::generated_block_enum::REGISTRY_IDS_BY_NAME[index as usize];
+    crate::generated_block_registry::BLOCK_REGISTRY_NAMES[registry_id as usize]
+}
 
 /// A validated global block-state id — one of the 32,366 states of 26.2.
 ///
@@ -121,7 +135,7 @@ impl StateId {
 #[must_use]
 pub fn block_name(id: u32) -> Option<&'static str> {
     let &(block, _) = table::STATES.get(id as usize)?;
-    Some(table::BLOCK_NAMES[block as usize])
+    Some(block_name_at_alphabetical_index(block))
 }
 
 /// The interned identifier for the `minecraft:block` registry entry `id` (for
@@ -129,24 +143,21 @@ pub fn block_name(id: u32) -> Option<&'static str> {
 ///
 /// This is the *block-type* registry (one id per block, 1,196 entries in
 /// 26.2), distinct from the block-*state* ids [`block_name`] indexes: packets
-/// such as `block_event` carry a `Holder<Block>` (one id per block type) rather
-/// than a palette state id, and so does a `minecraft:tool` rule's explicit block
-/// set.
+/// such as `block_event` carry one registry id per block type rather than a
+/// palette state id, and so does a `minecraft:tool` rule's explicit block set.
 ///
 /// # The two id spaces are not the same order
 ///
-/// This used to index [`BLOCK_NAMES`](crate::generated_block_states) directly,
-/// on the assumption that a registry id and a block-name index are
-/// interchangeable. They are not. `BLOCK_NAMES` comes from `blocks.json`, a
-/// name-keyed JSON object, so it is **alphabetical**; the registry is in
-/// **registration** order. `minecraft:air` is registry id 0 but alphabetical
-/// index 19, and `minecraft:stone` is registry id 1 but alphabetical index 975 —
-/// so every id resolved to an unrelated block, quietly. The reconciliation now
-/// goes through the generated registry-order table.
+/// The block-state table does not carry a second copy of these names. Its first
+/// column remains an **alphabetical** index from the name-keyed blocks report;
+/// the lookup resolves it through
+/// [`crate::generated_block_enum::REGISTRY_IDS_BY_NAME`] into this
+/// registration-order canonical column. `minecraft:air` is registry id 0 but
+/// alphabetical index 19, and `minecraft:stone` is registry id 1 but
+/// alphabetical index 975, so the two orders cannot be used interchangeably.
 ///
-/// [`block_name`] was never affected: its state→block index and `BLOCK_NAMES`
-/// are built from the same alphabetical ordering by the same generator, so that
-/// path is self-consistent.
+/// [`block_name`] follows that same alphabetical index through the permutation,
+/// so it retains its public behavior without retaining duplicate names.
 ///
 /// Zero-heap: returns a `&'static str` straight from rodata. O(1).
 #[must_use]
@@ -186,16 +197,14 @@ struct BlockSpan {
     default: u32,
 }
 
-/// The reverse map's index: one [`BlockSpan`] per block, in
-/// [`table::BLOCK_NAMES`] order, plus that order's names sorted for binary
-/// search.
+/// The reverse map's index: one [`BlockSpan`] per state-table alphabetical
+/// block index, plus those names sorted for binary search.
 struct BlockStateIndex {
     spans: Box<[BlockSpan]>,
-    /// Block indices sorted by name. Built rather than assumed: `BLOCK_NAMES`
-    /// happens to be alphabetical today (it comes from a JSON object's keys),
-    /// but nothing in the generator promises it stays that way, and a silently
-    /// unsorted array would make `binary_search` return wrong answers rather
-    /// than fail.
+    /// State-table block indices sorted by canonical name. Built rather than
+    /// assumed: the raw `STATES` column carries no names, and a silently
+    /// unsorted permutation would make `binary_search` return wrong answers
+    /// rather than fail.
     by_name: Box<[u16]>,
 }
 
@@ -205,7 +214,7 @@ struct BlockStateIndex {
 fn block_state_index() -> &'static BlockStateIndex {
     static INDEX: std::sync::OnceLock<BlockStateIndex> = std::sync::OnceLock::new();
     INDEX.get_or_init(|| {
-        let block_count = table::BLOCK_NAMES.len();
+        let block_count = BLOCK_COUNT as usize;
         let mut spans: Vec<Option<BlockSpan>> = vec![None; block_count];
         let mut counts: Vec<u32> = vec![0; block_count];
         for id in 0..table::STATE_COUNT {
@@ -237,7 +246,7 @@ fn block_state_index() -> &'static BlockStateIndex {
                     panic!(
                         "generated block-state table has no state for block `{}` — regenerate or \
                          fix the table",
-                        table::BLOCK_NAMES[block]
+                        block_name_at_alphabetical_index(block as u16)
                     )
                 });
                 assert_eq!(
@@ -246,7 +255,7 @@ fn block_state_index() -> &'static BlockStateIndex {
                     "block `{}`'s states are not contiguous in the generated table \
                      ({}..={} spans {} ids but the block owns {}); `state_id` scans the span, so \
                      a non-block-major table would resolve into a neighbour's states",
-                    table::BLOCK_NAMES[block],
+                    block_name_at_alphabetical_index(block as u16),
                     span.first,
                     span.last,
                     span.last - span.first + 1,
@@ -271,7 +280,7 @@ fn block_state_index() -> &'static BlockStateIndex {
             );
         }
         let mut by_name: Vec<u16> = (0..block_count as u16).collect();
-        by_name.sort_unstable_by_key(|&b| table::BLOCK_NAMES[b as usize]);
+        by_name.sort_unstable_by_key(|&b| block_name_at_alphabetical_index(b));
         BlockStateIndex {
             spans,
             by_name: by_name.into_boxed_slice(),
@@ -279,13 +288,13 @@ fn block_state_index() -> &'static BlockStateIndex {
     })
 }
 
-/// The block index in [`table::BLOCK_NAMES`] whose identifier is `name`, or
+/// The state table's alphabetical block index whose identifier is `name`, or
 /// `None`. `O(log 1196)`.
 fn block_index(name: &str) -> Option<u16> {
     let index = block_state_index();
     index
         .by_name
-        .binary_search_by_key(&name, |&b| table::BLOCK_NAMES[b as usize])
+        .binary_search_by_key(&name, |&b| block_name_at_alphabetical_index(b))
         .ok()
         .map(|slot| index.by_name[slot])
 }
@@ -428,7 +437,7 @@ pub fn state_id(state: &str) -> Option<u32> {
 /// allocate nothing.
 #[derive(Debug, Clone)]
 pub struct BlockStateTable {
-    /// One identifier per block, indexed as [`table::BLOCK_NAMES`].
+    /// One identifier per state-table alphabetical block index.
     identifiers: Vec<Identifier>,
     /// One map per distinct property set, indexed as [`table::PROPERTY_SETS`].
     property_maps: Vec<BTreeMap<String, String>>,
@@ -445,9 +454,9 @@ impl BlockStateTable {
     /// never triggers it.
     #[must_use]
     pub fn new() -> Self {
-        let identifiers = table::BLOCK_NAMES
-            .iter()
-            .map(|name| {
+        let identifiers = (0..BLOCK_COUNT as u16)
+            .map(|index| {
+                let name = block_name_at_alphabetical_index(index);
                 name.parse::<Identifier>()
                     .expect("generated block name is a valid identifier")
             })

@@ -96,6 +96,14 @@ chunk palettes, `block_update`) and is a validated newtype rather than an enum, 
 32,366 hand-named variants buys nothing when no code ever matches on one. The orders are
 unrelated permutations — going between them always goes through the generated join
 (`StateId::block`, `Block::default_state`), never by assuming the indexes coincide.
+The raw block-state table keeps its first field as the alphabetical block index required by
+the name-keyed state report, but it does **not** carry a second block-name column: lookup
+resolves that field through `generated_block_enum::REGISTRY_IDS_BY_NAME` into the one
+registration-order `BLOCK_REGISTRY_NAMES` column. This preserves the state table's source
+ordering without making a second 1,196-name rodata copy. Air (registry 0, alphabetical 19)
+and stone (registry 1, alphabetical 975) are the standing controls that distinguish those
+orders; an unknown report name, mismatched canonical name, or incomplete 1,196-entry join
+fails generation rather than choosing a plausible wrong block.
 `block_states::state_id` is the reverse map (a canonical state string → its global state id)
 and is deliberately **derived at first use from the already-committed tables**, behind a
 `OnceLock`, rather than itself generated — generating it would add a second drift surface
