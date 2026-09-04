@@ -434,8 +434,8 @@ pub const LOCAL_PROFILE_SKIN_KEY_PREFIX: &str = "lodestone-local-profile-skin:";
 /// `player_skin.url` unconditionally — real or synthetic. Without this guard
 /// that sentinel would reach `spawn_fetch`, open (and fail) a real GET against
 /// an empty URL once per session, and log a spurious warning for every player
-/// with no declared skin, which after this change is the common case rather
-/// than the rare one.
+/// with no declared skin, which is the common case in offline-mode sessions
+/// rather than a rare exception.
 pub fn request(url: &str) {
     if url.is_empty() || url.starts_with(LOCAL_PROFILE_SKIN_KEY_PREFIX) {
         // The local-profile key names no host and its sheet is published

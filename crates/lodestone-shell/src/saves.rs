@@ -2,42 +2,37 @@
 //!
 //! # What it is
 //!
-//! The shell's counterpart to vanilla's own level-storage source: it answers "which worlds exist?", "which
-//! directory is this one?", "where does a new one go?" and "delete that one".
-//! Persistence itself landed in issue
-//!  and reached
-//! **zero players**, because `net.rs` opened every session through
-//! `IntegratedServer::open_in_memory_with_mobs` — the non-persistent
-//! constructor — and the persistent one needs a `world_dir` the shell had no
-//! concept of.
+//! The shell's counterpart to vanilla's own level-storage source: it answers
+//! "which worlds exist?", "which directory is this one?", "where does a new
+//! one go?" and "delete that one". Singleplayer persistence requires the
+//! integrated server to open each selected world with its directory; using an
+//! in-memory constructor would discard the world between sessions.
 //!
-//! # The product decision, restated now that it has changed
+//! # Save-list model
 //!
-//! That fix named two materially different readings:
+//! World storage can follow two materially different models:
 //!
 //! 1. **One implicit default world** — every singleplayer session opens
 //!    [`default_world_dir`], and it persists.
 //! 2. **A save list** — create/select/delete, each world its own directory with
 //!    its own name and seed, which is what vanilla does.
 //!
-//! That fix shipped (1). **This module now implements (2), and (1) is gone as a
-//! product behaviour.** The wart that forced the change was real and a player
-//! reported it: with one implicit world, *"Create New World" could not create a
-//! second one* — pressing it with a typed seed opened the existing world
-//! instead, because the stored seed of an existing world always wins over a
-//! requested one (see `lodestone_server::region_source::resolve_world_seed` for
-//! why that rule is the only safe one). The typed seed therefore took effect
-//! only on the very first launch, when no world existed yet.
+//! **This module implements (2).** Each Create New World action allocates a
+//! fresh directory, while reopening an existing world preserves its stored
+//! seed. Reusing one implicit directory would open the existing world instead
+//! and cause its stored seed to win over the newly typed seed (see
+//! `lodestone_server::region_source::resolve_world_seed` for why that rule is
+//! the only safe one).
 //!
-//! Creating a **new directory** is what fixes that properly, and it is why the
-//! fix is here rather than in `resolve_world_seed`: forcing a requested seed
-//! onto an existing world is the alternative, and it silently destroys the
-//! continuity of the world the player was building.
+//! Creating a **new directory** preserves that invariant, which is why the
+//! save-list owns directory allocation rather than changing
+//! `resolve_world_seed`: forcing a requested seed onto an existing world would
+//! silently destroy the continuity of the world the player was building.
 //!
-//! [`default_world_dir`] survives as exactly one thing: the folder name
-//! `"world"` a *dedicated* server uses, which is what an already-existing
-//! Lodestone save from before this change is called. Nothing calls it to *open*
-//! a world any more — [`list_worlds_in`] finds that directory like any other.
+//! [`default_world_dir`] remains the folder name `"world"` used by a
+//! *dedicated* server, so existing saves with that directory name remain
+//! discoverable. Nothing calls it to *open* a world any more —
+//! [`list_worlds_in`] finds that directory like any other.
 //!
 //! # How it works
 //!
@@ -84,18 +79,14 @@
 //! - **Names**: [`sanitise_name`] is vanilla's own sanitize-name and
 //!   [`available_dir_name`] is vanilla's own find-available-name, including its
 //!   `" (N)"` counter. See each for the two places this deliberately differs.
-//! - **Deletion is [`delete_world_in`], and it exists because its screen does**
-//!   (issue ). This
-//!   section used to say deletion was deliberately absent, and the reasoning it
-//!   gave was right and is worth keeping: the destructive part of Delete is not
-//!   the four-line `remove_dir_all`, it is a *confirmation the player cannot fire
-//!   by accident*, and **arming the existing Delete button and confirming with a
-//!   second press of the same button is deletable-by-double-click** — which for
-//!   an irreversible operation is worse than no Delete at all. What changed is
-//!   that [`crate::menu::confirm`] and [`crate::menu::Screen::Confirm`] now
-//!   exist, so the affirmative control is a *different control on a different
-//!   screen* whose rect does not overlap the Delete button's; a second click
-//!   where the player just clicked lands on nothing.
+//! - **Deletion is [`delete_world_in`].** The destructive operation requires a
+//!   *confirmation the player cannot fire by accident*: **arming the existing
+//!   Delete button and confirming with a second press of the same button is
+//!   deletable-by-double-click**, which is unsafe for an irreversible action.
+//!   [`crate::menu::confirm`] and [`crate::menu::Screen::Confirm`] provide a
+//!   *different control on a different screen* whose rect does not overlap the
+//!   Delete button's; a second click where the player just clicked lands on
+//!   nothing.
 //!   `the_confirmation_cannot_be_fired_by_a_second_click_where_delete_was` is the
 //!   gate on that, and it derives both rects from the layouts the draw uses.
 //! - [`world_dir_in`]'s containment check is what [`delete_world_in`] goes
@@ -137,8 +128,8 @@ use std::path::{Path, PathBuf};
 pub const SAVES_DIR: &str = "saves";
 
 /// The folder name a *dedicated* server uses (`level-name=world` in
-/// `server.properties`), and therefore the name of any world this client wrote
-/// while that fix's "one implicit world" reading shipped.
+/// `server.properties`), and therefore the name of any world written under
+/// that dedicated-server convention.
 ///
 /// Only [`default_world_dir`] reads it now. It is **not** the default name a new
 /// world gets — that is [`DEFAULT_NEW_WORLD_NAME`], vanilla's own
@@ -962,7 +953,7 @@ impl std::error::Error for DeleteError {}
 
 /// Remove the world named `dir_name` from under `root` —
 /// vanilla's own level-storage-access delete-level, and the destructive half
-/// of issue.
+/// behind the confirmation screen.
 ///
 /// **There is deliberately no no-argument twin.** Every other operation here has
 /// one because production calls it with the real root; this one is only ever
@@ -1071,9 +1062,8 @@ mod tests {
 
     #[test]
     fn the_default_world_is_inside_the_saves_root() {
-        // The save list enumerates children of `saves_dir()`; a pre-save-list
-        // world that was not one would be invisible after this change, which
-        // is the migration this assertion rules out.
+        // The save list enumerates children of `saves_dir()`; an existing
+        // default world must remain visible to that enumeration.
         assert!(default_world_dir().starts_with(saves_dir()));
     }
 
@@ -1350,7 +1340,8 @@ mod tests {
 
         // The seed's file must NOT exist yet: `resolve_world_seed` creates it on
         // first open, and that is what makes the requested seed win for a new
-        // world. Writing one here would re-introduce that fix's wart.
+        // world. Writing one here would reintroduce single-directory creation's
+        // seed-selection bug.
         assert!(
             !dir.join("data").join("minecraft").join("world_gen_settings.dat").exists(),
             "create must not write world_gen_settings.dat — `resolve_world_seed` \
