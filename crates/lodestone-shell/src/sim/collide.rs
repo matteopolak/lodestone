@@ -63,6 +63,8 @@
 //! into everything `sim.rs` re-exports that `sim::tests` has always had, with
 //! no need to enumerate any of it.
 
+use std::sync::OnceLock;
+
 use lodestone_ecs::entity::EntityUuid;
 use lodestone_ecs::{SessionScoreboard, SessionTabList};
 use lodestone_physics::CollisionRule;
@@ -176,20 +178,26 @@ impl Sim {
     /// `potion` in two), `ominous_item_spawner`, and the living-but-inert `bat`
     /// and `parrot`. Every one of them would have shoved the player.
     ///
-    /// # What the census deliberately excludes
+    /// # Two downstream gates share this snapshot
     ///
-    /// Boats and rideable minecarts do push players in vanilla, but from their
-    /// own ticks — the boat's own push override (with a
-    /// Y-ordering condition) and
-    /// the minecart's own push-entities pass (gated on
-    /// `isRideable()` and querying a `1.0E-7`-inflated box). Those cannot join
-    /// this list without changing the gate, so the census reports them `false`
-    /// rather than approximating them into the wrong pass. See
-    /// [`lodestone_model::EntityFacts::pushes_players`].
+    /// This is a mixed neighbourhood. [`lodestone_model::EntityFacts::pushes_players`]
+    /// selects candidates for the crowd-push gate, while
+    /// [`lodestone_model::EntityFacts::collidable`] selects candidates for the
+    /// hard movement-collision gate. An entity may satisfy either capability;
+    /// the later gate, rather than this snapshot, decides which effect applies.
+    ///
+    /// Boats have no ordinary crowd-push contribution, but their hard-collision
+    /// capability retains them for the movement gate; their separate tick-side
+    /// push also has a vertical-order condition. Rideable minecarts' own
+    /// tick-side push remains outside the crowd gate because it needs a
+    /// rideable-state test and a different query inflation. The census leaves
+    /// both special pushes absent instead of approximating them as ordinary
+    /// crowd pushes.
     pub(crate) fn tick_nearby_entities(&mut self) -> NearbyEntities {
         let center = self.player().position;
         let local = self.local;
         let local_uuid = self.local_uuid();
+        let nearby_radius = nearby_entity_radius();
         let (list, self_collision_rule) = self.write(|w| {
             // `w.query()` needs `&mut w`, if only transiently — build the
             // `QueryState` before taking any of the immutable borrows below,
@@ -237,9 +245,9 @@ impl Sim {
                 .iter(w)
                 .filter_map(|(pos, kind, entity_id, uuid)| {
                     let feet = Vec3d::new(pos.0.x, pos.0.y, pos.0.z);
-                    if (feet.x - center.x).abs() > NEARBY_ENTITY_RADIUS
-                        || (feet.y - center.y).abs() > NEARBY_ENTITY_RADIUS
-                        || (feet.z - center.z).abs() > NEARBY_ENTITY_RADIUS
+                    if (feet.x - center.x).abs() > nearby_radius
+                        || (feet.y - center.y).abs() > nearby_radius
+                        || (feet.z - center.z).abs() > nearby_radius
                     {
                         return None;
                     }
@@ -426,30 +434,129 @@ impl Sim {
 }
 
 /// Radius, in blocks, within which [`Sim::tick_nearby_entities`] hands a
-/// tracked entity to the crowd push as a candidate.
+/// tracked entity to movement collision as a candidate.
 ///
-/// Vanilla queries `getPushableEntities(this, this.getBoundingBox())` — the
-/// *un-inflated* player box — but `docs/entity-push.md`'s own wiring note is
-/// explicit that "a generous neighbourhood is fine: candidates that fail a
-/// gate contribute nothing". This is a coarse pre-filter, not the gate: the
-/// real predicate is `lodestone_physics::push::pair_admitted` downstream, so a
-/// too-large radius costs only a few wasted overlap tests while a too-small one
-/// **silently drops real candidates** and no test can see it.
+/// The source query uses the *un-inflated* player box, but this broad scan may
+/// admit more candidates: entities that fail a later gate contribute nothing.
+/// It is a coarse pre-filter, not the gate, so a too-large radius costs only a
+/// few wasted overlap tests while a too-small one **silently drops real
+/// candidates** and no test can see it.
 ///
 /// It was `4.0`, chosen for "a happy-ghast-sized neighbour" back when every
 /// candidate was handed the player's own `0.6 × 1.8` box. Now that the census
 /// supplies real dimensions that value is provably too small, and the bound
 /// follows from the census maxima rather than from a guess:
 ///
-/// - widest pusher is `ender_dragon` at `16.0`, and two boxes touch when their
-///   centres are within `(0.6 + 16.0) / 2 = 8.3` — so x/z needs `>= 8.3`;
-/// - tallest is `giant` at `12.0`, and this compares *feet* to *feet*, so a
-///   giant whose feet are `12.0` below ours still overlaps — y needs `>= 12.0`.
+/// - the current widest candidate is `ender_dragon` at `16.0`, and two boxes
+///   touch when their centres are within `(0.6 + 16.0) / 2 = 8.3` — so x/z
+///   needs `>= 8.3`;
+/// - the current tallest candidate is `giant` at `12.0`, and this compares
+///   *feet* to *feet*, so a giant whose feet are `12.0` below ours still
+///   overlaps — y needs `>= 12.0`.
 ///
-/// `16.0` is the largest extent in the census and covers both with margin.
-/// Deriving it programmatically from the census maxima, rather than restating
-/// them here, is the remaining nit — see `docs/entity-push.md`.
-const NEARBY_ENTITY_RADIUS: f64 = 16.0;
+/// The last independently verified safe radius. It is a floor rather than the
+/// production value: a future wider census entry expands the scan, while an
+/// empty or malformed census cannot silently shrink it below what the client
+/// has already established as safe.
+const NEARBY_ENTITY_RADIUS_FLOOR: f64 = 16.0;
+
+/// Caches the census-derived radius after the first collision tick. The census
+/// is immutable generated data, so recalculating its maxima per tick would
+/// only add work while producing the same answer.
+static NEARBY_ENTITY_RADIUS: OnceLock<f64> = OnceLock::new();
+
+/// Radius the live collision path uses for its broad neighbour filter.
+#[must_use]
+fn nearby_entity_radius() -> f64 {
+    *NEARBY_ENTITY_RADIUS.get_or_init(|| {
+        nearby_entity_radius_from_movement_collision_dimensions(
+            lodestone_data::entity_census::movement_collision_max_dimensions(),
+        )
+    })
+}
+
+/// Turns the generated movement-collision maxima into a broad-phase radius.
+///
+/// The largest raw extent is deliberately retained instead of reducing the
+/// width to a tight centre-distance bound. This is a candidate filter, not the
+/// overlap predicate; its only unsafe failure mode is becoming too small.
+#[must_use]
+fn nearby_entity_radius_from_movement_collision_dimensions(dimensions: Option<(f32, f32)>) -> f64 {
+    dimensions.map_or(NEARBY_ENTITY_RADIUS_FLOOR, |(width, height)| {
+        f64::from(width.max(height)).max(NEARBY_ENTITY_RADIUS_FLOOR)
+    })
+}
+
+#[cfg(test)]
+mod nearby_entity_radius_tests {
+    use super::*;
+
+    /// The real census is deliberately part of this assertion rather than a
+    /// copied pair of maxima. A future wider candidate must widen the live
+    /// pre-filter without a second hand-maintained number here.
+    #[test]
+    fn the_live_radius_comes_from_the_real_movement_collision_census() {
+        let census = lodestone_data::entity_census::movement_collision_max_dimensions();
+        assert_eq!(
+            nearby_entity_radius_from_movement_collision_dimensions(census),
+            16.0,
+            "the generated movement collision census must establish the expected radius"
+        );
+        let dimensions = census
+            .expect("the real census contains movement collision candidates");
+        assert_eq!(
+            nearby_entity_radius(),
+            f64::from(dimensions.0.max(dimensions.1)).max(NEARBY_ENTITY_RADIUS_FLOOR),
+            "the production accessor must use the real movement collision census maxima"
+        );
+        assert_eq!(
+            dimensions,
+            (16.0, 12.0),
+            "the current census must independently establish the expected radius"
+        );
+    }
+
+    /// A 4-block filter used to look plausible around ordinary mobs but drops
+    /// an actually overlapping giant whose feet are eleven blocks below the
+    /// local player. The derived radius must keep that candidate; the stale
+    /// value is the control proving this is a discriminator rather than an
+    /// assertion about an arbitrary constant.
+    #[test]
+    fn the_census_radius_keeps_a_giant_that_the_stale_radius_drops() {
+        let radius = nearby_entity_radius_from_movement_collision_dimensions(Some((16.0, 12.0)));
+        let giant_feet_delta = 11.0;
+        let local_vertical_span = (0.0, 1.8);
+        let giant_vertical_span = (-giant_feet_delta, -giant_feet_delta + 12.0);
+
+        assert!(
+            giant_vertical_span.1 > local_vertical_span.0
+                && giant_vertical_span.0 < local_vertical_span.1,
+            "the giant must actually overlap the local player's vertical span"
+        );
+        assert!(
+            giant_feet_delta <= radius,
+            "the derived radius must retain a giant whose 12-block hitbox still overlaps"
+        );
+        assert!(
+            giant_feet_delta > 4.0,
+            "control: the stale 4-block radius must exclude this overlapping candidate"
+        );
+    }
+
+    /// An empty or malformed census must not shrink the pre-filter below the
+    /// last known-safe radius: a broad scan is cheap, while silently dropping
+    /// a real candidate is not.
+    #[test]
+    fn an_empty_or_degenerate_census_uses_the_safe_radius_floor() {
+        for dimensions in [None, Some((0.0, 0.0))] {
+            assert_eq!(
+                nearby_entity_radius_from_movement_collision_dimensions(dimensions),
+                16.0,
+                "{dimensions:?} must retain the safe floor"
+            );
+        }
+    }
+}
 
 /// Issue #614's last static lead: does `mesher.rs`'s section-to-world-y
 /// placement agree with what [`Sim::live_collision`] queries against, in a

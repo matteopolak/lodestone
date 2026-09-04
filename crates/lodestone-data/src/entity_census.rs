@@ -188,6 +188,50 @@ pub fn can_be_collided_with(id: i32) -> Option<bool> {
         .and_then(|index| ENTITY_CAN_BE_COLLIDED_WITH.get(index).copied())
 }
 
+/// Whether either type-level movement capability makes an entity a candidate.
+///
+/// The shell's broad-phase query retains either a crowd pusher or a hard
+/// collider. Keeping this predicate beside the census bounds makes a future
+/// wider hard-only collider expand the query instead of being filtered out
+/// before its per-instance gate can run.
+fn movement_collision_candidate(pushes: bool, collidable: bool) -> bool {
+    pushes || collidable
+}
+
+fn max_dimensions_matching(mut includes: impl FnMut(i32) -> bool) -> Option<(f32, f32)> {
+    (0..TYPE_COUNT as i32)
+        .filter(|&id| includes(id))
+        .filter_map(crate::entity_dimensions::base_dimensions)
+        .fold(None, |acc, dims| {
+            Some(match acc {
+                Some((width, height)) => (width.max(dims.width), height.max(dims.height)),
+                None => (dims.width, dims.height),
+            })
+        })
+}
+
+/// The widest and tallest base hitbox among entity types the movement
+/// broad-phase must retain.
+///
+/// This is the union of types that [`pushes_players`] and types that
+/// [`can_be_collided_with`]. A hard-only collider does not run the ordinary
+/// crowd pass, but it must still reach the shell's later hard-collision gate.
+/// Scanning both columns lets a future wider hard-only collider expand the
+/// coarse query rather than being lost before that gate.
+///
+/// Returns `None` only if the census is degenerate and has neither a pusher
+/// nor a hard collider, so callers can retain a safe floor rather than silently
+/// filter with `(0.0, 0.0)`.
+#[must_use]
+pub fn movement_collision_max_dimensions() -> Option<(f32, f32)> {
+    max_dimensions_matching(|id| {
+        movement_collision_candidate(
+            pushes_players(id) == Some(true),
+            can_be_collided_with(id) == Some(true),
+        )
+    })
+}
+
 /// The widest and tallest base hitbox among entity types that can push the
 /// player.
 ///
@@ -205,15 +249,7 @@ pub fn can_be_collided_with(id: i32) -> Option<bool> {
 /// 0.0)`.
 #[must_use]
 pub fn pusher_max_dimensions() -> Option<(f32, f32)> {
-    (0..TYPE_COUNT as i32)
-        .filter(|&id| pushes_players(id) == Some(true))
-        .filter_map(crate::entity_dimensions::base_dimensions)
-        .fold(None, |acc, dims| {
-            Some(match acc {
-                Some((width, height)) => (width.max(dims.width), height.max(dims.height)),
-                None => (dims.width, dims.height),
-            })
-        })
+    max_dimensions_matching(|id| pushes_players(id) == Some(true))
 }
 
 #[cfg(test)]
@@ -375,5 +411,31 @@ mod tests {
         // `the_census_is_neither_all_true_nor_all_false`), so this is a live
         // assertion the table is not that degenerate, not a description.
         assert!(pusher_max_dimensions().is_some());
+    }
+
+    #[test]
+    fn movement_collision_candidate_keeps_hard_only_colliders() {
+        assert!(movement_collision_candidate(true, false));
+        assert!(movement_collision_candidate(false, true));
+        assert!(movement_collision_candidate(true, true));
+        assert!(!movement_collision_candidate(false, false));
+    }
+
+    #[test]
+    fn movement_collision_max_dimensions_uses_the_full_candidate_union() {
+        use crate::entity_dimensions::base_dimensions;
+
+        let boat = entity_type_id("minecraft:oak_boat").expect("oak boat is real");
+        assert_eq!(pushes_players(boat), Some(false));
+        assert_eq!(can_be_collided_with(boat), Some(true));
+        let boat_dimensions = base_dimensions(boat).expect("oak boat has dimensions");
+
+        let maxima = movement_collision_max_dimensions()
+            .expect("the movement collision census is non-empty");
+        assert_eq!(maxima, (16.0, 12.0), "the current full census has fixed maxima");
+        assert!(
+            maxima.0 >= boat_dimensions.width && maxima.1 >= boat_dimensions.height,
+            "the hard-only boat must be covered by the same broad-phase bound"
+        );
     }
 }
