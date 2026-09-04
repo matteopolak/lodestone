@@ -159,7 +159,18 @@ impl ResourceSource for ZipSource {
         // buffer (Arc). No re-parse, no lock — each call reads independently.
         let mut archive = self.archive.clone();
         let mut entry = archive.by_index(idx).ok()?;
-        let mut buf = Vec::with_capacity(entry.size() as usize);
+        // NOT `Vec::with_capacity(entry.size() as usize)`: `size()` is the
+        // entry's own declared uncompressed-size field, read straight off the
+        // archive before a single byte of it is decompressed or checked
+        // against the CRC-32 the archive also carries — a hostile or merely
+        // corrupt pack can declare almost 4 GiB for a few real bytes, and a
+        // fuzz target over this exact function reproduced the resulting
+        // allocator abort (`malloc(4294967294)`) on the first execution.
+        // `read_to_end` grows the buffer to whatever the entry actually
+        // decompresses to regardless of the hint, so dropping the
+        // preallocation costs realloc overhead on a large *honest* entry and
+        // costs nothing on a lying one.
+        let mut buf = Vec::new();
         entry.read_to_end(&mut buf).ok()?;
         Some(buf)
     }
