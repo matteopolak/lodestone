@@ -42,7 +42,7 @@ use lodestone_audio::{
 };
 use lodestone_model::event::SoundCategory as ModelCategory;
 
-use crate::driver::{DriverError, SoundResolver, StreamingSound};
+use crate::driver::{DriverError, SoundResolver};
 use crate::music::MusicStart;
 
 /// A running native audio engine.
@@ -129,42 +129,11 @@ impl AudioEngine {
         self.lock_mixer().set_listener(listener);
     }
 
-    /// Resolve a **music** track to a lazily-decoded stream, without touching the
-    /// mixer.
-    ///
-    /// This is the music counterpart to [`Self::play_sound`], and it deliberately
-    /// stops short of playing, because the last mile does not exist yet: `Mixer`
-    /// has no streaming-voice API, and its `SoundInstance` takes a fully decoded
-    /// `Arc<PcmBuffer>`. So a caller gets a [`StreamingSound`] it can prove it
-    /// resolved, and nothing is audible until a streaming voice lands. See
-    /// `docs/music-selection.md`.
-    ///
-    /// # Why this must not be [`SoundResolver::resolve_instance`]
-    ///
-    /// **All 316 music leaf entries declare `"stream": true`**, and
-    /// `resolve_instance` caches decoded PCM — `the_end.ogg` alone is **304 MiB**
-    /// decoded. Routing music through the caching path is a several-hundred-
-    /// megabyte allocation, not a glitch, which is why this exposes only the
-    /// streaming path and no accessor to the resolver itself.
-    ///
-    /// `Ok(None)` is the **ordinary** answer in a normal checkout, not an error:
-    /// `cargo xtask fetch-sounds` excludes music by default, so 0 of 70 music
-    /// objects are on disk and `resolve_streaming` reports absence rather than
-    /// failing. Silence is the correct default here.
-    pub fn resolve_music(
-        &mut self,
-        event_name: &str,
-        seed: i64,
-    ) -> Result<Option<StreamingSound>, DriverError> {
-        self.resolver.resolve_streaming(event_name, seed)
-    }
-
-    /// Starts a music/record track playing for real: resolves it exactly like
-    /// [`resolve_music`](Self::resolve_music), then spins up a producer
-    /// thread that decodes it packet by packet into a fresh
+    /// Starts a music/record track playing for real: resolves it through
+    /// [`SoundResolver::resolve_streaming`], then spins up a producer thread
+    /// that decodes it packet by packet into a fresh
     /// [`SampleRing`](lodestone_audio::SampleRing) and hands that ring to the
-    /// mixer as a new streaming voice. This is the "last mile"
-    /// [`resolve_music`](Self::resolve_music) always documented as missing.
+    /// mixer as a new streaming voice.
     ///
     /// # Threading and realtime discipline
     ///
@@ -198,7 +167,7 @@ impl AudioEngine {
     /// Returns [`MusicStart::Silent`] — not an error — for vanilla's ordinary
     /// "nothing resolved" case (unknown event, or the `.ogg` bytes are absent
     /// from a checkout that has not run `fetch-sounds --all`), matching
-    /// [`resolve_music`](Self::resolve_music)'s own contract.
+    /// [`SoundResolver::resolve_streaming`]'s contract.
     pub fn start_music(&mut self, event_name: &str, seed: i64) -> Result<MusicStart, DriverError> {
         // Defensive cleanup, not the ordinary path: `MusicManager` only ever
         // calls `start` once the previous track is already known inactive,

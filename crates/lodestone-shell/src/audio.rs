@@ -1094,8 +1094,8 @@ impl ShellAudio {
         })
     }
 
-    /// Starts a music track playing for real: resolves it exactly like
-    /// native's `resolve_music` used to, then builds a [`MusicProducer`] and
+    /// Starts a music track playing for real: resolves it through
+    /// `SoundResolver::resolve_streaming`, then builds a [`MusicProducer`] and
     /// a fresh [`SampleRing`](lodestone_audio::SampleRing), pumps it once
     /// synchronously (so the very first render block already has something
     /// to play), and hands the ring to the mixer as a new streaming voice.
