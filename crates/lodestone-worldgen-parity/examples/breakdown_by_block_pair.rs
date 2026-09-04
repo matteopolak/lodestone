@@ -3,12 +3,10 @@
 //! Finer-grained than `compare`'s bounding-box/section report: groups every
 //! *real* (base-block-id-differing) mismatch by `(expected, got)` pair and
 //! prints the biggest offenders, e.g. `("minecraft:terracotta",
-//! "minecraft:stone") x1720` — this is what actually said "chunk
-//! (-120,-120) is the badlands-exclusion gap" and "chunk (0,0)'s carve gap is
-//! mostly water-where-vanilla-carved-a-flooded-cave-and-we-didn't," rather
-//! than a percentage. Kept as a standing diagnostic, not a test: there is no
-//! fixed "correct" set of pairs to assert against, since which pairs show up
-//! is exactly what changes as more phases (#295, #406) get composed.
+//! "minecraft:stone") x1720`. The resulting histogram identifies which
+//! material substitutions dominate a chunk instead of reducing the result to
+//! a percentage. This is a standing diagnostic rather than a test: the set of
+//! expected pairs depends on which world-generation stages are enabled.
 use lodestone_worldgen_parity::{diff_field, parse_compact};
 use std::collections::BTreeMap;
 

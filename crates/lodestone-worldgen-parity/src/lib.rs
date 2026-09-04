@@ -1,22 +1,19 @@
-//! Chunk-for-chunk parity harness: the shared, reusable comparator every
-//! worldgen phase (epic #404: biomes #405, carvers/aquifer/ores #295,
-//! vegetation #406) can point at instead of improvising its own oracle diff.
+//! Chunk-for-chunk parity harness: the shared, reusable comparator that each
+//! world-generation phase can use instead of implementing its own fixture
+//! diff.
 //!
 //! # What this crate is
 //!
 //! Two halves:
 //!
-//! 1. **A compact, committed fixture format** (`fixtures/*.txt`) holding a
-//!    real vanilla 26.2 JVM's own generated output for a fixed seed and named
-//!    chunk coordinates, at two pipeline points (`postsurface` — after
-//!    vanilla's own surface-building step, before carvers; `postcarve` — after vanilla's own
-//!    carver-application step, the
-//!    full non-structure/non-feature chunk). Produced by
-//!    `scripts/worldgen-oracle/ComposedChunkOracle.java`, which runs vanilla's
-//!    own noise-fill, surface-building and carver-application steps through the REAL
-//!    multi-noise biome source (the same 7594-row table `BiomeOracle.java`
-//!    dumps) — not a biome pinned to a constant, so the biome driving surface
-//!    materials and carver selection is whatever vanilla actually assigns.
+//! 1. **A compact, committed fixture format** (`fixtures/*.txt`) holding
+//!    reference-runtime output for a fixed seed and named chunk coordinates,
+//!    at two pipeline points (`postsurface` — after surface building and before
+//!    carvers; `postcarve` — after carver application, for the full
+//!    non-structure/non-feature chunk). The fixture generator performs the
+//!    complete noise, surface, and multi-noise biome stages, so surface
+//!    materials and carver selection come from the sampled biome rather than a
+//!    hard-coded substitute.
 //! 2. **A diff engine** ([`diff_field`]) that compares one of those fixtures
 //!    against [`lodestone_worldgen::overworld::GeneratedColumn`] (or any
 //!    `Fn(lx, y, lz) -> String`) and reports *where* it differs — bounding
@@ -31,14 +28,11 @@
 //! # Honest scope
 //!
 //! The fixture's `postcarve` stage is shape + the real aquifer + surface
-//! rules + carvers — **not** ore/vegetation features (unbuilt in this repo's
-//! Rust; `FeatureOracle.java` already isolates the ore-feature engine
-//! separately and is the natural next extension, not attempted here) and
-//! **not** structures (unbuilt anywhere in this repo, `#136` says do not
-//! start). A diff against `postcarve` therefore over-counts the true gap by
-//! exactly "no ores, no vegetation, no structures" on top of whatever
-//! carvers/aquifer/biome gap is real — `docs/worldgen-parity.md` breaks this
-//! apart per stage so the two are not conflated.
+//! rules + carvers — **not** ore/vegetation features or structures, which are
+//! outside this crate's generated scope. A diff against `postcarve` therefore
+//! includes the missing decoration and structure work in addition to any
+//! carver, aquifer, biome, or surface mismatch; `docs/worldgen-parity.md`
+//! breaks this apart per stage so the two are not conflated.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -97,7 +91,7 @@ impl BlockField {
 }
 
 /// One chunk's fixture: both pipeline stages plus the per-quart biome table,
-/// exactly what `ComposedChunkOracle.java` dumps for one `(seed, cx, cz)`.
+/// exactly what the reference fixture generator emits for one `(seed, cx, cz)`.
 #[derive(Debug, Clone)]
 pub struct ChunkFixture {
     pub seed: i64,
@@ -114,31 +108,30 @@ pub struct ChunkFixture {
     /// pipeline (shape + fluid-approx + biome + surface) should be compared
     /// against.
     pub postsurface: BlockField,
-    /// Post-carver-application: the full non-feature/non-structure vanilla
-    /// chunk — the honest "how far are we" target once #295 lands.
+    /// Post-carver-application: the full non-feature/non-structure reference
+    /// chunk — the honest target for the stages implemented here.
     pub postcarve: BlockField,
-    /// Post ore-only decoration of the CENTRE chunk (`ComposedChunkOracle
-    /// .java`'s `postfeatures` stage) — narrower than `FeatureOracle.java`'s
-    /// own isolated ore fixture (single-source, no 3x3 neighbour spill; see
-    /// that Java file's `postfeatures` doc comment for the exact scope).
-    /// Vegetation features and structures are still entirely absent.
+    /// Post ore-only decoration of the centre chunk (`postfeatures`) —
+    /// narrower than the full ore fixture because it uses one source chunk and
+    /// does not include 3x3 neighbour spill. Vegetation features and
+    /// structures are still entirely absent.
     pub postfeatures: BlockField,
 }
 
 // ---------------------------------------------------------------------------
-// Raw oracle output (ComposedChunkOracle.java's stdout) -> ChunkFixture list
+// Raw reference-generator output -> ChunkFixture list
 // ---------------------------------------------------------------------------
 
-/// Parses `ComposedChunkOracle.java`'s raw stdout (one or more chunks,
-/// `meta.done cx,cz` terminating each) into a list of [`ChunkFixture`]s.
-/// Tolerant of interleaved JVM log lines (`[main/WARN] ...`) — anything not
-/// matching a known `key value...` line is skipped, not an error, since
-/// vanilla's own registry-bootstrap step logs a couple of harmless warnings to stdout.
+/// Parses raw reference-generator output (one or more chunks, `meta.done
+/// cx,cz` terminating each) into a list of [`ChunkFixture`]s. Tolerant of
+/// interleaved runtime log lines (`[main/WARN] ...`) — anything not matching a
+/// known `key value...` line is skipped, not an error, because registry setup
+/// can emit harmless warnings to stdout.
 ///
 /// # Panics
 /// Panics on a malformed *matched* line (wrong token count, unparseable
-/// integer) — a real fixture from a real oracle run should never hit this;
-/// tripping it means the oracle or this parser drifted from each other.
+/// integer) — a fixture from the reference generator should never hit this;
+/// tripping it means the generator and parser no longer agree on the format.
 #[must_use]
 pub fn parse_raw_dump(text: &str) -> Vec<ChunkFixture> {
     let mut out = Vec::new();

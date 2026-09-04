@@ -1,7 +1,6 @@
 //! The actual parity gate: diffs `lodestone_server::overworld_generator` (the
 //! generator the integrated server serves today) against the committed
-//! vanilla fixture (`fixtures/composed_seed42.txt`, from
-//! `scripts/worldgen-oracle/ComposedChunkOracle.java`) block-for-block, for
+//! reference fixture (`fixtures/composed_seed42.txt`) block-for-block, for
 //! every fixture chunk, at both pipeline stages.
 //!
 //! Regenerate the fixture after a data/seed/coordinate change with:
@@ -15,15 +14,13 @@
 //! be the stale thing).
 //!
 //! See `docs/worldgen-parity.md` for what the measured numbers mean.
-//! Issue #295 composed the real aquifer and carvers into `OverworldGenerator`
-//! (`crates/lodestone-worldgen/src/overworld.rs`) — `column()`'s output is
-//! now post-carve, not post-surface, which is why
-//! [`composed_pipeline_vs_vanilla_postsurface_reference`] deliberately
-//! expects *more* real mismatches against the `postsurface` stage than it
-//! used to: every cell a carver legitimately touches now differs from the
-//! pre-carve reference on purpose. `postcarve` remains the honest "how close
-//! to a real vanilla chunk" number; ore/vegetation features and structures
-//! are still missing from it (see `crate` doc comment).
+//! `column()` includes aquifer and carver application, so its output is
+//! post-carve rather than post-surface. Consequently,
+//! [`composed_pipeline_vs_vanilla_postsurface_reference`] counts every cell
+//! legitimately touched by a carver as a real mismatch against the pre-carve
+//! reference. `postcarve` remains the honest "how close to a real vanilla
+//! chunk" number; ore/vegetation features and structures are still missing
+//! from it (see the crate doc comment).
 
 use lodestone_worldgen_parity::{ChunkFixture, diff_field, parse_compact};
 
@@ -237,15 +234,13 @@ fn postfeatures_actually_differs_from_postcarve() {
     }
 }
 
-/// The residual ore-composition gap, measured and reported rather than
-/// guessed. `OverworldGenerator::column` now composes the real 3×3 ore
-/// driver (issue #295 — see `crates/lodestone-worldgen/src/overworld.rs`'s
-/// doc comment), and the residual against this single-source-only oracle
-/// stage is *expected* to stay non-zero (real vanilla spill this oracle
-/// can't model) rather than shrink to zero — this test's job is to put a
-/// number on that residual, not to pass/fail on it reaching zero. The only
-/// hard assertion is a floor (no regression below the measured post-#295
-/// baseline); the gap itself is reported, not asserted away.
+/// The residual ore-composition gap is measured and reported rather than
+/// guessed. `OverworldGenerator::column` composes the real 3×3 ore driver,
+/// while this fixture stage records only a single source chunk. Neighbour
+/// spill therefore produces an expected non-zero residual; this test puts a
+/// number on that residual instead of treating zero as the success condition.
+/// The only hard assertion is a floor based on the measured fixture baseline;
+/// the gap itself is reported, not asserted away.
 #[test]
 fn ore_composition_gap_is_measured_and_reported() {
     for f in &fixtures() {
@@ -259,37 +254,21 @@ fn ore_composition_gap_is_measured_and_reported() {
         );
         assert_eq!(report.total, 16 * 16 * f.height as usize);
 
-        // Floor: measured after composing `apply_ore_step_3x3_per_source`
-        // into `OverworldGenerator::column` (issue #295). This did **not**
-        // land at (or near) zero, and that is itself the finding worth
-        // recording rather than routing around — see
-        // `docs/worldgen-parity.md`'s "known gap: composing the real 3×3
-        // ore driver against a single-source-only oracle" section for the
-        // full write-up. In short: `postfeatures` only ever runs the
-        // CENTRE's own decoration pass (`ComposedChunkOracle.java`'s own doc
-        // comment), so a *faithful* 3×3 composition legitimately diverges
-        // from it wherever real vanilla ore spill from a neighbour chunk
-        // would land in the centre — that divergence is the composition
-        // working, not a regression, and was isolated with a debug-only
-        // single-source toggle (`LODESTONE_ORE_SINGLE_SOURCE_DEBUG=1`) that
-        // reproduces the oracle's own scope and measured a much smaller
-        // residual (563/98304 at (0,0)) — proving the engine itself is
-        // correct and the remaining full-3×3 gap is (mostly) real spill this
-        // oracle stage cannot see.
+        // Floor: `postfeatures` records only the centre chunk's decoration
+        // pass, while `apply_ore_step_3x3_per_source` includes neighbour spill.
+        // A faithful 3×3 composition therefore differs wherever an ore vein
+        // from a neighbouring source lands in the centre. The debug-only
+        // single-source toggle (`LODESTONE_ORE_SINGLE_SOURCE_DEBUG=1`) matches
+        // the fixture's narrower scope and measures 563/98304 at (0,0),
+        // confirming that most of the full-3×3 residual is a scope difference.
         //
-        // (-120,-120) used to be the exception: its single-source residual
-        // was *larger* than the composed number, because that chunk's real
-        // biome is badlands, which `crate::biome::usable_overworld_table`
-        // used to exclude (issue #405/#295's carried-over gap, Job 3) — every
-        // source chunk's ore *list* was wrong before 3×3 spill was even
-        // considered. `3cf523c` ported `SurfaceSystem.getBand` and made that
-        // table a pass-through, closing Job 3: re-measured here at
-        // 96429/98304 (up from the pre-fix 91703), the same kind of jump the
-        // other parity tests in this file saw once badlands resolved
-        // correctly. Floors below are measured, not guessed, with headroom.
+        // The (-120,-120) fixture samples badlands. Its biome-specific ore
+        // table is preserved by `crate::biome::usable_overworld_table`, so
+        // the bonus gold entry is included in the measured 96429/98304 match
+        // floor below. Floors are measured values with headroom.
         let floor = match (f.chunk_x, f.chunk_z) {
             (0, 0) => 92_000,       // measured 92223/98304
-            (-120, -120) => 96_300, // measured 96429/98304 — Job 3 closed, see above
+            (-120, -120) => 96_300, // measured 96429/98304
             other => panic!("no measured floor recorded for fixture chunk {other:?} — add one"),
         };
         assert!(
@@ -385,21 +364,11 @@ fn ore_counts_by_type_are_predicted_and_measured() {
             if v < 10 {
                 continue;
             }
-            // Former documented exception, now a success assertion.
-            // `usable_overworld_table` used to exclude badlands (Job 3,
-            // unported `SurfaceSystem.getBand`), so chunk (-120,-120) — real
-            // vanilla biome badlands, whose `UNDERGROUND_ORES` step names
-            // the bonus `minecraft:ore_gold_extra` vein as its 27th entry
-            // (confirmed against `.cache/mc/26.2/src/data/minecraft/
-            // worldgen/biome/badlands.json`; no substitute biome's list
-            // contains it) — always placed zero here. `3cf523c` ported
-            // `getBand` and made that table a pass-through, so this chunk
-            // now resolves to its real biome and should place real gold —
-            // measured 57 (vanilla 51) once the exception below was
-            // removed and this ran as a normal assertion. Kept as its own
-            // `eprintln` (rather than folding into the generic loop below,
-            // silently) so a regression that broke gold specifically is
-            // easy to spot in the log, not just in a hard failure.
+            // The badlands sample has a biome-specific `UNDERGROUND_ORES`
+            // entry for the bonus `minecraft:ore_gold_extra` vein. Keep its
+            // positive-gold check and dedicated log separate from the generic
+            // per-type assertion so a missing biome-specific entry remains
+            // visible in both normal output and a hard failure.
             if (f.chunk_x, f.chunk_z) == (-120, -120) && id == "minecraft:gold_ore" {
                 let r = rust_counts.get(id).copied().unwrap_or(0);
                 eprintln!(
@@ -429,15 +398,11 @@ fn ore_counts_by_type_are_predicted_and_measured() {
 }
 
 /// Reference gate against vanilla's **pre-carve** `postsurface` stage.
-/// Before issue #295 composed carvers, `OverworldGenerator::column()`'s
-/// output *was* the post-surface subset, so this test used to isolate
-/// exactly what was composed from what wasn't. Now that carve runs inside
-/// `column()` too, this comparison **necessarily** shows every cell a
-/// carver legitimately touched as a "real" mismatch against the pre-carve
-/// reference — that is not a regression, it is carving working. The ceiling
-/// below is therefore a *measured, re-assertable* value, not a target to
-/// shrink: a regression here means either a carver changed what it carves
-/// (investigate) or an earlier stage (shape/aquifer/biome/surface) broke.
+/// `OverworldGenerator::column()` applies carving before this comparison, so
+/// every cell legitimately touched by a carver appears as a real mismatch
+/// against the pre-carve reference. The ceiling is a measured,
+/// re-assertable bound: exceeding it indicates a change in carving or an
+/// earlier shape, aquifer, biome, or surface stage.
 ///
 /// Thresholds are measured against the committed fixture (see
 /// `docs/worldgen-parity.md`), not guessed: they assert "did not get worse
@@ -458,31 +423,22 @@ fn composed_pipeline_vs_vanilla_postsurface_reference() {
         assert_eq!(report.total, 16 * 16 * f.height as usize, "diff must visit every cell");
 
         let real = report.real_mismatches().len();
-        // Measured post-#295 ore composition (see docs/worldgen-parity.md):
-        // chunk (0,0) real=8787/98304 (grew from the pre-ore-composition
-        // 3060: every cell the composed ore step legitimately wrote — an
-        // ore block where vanilla's pre-carve `postsurface` still has plain
-        // stone — now also counts as a "mismatch" against this pre-carve,
-        // pre-feature reference, exactly the same pattern carve composition
-        // produced against this same stage earlier; not a regression).
+        // Current fixture measurements: chunk (0,0) has 8787 real mismatches
+        // out of 98304. Ore placement contributes to this count because the
+        // generated column includes decoration while `postsurface` is
+        // pre-carve and pre-feature.
         //
-        // chunk (-120,-120) used to be real=11257/98304, overwhelmingly the
-        // badlands-exclusion gap (Job 3). `3cf523c` ported
-        // `SurfaceSystem.getBand` and made `usable_overworld_table` a
-        // pass-through, closing Job 3: re-measured here at 6704/98304 — down,
-        // not up, because a correctly-resolved badlands biome's own surface
-        // rule (banded terracotta) tracks vanilla's `postsurface` far better
-        // than the substitute biome's rule ever did, even though the ore step
-        // (a separate, still-imperfect gap — see
-        // `ore_composition_gap_is_measured_and_reported`) keeps contributing
-        // its own share of mismatches here too.
+        // The badlands sample at (-120,-120) has 6704 real mismatches out of
+        // 98304. Its biome-specific banded-terracotta surface rule tracks the
+        // reference closely; the independent ore-composition residual is
+        // covered by `ore_composition_gap_is_measured_and_reported`.
         //
         // 5% headroom over the measured value per chunk so this test does
         // not flap on insignificant noise while still catching a real
         // regression.
         let ceiling = match (f.chunk_x, f.chunk_z) {
             (0, 0) => 9_230,      // measured 8787
-            (-120, -120) => 7_040, // measured 6704 — Job 3 closed, see above
+            (-120, -120) => 7_040, // measured 6704
             other => panic!("no measured ceiling recorded for fixture chunk {other:?} — add one"),
         };
         assert!(
@@ -500,16 +456,13 @@ fn composed_pipeline_vs_vanilla_postsurface_reference() {
     }
 }
 
-/// The full-pipeline gate: currently-composed Rust (shape + real aquifer +
-/// biome + surface + carvers + ores, issue #295) vs. vanilla's `postcarve` —
-/// which has NO ore features at all, so composing ores necessarily *widens*
-/// this gap by exactly the ore blocks placed; still missing
-/// vegetation/structures, see this crate's doc comment. This is the "how far
-/// from a real vanilla chunk are we today" number. The assertion is a
-/// **floor**, not a ceiling: it fails if this regresses *below* the measured
-/// baseline (i.e. if any composed stage got worse), and separately reports
-/// the full gap so it's visible without being a pass/fail trap for the next
-/// increment's own work (vegetation features).
+/// The full-pipeline gate compares currently-composed Rust (shape + real
+/// aquifer + biome + surface + carvers + ores) with vanilla's `postcarve`.
+/// That reference has no ore features, so generated ore blocks necessarily
+/// widen this gap; vegetation and structures are also absent, as described in
+/// the crate documentation. The assertion is a **floor**, not a ceiling: it
+/// fails when the match count falls below the measured baseline and reports
+/// the full gap for the stages outside this fixture's scope.
 #[test]
 fn full_vanilla_pipeline_gap_is_measured_and_reported() {
     for f in &fixtures() {
@@ -523,28 +476,17 @@ fn full_vanilla_pipeline_gap_is_measured_and_reported() {
         );
         assert_eq!(report.total, 16 * 16 * f.height as usize);
 
-        // Floor, not ceiling: this compares against `postcarve`, which has
-        // NO ore features at all, so composing ores (issue #295) necessarily
-        // *lowers* this number by exactly however many real ore blocks the
-        // composed pipeline now places — that is the composition working,
-        // matching the same "regressed against the pre-carve reference"
-        // pattern carve composition produced earlier against `postsurface`.
-        // A regression *below* the measured floor here means an
-        // already-composed stage (shape/aquifer/biome/surface/carve) broke,
-        // not that ore composition is "worse."
+        // Floor, not ceiling: `postcarve` has no ore features, so generated
+        // ore blocks reduce the match count even though ore composition is
+        // functioning. A result below the floor indicates a regression in an
+        // already-composed shape, aquifer, biome, surface, or carver stage.
         //
-        // Measured after composing ores: chunk (0,0) 88733/98304 match,
-        // 5727 real mismatches (down from the pre-ore 94460/0 baseline by
-        // exactly the ore blocks placed — see `ore_composition_gap_is_measured_and_reported`
-        // for the vs-`postfeatures` breakdown of that number).
-        //
-        // Chunk (-120,-120) used to be 87508/98304, 10790 real — dominated by
-        // the badlands-exclusion gap (Job 3). `3cf523c` closed Job 3
-        // (`usable_overworld_table` is now a pass-through); re-measured here
-        // at 92061/98304, 6237 real.
+        // Current fixture measurements are 88733/98304 matches and 5727 real
+        // mismatches for (0,0), and 92061/98304 matches and 6237 real
+        // mismatches for (-120,-120).
         let floor = match (f.chunk_x, f.chunk_z) {
             (0, 0) => 88_700,       // measured 88733
-            (-120, -120) => 92_000, // measured 92061 — Job 3 closed, see above
+            (-120, -120) => 92_000, // measured 92061
             other => panic!("no measured floor recorded for fixture chunk {other:?} — add one"),
         };
         assert!(
@@ -570,15 +512,12 @@ fn full_vanilla_pipeline_gap_is_measured_and_reported() {
     }
 }
 
-/// Issue #295's headline claim, made assertable rather than eyeballed.
-/// `docs/worldgen-parity.md` named chunk (0,0)'s pre-#295 postcarve gap as
-/// "dominated by `water -> stone`, 2780 positions" — vanilla's flooded caves,
-/// which the (then uncomposed) carvers/aquifer could not produce. Per
-/// `CLAUDE.md`'s "predict the value, do not merely assert the sign of the
-/// change": this predicts the bucket lands at exactly zero once the real
-/// aquifer + carvers are composed, and asserts that value — not just "fewer
-/// mismatches than before," which a differently-wrong composition could also
-/// satisfy.
+/// Specific mismatch gate for chunk (0,0). The committed `postcarve`
+/// reference contains water in flooded caves, so the generated column should
+/// reproduce those cells rather than leaving stone in their positions. The
+/// zero target is exact: checking the bucket count prevents a differently
+/// wrong composition from passing merely because it produces fewer total
+/// mismatches.
 #[test]
 fn water_to_stone_bucket_is_resolved_for_chunk_0_0() {
     let f = fixtures()
@@ -607,9 +546,9 @@ fn water_to_stone_bucket_is_resolved_for_chunk_0_0() {
         "the water->stone bucket (vanilla's flooded caves) should be fully resolved by \
          composing the real aquifer + carvers — got {water_to_stone} remaining"
     );
-    // Anti-vacuity: the fixture must still actually contain the water vanilla
-    // carved into this chunk, so a diff engine that visited nothing (or a
-    // fixture gone stale to all-air) couldn't pass this by accident.
+    // Anti-vacuity: the fixture must contain enough reference water in this
+    // chunk for the bucket to be exercised, so an empty traversal or stale
+    // all-air fixture cannot pass the gate by accident.
     let water_cells = (0..16)
         .flat_map(|lx| (0..16).map(move |lz| (lx, lz)))
         .flat_map(|(lx, lz)| (f.min_y..f.min_y + f.height).map(move |y| (lx, y, lz)))
