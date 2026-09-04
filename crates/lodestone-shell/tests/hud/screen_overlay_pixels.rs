@@ -66,6 +66,27 @@ fn png(w: u32, h: u32, rgba: [u8; 4]) -> Vec<u8> {
     out
 }
 
+fn border_vignette_png() -> Vec<u8> {
+    let mut buf = vec![0u8; (W * H * 4) as usize];
+    for y in 0..H {
+        for x in 0..W {
+            let edge = x < 32 || x >= W - 32 || y < 32 || y >= H - 32;
+            let rgba = if edge { [255, 255, 255, 255] } else { [0, 0, 0, 255] };
+            let offset = ((y * W + x) * 4) as usize;
+            buf[offset..offset + 4].copy_from_slice(&rgba);
+        }
+    }
+    let mut out = Vec::new();
+    {
+        let mut enc = png::Encoder::new(&mut out, W, H);
+        enc.set_color(png::ColorType::Rgba);
+        enc.set_depth(png::BitDepth::Eight);
+        let mut writer = enc.write_header().unwrap();
+        writer.write_image_data(&buf).unwrap();
+    }
+    out
+}
+
 /// A synthetic pack: an opaque white `underwater.png` (unambiguous against
 /// any background) and an opaque orange 32-frame `fire_1.png` strip.
 fn manager() -> ResourceManager {
@@ -97,6 +118,10 @@ fn manager() -> ResourceManager {
     src.insert(
         "assets/minecraft/textures/block/nether_portal.png".to_string(),
         png(16, 16 * 32, [200, 40, 200, 255]),
+    );
+    src.insert(
+        "assets/minecraft/textures/misc/vignette.png".to_string(),
+        border_vignette_png(),
     );
     ResourceManager::new(vec![Box::new(src)])
 }
@@ -266,6 +291,99 @@ fn underwater_overlay_reaches_the_screen_through_render_with_effects() {
     );
 }
 
+/// The existing border-strength producer reaches a dedicated render draw,
+/// while the exact zero-strength mutation opens no pass. The synthetic white
+/// mask changes the whole frame, making a missing route impossible to hide in
+/// the first-person arm's small pixel footprint.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn border_warning_strength_reaches_pixels_and_zero_is_a_real_control() {
+    let ctx = ctx();
+    let (device, queue) = (ctx.device(), ctx.queue());
+    let format = wgpu::TextureFormat::Rgba8Unorm;
+    let mut target = HeadlessTarget::new(device, W, H, format);
+    let cam = camera();
+
+    let mut warning = RenderState::new(device, queue, format, W, H, None);
+    warning.install_screen_effects(
+        ScreenEffectRenderer::new(device, queue, format, &manager()).expect("build over synthetic pack"),
+    );
+    let frame = target.acquire().expect("acquire");
+    let warning_stats = warning.render_with_effects(
+        device,
+        queue,
+        frame.view(),
+        &cam,
+        None,
+        &[],
+        ScreenEffects {
+            wearing_pumpkin: true,
+            border_warning_strength: 0.5,
+            ..ScreenEffects::default()
+        },
+    );
+    let warning_pixels = target.read_texels(device, queue);
+
+    let mut zero = RenderState::new(device, queue, format, W, H, None);
+    zero.install_screen_effects(
+        ScreenEffectRenderer::new(device, queue, format, &manager()).expect("build over synthetic pack"),
+    );
+    let frame = target.acquire().expect("acquire");
+    let zero_stats = zero.render_with_effects(
+        device,
+        queue,
+        frame.view(),
+        &cam,
+        None,
+        &[],
+        ScreenEffects {
+            wearing_pumpkin: true,
+            border_warning_strength: 0.0,
+            ..ScreenEffects::default()
+        },
+    );
+    let zero_pixels = target.read_texels(device, queue);
+
+    let changed = differs_fraction(&warning_pixels, &zero_pixels);
+    let mut edge_changed = 0usize;
+    let mut edge_total = 0usize;
+    let mut centre_changed = 0usize;
+    let mut centre_total = 0usize;
+    for y in 0..H {
+        for x in 0..W {
+            let offset = ((y * W + x) * 4) as usize;
+            let a = &warning_pixels[offset..offset + 4];
+            let b = &zero_pixels[offset..offset + 4];
+            let delta = (i32::from(a[0]) - i32::from(b[0])).abs()
+                + (i32::from(a[1]) - i32::from(b[1])).abs()
+                + (i32::from(a[2]) - i32::from(b[2])).abs();
+            if x < 28 || x >= W - 28 || y < 28 || y >= H - 28 {
+                edge_total += 1;
+                edge_changed += usize::from(delta > 12);
+            } else if x >= 40 && x < W - 40 && y >= 40 && y < H - 40 {
+                centre_total += 1;
+                centre_changed += usize::from(delta > 12);
+            }
+        }
+    }
+    let edge_fraction = edge_changed as f64 / edge_total as f64;
+    let centre_fraction = centre_changed as f64 / centre_total as f64;
+    assert!(warning_stats.border_warning_overlay_drawn, "positive strength must issue the warning draw");
+    assert!(!zero_stats.border_warning_overlay_drawn, "zero-strength mutation must issue no warning draw");
+    assert!(
+        edge_fraction > 0.95,
+        "warning should change the synthetic mask's edge, only {:.1}% differed ({})",
+        edge_fraction * 100.0,
+        differs_bbox(&warning_pixels, &zero_pixels, W),
+    );
+    assert!(
+        centre_fraction < 0.01,
+        "warning must leave the black centre of the mask unchanged, {:.1}% differed; whole-frame {:.1}%",
+        centre_fraction * 100.0,
+        changed * 100.0,
+    );
+}
+
 /// The fire overlay, through the real `render_with_effects` path, must
 /// change rows matching its real two-quad geometry's predicted vertical
 /// extent (`fire_overlay_vertical_extent`, that fix) — not the retired
@@ -430,6 +548,7 @@ fn spectator_suppresses_both_overlays() {
             scoping: true,
             nausea_intensity: 1.0,
             portal_intensity: 1.0,
+            border_warning_strength: 0.0,
         },
     );
 
@@ -531,6 +650,7 @@ fn freeze_confusion_and_portal_survive_third_person_unlike_the_others() {
             freeze_percent: 1.0,
             nausea_intensity: 1.0,
             portal_intensity: 1.0,
+            border_warning_strength: 0.0,
             spectator: false,
             tick: 0,
         },

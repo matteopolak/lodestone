@@ -6,23 +6,23 @@
 post-hand-pass overlays: underwater tint and scroll, fire, a carved-pumpkin vignette, freezing in
 powder snow, the spyglass scope, the nausea "confusion" swirl, and the nether/end portal swirl
 (portal wins when both are active), plus the world-border warning's cyan vignette tint. In vanilla
-these come from two different mechanisms — its own screen-effect submission for underwater/fire, and
-its own camera-overlay extraction for the rest — but all share one "textured, alpha-blended, screen-space
-quad after the hand pass" shape, so this port draws all of them through one pipeline. Confusion and
-portal additionally drive a world-space projection warp that lives in `camera.rs`, not in this pass.
+these come from several extraction paths. Most share one textured alpha-blended pipeline; the border
+warning uses the same vertex and texture layout but a dedicated multiply-blend pipeline. Confusion
+and portal additionally drive a world-space projection warp that lives in `camera.rs`, not in this
+pass.
 
 ## How it works
 
 ### The pipeline
 
-One `wgpu::RenderPipeline`, one bind group (a texture plus a sampler, nothing else — no camera
-uniform), draws every overlay: each quad is built directly in NDC on the CPU per frame and uploaded
-as a small non-indexed triangle list, the same "rebuilt every frame" choice the sky pass makes. Each
-draw opens its own render pass with `LoadOp::Load` (never `Clear`) and no depth attachment, since it
-runs after the world, entities and the first-person hand and must not erase them or take a
-depth-comparison sign it does not need. This is deliberately the one pass that must never be the one
-to push an adapter over the renderer's 4-bind-group floor — see `docs/architecture.md`'s hard
-constraints before adding a second texture here; prefer a second draw call over a second bind group.
+Two `wgpu::RenderPipeline`s share one bind-group layout (a texture plus a sampler, nothing else — no
+camera uniform) and the same shader. Most overlays use standard alpha blending. The border warning
+uses `ZERO` / `ONE_MINUS_SRC_COLOR` for RGB and preserves destination alpha, which makes the vignette
+texture a multiply mask. Each quad is built directly in NDC on the CPU and uploaded as a small
+non-indexed triangle list. Every draw opens its own render pass with `LoadOp::Load` (never `Clear`)
+and no depth attachment, since it runs after the world, entities and the first-person hand and must
+not erase them or take a depth-comparison sign it does not need. Both pipelines use one bind group,
+so this subsystem stays below the renderer's 4-bind-group floor.
 
 ### Per-effect mechanism
 
@@ -66,6 +66,12 @@ constraints before adding a second texture here; prefer a second draw call over 
   the tick rate rather than per frame (a per-frame ramp would be frame-rate dependent) and read back
   interpolated between the previous and current tick rather than sampled raw, which would paint a
   visible tick-stepped staircase across the ramp.
+- **World-border warning**: `Sim::world_border_warning` produces distance, threshold and strength
+  from the session's server-derived border state. `WindowApp::redraw` samples that tuple once, sends
+  its strength through `ScreenEffects`, and reuses the same tuple for the debug HUD. Positive
+  strength draws `textures/misc/vignette.png` with the multiply pipeline. The source tint is
+  `[1-strength, 1, 1, 1]`, so the blend retains progressively more destination red at the textured
+  edge. Ambient-light vignette darkening is a separate input and is not implemented by this path.
 
 ### Draw order and gating
 
@@ -75,6 +81,9 @@ only, while freeze/confusion/portal are spectator-gated but draw in third person
 `Hud` method nests the first group inside a first-person check and leaves the second group as
 siblings of it, so the two groups are tracked and re-checked separately rather than folded into one
 bool, precisely so a freeze-only third-person frame cannot also fire a stale first-person-only flag.
+The border warning is a third group: it describes a world boundary rather than the player's body,
+so camera and spectator mode do not suppress it. `RenderStats::border_warning_overlay_drawn` records
+the actual draw independently from the other overlay stats.
 
 ### A session-scoped flag needs an explicit reset
 
@@ -90,16 +99,12 @@ the stale value actually diverges from reality.
 
 ### The world-border warning
 
-Vanilla's border warning is not one of this module's overlays — it is a cyan tint applied to the
-existing vignette texture inside vanilla's own vignette-extraction routine, derived from distance to the border, the
-border's warning-blocks setting, and how fast the border is currently moving. It shares this doc
-because it is the same family of "screen darkening keyed off world state" effect and because its
-formula carries a real unit hazard worth recording: one of vanilla's own inputs to the "how fast is
-the border moving" term is denominated in ticks, not milliseconds, and if a port stores that duration
-in milliseconds instead the moving term comes out twenty times too small. It fails safe rather than
-wrong: a `max` against the static warning-blocks floor still makes the tint appear at the right
-distance, so only the *early* warning for an incoming shrink is foreshortened, and the static case
-(no border currently resizing) is exact either way.
+The warning strength is derived from distance to the border, the border's warning-block setting, and
+how fast the border is currently moving. One input to the moving threshold is denominated in ticks,
+not milliseconds; storing that duration in milliseconds makes the moving term twenty times too
+small. The static warning-block floor masks that error for a stationary border, so tests must include
+an incoming shrink. This consumer deliberately supplies settled brightness `1.0`; the separate
+ambient-light vignette contribution remains out of scope.
 
 ## How to change it
 
@@ -110,7 +115,7 @@ distance, so only the *early* warning for an incoming shrink is foreshortened, a
   the rest of the renderer. Only RGB goes through the round trip; alpha is coverage and is never
   gamma-encoded. Doing the multiply in linear light washes out both overlays, most visibly
   underwater's already-subtle tint.
-- **Two independent gate groups, not one** — see "Draw order and gating" above. A new overlay's
+- **Three independent gate groups, not one** — see "Draw order and gating" above. A new overlay's
   gating should be decided by checking which of vanilla's two `Hud` groups it belongs to, not by
   assuming it follows the majority.
 - **The projection warp lives in `camera.rs`, not here** — a formula change to the confusion/portal
@@ -126,10 +131,12 @@ distance, so only the *early* warning for an incoming shrink is foreshortened, a
 
 ## Configuration
 
-None. Every texture loads from whichever `client.jar`/resource pack the renderer's asset root
-already resolves, the same as the sky pass, and loading is fail-open: a jar-less run or a pack
-missing one of these textures leaves the renderer with no overlay pass installed rather than failing
-to start. There is no env var or flag specific to this pass.
+Every texture loads from whichever `client.jar`/resource pack the renderer's asset root already
+resolves, the same as the sky pass. The vignette asset is required by `ScreenEffectRenderer::new`, as
+are the other overlay assets; the shell's resource installation remains fail-open and leaves the
+whole optional pass uninstalled if any required texture is absent. There is no env var or live flag
+specific to this pass. The existing inactive Show Vignette menu row is not wired into
+`ScreenEffects` and does not control the warning draw.
 
 ## Dependencies
 
@@ -141,8 +148,9 @@ to start. There is no env var or flag specific to this pass.
   call inside the main render pass behind its own gate, and tracks per-effect "did this draw" stats
   used by its own pixel-level tests.
 - The shell's per-frame input construction — computes each effect's live value (eye-in-water,
-  on-fire, wearing-pumpkin, freeze percentage, spyglass scoping, nausea/portal intensity, spectator
-  state) from session and simulation state each frame and feeds it into the render call.
+  on-fire, wearing-pumpkin, freeze percentage, spyglass scoping, nausea/portal intensity, border
+  warning strength, spectator state) from session and simulation state each frame and feeds it into
+  the render call.
 - `lodestone-physics`'s player state — owns the freeze mechanic (ticks frozen, percent frozen),
   consumed here rather than duplicated.
 - `docs/lighting-and-sky.md` — the lightmap curve underwater's brightness term reuses.

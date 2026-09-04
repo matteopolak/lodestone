@@ -79,6 +79,12 @@ fn manager() -> ResourceManager {
         "assets/minecraft/textures/block/nether_portal.png".to_string(),
         png(16, 16 * 32, [200, 40, 200, 255]),
     );
+    // Opaque white mask makes the multiply blend's channel factors directly
+    // observable across the entire target.
+    src.insert(
+        "assets/minecraft/textures/misc/vignette.png".to_string(),
+        png(256, 256, [255, 255, 255, 255]),
+    );
     ResourceManager::new(vec![Box::new(src)])
 }
 
@@ -156,6 +162,49 @@ fn underwater_overlay_paints_the_whole_frame() {
         "expected the underwater overlay to cover the whole frame, only {:.1}% non-black",
         frac * 100.0
     );
+}
+
+/// The warning uses a dedicated multiply blend rather than the shared alpha
+/// pipeline. Starting from the opaque green pumpkin texture and applying a
+/// half-strength, all-white vignette predicts red near 20 and green/blue near
+/// zero across the target: standard alpha blending cannot produce that tuple.
+#[test]
+#[ignore = "requires a GPU adapter"]
+fn border_warning_uses_the_multiply_blend_pipeline() {
+    let Some(ctx) = ctx() else { return };
+    let fx = ScreenEffectRenderer::new(
+        ctx.device(),
+        ctx.queue(),
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        &manager(),
+    )
+    .expect("build screen-effect renderer over the synthetic pack");
+    let mut target = HeadlessTarget::new(
+        ctx.device(),
+        WIDTH,
+        HEIGHT,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+    );
+    let frame = target.acquire().expect("acquire");
+    let mut encoder = ctx.device().create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("border-warning-gpu-test-encoder"),
+    });
+    fx.draw_pumpkin(&mut encoder, frame.view());
+    fx.draw_border_warning(ctx.queue(), &mut encoder, frame.view(), 0.5);
+    ctx.queue().submit(std::iter::once(encoder.finish()));
+
+    let pixels = target.read_texels(ctx.device(), ctx.queue());
+    let mut sums = [0u64; 3];
+    let mut count = 0u64;
+    for px in pixels.chunks_exact(4) {
+        for channel in 0..3 {
+            sums[channel] += u64::from(px[channel]);
+        }
+        count += 1;
+    }
+    let avg = sums.map(|sum| sum as f64 / count as f64);
+    assert!(avg[0] > 8.0 && avg[0] < 35.0, "half of source red 40 should survive, got {avg:?}");
+    assert!(avg[1] < 5.0 && avg[2] < 5.0, "cyan source factors must remove destination green/blue, got {avg:?}");
 }
 
 /// The fire overlay, drawn onto a black target, must paint rows matching

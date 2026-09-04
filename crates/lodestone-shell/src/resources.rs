@@ -1194,11 +1194,11 @@ pub fn load_sky(
     }
 }
 
-/// Load and build the underwater/fire screen-overlay pass (`textures/misc/underwater.png`,
-/// `textures/block/fire_1.png`, from `client.jar`) via [`ScreenEffectRenderer::new`].
-/// Same shape as [`load_sky`]: fail-open, `None` on a jar-less run or a pack
-/// missing either texture, leaving [`crate::gpu::RenderState`] with no overlay
-/// pass installed rather than failing startup.
+/// Load and build the required screen-effect textures and pipelines via
+/// [`ScreenEffectRenderer::new`]. Same shape as [`load_sky`]: fail-open,
+/// `None` on a jar-less run or a pack missing any required texture, leaving
+/// [`crate::gpu::RenderState`] with no overlay pass installed rather than
+/// failing startup.
 #[must_use]
 pub fn load_screen_effects(
     device: &wgpu::Device,
@@ -1208,7 +1208,7 @@ pub fn load_screen_effects(
     let manager = open_vanilla_pack_stack()?;
     match ScreenEffectRenderer::new(device, queue, color_format, &manager) {
         Ok(fx) => {
-            tracing::info!(target: "assets", "loaded underwater/fire screen overlays");
+            tracing::info!(target: "assets", "loaded screen-effect overlays");
             Some(fx)
         }
         Err(e) => {

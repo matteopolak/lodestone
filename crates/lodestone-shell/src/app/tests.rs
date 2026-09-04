@@ -54,6 +54,134 @@ fn ordinary_policy_remains_persisted_option_driven() {
     assert!(should_background_pace(&config));
 }
 
+fn open_test_stonecutter(
+    app: &mut WindowApp,
+    result_count: usize,
+) -> lodestone_client::OpenMenuSnapshot {
+    use lodestone_client::ClientEvent;
+
+    const WINDOW_ID: i32 = 17;
+    let stone_id = lodestone_data::items::item_id("minecraft:stone")
+        .expect("the generated table knows stone");
+    let slab_id = lodestone_data::items::item_id("minecraft:stone_slab")
+        .expect("the generated table knows stone slabs");
+    let ingest = |event| {
+        app.sim
+            .net()
+            .expect("the test attached a loopback client")
+            .ingest_session_event(event);
+    };
+    ingest(ClientEvent::ScreenOpened {
+        window_id: WINDOW_ID,
+        menu_type: "minecraft:stonecutter".parse().unwrap(),
+        title: lodestone_model::Text::literal("Stonecutter"),
+    });
+    let mut items = vec![None; 38];
+    items[0] = Some(lodestone_model::ItemStack::new(
+        "minecraft:stone".parse().unwrap(),
+        1,
+    ));
+    ingest(ClientEvent::ContainerContent {
+        window_id: WINDOW_ID,
+        state_id: 1,
+        items,
+        carried_item: None,
+    });
+    ingest(ClientEvent::RecipePropertySetsUpdated {
+        item_sets: Vec::new(),
+        stonecutter_results: (0..result_count)
+            .map(|_| (vec![stone_id], vec![slab_id]))
+            .collect(),
+    });
+    app.sim.open_menu().expect("the server stonecutter opens")
+}
+
+fn point_at_stonecutter_index(
+    menu: &lodestone_game::menu::Menu,
+    index: i32,
+    start: i32,
+) -> (f32, f32) {
+    let width = 1280;
+    let height = 720;
+    let layout = crate::container::slot_layout(menu);
+    let (panel_x, panel_y) = crate::container::panel_origin_with_scale(
+        &layout,
+        crate::config::AUTO_GUI_SCALE,
+        width,
+        height,
+    );
+    let scale = crate::config::calculate_gui_scale(
+        crate::config::AUTO_GUI_SCALE,
+        width,
+        height,
+    )
+    .max(1) as f32;
+    let rect = crate::container::stonecutter::grid_rect(index, start)
+        .expect("the requested result is visible");
+    ((panel_x + rect.x + 1.0) * scale, (panel_y + rect.y + 1.0) * scale)
+}
+
+#[test]
+fn stonecutter_scroll_and_click_use_the_visible_server_index_when_local_recipes_are_empty() {
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, actions) = NetClient::loopback();
+    app.sim.attach_net(net);
+    app.recipe_book = Some(lodestone_game::recipe::RecipeBook::new());
+    let open = open_test_stonecutter(&mut app, 16);
+    app.ui.enter_dev_world();
+    app.ui.open_container();
+
+    assert!(
+        app.scroll_stonecutter(-1.0),
+        "the server's offscreen row consumes the wheel"
+    );
+    assert_eq!(app.stonecutter_scroll, 1.0);
+    app.cursor = point_at_stonecutter_index(&open.menu, 4, 4);
+    assert!(app.handle_stonecutter_click(&open.menu, 1280, 720));
+    assert_eq!(
+        actions.try_recv(),
+        Ok(lodestone_model::ClientAction::ContainerButtonClick {
+            window_id: 17,
+            button_id: 4,
+        }),
+        "the first cell after scrolling must retain server button id 4"
+    );
+}
+
+#[test]
+fn stonecutter_click_rejects_a_local_recipe_the_server_did_not_offer() {
+    use lodestone_game::item::ItemStack;
+    use lodestone_game::recipe::{Ingredient, Recipe, RecipeBook};
+
+    let mut app = WindowApp::new(Config {
+        mode: Mode::Headless,
+        ..Config::default()
+    });
+    let (net, actions) = NetClient::loopback();
+    app.sim.attach_net(net);
+    let stone = "minecraft:stone".parse().unwrap();
+    let mut local = RecipeBook::new();
+    local.insert(
+        "minecraft:local_only_stonecutting".parse().unwrap(),
+        Recipe::Stonecutting {
+            ingredient: Ingredient::Item(stone),
+            result: ItemStack::new("minecraft:stone_slab".parse().unwrap(), 1),
+        },
+    );
+    app.recipe_book = Some(local);
+    let open = open_test_stonecutter(&mut app, 0);
+    app.cursor = point_at_stonecutter_index(&open.menu, 0, 0);
+
+    assert!(!app.handle_stonecutter_click(&open.menu, 1280, 720));
+    assert!(
+        actions.try_recv().is_err(),
+        "a local-only recipe must send no button click"
+    );
+}
+
 /// Java's `String.hashCode()`, computed by hand from the well-known
 /// public algorithm — an oracle that lives outside this file, per
 /// `CLAUDE.md`'s evidence standard. `"hello"`: `h = 0`, then

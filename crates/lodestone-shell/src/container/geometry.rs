@@ -1435,19 +1435,13 @@ fn draw_beacon_panel(
 
 /// Draws the stonecutter's up-to-twelve visible recipe-button icons from
 /// `frame.stonecutter_matches` — the server's own authoritative result list
-/// (`super::stonecutter::server_matches`), not a locally re-derived guess. A
-/// no-op for every other screen (`menu.special_layout()` is not
-/// `Stonecutter`) and for an empty list (no input item held, or
-/// `update_recipes` has not arrived yet), which is what keeps every existing
-/// caller — the headless builds, the pixel gates, `tests/container_screen.rs`
-/// — unchanged.
-///
-/// `start_index` is pinned at `0`: the persisted scroll offset lives on
-/// `WindowApp` (`app/container_input.rs`), outside this crate, and is not
-/// threaded into `ContainerFrame` yet. Every one of the up-to-twelve visible
-/// cells still draws correctly at that offset; only scrolling past the first
-/// page is not yet reflected here — the same disclosed cut the wheel-scroll
-/// half of this screen already had before it was wired.
+/// (`super::stonecutter::server_results_for_menu`), not a locally re-derived
+/// guess. A no-op for every other screen (`menu.special_layout()` is not
+/// `Stonecutter`) and for an empty list (no input item held, or `update_recipes`
+/// has not arrived yet), which is what keeps every existing caller — the
+/// headless builds, the pixel gates, `tests/container_screen.rs` — unchanged.
+/// Pagination precedes icon filtering: an unresolvable server row leaves its
+/// cell blank, while later rows keep both their visual position and button id.
 fn draw_stonecutter_grid(
     b: &mut Builder<'_>,
     menu: &Menu,
@@ -1459,11 +1453,12 @@ fn draw_stonecutter_grid(
     if menu.special_layout() != Some(SpecialLayout::Stonecutter) {
         return;
     }
-    const START_INDEX: i32 = 0;
-    for (i, stack) in frame.stonecutter_matches.iter().enumerate() {
-        let Ok(index) = i32::try_from(i) else { break };
-        let Some(rect) = super::stonecutter::grid_rect(index, START_INDEX) else {
-            break;
+    for (index, stack) in super::stonecutter::visible_server_results(
+        frame.stonecutter_matches,
+        frame.stonecutter_start_index,
+    ) {
+        let Some(rect) = super::stonecutter::grid_rect(index, frame.stonecutter_start_index) else {
+            continue;
         };
         b.draw_stack(assets, stack, x + rect.x, y + rect.y);
     }

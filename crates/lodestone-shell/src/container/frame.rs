@@ -237,18 +237,18 @@ pub struct ContainerFrame<'a> {
     /// ingredients, which a local grid match cannot predict from an
     /// incomplete or empty grid.
     pub recipe_ghost: Option<&'a ItemStack>,
-    /// The stonecutter's own result grid, already resolved to drawable
-    /// stacks and already filtered to whatever the input slot holds — see
-    /// `crate::container::stonecutter::server_matches`. `&[]` (the default)
-    /// draws no buttons, matching every existing caller (headless builds,
-    /// the pixel gates, `tests/container_screen.rs`).
+    /// The stonecutter's server result rows, already filtered to whatever the
+    /// input slot holds — see
+    /// `crate::container::stonecutter::server_results_for_menu`. `&[]` (the
+    /// default) draws no buttons, matching every existing caller (headless
+    /// builds, the pixel gates, `tests/container_screen.rs`).
     ///
-    /// This is the server's own authoritative list
-    /// (`lodestone_game::recipe_sync::RecipeBookSync::stonecutter_results_for`),
-    /// not `crate::container::stonecutter::matches`'s local recipe-book
-    /// guess: the two agree on this build's own bundled corpus but only this
-    /// field is correct against a server running a different datapack.
-    pub stonecutter_matches: &'a [ItemStack],
+    /// A `None` row draws no icon but retains its server button index; removing
+    /// it would shift every later click. [`Self::stonecutter_start_index`] is
+    /// the page start computed from the same list and scroll offset.
+    pub stonecutter_matches: &'a [Option<ItemStack>],
+    /// First server result index on the visible stonecutter page.
+    pub stonecutter_start_index: i32,
 }
 
 impl<'a> ContainerFrame<'a> {
@@ -282,6 +282,7 @@ impl<'a> ContainerFrame<'a> {
             bundle_selection: None,
             recipe_ghost: None,
             stonecutter_matches: &[],
+            stonecutter_start_index: 0,
             effects: &[],
         }
     }
@@ -314,6 +315,7 @@ impl<'a> ContainerFrame<'a> {
             bundle_selection: None,
             recipe_ghost: None,
             stonecutter_matches: &[],
+            stonecutter_start_index: 0,
             effects: &[],
         }
     }
@@ -449,8 +451,13 @@ impl<'a> ContainerFrame<'a> {
     /// Attach the stonecutter's server-derived result grid — see
     /// [`stonecutter_matches`](Self::stonecutter_matches).
     #[must_use]
-    pub fn with_stonecutter_matches(mut self, matches: &'a [ItemStack]) -> Self {
+    pub fn with_stonecutter_matches(
+        mut self,
+        matches: &'a [Option<ItemStack>],
+        start_index: i32,
+    ) -> Self {
         self.stonecutter_matches = matches;
+        self.stonecutter_start_index = start_index;
         self
     }
 

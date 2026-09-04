@@ -431,6 +431,10 @@ pub struct RenderStats {
     /// Whether the portal overlay drew this frame — not
     /// first-person-gated, keyed on `ScreenEffects::portal_intensity > 0.0`.
     pub portal_overlay_drawn: bool,
+    /// Whether the world-border warning vignette drew this frame, keyed on
+    /// `ScreenEffects::border_warning_strength > 0.0`. This screen-level
+    /// effect is not suppressed by camera or spectator mode.
+    pub border_warning_overlay_drawn: bool,
     /// Block-entity rigs drawn this frame — chests today.
     ///
     /// Its own counter, not folded into `entities_drawn`, for the reason

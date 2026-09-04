@@ -41,11 +41,10 @@ still need a gate.
   `WorldBorder::lerp_size_between` through the shared `BorderFeed`. The tick loop calls
   `border.with(WorldBorder::tick)` before the remaining world tick, so a timed resize advances in
   production and reaches every client using that feed.
-- **B2 (border client consumer) has its state path wired:** the six border events route to SESSION
-  (`event.rs`'s `route()`), fold into
-  `SessionWorldBorder`, and reach the debug overlay (`sim::session::border_warning`). The vignette
-  pixel consumer (`misc/vignette.png` + a multiply blend state) is
-  still unbuilt.
+- **B2 (border client consumer) is wired through pixels:** the six border events route to SESSION
+  (`event.rs`'s `route()`), fold into `SessionWorldBorder`, and feed
+  `sim::session::border_warning`. One sampled tuple drives both the debug overlay and the required
+  `misc/vignette.png` multiply-blend draw through `ScreenEffects`.
 - **S1 (sleep) includes the wake packet.** `sleep.rs`
   (479 lines) implements the world-global vote (`SleepVote`) and the tick-owned skip arithmetic
   (`SleepState`), and `ServerBound::PlayerCommand`'s `STOP_SLEEPING` arm (action 0) is handled, not
@@ -399,17 +398,19 @@ pathspec commits.
 
 ### B2 — border client consumer
 
-- **Current state:** border events already route to `session` and fold into
+- **Current state:** border events route to `session` and fold into
   `lodestone_ecs::session::SessionWorldBorder` via `apply_world_border`, stamped from
-  `FrameClock`. The formula is gated by `sim::session::border_warning` and appears in the debug
-  overlay; no event-route or `net.rs` change is required.
-- **Remaining consumer:** apply the warning's cyan tint to the HUD vignette when
-  `distance_to_border < max(warning_blocks, speed * warning_time_ticks)`. This needs
-  `misc/vignette.png` and a multiply blend state in `lodestone-render/src/screen_effects.rs`.
-  The animated wall is separate rendering work.
-- **Gate:** with a border 10 blocks away and `warning_blocks` 5, assert no vignette; at 4 blocks,
-  assert cyan coverage in the screen-edge rectangle above a threshold and print a bounding box on
-  failure. Disable the vignette input once and observe that the same pixel gate fails.
+  `FrameClock`. The formula in `sim::session::border_warning` is sampled once per redraw; its
+  strength feeds `ScreenEffects::border_warning_strength`, while the full tuple is reused by the
+  debug overlay. No event-route or `net.rs` change is required.
+- **Visual consumer:** positive strength draws `misc/vignette.png` through a dedicated multiply
+  pipeline in `lodestone-render::screen_effects`; `RenderStats::border_warning_overlay_drawn`
+  exposes whether the pass actually ran. The animated wall and ambient-light vignette are separate
+  rendering work.
+- **Gate:** formula tests distinguish the static and moving thresholds. Pure geometry tests pin the
+  full-screen quad and clamped tint, a direct GPU test distinguishes multiply from alpha blending,
+  and the shell pixel route compares positive strength against an executed zero-strength mutation
+  while printing a differing-pixel bounding box on failure.
 
 ### S1 — sleep and the night-skip vote (blocked on shape B + T1 + W1 + R1)
 
@@ -509,6 +510,6 @@ End selection and portal travel:   D1
    plain state, but R2 and shape-B-dependent units overlap the migration's own first steps.
    Mitigation: R2 is explicitly the migration's pilot candidate; the orchestrator brokers which
    plan moves first, and no unit builds new locked shared state.
-3. **Client islands.** Border, game-rule, and spawn events now reach session state, but a session
-   update is not a rendered feature. The border vignette remains the concrete pixel consumer;
-   gate it by pixels and behavior, never by a cell update alone.
+3. **Client islands.** A session update is not a rendered feature. The border path closes through a
+   concrete vignette draw and pixel gate; game-rule and spawn work must meet the same standard rather
+   than stopping at a cell update.

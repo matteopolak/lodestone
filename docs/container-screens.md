@@ -149,18 +149,15 @@ loom grid → recipe-book panel → ordinary slot click); each stage only sees a
 refused, so adding a new click surface means adding it to every later stage's guard, not just its own
 line.
 
-The stonecutter and loom differ from the enchanting table in that their offer *lists* are
-server-computed data the client has to reconstruct rather than a number streamed over the wire. The
-stonecutter mirrors the shell's own already-loaded recipe book, filtered by the input item — an
-independent re-derivation of the server's equivalent function, agreeing because both walk the same
-recipe corpus, not because one calls the other. The loom's offer list is a small hardcoded table
-transcribed from the pack's own banner-pattern tag JSON (a pattern item does not always grant its own
-namesake pattern) and is duplicated rather than shared between client and server, since there's no
-crate boundary either could cross — re-derive from the jar's tag data on both sides if it ever needs a
-new row, never guess the identity mapping. Both grids' scroll math is wheel-only; the scrollbar
-thumb-drag is a disclosed cut, since vanilla's own thumb-drag geometry is not even internally
-consistent between click-start and continuation. Neither grid draws icon-level recipe/pattern art —
-only the click surfaces exist.
+The stonecutter's ordered result rows arrive in recipe synchronization data and are the single source
+for its redraw, wheel range and click validation. This matters for datapacked servers: consulting the
+shell's bundled `RecipeBook` could draw one order while sending a button id for another. The frame
+carries both the server rows and the start index derived from the persisted wheel offset; drawing
+applies `skip(start).take(12)` before filtering unresolvable icons, so a blank row cannot renumber a
+later server button. The loom's offer list is instead a small hardcoded table transcribed from the
+pack's banner-pattern tag JSON (a pattern item does not always grant its namesake pattern). Both grids'
+scroll math is wheel-only; scrollbar thumb-drag remains unwired. Stonecutter result icons draw from the
+server rows, while loom pattern icons remain a disclosed cut.
 
 ## Creative inventory
 
