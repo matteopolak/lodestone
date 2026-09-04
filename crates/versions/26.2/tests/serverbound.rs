@@ -5,6 +5,8 @@
 
 #[path = "serverbound/serverbound_actions.rs"]
 mod serverbound_actions;
+#[path = "serverbound/serverbound_block_entity_query.rs"]
+mod serverbound_block_entity_query;
 #[path = "serverbound/serverbound_backlog.rs"]
 mod serverbound_backlog;
 #[path = "serverbound/serverbound_change_game_mode.rs"]

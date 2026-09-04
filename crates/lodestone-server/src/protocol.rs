@@ -1081,6 +1081,13 @@ pub enum ServerBound {
     /// The client completed its initial placement and is ready for movement
     /// dependent simulation.
     PlayerLoaded,
+    /// Requests the authoritative block-entity data for operator inspection.
+    BlockEntityTagQuery {
+        /// Correlation id echoed in the response.
+        transaction_id: i32,
+        /// Position in the player's current dimension.
+        pos: BlockPos,
+    },
     /// The client closed a container screen (`ServerboundContainerClosePacket`).
     /// `window_id` is the id the client had open — vanilla's
     /// `ServerPlayer::doCloseContainer` compares this against nothing at all
@@ -2695,6 +2702,13 @@ pub trait ServerProtocol: Send + Sync {
         ServerDirective::None
     }
 
+    /// Answers an operator NBT query. `None` means no block entity exists.
+    /// Unsupported hosting families emit nothing.
+    fn encode_tag_query(&self, transaction_id: i32, tag: Option<&lodestone_core::Nbt>) -> ServerDirective {
+        let _ = (transaction_id, tag);
+        ServerDirective::None
+    }
+
     /// Encodes one [`crate::effects::WorldEffect`] by dispatching to whichever
     /// of the encoders above it names.
     ///
@@ -3623,6 +3637,10 @@ impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P> {
         nbt: &lodestone_core::Nbt,
     ) -> ServerDirective {
         (**self).encode_block_entity_data(pos, block_entity_type, nbt)
+    }
+
+    fn encode_tag_query(&self, transaction_id: i32, tag: Option<&lodestone_core::Nbt>) -> ServerDirective {
+        (**self).encode_tag_query(transaction_id, tag)
     }
 
     fn encode_air_supply_update(&self, air: i32) -> ServerDirective {

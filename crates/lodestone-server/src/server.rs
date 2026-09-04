@@ -3925,6 +3925,7 @@ where
             | ServerBound::RecipeBookSettingsChanged { .. }
             | ServerBound::ResourcePackResponse { .. }
             | ServerBound::PlayerLoaded
+            | ServerBound::BlockEntityTagQuery { .. }
             | ServerBound::ContainerClosed { .. }
             | ServerBound::Attack { .. }
             | ServerBound::InteractEntity { .. }
@@ -9691,13 +9692,81 @@ fn apply_spectator_action(
     }
 }
 
-/// Maps a wire hand ordinal (`0` main, `1` off) to
-/// `ClientboundAnimatePacket`'s own action byte (`SWING_MAIN_HAND = 0`,
-/// `SWING_OFF_HAND = 3`) — see vanilla's own `ClientboundAnimatePacket` constants,
-/// which `ServerProtocol::encode_animate`'s own doc comment already names.
-/// Anything outside `0..=1` degrades to the main-hand swing, the same
-/// "malformed input degrades the effect" convention `ServerBound::Swing`'s
-/// own decode arm already applies at the wire boundary.
+/// The outer option denies unauthorized requests without a response; the inner
+/// option reports whether the current dimension contains a block entity.
+fn block_entity_query_tag(
+    entities: &BlockEntityHandle,
+    permission_level: u8,
+    pos: BlockPos,
+) -> Option<Option<lodestone_core::Nbt>> {
+    if permission_level < COMMANDS_GAMEMASTER_LEVEL {
+        return None;
+    }
+    Some(entities.with(|registry| {
+        registry.get(pos).map(|entity| {
+            let mut tag = crate::chunk_nbt::block_entity_to_nbt(pos, entity);
+            if let lodestone_core::Nbt::Compound(fields) = &mut tag {
+                fields.retain(|(key, _)| !matches!(key.as_str(), "id" | "x" | "y" | "z" | "keepPacked"));
+            }
+            tag
+        })
+    }))
+}
+
+#[cfg(test)]
+mod block_entity_query_tests {
+    use super::*;
+    use lodestone_core::Nbt;
+
+    #[test]
+    fn block_entity_query_checks_permission_and_strips_only_metadata() {
+        let entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(-3, -17, 5);
+        entities.with(|registry| registry.insert(pos, crate::block_entities::BlockEntity::Opaque {
+            id: "minecraft:chest".into(),
+            nbt: Nbt::Compound(vec![
+                ("id".into(), Nbt::String("minecraft:chest".into())),
+                ("x".into(), Nbt::Int(-3)),
+                ("y".into(), Nbt::Int(-17)),
+                ("z".into(), Nbt::Int(5)),
+                ("CustomName".into(), Nbt::String("Supplies".into())),
+            ]),
+        }));
+        assert_eq!(block_entity_query_tag(&entities, 1, pos), None);
+        assert_eq!(block_entity_query_tag(&entities, 2, pos), Some(Some(Nbt::Compound(vec![
+            ("CustomName".into(), Nbt::String("Supplies".into())),
+        ]))));
+        assert_eq!(block_entity_query_tag(&entities, 2, BlockPos::new(9, 8, 7)), Some(None));
+        entities.with(|registry| {
+            let crate::block_entities::BlockEntity::Opaque { nbt: Nbt::Compound(fields), .. } =
+                registry.get(pos).unwrap() else { panic!("opaque compound retained") };
+            assert_eq!(fields.len(), 5, "query must not mutate saved metadata");
+        });
+    }
+
+    #[test]
+    fn block_entity_query_serializes_the_live_container() {
+        let entities = BlockEntityHandle::new();
+        let pos = BlockPos::new(7, 64, -9);
+        entities.with(|registry| registry.insert(pos, crate::block_entities::BlockEntity::Container {
+            id: "minecraft:chest".into(),
+            slots: vec![Some(ItemStack::new("minecraft:apple".parse().unwrap(), 5))],
+        }));
+        assert_eq!(block_entity_query_tag(&entities, 2, pos), Some(Some(Nbt::Compound(vec![
+            ("components".into(), Nbt::Compound(vec![])),
+            ("Items".into(), Nbt::List {
+                element_type: lodestone_core::NbtTag::Compound,
+                elements: vec![Nbt::Compound(vec![
+                    ("Slot".into(), Nbt::Byte(0)),
+                    ("id".into(), Nbt::String("minecraft:apple".into())),
+                    ("count".into(), Nbt::Int(5)),
+                ])],
+            }),
+        ]))));
+    }
+}
+
+/// Maps main/off-hand ordinals to animation action bytes; invalid hands use main.
 fn swing_action(hand: u8) -> u8 {
     if hand == 1 { 3 } else { 0 }
 }
@@ -10701,6 +10770,11 @@ where
         }
         ServerBound::PlayerLoaded => {
             *client_loaded = true;
+        }
+        ServerBound::BlockEntityTagQuery { transaction_id, pos } => {
+            if let Some(tag) = block_entity_query_tag(block_entities, commands.permission_level, pos) {
+                apply(conn, state, proto.encode_tag_query(transaction_id, tag.as_ref())).await?;
+            }
         }
         ServerBound::ContainerClosed { window_id } => {
             // Closing returns carried items and virtual crafting/workstation
