@@ -153,19 +153,16 @@ host/port triggered the probe — those fields still travel in the handshake, a
 real server may virtual-host on them, but the relay itself does not route on
 them.
 
-**A real browser** ***join*** **is not currently wired to the relay at all.**
-`lodestone-shell/src/net.rs`'s `run_async`, on `target_arch = "wasm32"` with a
-remote `Origin`, unconditionally reports *"connect: a browser cannot open a
-TCP socket … must go through the WebSocket relay"* and returns — there is no
-call to `lodestone_net::WsWebTransport::connect` anywhere in that path, and
-`lodestone-net`'s `ws-web` feature was not even enabled on `lodestone-shell`'s
-dependency edge before this change (it needed adding just to make the ping
-above compile). Older prose elsewhere in this file (the "Multiplayer: a real
-browser join" section) describes a *working* join through a now-deleted
-`src/multiplayer.rs` in an earlier version of this crate; that measurement
-predates the shell-launcher port and does not describe what `net.rs` does
-today. Wiring a real join is a separate, larger change than this pass made —
-see that function's `Origin::Remote` match arm for the exact seam.
+**Browser multiplayer join:** `lodestone-shell/src/net.rs`'s `run_async` uses
+the wasm `Origin::Remote` path to build a destination-specific relay URL with
+`crate::platform::relay::relay_ws_url_for`. It opens that URL with
+`lodestone_net::WsWebTransport::connect`, races the dial against the
+browser-safe `crate::platform::relay::sleep` deadline, and passes the connected
+transport to `ClientBuilder::connect_with`. The normal protocol handshake,
+login, and event driver then run through the same version-adapter path as a
+native connection; only the transport dial differs. The `ws-web` feature is
+enabled on the shell's dependency edge, while its implementation remains
+target-gated inside `lodestone-net`, so native builds retain their TCP path.
 
 ## Serving the page and the relay from one process
 
@@ -287,7 +284,7 @@ The failure is worth understanding because it is the repo's dominant defect clas
 wearing browser clothes:
 
 `lodestone-camera-bgl` binding 1 (the section origin) is declared
-`has_dynamic_offset: true` by issue #76's group-0 split, so `set_bind_group` must
+`has_dynamic_offset: true` in the group-0 split, so `set_bind_group` must
 supply exactly one dynamic offset. `src/main.rs` passed `&[]`. WebGPU's response:
 
 ```
@@ -492,7 +489,9 @@ adopted here. Both would be real work with a real dependency cost (browser timer
 are not tokio's timers: clamping, background-tab throttling, no multi-threaded
 runtime), and neither is on the critical path to a rendered frame or a
 multiplayer join. Revisit only if in-browser *singleplayer* with mobs becomes the
-goal, and read issue #284 first — it wants **fewer** timers, not a seventh.
+goal; prefer consolidating scheduling instead of adding another periodic timer,
+and account for browser timer clamping, background-tab throttling, and the lack
+of a multithreaded runtime.
 
 Related trap, and the reason the whole wasm build was red: `tokio::time::Instant`
 is **not** a wasm-safe substitute for `std::time::Instant`. It bottoms out in
