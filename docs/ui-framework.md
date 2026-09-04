@@ -43,6 +43,8 @@ footer at the screen bottom, and clamps the content band so it can never overlap
 container screen (inventories, chests) uses none of this — its slot geometry comes from the
 game-logic menu classes as constructor arithmetic, not from a layout tree, and that boundary should
 stay: arranging a container screen with these containers would invent geometry vanilla never had.
+Screens construct `HeaderAndFooterLayout` from the current canvas dimensions for each layout pass;
+the layout does not retain a separate resize setter that callers must remember to synchronize.
 
 The alignment formula is not `(available - width) / 2`; it is a padding-aware lerp between the
 leading and trailing padding. `x` truncates and `y` rounds — a real, asymmetric vanilla quirk, not a
