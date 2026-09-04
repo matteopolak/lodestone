@@ -127,11 +127,9 @@ pub enum ColumnSource {
 
 /// Why one slot of a 27-section neighbourhood holds no section.
 ///
-/// The two cases are the point of this type. Before it they were one `Option`
-/// resolving to the same all-air stand-in, and that conflation is what made
-/// #389 invisible: a chunk seam meshed against a not-yet-loaded neighbour is
-/// indistinguishable, at the call site, from one meshed against the edge of the
-/// world — so the wrong one was silently treated as final.
+/// The two cases must remain distinct. A chunk seam meshed against a
+/// not-yet-loaded neighbour cannot share the all-air stand-in used for the edge
+/// of the world, or the wrong result is silently treated as final.
 #[derive(Debug, Clone)]
 pub enum Neighbour {
     /// A real section, held as a clone of the handle
@@ -577,9 +575,9 @@ pub fn snapshot_section_live(
     };
     // `WorldDimensions` carries only `min_y`/`height`, not dimension identity, so
     // the sky policy reads the connected dimension off the player snapshot — the
-    // cheapest place this crate can reach it without growing that struct. Since
-    // #288 the snapshot also carries the server's own dimension **type**, which
-    // is what the policy actually wants; the level id stays as the fallback.
+    // cheapest place this crate can reach it without growing that struct. The
+    // snapshot carries the server's dimension **type**, which is what the
+    // policy actually wants; the level id stays as the fallback.
     let player = handle.player();
     let sky_default =
         sky_default_for_dimension(player.dimension.as_ref(), player.dimension_type.as_ref());
@@ -626,7 +624,7 @@ pub fn snapshot_section_live(
 /// `minecraft:overworld`) used to be assumed lit.
 ///
 /// The name match survives only for `dimension_type == None`: a server or
-/// protocol family that sends no `registry_data`. It is the pre-#288 behaviour
+/// protocol family that sends no `registry_data`. It is the name-match fallback
 /// verbatim, so that path cannot have regressed, and it is deliberately **not**
 /// "assume the overworld".
 #[must_use]
@@ -1402,7 +1400,7 @@ struct SnapshotFluidView<'a> {
     /// and not `Copy`. **This makes the view `!Sync`**, which is sound because
     /// [`mesh_snapshot_fluids`] builds one per call and `mesh_fluids` never shares
     /// it — the mesh worker pool parallelises over *sections*, one view each. The
-    /// same reasoning `NamedBiomeTint` already relies on since #542.
+    /// same reasoning applies to any cached biome tint view.
     ///
     /// The cursor caches sampled colours, so it is only correct because a
     /// [`SectionSnapshot`] is immutable for the life of the view. Do not hoist one
@@ -1590,8 +1588,7 @@ impl FluidSectionView for SnapshotFluidView<'_> {
 ///
 /// Public so a gate can measure the **live** fluid path rather than
 /// `mesh_simple`, which has no fluid path at all — `docs/fluid-rendering.md`'s
-/// "there are two meshers" gotcha, and the reason the #389 seam gate exists in
-/// two halves.
+/// "there are two meshers" gotcha; the seam behavior is tested in two halves.
 #[must_use]
 pub fn mesh_snapshot_fluids(snapshot: &SectionSnapshot, models: &BlockModels) -> FluidMeshes {
     mesh_snapshot_fluids_at(snapshot, models, BLEND_RADIUS)
@@ -2704,8 +2701,8 @@ pub struct TerrainMesh {
     /// because a neighbour is missing for a reason that will never resolve: it
     /// left the tracking view.
     ///
-    /// Issue #479's second half, and the one that survives any amount of CPU.
-    /// [`SnapshotOutcome::Deferred`] means "a neighbour column has not arrived
+    /// This is the permanent-missing-neighbour case, unlike
+    /// [`SnapshotOutcome::Deferred`], which means "a neighbour column has not arrived
     /// *yet*", and [`Self::route`] drops a deferred section that has never
     /// reached the GPU, relying on [`Self::mark_neighbours_dirty`] to re-drive it
     /// when the missing column lands. For a column on the **trailing** edge of the
@@ -3154,8 +3151,8 @@ impl TerrainMesh {
     /// only record of what this column put on the GPU.
     ///
     /// The loaded neighbours go into [`Self::forced_columns`], **not**
-    /// [`Self::dirty_columns`], and that distinction is the whole of #479's second
-    /// half. An ordinary dirty signal re-snapshots them and then *drops the result*
+    /// [`Self::dirty_columns`]. That distinction is essential for permanent
+    /// evictions. An ordinary dirty signal re-snapshots them and then *drops the result*
     /// unless they already reached the GPU, because a missing neighbour reads as
     /// "not arrived yet". Here we know better: this very call is the neighbour
     /// leaving. A column on the trailing edge of the view that has never been
@@ -3748,7 +3745,7 @@ mod tests {
         let custom: DimensionId = "somemod:cave_dimension".parse().unwrap();
 
         // Every case here passes `None` for the dimension type: this is the
-        // pre-#288 name-match fallback, kept verbatim for servers that send no
+        // name-match fallback, kept for servers that send no
         // `registry_data`.
         assert_eq!(
             sky_default_for_dimension(None, None),
@@ -3783,7 +3780,7 @@ mod tests {
         let overworld: DimensionId = "minecraft:overworld".parse().unwrap();
         let custom: DimensionId = "mypack:mine".parse().unwrap();
 
-        // Issue #34, both directions. The name match and the registry disagree
+        // The name match and the registry disagree
         // in each case, and the registry must win — a test where they agree
         // would pass with the registry lookup deleted.
         assert_eq!(
@@ -3806,7 +3803,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // #389: a seam meshed against a not-yet-loaded neighbour
+    // A seam meshed against a not-yet-loaded neighbour.
     // -----------------------------------------------------------------------
 
     /// Section count and `min_y` for the seam fixture: two sections, content in
@@ -4011,7 +4008,7 @@ mod tests {
     #[test]
     fn a_seam_meshed_without_its_neighbour_converges_on_the_neighbour_present_answer() {
         // Meshed while the east column is still in flight. `ColumnSource::Complete`
-        // is used here on purpose: it reproduces the pre-#389 code exactly, which
+        // is used here on purpose: it reproduces the earlier seam behavior exactly, which
         // had no other option — this is the *stale* mesh, measured, not described.
         let (stale_label, stale, stale_box) =
             seam_measure(&seam_world(EastNeighbour::Absent), ColumnSource::Complete);
@@ -4124,7 +4121,7 @@ mod tests {
 
     /// **Control 1, executed: a `Complete` world must NOT defer.** The offline
     /// demo world's outer ring has no neighbours and never will; deferring it
-    /// would trade #389's fake seam for a permanent hole. If this ever starts
+    /// would trade a temporary seam artifact for a permanent hole. If this ever starts
     /// deferring, `Sim::build`'s demo terrain loses its rim.
     #[test]
     fn control_a_complete_world_never_defers_an_absent_neighbour() {
@@ -4971,7 +4968,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Issue #479: the walk harness
+    // Walk harness for bounded tracking-view eviction.
     // -----------------------------------------------------------------------
 
     /// Chebyshev radius of the simulated tracking view, in columns, for the
@@ -5004,11 +5001,10 @@ mod tests {
     /// scenario size is a function of the budget, and `WALK_STEPS` is not a lever
     /// on it.
     ///
-    /// Hard-coding `3` here is what silently voided the test when `17c786e`
-    /// raised the budget from 4 to 64: a 49-column window drained inside one
-    /// frame, `max_backlog` went from 45 (= 49 − 4, the figure in the #479
-    /// record) to **0**, and the vacuity guard the author had written fired
-    /// rather than the test passing quietly. This solves for `rd` instead, so
+    /// Hard-coding `3` here would silently void the test when the budget grows:
+    /// a 49-column window would drain inside one frame, `max_backlog` would go
+    /// from 45 (= 49 − 4) to **0**, and the vacuity guard would fire rather than
+    /// the test passing quietly. This solves for `rd` instead, so
     /// the next budget change scales the scenario instead of breaking it:
     ///
     /// ```text
@@ -5096,11 +5092,11 @@ mod tests {
     /// returning the columns still resident on the (modelled) GPU at the end.
     ///
     /// `evict` is the switch this test and its control share: `true` is the
-    /// fixed client, `false` reproduces the pre-#479 client exactly — the
+    /// fixed client, `false` reproduces the client without unload handling — the
     /// arrival half wired and the unload half absent. Everything else is
     /// identical, so the two runs differ only in the thing under test.
     fn walk(evict: bool) -> (BTreeSet<(i32, i32)>, BTreeSet<(i32, i32)>) {
-        // Issue #423: the test edits the store, so it holds the write handle and
+        // The test edits the store, so it holds the write handle and
         // hands the paired read handle to the mesher — the same split production
         // (`drive_placement`) observes.
         let write = ChunkWorldWrite::new(World::new());
@@ -5162,7 +5158,7 @@ mod tests {
     /// Stated as a *predicted magnitude*, not a direction: the two hypotheses
     /// are computed from the walk's own geometry and the measurement has to land
     /// on one of them. Bounded (correct) is at most `window()`'s 49 columns;
-    /// unbounded (pre-#479) is every column the walk ever visited, 126 at these
+    /// unbounded is every column the walk ever visited, 126 at these
     /// constants. "Fewer than it visited" would be satisfied by both, so it is
     /// not what this asserts.
     #[test]
@@ -5181,7 +5177,8 @@ mod tests {
         );
         // Both hypotheses, computed from outside the code under test, so the
         // measurement has to land on one of them. Correct: the columns that ever
-        // escaped deferral *and* are still in view. Pre-#479: every column that
+        // escaped deferral *and* are still in view. Without eviction handling,
+        // every column that
         // ever escaped deferral, in view or not.
         let correct: BTreeSet<(i32, i32)> =
             ever_interior().intersection(&live).copied().collect();
@@ -5303,7 +5300,7 @@ mod tests {
     /// worldgen. The standing loop stays as the bounded safety net that would
     /// catch a genuinely stuck queue, `frames_with_backlog` is what proves the
     /// queue carried work across frames, and `resident == expected` — the
-    /// permanent-deferral evidence #479 turned on — is unaffected either way and
+    /// permanent-deferral evidence remains unaffected either way and
     /// now covers 132 columns rather than 30.
     #[test]
     fn standing_still_drains_the_heal_backlog_and_no_column_is_lost() {

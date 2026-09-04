@@ -246,11 +246,10 @@ pub type SharedHandle = Arc<OnceLock<Arc<ClientHandle>>>;
 /// This exists because nothing between here and `lodestone-client` carries a
 /// name→identity answer at all: `lodestone_client::state`'s own docs say the
 /// id→name *registry* mapping is "deliberately outside this crate", and that
-/// crate's `ClientHandle` has no uuid accessor either — the identity only ever
-/// existed as a local variable inside [`run`]. Issue #189's Social
-/// Interactions roster needs it to exclude the local player
-/// (`crate::menu::social::entries_from_tablist`'s `exclude` parameter), which
-/// is the first consumer that made the gap visible.
+/// crate's `ClientHandle` has no uuid accessor either. The identity is built as
+/// a local value inside [`run`] for the Social Interactions roster, whose
+/// `crate::menu::social::entries_from_tablist` function excludes the local
+/// player with it.
 pub type SharedLocalUuid = Arc<OnceLock<uuid::Uuid>>;
 
 /// The world's weather, published lock-free by the net thread and read once per
@@ -383,7 +382,7 @@ impl BiomeClimateCell {
     /// that fails to parse one field but not another is exactly the case
     /// `Option` per field already exists to carry).
     ///
-    /// `pub(crate)`, not private: the app.rs live gate for issue #25
+    /// `pub(crate)`, not private: the app.rs live gate for
     /// (`live_precipitation_matches_vanillas_own_threshold_for_real_biomes`)
     /// connects through `ClientBuilder` directly, bypassing `forward`
     /// entirely, and calls this by hand with the real event off the raw
@@ -478,7 +477,7 @@ impl BiomeNameCell {
 pub type SharedBiomeNames = Arc<BiomeNameCell>;
 
 /// The server's Brigadier command tree, plus the newest reply to a
-/// `command_suggestion` request (issues #470/#471).
+/// `command_suggestion` request.
 ///
 /// # Why a cell rather than a [`NetUpdate`]
 ///
@@ -496,19 +495,19 @@ pub type SharedBiomeNames = Arc<BiomeNameCell>;
 ///
 /// # What consumes this today, honestly
 ///
-/// **The fold, and not yet a screen.** This closes the half of issue #471 that
+/// **The fold, and not yet a screen.** This closes the live forwarding gap that
 /// is a live defect — `lodestone_model::event::route` sends both variants to
 /// `SHELL`, so with no arm in [`forward`] they reached the terminal `_ =>` and
 /// tripped its `debug_assert!` on any debug-build join to a real server. The
-/// remaining two steps in #471 — pointing `menu/render/screens.rs`'s
+/// remaining screen integration steps — pointing `menu/render/screens.rs`'s
 /// `command_block_frame` at [`Self::tree`] instead of the `None` every caller
 /// passes, and making the chat box's Tab key call `chat::complete` — live in
-/// `chat.rs` and the menu files, which this change does not own.
+/// `chat.rs` and the menu files, outside this module.
 ///
-/// **So this is deliberately a half-wire, and saying so is the point**:
-/// storing the value where the consumer can reach it is what makes the next
-/// step an arm rather than a re-decode, and dropping it in the arm instead
-/// would be the island pattern the `debug_assert!` above exists to catch.
+/// **This is deliberately a half-wire:** storing the value where the consumer
+/// can reach it makes the next integration step an arm rather than a re-decode;
+/// dropping it in the arm would leave the unreachable route the assertion
+/// above exists to catch.
 #[derive(Debug, Default)]
 pub struct CommandTreeCell {
     tree: Mutex<Option<Arc<lodestone_model::command_tree::CommandTree>>>,
@@ -792,9 +791,9 @@ pub enum NetUpdate {
     /// store, so every mesh belonging to it is now geometry for blocks the
     /// client no longer has.
     ///
-    /// Issue #479: this variant exists because that eviction previously reached
-    /// only collision. `LiveCollision` re-reads the store every tick, so it
-    /// tracked the unload for free, while the renderer had no signal at all —
+    /// This variant carries the unload signal separately from collision.
+    /// `LiveCollision` re-reads the store every tick, so it tracks the unload
+    /// for free, while the renderer needs an explicit signal —
     /// `ClientEvent::ChunkUnloaded` had four producers and no shell consumer and
     /// died in [`forward`]'s terminal arm, the island class `CLAUDE.md` §1 names.
     /// The result was a session whose GPU section map, uploaded-section set and
@@ -837,7 +836,7 @@ pub enum NetUpdate {
     /// for exactly that reason. `Sim::poll_net` forwards them to the one consumer
     /// that knows the rule.
     ///
-    /// Added for issue #23: this variant is why a chest lid opens at all. The
+    /// This variant lets a chest lid open. The
     /// event was decoded by `v770`'s adapter and reached
     /// `ClientEvent::BlockEvent` with **no consumer anywhere** — it fell through
     /// [`forward`]'s terminal `_ =>` arm and was dropped silently, so a chest
@@ -1112,7 +1111,7 @@ pub enum NetUpdate {
         effect: String,
     },
     /// An item entity was collected (`take_item_entity`), for the fly-to-collector
-    /// animation — issue #365.
+    /// animation.
     ///
     /// Carried as the raw [`ClientEvent::ItemPickup`], like [`Self::TitleEvent`]:
     /// the consumer is [`lodestone_game::mining::PickupFeed`], whose `apply` folds
@@ -1331,8 +1330,8 @@ pub struct NetClient {
     biome_names: SharedBiomeNames,
     /// The server's command tree and newest suggestion reply, folded by
     /// [`forward`]'s two command arms. See [`CommandTreeCell`] for why this is
-    /// a shared cell rather than a [`NetUpdate`], and for exactly how much of
-    /// issue #471 it closes.
+    /// a shared cell rather than a [`NetUpdate`], and for the forwarding
+    /// boundary it closes.
     command_tree: SharedCommandTree,
     /// The current dimension's absent-sky-light policy. Unlike [`Self::weather`]
     /// the **net thread never writes this** — `Sim::refresh_mesh_policy` is the
@@ -1570,28 +1569,23 @@ const SINGLEPLAYER_ADDRESS: (&str, u16) = ("singleplayer", 0);
 /// line on the builder.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Vanilla's well-known Minecraft port — the one a joining player will try
-/// first if they only know the host's address.
+/// Well-known Minecraft port used when a caller supplies only a host address.
 ///
-/// **Not what the pause menu's Open to LAN asks for since issue #559.**
-/// `PauseButton::OpenToLan` now calls `NetClient::publish_to_lan(0)`, matching
-/// vanilla's own multiplayer-options screen, which defaults to
-/// asking the OS for any free port — an OS-assigned port, reported back through
+/// **Not the pause menu's Open to LAN port.**
+/// `PauseButton::OpenToLan` calls `NetClient::publish_to_lan(0)`, asking the OS
+/// for any free port; that OS-assigned port is reported through
 /// `NetUpdate::LanOpened` once bound — rather than this fixed one. This
-/// constant is kept for an explicit-port control (vanilla's `/publish <port>`)
-/// to default its text field to, once one exists; it names *a* well-known
-/// port, not the one this shell binds automatically.
+/// constant remains the default for an explicit-port control once one exists;
+/// it names *a* well-known port, not the one this shell binds automatically.
 #[cfg(not(target_arch = "wasm32"))]
 pub const LAN_DEFAULT_PORT: u16 = 25565;
 
-/// How often a persistent singleplayer world writes its dirty chunks (issue
-/// #468).
+/// How often a persistent singleplayer world writes its dirty chunks.
 ///
-/// Vanilla autosaves every 6000 ticks (5 minutes). This is far shorter because
-/// the cost model is different, not because 5 minutes is wrong: a save here
-/// writes **only the dirty set**, so a player standing still writes nothing at
-/// all, and three mutated chunks write exactly three columns rather than the
-/// ~512 a residency-proportional save would. The work happens inside
+/// A five-minute interval is intentionally shorter than a full residency pass:
+/// a save here writes **only the dirty set**, so a player standing still writes
+/// nothing at all, and three mutated chunks write exactly three columns rather
+/// than the ~512 a residency-proportional save would. The work happens inside
 /// `spawn_blocking`, off the thread `run_tick_loop` shares. So the interval
 /// trades almost nothing for a much smaller window of unsaved building if the
 /// process is killed rather than quit cleanly.
@@ -1766,7 +1760,7 @@ impl NetClient {
     }
 
     /// As [`Self::connect`], but for an **online-mode** server: `auth` is an
-    /// authenticated Microsoft/Minecraft session (issue #65 — see
+    /// authenticated Microsoft/Minecraft session (see
     /// `lodestone_auth::login` for how to obtain one from a cached refresh
     /// token or a completed interactive device-code sign-in) that the net
     /// thread hands to [`lodestone_client::ClientBuilder::online_session`],
@@ -1919,7 +1913,7 @@ impl NetClient {
     ///
     /// `port` of `0` asks the OS for a free one.
     ///
-    /// **Not the pause menu's Open to LAN entry point since issue #562** — a
+    /// **Not the pause menu's Open to LAN entry point** — a
     /// world already running (the common case, since the button lives on the
     /// pause menu of a session already in progress) publishes in place through
     /// [`Self::publish_to_lan`] instead of coming back through here, which
@@ -1927,8 +1921,8 @@ impl NetClient {
     /// one for *starting* a session already in LAN mode.
     ///
     /// `online_mode` runs the real RSA/AES handshake and session-server
-    /// ownership check on every connection this listener accepts (issue
-    /// #273's shell-side control) — `false` matches every other constructor
+    /// ownership check on every connection this listener accepts (the
+    /// shell-side control) — `false` matches every other constructor
     /// here and keeps the listener exactly as offline as it has always been.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
@@ -2262,8 +2256,8 @@ impl NetClient {
     /// straight off the client-owned entity table through the shared handle.
     /// Empty before login.
     ///
-    /// Issue #36 deleted the `entity_snapshot`/`EntitySnapshot` lowering this
-    /// used to feed — `entities.rs`'s `fold_entities` reads ingest components
+    /// The `entity_snapshot`/`EntitySnapshot` lowering is no longer needed:
+    /// `entities.rs`'s `fold_entities` reads ingest components
     /// directly now, inside `Sim`'s own `World`, so nothing production-side
     /// needs a version-free copy any more. This passthrough survives only for
     /// callers with no ingest `World` of their own to write into — a live
@@ -2377,8 +2371,8 @@ impl NetClient {
     /// instructions — see [`SharedLocalUuid`]) or for a loopback client built
     /// with [`Self::loopback_with_feed`], which has no `LoginProfile` at all.
     ///
-    /// Issue #189: this is the identity `crate::menu::social::
-    /// entries_from_tablist` needs to exclude the local player from the
+    /// This is the identity `crate::menu::social::entries_from_tablist` needs
+    /// to exclude the local player from the
     /// Social Interactions roster.
     #[must_use]
     pub fn local_uuid(&self) -> Option<uuid::Uuid> {
@@ -2410,7 +2404,7 @@ impl NetClient {
     ///
     /// See [`CommandTreeCell`] for what does and does not consume it yet —
     /// today the fold is live and the screens that should read it are still
-    /// passing `None` (issue #471, steps 2 and 3).
+    /// passing `None`.
     #[must_use]
     pub fn shared_command_tree(&self) -> SharedCommandTree {
         Arc::clone(&self.command_tree)
@@ -2845,7 +2839,7 @@ async fn run_async(
     protocol: i32,
     tx: SyncSender<NetUpdate>,
     action_rx: Receiver<ClientAction>,
-    // Issue #562. Native only — the capability it drives (`IntegratedServer::publish`)
+    // Native only — the capability it drives (`IntegratedServer::publish`)
     // needs a real TCP socket, which wasm32 does not have; the wasm `spawn_local`
     // call site below passes nothing for this parameter, matching how `world_dir`/
     // `lan_port` are already cfg-gated on `Origin::Integrated`.
@@ -2903,15 +2897,15 @@ async fn run_async(
                 #[cfg(not(target_arch = "wasm32"))]
                 online_mode,
             } => {
-                // Issue #468: the world's **stored** seed wins over the
+                // The world's **stored** seed wins over the
                 // requested one, so this has to be resolved before the
                 // generator is built — the generator is seeded once and never
                 // reseeded. A failure here is reported and the session falls
                 // back to a non-persistent world rather than being aborted:
                 // losing saves is bad, but refusing to open the game at all
-                // because a data directory is read-only is worse, and a silent
-                // re-roll of the seed (which is what vanilla itself does here)
-                // is the exact defect this issue exists to fix.
+                // because a data directory is read-only is worse than losing
+                // persistence, and a silent re-roll would produce the wrong
+                // world.
                 #[cfg(not(target_arch = "wasm32"))]
                 let seed = match &world_dir {
                     Some(dir) => {
@@ -2950,7 +2944,7 @@ async fn run_async(
                 // `crate::worldgen` calls directly for the dev world, reached
                 // through the server's `ChunkSource` so the client sees it over
                 // the real wire instead of by a local shortcut. Generation is
-                // lazy per column, and since issue #453 the initial view is
+                // lazy per column, and the initial view is
                 // streamed **outward from the player's own column**, one Chebyshev
                 // ring generated and encoded before the next is asked for — so the
                 // first terrain reaches the client after a single column rather
@@ -3105,16 +3099,15 @@ async fn run_async(
                         }
                     }
                     None => {
-                // Issue #217: `MobSim` computed AI motion server-side with no
-                // production consumer streaming it anywhere — an island by its
-                // own module doc's admission. `open_in_memory_with_mobs` is
-                // the production wiring: it spawns a task that owns a live
+                // `MobSim` owns the server-side AI task and streams its motion
+                // through the entity-sync pass `serve_connection` already runs
+                // on this connection's inbound-packet cadence.
+                // `open_in_memory_with_mobs` is the production wiring: it spawns
+                // a task that owns a live
                 // `MobSim` over a snapshot of the **same** terrain this
-                // connection is served — one shared `ChunkStore` since issue
-                // #454, where it used to be a second independent generator that
-                // merely agreed — and republishes positions every tick through
-                // the entity-sync pass `serve_connection` already runs on this
-                // connection's own inbound-packet cadence. `wasm32` gets the old
+                // connection is served — one shared `ChunkStore`, rather than
+                // a second independent generator that merely agreed — and
+                // republishes positions every tick. `wasm32` gets the old
                 // mob-free path: the tick loop needs `tokio::time`, which is
                 // unavailable there (see `lodestone_server`'s own doc
                 // comment on `mobs::run_mob_tick_loop`) — a real, documented
@@ -3139,8 +3132,8 @@ async fn run_async(
                             }))
                         },
                     );
-                    // Issue #468: the whole point. `open_persistent_with_mobs`
-                    // wraps `source` in a `RegionChunkSource` *below* the
+                    // `open_persistent_with_mobs` wraps `source` in a
+                    // `RegionChunkSource` *below* the
                     // `ChunkStore` and above the generator, so every existing
                     // mutation path (player edits, random ticks, the mob sim's
                     // grazing) is carried without any of them being touched.
@@ -3464,7 +3457,7 @@ async fn run_async(
         let relay_destination = (server.host.clone(), server.port);
         let mut builder = ClientBuilder::new(server, profile, adapter)
             .connect_timeout(Some(Duration::from_secs(10)))
-            // Issue #280: arm the read timeout so a server that hangs (sends
+            // Arm the read timeout so a server that hangs (sends
             // nothing) surfaces as a disconnect instead of stalling the session
             // forever. The mechanism is per-packet, so the server's own 15-second
             // keep-alive keeps a healthy session clear of it — see [`READ_TIMEOUT`].
@@ -3580,7 +3573,7 @@ async fn run_async(
         let handle = Arc::new(handle);
         let _ = shared_handle.set(Arc::clone(&handle));
 
-        // Issue #449: a real boundary — the handshake and login have completed
+        // A real boundary — the handshake and login have completed
         // (`connect`/`connect_with` returned a handle), so the loading screen
         // stops saying "Connecting to the server..." and says "Joining
         // world...". `NetUpdate::LoggedIn` moves it on again, from the forward
@@ -3703,7 +3696,7 @@ async fn run_async(
                     break 'session;
                 }
             }
-            // Issue #562: "Open to LAN" without a restart. `publish_to_lan`
+            // "Open to LAN" without a restart. `publish_to_lan`
             // requests land here rather than through `handle.send_action` above
             // — this is not a wire packet, it is a local call into the
             // **already-running** `IntegratedServer` this loop is holding for
@@ -3806,7 +3799,7 @@ async fn run_async(
                 tokio::time::timeout(Duration::from_millis(15), events.recv()).await;
             match netbuf_timeout_result {
                 Ok(Some(event)) => {
-                    // Issue #613's original auto-decline is now the *routing*
+                    // The policy decision is the *routing*
                     // this arm does before generic `forward`ing — answered
                     // here, not inside `forward`, because `handle` (the only
                     // thing that can send an outbound action) and the
@@ -3919,14 +3912,9 @@ async fn run_async(
 
         // Singleplayer only: stop the server we started, **and wait for it**.
         //
-        // This used to be `trigger_shutdown()`, a fire-and-forget notify, after
-        // which the binding dropped and `impl Drop for IntegratedServer`
-        // *aborted* the tick and serving tasks. That was a second island one
-        // layer above issue #468's: even with the persistent constructor wired
-        // in, the final save could never run, because `save_now` lives in
-        // `shutdown()` and nothing awaited it. Every edit since the last
-        // autosave tick would have been lost on every quit — including, for a
-        // short session, all of them.
+        // `shutdown()` joins the tick and serving tasks before returning, so
+        // `save_now` runs for persistent worlds instead of leaving final edits
+        // behind when the session exits.
         //
         // `shutdown()` joins the serving and tick tasks *before* flushing, so
         // an in-flight block edit cannot be dropped between the last tick and
@@ -3940,8 +3928,8 @@ async fn run_async(
             tracing::info!(target: "net", "stopping the integrated server and saving the world");
             // **`drop`, not `shutdown().await`, for a LAN handle.** `shutdown`
             // joins the accept loop, which is parked in `accept()` where the
-            // notify cannot reach it, and joining it hung indefinitely for a
-            // `view_radius: 0` handle while #535's own gate was written. Dropping
+            // notify cannot reach it, and can hang indefinitely for a
+            // `view_radius: 0` handle. Dropping
             // aborts both loops. There is nothing to lose by not joining: a LAN
             // handle has `save: None`, so its flush is the explicit one below.
             #[cfg(not(target_arch = "wasm32"))]
@@ -4021,11 +4009,9 @@ fn run(
 
 /// Builds the chunk source (and its declared `(min_y, height)`) for a freshly
 /// created singleplayer/LAN world, from the Create New World screen's own
-/// [`WorldTypePreset`](crate::menu::create_world::WorldTypePreset) — issue
-/// #592's item 2, unblocked once `crates/lodestone-server/src/lib.rs`
-/// re-exported `single_biome_chunk_source`/`flat_chunk_source`/
-/// `debug_chunk_source` (landed on `main` ahead of this pass; see that
-/// preset's own module doc for the three already-wired presets' history).
+/// [`WorldTypePreset`](crate::menu::create_world::WorldTypePreset), using the
+/// `single_biome_chunk_source`/`flat_chunk_source`/`debug_chunk_source`
+/// constructors re-exported by `crates/lodestone-server/src/lib.rs`.
 ///
 /// Not `#[cfg(not(target_arch = "wasm32"))]`: every function this calls lives
 /// in `lodestone-server`'s `worldgen_data` module, which carries no wasm32
@@ -4181,8 +4167,8 @@ fn lan_online_mode(enabled: bool) -> Option<lodestone_server::OnlineModeConfig> 
     Some(lodestone_server::OnlineModeConfig::new(reqwest::Client::new()))
 }
 
-/// Bind the world to a TCP port with `IntegratedServer::open_to_lan` (issue
-/// #535's scope 1), returning the handle, the address the host's own client
+/// Bind the world to a TCP port with `IntegratedServer::open_to_lan`, returning
+/// the handle, the address the host's own client
 /// should dial, and the save handle when there is a world on disk.
 ///
 /// Split out of [`run`]'s already-long `Origin::Integrated` arm, and `async`
@@ -4372,14 +4358,13 @@ fn decide_resource_pack_push(
     }
 }
 
-/// Routes one `ClientboundResourcePackPushPacket`, replacing issue #613's
-/// original unconditional auto-decline. Vanilla's own decision
-/// (vanilla's own common-packet-listener resource-pack-push handling), enumerated:
+/// Routes one `ClientboundResourcePackPushPacket` according to the pack policy.
+/// The decision table is:
 ///
 /// 1. **Invalid URL** → `INVALID_URL`, unconditionally, before the policy is
 ///    consulted at all — see [`resource_pack_url_is_valid`].
 /// 2. **Auto-apply** when `policy != Prompt && (!required || policy !=
-///    Disabled)` — vanilla's own condition, reproduced rather than
+///    Disabled)` — the condition is kept explicit rather than
 ///    simplified so the two cannot silently drift: [`ServerPackPolicy::
 ///    Enabled`](crate::menu::servers::ServerPackPolicy::Enabled) always
 ///    auto-applies (a real accept: `ACCEPTED` then the download starts);
@@ -4801,8 +4786,8 @@ fn forward(
             _ => NetUpdate::Chat {
                 text,
                 player: matches!(kind, lodestone_model::event::ChatKind::Chat),
-                // Carried verbatim so the sim can filter hidden players (issue
-                // #419) — the suppression lives in `net_apply`, not here, so this
+                // Carried verbatim so the sim can filter hidden players — the
+                // suppression lives in `net_apply`, not here, so this
                 // router keeps its one-job shape and the reader sees *every* chat
                 // event routed, filtered or not.
                 sender,
@@ -4985,12 +4970,10 @@ fn forward(
         // event to also carry `column`; we deliberately do not consume it, both
         // to honour the ruling and to stay robust if that field is reverted.
         ClientEvent::ChunkLoaded { pos, .. } => NetUpdate::Chunk { x: pos.x, z: pos.z },
-        // The eviction twin of the arm above, and it is the arm's *absence* that
-        // was issue #479: the adapter had already dropped the column through the
-        // `WorldSink`, so collision followed it and only the renderer was left
-        // holding geometry for blocks the client no longer has. A notification
-        // "with nothing left to do" is exactly what an island looks like from
-        // inside — the thing left to do was on the GPU.
+        // The eviction twin of the arm above carries no payload: the adapter
+        // has already dropped the column through the `WorldSink`, so collision
+        // follows it while the renderer must discard any geometry it holds for
+        // blocks the client no longer has.
         ClientEvent::ChunkUnloaded { pos, .. } => NetUpdate::ChunkUnloaded { x: pos.x, z: pos.z },
         ClientEvent::SectionBlocksChanged { section, blocks } => NetUpdate::SectionBlocks {
             x: section.x,
@@ -5116,7 +5099,7 @@ fn forward(
             weather.apply(raining, rain_level, thunder_level);
             return Ok(());
         }
-        // Every biome's declared climate (issue #25/#26's shared biome lane),
+        // Every biome's declared climate uses the shared biome lane,
         // emitted at the same `Login` moment as `BiomeVisuals`. Folded into the
         // shared `BiomeClimateCell` and **deliberately not forwarded** — same
         // reasoning as `WeatherChanged` just above: the whole table replaces
@@ -5137,8 +5120,8 @@ fn forward(
             biome_climates.apply(&temperatures, &downfall, &has_precipitation);
             return Ok(());
         }
-        // The same registry generation's entry names (follow-up to issue #96
-        // / `eb423ac`), folded into the shared `BiomeNameCell` and
+        // The same registry generation's entry names are folded into the
+        // shared `BiomeNameCell` and
         // deliberately not forwarded — same shape as `BiomeClimates` above:
         // the whole table replaces at once, and the mesh worker threads read
         // it through `Sim`/`TerrainMesh`, not through this channel.
@@ -5146,8 +5129,8 @@ fn forward(
             biome_names.apply(&names);
             return Ok(());
         }
-        // The server's Brigadier command tree (decode, issue
-        // #471's wire). Folded into the shared `CommandTreeCell` and not
+        // The server's Brigadier command tree (decoded from the wire). Folded
+        // into the shared `CommandTreeCell` and not
         // forwarded — same shape as the two registry arms above: the whole
         // tree replaces at once, and the chat box and command-block screen
         // read it per frame from the menu layer rather than through this
@@ -5227,7 +5210,7 @@ fn forward(
 }
 
 // `entity_snapshot` (the `EntityView` -> `EntitySnapshot` lowering) and
-// `entity_snapshots()` above are deleted with issue #36: `entities.rs`'s
+// `entity_snapshots()` above are no longer used: `entities.rs`'s
 // `fold_entities` reads the ingest components directly inside its own write
 // guard now, so there is nothing left to lower `EntityView` into. See
 // `entities.rs`'s `fold_entities` doc and `docs/entity-components.md`'s
@@ -5653,7 +5636,7 @@ mod tests {
         }
     }
 
-    /// Issue #189's other half of the social-roster seam: `local_uuid` must be
+    /// The other half of the social-roster seam: `local_uuid` must be
     /// published even when the connection itself never succeeds, because
     /// [`LoginProfile`] — and the `local_uuid.set(..)` right after it — is
     /// built *before* `run` ever attempts to dial (see `run`'s own comment at
@@ -5741,7 +5724,7 @@ mod tests {
         }
     }
 
-    /// Issue #192: `ClientEvent::WinGame` must reach `NetUpdate::WinGame`
+    /// `ClientEvent::WinGame` must reach `NetUpdate::WinGame`
     /// through the real `forward` function — not a hand-constructed
     /// `NetUpdate` — the same shape as `forward_translates_...` above proves
     /// for `Death`. `route()` claims `shell: true` unconditionally for this
@@ -5942,12 +5925,10 @@ mod tests {
         let directives = adapter
             .handle_packet(&mut world, ConnectionState::Play, 36, &payload)
             .expect("a byte-accurate explode payload must decode");
-        // Two directives since #416 (`bf18817`): the particle emitter first,
-        // then the sound. This assertion used to read `len() == 1` and broke
-        // when the particle arm landed — which is the point of asserting the
-        // set rather than a count. A `count` alone cannot say *which*
-        // directives are present, so it fails on a correct addition and would
-        // equally pass if the sound were replaced by a second particle.
+        // Two directives are expected: the particle emitter first,
+        // then the sound. Assert the directive set rather than only its count:
+        // a count cannot identify which effects are present and could pass if
+        // the sound were replaced by a second particle.
         assert_eq!(
             directives.len(),
             2,
@@ -5960,7 +5941,7 @@ mod tests {
                 panic!("expected only Emit directives");
             };
             match event {
-                // Guards the #416 chain: the renderer for `explosion_emitter`
+                // Guards the particle chain: the renderer for `explosion_emitter`
                 // is built and reaches pixels, but was fed by nothing until
                 // `decode_explode` emitted this. If it regresses, an explosion
                 // goes silent-visual again and only this line notices.
@@ -6044,18 +6025,15 @@ mod tests {
         }
     }
 
-    /// The control for [`NET_RELAY_CAPACITY`]'s whole reasoning (#581): a
+    /// The control for [`NET_RELAY_CAPACITY`]'s whole reasoning: a
     /// full relay must be reported as "stop the loop", exactly like a
     /// disconnected receiver, and must never block the caller.
     ///
-    /// This test's own completion is half the assertion: `forward` used to
-    /// funnel through a blocking `Sender::send` on an unbounded channel,
-    /// which could never fill and therefore could never exercise this path
-    /// at all. If `try_send` regressed back to a blocking `send` on a now
-    /// *bounded* channel, this test would hang forever rather than fail
-    /// loudly — so the collection below is the *second* half: proving
-    /// capacity was actually enforced (exactly 2 items land, not 3), not
-    /// just that a third call returned.
+    /// The test exercises the bounded relay directly: a blocking send would
+    /// hang when the third item is offered, while `try_send` must return
+    /// `Full`. The collection below proves capacity was enforced (exactly two
+    /// items land, not three), rather than checking only that a third call
+    /// returned.
     #[test]
     fn forward_reports_a_full_relay_as_stop_the_loop_not_a_block() {
         use lodestone_client::ResourceKey;
@@ -6244,8 +6222,8 @@ mod tests {
         );
     }
 
-    /// The biome-registry-names twin of the test above (follow-up to issue
-    /// #96 / `eb423ac`): before this arm existed, the event reached the
+    /// The biome-registry-names twin of the test above: without this arm, the
+    /// event reached the
     /// terminal `_ =>` and the `debug_assert!` there would have fired on
     /// every login once `v770` started emitting it (`route` claims
     /// `shell`/`must_forward` for it). Also pins the leak-intern:
@@ -6524,7 +6502,7 @@ mod tests {
     }
 
     // `bare_entity_view`, the "entity_snapshot_carries_*" tests, and the
-    // `name_tag` submodule are deleted with issue #36: they pinned the
+    // `name_tag` submodule are no longer used: they pinned the
     // (now-deleted) `EntityView` -> `EntitySnapshot` boundary. That property
     // — a decoded value survives from ingest to the render component set —
     // moved to `entities.rs`'s own test module, re-aimed at the
