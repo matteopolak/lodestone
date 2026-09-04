@@ -4,24 +4,19 @@
 //!
 //! # Why the demo path, and why that is a legitimate stand-in here
 //!
-//! `crates/lodestone-render/benches/render_submit.rs`'s own module doc names
-//! the exact seams this file exists to close: `RenderState::render_inner` is
-//! private and `RenderStats` has no bind-group field, so neither that fix's
-//! bind-group half nor that fix could be built from `lodestone-render` — both are
-//! `lodestone-shell` types. **The claim that `lodestone-shell` had no
-//! `benches/` directory was stale by the time it was checked**:
-//! `benches/entity_tick.rs` already existed. What was missing was a bench
-//! *in* that directory pointed at the terrain-submit path, and the two public
-//! seams needed to read it — `RenderStats::terrain_camera_bind_group_switches`
-//! and `RenderState::{model,packed}_origin_arena_stats` — added alongside
-//! this file (`crates/lodestone-shell/src/gpu/{stats,terrain,frame}.rs`).
+//! `RenderState::render_inner` is private, so this bench reaches the terrain
+//! submit path through the public benchmark harness. It observes terrain
+//! bind-group switches with `RenderStats::terrain_camera_bind_group_switches`
+//! and packed origin-arena occupancy with
+//! `RenderState::packed_origin_arena_stats`; together these seams expose the
+//! resource behavior measured here.
 //!
 //! The demo/packed world (`crate::worldgen::generate`) needs no vanilla
-//! `client.jar`: every headless GPU test in `gpu/pixel_gates.rs` and
-//! `gpu/sections.rs` already builds against it for exactly that reason. It is
-//! also the path that fix most recently touched (the packed table's own
-//! shared camera + dynamic-offset arena), so it is a real regression surface,
-//! not a synthetic stand-in invented for this bench. The **live-vanilla model
+//! `client.jar`: headless GPU tests in `gpu/pixel_gates.rs` and
+//! `gpu/sections.rs` build against it for exactly that reason. It exercises
+//! the packed table's shared camera and dynamic-offset arena, making it a
+//! representative regression surface rather than a synthetic stand-in for
+//! this bench. The **live-vanilla model
 //! path** (`self.model`, built only when `RenderState::new` is given a real
 //! `BlockAtlas`) needs `crate::resources::BlockResources::load(true)`, which
 //! degrades to `None` without a jar rather than failing — so it is not
