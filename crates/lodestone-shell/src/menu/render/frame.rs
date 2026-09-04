@@ -2,7 +2,8 @@
 //! [`MenuNotice`], [`AccountEntryView`], [`ServerEntryView`], [`MenuFrame`]
 //! and the [`FaviconCache`] that feeds it, plus [`owns_frame`].
 //!
-//! Split out of `menu/render.rs` verbatim: a pure move by line range.
+//! The frame data model is kept separate from drawing code so callers can
+//! build and test it without a renderer.
 
 use super::*;
 
@@ -36,11 +37,8 @@ pub struct MenuLabel {
     /// RGBA, sRGB 0..1 written verbatim (the shell's convention — see
     /// `docs/vanilla-hud-text.md`).
     pub colour: [f32; 4],
-    /// Font-pixel scale. `1.0` for ordinary vanilla component text (every
-    /// label before issue #103 used this implicitly — `build`'s `frame.vanilla`
-    /// loop hardcoded it). The death screen's title needs `2.0`:
-    /// `DeathScreen.visitText` sets `output.defaultParameters(normalParameters.
-    /// withScale(2.0F))` before drawing it.
+    /// Font-pixel scale. `1.0` for ordinary component text; the death screen's
+    /// title uses `2.0` so its heading is twice the normal glyph size.
     pub scale: f32,
 }
 
@@ -56,7 +54,7 @@ pub struct MenuRow {
     /// Favicon to draw at the row's left edge.
     pub favicon: Option<FaviconMosaic>,
     /// A player head to draw at the row's left edge instead of a favicon —
-    /// the account list's own icon (issue #66/#62). Drawn through the exact
+    /// the account list's own icon. Drawn through the exact
     /// same [`FaviconMosaic`] path as `favicon`: a head is not a conceptually
     /// different kind of "small square texture", so it gets no second
     /// drawable type or draw call to drift from the favicon one. See
@@ -72,8 +70,8 @@ pub struct MenuRow {
     ///
     /// With [`Self::edit`] set this only selects the field *fill* for the
     /// jar-less fallback; the caret, the selection and the visible slice all come
-    /// from the widget. Without it, the pre-#395 draw applies: the whole label
-    /// with a caret parked after it.
+    /// from the widget. Without it, the fallback draws the whole label with a
+    /// caret parked after it.
     pub field: bool,
     /// Draw the row's background as vanilla's `AbstractSliderButton` track
     /// instead of a `Button`.
@@ -82,10 +80,8 @@ pub struct MenuRow {
     /// booleans are `CycleButton`s, and the two
     /// look nothing alike — a slider track has no bevel and no disabled variant.
     ///
-    /// This used to say "no live option in this client is a slider", citing
-    /// `guiScale`'s `ClampingLazyMaxIntRange` — true when written, false since
-    /// issue #203 gave `mouseWheelSensitivity` a real live value (see
-    /// [`Self::slider_value`]). Kept as its own `bool` rather than folded into
+    /// Numeric options use this track, while enums and booleans use cycle
+    /// buttons. Kept as its own `bool` rather than folded into
     /// that field because a non-slider row still needs to say "not a slider" and
     /// `Option<f32>` already carries that (`None`); this is `is_slider`, not
     /// `has_a_known_value`.
@@ -319,9 +315,9 @@ pub struct PackEntryView {
     pub can_unselect: bool,
 }
 
-/// One tab-bar row's state — the shared tab widget's own view type (issue
-/// #564), now with two consumers: Statistics's `TAB_LABELS` and Create New
-/// World's own (#567). Both build one of these per tab rather than reaching
+/// One tab-bar row's state — the shared tab widget's own view type,
+/// with two consumers: Statistics's `TAB_LABELS` and Create New World's own
+/// tab list. Both build one of these per tab rather than reaching
 /// for a bespoke row type each, which is the whole point of building the
 /// widget once — see [`super::layout::tab_bar_row_rect`], the one geometry
 /// function [`super::render::row_rect`]'s `MenuRow::tab` arm resolves every
@@ -393,7 +389,7 @@ pub struct WorldEntryView {
     pub scroll: f32,
 }
 
-/// One account-list row's state (issues #66/#402).
+/// One account-list row's state.
 ///
 /// Deliberately two fields. Everything else a row draws is already a [`MenuRow`]
 /// field — the username is `label`, "Microsoft account" is `detail`, the
@@ -559,15 +555,15 @@ pub struct ServerEntryView {
     pub can_move_up: bool,
     /// `index < servers.size() - 1` — the move-down guard (`:386`).
     pub can_move_down: bool,
-    /// The list's current scroll offset, **in logical pixels** (issues #402,
-    /// #445). Denormalized onto every entry (rather than added as a parameter to
+    /// The list's current scroll offset, **in logical pixels**. Denormalized
+    /// onto every entry (rather than added as a parameter to
     /// [`row_rect`] and every render function it calls) so `row_rect` — which
     /// `app.rs`'s hit-test reads too — can resolve a row's position and
     /// visibility from the row alone, with no second plumbing path from
     /// `MenuNav` to the draw.
     ///
-    /// **Pixels rather than rows since #445**, which is what makes the wheel
-    /// scroll by vanilla's 18 px half-entry instead of jumping a whole row. This
+    /// **Pixels rather than rows**, which makes the wheel scroll by 18 px
+    /// half-entry increments instead of jumping a whole row. This
     /// is also the value [`server_scroll_list`] hands the scrollbar, so the thumb
     /// and the rows read the same number — see [`server_scroll_model`].
     pub scroll: f32,
@@ -815,8 +811,8 @@ pub struct MenuFrame<'a> {
     /// with no scrollbar wants anyway — so this degrades to [`Self::labels`]
     /// rather than to nothing.
     pub list_labels: Vec<MenuLabel>,
-    /// The loading screen's progress bar, `None` on every other screen (issue
-    /// #449) — see [`MenuProgress`] and [`loading_frame_with_progress`].
+    /// The loading screen's progress bar, `None` on every other screen — see
+    /// [`MenuProgress`] and [`loading_frame_with_progress`].
     pub progress: Option<MenuProgress>,
     /// The loading screen's chunk-status grid, `None` on every other screen
     /// and `None` on the loading screen itself until a view radius is known
@@ -1046,9 +1042,9 @@ pub fn owns_frame(screen: super::Screen) -> bool {
             | Screen::Social
             | Screen::Statistics
             | Screen::CreateWorld
-            // Issue #540. A full-frame screen with two buttons and nothing behind
-            // it worth rendering — the world list it was opened from is a menu
-            // screen too, so the Clear pass costs nothing here.
+            // A full-frame screen with two buttons and nothing behind it worth
+            // rendering — the world list it was opened from is a menu screen
+            // too, so the Clear pass costs nothing here.
             | Screen::Confirm
     )
 }
