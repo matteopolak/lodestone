@@ -36,25 +36,24 @@
 //!   and [`MobSim`] ticks goal-driven `NavigatingMob`s over it. The encoder
 //!   half of streaming the result to a client (`ServerProtocol::encode_add_entity`
 //!   / `encode_entity_update` / `encode_remove_entity`) is a separate seam a
-//!   version crate implements, but as of issue #217 something in this crate
+//!   version crate implements, and production wiring in this crate
 //!   also *drives* it in production: [`IntegratedServer::open_in_memory_with_mobs`]
-//!   spawns a background task (`tick::run_tick_loop`, issue #284 — before that,
-//!   `mobs::run_mob_tick_loop`) that owns a live
+//!   spawns a background task (`tick::run_tick_loop`) that owns a live
 //!   `MobSim` and republishes its snapshots through [`LiveMobSource`], an
 //!   [`EntitySource`] the existing `serve_connection` streaming pass already
 //!   diffs against every connection reactively. The same loop also ticks
-//!   every registered block entity and tracks MSPT/TPS/overrun accounting
-//!   (issue #285) — see the `tick` module's own doc comment for the full
-//!   before/after picture of every timer this crate had.
+//!   every registered block entity and tracks MSPT/TPS/overrun accounting — see
+//!   the `tick` module's own doc comment for the current responsibilities of
+//!   each timer.
 //! * [`PlayerVitals`] — the server-authoritative air-supply countdown and
-//!   drowning damage (issue #267). Player-only for now (see its own module
+//!   drowning damage. Player-only for now (see its own module
 //!   doc comment for why `MobSim` does not yet participate); ticked from
 //!   `serve_play`'s per-tick timer against a submersion test over
 //!   [`ChunkSource::block_state`] at the tracked player position, with the
 //!   two new [`ServerProtocol`] methods (`encode_air_supply_update`,
 //!   `encode_set_health`) defaulting to emit nothing, exactly like the
 //!   keep-alive/time/view-streaming encoders above.
-//! * [`FallTracker`] — server-authoritative fall damage (issue #265),
+//! * [`FallTracker`] — server-authoritative fall damage,
 //!   packet-driven rather than timer-driven like [`PlayerVitals`]: it is fed
 //!   the `(y, on_ground)` pair every [`ServerBound::PlayerMoved`] now
 //!   carries and reports damage the moment a landing crosses vanilla's
@@ -83,8 +82,7 @@
 //!   entry instead of always writing stone — the doc's second named gap);
 //!   [`IntegratedServer::open_in_memory_with_mobs`] spawns
 //!   `tick::run_tick_loop`, which ticks block entities from the same unified
-//!   loop as the mob sim (issue #284 — before that, a second, separate
-//!   `block_entities::run_block_entity_tick_loop` task), so a furnace placed
+//!   loop as the mob sim, so a furnace placed
 //!   in a real singleplayer session actually
 //!   ticks. The doc's third named gap (container packets so a client can
 //!   *see* inside one) is not closed by this landing; see that doc for the
@@ -99,21 +97,21 @@
 //!
 //! [`Transport`]: lodestone_net::Transport
 
-/// Server access control (issue #336): ops, whitelist, player bans and IP bans in
+/// Server access control: ops, whitelist, player bans and IP bans in
 /// vanilla's own four JSON files, enforced at join. Native only — a browser world
 /// has no filesystem and no remote players.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod access;
 mod advancements;
 /// Beacon pyramid detection, primary/secondary effect selection and periodic
-/// effect application (issue #616's `SET_BEACON` remainder) — pure, testable
+/// effect application — pure, testable
 /// derivations; `crate::server` owns the block entity, the menu, and every
 /// side effect (payment consumption, `ActiveEffects::apply`, the wire).
 pub mod beacon;
 mod block_breaking;
 mod block_entities;
 /// Rolling a broken block's loot table and popping the result as item entities
-/// (issue #337's missing consumer) — the join between [`loot`],
+/// — the join between [`loot`],
 /// [`MobSim::spawn_item`] and `server`'s block-break arm.
 pub mod block_drops;
 mod block_placement;
@@ -134,7 +132,7 @@ pub mod boat;
 mod border;
 /// A wasm32-only periodic driver (`BrowserInterval`) for `server::serve_play`'s
 /// browser build — see that module's own doc for why `tokio::time` cannot be
-/// used here at all (issue #636).
+/// used here at all.
 mod browser_timer;
 mod brewing;
 /// Server-side chat-session bookkeeping: the announced session/chain-position
@@ -143,8 +141,8 @@ mod brewing;
 /// does not verify.
 pub mod chat_session;
 mod chunk;
-/// Bit-packed per-section block storage for [`chunk::ChunkColumn`] — issue #551,
-/// unit U8 of `docs/plans/chunk-lifecycle.md`. Private: the representation is an
+/// Bit-packed per-section block storage for [`chunk::ChunkColumn`] — unit U8 of
+/// `docs/plans/chunk-lifecycle.md`. Private: the representation is an
 /// implementation detail of `ChunkColumn`, which exposes it only as
 /// `append_section_cells`/`blocks_heap_bytes`.
 mod chunk_blocks;
@@ -152,15 +150,13 @@ pub mod chunk_nbt;
 mod chunk_store;
 mod command;
 mod command_block;
-/// The built-in server command tree (`/gamerule`, …) — issue #48. **Was an
-/// orphan file, never declared and therefore never compiled**; see
+/// The built-in server command tree (`/gamerule`, …); see
 /// `docs/game-rules.md`.
 ///
-/// Public as of the command-dispatcher unit: the wire-parity gates live in
+/// Public because the wire-parity gates live in
 /// `crates/protocol/v770/tests/` (they need a real `V770Adapter` to decode the
 /// captured vanilla tree, which this crate cannot reach), so `ServerCommands` and
-/// its projection have to be nameable from outside. It was `mod commands;` while
-/// it was an island, which is part of how the island survived.
+/// its projection have to be nameable from outside the crate.
 pub mod commands;
 mod composter;
 /// The ender dragon fight — phase state machine, crystal healing and the
@@ -179,7 +175,7 @@ pub mod wither;
 /// constructs [`dimension::DimensionalSource`] itself.
 pub mod dimension;
 /// Background world-tick loops for a dimension nobody may be standing in
-/// (issue #579) — `crate::integrated`'s `with_nether` calls this the first
+/// — `crate::integrated`'s `with_nether` calls this the first
 /// time a dimension's sibling `ChunkSource` is built. Crate-private: its one
 /// entry point is consumed from `crate::integrated` alone.
 ///
@@ -197,7 +193,7 @@ pub mod portal;
 /// of a click from the slot/button/click-type the wire carries, rather than
 /// applying the client's claimed slot diff.
 pub mod container_click;
-/// Issue #529: the server-authoritative crafting grid and the bundled recipe
+/// The server-authoritative crafting grid and the bundled recipe
 /// corpus it re-derives a result from. Public because a host may want to read
 /// the corpus, and because `CraftingState` is named by the container plumbing.
 pub mod crafting;
@@ -209,14 +205,14 @@ pub mod anvil;
 pub mod enchantment_data;
 pub mod enchanting;
 pub mod smithing;
-/// Issue #150: the loom's banner-pattern application, and the same
+/// The loom's banner-pattern application, and the same
 /// scratch-menu shape `smithing`/`anvil` already use for a non-block-entity
 /// station.
 pub mod loom;
-/// Issue #150: the stonecutter's recipe list, read straight off
+/// The stonecutter's recipe list, read straight off
 /// [`crafting::recipe_book`]'s already-loaded corpus.
 pub mod stonecutting;
-/// Issue #530: sounds, particles and level events the server owns. Public
+/// Sounds, particles and level events the server owns. Public
 /// because `ServerProtocol`'s three new encoders name [`effects::WorldEffect`].
 pub mod effects;
 mod fall;
@@ -253,9 +249,8 @@ pub mod burning;
 /// over an id and an amplifier, not a place to keep effect state.
 pub mod mob_effects;
 mod furnace;
-/// The world's typed game-rule registry (issue #327). **Was an orphan file too**
-/// — none of its 780 lines, including `game_rule_defaults_match_the_jar`, was in
-/// the crate at all.
+/// The world's typed game-rule registry, including
+/// `game_rule_defaults_match_the_jar` validation.
 pub mod game_rules;
 mod gravity_tick;
 mod growth_tick;
@@ -279,8 +274,8 @@ pub mod join_scheduler;
 /// `compute_served_light` was measured to actually compute, and the one trap in
 /// `docs/server-chunk-light.md`'s brokered seam patch.
 pub mod light;
-/// Loot-table loading and rolling (issue #337): parses Mojang's datapack
-/// loot-table JSON from the bundled `assets/loot_table/` set and rolls it with
+/// Loot-table loading and rolling: parses datapack loot-table JSON from the
+/// bundled `assets/loot_table/` set and rolls it with
 /// the server's deterministic RNG for the empty loot context.
 pub mod loot;
 mod mob_spawn;
@@ -289,31 +284,31 @@ mod mob_spawn;
 /// `tick::run_tick_loop` against the block entities `chunk_nbt` loads.
 pub mod mob_spawner;
 mod mobs;
-/// Natural mob spawning against a live world (issues #221/#222): the per-species
+/// Natural mob spawning against a live world: the per-species
 /// `SpawnPlacements` table, a per-column light cache over the real light engine,
 /// and the `NaturalSpawner` that runs vanilla's cluster loop over real terrain
 /// and biome spawn lists. Driven by `tick::run_tick_loop`.
 pub mod natural_spawn;
 mod neighbor_update;
-/// Pistons (issue #316): the structure resolver, the quasi-connectivity signal
+/// Pistons: the structure resolver, the quasi-connectivity signal
 /// rule, and the move. Public because the resolver's order is the behaviour and
 /// gates outside this crate assert it.
 pub mod piston;
 mod players;
 mod plugin_channels;
-/// Issue #134: the plugin-facing custom-dimension registry — see
+/// The plugin-facing custom-dimension registry — see
 /// `docs/plugin-worldgen-api.md`.
 pub mod plugin_dimension;
-/// Issue #132's decision made concrete: bridges a plugin's
+/// Bridges a plugin's
 /// `lodestone_worldgen::generator::ChunkGenerator` into a real
 /// [`chunk::ChunkSource`] — see `docs/plugin-worldgen-api.md`.
 pub mod plugin_worldgen;
-/// Issue #150: the plugin-facing crafting-station (anvil/grindstone/
+/// The plugin-facing crafting-station (anvil/grindstone/
 /// smithing/loom/stonecutter) result-hook registry — see
 /// `docs/plugin-crafting-hooks.md`.
 pub mod plugin_crafting;
 mod protocol;
-/// The GameSpy4 / UT3 server-query protocol (issue #332): a UDP listener
+/// The GameSpy4 / UT3 server-query protocol: a UDP listener
 /// answering the challenge-response dance server-list aggregators use, wired
 /// into `IntegratedServer::bind` (native targets only — the socket half of the
 /// module is `cfg`-gated, the protocol logic compiles everywhere).
@@ -347,7 +342,7 @@ pub mod redstone_counters;
 pub use redstone_graph::{ReactionClass, CLASS_NAMES as REACTION_CLASS_NAMES, CLASS_COUNT as REACTION_CLASS_COUNT};
 mod redstone_diode;
 mod redstone_dispenser;
-/// Issue #315/#317's end-to-end gates: repeater delay/locking, comparator
+/// End-to-end gates for repeater delay/locking, comparator
 /// modes and observer pulse width, driven through the production entry point
 /// against values measured on a real 26.2 server. Test-only.
 #[cfg(test)]
@@ -361,7 +356,7 @@ mod redstone_graph;
 mod redstone_note_block;
 mod redstone_observer;
 mod redstone_openable;
-/// Issue #314's end-to-end gate: redstone propagation driven through the
+/// An end-to-end gate for redstone propagation driven through the
 /// production entry point against values measured on a real 26.2 server.
 /// Test-only — it holds the oracle table and the gates, no production code.
 #[cfg(test)]
@@ -374,11 +369,11 @@ mod redstone_oracle_gate;
 #[cfg(test)]
 mod redstone_order_oracle_gate;
 /// `docs/plans/redstone-execution-model.md`'s U0, piston half: interrupting a
-/// piston's own pending commit — the "update-order quirk" issue #316 is named
-/// for — measured on a real 26.2 server. Test-only.
+/// piston's own pending commit — the measured update-order behavior — on a real
+/// 26.2 server. Test-only.
 #[cfg(test)]
 mod redstone_piston_order_oracle_gate;
-/// Issue #465's delayed half: a component a player mutates must flip at the
+/// The delayed placement gate: a component a player mutates must flip at the
 /// tick the live 26.2 server flipped it, and the flip must reach the wire —
 /// driven through the real `tick::run_tick_loop` rather than through
 /// `propagate_and_react` directly, because "does anything drain the queue this
@@ -391,7 +386,7 @@ mod redstone_target;
 mod redstone_torch;
 mod redstone_tripwire;
 mod redstone_wire;
-/// Per-player `.dat` persistence (issue #302) — inventory, position, health and
+/// Per-player `.dat` persistence — inventory, position, health and
 /// game mode across a disconnect. Native only, for the same reason
 /// `region_source` is: it is a `std::fs` schema over `lodestone-anvil`.
 #[cfg(not(target_arch = "wasm32"))]
@@ -404,21 +399,21 @@ pub mod player_data;
 /// to exist everywhere even though its filesystem-bearing payload — gated
 /// inside this module itself — cannot. See the module's own doc comment.
 pub mod live_save;
-/// Per-chunk entity persistence (issue #303) — the `entities/` region set that
+/// Per-chunk entity persistence — the `entities/` region set that
 /// makes a mob and a dropped item survive a restart. Native only, like
 /// `player_data` and `region_source`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod entity_storage;
-/// Per-section point-of-interest persistence (issue #303's second half) — the
+/// Per-section point-of-interest persistence — the
 /// `poi/` region set. Native only, like `entity_storage`.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod poi_storage;
-/// World persistence (issue #437). Native only: a browser singleplayer world
+/// World persistence. Native only: a browser singleplayer world
 /// has no filesystem, and `lodestone-anvil` is a `std::fs` crate — see this
 /// crate's `Cargo.toml` for the matching target-gated dependency.
 #[cfg(not(target_arch = "wasm32"))]
 pub mod region_source;
-/// The Source RCON listener (issue #331). Native only, like `region_source`:
+/// The Source RCON listener. Native only, like `region_source`:
 /// the listener is a `tokio::net::TcpListener`, and a browser singleplayer
 /// world has no network listener for an admin console.
 #[cfg(not(target_arch = "wasm32"))]
@@ -445,10 +440,10 @@ mod spawn;
 /// behaviour are both callers, and because the item→entity derivation is worth
 /// asserting from an integration test rather than only from inside the crate.
 pub mod spawn_egg;
-/// Structure chests (issue #337): the data-marker pass that fills a shipwreck's,
+/// Structure chests: the data-marker pass that fills a shipwreck's,
 /// igloo's or ocean ruin's chest with a rolled loot table at generation time.
 mod structure_loot;
-/// Issue #136: pasting a structure template into an already-generated,
+/// Pasting a structure template into an already-generated,
 /// live/persisted world — the runtime entry point
 /// `lodestone_worldgen::structure::template::StructureTemplate::place` does
 /// not itself provide (it only writes into a generation-time
@@ -463,12 +458,12 @@ mod tick;
 /// the players** rather than sitting on world spawn. Public because a host wants
 /// to publish player anchors into it and because its gates assert from outside.
 pub mod tick_area;
-/// The chunk ticket type and the empty-to-full status pipeline (issue #289).
+/// The chunk ticket type and the empty-to-full status pipeline.
 /// `pub` so `crate::chunk_store::ChunkStore`'s own public accessors can name
 /// [`ticket::TicketStoreHandle`]/[`ticket::ChunkStatus`] in their signatures.
 pub mod ticket;
-/// Villager merchant-offer purchase mechanics and restock cadence — issue
-/// #245's "refresh" half. Consumes `lodestone_data::villager_trades` and
+/// Villager merchant-offer purchase mechanics and restock cadence. Consumes
+/// `lodestone_data::villager_trades` and
 /// `crate::mobs::villager::Profession` read-only; nothing here is wired to
 /// the network or to `MobSim` yet — see the module's own doc for exactly
 /// what remains.
@@ -488,7 +483,7 @@ pub mod lightning;
 pub mod regional_difficulty;
 mod world_spawn;
 /// One shared, persistable store for the world's scalars — game rules,
-/// difficulty and the clock (issues #327, #328, #323). Public because a host and
+/// difficulty and the clock. Public because a host and
 /// the gates both read it.
 pub mod world_state;
 mod worldgen_data;
@@ -516,7 +511,7 @@ pub use brewing::{
 pub use chunk::{
     ChunkColumn, ChunkSource, NetherChunkSource, OverworldChunkSource, WorldgenChunkSource,
 };
-// Issue #505: `chunk_store::ChunkStore` itself stays crate-private (its methods
+// `chunk_store::ChunkStore` itself stays crate-private (its methods
 // are `pub(crate)` and `IntegratedServer` is the only thing that should build
 // one), but its **capacity policy** is public, for one reason: the policy is a
 // claim about what `crate::server` streams, and the gate that joins the two —
@@ -604,7 +599,7 @@ pub use random_tick::{
 pub use rcon::{DEFAULT_RCON_PORT, RconConfig};
 pub use scheduled_tick::{ScheduledTick, ScheduledTickQueue, StagedTick, TickPriority};
 pub use server::{
-    // Issue #551's gate in `tests/view_radius_store_capacity.rs` asserts at compile
+    // The gate in `tests/view_radius_store_capacity.rs` asserts at compile
     // time that the radius it raises the slider to is one `ViewTracker::max_radius`
     // actually permits — a premise it must not restate as a literal.
     MAX_CLIENT_VIEW_RADIUS,
@@ -634,7 +629,7 @@ pub use worldgen_data::{
     overworld_generator, overworld_generator_of_type, BUNDLED_WORLDGEN_SCOPE, WorldType,
     WorldgenScopeMismatch,
 };
-// Issue #519's remaining three presets (`single_biome_surface`, `flat`/
+// The remaining three presets (`single_biome_surface`, `flat`/
 // `flat_all_dimensions`, `debug_all_block_states`): re-exported so a
 // world-creation UI outside this crate can select them the same way it
 // already can `WorldType` above — see `docs/worldgen-world-type-selection.md`
@@ -654,12 +649,12 @@ pub use worldgen_data::overworld_chunk_source_override;
 // Re-exported so a caller (e.g. the shell's local world) can name the generator
 // and its output without depending on `lodestone-worldgen` directly.
 pub use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
-// Same reason, for issue #519's `flat`/`debug_all_block_states` presets.
+// Same reason, for the `flat`/`debug_all_block_states` presets.
 pub use lodestone_worldgen::debug::DebugLevelSource;
 pub use lodestone_worldgen::flat::{FlatLayer, FlatLevelGeneratorSettings, FlatLevelSource, StructureOverrides};
 
-/// `Heightmap.Types.MOTION_BLOCKING`'s registry id, re-exported for the same
-/// reason (issue #516): `lodestone-worldgen` is only a *dev*-dependency of
+/// The motion-blocking heightmap registry id, re-exported for the same
+/// reason: `lodestone-worldgen` is only a *dev*-dependency of
 /// `lodestone-v26-2`, so the encoder that writes
 /// [`ChunkColumn::motion_blocking`] into the chunk packet cannot name the
 /// constant at its source. Re-exported rather than restated so the id is never
