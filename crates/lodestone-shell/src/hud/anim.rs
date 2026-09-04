@@ -12,11 +12,11 @@
 //! Every duration below is copied from vanilla's own hud rendering in **vanilla ticks** (20 per
 //! second, 50ms each). Nothing reaches `hud.rs` with the server's own tick
 //! counter — `HudFrame` carries only current-value vitals (`health`, `food`,
-//! …), not a clock, and `sim.rs`/`app.rs` are a different agent's files for
-//! this change. Since a vanilla tick *is* 50ms of real time whenever the
+//! …), not a clock, and this module therefore derives its own display clock.
+//! Since a vanilla tick *is* 50ms of real time whenever the
 //! client is keeping up with the server (the overwhelmingly common case),
 //! [`wall_tick`] divides a wall-clock [`crate::platform::Instant::elapsed`] by 50ms
-//! and uses that as a drop-in `tickCount` substitute for this HUD's own
+//! and uses that as a drop-in display-tick substitute for this HUD's own
 //! purely decorative timers — the same trade already made for the chat
 //! caret's blink (`app.rs`'s `chat_caret_visible`: wall time instead of a
 //! tick count, "the caret keeps blinking while the game is paused"). None of
@@ -28,17 +28,14 @@
 //! clock — so all of it is unit-tested with literal tick numbers and no
 //! timing flakiness.
 //!
-//! ## Why the jitter is not vanilla's exact RNG sequence
+//! ## Why jitter uses independent deterministic noise
 //!
-//! Vanilla reuses one `RandomSource` field, reseeded once per
-//! `extractPlayerHealth` call (vanilla's own hud rendering, `random.setSeed(tickCount *
-//! 312871)`) and then consumed sequentially across heart containers and food
-//! pips in a fixed draw order. Reproducing that exact sequence buys nothing
-//! visible — nobody can screenshot-diff a purely cosmetic jitter against a
-//! live server — and `docs/sky-and-air-bubbles.md` already made the identical
-//! trade for the star field's RNG ("same distribution shape, different exact
-//! positions, a visual choice and not a decode-parity claim"). [`jitter`]
-//! below is a small splitmix64-style mix keyed by `(tick, salt)` instead.
+//! The reference presentation reseeds one pseudorandom stream from the
+//! display tick, then consumes it across heart containers and food pips in a
+//! fixed draw order. Exact stream order is not a visible contract for this
+//! cosmetic movement, so [`jitter`] instead uses a small splitmix64-style mix
+//! keyed by `(tick, salt)`. The result is deterministic per displayed element
+//! without coupling one element's movement to another's draw order.
 
 use crate::platform::Instant;
 
@@ -47,7 +44,7 @@ use lodestone_assets::ResourceLocation;
 use super::HotbarSlot;
 
 /// Vanilla-tick-equivalent index derived from a wall-clock instant — see the
-/// module doc for why this substitutes for the real `tickCount`.
+/// module doc for why this substitutes for the presentation tick counter.
 pub(super) fn wall_tick(since: Instant) -> i64 {
     (since.elapsed().as_millis() / 50) as i64
 }
@@ -145,17 +142,17 @@ impl HeartAnim {
 }
 
 /// The critical-health y-jitter: once
-/// `currentHealth + absorption <= 4`, every heart **container** redraws with
-/// a fresh `0..=1`px offset. Vanilla reseeds one shared RNG stream per
-/// `extractPlayerHealth` call; this keys an independent draw
+/// combined health plus absorption is at most four half-points, every heart
+/// **container** redraws with a fresh `0..=1`px offset. The reference
+/// health-extraction pass reseeds one shared RNG stream; this keys an independent draw
 /// by `(tick, container)` instead — see the module doc.
 pub(super) fn heart_jitter(tick: i64, container: usize) -> f32 {
     jitter(tick, 0xBEEF_0000_u64 ^ container as u64, 2) as f32
 }
 
-/// The hunger-row wobble while saturation is empty:
-/// `getSaturationLevel() <= 0.0 && tickCount % (food * 3 + 1) == 0` gates a
-/// fresh `-1..=1`px offset per pip; any other tick draws flush (no
+/// The hunger-row wobble while saturation is empty. A zero-saturation display
+/// tick whose remainder modulo `food * 3 + 1` is zero gates a fresh
+/// `-1..=1`px offset per pip; any other tick draws flush (no
 /// cross-frame memory needed — unlike the heart row, this is a pure function
 /// of the current tick, food and saturation). Vanilla draws each of the ten
 /// pips with an independently-drawn offset on a gated tick; `pip` keys that

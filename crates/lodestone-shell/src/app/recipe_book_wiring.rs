@@ -63,8 +63,8 @@ fn no_tooltip() -> crate::container::RecipeTooltipContext {
 /// The dispatch loop's **resulting slot contents**, not merely that clicks
 /// were issued.
 ///
-/// This is the assertion that would have caught the plan this change was
-/// briefed with. "Two `ContainerClick`s per step — pick up from
+/// This assertion validates the required result rather than the number of
+/// dispatched clicks. "Two `ContainerClick`s per step — pick up from
 /// `source_slot`, place into `cell`" reads correctly and is wrong:
 /// `Click::left` on a slot places the **whole** carried stack, so a 5-coal
 /// stack would land entirely in cell 0. See [`auto_fill_clicks`].

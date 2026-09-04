@@ -392,15 +392,12 @@ impl FramePacer {
 mod tests {
     use super::*;
 
-    /// Issue #570's discriminating input: a real cap, driven by an event
-    /// loop that iterates far faster than it presents. `dt` at 200 Hz is
-    /// ~5 ms, so the removed `1.0 / step.dt` implementation reported
-    /// something on the order of 200 — nowhere near a 10 fps cap, which is
-    /// exactly why the owner saw ~20,000 fps at a real 10 fps cap (their
-    /// loop spun even faster than this one). Prefer a counter over a
-    /// wall-clock duration per this repo's evidence standard: the clock here
-    /// is entirely synthetic, so the assertion is deterministic regardless of
-    /// machine load.
+    /// A real cap driven by an event loop that iterates far faster than it
+    /// presents is the discriminating input for the FPS counter. `dt` at
+    /// 200 Hz is ~5 ms, so a reciprocal of `step.dt` would report about 200,
+    /// not the 10 fps presentation cap. A counter is preferable to a
+    /// wall-clock duration here because the clock is entirely synthetic, so
+    /// the assertion is deterministic regardless of machine load.
     #[test]
     fn a_ten_fps_cap_against_a_fast_loop_reports_the_cap_not_the_iteration_rate() {
         let t0 = Instant::now();

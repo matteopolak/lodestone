@@ -16,23 +16,20 @@
 //! Two things vanilla's own locator-bar rendering reads that this module deliberately leaves
 //! out, named here rather than silently approximated:
 //!
-//! * **Per-distance sprite selection.** Vanilla resolves a
-//!   `minecraft:waypoint_style` registry entry and picks one of its sprites
-//!   by distance (`WaypointStyle::sprite`, `near_distance`/`far_distance`).
-//!   That registry is not modelled anywhere in this workspace. Every dot
-//!   here draws the same sprite, `hud/locator_bar_dot/default` — the
-//!   built-in style's own asset path
-//!   (`WaypointStyle::ICON_LOCATION_PREFIX` + `WaypointStyleAssets::DEFAULT`
-//!   getting `"default"`), not a placeholder name.
-//! * **Pitch direction (up/down arrows).** `TrackedWaypoint::pitchDirectionToCamera`
-//!   needs the camera's full projection to tell whether a waypoint is above
-//!   or below the current view, which this module has no camera type for.
+//! * **Per-distance sprite selection.** Style data can select a sprite by
+//!   near and far distance thresholds. That registry is not modelled anywhere
+//!   in this workspace, so every dot draws the built-in
+//!   `hud/locator_bar_dot/default` sprite.
+//! * **Pitch direction (up/down arrows).** Determining whether a waypoint is
+//!   above or below the current view needs the camera's full projection,
+//!   which this module has no camera type for.
 //!   [`locator_dots`] returns no arrow information at all; a caller that
 //!   wants the arrows has to add that projection.
 //!
-//! Both are real gaps, not stand-ins for something this module gets wrong —
-//! the horizontal dot position, which is what issue #26 is actually about,
-//! is a full port.
+//! Within that supported scope, the module projects waypoint positions to
+//! clipped horizontal dots, preserves server-provided colours, and derives a
+//! deterministic fallback colour. The uniform sprite and unnormalised fallback
+//! RGB are intentional approximations documented below.
 //!
 //! # The colour hash
 //!
@@ -51,9 +48,8 @@
 
 use lodestone_model::event::{TrackedWaypoint, WaypointId, WaypointPosition};
 
-/// `WaypointStyle::ICON_LOCATION_PREFIX` + `WaypointStyleAssets::DEFAULT`'s
-/// `"default"` name — the one sprite every dot draws, per the module doc's
-/// "what this does not model".
+/// The built-in locator-dot asset's `"default"` suffix — the one sprite every
+/// dot draws, per the module doc's "what this does not model".
 pub const DEFAULT_DOT_SPRITE: &str = "hud/locator_bar_dot/default";
 
 /// `ContextualBar::VISIBLE_DEGREE_RANGE` / `LocatorBar::DOT_SIZE`'s siblings.
