@@ -1,4 +1,4 @@
-//! The world's game rules: one shared, typed, defaulted store (issue #327).
+//! The world's game rules: one shared, typed, defaulted store.
 //!
 //! # What it is
 //!
@@ -7,15 +7,11 @@
 //! [`GameRulesHandle`], a cheap cloneable handle so **one** store is shared by
 //! the world tick loop and every connection.
 //!
-//! # Two islands this closes, and they are different islands
+//! # Shared storage and enforcement
 //!
-//! **Storage existed and was per-connection.** `crate::server`'s
-//! `WorldAdminState` held a bare `HashMap<String, String>` constructed as a
-//! stack local inside `serve_play`, which runs once per accepted socket. Its own
-//! doc comment was honest that two LAN players would each hold a private,
-//! divergent view. That is fixed by the *sharing* half of this module: the
-//! handle is cloned, never split, so a rule set by one connection is the rule
-//! every connection and the tick loop reads.
+//! [`GameRules`] is a world-scoped typed store. [`GameRulesHandle`] clones share
+//! the same inner state, so a rule set by one connection is the rule every
+//! connection and the tick loop reads.
 //!
 //! **Enforcement did not exist at all.** A rule nothing consults is worse than
 //! an absent rule, because it reads as connected: the round trip confirms back
@@ -24,10 +20,8 @@
 //! the ones in the world tick loop are the load-bearing ones, because they run with
 //! no connection attached.
 //!
-//! **And a third island, bigger than either: this file was never declared as a
-//! module.** None of its lines was in the crate at all — including
-//! `game_rule_defaults_match_the_jar`, so the jar-checked defaults were never
-//! actually checked. `lib.rs` declares it now.
+//! The crate root declares this module, so the typed defaults and their
+//! validation test are compiled with the live server.
 //!
 //! # The identifiers are snake_case in 26.2, and this is the trap
 //!
@@ -42,10 +36,10 @@
 //! |---|---|---|
 //! | `doDaylightCycle` | `advance_time` | |
 //! | `doWeatherCycle` | `advance_weather` | |
-//! | `doMobSpawning` | `spawn_mobs` | `spawn_monsters`/`spawn_phantoms`/`spawn_patrols`/`spawn_wardens`/`spawn_wandering_traders` are now **separate** rules, not one |
+//! | `doMobSpawning` | `spawn_mobs` | `spawn_monsters`/`spawn_phantoms`/`spawn_patrols`/`spawn_wardens`/`spawn_wandering_traders` are **separate** rules, not one |
 //! | `naturalRegeneration` | `natural_health_regeneration` | |
 //! | `spawnRadius` | `respawn_radius` | |
-//! | `doTileDrops` | `block_drops` | |
+//! | legacy block-drop rule | `block_drops` | |
 //! | `doMobLoot` | `mob_drops` | |
 //! | `doEntityDrops` | `entity_drops` | |
 //! | `maxCommandChainLength` | `max_command_sequence_length` | |
@@ -67,23 +61,23 @@
 //!   than silently shipping.
 //! * **Enforcing a rule:** add a typed accessor here, then read it at the
 //!   decision point. The accessor is the cheap half; finding the decision point
-//!   is the work, and a rule with an accessor and no reader is exactly the island
-//!   this module exists to stop creating. `docs/world-state.md` tables every
+//!   is the work, and a rule with an accessor needs a reader at its decision
+//!   point. `docs/world-state.md` tables every
 //!   accessor against its production reader, including the two (`spawn_mobs`,
 //!   `keep_inventory`) that still have none and why.
 //! * **Do not split the handle per connection.** `crate::BlockTickFeed` has a
 //!   `subscriber()` that deliberately splits, because its outbound queue is
-//!   drain-all. This type is the opposite: sharing *is* the fix, and a
-//!   per-connection clone of the inner `Arc` is what #327 was reported for.
+//!   drain-all. This type shares one inner `Arc`, so every connection and the
+//!   world loop observe the same rule values.
 //!
 //! # Configuration
 //!
 //! No environment variable and no config file. Defaults come from [`GAME_RULES`];
 //! a running world's overrides come from `SET_GAME_RULE` frames (validated by
-//! `crate::server`'s `apply_game_rule_changed`). Persistence to `level.dat` **is**
-//! wired now, through [`crate::world_state::WorldStateHandle`] — see
-//! `docs/world-state.md`, which also records that `/gamerule`
-//! (`crate::commands`) still has no production constructor: that is #48's wiring.
+//! `crate::server`'s `apply_game_rule_changed`). Persistence to `level.dat` uses
+//! [`crate::world_state::WorldStateHandle`]. The command layer has no
+//! production constructor for this handle, so its rule updates remain outside
+//! the live command path; see `docs/world-state.md`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -133,8 +127,7 @@ impl GameRuleValue {
 }
 
 /// One rule's identity: its 26.2 identifier, its default, and (for an integer)
-/// the inclusive range vanilla's own `IntegerArgumentType`/`Codec.intRange`
-/// enforces.
+/// the inclusive range enforced by this parser.
 ///
 /// `min`/`max` are `None` for a boolean rule. They matter: `random_tick_speed`
 /// is `integer(0, MAX)`, so a negative value is rejected by vanilla at parse
@@ -164,11 +157,8 @@ impl GameRuleSpec {
 
     /// Parses `raw` as this rule's own type, applying the integer range.
     ///
-    /// Mirrors `GameRule<T>::deserialize` plus the `ArgumentType` bound that
-    /// guards it in vanilla — both, because vanilla applies the bound at two
-    /// layers (`IntegerArgumentType.integer(min, max)` for `/gamerule`,
-    /// `Codec.intRange(min, max)` for `level.dat`) and this crate has one entry
-    /// point for both.
+    /// Applies the same inclusive bound to command input and `level.dat` values
+    /// so both entry points share one validation rule.
     pub fn parse(&self, raw: &str) -> Result<GameRuleValue, GameRuleError> {
         match self.default {
             GameRuleValue::Bool(_) => match raw {
@@ -345,9 +335,7 @@ pub const KEEP_INVENTORY: &str = "keep_inventory";
 /// regeneration arms on it and neither starvation nor depletion.
 pub const NATURAL_HEALTH_REGENERATION: &str = "natural_health_regeneration";
 
-/// `block_drops` — pre-26.2 `doTileDrops`. Read by `crate::server`'s block-break
-/// arm, which is where vanilla consults it too
-/// (`Block.dropResources`'s `GameRules.RULE_DOBLOCKDROPS`).
+/// `block_drops` controls whether the block-break arm emits drops.
 pub const BLOCK_DROPS: &str = "block_drops";
 
 /// `mob_drops` — pre-26.2 `doMobLoot`. Read by `crate::mobs::MobSim::reap_dead`.
@@ -610,9 +598,8 @@ impl GameRules {
 /// Shaped like [`crate::BlockTickFeed`] — `Clone + Default`, an inner
 /// `Arc<Mutex<_>>`, so every existing `serve_connection*` entry point can pass
 /// one — with one deliberate difference: **there is no `subscriber()`**. Every
-/// clone of this handle shares the same store, and that is the whole point of
-/// issue #327's scope half. A per-connection store is the bug, not the
-/// behaviour.
+/// clone of this handle shares the same store, so all connections observe
+/// the same rule values. A per-connection store would let them diverge.
 ///
 /// `Mutex`, not `RwLock`: every access here is a single map lookup or insert
 /// under microseconds of contention from at most a handful of connection tasks
@@ -673,7 +660,7 @@ impl GameRulesHandle {
     /// Whether this handle and `other` name the same store.
     ///
     /// Exists for the sharing gate: "a rule set on one connection is visible on
-    /// another" is the property #327 reported broken, and its negative control
+    /// another" is the property under test, and its negative control
     /// needs to be able to state that two handles really are (or really are
     /// not) the same store, rather than inferring it from a value that could
     /// have agreed by both being at the default.
@@ -895,8 +882,8 @@ mod tests {
         assert!(!rules.keep_inventory());
     }
 
-    /// The scope half of #327: every clone of a handle is the **same** store.
-    /// A per-connection store was the reported bug.
+    /// Every clone of a handle refers to the **same** store; divergent
+    /// per-connection values are not possible.
     #[test]
     fn every_clone_of_a_handle_shares_one_store() {
         let a = GameRulesHandle::new();

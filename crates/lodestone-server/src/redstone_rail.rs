@@ -1,5 +1,5 @@
 //! Powered and activator rails (`minecraft:powered_rail` /
-//! `minecraft:activator_rail`) — the "powered rail" half of the rail issue.
+//! `minecraft:activator_rail`) — the "powered rail" half of rail behavior.
 //! `minecraft:detector_rail`'s own `POWERED` *read* already landed in
 //! `crate::redstone` (`is_detector_rail`'s `ownSignal`/`getDirectSignal`
 //! arms); its *producer* remains unbuilt — see this module's own doc comment
@@ -8,32 +8,25 @@
 //!
 //! # What it is
 //!
-//! Both `minecraft:powered_rail` and `minecraft:activator_rail` are the same
-//! Java class, `PoweredRailBlock`
-//! (`Blocks.ACTIVATOR_RAIL = register(..., PoweredRailBlock::new, ...)`,
-//! confirmed against the jar rather than assumed) — one `POWERED` boolean
-//! that tracks whether **direct redstone signal touches this rail, or a
-//! chain of same-orientation powered rails up to 8 cells away (through
-//! boosters) eventually reaches one that does**
-//! (vanilla's own `PoweredRailBlock.findPoweredRailSignal`/`isSameRailWithPower`).
-//! Activator rail's own *activation* effect
-//! — `AbstractMinecart.activateMinecart` (a plain minecart ejects its rider,
-//! a TNT minecart primes) — is now modelled, in
+//! Both `minecraft:powered_rail` and `minecraft:activator_rail` share one
+//! block-state shape — one `POWERED` boolean
+//! that tracks direct redstone signal or a same-orientation powered-rail chain
+//! reaching up to 8 cells away through already-powered relays.
+//! Activator rail's own *activation* effect (a plain minecart ejects its rider,
+//! a TNT minecart primes) is modelled in
 //! `crate::mobs::minecart::apply_activation`; this module's own `POWERED`
 //! tracking is what feeds it the rail's activation state each tick. This
 //! module remains the `POWERED` tracking only.
 //!
-//! Neither block is a redstone **signal source** — `PoweredRailBlock`
-//! overrides no `ownSignal`, so it never appears in
+//! Neither block is a redstone **signal source** — it never appears in
 //! `crate::redstone::is_signal_source`. It only *consumes* signal to decide
 //! its own `POWERED`, the same shape a door or fence gate has in
 //! `crate::redstone_openable`.
 //!
 //! # What is deliberately not modelled: connectivity (`SHAPE`)
 //!
-//! `BaseRailBlock`'s own generic curve/straight connection algorithm
-//! (`updateDir`/`RailState.place`) decides
-//! which of the (for `PoweredRailBlock`, six non-curved) `SHAPE` values a rail
+//! A separate generic curve/straight connection algorithm decides
+//! which of the six non-curved `SHAPE` values a rail
 //! settles into from its neighbours — a placement/shape-pipeline concern
 //! shared with the plain, non-redstone `minecraft:rail`, and out of this
 //! module's scope. [`update_state`] below reads whatever `SHAPE` a rail
@@ -42,17 +35,14 @@
 //! doc draws between "the read is right, the producer is separate" for six of
 //! its nine input families.
 //!
-//! # What this needs of the execution model (for issue #548)
+//! # What this needs of the execution model
 //!
-//! * **Trigger**: a neighbour notification, reacting through the same
-//!   `PoweredRailBlock.updateState` override `BaseRailBlock.neighborChanged`
-//!   calls — wired into `react_to_notification`
+//! * **Trigger**: a neighbour notification, wired into `react_to_notification`
 //!   exactly like the hopper `ENABLED`/note-block `POWERED` arms, no
 //!   scheduled tick.
-//! * **Propagation is *not* a plain six-direction fan-out.** Vanilla calls
-//!   `updateNeighborsAt(pos.below(), this)` unconditionally on a `POWERED`
-//!   flip, and *additionally* `updateNeighborsAt(pos.above(), this)` only
-//!   when the rail's own `SHAPE` is a slope (vanilla's own powered-rail block).
+//! * **Propagation is *not* a plain six-direction fan-out.** A `POWERED`
+//!   flip always notifies the cell below and additionally notifies the cell
+//!   above when the rail's own `SHAPE` is a slope.
 //!   [`NeighborFanOut`] carries exactly that pair so a caller does not
 //!   over-notify a flat rail's cell above it.
 //! * **Scheduled tick**: none — this is a same-tick decision, like the note
@@ -61,7 +51,7 @@
 //!   is the sharpest requirement in the family — [`find_powered_rail_signal`]
 //!   recurses up to 8 cells through **other rails of the same block type**,
 //!   reading each one's own current `POWERED`. A dependency-graph rework
-//!   (issue #548) has to treat a chain of powered rails as one connected unit
+//!   has to treat a chain of powered rails as one connected unit
 //!   for invalidation purposes: flipping the direct-signal source at one end
 //!   can flip every rail in the chain, and re-deriving that from a single
 //!   position's own six neighbours (the shape every other device in this
@@ -78,13 +68,11 @@ use lodestone_model::BlockPos;
 pub const POWERED_RAIL: &str = "minecraft:powered_rail";
 pub const ACTIVATOR_RAIL: &str = "minecraft:activator_rail";
 
-/// `PoweredRailBlock.findPoweredRailSignal`'s own recursion cap
-/// (`searchDepth >= 8`).
+/// Recursion cap for the same-orientation rail search (`search_depth >= 8`).
 pub const MAX_SEARCH_DEPTH: i32 = 8;
 
-/// `RailShape`, narrowed to the six values `PoweredRailBlock.SHAPE`
-/// (`BlockStateProperties.RAIL_SHAPE_STRAIGHT`) actually allows — a powered
-/// or activator rail can never curve.
+/// Six straight-only rail orientations; powered and activator rails cannot
+/// curve.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RailShape {
     NorthSouth,
@@ -135,34 +123,23 @@ fn rail_powered(state: &str) -> bool {
     get_bool_property(state, "powered").unwrap_or(false)
 }
 
-/// `true` for either block this module covers — the one class,
-/// `PoweredRailBlock`, registered twice (see this module's own doc comment).
+/// `true` for either powered-rail family covered by this module.
 #[must_use]
 pub fn is_powered_rail_family(state: &str) -> bool {
     matches!(base_name(state), POWERED_RAIL | ACTIVATOR_RAIL)
 }
 
-/// The type/orientation half of `PoweredRailBlock.isSameRailWithPower`
-/// (`:105-125`) — is the rail at `pos` the *same* block as the one searching,
-/// oriented so it can actually pass power along (excludes a perpendicular
-/// straight rail; a slope in the perpendicular axis is fine, matching the
-/// jar's own `dir` comparison), and currently `POWERED`? [`is_same_rail_at`]
-/// is the full port — this is the half with no recursion in it, split out so
-/// each half has one job.
+/// Checks whether a candidate at `pos` belongs to the same rail family, has a
+/// compatible orientation, and is currently powered. Recursion and neighbour
+/// signal checks stay in [`is_same_rail_at`].
 fn is_candidate_rail(state: &str, family: &str, dir: RailShape) -> bool {
     if base_name(state) != family {
         return false;
     }
     let Some(my_shape) = rail_shape(state) else { return false };
 
-    // `dir != EAST_WEST || myShape not in {NORTH_SOUTH, ASCENDING_NORTH,
-    // ASCENDING_SOUTH}` — i.e. reject when the search direction is
-    // perpendicular to this rail's own orientation. Named as the rejection
-    // condition, not the acceptance one, because that is the shape the jar's
-    // own double-negative reads most faithfully as — inverting this comparison
-    // is the exact mistake that made a same-direction chain look perpendicular
-    // to itself (§ this module's own oracle gate, discovered from a straight
-    // run failing to propagate at all).
+    // Reject a rail whose straight orientation is perpendicular to the search
+    // direction; slopes along the perpendicular axis remain compatible.
     let perpendicular_mismatch = match dir {
         RailShape::EastWest => matches!(my_shape, RailShape::NorthSouth | RailShape::AscendingNorth | RailShape::AscendingSouth),
         RailShape::NorthSouth => matches!(my_shape, RailShape::EastWest | RailShape::AscendingEast | RailShape::AscendingWest),
@@ -171,14 +148,12 @@ fn is_candidate_rail(state: &str, family: &str, dir: RailShape) -> bool {
     !perpendicular_mismatch && rail_powered(state)
 }
 
-/// `PoweredRailBlock.findPoweredRailSignal` (`:30-103`) — walks up to
-/// [`MAX_SEARCH_DEPTH`] cells `forward` (or backward) along `shape`,
-/// following ascending slopes up or down a Y level as vanilla's own `switch`
-/// does, and asks whether the rail found there is itself powered (directly,
-/// via `has_neighbor_signal`, or recursively via its own further search).
+/// Walks up to [`MAX_SEARCH_DEPTH`] cells forward or backward along `shape`,
+/// following ascending slopes up or down a Y level, and asks whether a rail
+/// found there is powered directly, by a neighbour, or through another relay.
 ///
-/// `has_neighbor_signal` is vanilla's `level.hasNeighborSignal(pos)` at each
-/// visited rail — supplied by the caller (typically
+/// `has_neighbor_signal` is evaluated at each visited rail and supplied by the
+/// caller (typically
 /// `crate::redstone::best_neighbor_signal(lookup, pos, false) > 0`) rather
 /// than recomputed here, keeping this module's only dependency on the query
 /// layer at the call site.
@@ -269,10 +244,8 @@ where
         )
 }
 
-/// `PoweredRailBlock.isSameRailWithPower` (`:105-125`), in full: is this a
-/// candidate rail ([`is_candidate_rail`]), and if so does it carry power —
-/// either a direct neighbour signal of its own, or, failing that, its own
-/// further [`find_powered_rail_signal`] recursion one level deeper?
+/// Checks a candidate rail and then looks for either a direct neighbour signal
+/// or a powered relay farther along the same orientation.
 fn is_same_rail_at<F, S>(lookup: &F, has_neighbor_signal: &S, family: &str, pos: BlockPos, forward: bool, search_depth: i32, dir: RailShape) -> bool
 where
     F: Fn(BlockPos) -> WorldState,
@@ -289,9 +262,8 @@ where
     find_powered_rail_signal(lookup, has_neighbor_signal, family, pos, shape, forward, search_depth + 1)
 }
 
-/// `pos.below()`, plus `pos.above()` only when `shape.is_slope()` —
-/// `PoweredRailBlock.updateState`'s own extra `updateNeighborsAt` calls
-/// (`:134-138`), returned as [`Notification`]s ready to feed back into
+/// `pos.below()`, plus `pos.above()` only when `shape.is_slope()`, returned as
+/// [`Notification`]s ready to feed back into
 /// `NeighborPropagator`'s cascade, the same shape a piston move's own fan-out
 /// already returns.
 #[must_use]
@@ -309,8 +281,7 @@ pub fn extra_notifications(pos: BlockPos, shape: RailShape) -> Vec<crate::neighb
     out
 }
 
-/// `PoweredRailBlock.updateState` (`:127-140`) — `None` when nothing changes
-/// (vanilla's own `if (shouldPower != isPowered)` guard).
+/// Returns `None` when the computed `POWERED` value already matches the state.
 #[must_use]
 pub fn update_state<F, S>(lookup: &F, has_neighbor_signal: &S, pos: BlockPos, state: &str) -> Option<String>
 where
@@ -352,7 +323,7 @@ mod tests {
     }
 
     /// Direct signal alone (no chain at all) powers the rail — the base case
-    /// `hasNeighborSignal(pos)` covers on its own.
+    /// the direct-neighbour check covers on its own.
     #[test]
     fn direct_signal_powers_a_rail_with_no_neighbours() {
         let pos = BlockPos::new(0, 64, 0);
@@ -362,10 +333,9 @@ mod tests {
         assert_eq!(out, Some(rail("north_south", true)));
     }
 
-    /// **The chain case, two hops out.** `isSameRailWithPower` only ever
+    /// **The chain case, two hops out.** The search only ever
     /// extends the search through a cell that is *itself* already
-    /// `POWERED` (vanilla's `if (!state.getValue(POWERED)) return false`,
-    /// [`is_candidate_rail`]'s own gate) — being marked powered is what makes
+    /// `POWERED` ([`is_candidate_rail`]'s own gate) — being marked powered is
     /// a rail a valid relay candidate, and the search then asks whether
     /// *that* rail has a direct signal of its own or must recurse again. So
     /// both B and C carry `powered=true` here (as if each had already
@@ -428,8 +398,8 @@ mod tests {
     }
 
     /// A perpendicular straight rail must not relay power across a junction —
-    /// `isSameRailWithPower`'s own axis check, the discriminating input being
-    /// an east/west rail sitting where a north/south search is looking.
+    /// the axis check is discriminated by an east/west rail sitting where a
+    /// north/south search is looking.
     #[test]
     fn a_perpendicular_rail_does_not_relay_power() {
         let a = BlockPos::new(0, 64, 0);
@@ -465,9 +435,7 @@ mod tests {
         assert!(slope.iter().any(|n| n.pos == Direction::Up.relative(pos)));
     }
 
-    /// `is_powered_rail_family` covers both registrations of the one class —
-    /// the fact this module's own doc comment cites as verified against the
-    /// jar rather than assumed.
+    /// `is_powered_rail_family` covers both registered rail families.
     #[test]
     fn both_powered_and_activator_rail_are_the_same_family() {
         assert!(is_powered_rail_family("minecraft:powered_rail[shape=north_south,powered=false]"));

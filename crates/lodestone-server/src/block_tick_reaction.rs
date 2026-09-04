@@ -178,7 +178,7 @@ pub fn run_due_block_tick(
             // Guarded on the cell still holding a moving-piston state:
             // anything else already rewrote it (a player broke it, a second
             // move claimed it), and committing over that would resurrect a
-            // block from a move that no longer exists.
+            // block without a matching pending move.
             if crate::piston::is_moving_piston(state) {
                 crate::piston::parse_finish_kind(kind).map(|entity| entity.moved_state)
             } else {

@@ -1,5 +1,5 @@
 //! Block drops: rolling a broken block's loot table and popping the result as
-//! item entities (issue #337's missing consumer).
+//! item entities for the block-break consumer.
 //!
 //! # What it is
 //!
@@ -60,14 +60,13 @@
 //!
 //! ## The RNG divergence that is deliberate, and visible
 //!
-//! Vanilla makes the three position draws from the **level's** `RandomSource`
-//! and the two velocity draws from the **entity's own** freshly-seeded one —
-//! two independent streams. This crate has one [`SpawnRng`] per call site, so
-//! all five come from that single stream. The draw *count* and *order* are
-//! vanilla's; the stream is not, and [`crate::loot`]'s own module doc records
-//! the same divergence for the roll itself (`SpawnRng` is SplitMix64, vanilla's
-//! is Xoroshiro). Byte-exact stream parity with a JVM roll is a separate,
-//! larger piece of work — see that doc.
+//! The reference implementation uses one random stream for the three position
+//! draws and another for the two velocity draws. This crate has one
+//! [`SpawnRng`] per call site, so all five come from that single stream. The
+//! draw *count* and *order* are preserved; the stream is not, and
+//! [`crate::loot`]'s own module doc records the same divergence for the roll
+//! itself (`SpawnRng` is SplitMix64). Byte-exact stream parity with a JVM roll
+//! is a separate, larger piece of work — see that doc.
 //!
 //! # How to change it
 //!
@@ -77,15 +76,14 @@
 //!   found without a code change — and a block with **no** bundled table drops
 //!   nothing, which is the honest behaviour rather than a guessed default.
 //!   [`drop_block_loot`] returns an empty `Vec` for both "no such table" and "a
-//!   table that rolled nothing", because vanilla does not distinguish them at
+//!   table that rolled nothing", because the server boundary does not distinguish them at
 //!   this seam either.
 //! * **Tool-sensitive drops** are two separate mechanisms and conflating them is
-//!   the trap (issue #539). `Silk Touch`/`Fortune`/`match_tool` are *loot*
+//!   the trap. `Silk Touch`/`Fortune`/`match_tool` are *loot*
 //!   features, evaluated inside [`crate::loot`] against
 //!   [`crate::LootContext::tool`], which [`drop_block_loot`] fills from its
 //!   `held` argument. The **correct-tool** requirement is *not* a loot condition
-//!   at all: it is [`drops_are_allowed`], vanilla's
-//!   `Player.hasCorrectToolForDrops`, which the caller must consult *before*
+//!   at all: it is [`drops_are_allowed`], which the caller must consult *before*
 //!   rolling — see that function's doc for why folding it into the roll is wrong
 //!   twice.
 //! * **The pickup volume** is vanilla's player AABB inflated by `(1.0, 0.5,
@@ -103,35 +101,32 @@ use lodestone_model::{BlockPos, ItemStack, ResourceKey, Vec3};
 use crate::loot::{LootBlockState, LootContext, LootTableSet, LootTool};
 use crate::mob_spawn::SpawnRng;
 
-/// Half the height of the dropped-item entity's own hitbox, which vanilla
-/// sizes to a 0.25×0.25 square. Vanilla's own drop-spawning routine subtracts
-/// this from the y it computes so the item's 0.25-tall box is *centred* on the
-/// block centre rather than sitting on it.
+/// Half the height of the dropped-item hitbox, `0.125`. The spawn position
+/// subtracts this value so the `0.25`-tall box is centred on the block centre.
 const ITEM_HALF_HEIGHT: f64 = 0.25 / 2.0;
 
-/// The `±0.25` spread vanilla's own drop-spawning routine applies to each of the three axes
-/// (`Mth.nextDouble(random, -0.25, 0.25)`).
+/// The `±0.25` position spread applied independently on each axis.
 const POP_SPREAD: f64 = 0.25;
 
-/// Vanilla's `ItemEntity` constructor sets `deltaMovement.y` to this constant —
-/// it consumes **no** RNG draw, unlike x and z. See the module doc comment.
+/// The initial upward velocity for a dropped item. It consumes **no** RNG draw,
+/// unlike the horizontal velocity components.
 const POP_VELOCITY_Y: f64 = 0.2;
 
 /// Horizontal velocity spread: `random.nextDouble() * 0.2 - 0.1`, i.e. `±0.1`.
 const POP_VELOCITY_SPREAD: f64 = 0.1;
 
-/// Vanilla's own default pickup-delay setter — ten ticks
-/// before a freshly popped drop can be collected, which is what stops the
+/// The default pickup delay: ten ticks before a freshly popped drop can be
+/// collected. This stops the
 /// player who broke the block from re-absorbing it instantly and is why a
 /// pickup gate must advance the tick clock before asserting.
 pub const DEFAULT_PICKUP_DELAY: i16 = 10;
 
-/// Vanilla player bounding-box width (`EntityTypes.PLAYER` is
-/// `.sized(0.6F, 1.8F)`), halved — the box is centred on the feet position in
+/// Player bounding-box width (`0.6` blocks), halved — the box is centred on the
+/// feet position in
 /// x/z.
 const PLAYER_HALF_WIDTH: f64 = 0.6 / 2.0;
 
-/// Vanilla player bounding-box height.
+/// Player bounding-box height: `1.8` blocks.
 const PLAYER_HEIGHT: f64 = 1.8;
 
 /// Half-extents of the item entity's own box (`sized(0.25F, 0.25F)`) in x/z.
@@ -141,7 +136,8 @@ const ITEM_HALF_WIDTH: f64 = 0.25 / 2.0;
 const ITEM_HEIGHT: f64 = 0.25;
 
 /// The pickup-range inflation applied to the player's own hitbox each tick
-/// (`this.getBoundingBox().inflate(1.0, 0.5, 1.0)`), as `(horizontal, vertical)`.
+/// The pickup volume expands the player box by `(1.0, 0.5, 1.0)`, as
+/// `(horizontal, vertical)`.
 const PICKUP_INFLATE_XZ: f64 = 1.0;
 const PICKUP_INFLATE_Y: f64 = 0.5;
 
@@ -189,8 +185,7 @@ pub fn bundled_tables() -> &'static LootTableSet {
 pub struct PoppedItem {
     /// The rolled stack. `count` can legitimately be `0` — see
     /// [`crate::loot`]'s note on `set_count`; [`drop_block_loot`] filters those
-    /// out, because vanilla's `popResource` skips an empty stack
-    /// (`!itemStack.isEmpty()` in the private `popResource` overload).
+    /// out, because an empty stack is not emitted as an item entity.
     pub stack: ItemStack,
     /// World-space feet position, already carrying `popResource`'s jitter and
     /// its `- halfHeight` centring.
@@ -199,8 +194,8 @@ pub struct PoppedItem {
     pub velocity: Vec3,
 }
 
-/// The loot-table key for a block state — vanilla's own loot-table lookup, whose
-/// default is `minecraft:blocks/` + the block's registry path
+/// The loot-table key for a block state. The default is
+/// `minecraft:blocks/` + the block's registry path
 /// (built from the block id as a lazily-supplied default).
 ///
 /// Accepts a state string with or without properties: `"minecraft:oak_log
@@ -225,13 +220,13 @@ pub fn block_loot_table_id(block_state: &str) -> Option<ResourceKey> {
     format!("minecraft:blocks/{path}").parse().ok()
 }
 
-/// The loot context's `LootContextParams.BLOCK_STATE` for a block-state string —
-/// the block's identity plus its **fully resolved** property set.
+/// The loot context's block-state value for a block-state string — the block's
+/// identity plus its **fully resolved** property set.
 ///
 /// # Why this resolves through the census instead of reading the brackets
 ///
-/// Vanilla's `StatePropertiesPredicate.PropertyMatcher.match` asks the block's
-/// `StateDefinition` for the property and then reads the *state's* value, so
+/// Property matching asks the block's state definition for each property and
+/// then reads the *state's* value, so
 /// every property the block has contributes a value whether or not the caller
 /// spelled it. Splitting `"minecraft:wheat[age=3]"` on commas would agree by luck
 /// for anything `crate::growth_tick` wrote and disagree for a bare
@@ -239,7 +234,7 @@ pub fn block_loot_table_id(block_state: &str) -> Option<ResourceKey> {
 /// `age=7` matcher *because zero is not seven* rather than because the string
 /// happened to omit the property.
 ///
-/// `lodestone_data::block_states::state_id` is the resolution — Mojang's own
+/// `lodestone_data::block_states::state_id` is the resolution — the committed
 /// 32,366-state table, with its default-plus-overrides fallback — and
 /// `properties` reads the canonical `(name, value)` list straight back out.
 ///
@@ -293,8 +288,8 @@ fn parsed_properties(block_state: &str) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// `Block.popResource`'s position and the `ItemEntity` constructor's velocity,
-/// in vanilla's exact five-draw order.
+/// A dropped block's position and initial velocity, in the exact five-draw
+/// order.
 ///
 /// Separated from [`drop_block_loot`] so a test can pin the draw *sequence*
 /// against a known RNG state — the property that a "spawn it near the block
@@ -316,12 +311,11 @@ pub fn pop_resource_placement(pos: BlockPos, rng: &mut SpawnRng) -> (Vec3, Vec3)
     (position, dropped_item_velocity(rng))
 }
 
-/// The dropped-item entity's own initial velocity — two horizontal draws
-/// and a constant `0.2` upward
-/// (`setDeltaMovement(random.nextDouble() * 0.2 - 0.1, 0.2, random.nextDouble() * 0.2 - 0.1)`).
+/// The dropped-item initial velocity: two horizontal draws and a constant
+/// `0.2` upward.
 ///
 /// Shared by [`pop_resource_placement`] (a block's drop) and mob death loot
-/// (`Entity.spawnAtLocation`), which differ only in the *position*: a block's is
+/// (mob death loot), which differ only in the *position*: a block's is
 /// jittered inside its cell, a mob's is the mob's own position.
 #[must_use]
 pub fn dropped_item_velocity(rng: &mut SpawnRng) -> Vec3 {
@@ -331,8 +325,7 @@ pub fn dropped_item_velocity(rng: &mut SpawnRng) -> Vec3 {
 }
 
 /// Ticks a **player-thrown** stack cannot be picked back up for —
-/// `LivingEntity.createItemStackToDrop`'s `entity.setPickUpDelay(40)`, and
-/// **four times** the 10 a block pop uses (`setDefaultPickUpDelay`).
+/// **Four times** the 10-tick block-drop delay.
 ///
 /// That difference is the whole point of the constant: at 10 ticks a player who
 /// throws an item while walking forwards immediately walks into it and picks it
@@ -341,7 +334,8 @@ pub fn dropped_item_velocity(rng: &mut SpawnRng) -> Vec3 {
 pub const THROWN_PICKUP_DELAY_TICKS: i16 = 40;
 
 /// How far below eye level a thrown stack leaves the player's hand —
-/// the real create-item-stack-to-drop derivation's eye height minus `0.3F`.
+/// The eye-height offset used when a thrown stack leaves the player's hand:
+/// `0.3` blocks.
 pub const THROW_HAND_DROP: f64 = 0.3;
 
 /// The forward impulse of a player throw, before the random spread —
@@ -381,18 +375,15 @@ const THROW_VERTICAL_JITTER: f64 = 0.1;
 ///
 /// # Draw order is load-bearing
 ///
-/// Four draws, in this order: the two vertical-jitter floats, then the direction
-/// angle, then the spread magnitude — matching the order the decompiled source
-/// evaluates them in. A `SpawnRng` is a shared stream, so a reordering here
+/// Four draws, in this order: the two vertical-jitter values, then the direction
+/// angle, then the spread magnitude. A `SpawnRng` is a shared stream, so a reordering here
 /// changes every later consumer's numbers as well as this one's.
 #[must_use]
 pub fn thrown_item_velocity(yaw_degrees: f32, pitch_degrees: f32, rng: &mut SpawnRng) -> Vec3 {
     let yaw = f64::from(yaw_degrees).to_radians();
     let pitch = f64::from(pitch_degrees).to_radians();
-    // Vanilla evaluates `nextFloat() - nextFloat()` for the vertical jitter
-    // *inside* the `setDeltaMovement` argument list, i.e. after `dir` and
-    // `pow2` are bound. Java evaluates arguments left to right, so `y`'s two
-    // draws come after those two — hence this order.
+    // The vertical jitter draws occur after the direction and spread draws;
+    // preserving that order keeps subsequent consumers deterministic.
     let dir = rng.next_f64() * std::f64::consts::TAU;
     let spread = THROW_SPREAD * rng.next_f64();
     let jitter = (rng.next_f64() - rng.next_f64()) * THROW_VERTICAL_JITTER;
@@ -403,9 +394,8 @@ pub fn thrown_item_velocity(yaw_degrees: f32, pitch_degrees: f32, rng: &mut Spaw
     )
 }
 
-/// The loot-table key for a mob's death drop — `LivingEntity.getLootTable`, whose
-/// default is `EntityType`'s built-in `entities/<path>`
-/// (`EntityType.Builder`'s `lootTable` supplier).
+/// The loot-table key for a mob's death drop. The default is the built-in
+/// `entities/<path>` path derived from the entity registry key.
 ///
 /// Same shape as [`block_loot_table_id`] one directory over, and the same
 /// tolerance: a name that parses but has no bundled table misses in
@@ -419,8 +409,7 @@ pub fn mob_loot_table_id(entity_type: &ResourceKey) -> Option<ResourceKey> {
     format!("minecraft:entities/{path}").parse().ok()
 }
 
-/// Vanilla's own ranged-double-draw helper:
-/// `random.nextDouble() * (max - min) + min`.
+/// A ranged random draw: `random * (max - min) + min`.
 fn next_in_range(rng: &mut SpawnRng, min: f64, max: f64) -> f64 {
     if min >= max {
         return min;
@@ -428,26 +417,24 @@ fn next_in_range(rng: &mut SpawnRng, min: f64, max: f64) -> f64 {
     rng.next_f64() * (max - min) + min
 }
 
-/// Vanilla's own correct-tool-for-drops test:
-/// `!state.requiresCorrectToolForDrops() || selectedItem.isCorrectToolForDrops(state)`.
+/// The correct-tool gate for block drops is:
+/// `!requires_correct_tool || selected_item_is_correct`.
 ///
 /// **This is not a loot condition** and deliberately does not live inside
-/// [`drop_block_loot`]. Vanilla consults it in `ServerPlayerGameMode.destroyBlock`
-/// (`:295`) and, when it is false, simply never calls `playerDestroy` →
-/// `dropResources` at all — the block still breaks, and nothing drops. Folding it
-/// into the table roll would look equivalent and be wrong twice: the roll's RNG
-/// draws would still happen (shifting the stream for the next break), and a table
-/// with no `match_tool` branch would still be consulted.
+/// [`drop_block_loot`]. The block-break path checks it before rolling any loot;
+/// when false, the block still breaks but produces no drops. Folding it into the
+/// table roll would still consume RNG draws and would consult tables that have no
+/// matching tool branch.
 ///
-/// The whole computation already existed in [`lodestone_data::tool::mining`],
-/// whose `correct_tool` field is *this* flag rather than the block's own
-/// `requiresCorrectToolForDrops` — the two are routinely confused, and
+/// The computation comes from [`lodestone_data::tool::mining`], whose
+/// `correct_tool` field is *this* flag rather than the block's own requirement —
+/// the two are routinely confused, and
 /// `lodestone-shell`'s `sim.rs` carries the same warning for the mining-speed
 /// divider. `held` is the main-hand stack; `None` is a bare hand.
 ///
 /// Returns `true` for a block state this version's census does not know, which is
-/// the same direction the pre-#539 behaviour took (everything dropped) and keeps
-/// an unknown state from silently swallowing its drops.
+/// the same permissive direction used for unknown states elsewhere in the
+/// server, keeping an unknown state from silently swallowing its drops.
 #[must_use]
 pub fn drops_are_allowed(block_state: &str, held: Option<&ItemStack>) -> bool {
     let Some(state_id) = crate::mobs::block_state_id(block_state) else {
@@ -457,18 +444,15 @@ pub fn drops_are_allowed(block_state: &str, held: Option<&ItemStack>) -> bool {
 }
 
 /// Rolls `block_state`'s loot table and returns one [`PoppedItem`] per
-/// resulting stack — vanilla's `Block.dropResources` → `getDrops` →
-/// `popResource` chain.
+/// resulting stack through the block-drop pipeline.
 ///
 /// `held` is the breaking player's main-hand stack, becoming the loot context's
-/// `LootContextParams.TOOL`; `None` is a bare hand and reproduces the empty
-/// context exactly. **Callers must gate on [`drops_are_allowed`] first** — this
-/// function models `getDrops`, not `destroyBlock`, so it will happily roll a
-/// stone table for a bare hand.
+/// the tool field; `None` is a bare hand and reproduces the empty context
+/// exactly. **Callers must gate on [`drops_are_allowed`] first** — this
+/// function rolls loot independently of the block-break tool gate.
 ///
 /// Empty for a block with no bundled table and for a table that rolled nothing.
-/// Zero-count stacks are dropped, matching the `!itemStack.isEmpty()` guard in
-/// vanilla's private `popResource` overload.
+/// Zero-count stacks are dropped from the returned list rather than emitted.
 ///
 /// **The RNG is threaded, not re-seeded per stack.** A table that rolls three
 /// stacks makes its own draws first and then `3 × 5` placement draws, in stack
@@ -486,8 +470,7 @@ pub fn drop_block_loot(
 }
 
 /// Rolls `block_state`'s loot table for a block destroyed by an **explosion** of
-/// `radius` — vanilla's `BlockBehaviour.onExplosionHit` for a
-/// `DESTROY_WITH_DECAY` blast, which is what a creeper's is.
+/// `radius` — the decay radius supplied by a destroy-with-decay blast.
 ///
 /// The only difference from [`drop_block_loot`] is
 /// [`LootContext::explosion_radius`], and it is the difference between a faithful
@@ -497,9 +480,8 @@ pub fn drop_block_loot(
 /// them and `explosion_decay` thins multi-item stacks item by item. `crate::loot`'s
 /// own doc has the two transcribed record definitions.
 ///
-/// Vanilla's `DESTROY` variant (a blast with `yield = 1.0`) exists too and passes
-/// **no** radius; nothing in this crate produces one, so it is
-/// [`drop_block_loot`] and not a third entry point.
+/// A full-yield destroy blast passes **no** radius; nothing in this crate
+/// produces one, so it uses [`drop_block_loot`] rather than a third entry point.
 #[must_use]
 pub fn drop_explosion_loot(
     tables: &LootTableSet,
@@ -508,8 +490,8 @@ pub fn drop_explosion_loot(
     radius: f32,
     rng: &mut SpawnRng,
 ) -> Vec<PoppedItem> {
-    // No tool: a blast breaks the block, not a player, so `LootContextParams.TOOL`
-    // is absent exactly as it is for a bare hand.
+    // No tool: a blast breaks the block, not a player, so the loot context has
+    // no tool value.
     drop_block_loot_in(tables, block_state, pos, None, Some(radius), rng)
 }
 
@@ -788,17 +770,10 @@ mod tests {
 
     /// A block with no table at all drops nothing, and does not panic.
     ///
-    /// Since #538 the bundle is the whole clean vanilla corpus, so this path is
-    /// no longer "almost every block" — it is the blocks vanilla itself gives no
-    /// loot table: `bedrock`, `barrier`, `air`/`cave_air`, the fluids,
-    /// `end_portal`. Each row below is a real 26.2 block for which
-    /// `.cache/mc/26.2/client-src/data/minecraft/loot_table/blocks/` has **no
-    /// file**, checked rather than assumed, plus one unparseable name.
-    ///
-    /// This is also the *world*-species guard for the "no table" branch: a
-    /// fixture naming a block that merely happens not to be bundled would stop
-    /// exercising it the moment the bundle grew, which is exactly what happened
-    /// to this test's previous subject (`deepslate_emerald_ore`, now bundled).
+    /// The fixture exercises the no-table branch with known block names whose
+    /// bundled table set has no entry: `bedrock`, `barrier`, `air`/`cave_air`,
+    /// the fluids, and `end_portal`, plus one unparseable name. The production
+    /// lookup therefore returns no table, and the caller emits no drops.
     #[test]
     fn a_block_with_no_bundled_table_drops_nothing() {
         let tables = LootTableSet::load_bundled();
@@ -1412,15 +1387,14 @@ mod tests {
         assert_eq!(loot_block_state(""), None);
     }
 
-    /// **The reported bug, end to end through the production entry point.**
+    /// **End-to-end through the production entry point.**
     /// Breaking fully-grown wheat with a bare hand pops one wheat and one seed;
     /// breaking it before it ripens pops one seed and nothing else.
     ///
     /// `drop_block_loot` is the function `server.rs`'s `StopDestroy` arm calls, so
-    /// this is the whole path rather than the roller in isolation — the same
-    /// `block_state` argument that picks the loot table now also fills
-    /// `LootContextParams.BLOCK_STATE`, which is why the fix needed no new argument
-    /// at any call site.
+    /// this exercises the complete path rather than the roller in isolation. The
+    /// same `block_state` argument selects the loot table and fills the loot
+    /// context's block-state field.
     #[test]
     fn breaking_ripe_wheat_pops_wheat_and_a_seed_and_unripe_wheat_pops_one_seed() {
         let tables = LootTableSet::load_bundled();

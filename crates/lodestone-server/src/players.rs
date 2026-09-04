@@ -1,14 +1,11 @@
 //! The connected-player registry — the thing that makes a player an **entity
-//! other connections receive** (issue #438).
+//! other connections receive**.
 //!
 //! # What it is
 //!
-//! Before this module the server had exactly one entity egress,
-//! [`EntitySource::snapshots`](crate::EntitySource), and in production it was
-//! fed by [`LiveMobSource`](crate::LiveMobSource) alone. Everything the server
-//! knew about a *player* lived in local variables inside `serve_play`'s stack
-//! frame, so nothing could address it: two players on one server — including
-//! over LAN — were completely invisible to each other.
+//! The server exposes players through the same entity egress as mobs. A shared
+//! registry gives each connection a stable view of every player, including
+//! players connected over LAN.
 //!
 //! [`PlayerRegistry`] is the shared handle that fixes that, in the same shape
 //! [`BlockEntityHandle`](crate::BlockEntityHandle) and
@@ -19,15 +16,11 @@
 //!
 //! # Why there is no broadcast channel
 //!
-//! Issue #438's own body names "no broadcast path" as the third of three
-//! blockers, and it is the one that turned out **not** to need building.
-//! [`EntityStreamer`](crate::EntitySource)'s per-connection diff is already a
-//! *pull*: each connection compares "the entities right now" against what it
-//! was last sent and emits the difference. A player appearing in the registry
-//! is therefore picked up by every other connection's next pass with no push
-//! at all — the same mechanism that already spawns a mob that walked into
-//! view. Adding a `broadcast::Sender` would have been a second, redundant
-//! mechanism for a diff that already exists.
+//! [`EntityStreamer`](crate::EntitySource)'s per-connection diff is a *pull*:
+//! each connection compares the entities in the registry with the snapshot it
+//! last sent and emits the difference. A player appearing in the registry is
+//! picked up by every other connection's next pass, just like a mob entering
+//! view. The same diff handles both cases without a separate broadcast path.
 //!
 //! The tab list is the one thing the entity diff does *not* cover, so it gets
 //! the identical treatment one level up: [`PlayerListStreamer`] is the
@@ -58,7 +51,7 @@
 //!   skin properties): extend [`TrackedPlayer`], set it in [`PlayerRegistry`],
 //!   and lower it in [`PlayerRegistry::view`]. Nothing in `crate::server`
 //!   changes.
-//! * **Player rotation is live as of issue #262's wiring**, and the gotcha is
+//! * **Player rotation is live as of the wiring**, and the gotcha is
 //!   that it arrives on *four* different packets, not one.
 //!   [`ServerBound::PlayerMoved`](crate::ServerBound::PlayerMoved) carries an
 //!   `Option<Rotation>` (`Some` only for `move_player_pos_rot`),
@@ -105,8 +98,8 @@ use crate::server::EntitySource;
 /// could ever reach here, and leaves this allocator another billion. The
 /// real engine
 /// has no such split — its own entity counter is one shared atomic integer for every
-/// entity in the level — so the *real* fix is one shared allocator when the
-/// server-ECS migration (#433) gives both a common owner. Until then this
+/// entity in the level — so a shared allocator would be needed when both layers
+/// share an owner. Until then this
 /// constant is what stops the aliasing, and it is asserted disjoint from the
 /// mob range by this module's own tests.
 pub const PLAYER_ENTITY_ID_BASE: i32 = 1 << 30;
@@ -207,7 +200,7 @@ struct Inner {
     /// to a *different* player.
     next_offset: i32,
     players: Vec<TrackedPlayer>,
-    /// The chat log (#469). See [`PlayerRegistry::say`].
+    /// The chat log. See [`PlayerRegistry::say`].
     chat: VecDeque<ChatLine>,
     /// Sequence number of `chat.front()`. Cursors are absolute sequence
     /// numbers, so trimming the front of the window cannot silently rewind
@@ -303,7 +296,7 @@ impl PlayerRegistry {
         Self::default()
     }
 
-    /// Appends one player chat line to the shared log (#469).
+    /// Appends one player chat line to the shared log.
     ///
     /// # Why the chat log lives here, of all places
     ///

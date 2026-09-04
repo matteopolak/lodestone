@@ -1,4 +1,4 @@
-//! Piston entity shoving (issue #694) — the entity-aware half of a piston
+//! Piston entity shoving — the entity-aware half of a piston
 //! move that `crate::piston`'s own module doc names as still missing:
 //! `PistonMovingBlockEntity`'s `moveCollidedEntities`/`moveStuckEntities`.
 //!
@@ -20,7 +20,7 @@
 //! torches, repeaters, comparators, observers, buttons **and** pistons all
 //! run through, and threading a mob parameter into it would touch every one
 //! of those families for a capability only pistons need. So the wiring is
-//! the other option issue #694 named: `crate::tick`'s own
+//! the integration point is `crate::tick`'s own
 //! `propagate_and_react_with_entities` call sites already hold `mobs: &MobHandle`
 //! (see `crate::tick::post_note_block_vibration` for the identical shape,
 //! landed for note-block hearing) and already read every
@@ -59,24 +59,18 @@
 //!   mob left overlapping solid terrain after the shove takes whatever
 //!   ordinary in-block damage this crate already applies to any entity
 //!   stuck inside a block, ordinary suffocation, not a piston-specific hit.
-//!   Every mob is treated as [`PushReaction::Normal`], real vanilla's
+//!   Every mob is treated as [`PushReaction::Normal`], the
 //!   default for the overwhelming majority of entity types.
 //! - **Players are not shoved through here, but they are shoved.**
 //!   [`MobSim::explode`](super::MobSim::explode)'s own doc already
 //!   establishes why this method cannot reach one: a connected player's
 //!   position is client-reported, not server-owned state this sim can just
-//!   translate (ordinary hostile melee against a player has the identical
-//!   gap — see `crate::mobs::warden::SONIC_BOOM_KNOCKBACK_HORIZONTAL`'s own
-//!   doc). Issue #694's own text scoped this as needing "a server-authoritative
-//!   correction sent to the client", and that now exists, just not in this
-//!   file: `crate::tick::shove_entities_from_piston` (this method's own
-//!   caller) also publishes a
-//!   [`crate::effects::WorldEffect::PistonPlayerPush`] alongside the
-//!   `sim.shove_from_piston` call below, and the *player's own connection*
-//!   applies it to its own last-known position and sends a real teleport —
-//!   see that variant's own doc and `crate::server`'s handling of it.
-//! - **The `moving_piston` collision-shape gap is fixed for mobs, but not
-//!   here.** `crate::mobs::world::ChunkWorld::collision_top` — the
+//!   translate. The tick path publishes
+//!   [`crate::effects::WorldEffect::PistonPlayerPush`] alongside the mob shove,
+//!   and the player's connection applies that displacement to its tracked
+//!   position before sending a teleport.
+//! - **Mob collision lookup treats `moving_piston` as a full block, but
+//!   player physics are not modeled here.** `crate::mobs::world::ChunkWorld::collision_top` — the
 //!   [`lodestone_entity::pathfinding::PathWorld`] method
 //!   `NavigatingMob::ground_below` reads to find the floor beneath a mob —
 //!   now treats a `moving_piston` cell as a full block rather than reading
@@ -99,9 +93,8 @@ use super::{ChunkWorld, MobSim, SimMob};
 use crate::piston::Direction;
 
 /// `Direction`'s unit step vector as a float triple. `crate::piston::push_delta`
-/// now owns this (issue #694, item 4 needed the identical conversion for a
-/// player correction outside `MobSim`); kept as a local alias so this file's
-/// own call sites are unchanged.
+/// `crate::piston::push_delta` provides this conversion for the mob and player
+/// correction paths, so this helper remains a local alias for the mob call sites.
 fn direction_vector(direction: Direction) -> Vec3 {
     crate::piston::push_delta(direction)
 }
@@ -140,7 +133,7 @@ fn mob_aabb(m: &SimMob<'_>) -> lodestone_physics::Aabb {
 }
 
 impl<'w> MobSim<'w> {
-    /// Issue #694: shoves every live mob whose own bounding box overlaps the
+    /// Shoves every live mob whose own bounding box overlaps the
     /// swept region between `source` and `dest` (see this module's own doc
     /// for why those two cells alone are the whole query, for any moving
     /// piston cell) by one full block along `push_direction`.
@@ -275,9 +268,9 @@ mod tests {
         assert_eq!(shoved, vec![id], "a mob at the retracting head's own cell must be shoved");
     }
 
-    /// Item 3 of issue #694: the `moving_piston` collision-shape gap, for a
-    /// mob rather than a connected player (see this module's own doc for
-    /// why a player is a different, untouched question). Driven through the
+    /// The `moving_piston` collision-shape behavior is exercised for a mob
+    /// rather than a connected player (see this module's own doc for the
+    /// separate player boundary). Driven through the
     /// real production path an idle mob's floor-finding actually runs:
     /// `MobSim::tick` → `NavigatingMob::advance`'s no-waypoint branch →
     /// `ground_below` → `PathWorld::collision_top`
@@ -288,10 +281,10 @@ mod tests {
 
         // Control, run and observed rather than assumed: the per-state
         // collision table this method would otherwise read straight through
-        // really is empty for `moving_piston` — proving the fix's whole
+        // really is empty for `moving_piston` — proving the collision-table
         // premise (see `collision_top`'s own doc for why: the census was
         // dumped with no block entity present, and vanilla's own
-        // its own moving-piston block's collision-shape getter returns `Shapes.empty()` in
+        // the moving-piston block's collision-shape getter returns an empty shape in
         // exactly that case).
         let state_id = lodestone_data::block_states::state_id(&moving).expect("a real 26.2 state");
         let boxes = lodestone_data::collision_shapes::collision_boxes(state_id).expect("a known state id");

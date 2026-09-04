@@ -1,31 +1,30 @@
-//! `Item.use` — what a right-click with nothing in front of you does.
+//! Right-click item use when the player has no block target.
 //!
 //! # What it is
 //!
-//! `server`'s `apply_use_item` handled exactly one thing: a bow draw or a
+//! `server`'s `apply_use_item` handles a bow draw or a
 //! throwable's launch (`launch_intent`). Everything else — **all of eating and
 //! drinking, and every equip-by-right-click** — reached the server and did
 //! nothing at all, which is one gap rather than several: they are consecutive
 //! arms of the same method.
 //!
-//! `Item.use` in 26.2, in its own order:
+//! The item-use decision order is:
 //!
-//! 1. `DataComponents.CONSUMABLE` → `consumable.startConsuming(player, stack, hand)`
-//! 2. `DataComponents.EQUIPPABLE`, **gated on `equippable.swappable()`** →
-//!    `equippable.swapWithEquipmentSlot(stack, player)`
-//! 3. `DataComponents.BLOCKS_ATTACKS` → `startUsingItem` (a shield raise)
-//! 4. `DataComponents.KINETIC_WEAPON` → `startUsingItem` plus a sound
+//! 1. A consumable starts its timed use.
+//! 2. A swappable equipment item exchanges with its matching equipment slot.
+//! 3. A defensive item starts a blocking use.
+//! 4. A kinetic weapon starts a use and emits its sound.
 //!
 //! **The order is load-bearing**: an item that is both consumable and equippable
 //! eats rather than equips, and nothing about a wrong order is visible until you
 //! meet such an item. This module supplies arms 1 and 2. Arms 3 and 4 are not
 //! modelled — there is no blocking or kinetic-weapon model in this crate for a
-//! raised shield to feed, and `startUsingItem` with no consumer would be an
+//! raised shield to feed, and a use with no consumer would be an
 //! island.
 //!
 //! # Where the numbers come from
 //!
-//! [`FOODS`] is a transcription of the three-way join vanilla spreads over
+//! [`FOODS`] is a transcription of the three-way join the game data spreads over
 //! its own food-properties table (the `nutrition`/`saturationModifier`/`alwaysEdible` triple),
 //! its own item registrations (which item carries which food constant, and which
 //! consumable constant overrides the default) and its own consumables table (the
@@ -35,11 +34,11 @@
 //! it is small enough (40 items) to transcribe exactly.
 //!
 //! The equip half needs no transcription: `lodestone_data::item_prototypes`
-//! already carries `Equippable.slot()` and `allowedEntities.isEmpty()` from a JVM
+//! already carries the equipment slot and broad-eligibility flag from a data
 //! dump. It deliberately does **not** carry `swappable`, which is the one field
 //! arm 2 is gated on, so [`UNSWAPPABLE`] names the nine items whose registration
-//! sets it false — read straight off vanilla's own item registration table, and a set that small because
-//! `Equippable.Builder`'s default is `true`.
+//! sets it false — read straight off the item registration data; the set is small
+//! because the default is `true`.
 //!
 //! # How to change it
 //!
@@ -47,15 +46,15 @@
 //! `crate::food::FoodData::eat`'s and does not belong here. Adding arm 3 or 4
 //! means finding a consumer for a held-use with no completion effect first.
 //!
-//! **`Consumable.onConsume`'s effect lists are now modelled** (issue #690) —
+//! **Consumable effect lists are modelled** —
 //! `crate::server`'s `finish_drinking_potion`/`finish_drinking_milk` plus the
 //! `food_consume_effects`/`removes_poison_on_consume` grants
 //! `crate::mob_effects` carries, wired into the same `finish_tick` callback this
 //! module's landing created. A potion applies its full unscaled built-in effect
 //! list, milk clears every active effect, and golden apple/pufferfish/rotten
 //! flesh/spider eye/poisonous potato/chicken/honey bottle grant or remove the
-//! effects vanilla's own consumables table names for them. `chorus_fruit`'s
-//! `TeleportRandomlyConsumeEffect` is **not** among these — teleport-on-eat is a
+//! effects listed for those items in the consumable data. `chorus_fruit`'s
+//! Random teleport on eating is **not** among these — teleport-on-eat is a
 //! movement mechanic, not a status effect, and stays unmodelled here.
 //!
 //! Still not modelled, and each one is a real omission rather than an
@@ -77,17 +76,16 @@ use crate::inventory::{
 /// `minecraft:food` plus the `consumeSeconds` of the item's `minecraft:consumable`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Food {
-    /// `FoodProperties.nutrition`.
+    /// Nutrition points restored by the food.
     pub nutrition: i32,
-    /// `FoodProperties.saturation`, which is the *modifier*
-    /// (`FoodProperties.Builder.saturationModifier`) — the name in the record is
+    /// The saturation value is a *modifier*, not a number of points — the field
     /// `saturation` and the value is a modifier, which is exactly the trap
     /// `crate::food::FoodData::eat`'s own doc comment names.
     pub saturation_modifier: f32,
-    /// `FoodProperties.canAlwaysEat` — a golden apple or honey may be eaten on a
+    /// Whether a golden apple or honey may be eaten on a
     /// full bar.
     pub can_always_eat: bool,
-    /// `Consumable.consumeTicks()`, which is `(int)(consumeSeconds * 20.0F)`.
+    /// Number of ticks in the timed use, `(consume_seconds * 20.0).floor()`.
     pub use_ticks: i32,
 }
 
@@ -127,19 +125,19 @@ pub(crate) fn can_eat(food: Food, food_level: i32, invulnerable: bool) -> bool {
 /// slot is, or `None` when the item is not equippable, is not *swappable*, or
 /// equips somewhere this crate has no slot for.
 ///
-/// `Equippable.slot()` and `allowedEntities.isEmpty()` come from
+/// The equipment slot and broad-eligibility flag come from
 /// `lodestone_data::item_prototypes`; `swappable` comes from [`UNSWAPPABLE`]
 /// because that census does not carry it. `MAINHAND`/`BODY`/`SADDLE` return
-/// `None`: `swapWithEquipmentSlot` into the main hand is a no-op and the other
-/// two are not player slots.
+/// `None`: swapping into the main hand is a no-op and the other two are not
+/// player slots.
 #[must_use]
 pub(crate) fn swappable_equip_slot(item: &str) -> Option<(EquipmentSlot, usize)> {
     if UNSWAPPABLE.contains(&item) {
         return None;
     }
     let prototype = lodestone_data::item_prototypes::prototype(item)?;
-    // `Equippable.canBeEquippedBy(player.typeHolder())` — an empty
-    // `allowedEntities` accepts everything, a non-empty one is a mob-only piece
+    // An empty broad-eligibility set accepts everything; a non-empty one is a
+    // mob-only piece
     // (a horse's armour, a llama's carpet) and a player click must PASS.
     if !prototype.equippable_by_any_entity {
         return None;
@@ -173,8 +171,8 @@ pub(crate) struct EquipSwap {
     pub spilled: Option<ItemStack>,
 }
 
-/// `Equippable.swapWithEquipmentSlot(inHand, player)` for the stack in native
-/// slot `hand_native`, or `None` when vanilla returns `FAIL`/`PASS` and nothing
+/// Exchanges the stack in native slot `hand_native` with the matching equipment
+/// slot, or returns `None` when the item cannot be exchanged and nothing
 /// moves.
 ///
 /// # The count branch is the whole subtlety
@@ -252,13 +250,11 @@ pub(crate) fn swap_with_equipment_slot(
     })
 }
 
-/// The nine items whose registration sets `Equippable.swappable` to `false`, so
-/// `Item.use` falls straight past arm 2 for them.
+/// The nine items whose registration sets `swappable` to `false`, so item use
+/// falls straight past the equipment arm for them.
 ///
-/// Read off vanilla's own item registration table: `CARVED_PUMPKIN`'s explicit
-/// `Equippable.builder(HEAD).setSwappable(false)`, the seven
-/// `equippableUnswappable(EquipmentSlot.HEAD)` mob heads, and `SHIELD`'s
-/// `equippableUnswappable(EquipmentSlot.OFFHAND)`. Sorted, for
+/// Read from the item registration table: the carved-pumpkin entry, seven
+/// unswappable head items, and the unswappable shield entry. Sorted, for
 /// [`slice::contains`]'s sake nothing — it is nine entries and a linear scan.
 static UNSWAPPABLE: &[&str] = &[
     "minecraft:carved_pumpkin",
@@ -274,8 +270,8 @@ static UNSWAPPABLE: &[&str] = &[
 
 /// Every food item in 26.2, sorted by registry name.
 ///
-/// The triple comes from vanilla's own food-properties table, the item→constant join from vanilla's own item registrations,
-/// and `use_ticks` from vanilla's own consumables table — `DEFAULT_CONSUME_TICKS` unless the
+/// The triple comes from the food-property records and the item→constant join,
+/// while `use_ticks` uses `DEFAULT_CONSUME_TICKS` unless the
 /// item's registration names a consumables constant that overrides
 /// `consumeSeconds`, which in 26.2 is only `HONEY_BOTTLE` (`2.0F`) and
 /// `DRIED_KELP` (`0.8F`).
@@ -326,43 +322,33 @@ static FOODS: &[(&str, Food)] = &[
 ];
 
 // ---------------------------------------------------------------------------
-// Pick-block / pick-entity (middle-click, issue #558)
+// Pick-block / pick-entity (middle-click)
 // ---------------------------------------------------------------------------
 //
-// `ServerGamePacketListenerImpl::handlePickItemFromBlock`/
-// `handlePickItemFromEntity` resolve **what** to pick (a block's clone-item
-// stack, or an entity's `getPickResult()`), then both funnel into the same
-// `tryPickItem`, which is vanilla's three-way split: already in the hotbar ->
-// select it; elsewhere in the inventory -> swap it into a hotbar slot;
-// nowhere at all and creative -> mint it. `crate::server`'s consumer resolves
-// the "what" (it alone has the world/mob lookups) and calls
-// [`try_pick_item`] for the "where it goes" — the same split this module's
+// The two middle-click packet forms resolve **what** to pick (a block-derived
+// stack or an entity-derived stack), then both use the same [`try_pick_item`]
+// three-way split: an existing hotbar match selects it; an
+// inventory match moves it into a hotbar slot; and a creative-only missing
+// match creates it. `crate::server` resolves the target (it alone has the
+// world/mob lookups) and calls [`try_pick_item`] for the destination — the same
+// split this module's
 // `swap_with_equipment_slot` already keeps as a pure function over
 // [`PlayerInventory`].
 //
-// Vanilla's client does **no** local prediction here: `Minecraft
-// ::pickBlockOrEntity` unconditionally forwards to
-// `MultiPlayerGameMode::handlePickItemFromBlock`/`handlePickItemFromEntity`,
-// which do nothing but send the packet — the whole decision lives in
-// `tryPickItem`, server-side. So there is no client-side hotbar-prediction
-// gap to close here: the existing `ClientboundSetHeldSlotPacket` round trip
-// (this crate's client already decodes `SET_HELD_SLOT` into
-// `ClientEvent::HeldSlotChanged`) is exactly vanilla's own latency, not a
-// missing optimisation.
+// The client performs no local prediction here: it forwards the request and
+// the server makes the whole decision. The held-slot update is the
+// synchronization point for the selected hotbar slot.
 
-/// The item [`try_pick_item`] should receive for a middle-click on the block
+/// The item [`try_pick_item`] receives for a middle-click on the block
 /// whose canonical state string is `block_state` (bare `"minecraft:stone"` or
 /// with properties, `"minecraft:oak_stairs[facing=east,...]"` — only the base
-/// name matters). This is vanilla's own clone-item-stack getter's **default** arm
-/// (`new ItemStack(this.asItem())`); see
+/// name matters). This covers the default block-to-item mapping; see
 /// [`lodestone_data::block_items::item_for_block`]'s own doc comment for the
-/// per-block `getCloneItemStack` overrides (crops, flower pots, banners,
-/// beehives, ...) this does not model.
+/// per-block overrides (crops, flower pots, banners, beehives, ...) this does
+/// not model.
 ///
 /// `None` for a state naming no built-in block and for a block with no
-/// registered `BlockItem` at all (air, fluids, redstone wire, portal
-/// blocks, ...) — vanilla's own `tryPickItem` no-ops identically on an empty
-/// stack.
+/// registered item at all (air, fluids, redstone wire, portal blocks, ...).
 #[must_use]
 pub(crate) fn clone_item_stack_for_block(block_state: &str) -> Option<ItemStack> {
     let name = block_state.split('[').next().unwrap_or(block_state);
@@ -371,19 +357,16 @@ pub(crate) fn clone_item_stack_for_block(block_state: &str) -> Option<ItemStack>
     Some(ItemStack::new(item.name().parse().ok()?, 1))
 }
 
-/// The item [`try_pick_item`] should receive for a middle-click on an entity
+/// The item [`try_pick_item`] receives for a middle-click on an entity
 /// of type `entity_type` (a full registry name, `"minecraft:sheep"`) — the
-/// only modelled arm of `Entity.getPickResult()`: `Mob.getPickResult()`'s own
-/// `SpawnEggItem.byId(this.getType())`, a mob's spawn egg.
+/// modelled entity result is the mob's spawn egg.
 ///
-/// Derived by name exactly as [`crate::spawn_egg::entity_type_for_egg`]
-/// derives the reverse (`{entity path}` <-> `{entity path}_spawn_egg`), and
-/// checked against the real item registry the same way — see that module's
-/// own doc comment for why the derivation is exact rather than a guess (88
-/// registrations, zero mismatches against the pinned 26.2 decompile).
+/// Derived by appending `_spawn_egg` to the entity path, matching
+/// [`crate::spawn_egg::entity_type_for_egg`]'s reverse mapping, and
+/// checked against the real item registry the same way. The mapping covers 88
+/// registrations with zero mismatches against the pinned 26.2 data.
 ///
-/// `None` for every entity whose `getPickResult` also returns `null` by
-/// vanilla's own default (arrows, most projectiles, item entities, XP
+/// `None` for every entity with no spawn-egg result (arrows, most projectiles, item entities, XP
 /// orbs, the player) and for the handful of non-`Mob` overrides this crate
 /// does not model (minecarts, boats, item frames, paintings, end crystals,
 /// leash knots, armour stands) — each returns a *different* item than a
@@ -397,11 +380,11 @@ pub(crate) fn spawn_egg_for_entity_type(entity_type: &str) -> Option<ItemStack> 
     Some(ItemStack::new(egg.parse().ok()?, 1))
 }
 
-/// `Player.isWithinEntityInteractionRange(entity, extraDistance)`, flattened
-/// the same way [`crate::block_breaking::within_interaction_range`] flattens
-/// the block version: a single generous centre-to-eye radius rather than
-/// vanilla's per-attribute `ENTITY_INTERACTION_RANGE` (`3.0` base, `+2.0`
-/// creative) plus this packet's own `+3.0` tolerance. `None` feet permits
+/// The entity interaction range, flattened as
+/// [`crate::block_breaking::within_interaction_range`] flattens the block
+/// version: a single generous centre-to-eye radius rather than per-mode
+/// attributes (`3.0` base, `+2.0` creative) plus this packet's own `+3.0`
+/// tolerance. `None` feet permits
 /// unconditionally, matching that same function's "no data yet, don't guess".
 #[must_use]
 pub(crate) fn within_entity_pick_range(feet: Option<Vec3>, entity_pos: Vec3) -> bool {
@@ -416,14 +399,12 @@ pub(crate) fn within_entity_pick_range(feet: Option<Vec3>, entity_pos: Vec3) -> 
 }
 
 /// What a pick changed, for the caller to echo back to the client —
-/// `tryPickItem`'s own two effects (`ClientboundSetHeldSlotPacket` plus
-/// `broadcastChanges`), reduced to exactly the natives this crate's model
+/// the held-slot update plus exactly the native slots this crate's model
 /// touched rather than a diff of the whole menu.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct PickOutcome {
-    /// The hotbar slot selected after the pick. Always populated — vanilla's
-    /// own `tryPickItem` sends `ClientboundSetHeldSlotPacket` unconditionally,
-    /// whether or not anything actually moved.
+    /// The hotbar slot selected after the pick. Always populated, whether or
+    /// not anything actually moved.
     pub selected: u8,
     /// Every native slot whose contents changed, in the order they were
     /// written. Empty for the "already in the hotbar" case (only the
@@ -431,18 +412,14 @@ pub(crate) struct PickOutcome {
     pub changed: Vec<usize>,
 }
 
-/// Native slots vanilla's `Inventory.items` covers: hotbar (`0..=8`) plus
-/// main storage (`9..=35`). Restated from `crate::inventory`'s private
-/// `ITEMS_SIZE` rather than imported — `inventory.rs` is a heavily contended
-/// shared file and this is the only pick-item consumer of the boundary,
-/// which is `Inventory.INVENTORY_SIZE` in vanilla and has not changed since
-/// Minecraft added the off-hand slot.
+/// Native slots covered by the hotbar (`0..=8`) plus main storage
+/// (`9..=35`). Restated from `crate::inventory`'s private `ITEMS_SIZE` rather
+/// than imported — this is the only pick-item consumer of the boundary.
 const PICK_SCAN_SIZE: usize = 36;
 
-/// `Inventory.findSlotMatchingItem` — the first native slot in hotbar-then-
-/// main-storage order (`0..36`; armour and the off-hand are excluded,
-/// matching vanilla's `items` list) holding a stack of the same item and
-/// components as `stack`.
+/// The first native slot in hotbar-then-main-storage order (`0..36`; armour and
+/// the off-hand are excluded) holding a stack of the same item and components
+/// as `stack`.
 fn find_slot_matching_item(inventory: &PlayerInventory, stack: &ItemStack) -> Option<usize> {
     (0..PICK_SCAN_SIZE).find(|&native| {
         inventory
@@ -451,12 +428,9 @@ fn find_slot_matching_item(inventory: &PlayerInventory, stack: &ItemStack) -> Op
     })
 }
 
-/// `Inventory.getSuitableHotbarSlot` — the first **empty** hotbar slot
-/// starting at the currently selected one and wrapping. This crate has no
-/// enchantment model, so vanilla's second pass ("first *unenchanted* slot")
-/// always accepts its very first candidate — the currently selected slot —
-/// which is exactly vanilla's own final fallback, so the two collapse into
-/// one `else`.
+/// The first **empty** hotbar slot starting at the currently selected one and
+/// wrapping. This crate has no enchantment model, so there is no second pass
+/// for an unenchanted slot; the first candidate is also the final fallback.
 fn suitable_hotbar_slot(inventory: &PlayerInventory) -> u8 {
     let selected = inventory.selected_hotbar_slot();
     for offset in 0..HOTBAR_SIZE {
@@ -468,24 +442,21 @@ fn suitable_hotbar_slot(inventory: &PlayerInventory) -> u8 {
     selected
 }
 
-/// `ServerGamePacketListenerImpl::tryPickItem`'s three-way split (issue
-/// #558): `stack` is the resolved clone-item-stack or spawn egg (`None`
-/// upstream is "nothing to pick" and never reaches here — an empty
-/// `itemStack.isEmpty()` in vanilla); `creative` is
-/// `player.hasInfiniteMaterials()`.
+/// The three-way pick-item split: `stack` is the resolved clone-item stack or
+/// spawn egg (`None` means "nothing to pick" and never reaches here — an empty
+/// item stack); `creative` is the caller's creative flag.
 ///
-/// 1. **Already in the hotbar** (`Inventory.isHotbarSlot`) -> just move the
+/// 1. **Already in the hotbar** -> just move the
 ///    selection there.
 /// 2. **Elsewhere in the inventory** -> swap it into a
-///    [`suitable_hotbar_slot`] (`Inventory.pickSlot`).
+///    [`suitable_hotbar_slot`].
 /// 3. **Not held at all, creative only** -> mint it into a suitable hotbar
 ///    slot, banking whatever was displaced into the first free slot
-///    (`Inventory.addAndPickItem`). Survival falls all the way through and
-///    changes nothing but still reports the current selection, matching
-///    vanilla's own unconditional `ClientboundSetHeldSlotPacket` send.
+///    Survival falls all the way through and changes nothing but still reports
+///    the current selection.
 ///
-/// `isItemEnabled` (experimental-feature items) has no model in this crate
-/// and is not checked.
+/// Experimental-feature item gating has no model in this crate and is not
+/// checked.
 pub(crate) fn try_pick_item(
     inventory: &mut PlayerInventory,
     stack: ItemStack,
@@ -513,8 +484,8 @@ pub(crate) fn try_pick_item(
             inventory.set_selected_hotbar_slot(suitable);
             let suitable_native = usize::from(suitable);
             if let Some(displaced) = inventory.native(suitable_native).cloned() {
-                // `Inventory.getFreeSlot()`: the first empty slot in `0..36`.
-                // Vanilla drops the displaced stack on the floor when there is
+                // The first empty slot in `0..36` receives a displaced stack.
+                // Drop handling is outside this pure inventory operation when
                 // none; this crate has no command-less world-drop path for
                 // that corner (the same scope cut `swap_with_equipment_slot`'s
                 // `spilled` field documents above), so a full inventory simply
@@ -569,7 +540,7 @@ mod tests {
         assert_eq!(FOODS.len(), 40, "the join lost or gained a food");
     }
 
-    /// The values, against vanilla's own food-properties table read directly. Chosen so a
+    /// The `Food` values, read directly from the food-property records. Chosen so a
     /// transposition of `nutrition` and `saturation_modifier` cannot survive:
     /// every pair here is distinct, and cooked beef's 8/0.8 is deliberately
     /// *not* one of them — a 1.2 modifier next to a nutrition of 4 is.
@@ -767,7 +738,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Pick-block / pick-entity (issue #558)
+    // Pick-block / pick-entity
     // -----------------------------------------------------------------------
 
     /// [`clone_item_stack_for_block`]'s default arm: an ordinary block clones

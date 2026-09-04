@@ -2,68 +2,46 @@
 //!
 //! `lodestone-entity` owns a complete goal scheduler, A\* pathfinder, and the
 //! [`NavigatingMob`] composition that wires them together over the version-free
-//! [`PathWorld`] seam. Until now nothing in a *running* world ticked any of it:
-//! in vanilla multiplayer the client interpolates server-streamed positions and
-//! correctly runs no AI, so the natural home for mob AI is the **server**, and
-//! the server had no tick loop for it. This module is that home.
+//! [`PathWorld`] seam. The server tick loop advances this simulation and
+//! publishes its snapshots to the connection layer. Clients interpolate those
+//! positions; mob decisions and movement remain server-side in this module.
 //!
 //! Two pieces, deliberately kept separate rather than fused:
 //!
 //! * [`ChunkWorld`] adapts the server's own [`ChunkColumn`] terrain (which
-//!   stores real vanilla block-state strings, not just a solid/air bit — see
-//!   its own doc comment) into a [`PathWorld`]. It is the exact analogue of
+//!   stores complete block-state strings, not just a solid/air bit — see its
+//!   own doc comment) into a [`PathWorld`]. It is the terrain adapter for
 //!   `lodestone-render`'s `world.rs`: this crate owns terrain *storage*,
 //!   `lodestone-entity` owns the traversal reasoning, and the adapter is the
 //!   single seam between them. It classifies each cell through the real
 //!   26.2 per-block-state census (`lodestone_data::path_types` +
-//!   `collision_shapes`) rather than a solid/air guess (issue #204) — and it
+//!   `collision_shapes`) rather than a solid/air guess — and it
 //!   stays version-free doing it, because `lodestone-data` is 26.2 *game*
 //!   data (tags, collision geometry, ...) with no protocol dependency of its
 //!   own (`docs/lodestone-data-crate.md`), not a `crates/protocol/*` crate.
-//!   `base_path_type`/`collision_top` now distinguish water from lava from a
-//!   fence from a trapdoor from a damaging block, matching whatever vanilla's
-//!   pathfinding node classifier and floor-height probe would say for
-//!   the same state. `PathWorld::collides` (the coarse jump-clearance/
-//!   diagonal-reach sweep) is unchanged and still reads
-//!   [`ChunkColumn::is_solid`] — vanilla's own collision sweep tests real
-//!   per-shape AABBs too, but that is a wider change than this issue asked
-//!   for; its own doc comment below says so.
+//!   `base_path_type`/`collision_top` distinguish water, lava, fences,
+//!   trapdoors, and damaging blocks for navigation. `PathWorld::collides`
+//!   intentionally keeps the coarse jump-clearance/diagonal-reach sweep over
+//!   [`ChunkColumn::is_solid`]; shape-aware AABB checks remain outside this
+//!   adapter.
 //! * [`MobSim`] owns the live mobs and advances them one tick at a time. The
 //!   world outlives the sim (the mobs borrow it), which is why `ChunkWorld` is a
 //!   value the caller holds and hands to [`MobSim::new`] by reference.
 //!
-//! # Scope, honestly — updated for issue #217
+//! # Live mob ticking
 //!
-//! The paragraph this replaced said streaming positions to a client needed a
-//! version crate's `add_entity`/`move_entity` *encoders* that did not exist yet.
-//! Those encoders shipped separately (`V770ServerProtocol::encode_add_entity`/
-//! `encode_entity_update`/`encode_remove_entity` in `crates/protocol/v770`) and
-//! were proven end-to-end against a real client by
-//! `crates/protocol/v770/tests/entity_streaming_live.rs` — but with a
-//! hand-mutated stand-in source, not a real [`MobSim`], because `MobSim` was
-//! `!Send` at the time (it stores goals as `Box<dyn Goal>`, and
-//! `lodestone_entity::ai::Goal` carried no `Send` bound) and
-//! `IntegratedServer::open_in_memory_with_entities` spawns its serving task
-//! with `tokio::spawn`, which requires the future — and everything it captures
-//! — to be `Send`. `Goal: Send` landed since (`crates/lodestone-entity/src/ai/goal.rs`),
-//! so that blocker is gone (see the `assert_send::<MobSim<'static>>()` const
-//! check below, which now compiles).
+//! Entity packets are produced by the version adapter and consumed by the
+//! connection streaming pass. `MobSim` is `Send`, so a tick task can own the
+//! simulation while the connection task reads snapshots; the compile-time
+//! `assert_send::<MobSim<'static>>()` check documents that requirement.
 //!
-//! So the actual remaining gap, confirmed by grepping for
-//! `open_in_memory_with_entities`/`MobSim::new` outside this crate's own
-//! tests, was **not** a missing encoder — it was that nothing in production
-//! ever constructed a [`MobSim`] or ticked it. [`LiveMobSource`] and
-//! [`crate::tick::run_tick_loop`] close that: a background task owns a
-//! [`ChunkWorld`] snapshot and a seeded [`MobSim`] for its lifetime, ticks it
-//! once per server tick, and republishes snapshots into a shared
-//! `EntitySource` the same [`serve_connection`](crate::serve_connection)
-//! streaming pass `entity_streaming_live.rs` already exercises picks up
-//! reactively on the connection's own inbound-packet cadence. (A standalone
-//! `run_mob_tick_loop` used to own this before issue #284 folded mob and
-//! block-entity ticking into the one loop; it no longer exists.) See
+//! [`crate::tick::run_tick_loop`] keeps a [`ChunkWorld`] snapshot and a seeded
+//! [`MobSim`], advances it once per server tick, and republishes snapshots into
+//! the shared `EntitySource` consumed by the
+//! [`serve_connection`](crate::serve_connection) streaming pass. See
 //! [`crate::IntegratedServer::open_in_memory_with_mobs`] for the production
-//! wiring and `docs/live-mob-sim.md` for the full writeup, including what is
-//! deliberately still not built (natural terrain/biome-aware spawning).
+//! setup and `docs/live-mob-sim.md` for the remaining terrain/biome-aware
+//! spawning boundary.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -136,27 +114,22 @@ mod golem;
 // staying true.
 pub use golem::{GolemConstruction, GolemSpecies};
 
-// Villager professions and workstation claiming (issues #243, #245). `pub`
+// Villager professions and workstation claiming. `pub`
 // (not re-exported at the top level) so `crate::server` can reach
 // `crate::mobs::villager::trades::offers_up_to` when it builds a
 // `MERCHANT_OFFERS` packet from an `InteractOutcome::OpenTrade`.
 pub mod villager;
 
-// No re-export: every item in `species` was already private in `mobs.rs`
-// before this split (nothing outside this module ever named them), so
-// `pub(super)` here — visible within `mobs` and its descendants — is a
-// superset of that, not a narrowing, and there is no external path to keep
-// stable.
+// Species helpers stay private to this module tree; `pub(super)` exposes them
+// to descendant simulation modules without adding an external API path.
 mod species;
 
 // No re-export: `ProjectileHit`/`projectile_damage_type`/`first_solid_along`
-// were already private, and every `impl MobSim` method here is `pub`, so its
-// path (`MobSim::spawn_projectile`, etc.) does not depend on which file the
-// `impl` block textually lives in.
+// `ProjectileHit`/`projectile_damage_type`/`first_solid_along` remain private;
+// public `MobSim` methods provide the external projectile surface.
 mod projectiles;
 
-// No re-export: every `impl MobSim` method here was already `pub`, so its
-// path is unaffected by the file move. `merge_neighbouring_items` is
+// Public `MobSim` methods provide the item surface. `merge_neighbouring_items` is
 // `pub(super)` in `items.rs` because `tick_with_terrain` below calls it via
 // `self.merge_neighbouring_items()` — a method call, so no `items::` prefix
 // is needed at that call site either.
@@ -216,31 +189,31 @@ pub(crate) mod minecart;
 // module's own driver plumbing call it.
 mod lightning;
 
-// Issue #257. No re-export: every `impl MobSim` method is `pub` already
-// (`cast_fishing_bobber`, `retrieve_fishing_bobber`, …), `FishHookState`/
+// Public `MobSim` methods (`cast_fishing_bobber`, `retrieve_fishing_bobber`, …)
+// provide the fishing surface; `FishHookState`/
 // `FishingBobber` stay `pub(super)`, and `FISHING_ROLL_SEED` is read directly
 // as `fishing::FISHING_ROLL_SEED` by `MobSim::new`, the same shape
 // `orbs::ORB_BEHAVIOR_SEED` uses.
 mod fishing;
 
-// Issue #241 (the raid half — patrols already exist, see `mobs::mod`'s own
-// module doc and `docs/pillager-patrols.md`). No re-export: every `impl
-// MobSim` method is `pub` already; `RAID_ROLL_SEED` is read the same way
+// Raid support covers the raid half; patrols are documented in the module doc
+// and `docs/pillager-patrols.md`. Public `MobSim` methods provide the raid
+// surface; `RAID_ROLL_SEED` is read the same way
 // `fishing::FISHING_ROLL_SEED` is.
 mod raid;
 
-// Issue #459's step 3: the warden anger consumer for the vibration
+// The warden anger consumer for the vibration
 // substrate (`crate::mobs::vibration` — re-exported from `lodestone_entity`).
 // `pub` because `warden::AngerLevel` is part of `SimMob::warden_anger_level`'s
 // public return type.
 pub mod warden;
 
-// Issue #230's last remaining species: the sniffer's seek/dig/rise/egg-drop
+// The sniffer's seek/dig/rise/egg-drop
 // state machine. `pub` for the same reason `warden` is — `sniffer::SnifferState`
 // is part of `SimMob::snapshot`'s metadata output.
 pub mod sniffer;
 
-// Issue #694: piston entity shoving. Not `pub` — `crate::tick` reaches it
+// Piston entity shoving. Not `pub` — `crate::tick` reaches it
 // through `MobSim::shove_from_piston` alone, which `MobSim` (already
 // re-exported) already carries.
 mod piston_shove;
@@ -266,8 +239,8 @@ fn attr(attrs: &AttributeMap, path: &str) -> f64 {
 /// `default_def(key).default` for an absent instance, so it returns `Some` for
 /// every attribute the registry knows. `attr(&AttributeMap::new(),
 /// "follow_range")` is therefore **32.0**, not `0.0` — and 32.0 is the one value
-/// `follow_range` must never take, because vanilla's generic mob attribute
-/// builder overrides it to `16.0` for *every* mob, so no living entity in the
+/// `follow_range` must never take, because the generic mob attribute setup
+/// overrides it to `16.0` for *every* mob, so no living entity in the
 /// game ever carries the registry number (the registry default and the
 /// builder override live in two different places; see `DEFAULT_FOLLOW_RANGE`'s
 /// own doc).
@@ -288,17 +261,17 @@ fn attr_present(attrs: &AttributeMap, path: &str) -> Option<f64> {
 /// subjected to on ordinary, unmodified-friction terrain: standard block
 /// friction combined with the constant air-drag factor every entity carries
 /// regardless of the block underfoot. See `docs/mob-species-spawning.md` for
-/// the exact vanilla methods this reproduces.
+/// the measured conversion documented in `docs/mob-species-spawning.md`.
 const AI_GROUND_FRICTION: f64 = 0.6 * 0.91;
 
-/// Converts a requested ground speed — a goal's `speedModifier` multiplied
-/// onto the mob's `movement_speed` attribute, the unit every roster goal in
+/// Converts a requested ground speed — a goal's speed multiplier applied
+/// to the mob's `movement_speed` attribute, the unit every roster goal in
 /// this crate already hands to [`NavigatingMob`](lodestone_entity::ai::navigating_mob::NavigatingMob)'s
 /// `move_to` — into the sustained blocks-per-tick rate an AI-driven mob
 /// actually converges on.
 ///
-/// Vanilla's AI movement controller does not drive a mob at full input
-/// magnitude the way a player's WASD does: the forward input it feeds into
+/// The AI movement controller does not drive a mob at full input magnitude the
+/// way a player's WASD does: the forward input it feeds into
 /// the entity's own travel step is numerically the *same* value as the
 /// per-tick speed scale applied to that input, so the two multiply — the
 /// per-tick thrust actually added to the mob's velocity is the *square* of
@@ -316,7 +289,7 @@ fn ai_ground_speed(requested_speed: f64) -> f64 {
 /// attack_damage, defenses, knockback_resistance)`.
 ///
 /// Folds through [`default_attributes`] when `entity_type` is one of the
-/// vanilla templates that module knows (the zombie family, skeleton family,
+/// templates this module knows (the zombie family, skeleton family,
 /// creeper, spider, and the common animals); for anything else it falls back
 /// to an empty [`AttributeMap`], whose [`AttributeMap::value`] already resolves
 /// every path to the generic `RangedAttribute` default (`max_health` 20,
@@ -342,14 +315,14 @@ fn ai_ground_speed(requested_speed: f64) -> f64 {
 /// the "vacuous species" this repo's own evidence section warns about;
 /// re-check this comment before adding one, rather than assuming it is
 /// missing.
-/// Vanilla's goat spawn-finalization pre-broken-horn roll:
+/// Goat spawn horn state uses a pre-broken-horn roll:
 /// a non-baby check gated on a `< 0.1` float draw, then
 /// a coin flip to pick which horn — narrowed to "not a baby" being
 /// unconditionally true here, since [`MobSim::spawn_species`] always spawns
 /// adult-shaped (see that method's own doc comment). `(has_left, has_right)`,
 /// both `true` for every non-goat species and for the roll's own miss.
 ///
-/// `rng.next_int(2) == 0` stands in for vanilla's own boolean-from-bounded-int draw — the
+/// `rng.next_int(2) == 0` supplies the boolean-from-bounded-int draw — the
 /// same coin-flip shape [`raid::bonus_spawns`] already uses for its own
 /// `nextInt(2)` roll, not a bit-identical transcription of Java's real
 /// `nextBoolean` implementation.
@@ -373,11 +346,10 @@ fn combat_defaults(entity_type: &ResourceKey) -> (f32, f32, Defenses, f64) {
     (max_health, attack_damage, defenses, knockback_resistance)
 }
 
-/// [`SpawnRng`] already exposes vanilla-shaped `next_f32`/`next_int` draws;
-/// this is the seam [`lodestone_entity::spawn_equipment`] needs to read them
-/// without that crate depending on this one's RNG type. A local `impl` of a
-/// foreign trait for a local type — always allowed under the orphan rule,
-/// since `SpawnRng` is declared in this crate (`mob_spawn.rs`).
+/// [`SpawnRng`] exposes the `next_f32`/`next_int` draws required by
+/// [`lodestone_entity::spawn_equipment`]. This local implementation keeps the
+/// RNG dependency at the seam without exposing the server's concrete type to
+/// the entity crate; the orphan rule permits it because `SpawnRng` is local.
 impl EquipRandom for SpawnRng {
     fn next_f32(&mut self) -> f32 {
         SpawnRng::next_f32(self)
@@ -388,25 +360,15 @@ impl EquipRandom for SpawnRng {
     }
 }
 
-/// Vanilla's generic per-entity age-scale fallback: half size while a
-/// baby, full size otherwise (an entity's base dimensions get scaled by
-/// this factor when its default hitbox is computed). Used only for a species with no entry in
-/// [`baby_dimensions`] — vanilla itself does not treat this as "the" baby
-/// rule, most breedable animals and the whole zombie family override
-/// `getDefaultDimensions` with their own literal box instead of taking this
-/// default, which is why it is the fallback and not the primary path.
+/// Generic age-scale fallback: half size while a mob is a baby, full size
+/// otherwise. It applies only when [`baby_dimensions`] has no species entry;
+/// species-specific dimensions take precedence over this fallback.
 const DEFAULT_BABY_AGE_SCALE: f32 = 0.5;
 
-/// A species' own baby-dimensions constant (`width`, `height`), pre-`SCALE`-
-/// attribute — vanilla declares one per species rather than deriving it from
-/// [`DEFAULT_BABY_AGE_SCALE`], and the two disagree: a baby zombie is
-/// `0.49×0.98`,
-/// not `0.6×1.95 * 0.5 = 0.3×0.975`. Scoped to the species this sim actually
-/// grows babies for — [`crate::ai::roster::passive`]'s breedable animals, the
-/// wolf ([`crate::ai::roster::neutral`]) and the zombie family, which spawns
-/// naturally as a baby without ever being bred; every other species falls
-/// back to [`DEFAULT_BABY_AGE_SCALE`], which is vanilla's own real generic
-/// default rather than an approximation invented for the gap.
+/// Species-specific baby dimensions (`width`, `height`) before the `SCALE`
+/// attribute is applied. The table covers breedable passive animals, wolves,
+/// and the zombie family; every other species uses
+/// [`DEFAULT_BABY_AGE_SCALE`] against its base dimensions.
 fn baby_dimensions(entity_type: &ResourceKey) -> Option<(f32, f32)> {
     Some(match entity_type.path() {
         // The zombie family (husk, zombified piglin, drowned, zombie villager)
@@ -423,16 +385,9 @@ fn baby_dimensions(entity_type: &ResourceKey) -> Option<(f32, f32)> {
     })
 }
 
-/// The baby-only movement-speed multiplier vanilla applies as a transient
-/// `MOVEMENT_SPEED` `AttributeModifier` with `ADD_MULTIPLIED_BASE`, so the
-/// final speed is `base * (1.0 + amount)`. Only the zombie family carries one
-/// (amount `0.5`, applied on an age-state transition
-/// rather than at spawn, but the net effect for a mob whose age never crosses
-/// back is the same as always having it while a baby). Every breedable
-/// ageable mob this sim spawns — cow, sheep, pig, chicken, rabbit, wolf — has
-/// **no** baby speed modifier at all, confirmed by reading each one's own
-/// goal-registration/attribute setup: only the hitbox shrinks for them. `1.0`
-/// (no change) for anything not listed.
+/// Baby-only movement uses a multiplicative speed factor of `1.5` for the
+/// zombie family. Breedable animals in this simulation have no baby speed
+/// factor; their hitboxes shrink instead. Every unlisted species uses `1.0`.
 fn baby_speed_multiplier(entity_type: &ResourceKey) -> f64 {
     match entity_type.path() {
         "zombie" | "husk" | "zombie_villager" | "drowned" | "zombified_piglin" => 1.5,
@@ -449,10 +404,8 @@ fn baby_speed_multiplier(entity_type: &ResourceKey) -> f64 {
 /// no adapter to thread through here.
 ///
 /// `is_baby` selects [`baby_dimensions`]'s per-species literal, falling back
-/// to [`DEFAULT_BABY_AGE_SCALE`] against the census base — never against the
-/// `SCALE` attribute, which is applied once, uniformly, after either
-/// selection (matching vanilla's own separate "compute default dimensions,
-/// then scale" fold).
+/// to [`DEFAULT_BABY_AGE_SCALE`] against the census base. The `SCALE`
+/// attribute is applied once, uniformly, after either selection.
 fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool) -> MobShape {
     let scale = attr(attrs, "scale") as f32;
     let step_height = attr(attrs, "step_height") as f32;
@@ -476,13 +429,13 @@ fn species_shape(entity_type: &ResourceKey, attrs: &AttributeMap, is_baby: bool)
     shape
 }
 
-/// Species whose own constructor or `finalizeSpawn` unconditionally enables
+/// Species whose setup unconditionally enables
 /// door-opening in the pathfinder's node evaluator, folded here since
 /// [`MobShape::land`]'s default (mirroring the evaluator's own field default)
 /// is `false` and [`species_shape`] is the only production caller that could
 /// ever set it otherwise.
 ///
-/// The zombie family is deliberately **not** here: vanilla gates its
+/// The zombie family is deliberately **not** here: its
 /// door-breaking behind a spawn-time regional-difficulty coin flip, not a
 /// species constant, so it is rolled once per spawn in
 /// [`MobSim::spawn_species`] instead. See `docs/mob-species-spawning.md` for
@@ -494,14 +447,13 @@ fn species_can_open_doors(entity_type: &ResourceKey) -> bool {
     )
 }
 
-/// Species whose own constructor installs a float-on-liquid goal (or calls
-/// the navigator's float setter directly), so the pathfinder should treat
+/// Species whose setup installs float-on-liquid behavior (or calls the
+/// navigator's float setter directly), so the pathfinder should treat
 /// water as swimmable rather than avoided.
 ///
 /// Deliberately excludes every aquatic species this sim spawns (`guardian`,
-/// `elder_guardian`, `drowned`): their real vanilla navigation classes
-/// override the float setter as a no-op (they always swim, so the flag is
-/// structurally inert for them in vanilla too), not merely unmodelled here.
+/// `elder_guardian`, `drowned`): their navigation always swims, so the flag is
+/// structurally inert for them rather than merely unmodelled here.
 /// Also excludes species with no ground navigation at all (`ghast`, `blaze`),
 /// for the same reason. See `docs/mob-species-spawning.md`.
 fn species_can_float(entity_type: &ResourceKey) -> bool {
@@ -530,19 +482,17 @@ fn species_can_float(entity_type: &ResourceKey) -> bool {
     )
 }
 
-/// Per-species pathfinding-malus overrides (vanilla's own per-species malus
-/// setter), folded onto
+/// Per-species pathfinding-malus overrides, folded onto
 /// [`PathType::malus`]'s default table by [`species_shape`]. A species not
-/// listed carries no overrides, so the vanilla default table applies
+/// listed carries no overrides, so the default table applies
 /// unchanged — that is the correct answer for most species, not a gap.
 ///
-/// Every entry is read from that species' own constructor/spawn-finalization in
-/// the 26.2 decompile, including the base animal class's own
-/// `FIRE_IN_NEIGHBOR`/`FIRE` overrides folded into each `Animal`-derived
+/// Every entry comes from the species' setup data, including the base animal
+/// `FIRE_IN_NEIGHBOR`/`FIRE` overrides folded into each animal-derived
 /// species' arm below (this function has no separate "is an Animal" pass to
 /// apply them in, so they are duplicated per arm exactly as each species'
-/// own constructor chain would apply them). See `docs/mob-species-spawning.md`
-/// for the full citation table.
+/// setup chain applies them. See `docs/mob-species-spawning.md` for the full
+/// measurement table.
 fn species_malus_overrides(entity_type: &ResourceKey) -> &'static [(PathType, f32)] {
     match entity_type.path() {
         "bee" => &[
@@ -602,37 +552,33 @@ fn species_malus_overrides(entity_type: &ResourceKey) -> &'static [(PathType, f3
     }
 }
 
-/// Vanilla's leash-snap distance: past this distance the lead snaps.
+/// Distance past which a lead snaps.
 const LEASH_TOO_FAR_DIST: f64 = 12.0;
 
-/// Vanilla's leash-elastic distance: past this distance (minus both
-/// entities' bounding-box widths, a nuance this port does not carry — see
-/// [`MobSim::tick_leashes`]'s own doc comment) a pull force applies.
+/// Distance past which the leash applies a pull after accounting for the
+/// entities' bounding-box widths; the current seam uses the documented coarse
+/// approximation in [`MobSim::tick_leashes`].
 const LEASH_ELASTIC_DIST: f64 = 6.0;
 
-/// Vanilla's tempt-range attribute default value (a ranged attribute bounded
-/// `0.0..=2048.0`), the
-/// radius the temptation goal searches for a tempting player.
+/// Temptation search radius. The ranged attribute is bounded by
+/// `0.0..=2048.0` and supplies this value to the temptation goal.
 ///
-/// This one lives in the *feed* rather than in the goal because vanilla keeps
-/// it on the mob as an attribute; the other ranges below are per-goal-instance
-/// constructor arguments and stay with the goal.
+/// This value lives in the perception feed; the other ranges below are
+/// per-goal-instance arguments and stay with their behavior.
 const TEMPT_RANGE: f64 = 10.0;
 
-/// The radius every vanilla avoid-threat goal registration in the roster's
-/// species uses — the ocelot and cat's fear of players, the wolf's fear of
-/// skeletons, and the armadillo's fear of spiders.
+/// Radius used by the roster's avoid-threat behaviors for cats, wolves, and
+/// armadillos.
 const AVOID_RANGE: f64 = 6.0;
 
-/// The vertical half-extent of the avoid-threat goal's search box: the box is
+/// The vertical half-extent of the avoid-threat search box: the box is
 /// inflated by the horizontal search distance on X/Z but by a flat `3.0` on
 /// Y, so a threat directly overhead is out of range sooner than
 /// one to the side.
 const AVOID_RANGE_Y: f64 = 3.0;
 
-/// The breeding goal's partner-search radius — both the targeting-conditions
-/// range and the bounding-box inflation used to look for a nearby partner
-/// agree on `8.0`.
+/// Breeding partner-search radius. Both the targeting range and bounding-box
+/// inflation use `8.0`.
 const BREED_RANGE: f64 = 8.0;
 
 /// The horizontal/vertical box [`feed_perception`](MobSim::feed_perception)
@@ -640,9 +586,8 @@ const BREED_RANGE: f64 = 8.0;
 /// [`lodestone_entity::brain::NearbyBrainEntity`] feed.
 ///
 /// Deliberately wider than `NearestHostileSensor::RANGE` (`8.0`, in
-/// `lodestone_entity::brain::sensor`): this is a coarse host-side cut so the
-/// feed is cheap to build, and the *sensor* applies vanilla's real range on
-/// top, exactly the two-stage split that sensor's own doc describes.
+/// `lodestone_entity::brain::sensor`): this coarse host-side cut keeps the
+/// feed cheap to build, and the sensor applies its own range on top.
 const NEARBY_HOSTILE_SCAN_RANGE: f64 = 16.0;
 const NEARBY_HOSTILE_SCAN_RANGE_Y: f64 = 8.0;
 
@@ -681,13 +626,11 @@ pub struct PlayerPerception {
     /// some species or computed once per (player, species) pair by the caller,
     /// which is the feed's job, not the producer's.
     pub held_item: Option<ResourceKey>,
-    /// The player's normalised view direction — vanilla's own pitch/yaw to
-    /// unit-vector conversion, which the "is this player looking at me" test
-    /// calls at full partial-tick weight. Feeds the enderman's gaze test
-    /// (issue #458, primitive 2): [`lodestone_entity::ai::mob::is_in_view_cone`]
+    /// The player's normalised view direction. The gaze test
+    /// uses [`lodestone_entity::ai::mob::is_in_view_cone`]
     /// takes this directly as its `look` argument. `Vec3::new(0.0, 0.0, 1.0)`
-    /// (looking due "south", vanilla's own zero-rotation direction) is the
-    /// honest default for a producer that has not resolved a real angle yet.
+    /// (looking due "south") is the default when a producer has not resolved
+    /// a real angle yet.
     pub view_direction: Vec3,
 }
 
@@ -796,11 +739,9 @@ pub enum InteractOutcome {
         /// The horse family's temper value after the gain.
         temper: i32,
     },
-    /// A professioned villager's trade screen should open — vanilla's own
-    /// full mob-interaction override for villagers, which replaces the taming
-    /// chain entirely rather than falling through it (issue #245). Consumes
-    /// no item, the same as [`SitToggled`](Self::SitToggled): opening a menu
-    /// is not an item-use call in vanilla either.
+    /// A professioned villager's trade screen should open. The menu
+    /// interaction takes precedence over the generic item-use chain and
+    /// consumes no item, the same as [`SitToggled`](Self::SitToggled).
     OpenTrade {
         /// The villager's current profession — never `None`/`Nitwit`, which
         /// have no trades and never reach this arm (see
@@ -810,53 +751,41 @@ pub enum InteractOutcome {
         /// accumulate (see `villager::trades::offers_up_to`).
         level: i32,
     },
-    /// Vanilla's horse-family mount interaction — the actor is now aboard. The caller's
-    /// cue to send a set-passengers update, exactly as
-    /// [`MobSim::mount_mob`]'s own doc names. Consumes no item.
+    /// A mount interaction succeeded and the actor is aboard. The caller uses
+    /// this outcome to send a passengers update; no item is consumed.
     Mounted,
-    /// A golden apple was used on a weakened zombie villager — vanilla's own
-    /// zombie-villager interaction branch that consumes one item
-    /// (issue #247). Consumes the item, matching that real consume call —
-    /// the no-weakness arm (a plain success that does **not**
+    /// A golden apple starts conversion for a weakened zombie villager and
+    /// consumes one item. The no-weakness arm (a plain success that does **not**
     /// reduce the stack) is reported as [`Pass`](Self::Pass) instead; see
     /// [`MobSim::interact`]'s zombie-villager short-circuit for why that
     /// simplification is disclosed rather than a distinct variant.
     ZombieVillagerConversionStarted,
-    /// An empty-handed allay was given an item — vanilla's own allay
-    /// item-carrying interaction half (issue #230). Consumes the item, matching that real
-    /// one-item consume call; see [`MobSim::interact`]'s allay
-    /// short-circuit for what is and is not modelled around it.
+    /// An empty-handed allay was given an item. The interaction consumes one
+    /// item; [`MobSim::interact`] handles the surrounding carrying rules.
     ///
-    /// **No wire encoder exists yet to make this visible** — this crate's
+    /// **No server-side set-equipment encoder is available** — this crate's
     /// server protocol has no set-equipment producer at all (only a
     /// client-side decoder, for joining someone else's server), so the held
-    /// item is real server-side state with no client-visible consequence
-    /// today. That gap is not specific to the allay: every mob's
+    /// item is real server-side state but is absent from client-visible snapshots.
+    /// That absence is not specific to the allay: every mob's
     /// `NavigatingMob::main_hand_item` has the identical problem.
     ItemGiven,
-    /// An allay duplicated itself (issue #230) — vanilla's own allay
-    /// self-duplication path, reached from the interaction handler's
-    /// "is dancing, holds a duplication-eligible item, and can duplicate"
-    /// gate. Consumes the item, matching
-    /// vanilla's own item-removal helper's one-item consume call.
+    /// An allay duplicated itself after satisfying the dance, item, and
+    /// cooldown gates. One item is consumed by the interaction.
     ///
-    /// **Disclosed substitution**: real vanilla's "is dancing" state is driven by
-    /// a jukebox playing nearby, a mechanic this
-    /// crate does not model at all (no jukebox-playback producer exists
-    /// anywhere in this tree). [`MobSim::interact`]'s allay arm substitutes
-    /// "has recently heard a note block" (the same
-    /// [`SimMob::allay_liked_noteblock`] state `DELIVER` reads) for
-    /// the dancing check — a real, disclosed narrowing rather than an invented
-    /// note-block-specific trigger vanilla does not have, named here so a
-    /// reader comparing against the jar is not misled.
+    /// **Disclosed substitution**: this crate has no jukebox-playback producer,
+    /// so the allay arm uses "has recently heard a note block" (the same
+    /// [`SimMob::allay_liked_noteblock`] state `DELIVER` reads) as its dance
+    /// signal. This keeps duplication tied to an observable event while
+    /// documenting the missing playback state explicitly.
     AllayDuplicated,
 }
 
 impl InteractOutcome {
     /// Whether the interaction consumed one of the held item.
     ///
-    /// `SitToggled`/`OpenTrade` are the exceptions, and `SitToggled`'s is
-    /// vanilla's own: a success that explicitly withholds the item. A pet you sit
+    /// `SitToggled`/`OpenTrade` are the exceptions: these successes explicitly
+    /// withhold the item. A pet you sit
     /// down does not eat whatever you happened to be holding, and opening a
     /// trade screen is not an item-use call either.
     #[must_use]
@@ -919,12 +848,12 @@ fn taming_particles(particle: &str, pos: Vec3) -> crate::effects::WorldEffect {
 /// Who owns a tamed mob.
 ///
 /// Two variants because the two are genuinely different relations rather than one
-/// with a wider key. A player owner is a **uuid** — vanilla's own
-/// tamed-animal owner-uuid metadata field, which is a uuid on the wire and in NBT
+/// with a wider key. A player owner is a **uuid** — the identity carried on
+/// the wire and in NBT
 /// alike, and the only identity that survives a reconnect. A mob owner is a
 /// runtime **entity id**, because nothing persists it and there is no uuid to
-/// resolve; that flavour predates taming and exists for the ownership questions
-/// the neutral roster asks (the "alert others of the same owner" goal's same-owner filter).
+/// resolve; that flavour serves ownership questions such as sharing a grudge
+/// with another mob of the same owner.
 ///
 /// Collapsing them into one `i32` is what made ownership unable to name a player,
 /// and collapsing them into one `Uuid` would require inventing uuids for mobs
@@ -937,28 +866,22 @@ pub enum MobOwner {
     Player(Uuid),
 }
 
-/// A parrot (or, in principle, any [`LandOnOwnersShoulderGoal`]-carrying
-/// species) currently riding a shoulder — [`MobSim::shoulder_riders`]' value
-/// type. Vanilla persists the whole entity's NBT
-/// (its own shoulder-mount setter saves the full entity, minus its id); this keeps
+/// A parrot (or another shoulder-riding species) currently riding a shoulder
+/// — [`MobSim::shoulder_riders`]' value type. The persistent format stores
 /// only what [`MobSim::tick_shoulder_dismounts`] needs to respawn something
 /// recognisable — a disclosed loss of the original's variant/health/name.
 ///
-/// [`LandOnOwnersShoulderGoal`]: lodestone_entity::ai::goals::LandOnOwnersShoulderGoal
 #[derive(Debug, Clone)]
 struct ShoulderRider {
     /// What to respawn on dismount.
     entity_type: ResourceKey,
-    /// The game tick this mob mounted — vanilla's own per-player "time this
-    /// entity sat on a shoulder" clock,
-    /// gating the 20-tick minimum ride vanilla's shoulder-passenger removal
-    /// enforces before a dismount condition can actually take effect.
+    /// The game tick this mob mounted. A dismount condition applies only after
+    /// the 20-tick minimum ride.
     mounted_tick: u64,
 }
 
-/// What a lead is tied to — vanilla's own leash-data holder field, which
-/// is any entity (a player, another leashable mob, or a
-/// fence-knot decoration entity). This sim has no non-living decoration-entity
+/// What a lead is tied to: a player, another leashable mob, or a
+/// fence-knot decoration entity. This sim has no non-living decoration-entity
 /// concept ([`SimMob`] assumes health, an `AttributeMap` and a goal
 /// selector, none of which a knot has), so a fence anchor is a bare
 /// [`BlockPos`] rather than a spawned entity — see [`MobSim::try_leash_to_fence`]'s
@@ -970,36 +893,32 @@ pub enum LeashHolder {
     Player(Uuid),
     /// Another live [`SimMob`], by runtime entity id.
     Mob(i32),
-    /// A fence post — vanilla's own fence-knot decoration entity's world
-    /// position, without the entity itself.
+    /// A fence post, represented by its world position without a separate
+    /// decoration entity.
     Fence(BlockPos),
 }
 
-/// The result of [`MobSim::try_leash`] — mirrors vanilla's own generic
-/// interact handler's two leash-specific branches (success/success-without-item/
-/// pass) closely enough that a caller can derive its own packet response
-/// from it without re-deriving the branching itself.
+/// The result of [`MobSim::try_leash`]. A caller can derive its packet response
+/// without repeating the leash-specific branching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LeashOutcome {
     /// The mob is now leashed to the given holder. The caller must consume
-    /// one `minecraft:lead` from the placer's hand (vanilla's own stack-shrink call).
+    /// one `minecraft:lead` from the placer's hand.
     Attached,
     /// The mob was leashed to the interacting player and is now free. `true`
-    /// means a `minecraft:lead` item was spawned at the mob's position
-    /// (vanilla's own drop-leash path); `false` means none was (vanilla's own remove-leash path,
-    /// the creative-mode/infinite-materials arm — the caller supplies which
-    /// via `try_leash`'s own `creative` parameter, this sim having no
-    /// game-mode state of its own).
+    /// means a `minecraft:lead` item was spawned at the mob's position; `false`
+    /// means no item was spawned (the creative/infinite-materials arm). The
+    /// caller supplies that distinction through `try_leash`'s `creative`
+    /// parameter; this sim has no game-mode state of its own.
     Detached { dropped_lead: bool },
     /// Neither arm applied — not leashable, out of range, or the holder
-    /// requested is not a fresh attach for an already-player-held mob
-    /// (vanilla's own "current holder is a player" guard).
+    /// requested is not a fresh attach for an already-player-held mob.
     Refused,
 }
 
-/// Vanilla's default creeper explosion radius (a flat byte constant, `3`),
+/// Default creeper explosion radius (a flat byte constant, `3`),
 /// used flat by
-/// [`MobSim::tick`]'s detonation trigger. Vanilla doubles this for a
+/// [`MobSim::tick`]'s detonation trigger. A charged creeper doubles this for a
 /// lightning-charged creeper (an explosion-multiplier field set to `2.0` when
 /// powered, `1.0` otherwise); `SimMob` has no
 /// "powered" state anywhere in this crate (no lightning-charging is
@@ -1013,8 +932,7 @@ const CREEPER_EXPLOSION_RADIUS: f32 = 3.0;
 /// Configure it after spawning with [`add_goal`](SimMob::add_goal) and
 /// [`set_attack_target`](SimMob::set_attack_target); observe it with
 /// [`position`](SimMob::position) / [`path_searches`](SimMob::path_searches).
-/// A live persistent grudge: vanilla's `NeutralMob` anger state, resolved by
-/// the host (issue #458).
+/// A live persistent grudge, resolved by the host.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Anger {
     /// The absolute [`MobSim::tick_count`] at which this grudge expires. The
@@ -1022,16 +940,15 @@ struct Anger {
     end_time: u64,
     /// Where the offending entity was when the grudge was set. A position
     /// rather than an id because that is all
-    /// [`MobController::angry_target`] carries; an *ownership* relation (#458's
-    /// primitive 5) is what a real identity would need, and it does not exist
-    /// at this seam yet.
+    /// [`MobController::angry_target`] carries; an identity relation would be
+    /// needed to preserve a target entity, but this state stores only its
+    /// position.
     target: Vec3,
 }
 
-/// Vanilla's persistent-anger duration, in ticks, **inclusive at both ends**.
+/// Persistent-anger duration, in ticks, **inclusive at both ends**.
 ///
-/// Vanilla's own neutral-mob persistent-anger constant, a seconds-based
-/// range of `[20, 39]` converted
+/// The duration is a seconds-based range of `[20, 39]` converted
 /// to a uniform-int range of `[400, 780]` ticks — seconds convert to ticks by
 /// multiplying by 20, so this is
 /// already ticks. Identical for all four neutral species.
@@ -1041,16 +958,15 @@ struct Anger {
 /// those two hypotheses explicitly rather than asserting a grudge merely ends.
 const ANGER_TICKS: (u64, u64) = (400, 780);
 
-/// Vanilla's own zombified-piglin alert interval — a seconds-based range of
+/// Zombified-piglin alert interval — a seconds-based range of
 /// `[4, 6]` converted to
 /// `[80, 120]` ticks, the throttle on the piglin's own private
-/// alert-others step. Deliberately **not** [`ANGER_TICKS`]: a different
-/// window this mechanism never touches, matching the piglin's real jar
-/// constant rather than reusing the shared grudge-duration one.
+/// alert-others step. Deliberately **not** [`ANGER_TICKS`]: it is a different
+/// window and this mechanism never reuses the shared grudge-duration value.
 const PIGLIN_ALERT_INTERVAL_TICKS: (i32, i32) = (80, 120);
 
-/// Vanilla's own "how long after a player's hit a mob's
-/// death still counts as a player kill" window, in ticks.
+/// Time window, in ticks, during which a player's hit counts toward a mob's
+/// death experience.
 const PLAYER_HURT_EXPERIENCE_TIME: u64 = 100;
 
 /// Vanilla's own default ambient-sound-interval getter's default (`80`) — the forced gap
@@ -1064,19 +980,18 @@ const AMBIENT_SOUND_INTERVAL: i32 = 80;
 /// every hit that passes the invulnerability gate.
 const ARMADILLO_DANGER_TICKS: i32 = 80;
 
-/// Vanilla's own axolotl hurt-handler's literal `200` — the tick count its
-/// play-dead timer is set to on a successful roll.
+/// Axolotl play-dead duration (`200` ticks) — the timer value on a successful
+/// roll.
 const AXOLOTL_PLAY_DEAD_TICKS: i32 = 200;
 
-/// An independent, deterministic per-*hit* approximation of
-/// vanilla's own axolotl hurt-handler's own two bounded-int-under-3 draws — the same
+/// An independent, deterministic per-*hit* approximation of the two
+/// bounded-int-under-3 draws used by the axolotl play-dead roll — the same
 /// "no shared RNG stream reaches this seam" shape [`camel_sit_roll`]'s own
 /// doc discloses, salted from the hit itself (the mob's id plus the
 /// pre-hit health and raw-damage bit patterns) rather than from a tick
 /// counter, since this fires once per hit rather than once per tick. The
 /// two draws are mixed with different constants so they do not correlate.
-/// Returns `(nextInt(3), nextInt(3))`, matching vanilla's own two calls in
-/// declaration order; the caller reproduces
+/// Returns `(nextInt(3), nextInt(3))` in declaration order; the caller reproduces
 /// `first == 0 && (second < damage || health_ratio < 0.5)` itself.
 fn axolotl_play_dead_roll(id: u64, health_bits: u32, damage_bits: u32) -> (u32, u32) {
     let seed = (u64::from(health_bits) << 32) | u64::from(damage_bits);
@@ -1274,9 +1189,9 @@ fn piglin_alert_interval(mob: &mut impl MobController) -> i32 {
 /// `crate::explosion`'s exposure sampling and `crate::mobs::projectiles`)
 /// would be the primitive if one were ever needed here.
 ///
-/// **A second, wholly separate mechanism also propagates piglin aggro, and it
-/// is now modelled too:** vanilla's own zombified-piglin AI step's private
-/// alert-others call, called every tick the piglin has a target, throttled
+/// **A second, wholly separate mechanism also propagates piglin aggro:** the
+/// zombified-piglin tick step makes an alert call every tick while the piglin
+/// has a target, throttled
 /// by its own alert-interval range of `[80, 120]` ticks
 /// ([`PIGLIN_ALERT_INTERVAL_TICKS`], deliberately not the shared grudge
 /// window `ANGER_TICKS` reuses) and gated on live line of sight to the
@@ -1428,19 +1343,18 @@ pub struct SimMob<'w> {
     /// Armour/resistance/absorption state `damage::apply_reductions` reads for
     /// every incoming hit; absorption is written back after each hit.
     defenses: Defenses,
-    /// Vanilla's own remaining-fire-ticks field — see `crate::burning`'s own module
+    /// Remaining-fire-ticks state — see `crate::burning`'s own module
     /// doc for the full mechanic. Currently only ever raised by a fireball's
     /// impact (`MobSim::resolve_projectile_hit`) and consumed by
     /// [`MobSim::tick_burning`]; standing in a fire/lava block does not yet
-    /// ignite a mob (a separate, disclosed gap — see that module's "What is
-    /// not here" section).
+    /// ignite a mob because this path has no block-state fire source.
     burn: crate::burning::BurnState,
-    /// Vanilla's persistent-anger state, host-side (issue #458, primitive 1):
+    /// Persistent-anger state, host-side (the anger deadline):
     /// the **absolute game tick** the grudge ends at, plus where the entity it
     /// is held against was when it was set.
     ///
-    /// `None` means no live grudge — vanilla's own neutral-mob mixin encodes
-    /// this as a sentinel `-1` end time.
+    /// `None` means no live grudge; the wire-facing representation uses a
+    /// sentinel `-1` end time.
     ///
     /// **A deadline, not a countdown.** 26.2 stores an absolute game time and
     /// compares against it; a decrementing counter
@@ -1452,16 +1366,14 @@ pub struct SimMob<'w> {
     /// query: the seam has no shared clock, so the host resolves expiry and
     /// only `Option<Vec3>` crosses. See that method's own doc comment.
     anger: Option<Anger>,
-    /// Issue #233: vanilla's own bee "has stung" flag, expressed as the [`MobSim::tick_count`] the
-    /// sting connected rather than a bare flag, since the self-destruct roll
-    /// (vanilla's own bee AI step) needs the elapsed time since the sting and a decrementing
-    /// counter would drift against a stepped tick loop for the same reason
+    /// A bee's sting is expressed as the [`MobSim::tick_count`] when the sting
+    /// connected rather than a bare flag, since the self-destruct roll needs
+    /// elapsed time and a decrementing counter would drift against a stepped
+    /// tick loop for the same reason
     /// [`Anger::end_time`] is an absolute deadline rather than a countdown.
     ///
-    /// `None` for a bee that has never stung. Set the instant a bee's own
-    /// attack connects ([`MobSim::tick`]'s first mob loop) and never cleared
-    /// — a stung bee is always on a path to death, matching vanilla's
-    /// own "has stung" flag having no reset.
+    /// `None` for a bee that has never stung. Set when a bee's attack connects
+    /// and never cleared; a stung bee remains on a path to death.
     stung_at: Option<u64>,
     /// Vanilla's own "ticks until next alert" field — the throttle on the piglin's
     /// own private alert-others call, a second, wholly separate group-aggro
@@ -1596,11 +1508,9 @@ pub struct SimMob<'w> {
     /// non-allay species (and every allay not currently on cooldown).
     allay_duplication_cooldown: i32,
     /// The [`MobSim::tick_count`] at which this mob stops counting as
-    /// player-killed — vanilla's own "last hurt by player memory time" field,
-    /// expressed as an absolute deadline for [`Anger`]'s reason.
+    /// player-killed, expressed as an absolute deadline for [`Anger`]'s reason.
     ///
-    /// **This is the gate on XP dropping at all.** Vanilla's own drop-experience
-    /// call requires
+    /// **This is the gate on XP dropping at all.** The drop-experience path requires
     /// this deadline to be set, so a mob that starves, drowns, burns, falls
     /// or is killed by another mob drops **no** experience — only a kill a player had
     /// a hand in within [`PLAYER_HURT_EXPERIENCE_TIME`] ticks does. Awarding
@@ -1610,17 +1520,17 @@ pub struct SimMob<'w> {
     /// `None` for a mob no player has ever hit.
     hurt_by_player_until: Option<u64>,
     /// Raw melee damage this mob's own attacks deal (`ATTACK_DAMAGE`
-    /// attribute), applied to whatever [`attack_target_id`](SimMob::attack_target_id)
-    /// names when a `MeleeAttackGoal` connects.
+    /// attribute), applied to the target named by
+    /// [`attack_target_id`](SimMob::attack_target_id) when an attack connects.
     attack_damage: f32,
     /// The invulnerability-frame gate for hits landing on *this* mob
     /// (`damage::HurtCooldown`), ticked once per sim tick regardless of
     /// whether anything hit this tick.
     hurt_cooldown: HurtCooldown,
-    /// Vanilla's own ambient-sound-time field: an increasing-probability countdown for
+    /// Ambient-sound time: an increasing-probability countdown for
     /// this mob's idle vocalisation (cow moo, zombie groan, …), ticked once
     /// per sim tick regardless of whether a goal moved this mob. Starts at
-    /// `0`, matching Java's field default — see
+    /// `0` — see
     /// [`MobSim::roll_ambient_sound`] for the roll this drives.
     ambient_sound_time: i32,
     /// The id of another live [`SimMob`] this mob's melee attacks should
@@ -1628,9 +1538,8 @@ pub struct SimMob<'w> {
     /// `Vec3` (which only drives movement — the goal/navigation seam has no
     /// entity identity, just positions).
     attack_target_id: Option<i32>,
-    /// Who owns this mob, if anyone — the ownership relation. Vanilla stores a
-    /// tamed animal's owner as a **player** uuid
-    /// (its own owner-uuid metadata field), and that is now expressible:
+    /// Who owns this mob, if anyone — the ownership relation. A tamed animal's
+    /// owner is a **player** uuid, which is expressible here:
     /// [`PerceivedPlayer`] carries a [`PlayerIdentity`] at the perception seam. The
     /// mob-to-mob flavour is kept because the enderman/wolf-pack work needs it
     /// and nothing about a uuid replaces it.
@@ -1642,7 +1551,7 @@ pub struct SimMob<'w> {
     /// `None` for a wild mob.
     owner: Option<MobOwner>,
     /// Whether this mob is *tame at all*, independent of whether its owner is
-    /// currently resolvable — vanilla's own "is tame" check, the `0x04` bit
+    /// currently resolvable — the `0x04` bit
     /// of its shared entity-flags metadata field.
     ///
     /// Not derived from [`owner`](Self::owner) being `Some`, and this is the
@@ -1688,8 +1597,8 @@ pub struct SimMob<'w> {
     /// mooshroom guard itself — see that module's doc for why nothing yet
     /// consumes the toggle this guards.
     last_lightning_bolt: Option<i32>,
-    /// This villager's profession (issue #243) — vanilla's own "none"
-    /// profession value
+    /// This villager's profession; [`villager::Profession::None`] is the
+    /// default
     /// for every non-villager species, and for a villager that has not
     /// claimed a workstation yet. Only meaningful when
     /// [`entity_type`](Self::entity_type) is `minecraft:villager`.
@@ -1705,8 +1614,7 @@ pub struct SimMob<'w> {
     /// Accumulated trading xp toward [`villager::max_xp_for_level`]'s next
     /// threshold. Vanilla's own villager-xp field.
     villager_xp: i32,
-    /// This villager's persistent trade economics (issue #245's third
-    /// piece, previously entirely absent) — per-offer demand, restock
+    /// This villager's persistent trade economics — per-offer demand, restock
     /// cadence and use counts, keyed alongside the `(profession, level)` it
     /// was built for so [`SimMob::ensure_trades`] can tell when it has gone
     /// stale. `None` for a non-villager or one with no profession yet.
@@ -1733,8 +1641,7 @@ pub struct SimMob<'w> {
     /// — vanilla's own shoulder-ride cooldown counter, incremented once
     /// per tick alongside [`no_action_time`](Self::no_action_time) and fed to
     /// [`MobController::ticks_since_shoulder_dismount`]. Only meaningful for
-    /// `minecraft:parrot`; a species that never mounts a shoulder simply
-    /// never has [`LandOnOwnersShoulderGoal`](lodestone_entity::ai::goals::LandOnOwnersShoulderGoal)
+    /// `minecraft:parrot`; a species that never mounts a shoulder does not
     /// read it.
     shoulder_dismount_ticks: i32,
     /// The bed this villager has claimed as its home point-of-interest, if any — `None`
@@ -1758,10 +1665,10 @@ pub struct SimMob<'w> {
     bell_search_cooldown: i32,
     /// The nearest warden-listenable vibration this tick, if this mob is a
     /// listener species ([`is_vibration_listener`]) and one was posted in
-    /// range — issue #459's vibration substrate, resolved host-side by
+    /// range — the vibration substrate, resolved host-side by
     /// [`MobSim::resolve_vibrations`]. `None` for every other mob, and for a
     /// listener with nothing audible in range this tick. Consumed by
-    /// [`MobSim::resolve_warden_anger`] (issue #459's step 3) into
+    /// [`MobSim::resolve_warden_anger`] (the anger-resolution step) into
     /// [`warden_anger`](Self::warden_anger)/[`warden_anger_target`](Self::warden_anger_target).
     nearest_vibration: Option<PostedVibration>,
     /// Vanilla's own per-suspect anger map's value for this mob's own **single**
@@ -1774,96 +1681,62 @@ pub struct SimMob<'w> {
     /// non-listener species.
     warden_anger: i32,
     /// The entity id [`warden_anger`](Self::warden_anger) is banked against —
-    /// vanilla's own per-suspect anger map's "current suspect", narrowed to one slot.
-    /// A new vibration from a **different** source replaces this and resets
-    /// the anger to `0` before absorbing the new event — see
-    /// [`MobSim::resolve_warden_anger`]'s own doc for why that is the honest
-    /// single-slot analogue of vanilla's multi-suspect sort rather than a
-    /// silent behaviour change. `None` once anger decays to `0` or the
-    /// target stops existing.
+    /// The last vibration source associated with this anger state. A vibration
+    /// from a **different** source replaces it and resets anger to `0` before
+    /// the new event is absorbed. `None` means anger has decayed to `0` or the
+    /// target is absent.
     warden_anger_target: Option<i32>,
-    /// Vanilla's own warden-AI emerge duration (134 ticks) counted down from spawn —
-    /// the emerging pose's own duration, matching vanilla's own warden
-    /// spawn-finalization setting the pose to emerging. `0` for every non-warden species and for a
-    /// warden past its emerge window. While positive: the warden is
-    /// invulnerable (vanilla's own "is invulnerable to" check's digging-or-emerging gate,
-    /// see [`SimMob::apply_damage`]'s own species arm) and does not strike
-    /// ([`warden::MobSim::resolve_warden_anger`] skips it outright, matching
-    /// emerging outranking fighting in vanilla's own activity-priority
-    /// list). See [`warden`] module doc for the digging/despawn half this
-    /// crate does not build.
+    /// Warden emergence duration (134 ticks) counted down from spawn. `0` for
+    /// every non-warden species and for a warden past its emerge window. While
+    /// positive, the warden is invulnerable and does not strike; the warden
+    /// activity resolver gives emergence priority over fighting. See
+    /// [`warden`] for the digging and despawn behavior that is not modeled.
     warden_emerge_ticks: i32,
-    /// Vanilla's own sonic-boom cooldown constant (40 ticks), ticked down once a boom lands —
-    /// [`warden::MobSim::resolve_warden_anger`]'s own gate on how often a
-    /// warden may re-use the ranged attack. `0` for every non-warden species.
+    /// Sonic-boom cooldown (40 ticks), ticked down once a boom lands. `0` for
+    /// every non-warden species.
     warden_sonic_boom_cooldown: i32,
-    /// Vanilla's own dig-cooldown memory's own TTL — [`warden::DIGGING_COOLDOWN_TICKS`]
-    /// (1200) at spawn (vanilla's own warden spawn-finalization sets this
-    /// memory unconditionally, issue #459's resolved ambiguity — see
-    /// [`warden`] module doc), continuously refreshed back to that value
-    /// every tick this warden is [`warden::AngerLevel::Angry`]
-    /// (vanilla's own dig-cooldown setter's own "refresh only while present"
-    /// shape), and decremented toward `0` otherwise. Digging becomes
-    /// eligible only once this reaches `0` — real vanilla's own dig-cooldown
-    /// memory being absent. `0` for every non-warden species.
+    /// Dig-cooldown TTL (`1200`) at spawn, refreshed to that value on every
+    /// angry warden tick and decremented toward `0` otherwise. Digging becomes
+    /// eligible only once this reaches `0`. `0` for every non-warden species.
     warden_dig_cooldown: i32,
-    /// Vanilla's own digging-duration constant (100 ticks) counted down while
-    /// in the digging pose — [`warden::MobSim::resolve_warden_anger`] discards
-    /// this mob outright once it reaches `0`, matching vanilla's own digging-stop
-    /// handler discarding the entity. `0` for every
-    /// non-warden species and for a warden not currently digging.
+    /// Digging duration (100 ticks) counted down while in the digging pose.
+    /// [`warden::MobSim::resolve_warden_anger`] removes this mob once it reaches
+    /// `0`. `0` for every non-warden species and for a warden not currently
+    /// digging.
     warden_digging_ticks: i32,
-    /// Vanilla's own "has left horn" metadata field. `true` for every non-goat species (the
-    /// field is meaningless there) and for a goat that has not lost this
-    /// horn. Rolled once at spawn (vanilla's own spawn-finalization's `< 0.1`
-    /// float-draw check) by [`MobSim::spawn_species`]; nothing in this crate yet
-    /// removes a horn afterward — `RamTarget`'s own doc discloses that
-    /// vanilla's own "rammed a horn-breaking block" block-contact trigger is not ported
-    /// (this seam has no block-state read), so a horn lost only ever happens
-    /// at spawn, never mid-game, here.
+    /// Whether the goat's left horn is present. `true` for every non-goat
+    /// species and for a goat that has not lost the horn. The value is rolled
+    /// once at spawn (`< 0.1` removes it); no block-contact path removes a horn
+    /// later because this seam has no block-state read.
     has_left_horn: bool,
-    /// Vanilla's own "has right horn" metadata field. See [`has_left_horn`](Self::has_left_horn)'s
-    /// own doc — identical shape, the other horn.
+    /// Whether the goat's right horn is present; see
+    /// [`has_left_horn`](Self::has_left_horn) for the same rule.
     has_right_horn: bool,
-    /// `minecraft:spawn_reinforcements` attribute's **base value** —
-    /// vanilla's own reinforcements-chance randomizer's `< 0.1` float draw,
-    /// rolled once at spawn for the zombie family
-    /// ([`MobSim::spawn_species`]) and decremented by
-    /// [`ZOMBIE_REINFORCEMENT_CALLER_CHARGE`] each time this mob successfully
-    /// calls one in — the permanent per-caller modifier
-    /// vanilla's own zombie hurt-handler keeps re-adding at a lower amount, folded here into
-    /// one running total rather than a separate modifier stack, since
-    /// nothing else ever reads this field's history. `0.0` for every
-    /// non-zombie-family species, where nothing reads it. **Does not model
-    /// the "leader zombie" bonus** (vanilla's own attribute-handling step's own
-    /// `< difficultyModifier * 0.05` roll, which adds `0.5..0.75`
-    /// to this and forces full health / door-breaking) — a real, disclosed
-    /// gap, matching `docs/mob-species-spawning.md`'s existing note that the
-    /// door-breaking roll does not model it either.
+    /// `minecraft:spawn_reinforcements` base value. Rolled once at spawn for
+    /// the zombie family (`< 0.1`) and decremented by
+    /// [`ZOMBIE_REINFORCEMENT_CALLER_CHARGE`] each successful call-in. The
+    /// accumulated value is `0.0` for every non-zombie-family species. The
+    /// leader bonus (`difficulty_modifier * 0.05`, adding `0.5..0.75` and
+    /// enabling full health and door breaking) is not modeled.
     reinforcement_chance: f64,
-    /// This mob's own gossip ledger (issue #244) — vanilla's own villager
-    /// gossip field, what
-    /// it believes about every UUID it has an opinion of. Empty for every
+    /// This mob's own gossip ledger: what it believes about every UUID it has
+    /// an opinion of. Empty for every
     /// non-villager species; a converted zombie villager's ledger is seeded
-    /// at conversion time (issue #247, [`villager::reputation::apply_reputation_event`]
+    /// at conversion time ([`villager::reputation::apply_reputation_event`]
     /// with [`villager::reputation::ReputationEventType::ZombieVillagerCured`]).
     gossip: villager::gossip::GossipContainer,
-    /// The tick this mob's gossip last decayed, for the 24000-tick cadence
-    /// vanilla's own gossip-decay step gates on — `None` before the first decay
-    /// check (matching vanilla's own zero-timestamp sentinel:
-    /// the very first check just records the timestamp rather than decaying
-    /// immediately).
+    /// The tick this mob's gossip last decayed, for the 24000-tick cadence.
+    /// `None` before the first decay check; the first check records the
+    /// timestamp rather than decaying immediately.
     last_gossip_decay_tick: Option<u64>,
     /// This mob's own "golem detected recently" memory
     /// — the absolute tick at which it stops suppressing a golem-summon
-    /// attempt, or `None` while the memory is absent. Set both right after a
-    /// successful spawn (vanilla's own golem-detection sensor notifies every
-    /// nearby villager)
-    /// and — not modelled here, see [`MobSim::tick_golem_summon`]'s own doc
-    /// for the disclosed cut — by proximity to an already-present iron golem.
+    /// attempt, or `None` while the memory is absent. Set after a successful
+    /// spawn; proximity to an already-present iron golem does not set it in this
+    /// model.
     /// Only meaningful for `minecraft:villager`.
     golem_detected_until: Option<u64>,
-    /// Live zombie-villager conversion state (issue #247) — `Some` only
+    /// Live zombie-villager conversion state — `Some` only
     /// while [`entity_type`](Self::entity_type) is `minecraft:zombie_villager`
     /// and a golden apple has been used on it while weakened. `None` for
     /// every other mob, and for a zombie villager that has not been cured
@@ -1902,7 +1775,7 @@ impl<'w> SimMob<'w> {
         self
     }
 
-    /// Sets the mob's current attack target (what a `MeleeAttackGoal` chases).
+    /// Sets the mob's current attack target.
     pub fn set_attack_target(&mut self, target: Option<Vec3>) {
         self.mob.set_attack_target(target);
     }
@@ -1983,8 +1856,8 @@ impl<'w> SimMob<'w> {
         self.mob.step_per_tick()
     }
 
-    /// Whether this mob is a baby (`age < 0`), which is what gates
-    /// `FollowParentGoal` and excludes it from breeding.
+    /// Whether this mob is a baby (`age < 0`), which gates following a parent
+    /// and excludes it from breeding.
     #[must_use]
     pub fn is_baby(&self) -> bool {
         self.mob.is_baby()
@@ -2057,7 +1930,7 @@ impl<'w> SimMob<'w> {
     }
 
     /// Whether the mob's feet cell holds water, read from the world (never
-    /// injected) — what drives `FloatGoal`.
+    /// injected) — the input for floating behavior.
     #[must_use]
     pub fn in_water(&self) -> bool {
         self.mob.in_water()
@@ -2092,7 +1965,7 @@ impl<'w> SimMob<'w> {
     }
 
     /// The nearest-adult position [`MobSim::tick`] last fed this mob, which is
-    /// what `FollowParentGoal` follows. Always `None` for an adult.
+    /// the target for parent-following behavior. Always `None` for an adult.
     #[must_use]
     pub fn parent_candidate(&self) -> Option<Vec3> {
         self.mob.parent_position()
@@ -2303,8 +2176,8 @@ impl<'w> SimMob<'w> {
         self.mob.owner_position()
     }
 
-    /// Teleports this mob directly to `pos` (issue #458, primitive 3: instant
-    /// relocation) — the host command the enderman's damage-triggered
+    /// Teleports this mob directly to `pos` (the instant-relocation primitive) —
+    /// the host command the enderman's damage-triggered
     /// teleport and gaze-triggered "teleport towards" reduce to. Rewrites
     /// position immediately and abandons any in-progress path (vanilla's own
     /// generic teleport-to call).
@@ -2313,7 +2186,7 @@ impl<'w> SimMob<'w> {
         self
     }
 
-    /// Records a self-inflicted damage request (issue #458, primitive 4) — the
+    /// Records a self-inflicted damage request (the self-damage primitive) — the
     /// bee's sting self-destruct. Drained and
     /// applied by [`MobSim::tick`] through the normal damage pipeline.
     pub fn damage_self(&mut self, amount: f32) -> &mut Self {
@@ -2321,17 +2194,17 @@ impl<'w> SimMob<'w> {
         self
     }
 
-    /// The mob's current attack-target *position* (what a `MeleeAttackGoal`
-    /// chases), as distinct from
+    /// The mob's current attack-target *position* (the point its attack
+    /// behavior chases), as distinct from
     /// [`attack_target_id`](SimMob::attack_target_id)'s entity identity. This
-    /// is the state `HurtByTargetGoal` writes when it retaliates.
+    /// is the state retaliation writes when the mob is attacked.
     #[must_use]
     pub fn attack_target(&self) -> Option<Vec3> {
         self.mob.attack_target()
     }
 
     /// Whether a goal has this mob holding jump this tick — the observable
-    /// effect of `FloatGoal`, i.e. what floating actually looks like.
+    /// effect of its water-escape behavior.
     #[must_use]
     pub fn is_jumping(&self) -> bool {
         self.mob.is_jumping()
@@ -2351,9 +2224,9 @@ impl<'w> SimMob<'w> {
     /// [`MobController`] seam.
     ///
     /// Deliberately separate from [`no_action_time`](SimMob::no_action_time),
-    /// which reads the sim's own record. The two being equal is exactly what
-    /// issue #441 fixed: the sim incremented its record every tick and never
-    /// pushed it across the seam, so goals read the trait default `0` forever.
+    /// which reads the sim's own record. The two must stay equal: the sim
+    /// increments its record every tick and goals must observe that value
+    /// through the controller seam rather than the trait default `0`.
     /// Keeping both readable is what lets a test assert the equality rather
     /// than assume it.
     #[must_use]
@@ -2369,10 +2242,9 @@ impl<'w> SimMob<'w> {
         self.goals.len()
     }
 
-    /// Marks the mob ignited (vanilla's own creeper ignite call), forcing a
+    /// Marks the mob ignited, forcing a
     /// creeper's swell direction to climb every tick regardless of
-    /// [`SwellGoal`](lodestone_entity::ai::goals::SwellGoal)'s own proximity
-    /// check. A no-op for a mob whose [`NavigatingMob`] never has anything
+    /// proximity check. A no-op for a mob whose [`NavigatingMob`] never has anything
     /// else move its swell direction off `-1` (every non-creeper species).
     pub fn ignite(&mut self) -> &mut Self {
         self.mob.ignite();
@@ -2535,7 +2407,7 @@ impl<'w> SimMob<'w> {
         // vanilla additionally requires a live source/direct entity
         // — this seam has no attacker-identity input to gate on, the same
         // simplification `armadillo_danger_ticks`'s own doc already
-        // discloses for its identical gap.
+        // discloses for the same missing attacker-identity input.
         if self.entity_type.path() == "axolotl"
             && self.axolotl_play_dead_ticks <= 0
             && self.in_water()
@@ -2555,16 +2427,10 @@ impl<'w> SimMob<'w> {
         let outcome = lodestone_entity::apply_reductions(amount, &self.defenses, flags);
         self.defenses.absorption = outcome.remaining_absorption;
         self.health = (self.health - outcome.to_health).max(0.0);
-        // Issue #441: every hit that is not swallowed by i-frames opens the
-        // panic window, because vanilla's own panic goal's "should panic" check reads the
-        // damage *source* rather than the attacking mob
-        // — so fall damage and drowning panic
-        // an animal exactly as a wolf bite does. The attacker half of the
-        // record is added by whichever caller knows the attacker's position
-        // ([`MobSim::attack`] and [`MobSim::tick`]'s melee resolution); the
-        // ones that do not (an explosion, a future environmental source) leave
-        // the mob panicking with nothing to retaliate against, which is the
-        // correct vanilla outcome rather than a gap.
+        // Every hit that is not swallowed by invulnerability opens the panic
+        // window. The attacker position is carried by callers that know it;
+        // environmental damage leaves the mob panicking without a retaliation
+        // target.
         //
         // Placed here, in the single funnel every damage path already goes
         // through, so a new damage source cannot forget it.
@@ -2735,8 +2601,8 @@ impl<'w> SimMob<'w> {
         self.meeting_point
     }
 
-    /// The nearest warden-listenable vibration this tick, if any — issue
-    /// #459's substrate. See the `nearest_vibration` field's own doc for
+    /// The nearest warden-listenable vibration this tick, if any — the
+    /// vibration substrate. See the `nearest_vibration` field's own doc for
     /// what this drives ([`MobSim::resolve_warden_anger`]).
     #[must_use]
     pub fn nearest_vibration(&self) -> Option<PostedVibration> {
@@ -2871,7 +2737,7 @@ impl<'w> SimMob<'w> {
     /// `metadata` is the per-species entity-metadata field list —
     /// general across mobs (see [`MetadataField`]'s own doc comment), not a
     /// creeper-only mechanism, even though a creeper was the only producer
-    /// for a long time. [`crate::server::EntityStreamer::sync`] diffs this exactly like
+    /// for a long time. [`crate::server::EntityStreamer`] diffs this exactly like
     /// every other field here, so a change reaches [`ServerProtocol::encode_set_entity_data`]
     /// through the same spawn/update path `position`/`rotation` already use —
     /// no second wiring for the next mob that needs a metadata field.
@@ -2879,7 +2745,7 @@ impl<'w> SimMob<'w> {
     /// `CreeperSwellDir` is always included for a creeper, even at its `-1`
     /// default: unlike `CreeperIgnited` (monotonic — set once, never
     /// cleared, so *absence* safely means "still false"), `swell_dir` can
-    /// legitimately return to `-1` mid-episode (`SwellGoal`'s retreat case),
+    /// legitimately return to `-1` mid-episode during retreat,
     /// and that transition must reach the client exactly like the climb to
     /// `1` did — a client that keeps whatever `swell_dir` it was last sent
     /// would integrate the fuse in the wrong direction forever if a
@@ -2952,7 +2818,7 @@ impl<'w> SimMob<'w> {
             }
             _ => {}
         }
-        // Vanilla's own villager-data metadata field, index 19 (issue #243) — the field a
+        // Villager metadata field, index 19 — the field a
         // client's own villager renderer/profession-layer actually reads
         // to pick a texture. Pushed unconditionally for every villager, at
         // whatever `profession`/`villager_level` currently are (including
@@ -3029,7 +2895,7 @@ impl<'w> SimMob<'w> {
             head_yaw: self.head_yaw(),
             velocity: self.velocity(),
             metadata,
-            // No mob overrides `getAddEntityPacket`'s data argument.
+            // No mob supplies additional spawn data here.
             object_data: 0,
             // Resolved by `MobSim::snapshots`, not here: `leash_holder` names a
             // player by uuid, and only `MobSim` (through `self.players`) can turn
@@ -3042,7 +2908,7 @@ impl<'w> SimMob<'w> {
 
 /// Wire identity for one tracked projectile.
 ///
-/// [`ProjectileRegistry`] (issue #211) deliberately stays version-free — its
+/// [`ProjectileRegistry`]  deliberately stays version-free — its
 /// own doc comment says a caller's `id`/ballistic state is all it tracks — so
 /// the uuid and canonical entity-type key a spawn packet needs live here,
 /// exactly the split [`SimMob`] already makes between `NavigatingMob`'s
@@ -3073,12 +2939,10 @@ struct ProjectileMeta {
 
 /// Wire identity plus fall dynamics for one tracked dropped item.
 ///
-/// [`ItemEntityRegistry`] (issue #215) tracks only the age/pickup-delay/count
+/// [`ItemEntityRegistry`]  tracks only the age/pickup-delay/count
 /// *lifecycle* — deliberately world- and wire-free, per its own doc comment.
-/// The item's identity and its [`ItemMotion`] (the fall-dynamics half that,
-/// before this, only ever ran client-side for rendering — see
-/// `crates/lodestone-shell/src/entities.rs`'s own `ItemMotion` import) live
-/// here, the server-authoritative side that issue was missing.
+/// The item's identity and its [`ItemMotion`] (the fall-dynamics state) live
+/// here, on the server-authoritative side for item state.
 #[derive(Debug, Clone)]
 struct ItemState {
     uuid: Uuid,
@@ -3173,15 +3037,10 @@ pub struct AttackOutcome {
 /// the world and hands it here. Drive the sim with [`tick`](MobSim::tick) once
 /// per game tick, or [`tick_for`](MobSim::tick_for) to run many.
 ///
-/// Also owns a [`ProjectileRegistry`] and an [`ItemEntityRegistry`] (issues
-/// #211/#215): before this, `grep -rn 'ProjectileRegistry\|ItemEntityRegistry'`
-/// outside `lodestone-entity` returned nothing — both types were fully
-/// implemented and unit-tested but never constructed anywhere a real server
-/// tick could reach, so arrows and dropped items never advanced on this
-/// project's own server. `MobSim` is the same home the server's unified tick
-/// loop ([`crate::tick::run_tick_loop`], issue #284) already ticks every
-/// server tick for mobs, so folding these two in here (rather
-/// than a sibling `ProjectileSim`) means [`tick`](MobSim::tick) closes the gap
+/// Also owns a [`ProjectileRegistry`] and an [`ItemEntityRegistry`]. The shared
+/// server tick calls [`tick`](MobSim::tick), which advances projectiles and
+/// dropped items alongside mobs; keeping the registries together preserves one
+/// snapshot and collision path for all three entity kinds.
 /// with no new task, and [`snapshots`](MobSim::snapshots) puts every entity
 /// kind on the same wire path mobs already proved reaches a real client.
 #[derive(Debug)]
@@ -3272,7 +3131,7 @@ pub struct MobSim<'w> {
     /// see [`items_settled_probe_count`](Self::items_settled_probe_count).
     item_probe_count: u64,
     /// Every detonation [`tick`](Self::tick) has triggered since the last
-    /// [`take_detonations`](Self::take_detonations) call (issue #425).
+    /// [`take_detonations`](Self::take_detonations) call.
     /// `tick` itself has no wire access — it only knows `self.world` — so
     /// this is the handoff point a driver ([`crate::tick::run_tick_loop`])
     /// drains into an [`crate::tick::ExplosionFeed`] for a connection to
@@ -3280,7 +3139,7 @@ pub struct MobSim<'w> {
     /// for why draining, not just reading, is what keeps a detonation from
     /// being broadcast twice.
     pending_detonations: Vec<Detonation>,
-    /// Grazed blocks awaiting the driver's world mutation (issue #456), as
+    /// Grazed blocks awaiting the driver's world mutation, as
     /// `(mob block position, which of the two blocks)`.
     ///
     /// The same handoff shape as [`pending_detonations`](Self::pending_detonations)
@@ -3294,7 +3153,7 @@ pub struct MobSim<'w> {
     /// consumer that knows what each variant means.
     pending_grazes: Vec<(BlockPos, EatenBlock)>,
     /// Players struck by a hostile mob's melee attack this tick, awaiting the
-    /// driver's `PlayerVitals::apply_damage` call (issue #625) — the same
+    /// driver's `PlayerVitals::apply_damage` call — the same
     /// handoff shape as [`pending_detonations`](Self::pending_detonations)
     /// above and for the same reason: this sim owns no connection and cannot
     /// reach a player's authoritative health itself. Drained by
@@ -3302,7 +3161,7 @@ pub struct MobSim<'w> {
     /// doc comment for how a target position resolves to a player identity.
     pending_player_hits: Vec<PlayerHit>,
     /// Players caught in an elder guardian's mining-fatigue pulse this tick
-    /// (issue #232) — the same handoff shape as
+    /// This has the same handoff shape as
     /// [`pending_player_hits`](Self::pending_player_hits) above and for the
     /// same reason: this sim owns no connection and cannot reach a player's
     /// `ActiveEffects` itself, nor send the `GUARDIAN_ELDER_EFFECT` game
@@ -3311,13 +3170,12 @@ pub struct MobSim<'w> {
     /// [`MiningFatigueAura`]'s own doc comment for exactly what the caller
     /// owes vanilla.
     pending_mining_fatigue: Vec<MiningFatigueAura>,
-    /// Hurt and death sounds awaiting the driver (issue #530), the same handoff
+    /// Hurt and death sounds awaiting the driver, the same handoff
     /// shape as the two above and for the same reason: this sim owns no
     /// connection. Drained by [`take_vocalisations`](Self::take_vocalisations).
     ///
-    /// Before this, `apply_damage` damaged and killed mobs with **no audible
-    /// result at all** — the `ServerProtocol` trait had no sound encoder, so a
-    /// player could beat a cow to death in silence.
+    /// `apply_damage` records the sound outcome for each damage or death event;
+    /// the driver encodes those outcomes for connected players.
     pending_vocalisations: Vec<crate::effects::WorldEffect>,
     /// Idle ambient vocalisations awaiting the driver — the same handoff shape
     /// as [`pending_vocalisations`](Self::pending_vocalisations) and for the
@@ -3346,13 +3204,12 @@ pub struct MobSim<'w> {
     /// driver through [`set_players`](Self::set_players) and consumed by
     /// [`tick`](Self::tick) to feed each mob's `nearest_player`/`temptation`.
     ///
-    /// This crate had **no player-position feed at all** before issue #441 —
-    /// see [`set_players`](Self::set_players) for why that made two of the
-    /// eight perception methods unreachable, and which one line closes it.
+    /// [`set_players`](Self::set_players) supplies the player position used by
+    /// eight perception methods; the live mob tick calls it before goal updates.
     players: Vec<PerceivedPlayer>,
     /// Raw `(player entity id, game tick they lay down)` pairs for every
-    /// currently sleeping player — issue #229's feed for
-    /// `CatRelaxOnOwnerGoal`/shoulder-ride dismount. Fed once per tick by
+    /// currently sleeping player — the player-position feed for
+    /// shoulder-ride dismount behavior. Fed once per tick by
     /// [`set_sleeping_players`](Self::set_sleeping_players) from
     /// `crate::sleep::SleepState`'s own roster, which is keyed by entity id
     /// (the same id [`PlayerIdentity::entity_id`] carries) rather than by
@@ -3365,10 +3222,10 @@ pub struct MobSim<'w> {
     /// asleep.
     sleeping_players: Vec<(i32, u64)>,
     /// One tamed mob currently perched on its owner's shoulder, keyed by
-    /// owner uuid — issue #229's shoulder-riding state. **One slot per
+    /// owner uuid — the shoulder-riding state. **One slot per
     /// owner**, not vanilla's two (left/right); see
     /// [`resolve_shoulder_mounts`](Self::resolve_shoulder_mounts)'s own doc
-    /// for what that costs. The mob entity itself no longer exists in
+    /// for what that costs. The mob entity is absent from
     /// [`mobs`](Self::mobs) while it holds this slot — only its type and the
     /// tick it mounted survive, enough to respawn it in
     /// [`tick_shoulder_dismounts`](Self::tick_shoulder_dismounts).
@@ -3390,8 +3247,8 @@ pub struct MobSim<'w> {
     /// sees.
     zombie_conversion_rng: SpawnRng,
     /// The RNG [`spread_villager_gossip`](Self::spread_villager_gossip) draws
-    /// from for [`villager::gossip::GossipContainer::transfer_from`]'s
-    /// weighted selection, on its own stream for the same isolation reason
+    /// from for the gossip ledger's weighted selection, on its own stream for
+    /// the same isolation reason
     /// [`zombie_conversion_rng`](Self::zombie_conversion_rng) is separate.
     gossip_spread_rng: SpawnRng,
     /// The `random.nextInt(7) + 1` draw vanilla's own
@@ -3466,7 +3323,7 @@ pub struct MobSim<'w> {
     /// makes, on its own stream for the same isolation reason
     /// [`patrol_rng`](Self::patrol_rng) is separate from every other roll.
     trader_rng: SpawnRng,
-    /// Live `LightningBolt` sidecars (issue #269), keyed by network entity id —
+    /// Live lightning sidecars, keyed by network entity id —
     /// the same shape [`orbs`]'s [`OrbState`] map establishes: no
     /// [`NavigatingMob`]/[`GoalSelector`] body, because a bolt has no box and
     /// no AI. See `mobs/lightning.rs`'s module doc.
@@ -3485,7 +3342,7 @@ pub struct MobSim<'w> {
     /// [`take_projectile_block_hits`](Self::take_projectile_block_hits).
     pending_projectile_block_hits: Vec<ProjectileBlockHit>,
     /// The live workstation claim ledger [`tick_villager_professions`](Self::tick_villager_professions)
-    /// reads and writes (issue #243). See [`villager::WorkstationClaims`]'s
+    /// reads and writes. See [`villager::WorkstationClaims`]'s
     /// own doc for why this reuses `crate::poi_storage::PoiRecord` rather
     /// than a parallel claim table, and for what is deliberately not built
     /// (no on-disk persistence, no block-event hook).
@@ -3496,7 +3353,7 @@ pub struct MobSim<'w> {
     #[cfg(not(target_arch = "wasm32"))]
     workstation_claims: villager::WorkstationClaims,
     /// The live bed claim ledger [`tick_villager_beds`](Self::tick_villager_beds)
-    /// reads and writes (issue #241's raid trigger). See
+    /// reads and writes (the raid trigger). See
     /// [`villager::BedClaims`]'s own doc for why this reuses
     /// `crate::poi_storage::PoiRecord` and what is deliberately not built.
     ///
@@ -3505,7 +3362,7 @@ pub struct MobSim<'w> {
     #[cfg(not(target_arch = "wasm32"))]
     bed_claims: villager::BedClaims,
     /// The live bell claim ledger [`tick_villager_bells`](Self::tick_villager_bells)
-    /// reads and writes (issue #231's `MEET` schedule activity) — see
+    /// reads and writes (the `MEET` schedule activity) — see
     /// [`villager::BellClaims`]'s own doc for why this exists and what it
     /// feeds.
     ///
@@ -3525,7 +3382,7 @@ pub struct MobSim<'w> {
     /// which is a harmless default rather than a silent lie, since `0` is a
     /// real, reachable time of day.
     day_time: i32,
-    /// Vibrations real producers posted this tick (issue #459's substrate) —
+    /// Vibrations real producers posted this tick (the vibration substrate) —
     /// resolved into each listener's [`SimMob::nearest_vibration`] by
     /// [`resolve_vibrations`](Self::resolve_vibrations), which also drains
     /// this back to empty so nothing crosses into the next tick. No
@@ -3544,13 +3401,13 @@ pub struct MobSim<'w> {
     /// for [`tnt_rng`](Self::tnt_rng)'s reason: a dragon tick must not shift
     /// which roll a mob spawn, a block drop, or anything else sees.
     dragon_rng: SpawnRng,
-    /// Live fishing bobbers (issue #257), keyed by network entity id — see
+    /// Live fishing bobbers, keyed by network entity id — see
     /// [`fishing::FishingBobber`] and `mobs::fishing`'s own module doc.
     fishing_bobbers: HashMap<i32, fishing::FishingBobber>,
     /// The bobber cast/bob/bite/loot-roll RNG stream, on its own stream for
     /// [`dragon_rng`](Self::dragon_rng)'s reason.
     fishing_rng: SpawnRng,
-    /// Live raids (issue #241), keyed by this sim's own raid id (not a
+    /// Live raids, keyed by this sim's own raid id (not a
     /// network entity id — a raid has no entity of its own; see
     /// [`raid::Raid`] and `mobs::raid`'s own module doc).
     raids: HashMap<i32, raid::Raid>,
@@ -3798,9 +3655,8 @@ pub enum MobAnimation {
         /// The mob's entity id.
         entity_id: i32,
     },
-    /// The mob died — `ClientboundEntityEventPacket` with
-    /// [`crate::protocol::entity_event::DEATH`], which is what starts the
-    /// client's `deathTime` counter and tips the body onto its side.
+    /// The mob died — emit the death animation event, which starts the
+    /// client's death counter and tips the body onto its side.
     Died {
         /// The mob's entity id.
         entity_id: i32,
@@ -3811,9 +3667,8 @@ pub enum MobAnimation {
 /// [`take_detonations`](MobSim::take_detonations) to hand a driver — the
 /// minimum a [`ServerProtocol::encode_explode`](crate::protocol::ServerProtocol::encode_explode)
 /// call needs. This crate tracks no block-destruction model, so there is
-/// nothing else (a block list, a knockback vector) to carry yet; see that
-/// method's own doc comment for exactly which vanilla `ClientboundExplodePacket`
-/// fields are therefore stubbed rather than modelled.
+/// nothing else (a block list, a knockback vector) to carry yet; the remaining
+/// explosion fields are intentionally absent from this event.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Detonation {
     /// The blast's centre, in world space.
@@ -3828,13 +3683,12 @@ pub struct Detonation {
 ///
 /// `SimMob::attack_target_id` names only "another live `SimMob`" by its own
 /// doc comment, so it structurally cannot carry a player: the goal seam
-/// (`NearestAttackableTargetGoal`/`MeleeAttackGoal`) targets and attacks a
-/// bare `Vec3`, never an identity. This is resolved by matching that target
+/// targets and attacks a bare `Vec3`, never an identity. This is resolved by matching that target
 /// position against `self.players`' [`feed_perception`]-fed positions in the
 /// same tick's [`tick`](MobSim::tick) — safe because nothing mutates a
 /// player's fed position between the feed at the top of the tick and the
 /// goal ticks that consume it. A grudge-target attack (the anger-gated
-/// `NearestAttackableTargetGoal` row) can miss this match: its target is a
+    /// anger-target row) can miss this match: its target is a
 /// position remembered from whenever the grudge was set, not refreshed to
 /// the player's current position, so a moved player will not match. That is
 /// a disclosed gap, not a silent one — ordinary hostile-melee (zombie,
@@ -3943,7 +3797,7 @@ pub struct MiningFatigueAura {
 }
 
 /// One projectile-vs-block impact [`MobSim::resolve_projectile_impacts`] found
-/// (issue #322), for [`take_projectile_block_hits`](MobSim::take_projectile_block_hits)
+/// for [`take_projectile_block_hits`](MobSim::take_projectile_block_hits)
 /// to hand a driver — the same handoff shape as
 /// [`pending_grazes`](MobSim::pending_grazes)/[`pending_lightning_fires`](MobSim::pending_lightning_fires)
 /// and for the identical reason: `MobSim::world` is an immutable pathfinding
@@ -4194,10 +4048,9 @@ impl<'w> MobSim<'w> {
     }
 
     /// This villager's priced offer list for one moment in time, backed by
-    /// its *persistent* [`crate::villager_trade::VillagerTrades`] (issue
-    /// #245's third piece — previously every call rebuilt a fresh,
-    /// stateless offer list, so demand never moved and nothing ever went
-    /// out of stock no matter how much was bought). Reputation and Hero of
+    /// its *persistent* [`crate::villager_trade::VillagerTrades`]. The
+    /// persistent third trade-state field, demand, and uses persist between
+    /// menu opens, while reputation and Hero of
     /// the Village are folded into a clone of each offer's price
     /// (`reset_special_price_diff` first, matching
     /// [`crate::mobs::villager::reputation::update_special_prices`]'s own
@@ -4264,27 +4117,10 @@ impl<'w> MobSim<'w> {
     }
 
     /// Replaces the set of players mob perception can see, for
-    /// [`tick`](Self::tick) to consume.
-    ///
-    /// # Why this exists, and what still has to call it
-    ///
-    /// Before issue #441 nothing in this crate knew where a player was.
-    /// `MobSim::tick` takes no arguments and `run_tick_loop`
-    /// (`crate::tick`) receives no player position either — the gap
-    /// [`run_mob_tick_loop`]'s own doc comment already discloses for
-    /// [`despawn_pass`](Self::despawn_pass). So
-    /// [`MobController::nearest_player`] and
-    /// [`MobController::temptation`] had no possible source, which is half of
-    /// why `LookAtPlayerGoal` and `TemptGoal` were structurally dead.
-    ///
-    /// The producer is **one line in `crate::server::dispatch_play_packet`'s
-    /// `ServerBound::PlayerMoved` arm**, which already holds both the new
-    /// position and a `MobHandle` in the same scope. That line is not in this
-    /// commit — `server.rs` is another agent's file this session — so until it
-    /// lands these two methods are fed only by tests, and every other one of
-    /// the eight is fed from state this crate already owns. That asymmetry is
-    /// recorded in `docs/mob-perception.md` rather than left for the next
-    /// author to rediscover.
+    /// [`tick`](Self::tick) to consume. The world tick calls this setter with
+    /// player positions before goal evaluation, allowing
+    /// [`MobController::nearest_player`] and [`MobController::temptation`] to
+    /// read the shared perception input.
     ///
     /// # Why the parameter is generic
     ///
@@ -4339,8 +4175,8 @@ impl<'w> MobSim<'w> {
     }
 
     /// Resolves a [`LeashHolder`] to the wire entity id
-    /// [`ServerProtocol::encode_set_entity_link`] needs as its target — vanilla's
-    /// own `ClientboundSetEntityLinkPacket(entity, holder)` takes a live `Entity`,
+    /// [`ServerProtocol::encode_set_entity_link`] needs as its target — the
+    /// encoder takes a live entity id,
     /// and this is "which id" for each of the three holder shapes this sim
     /// tracks. Only `MobSim` can answer it — a bare `LeashHolder::Player` carries
     /// a uuid, not a session-scoped entity id, and resolving that needs
@@ -4514,18 +4350,13 @@ impl<'w> MobSim<'w> {
         self.mobs.last_mut().expect("just pushed")
     }
 
-    /// Spawns a mob of a specific vanilla species at `pos`, resolving its body
-    /// and behaviour from real per-species data instead of the universal
-    /// `minecraft:zombie` placeholder [`spawn`](Self::spawn) still uses for its
-    /// own, unrelated existing callers (issue #205: `SimMob::entity_type`
-    /// defaulted to zombie unconditionally and every spawned mob got an empty
-    /// [`GoalSelector`], so two different species were behaviourally
-    /// identical).
+    /// Spawns a mob of a specific species at `pos`, resolving its body and
+    /// behavior from the per-species data tables.
     ///
-    /// * **Shape** comes from the real 26.2 dimension census
+    /// * **Shape** comes from the 26.2 dimension census
     ///   ([`lodestone_data::entity_dimensions`], keyed by
     ///   [`lodestone_data::entity_types::entity_type_id_parts`]) folded with the
-    ///   type's `SCALE`/`STEP_HEIGHT` attributes — the same maths
+    ///   type's `SCALE`/`STEP_HEIGHT` attributes — the same math
     ///   [`crate::resolve_mob_shape`] uses for a version-aware caller, read
     ///   directly here since `MobSim` already depends on `lodestone_data` for
     ///   its path/collision census above. Falls back to `MobShape::land(0.6,
@@ -4534,35 +4365,25 @@ impl<'w> MobSim<'w> {
     /// * **Combat stats** come from [`combat_defaults`], already species-aware.
     /// * **Speed**: the type's `movement_speed` attribute value feeds
     ///   [`SpeciesContext`](lodestone_entity::ai::roster::SpeciesContext) as-is
-    ///   (every roster goal multiplies it by vanilla's own `speedModifier`
-    ///   constants, exactly as vanilla's own move-control does before it ever
+    ///   (every roster goal multiplies it by its own speed constants before it
     ///   reaches motion), but the actual kinematic-follower rate handed to
-    ///   [`spawn_with_type`] is [`ai_ground_speed`] of that attribute — see its
-    ///   own doc for why a bare attribute value is not the mob's real
-    ///   blocks/tick and `docs/mob-species-spawning.md` for the vanilla
-    ///   methods and live-oracle measurement behind the conversion.
+    ///   [`spawn_with_type`] is [`ai_ground_speed`] of that attribute. A bare
+    ///   attribute value is not the mob's real blocks/tick rate; see
+    ///   `docs/mob-species-spawning.md` for the conversion measurement.
     /// * **Goals** come from [`lodestone_entity::ai::roster`], which resolves the
-    ///   species path to the goal set vanilla's own `registerGoals()` installs,
-    ///   at vanilla's own priority numbers. This function no longer knows
-    ///   anything about any individual species: a species with no roster entry
-    ///   gets `roster::FALLBACK` (wander and look around), which is exactly the
-    ///   baseline every species used to get here.
+    ///   species path to a prioritized set. This function does not know
+    ///   individual species: a species with no roster entry gets `roster::FALLBACK`
+    ///   (wander and look around).
     ///
-    ///   That matters beyond tidiness. Until the roster existed, `FloatGoal`,
-    ///   `PanicGoal`, `BreedGoal`, `TemptGoal` and `FollowParentGoal` were
-    ///   installed **only** by tests — implemented, unit-tested, and fed real
-    ///   perception by [`tick`](Self::tick), with zero production call sites. A
-    ///   cow could not panic or follow food in the running game no matter what
-    ///   the perception feed reported. This is where that stopped being true.
+    ///   The roster connects these behavior goals to production spawning, and
+    ///   perception supplied by [`tick`](Self::tick) drives them during a tick.
     ///
     ///   Two consequences worth knowing when reading a mob's behaviour:
-    ///   priorities here are vanilla's absolute numbers, so a creeper's
-    ///   `SwellGoal` is at 2 and its `MeleeAttackGoal` at 4 rather than the `-1`
-    ///   and `2` of the private scale this replaced; and the old
-    ///   `step_per_tick.max(0.2)` floor on melee speed is gone, because vanilla
-    ///   expresses speed as a multiplier on the mob's own `movement_speed` and
-    ///   every hostile species in the roster is already above that floor
-    ///   (slowest is a zombie's `0.23`).
+    ///   priorities use the roster's absolute values. For example, a creeper's
+    ///   swell goal is at priority 2 and its melee goal at priority 4. Melee
+    ///   speed is a multiplier on the mob's `movement_speed`; hostile roster
+    ///   entries are above the `0.2` lower bound (the slowest entry is a zombie
+    ///   at `0.23`).
     pub fn spawn_species(&mut self, entity_type: ResourceKey, pos: Vec3) -> &mut SimMob<'w> {
         let mut attrs = default_attributes(&entity_type).unwrap_or_else(AttributeMap::new);
         // Always spawns adult-shaped; a caller wanting a baby applies
@@ -4583,25 +4404,22 @@ impl<'w> MobSim<'w> {
         }
         let base_speed = attr(&attrs, "movement_speed");
         // `minecraft:follow_range`, read **once** and fed to both consumers, so
-        // target acquisition and the A* budget cannot drift apart (issue #455).
+        // target acquisition and the A* budget cannot drift apart.
         //
         // `attr_present` rather than `attr`: for a species `default_attributes`
         // has no template for, `attrs` is empty and `attr` returns the *registry*
         // default of **32.0** — not 0.0, and not a harmless approximation. 32.0
         // is the single value this attribute never legitimately holds, because
-        // vanilla's own generic mob attribute builder overrides it to 16.0 for every mob,
-        // so nothing in the game carries the registry
-        // number. Falling back explicitly to `DEFAULT_FOLLOW_RANGE` is what makes
-        // an unlisted species behave like a plain vanilla mob instead of like
-        // nothing at all.
+        // The generic attribute fallback is 16.0 for every mob, so the registry
+        // default is not the effective range. Falling back explicitly to
+        // `DEFAULT_FOLLOW_RANGE` keeps an unlisted species usable.
         //
         // Species that raise it do so in their own attribute builder — the
         // zombie family 35.0, blaze 48.0,
         // enderman 64.0 — and `attribute.rs::type_spec` has arms for only
-        // thirteen species (issue #457). So `zombie` gets its real 35.0 here
-        // while `zombie_villager`, which vanilla also puts at 35.0, gets 16.0.
-        // That is a **known wrong value on a connected wire**, tracked by #457
-        // and gated below so it is visible rather than assumed; the fix is more
+        // thirteen species. So `zombie` gets its real 35.0 here
+        // while `zombie_villager` uses the generic 16.0 fallback here.
+        // The explicit fallback keeps this behavior visible rather than assumed; the required
         // `type_spec` arms, not a fallback tuned to flatter the zombie family.
         let follow_range = attr_present(&attrs, "follow_range").unwrap_or(DEFAULT_FOLLOW_RANGE);
         let visited_budget = (follow_range * 16.0).floor() as i32;
@@ -4614,8 +4432,7 @@ impl<'w> MobSim<'w> {
 
         // Built *before* `entity_type` is moved into the spawn. `SpeciesContext`
         // wants the raw attribute — every roster goal supplies its own
-        // `speedModifier` multiplier on top, matching vanilla's own
-        // move-control order — so it is *not* `ai_ground_speed`-converted
+        // speed multiplier on top — so it is *not* `ai_ground_speed`-converted
         // here; the conversion happens once, below, for the kinematic
         // follower's own rate.
         let goals = roster::goals_for(&species_path, &SpeciesContext::new(base_speed));
@@ -4677,7 +4494,7 @@ impl<'w> MobSim<'w> {
             mob.add_goal(priority, goal);
         }
         // The `FOLLOW_RANGE` attribute reaches the controller, which is what
-        // bounds target acquisition (#455). Without this every hosted mob used
+        // bounds target acquisition. Without this every hosted mob used
         // the seam's `DEFAULT_FOLLOW_RANGE`, so the zombie family — the only
         // family `seed_demo_mobs` spawns — targeted at 16 blocks instead of its
         // real 35.0. A wrong *value* on a fully connected wire, which is the
@@ -4744,7 +4561,7 @@ impl<'w> MobSim<'w> {
     /// [`tick_with_terrain`](Self::tick_with_terrain) idiom) and
     /// [`GolemConstruction::consumed`] is a report, not an action — the
     /// caller (the block-placement owner) is the one that actually clears
-    /// those cells, exactly as this issue's own scope says: "given this
+    /// those cells, exactly as the documented scope says: "given this
     /// placement, does a valid pattern exist, and if so spawn the golem".
     pub fn try_construct_golem(
         &mut self,
@@ -4795,16 +4612,15 @@ impl<'w> MobSim<'w> {
 
     /// Advances every mob one tick: run its goals (which drive A\* and path
     /// following through the [`MobController`] seam), then step the follower.
-    /// Each mob's `no_action_time` ages by one tick, mirroring vanilla's own
-    /// server AI step incrementing its own no-action-time field, and is first cleared for any mob
-    /// vanilla's own "check despawn" step would clear it for — a persistent mob, or
+    /// Each mob's `no_action_time` ages by one tick and is first cleared for any
+    /// persistent mob, or
     /// one within its category's immune radius of a player from
     /// [`set_players`](Self::set_players). See the body for why that reset lives
     /// here rather than only in [`despawn_pass`](MobSim::despawn_pass), which
     /// has no production caller and left the counter monotonic — permanently
     /// disabling every idle-throttled goal five seconds into a world.
     ///
-    /// A `MeleeAttackGoal` that connected this tick is resolved into a real
+    /// A melee attack that connected this tick is resolved into a real
     /// [`SimMob::apply_damage`] call against whichever mob its
     /// [`attack_target_id`](SimMob::attack_target_id) names — the goal
     /// scheduler only ever produces the *intent* to strike (a position, via
@@ -4813,7 +4629,7 @@ impl<'w> MobSim<'w> {
     /// events, after every mob's own AI has ticked, so an attacker damaging
     /// another mob never needs two simultaneous mutable borrows into the same
     /// `Vec`. A mob whose health reaches `0.0` is removed at the end of the
-    /// tick that killed it (vanilla's immediate death removal).
+    /// tick that killed it.
     /// One tick, settling dropped items against this sim's own terrain snapshot.
     ///
     /// **Production should call [`tick_with_terrain`](Self::tick_with_terrain)
@@ -4835,7 +4651,7 @@ impl<'w> MobSim<'w> {
     #[cfg(not(target_arch = "wasm32"))]
     const JOB_SEARCH_INTERVAL_TICKS: i32 = 100;
 
-    /// One villager-profession pass (issue #243): throttled job search for
+    /// One villager-profession pass: throttled job search for
     /// unemployed villagers, and re-verification for employed ones.
     ///
     /// Re-verification, not an event hook, is how "losing the block loses
@@ -4846,7 +4662,7 @@ impl<'w> MobSim<'w> {
     /// type) releases its ticket and goes back to unemployed on the very
     /// next call.
     ///
-    /// Native-only (issue #243's wasm scope note) — see
+    /// Native-only (the wasm32 scope note) — see
     /// [`villager::WorkstationClaims`]'s own doc. A villager spawned in a
     /// `wasm32` (browser singleplayer) world keeps whatever profession it
     /// already had and simply never claims a new one.
@@ -4910,7 +4726,7 @@ impl<'w> MobSim<'w> {
     #[cfg(not(target_arch = "wasm32"))]
     const BED_SEARCH_INTERVAL_TICKS: i32 = 100;
 
-    /// One villager-bed pass (issue #241's raid trigger): throttled bed
+    /// One villager-bed pass (the raid trigger): throttled bed
     /// search for an unclaimed villager, re-verification for a claimed one.
     ///
     /// Independent of [`tick_villager_professions`](Self::tick_villager_professions):
@@ -4960,7 +4776,7 @@ impl<'w> MobSim<'w> {
     /// The live equivalent of
     /// [`crate::poi_storage::PoiStorage::occupied_in_range`] restricted to
     /// `home` POIs: every bed claimed through [`tick_villager_beds`](Self::tick_villager_beds)
-    /// within `radius` real blocks of `center`. Issue #241's raid trigger
+    /// within `radius` real blocks of `center`. The raid trigger
     /// (vanilla's own raid-creation-or-extension step's own point-of-interest
     /// range query over the `#village` tag, occupied only) is this method's reason to exist: a bed
     /// claimed through [`villager::BedClaims`] is never written to the
@@ -4978,7 +4794,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// The full point-of-interest range query, filtered to the `#village`
-    /// point-of-interest tag and occupied only, that issue #241's raid trigger actually
+    /// point-of-interest tag and occupied only, that the raid trigger actually
     /// needs — every claimed bed, workstation *or* bell within `radius` real
     /// blocks of `center`, unioning [`occupied_homes_in_range`](Self::occupied_homes_in_range)
     /// with [`villager::WorkstationClaims::occupied_in_range`] and
@@ -5008,7 +4824,7 @@ impl<'w> MobSim<'w> {
     #[cfg(not(target_arch = "wasm32"))]
     const BELL_SEARCH_INTERVAL_TICKS: i32 = 100;
 
-    /// One villager-bell pass (issue #231's `MEET` schedule activity):
+    /// One villager-bell pass (the `MEET` schedule activity):
     /// throttled bell search for an unclaimed villager, re-verification for
     /// a claimed one — [`tick_villager_beds`](Self::tick_villager_beds)'s own
     /// shape, restricted to [`villager::BellClaims`]/[`villager::find_and_claim_bell`]
@@ -5063,28 +4879,22 @@ impl<'w> MobSim<'w> {
     /// Throttles [`tick_cat_block_search`](Self::tick_cat_block_search)'s
     /// bounded terrain scan — the same shape
     /// [`JOB_SEARCH_INTERVAL_TICKS`](Self::JOB_SEARCH_INTERVAL_TICKS) is, and
-    /// for the identical reason: a scope choice, not a transcribed vanilla
-    /// constant. Vanilla's own generic "move to block" goal's own re-search
-    /// timer itself re-searches every
-    /// 200-400 ticks per cat, which this approximates rather than mirrors
-    /// exactly, since this scan runs independently of whether either goal is
-    /// currently eligible to start.
+    /// for the identical reason: a scope choice, not a copied constant. The
+    /// scan rechecks every 100 ticks independently of whether a movement
+    /// behavior is eligible to start; the interval bounds terrain work without
+    /// coupling it to the movement scheduler.
     const CAT_BLOCK_SEARCH_INTERVAL_TICKS: i32 = 100;
-    /// `CatSitOnBlockGoal`'s own bounds: horizontal search range 8, vertical
-    /// search range
-    /// 1 (the two-arg generic "move to block" goal convenience constructor's implicit
-    /// default, vertical search start 0).
+    /// The sitting search bounds: horizontal range 8 and vertical range 1,
+    /// centered on the mob's block position.
     const CAT_SIT_HORIZONTAL_RANGE: i32 = 8;
     const CAT_SIT_VERTICAL_RANGE: i32 = 1;
-    /// `CatLieOnBedGoal`'s own bounds: horizontal search range 8, vertical
-    /// search start
-    /// -2, vertical search range 6.
+    /// The bed search bounds: horizontal range 8, vertical start -2, and
+    /// vertical range 6.
     const CAT_BED_HORIZONTAL_RANGE: i32 = 8;
     const CAT_BED_VERTICAL_MIN: i32 = -2;
     const CAT_BED_VERTICAL_MAX: i32 = 6;
 
-    /// Issue #229: `CatSitOnBlockGoal`/`CatLieOnBedGoal`'s block-spiral
-    /// search, run here rather than inside either goal —
+    /// The cat block-spiral search, run here rather than inside either goal —
     /// `docs/mob-block-perception.md`'s own guidance for a goal that needs to
     /// search a neighbourhood ("must not be built on [block cues]… that is a
     /// host-computed candidate position instead"), the same shape
@@ -5093,12 +4903,9 @@ impl<'w> MobSim<'w> {
     /// [`lodestone_entity::ai::MobController::cat_sit_target`]'s own doc for
     /// the seam this feeds.
     ///
-    /// **Not vanilla's own expanding-square `findNearestBlock` order.**
-    /// Vanilla's search can return a farther cell than a closer one it has
-    /// not yet reached, because it stops at the first ring holding *any*
-    /// valid cell; this instead scans the whole box and keeps the closest
-    /// valid cell by real squared distance — a disclosed, and arguably more
-    /// correct, deviation, not a bug to fix toward bit-identical tie-breaking.
+    /// The scan checks the whole box and keeps the closest valid cell by real
+    /// squared distance. It therefore does not depend on ring traversal order
+    /// when several valid cells are present.
     ///
     /// Throttled per mob by [`SimMob::cat_search_cooldown`], the same shape
     /// [`job_search_cooldown`](SimMob::job_search_cooldown) already uses.
@@ -5123,8 +4930,8 @@ impl<'w> MobSim<'w> {
                 pos.z.floor() as i32,
             );
 
-            // `CatSitOnBlockGoal`'s own valid-target check: a chest, or a lit furnace, or
-            // a bed's non-head part.
+            // A sitting target is a chest, a lit furnace, or a bed's non-head
+            // part.
             let sit = Self::find_nearest_cat_block(
                 world,
                 origin,
@@ -5140,8 +4947,8 @@ impl<'w> MobSim<'w> {
             );
             mob.mob.set_cat_sit_target(sit);
 
-            // `CatLieOnBedGoal`'s own valid-target check: any bed part — vanilla makes
-            // no head/foot distinction here, unlike the sit goal above.
+            // A bed target accepts either bed part; unlike sitting, no
+            // head/foot distinction is needed here.
             let bed = Self::find_nearest_cat_block(
                 world,
                 origin,
@@ -5204,33 +5011,23 @@ impl<'w> MobSim<'w> {
         best.map(|(_, pos)| pos)
     }
 
-    /// Ticks between gossip-spread passes — a scope choice, not a
-    /// transcribed vanilla constant (see this method's own doc for why it
-    /// replaces vanilla's real per-*pair* 1200-tick "last gossip time"
-    /// cooldown with one whole-pass throttle instead), the same shape as
-    /// [`JOB_SEARCH_INTERVAL_TICKS`].
+    /// Ticks between gossip-spread passes. The whole-pass throttle is
+    /// intentionally separate from the per-pair gossip values; it keeps the
+    /// radius-bounded scan deterministic and bounded.
     const GOSSIP_SPREAD_INTERVAL_TICKS: u64 = 100;
-    /// How close two villagers must be to gossip this pass — vanilla's own
-    /// trigger has no fixed radius (it is whichever villagers a brain
-    /// sensor happens to bring within interaction range of each other
-    /// during its own "meet a nearby villager"/gossip behaviours), so this is this
-    /// crate's own bound, not a transcribed one.
+    /// How close two villagers must be to gossip this pass. This crate uses an
+    /// explicit squared radius so the pair scan remains bounded.
     const GOSSIP_SPREAD_RADIUS_SQR: f64 = 64.0; // 8 blocks
 
-    /// Issue #244: vanilla's own villager gossip step's nearby-villager spread
-    /// (`GossipContainer::transfer_from`, issue #244's own port), approximated
-    /// as a periodic radius-bounded scan over every villager pair rather than
-    /// vanilla's own sensor-driven "meet in village" brain behaviour (brain
-    /// package work is issue #231/#243's remainder, off limits for this
-    /// change — see `villager`'s own module doc for the same off-limits
-    /// boundary already drawn around workstation claiming).
+    /// Nearby villagers exchange gossip during a periodic radius-bounded scan
+    /// over every villager pair. The pass is an approximation of the
+    /// sensor-driven meeting behavior; the `villager` module supplies the
+    /// workstation-claiming boundary separately.
     ///
     /// Both directions of a meeting pair exchange from a **pre-transfer
     /// snapshot** of each side (`source_a`/`source_b`, cloned before either
-    /// mutates) so the second transfer never reads the first transfer's
-    /// already-updated state — an order-dependence bug a naive "transfer into
-    /// `left`, then transfer the (now different) `left` into `right`" would
-    /// have.
+    /// mutates), so the second transfer never reads the first transfer's
+    /// updated state. The result is independent of pair-transfer order.
     fn spread_villager_gossip(&mut self) {
         if self.tick_count % Self::GOSSIP_SPREAD_INTERVAL_TICKS != 0 {
             return;
@@ -5267,68 +5064,46 @@ impl<'w> MobSim<'w> {
         self.gossip_spread_rng = rng;
     }
 
-    /// Ticks between golem-summon checks — vanilla's own villager-panic
-    /// trigger's own
-    /// `timestamp % 100L == 0L` gate.
+    /// Ticks between golem-summon checks. The periodic check runs every 100
+    /// ticks.
     const GOLEM_SUMMON_INTERVAL_TICKS: u64 = 100;
-    /// Vanilla's own "has hostile" check's host-side radius, matching
-    /// `lodestone_entity::brain::NearestHostileSensor::RANGE` (8.0) — see
-    /// [`tick_golem_summon`](Self::tick_golem_summon)'s own doc for why this
-    /// recomputes the test rather than reading a villager's brain memory.
+    /// Host-side radius for the hostile-nearby check: 8 blocks squared. The
+    /// test is recomputed from the live mob list rather than a villager memory.
     const GOLEM_SUMMON_HOSTILE_RANGE_SQR: f64 = 64.0;
-    /// Vanilla's own "spawn golem if needed" step's own box, inflated `10.0`
-    /// on every axis.
+    /// Axis-aligned agreement box for golem spawning, inflated `10.0` on every
+    /// axis.
     const GOLEM_AGREEMENT_RADIUS: f64 = 10.0;
-    /// Vanilla's own villager-panic trigger's own "spawn golem if needed"
-    /// argument — the hurt/hostile path's agreement threshold (vanilla's other
-    /// call site, its own villager-gossip step's post-transfer check, uses `5` instead;
-    /// only the hurt/hostile path is built here).
+    /// Number of villagers required by the hurt/hostile agreement path. The
+    /// gossip-transfer path uses a separate threshold and is not part of this
+    /// check.
     const GOLEM_VILLAGERS_NEEDED: usize = 3;
-    /// Vanilla's own golem-detection sensor's own memory-time-to-live constant — how long a village suppresses a
-    /// further summon attempt after a successful one.
+    /// Memory lifetime after a successful golem spawn: `599` ticks before the
+    /// next summon attempt is eligible.
     const GOLEM_DETECTED_TTL: u64 = 599;
 
-    /// Issue #231's golem-summon-on-hurt: vanilla's own villager-panic
-    /// trigger's own "spawn golem if needed" call, called on the same 100-tick
-    /// cadence for every villager that is hurt or has a hostile nearby.
+    /// Golem-summon-on-hurt: the 100-tick cadence checks each villager that is
+    /// hurt or has a hostile nearby.
     ///
-    /// # Why this lives on `MobSim` rather than as a `Brain` behaviour
+    /// # Why this lives on `MobSim` rather than in a single-mob behavior
     ///
-    /// It needs two things no single mob's [`lodestone_entity::brain::BrainMob`]
-    /// seam can give it: **other villagers' own state** (the agreement count)
-    /// and **the power to create a new entity**. Villager panic itself is
-    /// brain-driven (`villager_brain`, `lodestone-entity`), but the brain
-    /// lives inside an opaque `Box<dyn Goal>` once installed
-    /// (`BrainGoal`) — this sim has no way to read *into* it, so "is this
-    /// villager hurt or does it see a hostile" is recomputed here directly
-    /// against [`SimMob::last_hurt_by`] and [`species::is_hostile_species`]
-    /// over `self.mobs`, mirroring what vanilla's own hurt-by/nearest-hostile
+    /// It needs other villagers' state (the agreement count) and the ability to
+    /// create a new entity. A single-mob behavior cannot provide either, so
+    /// "is this villager hurt or does it see a hostile" is recomputed here from
+    /// [`SimMob::last_hurt_by`] and [`species::is_hostile_species`]
+    /// over `self.mobs`, matching the same hurt/nearby-hostile inputs
     /// sensors
     /// would answer rather than reading their output.
     ///
-    /// # Three disclosed cuts from the jar original
+    /// # Three explicit behavior boundaries
     ///
-    /// * **Vanilla's own "spawn conditions met" check's own "last slept"
-    ///   gate is not enforced.**
-    ///   Vanilla additionally requires the villager to have slept within the
-    ///   last 24000 ticks — a proxy for "this is a real village with resting
-    ///   villagers", not merely a stray hurt animal. This crate has no
-    ///   sleep/bed tracking for villagers yet (the rest/schedule half of
-    ///   issue #231), so every villager is eligible regardless of sleep
-    ///   history.
-    /// * **No placement search from vanilla's own generic mob-spawn utility.** Vanilla searches a
-    ///   10-block horizontal, 8-block vertical box for a legal iron-golem
-    ///   cell; this sim's terrain read is a pathfinding snapshot, not a live
-    ///   column scan suited to that search, so the golem spawns one block
-    ///   beside the triggering villager instead — the same class of cut
-    ///   [`lodestone_entity::brain::behaviors::PrepareRam`]'s own doc
-    ///   discloses for a different pathfinding-heavy vanilla search.
-    /// * **At most one spawn per pass.** Vanilla's per-entity iteration could
-    ///   produce more than one spawn in the same 100-tick moment if several
-    ///   independent villager groups each clear the threshold; this port
-    ///   evaluates only the first id-ordered candidate, to keep one call
-    ///   deterministic rather than re-deriving vanilla's exact entity
-    ///   iteration order.
+    /// * **Sleep state is not an eligibility input.** Villager records do not
+    ///   carry bed state, so the hurt/hostile agreement check uses the
+    ///   available mob state without an additional rest requirement.
+    /// * **Placement uses a fixed adjacent cell.** The terrain interface is a
+    ///   pathfinding snapshot rather than a live column scan, so the agreement
+    ///   result places the golem one block beside the triggering villager.
+    /// * **One spawn candidate is evaluated per pass.** Candidates are sorted
+    ///   by id and the first qualifying candidate keeps the result deterministic.
     fn tick_golem_summon(&mut self) {
         if self.tick_count % Self::GOLEM_SUMMON_INTERVAL_TICKS != 0 {
             return;
@@ -5397,7 +5172,7 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// This villager's summed reputation toward `player` (issue #246) —
+    /// This villager's summed reputation toward `player` —
     /// vanilla's own "get player reputation" getter. `0` for a non-villager mob or an
     /// untracked player, matching
     /// [`villager::gossip::GossipContainer::reputation`]'s own default.
@@ -5408,7 +5183,7 @@ impl<'w> MobSim<'w> {
             .unwrap_or(0)
     }
 
-    /// Applies a reputation event (issue #246) directly to `villager_id`'s
+    /// Applies a reputation event directly to `villager_id`'s
     /// own gossip ledger — the entry point [`attack_from_player`](Self::attack_from_player)
     /// uses internally, and what any future caller with a villager id and a
     /// source uuid in hand (a wired `SELECT_TRADE` handler for `Trade`, a
@@ -5433,83 +5208,23 @@ impl<'w> MobSim<'w> {
     /// does not change underneath a search in progress. Items are the opposite
     /// case: an item has to land on the block that is there *this* tick.
     ///
-    /// **The oracle is a block-state *name*, not a solid/air boolean.** It used to be
-    /// the latter, and one bit per cell cannot express the shape an item actually
-    /// rests on: a bottom slab, soul sand and a patch of grass all answered "solid"
-    /// and all settled the item at the top of the cell. See [`ItemCollision`] for the
-    /// measured table and [`settle_item`] for the sweep that consumes it.
+    /// **The oracle is a block-state *name*, not a solid/air boolean.** A name
+    /// distinguishes shapes such as a bottom slab, soul sand, and a grass patch
+    /// when [`ItemCollision`] computes the resting surface.
     pub fn tick_with_terrain(&mut self, block_state: &dyn Fn(i32, i32, i32) -> String) {
-        // Issue #441 (plan unit A2): feed every mob's perception inputs before
-        // its goals run. Without this pass `NavigatingMob` reports the trait
-        // defaults for `nearest_player`/`temptation`/`avoid_threat`/
-        // `no_action_time`, and `partner_candidate`/`parent_candidate` stay
-        // `None` forever — which made eight of the thirteen implemented goals
-        // structurally incapable of firing in production. Ordering is
-        // load-bearing: it must run *before* `m.mob.tick(&mut m.goals)` below,
-        // because that call is what evaluates `can_use`.
+        // Feed every mob's perception inputs before its goals run. The pass
+        // supplies `nearest_player`, `temptation`, `avoid_threat`,
+        // `no_action_time`, `partner_candidate`, and `parent_candidate`; the
+        // subsequent goal tick evaluates `can_use` against those values.
         //
-        // `no_action_time` ages *before* the feed, not after the goals, because
-        // that is vanilla's own order: its own server AI step opens with
-        // an unconditional increment and only then ticks the selectors, so
-        // a goal sees the already-incremented value. Getting this backwards
-        // costs exactly one tick of idle time — small, invisible to any
-        // `cargo check`, and caught here only because
-        // `no_action_time_crosses_the_seam_instead_of_staying_on_the_sim_record`
-        // asserts the two readings are *equal* rather than merely both climbing.
+        // `no_action_time` increments before the perception pass, so each goal
+        // sees the value for the current simulation tick. The seam test checks
+        // that the same value reaches both the controller and the simulated mob.
         //
-        // The reset half of vanilla's own "check despawn" step runs *before* that
-        // increment, because that is where the world's own per-entity tick
-        // driver puts it: it calls
-        // the despawn check every tick immediately before the entity's own tick,
-        // and that despawn check is the **only** thing in vanilla that ever clears
-        // the no-action-time field. So a mob standing next to a
-        // player reads `1` here, never `2`.
-        //
-        // # Why this loop exists at all (the bug it fixes)
-        //
-        // Until now the increment above had no counterpart anywhere in
-        // production. [`despawn_pass`](Self::despawn_pass) owns the same reset,
-        // and it has **zero production callers** — `crate::tick::run_tick_loop`
-        // never calls it, because it is handed no player position (a gap that
-        // function's own doc comment discloses). So `no_action_time` was
-        // monotonic for the whole life of a world, and crossed
-        // `RandomStrollGoal`'s idle throttle of `100`
-        // (vanilla's own random-stroll goal's own idle-time check, our `goals.rs`'s
-        // `no_action_time() >= 100` early return) after five seconds — after
-        // which **no mob could ever stroll again**, which is why demo mobs
-        // reached a connected client and then stood still forever
-        // (`crates/protocol/v770/tests/live_mob_sim.rs`).
-        //
-        // It was total rather than intermittent because the throttle closed
-        // before the goal's own `1/120` roll could succeed even once. **That
-        // second half is now stale and is kept only as the record of why this
-        // reset exists.** It read: *"every `NavigatingMob` shares one hardcoded
-        // RNG seed (`SplitMix64(0x1234_5678_9ABC_DEF0)`, and `with_seed` has no
-        // caller outside a test), and for that one stream the first draw where
-        // `next_u64() % 120 == 0` is draw 130 — past the wall at 100 … The
-        // shared seed is a separate defect in a crate this module does not
-        // own."*
-        //
-        // That defect was fixed: issue #463 (`3b65cbf`) seeds each
-        // `NavigatingMob` from its own id (`spawn_with_type` passes
-        // `id as u64`), so the first hit is per-mob — draw 9 for id 1, 48 for
-        // id 2, 147 for id 3. The consequence is that the *symptom* is no longer
-        // uniform: a low-id mob now strolls before the throttle would have
-        // closed, and only a mob whose first hit lands past 100 shows it at all.
-        // Two gates in `tests/` had premises built on the old shared stream and
-        // failed when the seed changed; `tests/mob_idle_throttle.rs` now selects
-        // its subject's id deliberately, and its module doc carries the table.
-        //
-        // None of that changes what this reset is for: with it, a mob near a
-        // player never reaches the throttle regardless of which stream it draws.
-        //
-        // Reusing [`check_despawn`] rather than restating its 32-block immune
-        // radius: this call site wants only its `reset_timer` verdict, so it
-        // passes `rng_hit_800: false` and **ignores `discard` entirely** —
-        // removing a mob needs an RNG draw and is still `despawn_pass`'s job.
-        // With `rng_hit_800` false the only `discard` arm left is gate A
-        // (beyond `despawn_distance`), which never wants a reset either, so
-        // dropping the field here cannot mask one.
+        // The reset check runs immediately before the increment. Reusing
+        // [`check_despawn`] keeps the player-distance reset rule in one place;
+        // this call reads only `reset_timer`, passes `rng_hit_800: false`, and
+        // ignores `discard` because removal belongs to [`despawn_pass`].
         for m in &mut self.mobs {
             let pos = m.position();
             let nearest = self
@@ -5562,28 +5277,25 @@ impl<'w> MobSim<'w> {
         }
         self.feed_perception();
 
-        // Issue #625: the third element used to be discarded entirely — only
-        // `take_new_attacks().is_empty()` was read, so the actual attacked
-        // position (needed to resolve *which* player, if any, was on the
-        // receiving end) never left this loop. See `PlayerHit`'s own doc
-        // comment for what the resolution pass below does with it.
+        // Retain the attacked position from each record so the resolution pass
+        // can identify which player, if any, receives the hit.
         let mut hits: Vec<(Option<i32>, Vec3, f32, Vec3)> = Vec::new();
         let mut detonations: Vec<(i32, Vec3)> = Vec::new();
         let mut bred: Vec<(i32, Vec3, ResourceKey)> = Vec::new();
-        // Issue #456: accumulated into a local and moved into
+        // Accumulated into a local and moved into
         // `self.pending_grazes` after the loop, not pushed directly — `self` is
         // mutably borrowed by `&mut self.mobs` for the whole loop, exactly as it
         // is for `hits`/`detonations`/`bred`.
         let mut grazes: Vec<(BlockPos, EatenBlock)> = Vec::new();
         let mut launches: Vec<(i32, ProjectileLaunch)> = Vec::new();
-        // Issue #458, primitive 4: self-inflicted damage requests, drained per
-        // mob and resolved below — see the resolution pass after `hits`.
+        // Self-inflicted damage requests are drained per mob and resolved
+        // below, after `hits`.
         let mut self_damage: Vec<(i32, f32)> = Vec::new();
         // Idle ambient vocalisations rolled this tick — accumulated into a
         // local for the same reason `grazes`/`bred` are: `self.mobs` is
         // mutably borrowed for the whole loop.
         let mut ambient_sounds: Vec<crate::effects::WorldEffect> = Vec::new();
-        // Issue #232: elder guardian mining-fatigue pulses rolled this tick —
+        // Elder guardian mining-fatigue pulses rolled this tick —
         // accumulated into a local for the same reason `grazes`/`bred` are:
         // `self.mobs` is mutably borrowed for the whole loop, and reading
         // `self.players` from inside it (a *different* field) is fine, but
@@ -5599,8 +5311,7 @@ impl<'w> MobSim<'w> {
         // `piglin_alert_ticks`'s own doc comment for the mechanism and the
         // disclosed target-position approximation.
         let mut piglin_alerts: Vec<(Vec3, Vec3)> = Vec::new();
-        // Issue #229: `CatRelaxOnOwnerGoal`'s own "stop" handler's morning-gift request,
-        // and `LandOnOwnersShoulderGoal`'s own per-tick shoulder-mount request — both
+        // The morning-gift request and per-tick shoulder-mount request — both
         // drained per mob the same way `bred`/`grazes` are (own mob id, since
         // resolving either needs a second look at `self.mobs`/`self.players`
         // after the per-mob loop releases its borrow).
@@ -5699,13 +5410,8 @@ impl<'w> MobSim<'w> {
                     m.allay_duplication_cooldown -= 1;
                 }
             }
-            // Vanilla's own camel per-tick update's forced stand-in-water rule, then
-            // `camel_random_sitting`'s own approximation of
-            // vanilla's own random-sitting camel behaviour — see both functions' own docs. Only
-            // one of the two ever fires in a tick: entering water always
-            // wins over the random toggle, matching vanilla checking
-            // `isInWater()` unconditionally before `RandomSitting` even gets
-            // a turn to run.
+            // A camel entering water clears its sitting pose before the random
+            // sitting toggle runs. Only one of the two branches fires in a tick.
             if m.health > 0.0 && m.entity_type.path() == "camel" {
                 if m.camel_sitting && m.in_water() {
                     m.camel_sitting = false;
@@ -5713,40 +5419,26 @@ impl<'w> MobSim<'w> {
                 } else {
                     camel_random_sitting(m, tick_count);
                 }
-                // Vanilla's own camel per-tick update's dash-cooldown decrement —
-                // same "a corpse's fields are frozen, not ticked" gate as
-                // every other per-mob timer in this loop.
+                // A living camel decrements its dash cooldown; corpse fields
+                // remain frozen like every other per-mob timer in this loop.
                 if m.camel_dash_cooldown > 0 {
                     m.camel_dash_cooldown -= 1;
                 }
             }
             let new_attacks = m.mob.take_new_attacks();
-            // Issue #233: vanilla's own bee melee-hit handler — the sting connects the instant
-            // this mob's own attack fires (this codebase has no separate
-            // "swing missed" outcome, matching the fidelity every other
-            // consumer of `take_new_attacks` already assumes). `stung_at` is
-            // sticky (only the *first* sting matters) and clearing `anger`
-            // here is vanilla's own "stop being angry" call, called from the same
-            // method — see `SimMob::stung_at`'s own doc comment for why this
-            // is what stops the bee re-acquiring a target without a second
-            // "has not stung" guard on the goal itself.
+            // A bee's sting connects when its attack event is emitted. Only the
+            // first sting matters; clearing `anger` here prevents reacquisition.
             if !new_attacks.is_empty() && m.stung_at.is_none() && m.entity_type.path() == "bee" {
                 m.stung_at = Some(tick_count);
                 m.anger = None;
             }
             for target_pos in new_attacks {
-                // Carry the attacker's own position too, so the victim can
-                // retaliate: vanilla's own generic hurt handler sets its own
-                // "last hurt by mob" field from the
-                // damage source's attacker, which is
-                // what `HurtByTargetGoal` reads. Before #441 this tuple was
-                // `(target, damage)` only, so a mob struck by another mob had
-                // no way to learn who hit it and `HurtByTargetGoal` could never
-                // fire even once the perception seam existed.
+                // Carry the attacker's position so the victim can retaliate and
+                // identify the source of the hit.
                 hits.push((m.attack_target_id, target_pos, m.attack_damage, m.position()));
             }
-            // Issue #233: vanilla's own bee AI step's self-destruct roll — see
-            // `bee_sting_death_roll`'s own doc comment for the exact formula
+            // A stung bee's self-destruct roll — see
+            // `bee_sting_death_roll` for the exact formula
             // and its two derived bounds (certainly alive at sting+1,
             // certainly dead by sting+1200).
             if let Some(stung_at) = m.stung_at {
@@ -5763,28 +5455,26 @@ impl<'w> MobSim<'w> {
             if m.mob.take_detonated() {
                 detonations.push((m.id, m.position()));
             }
-            // Drain the "a `BreedGoal` connected this tick" flag. `breed()`
-            // itself only records the *event* — the seam has no notion of the
-            // partner's identity or of creating an entity — so resolving it
-            // into a real child is this driver's job, and the step commit
-            // `7bf2873` explicitly deferred to here.
+            // Drain the breeding flag. The mob controller records the event;
+            // this driver resolves it into a child because it owns the entity
+            // registry and the partner-independent spawn decision.
             if m.mob.take_bred() {
                 bred.push((m.id, m.position(), m.entity_type().clone()));
             }
-            // Issue #229: same one-shot-flag drain shape as `take_bred` above.
+            // Same one-shot-flag drain shape as `take_bred` above.
             if m.mob.take_gift_requested() {
                 gift_requests.push(m.id);
             }
             if m.mob.take_shoulder_ride_requested() {
                 shoulder_requests.push(m.id);
             }
-            // Issue #456. The goal records *that* a block was eaten and which of
+            // The goal records *that* a block was eaten and which of
             // the two positions it was; it cannot mutate the world, because this
             // sim borrows `world: &'w ChunkWorld` immutably. So this takes the
             // same route `pending_detonations` does — accumulate here, and let
             // `crate::tick::run_tick_loop` (which owns mutable chunk access)
-            // apply it. `docs/plans/…`/#238's plan says "a `MobSim::tick` drain";
-            // that is not achievable as written, and this is why.
+            // apply it. The tick loop owns mutable chunk access, so the
+            // simulation records the event and the loop performs the write.
             for what in m.mob.take_new_eaten() {
                 grazes.push((m.mob.block_position(), what));
             }
@@ -5795,10 +5485,8 @@ impl<'w> MobSim<'w> {
             for amount in m.mob.take_self_damage() {
                 self_damage.push((m.id, amount));
             }
-            // Issue #244: vanilla's own villager gossip-decay step's 24000-tick cadence.
-            // `None` -> `Some(tick_count)` is the "just record the timestamp,
-            // do not decay yet" first-call branch vanilla's own
-            // zero-timestamp check takes.
+            // Villager gossip decays on a 24000-tick cadence. `None` records
+            // the first timestamp without applying decay.
             if m.entity_type.path() == "villager" {
                 match m.last_gossip_decay_tick {
                     None => m.last_gossip_decay_tick = Some(tick_count),
@@ -5809,7 +5497,7 @@ impl<'w> MobSim<'w> {
                     Some(_) => {}
                 }
             }
-            // Issue #247: vanilla's own zombie-villager per-tick update's conversion countdown.
+            // Advance a zombie-villager conversion countdown.
             if m.entity_type.path() == "zombie_villager"
                 && let Some(mut state) = m.conversion
             {
@@ -5821,11 +5509,9 @@ impl<'w> MobSim<'w> {
                 );
                 state.remaining_ticks -= progress;
                 if state.remaining_ticks <= 0 {
-                    // Vanilla's own zombie-villager "finish conversion" step: profession, level and
-                    // xp are already generic `SimMob` fields carried on this
-                    // same struct, so becoming a villager needs no explicit
-                    // copy of them — only the species-derived combat stats
-                    // (`combat_defaults`), category and gossip seed change.
+                    // Conversion changes the species-derived combat stats,
+                    // category, and gossip seed; profession, level, and XP are
+                    // already fields on `SimMob`.
                     m.set_entity_type(
                         ResourceKey::from_str("minecraft:villager").expect("static key"),
                     );
@@ -5844,12 +5530,8 @@ impl<'w> MobSim<'w> {
                             starter,
                         );
                     }
-                    // Vanilla's own generic add-effect call with nausea, 200
-                    // ticks, amplifier 0
-                    // — the "confusion" state the issue's own body names; a real
-                    // timed effect, not cosmetic-only text, so a caller reading
-                    // `SimMob::effects()` right after conversion actually finds
-                    // it.
+                    // Conversion applies nausea for 200 ticks at amplifier 0.
+                    // It is a timed effect visible through `SimMob::effects()`.
                     m.effects.apply("minecraft:nausea", 200, 0);
                     m.conversion = None;
                     let block_pos = BlockPos::new(
@@ -5867,10 +5549,8 @@ impl<'w> MobSim<'w> {
                     m.conversion = Some(state);
                 }
             }
-            // Issue #232: vanilla's own elder-guardian AI step's periodic
-            // mining-fatigue pulse. See `ELDER_GUARDIAN_EFFECT_INTERVAL`'s own
-            // doc for why `tick_count` stands in for vanilla's per-entity
-            // generic tick-count field.
+            // Emit the elder-guardian mining-fatigue pulse on its periodic
+            // interval. `tick_count` is the simulation clock for this schedule.
             if m.entity_type.path() == "elder_guardian"
                 && tick_count.wrapping_add(m.id as u64) % ELDER_GUARDIAN_EFFECT_INTERVAL == 0
             {
@@ -5892,12 +5572,10 @@ impl<'w> MobSim<'w> {
         self.pending_grazes.extend(grazes);
         self.pending_ambient_sounds.extend(ambient_sounds);
         self.pending_mining_fatigue.extend(mining_fatigue);
-        // Vanilla's own zombified-piglin alert-others call's propagation half, resolved now
-        // that the per-mob loop's mutable borrow on an individual `SimMob`
-        // has ended — same box `alert_species("zombified_piglin")` already
-        // sizes for the one-shot "alert others of the same owner" goal path, and the
-        // same "already holding a live grudge is not redirected" gate
-        // `MobSim::attack`'s own pack-alert census uses.
+        // Propagate zombified-piglin alerts after the per-mob loop releases
+        // each `SimMob` borrow. The shared box from
+        // `alert_species("zombified_piglin")` bounds the one-shot pack alert,
+        // and mobs with an existing grudge keep their current target.
         if let Some((box_xz, box_y, _)) = alert_species("zombified_piglin") {
             for (source_pos, target_pos) in piglin_alerts {
                 for other in &mut self.mobs {
@@ -5938,16 +5616,11 @@ impl<'w> MobSim<'w> {
                 self.note_vocalisation(target_id, applied);
                 continue;
             }
-            // Issue #625: `attack_target_id` names only another `SimMob`
-            // (see `PlayerHit`'s own doc comment), which is why every
-            // hostile-melee attack against a player fell on the floor here
-            // before this arm existed — `target_id` is `None` for the
-            // `NearestAttackableTargetGoal`/`MeleeAttackGoal` path that
-            // targets `nearest_player`, and nothing resolved `target_pos`
-            // against anything. Matched by position rather than by id
-            // because the goal seam carries no player identity at all — see
-            // `PlayerHit`'s doc comment for the exact-match reasoning and its
-            // one disclosed miss (a stale grudge target).
+            // `attack_target_id` identifies another `SimMob`; player targets
+            // arrive as a position with `target_id == None`. Match that
+            // position against the player registry because this event carries
+            // no player identity. The exact comparison is documented by
+            // `PlayerHit`, including the possible stale-target miss.
             if let Some(identity) = self
                 .players
                 .iter()
@@ -5959,15 +5632,10 @@ impl<'w> MobSim<'w> {
                     raw_damage,
                     attacker_pos,
                 });
-                // Vanilla's own "owner hurt by" retaliation goal: a tamed pet retaliates against
-                // whatever just hurt its owner, reading the owner's
-                // own "last hurt by mob" field on the *owner's* own living-entity state —
-                // same field vanilla's `HurtByTargetGoal` reads off a mob
-                // itself, recorded on the player instead. The seam carries no
-                // entity identity (see `MobController::owner_position`'s own
-                // doc for why), so every owned pet gets the attacker's
-                // *position* the same way `note_hurt` above does for a mob
-                // victim.
+                // A tamed pet retaliates against the source that hurt its
+                // owner. The event carries the attacker's position rather than
+                // an entity identity, so each owned pet records that position
+                // for its next target selection.
                 for pet in &mut self.mobs {
                     if pet.owner_uuid() == Some(identity.uuid)
                         && pet.is_tame()
@@ -5978,13 +5646,11 @@ impl<'w> MobSim<'w> {
                 }
             }
         }
-        // Issue #458, primitive 4: self-inflicted damage — the bee's sting
-        // self-destruct. `damage_self` only
+        // Self-inflicted damage from a bee's sting self-destruct. `damage_self` only
         // records the intent; health lives here, so it is applied through the
-        // same pipeline a melee hit uses (i-frames and armour reductions
-        // included, matching vanilla's own generic hurt handler). Resolved before the
-        // retain below, so a mob that kills itself leaves the sim in the same
-        // tick, exactly as a fatal melee hit does.
+        // same pipeline as a melee hit (invulnerability and armour reductions
+        // included). Resolve it before retaining live mobs so a fatal event
+        // removes its mob in the same tick.
         for (id, amount) in self_damage {
             if let Some(m) = self.get_mut(id) {
                 let applied = m.apply_damage(amount, DamageFlags::default());
@@ -5993,31 +5659,21 @@ impl<'w> MobSim<'w> {
         }
         self.reap_dead();
         self.resolve_breeding(bred);
-        // Issue #229: the cat morning-gift roll/spawn and the parrot
-        // shoulder-mount request, both drained above alongside `bred`.
+        // Drain the cat morning-gift roll/spawn and parrot shoulder-mount
+        // request collected alongside `bred`.
         self.resolve_cat_gifts(gift_requests);
         self.resolve_shoulder_mounts(shoulder_requests);
         self.tick_shoulder_dismounts();
 
-        // Issue #213: `explode`'s exposure/damage maths was already correct
-        // and already unit-tested, but had zero production callers anywhere
-        // — a creeper's own fuse reaching `MAX_SWELL`
-        // (`NavigatingMob::take_detonated`, driven by `SwellGoal`/`ignite`)
-        // is the first one. Vanilla's own "explode creeper" step
-        // unconditionally discards the creeper
-        // alongside the blast (marks it dead and removes it), so
-        // the explicit retain below does not rely on the creeper taking
-        // lethal self-damage from its own blast — a wall could shield it
-        // from its own explosion exactly as it shields any other mob, and
-        // vanilla's own discard step has no such exception.
+        // A detonation removes the initiating mob explicitly after applying
+        // blast damage. This keeps self-removal independent of whether terrain
+        // shields the mob from its own blast.
         for (id, pos) in detonations {
             self.explode(pos, CREEPER_EXPLOSION_RADIUS, DamageFlags::default());
             self.mobs.retain(|m| m.id != id);
-            // Issue #425: before this, nothing recorded that a detonation
-            // happened at all beyond the damage `explode` itself just
-            // applied — a connected client had no way to learn "an
-            // explosion happened here" (no particle, no sound), because
-            // `tick` discarded this entirely. See `take_detonations`'s own
+            // Record the detonation separately from damage so a connected client
+            // can receive the explosion event (particle and sound handling) even
+            // when the blast does not damage an entity. See `take_detonations`'s
             // doc comment for the drain side.
             self.pending_detonations.push(Detonation {
                 centre: pos,
@@ -6025,25 +5681,16 @@ impl<'w> MobSim<'w> {
             });
         }
 
-        // Issues #211/#215: `ProjectileRegistry`/`ItemEntityRegistry` existed
-        // and were unit-tested but nothing called their `tick` from a real
-        // per-tick driver. `MobSim::tick` is that driver in production (see
-        // `run_mob_tick_loop` below), so advancing both here is what actually
-        // closes the island, not a hermetic test calling `tick` on the
-        // registry directly.
-        // Issue #260: the impact pass runs **before** the motion tick, matching
-        // vanilla's own base-arrow per-tick update's own order — it clips the segment it is about to
-        // travel and only moves if nothing was hit. Resolving after the move would
-        // put every impact a tick late and let an arrow settle on the far side of
-        // a wall. Before this, `spawn_projectile`'s own doc comment said hit
-        // detection was "explicit follow-up": a skeleton's arrows flew for their
-        // whole lifetime through anything in the way and hurt nothing.
+        // Advance both registries from this shared tick. Resolve projectile
+        // impacts before motion so the swept segment is clipped at the first
+        // collision; moving first would place impacts one tick late and could
+        // carry an arrow through a wall.
         self.resolve_projectile_impacts();
         self.projectiles.tick();
         for despawned_item_id in self.items.tick() {
             self.item_state.remove(&despawned_item_id);
         }
-        // Issue #533: **items land.** `ItemMotion::tick` is the entity's own
+        // **items land.** `ItemMotion::tick` is the entity's own
         // motion — gravity, translate, drag — and its doc comment has always said
         // "block collision that would zero a component is the world crate's job
         // and is expressed here through `on_ground`". Nothing ever did that job:
@@ -6056,7 +5703,7 @@ impl<'w> MobSim<'w> {
         // one tick apart fall at permanently different speeds — so the vertical
         // test could never pass for anything but two items spawned on the same
         // tick. Settling them onto a surface is what makes the merge reachable,
-        // which is why #533's two halves are one fix.
+        // which is why the item lifecycle and inventory handoff are one operation.
         let world = self.world;
         let mut fell_out_of_the_world: Vec<i32> = Vec::new();
         let view = ItemCollision {
@@ -6104,33 +5751,33 @@ impl<'w> MobSim<'w> {
         self.tick_leashes();
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_professions();
-        // Issue #241: villager bed claiming — see `tick_villager_beds`'s own
+        // villager bed claiming — see `tick_villager_beds`'s own
         // doc for why this is a separate memory from the job site above.
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_beds();
-        // Issue #231: villager bell claiming — see `tick_villager_bells`'s
+        // villager bell claiming — see `tick_villager_bells`'s
         // own doc for why this is a third, independent memory from the job
         // site and bed above.
         #[cfg(not(target_arch = "wasm32"))]
         self.tick_villager_bells();
-        // Issue #257: fishing bobbers. Reads `self.world` (the static
+        // fishing bobbers. Reads `self.world` (the static
         // per-tick terrain snapshot, not the live `view` oracle the item/orb
         // passes just above use) — see `fishing::MobSim::tick_fishing_bobbers`'s
         // own doc for why a bobber's whole interesting life is spent sitting
         // in open water, where the two oracles agree.
         self.tick_fishing_bobbers();
-        // Issue #241: raids. Wave spawning and victory/defeat need no live
+        // Raids. Wave spawning and victory/defeat need no live
         // terrain oracle either — see `raid::MobSim::tick_raids`'s own doc.
         self.tick_raids();
-        // Issue #244: nearby-villager gossip spread. No `wasm32` gate — unlike
+        // Nearby-villager gossip spread. No `wasm32` gate — unlike
         // `tick_villager_professions`, this touches no `std::fs`-backed type.
         self.spread_villager_gossip();
-        // Issue #231: golem-summon-on-hurt. No `wasm32` gate, for
+        // Golem-summon-on-hurt. No `wasm32` gate, for
         // `spread_villager_gossip`'s own reason.
         self.tick_golem_summon();
-        // Issue #229: the cat's chest/lit-furnace/bed candidate search.
+        // The cat's chest/lit-furnace/bed candidate search.
         self.tick_cat_block_search();
-        // Issue #230: allay item-carry-and-deliver — pick up matching ground
+        // Allay item-carry-and-deliver — pick up matching ground
         // items, then throw one at a live delivery target. Order matters:
         // an item picked up this very tick could in principle also be
         // delivered this tick if the allay is already standing at its
@@ -6138,15 +5785,15 @@ impl<'w> MobSim<'w> {
         // possibility rather than an arbitrary one-tick lag.
         self.allay_pick_up_items();
         self.allay_deliver_items();
-        // Issue #459: the vibration substrate. Last, so every producer
+        // The vibration substrate. Last, so every producer
         // earlier in this tick (currently just `reap_dead`'s `entity_die`)
         // has already posted before a listener resolves its nearest answer.
         self.resolve_vibrations();
-        // Issue #459's step 3: turns this tick's `nearest_vibration` answer
+        // Turns this tick's `nearest_vibration` answer
         // into real warden anger and, once angry and in range, a real melee
         // hit — see `warden::MobSim::resolve_warden_anger`'s own doc.
         self.resolve_warden_anger();
-        // Issue #230's last remaining species: the sniffer's own seek/dig/
+        // The sniffer's own seek/dig/
         // rise/egg-drop state machine — see `sniffer::MobSim::tick_sniffers`'s
         // own doc. No particular ordering dependency on the calls above;
         // placed last alongside the warden consumer as the other
@@ -6431,21 +6078,21 @@ impl<'w> MobSim<'w> {
         let mut patrol_group = vec![None; n];
         let mut stared_at = vec![false; n];
         let mut nearby_entities: Vec<Vec<NearbyBrainEntity>> = vec![Vec::new(); n];
-        // Issue #229: how long each mob's owner has been asleep, fed to
-        // `CatRelaxOnOwnerGoal` — see the per-mob computation below for the
+        // How long each mob's owner has been asleep, used by shoulder and
+        // morning-gift behavior; see the per-mob computation below for the
         // uuid/entity-id join.
         let mut owner_sleep_ticks: Vec<Option<u32>> = vec![None; n];
-        // Issue #231: the nearest visible zombified piglin, fed to a
+        // the nearest visible zombified piglin, fed to a
         // piglin's `AVOID` brain activity.
         let mut nearest_visible_zombified = vec![None; n];
-        // Issue #230: the nearest eligible tongue-attack prey, fed to a
+        // the nearest eligible tongue-attack prey, fed to a
         // frog's `TONGUE` brain activity.
         let mut nearest_attackable_food = vec![None; n];
-        // Issue #230: an allay's own delivery target, fed to its `DELIVER`
+        // an allay's own delivery target, fed to its `DELIVER`
         // brain activity.
         let mut delivery_target = vec![None; n];
 
-        // --- persistent anger (issue #458, primitive 1) --------------------
+        // --- persistent anger (the anger deadline) -------------------------------
         //
         // Resolved here, in the feed, for the same reason every other
         // pre-computed answer is: `MobController::angry_target` hands the goal
@@ -6454,11 +6101,11 @@ impl<'w> MobSim<'w> {
         // comparison and only the answer crosses.
         //
         // `now >= end_time` clears the grudge outright rather than merely
-        // reporting `None`, mirroring vanilla's `stopBeingAngry` — a grudge
-        // that expired must not come back if the clock is ever read again.
+        // reporting `None`; an expired grudge must not come back if the clock
+        // is read again.
         let now = self.tick_count;
 
-        // Issue #459 step 3 (pursuit): a warden tracks its own suspect
+        // Warden pursuit: a warden tracks its own suspect
         // (`SimMob::warden_anger`/`warden_anger_target`, entirely separate
         // from the `SimMob::anger` primitive the loop below reads) and never
         // populates `me.anger`, so without this it would always feed `None`
@@ -6478,8 +6125,8 @@ impl<'w> MobSim<'w> {
             .map(|me| {
                 if me.entity_type().path() != "warden"
                     || me.warden_emerge_ticks > 0
-                    // `DIG` outranks `FIGHT` in `WardenAi::updateActivity`'s
-                    // own priority list, the same reason `warden_emerge_ticks`
+                    // Digging outranks fighting in the activity priority list,
+                    // the same reason `warden_emerge_ticks`
                     // above already gates this off — a digging warden must
                     // not also start walking toward whatever it is angry at.
                     || me.warden_digging_ticks > 0
@@ -6561,7 +6208,7 @@ impl<'w> MobSim<'w> {
             // Vanilla's own generic "can mate" check: the
             // partner must be the *same class* and both must be in love. A
             // baby cannot breed (vanilla's own "can fall in love" check gates on age), and
-            // `BreedGoal`'s own "can continue to use" check additionally requires the partner
+            // The continuing-breed check additionally requires the partner
             // not be panicking — enforced here
             // too, since feeding a panicking partner would start the goal only
             // for it to abort on the next tick.
@@ -6630,7 +6277,7 @@ impl<'w> MobSim<'w> {
                 }
                 Some(MobOwner::Player(uuid)) => {
                     owner[i] = self.player_position(uuid);
-                    // Issue #229: how long that same player has been asleep,
+                    // how long that same player has been asleep,
                     // joined through `self.players`' own uuid<->entity_id
                     // pairing (`PlayerIdentity`) against
                     // `self.sleeping_players`' entity-id-keyed roster — see
@@ -6652,7 +6299,7 @@ impl<'w> MobSim<'w> {
                 None => {}
             }
 
-            // --- nearest visible zombified piglin (issue #231) -------------
+            // --- nearest visible zombified piglin  -------------
             // A piglin's own "avoid" brain activity. No range cut lives on the
             // mob in the jar (vanilla's own piglin-specific sensor reads whatever
             // its own "nearest visible living entities" sensor already gathered), so this
@@ -6670,7 +6317,7 @@ impl<'w> MobSim<'w> {
                 );
             }
 
-            // --- nearest eligible tongue-attack prey (issue #230) ----------
+            // --- nearest eligible tongue-attack prey  ----------
             // A frog's own "tongue" brain activity. Vanilla's own frog-attackables
             // sensor's own
             // range is its own target-detection-distance constant (10.0F); `FROG_FOOD_SPECIES`
@@ -6691,7 +6338,7 @@ impl<'w> MobSim<'w> {
                 );
             }
 
-            // --- allay delivery target (issue #230) -------------------------
+            // --- allay delivery target  -------------------------
             // Vanilla's own "get item deposit position" helper's note-block half
             // (its own "should deposit items at liked noteblock" check): only offered once
             // there is something to deliver, a recently-heard note block is
@@ -6714,7 +6361,7 @@ impl<'w> MobSim<'w> {
             }
 
             // --- patrol group target ---------------------------------------
-            // Issue #241a. A leader never reads this — it computes its own
+            // A leader never reads this — it computes its own
             // fresh target from `LongDistancePatrolGoal` itself; only a
             // non-leading, still-patrolling member needs the host's census.
             // See `nearest_patrol_leader_target`'s own doc comment for why
@@ -6723,7 +6370,7 @@ impl<'w> MobSim<'w> {
                 patrol_group[i] = nearest_patrol_leader_target(&self.mobs, pos, me.id);
             }
 
-            // --- gaze (issue #458, primitive 2) -----------------------------
+            // --- gaze (the view-direction feed) -----------------------------------
             // `MobController::is_being_stared_at` is host-fed: the geometry is
             // `lodestone_entity::ai::mob::is_in_view_cone`, vanilla's exact
             // `dot > 1.0 - coneSize / dist`. Line of sight is the same
@@ -6779,7 +6426,7 @@ impl<'w> MobSim<'w> {
             }
         }
 
-        // Issue #231: a plain field read, not a per-mob computation, so it
+        // a plain field read, not a per-mob computation, so it
         // lives outside the loop below like every other constant the loop
         // reuses (`tick_count`) — `self.mobs.iter_mut()` only borrows the
         // `mobs` field, so this and that are disjoint borrows regardless.
@@ -6792,11 +6439,11 @@ impl<'w> MobSim<'w> {
             // Not folded into the chain below: `set_tame`/`set_ordered_to_sit`
             // read `m`'s own record while the chain holds `m.mob` mutably.
             let (tame, ordered_to_sit) = (m.tame, m.ordered_to_sit);
-            // Issue #229: same reason as `tame`/`ordered_to_sit` above — read
+            // same reason as `tame`/`ordered_to_sit` above — read
             // before `m.mob` is borrowed mutably by the chain below.
             let shoulder_dismount_ticks = m.shoulder_dismount_ticks;
             m.mob.set_tame(tame).set_ordered_to_sit(ordered_to_sit);
-            // Issue #231: the villager POI-claim feed
+            // the villager POI-claim feed
             // (`crate::brain::VillagerPoiSensor`'s own source), read before
             // `m.mob` is borrowed mutably below — `m.workstation`/`m.bed`/
             // `m.meeting_point` are `None` for every non-villager species,
@@ -6811,8 +6458,8 @@ impl<'w> MobSim<'w> {
                 .set_temptation(temptation[i])
                 .set_avoid_threat(threat[i])
                 // The sim has incremented this every tick since long before
-                // #441, but only on its own record — it never crossed the
-                // `MobController` seam, so `RandomStrollGoal`'s idle
+                // this mob's record, but it never crossed the
+                // `MobController` seam, so idle
                 // suppression read the trait default `0` and never fired.
                 .set_no_action_time(m.no_action_time)
                 .set_love_partner_candidate(partner[i])
@@ -6828,7 +6475,7 @@ impl<'w> MobSim<'w> {
                 .set_nearest_visible_zombified(nearest_visible_zombified[i])
                 .set_nearest_attackable_food(nearest_attackable_food[i])
                 .set_delivery_target(delivery_target[i])
-                // Issue #230: a sniffer's own host-found dig-search target,
+                // a sniffer's own host-found dig-search target,
                 // fed to its `Brain`'s `WalkToPoi` — see
                 // `sniffer::MobSim::tick_sniffers`'s own doc for the state
                 // machine that produces this. `None` for every non-sniffer
@@ -7051,7 +6698,7 @@ impl<'w> MobSim<'w> {
         // animal-interaction
         // fall-through: a villager is never tameable, so this has to be a
         // short-circuit ahead of the `tame_mechanism` dispatch below rather
-        // than another arm inside it (issue #245).
+        // than another arm inside it.
         if species == "villager" {
             let profession = mob.profession;
             let level = mob.villager_level;
@@ -7071,9 +6718,9 @@ impl<'w> MobSim<'w> {
             return outcome;
         }
 
-        // Vanilla's own zombie-villager interaction override (issue #247): only the golden-apple-
-        // while-weakened case gets special handling. A golden apple used
-        // without Weakness (vanilla's own plain success result, which
+        // Zombie-villager interaction: only the golden-apple/weakness case
+        // gets special handling. A golden apple used without Weakness (the
+        // plain success result, which
         // does **not** reduce the stack) and every other item both fall
         // through to the generic dispatch below, which resolves to `Pass`
         // for a zombie villager exactly as its parent's generic interaction does for any
@@ -7110,8 +6757,7 @@ impl<'w> MobSim<'w> {
             return InteractOutcome::ZombieVillagerConversionStarted;
         }
 
-        // Vanilla's own allay interaction override, both real arms of it (issue #230): duplication
-        // is checked first, matching the jar's own order, then the
+        // Allay interaction: duplication is checked first, then the
         // empty-handed carrying gift. An allay is never tameable, so — like
         // the villager and zombie-villager arms above — this is a
         // short-circuit ahead of the `tame_mechanism` dispatch rather than
@@ -7507,7 +7153,7 @@ impl<'w> MobSim<'w> {
             // The child spawns through `spawn_species`, not `spawn_with_type`,
             // so it inherits the same goal set and category any other mob of
             // its species gets — a child that could not act would be a fresh
-            // island of exactly the kind this issue exists to close.
+            // island of exactly the kind this connectivity check exists to close.
             let child = self.spawn_species(species, breeder_pos);
             child.set_age(BABY_START_AGE);
 
@@ -7540,7 +7186,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// Drains and returns every [`Detonation`] [`tick`](Self::tick) has
-    /// triggered since the last call (issue #425) — the handoff
+    /// triggered since the last call — the handoff
     /// [`crate::tick::run_tick_loop`] uses to publish onto an
     /// [`crate::tick::ExplosionFeed`] every server tick, mirroring how
     /// [`items`](Self::item_count)' own despawn ids are drained rather than
@@ -7551,7 +7197,7 @@ impl<'w> MobSim<'w> {
         std::mem::take(&mut self.pending_detonations)
     }
 
-    /// Drains every hurt/death sound recorded since the last call (issue #530).
+    /// Drains every hurt/death sound recorded since the last call.
     ///
     /// Drained rather than read for [`take_detonations`](Self::take_detonations)'
     /// reason — a slow consumer must not play the same hit twice.
@@ -7638,38 +7284,35 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// Drains every graze [`tick`](Self::tick) has recorded since the last call
-    /// (issue #456), as `(mob block position, which block)`.
+    /// Drains every graze [`tick`](Self::tick) has recorded since the last call,
+    /// as `(mob block position, which block)`.
     ///
     /// Drained rather than read for [`take_detonations`](Self::take_detonations)'
     /// reason — a slow consumer must not apply the same eat twice — and it exists
     /// at all because this sim cannot apply it itself: `world: &'w ChunkWorld` is
     /// an immutable borrow.
     ///
-    /// # What the consumer owes vanilla
+    /// # Consumer behavior
     ///
-    /// Per vanilla's own "eat block" goal, with `mobGriefing` on:
+    /// With block mutation enabled:
     ///
     /// * [`EatenBlock::AtFeet`] → destroy the block at that cell, **no drops**
     ///   (its own destroy-block call with drops disabled).
     /// * [`EatenBlock::Below`] → set the cell one down to `minecraft:dirt`, plus
     ///   level event `2001` for the break particles.
     ///
-    /// And the part worth not re-deriving: vanilla calls its own "ate" hook **even when
-    /// `mobGriefing` suppresses the block change**, so the wool-regrowth effect
-    /// and the world mutation are separable — the gamerule check belongs on the
-    /// consumer, never in the goal.
+    /// The "ate" notification is emitted **even when block mutation suppresses
+    /// the block change**, so wool regrowth and world mutation are separable —
+    /// the gamerule check belongs on the consumer, never in the goal.
     ///
-    /// Nothing drains this yet, which is the honest state: #238's remaining half
-    /// is vanilla's own sheep "ate" hook's wool regrowth (unshears it, then ages
-    /// it up 60 ticks), which
-    /// is entity metadata on the wire.
+    /// The consumer drains this queue to apply wool regrowth (unshearing and
+    /// aging the coat by 60 ticks), which is entity metadata on the wire.
     pub fn take_grazes(&mut self) -> Vec<(BlockPos, EatenBlock)> {
         std::mem::take(&mut self.pending_grazes)
     }
 
     /// Drains every player hit by a hostile mob's melee attack since the last
-    /// call (issue #625) — the player-facing twin of
+    /// call — the player-facing twin of
     /// [`take_detonations`](Self::take_detonations)'s handoff shape, for the
     /// identical reason: this sim owns no connection, so the driver
     /// (`crate::server::serve_play`'s `vitals_tick` arm) is what turns each
@@ -7682,20 +7325,19 @@ impl<'w> MobSim<'w> {
     }
 
     /// Drains every player caught in an elder guardian's mining-fatigue pulse
-    /// since the last call (issue #232) — the same handoff shape as
+    /// since the last call — the same handoff shape as
     /// [`take_player_hits`](Self::take_player_hits) above and for the
     /// identical reason: this sim owns no connection, so the driver is what
     /// turns each entry into a real `ActiveEffects::apply` call and a
     /// `GUARDIAN_ELDER_EFFECT` game event. See [`MiningFatigueAura`]'s own
-    /// doc comment for exactly what the driver owes vanilla.
+    /// doc comment for exactly what the driver must apply.
     pub fn take_mining_fatigue_auras(&mut self) -> Vec<MiningFatigueAura> {
         std::mem::take(&mut self.pending_mining_fatigue)
     }
 
-    /// Drains every vanilla zombie hurt-handler reinforcement roll that passed since
-    /// the last call — see [`ReinforcementCall`]'s own doc for what the
-    /// driver still owes vanilla (the 50-candidate terrain search) before
-    /// actually spawning one.
+    /// Drains every zombie reinforcement roll that passed since the last call
+    /// — see [`ReinforcementCall`]'s own doc for the 50-candidate terrain
+    /// search the driver performs before spawning one.
     pub fn take_reinforcement_calls(&mut self) -> Vec<ReinforcementCall> {
         std::mem::take(&mut self.pending_reinforcements)
     }
@@ -7706,10 +7348,8 @@ impl<'w> MobSim<'w> {
     /// (`crate::tick::run_tick_loop_with_weather`) is expected to test each
     /// position with `crate::fire::can_survive` against the *live* world and
     /// write `crate::fire::state_for_placement` only where the cell is air and
-    /// survives — this drain hands over candidates, not verified placements,
-    /// exactly matching vanilla's own lightning-bolt "spawn fire" step's own
-    /// "air and can-survive" check
-    /// gate at the call site rather than here.
+    /// survives — this drain hands over candidates, not verified placements;
+    /// the "air and can-survive" gate stays at the call site.
     pub fn take_lightning_fires(&mut self) -> Vec<BlockPos> {
         std::mem::take(&mut self.pending_lightning_fires)
     }
@@ -7725,11 +7365,9 @@ impl<'w> MobSim<'w> {
     }
 
     /// Every live mob or connected player's position, floored to a
-    /// [`BlockPos`] — vanilla's own "find lightning target around" step's
-    /// own living-entity-in-box census,
-    /// pre-culling deferred to the caller (`lightning::find_lightning_target_around`
-    /// filters to its own search box internally, matching vanilla's own
-    /// entities-in-class-and-box shape).
+    /// [`BlockPos`] — the living-entity-in-box census for a lightning target.
+    /// Pre-culling is deferred to the caller; `lightning::find_lightning_target_around`
+    /// filters to its own search box internally.
     #[must_use]
     pub fn living_entity_positions(&self) -> Vec<BlockPos> {
         self.mobs
@@ -7796,7 +7434,7 @@ impl<'w> MobSim<'w> {
                 dealt.push((m.id, applied));
             }
         }
-        // Issue #530, after the loop rather than inside it: `note_vocalisation`
+        // After the loop rather than inside it: `note_vocalisation`
         // needs `&mut self` while the loop holds `&mut self.mobs`, and it must
         // still precede the retain below so a mob the blast killed is read for
         // its death sound before it leaves.
@@ -7808,78 +7446,37 @@ impl<'w> MobSim<'w> {
     }
 
     /// Resolves a melee attack against a live mob: runs the damage pipeline
-    /// ([`SimMob::apply_damage`]) and, whenever the hit actually landed, the
-    /// knockback impulse
-    /// ([`lodestone_physics::knockback::knockback_impulse`]), writing both
-    /// straight into the target's own state so the very next
-    /// [`snapshots`](Self::snapshots) call — and therefore the next entity
-    /// packet any connection tracking this mob receives — carries the
-    /// result. This is issue #12's actual missing hop: `SimMob::apply_damage`
-    /// already existed and was already correct, reached only by AI-driven
-    /// `MeleeAttackGoal` hits and explosions; this is the first path a
-    /// *player's* attack can reach it through.
+    /// ([`SimMob::apply_damage`]) and, whenever the hit lands, applies the
+    /// knockback impulse ([`lodestone_physics::knockback::knockback_impulse`]).
+    /// Both results are written to the target state before the next
+    /// [`snapshots`](Self::snapshots) call emits an entity packet.
     ///
-    /// # Two knockback contributions, chained like vanilla's two calls
+    /// # Two knockback contributions
     ///
-    /// Vanilla applies knockback to a melee target in two independent
-    /// generic knockback calls, not one: its own generic hurt handler
-    /// calls its own default-knockback step — a flat `0.4F` applied to **every**
-    /// damaging hit regardless of the attacker's own attributes — and,
-    /// separately, its own player-attack step calls its own extra-knockback
-    /// step with
-    /// the attacker's own knockback attribute plus a `0.5F` sprint bonus, which for a
-    /// bare-handed, non-enchanted attacker is `0.0` unless sprinting.
-    /// `knockback_power` here is that
-    /// *second*, caller-supplied bonus (`crate::server::apply_attack`'s
-    /// `SPRINT_ATTACK_KNOCKBACK_POWER`, `0.0` for a non-sprinting hit); the
-    /// mandatory first `0.4` was previously missing entirely, so a plain
-    /// (non-sprinting) punch applied **no knockback at all** — the literal
-    /// reported symptom ("mobs dont take knockback if i punch them"), not a
-    /// magnitude shortfall.
+    /// Each damaging hit applies a flat `0.4` contribution and then the
+    /// caller-supplied `knockback_power` bonus. A non-sprinting hit passes
+    /// `0.0` for the bonus; sprinting adds the configured extra contribution.
     ///
-    /// Both calls are chained through the same `knockback_impulse` primitive
-    /// — the second call's input velocity is the first call's output — which
-    /// reproduces vanilla's halving-then-subtracting twice (a single call
-    /// with the *summed* power is not equivalent: it halves the pre-hit
-    /// velocity only once).
+    /// The two calls are chained through the same `knockback_impulse` primitive:
+    /// the second call receives the first call's output velocity. This preserves
+    /// the two successive halving/subtraction operations; one call with the
+    /// summed power would halve the pre-hit velocity only once.
     ///
     /// # Direction
     ///
-    /// Both calls use the same horizontal direction: the vector from the
-    /// target's position to the attacker's, i.e. `dx = attacker_pos.x -
-    /// target_pos.x` — vanilla's own default-knockback step's own
-    /// source-position-minus-own-position formula.
-    /// `knockback_impulse` then subtracts that
-    /// direction's contribution from velocity, so the target moves *away*
-    /// from the attacker. This also substitutes for vanilla's own
-    /// extra-knockback step's
-    /// real attacker-facing formula
-    /// (`lodestone_physics::knockback::attack_direction`) for the bonus half,
-    /// since nothing server-side tracks player rotation yet — a materially
-    /// smaller divergence than it sounds, because a melee attack requires the
-    /// crosshair to already be on the target, so facing and attacker→target
-    /// are nearly always the same vector in practice.
+    /// Both calls use the horizontal vector from the target to the attacker,
+    /// `dx = attacker_pos.x - target_pos.x` and
+    /// `dz = attacker_pos.z - target_pos.z`. The impulse subtracts that
+    /// direction from velocity, moving the target away from the attacker.
     ///
-    /// A previous version of this method computed `dx`/`dz` as
-    /// `target_pos - attacker_pos` — backwards, pointing from the attacker
-    /// *to* the target rather than from the target *to* the attacker —
-    /// which pulled a hit mob toward its attacker instead of pushing it
-    /// away.
-    ///
-    /// A mob's own [`NavigatingMob`] follower has no ground-contact state
-    /// (see that struct's own doc comment: "kinematic... not the physics
-    /// integrator" — it always snaps to its waypoint's floor), so this always
-    /// takes `knockback_impulse`'s grounded branch (the `0.4`-capped vertical
-    /// hop), matching the common case of a hit landing on a walking mob.
+    /// [`NavigatingMob`] stores no ground-contact flag, so the attack uses the
+    /// grounded branch of `knockback_impulse` with its `0.4`-capped vertical
+    /// hop.
     ///
     /// Returns `None` if `target_id` names no live mob. Returns `Some` for
-    /// every resolved hit, including a fully-ignored one (still inside
-    /// i-frames — see [`AttackOutcome::damage_dealt`]) so a caller can always
-    /// tell "no such mob" from "hit landed on nothing new" without a second
-    /// lookup. A killing blow removes the mob from the sim immediately
-    /// (vanilla's own immediate death removal — the same behaviour
-    /// [`tick`](Self::tick)'s own end-of-tick retain already gives an
-    /// AI-driven kill), not deferred to the next [`tick`](Self::tick).
+    /// every resolved hit, including one ignored by invulnerability frames
+    /// (see [`AttackOutcome::damage_dealt`]). A killing blow removes the mob
+    /// immediately rather than deferring removal to the next [`tick`](Self::tick).
     pub fn attack(
         &mut self,
         target_id: i32,
@@ -7894,39 +7491,25 @@ impl<'w> MobSim<'w> {
         let (health, velocity, damage_dealt, pack_alert) = {
             let mob = self.get_mut(target_id)?;
             let damage_dealt = mob.apply_damage(raw_damage, flags);
-            // Issue #441: the retaliation half of the damage record. This is
-            // the *player's* attack path (`crate::server::apply_attack` is its
-            // only production caller), so this one line is what makes a mob hit
-            // by a player actually turn on them through `HurtByTargetGoal` —
-            // and it needs no new plumbing, because `attacker_pos` was already
-            // a parameter here for knockback direction.
+            // Record the attacker's position with the damage event so the mob's
+            // retaliation logic can select a target and its knockback logic can
+            // use the same direction.
             mob.mob.note_hurt(Some(attacker_pos));
-            // Issue #458, primitive 1. Vanilla's own neutral-mob "set last
-            // hurt by mob" setter
-            // starts a persistent grudge alongside the retaliation record, so
-            // the two begin at the same instant and by the same event.
+            // Start the persistent grudge alongside the retaliation record, so
+            // both state changes share this attack's simulation tick.
             //
-            // Started for **every** mob, with no species list. That is #455's
-            // structural route deliberately reused: only a species whose
-            // jar-cited roster registers an anger-gated target row can ever
-            // *read* `angry_target`, so an always-hostile zombie carrying an
-            // unread grudge is inert, whereas a name list here would be one
-            // more `is_hostile_species` waiting to go stale.
+            // Every mob records the grudge; only species with an anger-gated
+            // target rule read `angry_target`, so the shared state does not
+            // alter species that have no such rule.
             let was_already_angry = mob.anger.is_some();
             let end_time = now + grudge_ticks(&mut mob.mob);
             mob.anger = Some(Anger {
                 end_time,
                 target: attacker_pos,
             });
-            // Issue #233: zombified-piglin group aggro and wolf pack aggro
-            // (vanilla's own zombified-piglin alert-others call /
-            // its own "alert others of the same owner" goal registration — see
-            // `alert_species`'s own doc for the box/owner-filter citations).
-            // Gated on the grudge being *new*: vanilla fires its own
-            // alert-others call
-            // from that goal's own start hook/AI step, i.e. once
-            // per acquisition, not once per hit — an already-angry victim
-            // re-hit mid-grudge must not re-wake its whole pack every tick.
+            // Group alerting is enabled for the species returned by
+            // `alert_species`. It runs only when this hit creates a grudge;
+            // repeated hits during one grudge do not re-alert the group.
             let pack_alert = if was_already_angry {
                 None
             } else {
@@ -7941,36 +7524,24 @@ impl<'w> MobSim<'w> {
                     )
                 })
             };
-            // Vanilla's own "set last hurt by player" setter: this is the *player* attack path, so
-            // the kill counts as a player kill for the next 100 ticks. Vanilla's
-            // own drop-experience call reads exactly this, which is why a mob killed by
-            // anything else drops no XP — see `hurt_by_player_until`.
+            // Mark this as player-attributed damage for
+            // `PLAYER_HURT_EXPERIENCE_TIME` ticks; the death-loot path uses this
+            // deadline when deciding whether to award experience.
             mob.hurt_by_player_until = Some(now + PLAYER_HURT_EXPERIENCE_TIME);
             if damage_dealt > 0.0 && mob.health() > 0.0 {
                 let target_pos = mob.position();
-                // Vector from the target to the attacker — see this method's
-                // own doc comment for why this is the correct sign (and why
-                // the previous `target_pos - attacker_pos` pulled the mob
-                // toward its attacker instead of pushing it away).
+                // Vector from the target to the attacker; the impulse moves the
+                // target away from that source position.
                 let dx = attacker_pos.x - target_pos.x;
                 let dz = attacker_pos.z - target_pos.z;
                 let v = mob.velocity();
                 let jitter = || (1.0, 0.0);
-                // A degenerate (attacker and target share an exact
-                // horizontal position) direction is possible here, unlike
-                // `attack_direction`'s facing-derived one — see
-                // `knockback_impulse`'s own doc comment. A fixed,
-                // deterministic non-degenerate fallback (rather than a
-                // threaded RNG this call site has no source for) is
-                // sufficient: it only ever fires on that one pathological
-                // input, and `knockback_impulse`'s own test
-                // (`knockback_loops_the_jitter_until_a_non_degenerate_direction_lands`)
-                // already proves a single non-degenerate draw is enough
-                // to terminate the loop.
+                // Coincident horizontal positions use a fixed non-degenerate
+                // fallback because this call has no random source. That case
+                // needs only one fallback draw to produce a valid direction.
                 //
-                // First call: vanilla's mandatory `dealDefaultKnockback`,
-                // applied to every damaging hit regardless of the attacker's
-                // own knockback attribute.
+                // First call: the mandatory flat knockback contribution on
+                // every damaging hit.
                 let after_default = lodestone_physics::knockback::knockback_impulse(
                     lodestone_physics::geometry::Vec3d { x: v.x, y: v.y, z: v.z },
                     true, // always the grounded branch — see this method's own doc comment.
@@ -7980,10 +7551,8 @@ impl<'w> MobSim<'w> {
                     mob.knockback_resistance(),
                     jitter,
                 );
-                // Second call: the attacker-specific bonus (sprint attack,
-                // future enchantments), chained onto the first call's result
-                // exactly as vanilla's second, independent `knockback` call
-                // chains onto the first's mutated `deltaMovement`.
+                // Second call: the attacker-specific bonus, chained onto the
+                // first call's result.
                 let new_velocity = if knockback_power > 0.0 {
                     lodestone_physics::knockback::knockback_impulse(
                         after_default,
@@ -8001,16 +7570,9 @@ impl<'w> MobSim<'w> {
             }
             (mob.health(), mob.velocity(), damage_dealt, pack_alert)
         };
-        // Issue #233: resolve the group-alert census now that the borrow on
-        // `target_id`'s own `SimMob` above has ended. Every same-species mob
-        // in the box, not already holding a live grudge (vanilla's
-        // `getTarget() == null` guard — a pack member already fighting
-        // something is not redirected), gets the *same* deadline and target
-        // as the victim; matching the victim's own `end_time` rather than
-        // drawing a fresh one is a disclosed simplification (vanilla redraws
-        // `PERSISTENT_ANGER_TIME` per alerted mob), not a rule this repo has
-        // any evidence against — the alerted mobs still expire independently
-        // of the victim once ticked past `end_time`.
+        // Resolve group alerts after the mutable borrow of `target_id` ends.
+        // Each matching same-species mob in the alert box that has no active
+        // grudge receives the victim's deadline and target position.
         if let Some((species_key, victim_pos, victim_owner, need_owner_match, box_xz, box_y)) =
             pack_alert
         {
@@ -8037,7 +7599,7 @@ impl<'w> MobSim<'w> {
                 });
             }
         }
-        // Issue #530: before the removal below, so a killing blow is read for
+        // before the removal below, so a killing blow is read for
         // its death sound rather than finding no mob.
         self.note_vocalisation(target_id, damage_dealt);
         let killed = health <= 0.0;
@@ -8055,39 +7617,24 @@ impl<'w> MobSim<'w> {
         })
     }
 
-    /// How far a witnessing villager can be from a killed one and still
-    /// gossip about the murderer (issue #246,
-    /// vanilla's own "tell witnesses that I was murdered" step). Vanilla's own witness set comes from
-    /// the victim's own "nearest visible living entities" memory, which carries
-    /// no single fixed radius of its own — this crate's own scope choice,
-    /// the same shape as [`GOSSIP_SPREAD_RADIUS_SQR`](Self::GOSSIP_SPREAD_RADIUS_SQR).
+    /// How far a witnessing villager can be from a killed one and still record
+    /// the death. The fixed radius uses the same squared-distance shape as
+    /// [`GOSSIP_SPREAD_RADIUS_SQR`](Self::GOSSIP_SPREAD_RADIUS_SQR).
     const VILLAGER_KILLED_WITNESS_RADIUS_SQR: f64 = 100.0; // 10 blocks
 
-    /// [`attack`](Self::attack), plus the villager-reputation half of
-    /// vanilla's own villager "set last hurt by mob"/die/
-    /// "tell witnesses that I was murdered" steps (issue #246): a player-identified
-    /// attacker hurting or killing a villager writes `VillagerHurt`/
-    /// `VillagerKilled` gossip, exactly as
-    /// [`villager::reputation::apply_reputation_event`] already does for the
-    /// other three event kinds this crate can produce.
+    /// [`attack`](Self::attack), plus villager-reputation updates: a
+    /// player-identified attacker hurting or killing a villager writes
+    /// `VillagerHurt`/`VillagerKilled` gossip through
+    /// [`villager::reputation::apply_reputation_event`].
     ///
-    /// A new method rather than widening `attack`'s own signature: `attack`'s
-    /// only production caller is `crate::server::apply_attack` (off limits
-    /// for this change), and that call site has to switch to this one before
-    /// a real player attack gets reputation-wired — until then, `attack`
-    /// behaves exactly as before it, and this method exists with its own
-    /// tests, ready for that call site to adopt. `attacker` is `None` for a
-    /// caller that cannot resolve who is swinging (matching
-    /// [`PlayerIdentity`]'s own "unidentified actor" convention elsewhere in
-    /// this crate) — the gossip write is simply skipped, and this otherwise
-    /// behaves exactly like [`attack`](Self::attack).
+    /// A separate method keeps `attack`'s signature focused on damage. The
+    /// server attack path calls this method for player-attributed hits, while
+    /// `attacker` is `None` when the swinging actor is unavailable; the gossip
+    /// write is skipped and the damage behavior remains [`attack`](Self::attack).
     ///
-    /// A hit's gossip is written to the **victim's own** ledger
-    /// (vanilla's own "on reputation event from" receiver is the villager whose
-    /// "set last hurt by mob" fired); a kill's gossip is written to **every
-    /// nearby witnessing villager's own** ledger instead, since the victim no
-    /// longer exists to hold one — matching vanilla's own
-    /// witness-side reputation-event receiver, not the dead villager's.
+    /// A hit's gossip is written to the **victim's own** ledger. A kill's gossip
+    /// is written to **every nearby witnessing villager's own** ledger instead,
+    /// because a killed victim is removed before the witness update.
     pub fn attack_from_player(
         &mut self,
         target_id: i32,
@@ -8097,44 +7644,21 @@ impl<'w> MobSim<'w> {
         flags: DamageFlags,
         knockback_power: f64,
     ) -> Option<AttackOutcome> {
-        // A wither lives in `self.withers`, not `self.mobs` (see
-        // `TrackedWither`'s own doc), so `self.attack` below — which reads
-        // and writes `self.mobs` exclusively — silently finds nothing and
-        // this whole function returns `None` for a wither target. That was
-        // the actual state until this branch: `MobSim::damage_wither` was a
-        // real, tested armoured-phase/invulnerability gate with **zero**
-        // production callers, so every summoned wither was permanently
-        // unkillable by melee. Routed here instead of widening `attack`
-        // itself: a wither has no armour, anger, gossip or knockback state,
-        // so none of `attack`'s villager/pack-alert machinery applies to it.
+        // Withers live in `self.withers`, separate from the ordinary mob map,
+        // and use their own armor and emergence gates without mob anger,
+        // gossip, or knockback state.
         if self.withers.contains_key(&target_id) {
             return self.attack_wither(target_id, raw_damage);
         }
-        // A dragon lives in `self.dragons`, not `self.mobs`, for the
-        // identical reason the wither branch just above exists — see
-        // `dragon::MobSim::attack_dragon`'s own doc for why nothing could
-        // ever damage a dragon at all before this.
+        // Dragons likewise live in `self.dragons` and use the dedicated dragon
+        // damage path.
         if self.dragons.contains_key(&target_id) {
             return self.attack_dragon(target_id, raw_damage);
         }
-        // An end crystal lives in `self.crystals`, not `self.mobs` — the same
-        // reason the wither and dragon branches above exist. Vanilla's own
-        // end-crystal hurt-handler is a one-hit kill (no health, no armour, no
-        // knockback), so this returns straight from `destroy_end_crystal`
-        // rather than routing through the generic `self.attack`. Before this
-        // branch existed a player attacking a crystal reached neither
-        // `self.attack` (which only reads `self.mobs`) nor
-        // `destroy_end_crystal`, so the crystal could not be destroyed at
-        // all — removing the entire "break the crystals to stop the heal"
-        // strategy the dragon fight is built around.
-        // A boat, raft or minecart lives in `self.vehicles`, not `self.mobs` --
-        // the same reason the wither, dragon and crystal branches around this one
-        // exist. Vanilla's own generic vehicle hurt-handler shares nothing
-        // with a mob's damage
-        // pipeline: no health, no armour, no knockback, no gossip. Before this
-        // branch a punch on a boat reached `self.attack`, found nothing in
-        // `self.mobs`, and returned `None` -- so the hurt/hurt-dir/damage triple
-        // the client's rocking animation reads was never written by anything.
+        // End crystals live in `self.crystals` and use a one-hit destruction
+        // branch, so they do not enter the mob damage pipeline. Boats, rafts,
+        // and minecarts live in `self.vehicles` and use their own damage
+        // response without health, armor, knockback, or mob reputation state.
         if self.vehicles.contains_key(&target_id) {
             return self.attack_vehicle(target_id, raw_damage);
         }
@@ -8150,12 +7674,9 @@ impl<'w> MobSim<'w> {
         let target_was_villager = self
             .get(target_id)
             .is_some_and(|m| m.entity_type.path() == "villager");
-        // Vanilla's own raider-death step's player-kill half (issue #246's Hero of the Village
-        // gap): resolved *before* `self.attack` below, the same reason
-        // `target_pos_before` is — `raid::MobSim::raid_containing_raider`
-        // reads the raid's still-live `raiders` list, which a kill only
-        // prunes lazily on the next `tick_raids`, but resolving after the
-        // kill would be reading state that is about to change for no reason.
+        // Capture raid membership before `self.attack` mutates the target;
+        // `raid_containing_raider` reads the live raider list, which is pruned
+        // during the next raid tick.
         let target_raid_id = self.raid_containing_raider(target_id);
         let target_pos_before = self.get(target_id).map(SimMob::position);
         let outcome = self.attack(target_id, attacker_pos, raw_damage, flags, knockback_power)?;
@@ -8165,15 +7686,10 @@ impl<'w> MobSim<'w> {
         {
             self.add_raid_hero(raid_id, actor.uuid);
         }
-        // Vanilla's own zombie hurt-handler's reinforcement call: only the *roll* happens
-        // here — see `ReinforcementCall`'s own doc for why the terrain search
-        // is the driver's job. Gated on the hit actually landing on a
-        // survivor (`super.hurtServer` returning `true`), Hard world
-        // difficulty and the `spawn_mobs` game rule
-        // (`level.isSpawningMonsters()`). Reads then re-borrows `target_id`
-        // rather than holding one borrow across the RNG draw, since
-        // `self.reinforcement_rng` is a sibling field `self.get`/`get_mut`
-        // cannot see past.
+        // Zombie-family reinforcement performs only its probability roll here;
+        // the terrain search belongs to the spawn driver. It requires a
+        // successful hit, hard difficulty, and the `spawn_mobs` rule. Reborrow
+        // the target after the random draw because the RNG is a sibling field.
         if !outcome.killed && outcome.damage_dealt > 0.0 && self.spawn_hard_difficulty && self.spawn_monsters_enabled {
             let reinforcement_info = self.get(target_id).and_then(|mob| {
                 matches!(
@@ -8206,13 +7722,13 @@ impl<'w> MobSim<'w> {
                 });
             }
         }
-        // Vanilla's own "owner hurt target" retaliation goal: a wolf (or any
+        // Owner-directed retaliation: a wolf (or any
         // tamed pet) joins whatever
         // fight its owner just started, reading the owner's own "last hurt
         // mob" field on
-        // the *owner's* own living-entity state. This is the same field vanilla's
-        // `HurtByTargetGoal` reads off a mob itself, just recorded on the
-        // player instead — see `NavigatingMob::set_owner_hurt_target`'s own
+        // the *owner's* own living-entity state. This is the same field the
+        // mob retaliation behavior reads, just recorded on the player instead
+        // — see `NavigatingMob::set_owner_hurt_target`'s own
         // doc comment for the decay rule. Every tame pet owned by the
         // attacking player gets the target's pre-attack position (matching
         // the villager-witness resolution just below, which uses the same
@@ -8466,7 +7982,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// Every mob and dropped item in this sim, as the records
-    /// [`crate::entity_storage`] persists (issue #303).
+    /// [`crate::entity_storage`] persists.
     ///
     /// # Why this is not [`snapshots`](Self::snapshots)
     ///
@@ -8583,8 +8099,8 @@ impl<'w> MobSim<'w> {
     ///
     /// `nearest_player` is `None` when no player is loaded, in which case vanilla
     /// runs no despawn logic at all — the mobs are simply kept. The `1/800`
-    /// gate-B roll is drawn per candidate mob from `rng`, matching vanilla's
-    /// per-mob `random.nextInt(800)`.
+    /// gate-B roll is drawn per candidate mob from `rng`, with one success in
+    /// every 800 outcomes.
     ///
     /// Returns the number of mobs discarded.
     pub fn despawn_pass(&mut self, nearest_player: Option<Vec3>, rng: &mut SpawnRng) -> usize {
@@ -8817,30 +8333,14 @@ impl<'w> MobSim<'w> {
         spawned
     }
 
-    /// Issue #240: the wandering trader's own spawn cycle — vanilla's own
-    /// wandering-trader spawner's own tick/spawn steps.
-    /// Same shape as [`run_patrol_spawn_cycle`](Self::run_patrol_spawn_cycle):
-    /// a live, player-following `world` snapshot supplied by the caller
-    /// (never `self.world`, which is a stale snapshot — see that method's
-    /// own doc comment for why), a `spawn_wandering_traders` game-rule flag
-    /// the caller reads, and every counter this cycle owns living on `self`
-    /// so the driver need only call this once per tick.
+    /// Runs the wandering-trader spawn cycle against the live, player-following
+    /// `world` snapshot. The caller supplies the `spawn_wandering_traders` rule,
+    /// while this simulation owns the cycle counters and needs one call per tick.
     ///
-    /// **No persistence**: vanilla stores its own tick-delay/spawn-delay/
-    /// spawn-chance fields in its own saved-data file, so the
-    /// cycle survives a server restart. This crate has no save/load for
-    /// `MobSim` at all, so every field here resets with a fresh `MobSim` —
-    /// a disclosed gap, not a silent one.
-    ///
-    /// **Simplified from vanilla's own wandering-trader spawner's own spawn
-    /// call**, matching the
-    /// gaps `docs/wandering-trader.md` already discloses for
-    /// [`spawn_wandering_trader`](Self::spawn_wandering_trader) itself:
-    /// no meeting-point-of-interest search (always searches around a random
-    /// player's own position), no "no wandering trader spawns" biome-tag
-    /// exclusion, no "has enough space" collision check, and no
-    /// despawn-delay/wander-target/home-position setters afterwards (this sim
-    /// has no despawn-delay or home-position fields to set them on).
+    /// Cycle counters are session state; this simulation does not persist them.
+    /// Spawn selection uses a random player's position and omits point-of-interest
+    /// search, biome exclusion, collision checks, and post-spawn home/despawn
+    /// fields because those inputs are not part of this simulation's state.
     ///
     /// Returns the trader's entity id on a successful spawn.
     pub fn run_wandering_trader_spawn_cycle(
@@ -8947,22 +8447,12 @@ impl<'w> MobSim<'w> {
     }
 
     /// Removes every mob at or below zero health, rolling its death loot table
-    /// on the way out (issue #272 — the mob half of #337's loot chain).
+    /// on the way out (the mob tick's death-loot chain).
     ///
-    /// **This is the crate's only mob-removal-by-death path, deliberately.**
-    /// Before it, four separate `self.mobs.retain(|m| m.health > 0.0)` sites
-    /// dropped a dead mob on the floor, and adding loot to one of them would have
-    /// meant a cow killed by a melee hit dropping leather while a cow killed by a
-    /// creeper dropped nothing — the same defect in three places. Every removal
-    /// now funnels through here, so a new death cause gets drops for free.
-    ///
-    /// Vanilla's chain is its own generic die handler → "drop all death loot" →
-    /// "drop from loot table" → "spawn at location": the table is
-    /// `entities/<type>` ([`crate::block_drops::mob_loot_table_id`]) and each
-    /// stack becomes an item entity at the mob's own position with the
-    /// item-entity constructor's velocity — **not** vanilla's own
-    /// "pop resource" call's jittered
-    /// cell position, which is a block's drop.
+    /// This is the central mob-removal path. Each dead mob contributes the
+    /// loot table selected by [`crate::block_drops::mob_loot_table_id`], and
+    /// each resulting stack becomes
+    /// an item entity at the mob's position with the configured drop velocity.
     ///
     /// Rolls in the **empty** loot context, so `killed_by_player` is `false` and
     /// `enchanted_count_increase` (looting) contributes nothing: rare drops gated
@@ -9012,45 +8502,28 @@ impl<'w> MobSim<'w> {
             if drops_ominous_bottle {
                 self.drop_ominous_bottle(position);
             }
-            // Vanilla's own generic die handler calls "drop all death loot"
-            // then "drop experience", in that
-            // order, so the orbs land after the items.
+            // Drop ordinary death loot before experience, so the two output
+            // streams retain their stable ordering.
             if drops_experience {
                 self.drop_death_experience(&entity_type, position);
             }
-            // Issue #459's vibration substrate: vanilla's own generic die
-            // handler posts
-            // an entity-die game event at the
-            // dying mob's own position — this crate's first real producer.
-            // Vanilla's own game-event context's source-entity for this call
-            // is the dying
-            // mob itself, so `source` names the same id — a warden
-            // that hears this gets angry at the corpse's own identity,
-            // matching vanilla's own warden vibration-listener's
-            // no-projectile branch (its own "increase anger at" call)
-            // faithfully rather than substituting something that reads more
-            // sensibly. Every other vanilla producer (`block_destroy`,
-            // `step`, `container_open`, ...) lives outside this file's owned
-            // crate paths and is real follow-up work, not modelled here.
+            // A death posts an entity-die event at the dying mob's position,
+            // carrying that mob's id as the source. Other event producers are
+            // posted by their owning systems.
             self.post_vibration(position, VibrationEvent::EntityDie, Some(id));
         }
     }
 
-    /// Posts one vibration for a real producer to call — issue #459's
-    /// substrate. `pub` so a caller outside this crate's `mobs` module (a
-    /// future block-break/container hook in `server.rs`, say) can post one
-    /// without this module changing; [`reap_dead`](Self::reap_dead) is the
-    /// one producer this file owns today. `source` is
-    /// vanilla's own game-event context's source-entity id, when the
-    /// producer has one —
-    /// see [`PostedVibration::source`]'s own doc.
+    /// Posts one vibration for a producer. The optional `source` identifies
+    /// the entity responsible when the producer has one; see
+    /// [`PostedVibration::source`]'s own doc.
     pub fn post_vibration(&mut self, position: Vec3, event: VibrationEvent, source: Option<i32>) {
         self.posted_vibrations.push(PostedVibration { position, event, source });
     }
 
     /// Resolves this tick's nearest-vibration answer for every listener
-    /// species (issue #459's substrate), then drains the posted log back to
-    /// empty. Runs at the *end* of the tick, deliberately not inside
+    /// species, then drains the posted log back to empty. Runs at the *end*
+    /// of the tick, deliberately not inside
     /// [`feed_perception`](Self::feed_perception) (which runs before
     /// [`reap_dead`](Self::reap_dead) posts anything): a death this same
     /// tick must be audible this same tick, not one tick late — the same
@@ -9064,12 +8537,12 @@ impl<'w> MobSim<'w> {
             } else {
                 None
             };
-            // Vanilla's own allay-brain "heard a note block" handler (issue #230), the vibration substrate's
-            // second consumer: an allay within `ALLAY_LISTENER_RADIUS` of a
-            // `NoteBlockPlay` this tick either adopts it (no liked note block
-            // yet) or refreshes its cooldown (the *same* position heard
-            // again) — a different position while one is already liked is
-            // ignored, matching the jar's own `else if` exactly.
+            // The allay note-block consumer: an allay within
+            // `ALLAY_LISTENER_RADIUS` of a `NoteBlockPlay` this tick either
+            // adopts it (when no liked note block exists) or refreshes its
+            // cooldown for the same position heard again; a different position
+            // while one is already liked is
+            // ignored.
             if mob.entity_type.path() == "allay"
                 && let Some(heard) =
                     nearest_note_block_play(mob.position(), ALLAY_LISTENER_RADIUS, &posted)
@@ -9089,7 +8562,7 @@ impl<'w> MobSim<'w> {
     }
 
     /// Vanilla's own "pick up item" inventory-carrier helper /
-    /// allay-specific "wants to pick up" check (issue #230): a
+    /// allay-specific "wants to pick up" check: a
     /// held-item allay with inventory room absorbs the nearest matching
     /// dropped item within [`ALLAY_ITEM_PICKUP_RADIUS`], the ground half of
     /// this crate's own [`ALLAY_ITEM_PICKUP_RADIUS`] doc-disclosed
@@ -9098,9 +8571,7 @@ impl<'w> MobSim<'w> {
     /// deciding what to pick up reads `self.item_state` while mutating
     /// `self.mobs` would need it held mutably too.
     ///
-    /// **Disclosed narrowing**: vanilla's own "wants to pick up" check's own
-    /// `mobGriefing` game-rule
-    /// gate is not checked — this sim has no live game-rule value at this
+    /// **Disclosed narrowing**: this sim has no live block-mutation rule value at this
     /// seam (the same cut `tick.rs`'s own `mob_griefing` stub already
     /// discloses); every eligible allay always picks up.
     fn allay_pick_up_items(&mut self) {
@@ -9157,21 +8628,16 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// Vanilla's own allay item-delivery behavior (issue #230): a carrying allay within
-    /// [`ALLAY_DELIVER_ARRIVAL_DISTANCE`] of its own
-    /// [`SimMob::allay_liked_noteblock`]'s `.above()` cell throws one item
-    /// from its inventory there per tick — a real dropped
+    /// Allay item delivery: a carrying allay within
+    /// [`ALLAY_DELIVER_ARRIVAL_DISTANCE`] of its liked note-block's `.above()`
+    /// cell throws one item from its inventory there per tick — a real dropped
     /// [`ItemEntity`](lodestone_entity::item_entity), not a state flag, so a
-    /// player can actually walk over and collect it. The real jar throws on
-    /// a give-item-timeout-duration (20-tick) cadence with a small random
-    /// velocity per throw (its own "item thrown" hook's own pitch-varied
-    /// sound, no
-    /// modelled velocity spread here); this drains one per tick instead — a
-    /// disclosed, faster narrowing rather than porting the timeout memory.
+    /// player can actually walk over and collect it. Throws use a 20-tick
+    /// cadence with a small random velocity; this model drains one item per
+    /// tick and does not model velocity spread.
     ///
-    /// **Not delivered to a liked player as a fallback** — see
-    /// `MemoryModuleType::DELIVERY_TARGET`'s own doc for the disclosed gap
-    /// this shares with the brain-side memory it drives.
+    /// **Not delivered to a liked player as a fallback** because no player
+    /// delivery target is available in this simulation seam.
     fn allay_deliver_items(&mut self) {
         struct Delivery {
             mob_index: usize,
@@ -9352,21 +8818,15 @@ impl<'w> MobSim<'w> {
         if !(362..23_667).contains(&t) { 0.7 } else { 0.0 }
     }
 
-    /// Resolves every [`CatRelaxOnOwnerGoal`]-driven gift request
-    /// recorded this tick (issue #229): rolls [`Self::cat_gift_chance`] at
+    /// Resolves every cat morning-gift request
+    /// recorded this tick: rolls [`Self::cat_gift_chance`] at
     /// the current [`MobSim::day_time`], and on success rolls
     /// `gameplay/cat_morning_gift` and spawns the result at the cat's own
     /// position — the same loot-table-then-`spawn_item` shape
     /// [`drop_death_loot`](Self::drop_death_loot) already uses.
     ///
-    /// [`CatRelaxOnOwnerGoal`]: lodestone_entity::ai::goals::CatRelaxOnOwnerGoal
-    ///
-    /// **Disclosed simplification**: no `randomTeleport` hop before the
-    /// drop — vanilla relocates the cat to a random point within roughly five
-    /// blocks of the owner (or its leash holder) first; this spawns the item
-    /// at the cat's current position instead, which
-    /// [`CatRelaxOnOwnerGoal`](lodestone_entity::ai::goals::CatRelaxOnOwnerGoal)'s
-    /// own goal already parked next to the sleeping owner.
+    /// **Disclosed simplification**: no random relocation occurs before the
+    /// drop. The item spawns at the cat's current position.
     fn resolve_cat_gifts(&mut self, gift_requests: Vec<i32>) {
         if gift_requests.is_empty() {
             return;
@@ -9408,18 +8868,14 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// Resolves every [`LandOnOwnersShoulderGoal`]-driven mount request
-    /// recorded this tick (issue #229): vanilla's own shoulder-mount setter
-    /// discards the mob entity and hands its saved NBT
-    /// to its own player-side shoulder-mount setter. This crate has no per-player
-    /// NBT inventory to hand it to, so [`SimMob::owner`] resolved to a uuid
+    /// Resolves every shoulder-mount request recorded this tick. This crate has
+    /// no per-player NBT inventory, so [`SimMob::owner`] resolves to a UUID
     /// plus [`self.shoulder_riders`](Self::shoulder_riders) — one slot per
-    /// owner rather than vanilla's two (left/right) — is the stand-in: the
+    /// owner — is the stand-in: the
     /// parrot mob is removed the same way [`Self::despawn_pass`] removes any
     /// other mob, and [`Self::tick_shoulder_dismounts`] is what brings it
     /// back.
     ///
-    /// [`LandOnOwnersShoulderGoal`]: lodestone_entity::ai::goals::LandOnOwnersShoulderGoal
     fn resolve_shoulder_mounts(&mut self, shoulder_requests: Vec<i32>) {
         for id in shoulder_requests {
             let Some(m) = self.get(id) else { continue };
@@ -9449,7 +8905,7 @@ impl<'w> MobSim<'w> {
     /// respawning the mob at the owner's position — vanilla's own
     /// player-side "remove entities on shoulder"/"respawn entity on shoulder"
     /// calls,
-    /// gated the same way on `timeEntitySatOnShoulder + 20 <
+    /// gated the same way on `mounted_tick + 20 <
     /// gameTime` so a parrot cannot fall off the instant it lands.
     ///
     /// **Disclosed simplification**: vanilla's own "handle shoulder entities" step fires
@@ -9550,43 +9006,30 @@ impl<'w> MobSim<'w> {
             out.push(EntitySnapshot {
                 id,
                 // **`minecraft:item`, not the item's own key.** This field is an
-                // *entity* type and used to be set to `state.item` — so a
-                // dropped `minecraft:bone_meal` streamed with entity type
-                // `minecraft:bone_meal`, which is not in the entity-type
-                // registry at all. `v770`'s add-entity-body encoder resolves it
-                // with `entity_type_id(name).unwrap_or(0)`, and network entity
-                // type `0` is `minecraft:acacia_boat` — so every dropped item
-                // this server has ever spawned arrived at the client as a boat,
-                // with no error logged anywhere. Every wire in
-                // `cargo xtask connectedness` reads green for this path; the
-                // value travelling it was wrong, which is the failure mode
-                // CLAUDE.md records for `SET_TIME` (#323).
+                // *entity* type. The fixed item entity type keeps a dropped
+                // stack on the item-entity rendering path rather than treating
+                // its registry key as an entity type.
                 //
-                // The item's *identity* belongs in `metadata` instead, as
-                // vanilla's own item-entity item metadata field (index 8, an `ITEM_STACK` serializer) —
-                // see this field's note below.
+                // The item's *identity* belongs in `metadata` instead, at the
+                // item-stack metadata slot described below.
                 uuid: state.uuid,
                 entity_type: item_entity_type(),
                 position: state.motion.position,
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: state.motion.velocity,
-                // **The field that makes a drop draw at all** (issue #537). A
+                // **The field that makes a drop draw at all.** A
                 // client draws nothing for an item entity whose stack it has
-                // not been told: vanilla's own item-entity renderer's submit
-                // step returns
-                // early on `state.item.isEmpty()`, and this project's own
-                // client does the same (`EntityInterpolator::set_item_stack`).
-                // So until this was filled a block drop spawned, streamed as a
-                // real item entity, fell, merged and could be picked up — the
-                // pickup being *visible*, since the inventory slot updates —
-                // while drawing zero pixels. Every link in the chain was green.
+                // not been told: the renderer returns early on an empty stack,
+                // and this project's own
+                // client receives the same stack update.
+                // The metadata must therefore carry the stack for a block drop
+                // to draw while it falls, merges, and remains pickable.
                 //
                 // This is the **only** place in the tree that constructs a
                 // `MetadataField::Item`, and that is load-bearing rather than
-                // incidental: vanilla's own item-entity item metadata field's
-                // wire index (8) is shared
-                // with nineteen other fields on other classes, so the encoder
+                // incidental: the item-stack metadata field's wire index (8) is
+                // shared with other entity fields, so the encoder
                 // in `crates/protocol/v770/src/server_protocol.rs` relies on
                 // every `Item` field belonging to a `minecraft:item` entity by
                 // construction. This loop iterates `item_state`, so it does.
@@ -9601,17 +9044,16 @@ impl<'w> MobSim<'w> {
                     item: state.item.clone(),
                     count: self.items.get(id).map_or(1, |lifecycle| lifecycle.count),
                 }],
-                // `ItemEntity` does not override `getAddEntityPacket`; the stack
-                // travels as metadata (above), not as object data.
+                // The stack travels as metadata (above), not as object data.
                 object_data: 0,
-                // A dropped item is never leashable, vanilla's own interface for that.
+                // A dropped item is never leashable.
                 leash_link: None,
             });
         }
         // `ExperienceOrb`. Iterated in **sorted** id order, like the falling blocks
         // below and unlike the two loops above: an orb's whole visible behaviour is a
         // multi-tick drift toward the player, so a `HashMap` order would reshuffle
-        // which of two orbs `EntityStreamer::sync` updates first every tick.
+        // which of two orbs the snapshot stream updates first every tick.
         let mut orb_ids: Vec<i32> = self.orbs.keys().copied().collect();
         orb_ids.sort_unstable();
         for id in orb_ids {
@@ -9623,8 +9065,8 @@ impl<'w> MobSim<'w> {
                 uuid: orb.uuid,
                 entity_type: orb_entity_type(),
                 position: orb.motion.position,
-                // Vanilla's own orb constructor sets a random `yRot`, which nothing
-                // reads: vanilla's own orb renderer billboards the sprite at the camera.
+                // A random rotation has no consumer: the client billboards the
+                // sprite at the camera.
                 // Sending a rotation would be sending a value with no consumer.
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
@@ -9712,14 +9154,11 @@ impl<'w> MobSim<'w> {
                     vehicle.motion.position.z,
                 ),
                 // **The yaw is the point.** A boat's hull is the only thing that
-                // shows which way it faces, and vanilla's own boat-item use
-                // handler sets it from the
-                // placing player — a boat streamed at yaw 0 always points south
-                // however you placed it. The pitch stays 0: vanilla's own boat
-                // entity never
-                // writes `xRot`.
+                // shows which way it faces, and the placing player's action
+                // supplies it — a boat streamed at yaw 0 always points south
+                // however you placed it. The pitch stays 0.
                 rotation: Rotation::new(vehicle.yaw, 0.0),
-                // Vanilla's own boat entity is not a living entity, so there is no separate
+                // A boat is not a living entity, so there is no separate
                 // head rotation to send; the rotate-head packet is only sent
                 // for entities that have one.
                 head_yaw: 0.0,
@@ -9728,12 +9167,10 @@ impl<'w> MobSim<'w> {
                     vehicle.motion.velocity.y,
                     vehicle.motion.velocity.z,
                 ),
-                // Vanilla's own boat metadata registration registers its own
-                // paddle-left,
-                // paddle-right and bubble-time fields, on top of
-                // vanilla's own shared vehicle hurt/hurtdir/damage triple.
+                // Boat metadata contains paddle-left and paddle-right values,
+                // on top of the shared vehicle hurt state.
                 //
-                // The paddle pair is now sent — issue #262's `PADDLE_BOAT`
+                // The paddle pair is emitted — the `PADDLE_BOAT`
                 // remainder — via `MetadataField::BoatPaddles`, whose own doc
                 // has the index-11/12 collision this loop is the guard for
                 // (every entry here is a boat by construction, never the
@@ -9743,14 +9180,14 @@ impl<'w> MobSim<'w> {
                 // `CreeperSwellDir`'s own doc states, and load-bearing here:
                 // a stop-paddling transition must reach a diffing consumer as
                 // a real `false, false` rather than as an absent field.
-                // Vanilla's own bubble-time metadata field stays unsent: nothing in this crate's
+                // Bubble-time metadata stays unsent: nothing in this crate's
                 // boat physics tracks a bubble-column timer.
                 metadata: vec![
                     crate::protocol::MetadataField::BoatPaddles {
                         left: vehicle.paddle_left,
                         right: vehicle.paddle_right,
                     },
-                    // Vanilla's own shared vehicle hurt triple. Always included, at its
+                    // Shared vehicle hurt state. Always included, at its
                     // resting `(0, 1, 0.0)` as well, for `BoatPaddles`' own
                     // stated reason: the *end* of a rock has to reach a diffing
                     // consumer as a real zero rather than as an absent field, or
@@ -9761,15 +9198,15 @@ impl<'w> MobSim<'w> {
                         damage: vehicle.damage,
                     },
                 ],
-                // Vanilla's own boat entity does not override the add-entity packet.
+                // The boat supplies no additional spawn data.
                 object_data: 0,
-                // A boat is never leashable, vanilla's own interface for that.
+                // A boat is never leashable.
                 leash_link: None,
             });
         }
         // Primed TNT. Sorted ids, for the same reason every other sidecar loop
         // in this method is: a stable per-tick update order for
-        // `EntityStreamer::sync`.
+        // the snapshot stream.
         let mut tnt_ids: Vec<i32> = self.tnt.keys().copied().collect();
         tnt_ids.sort_unstable();
         for id in tnt_ids {
@@ -9781,18 +9218,17 @@ impl<'w> MobSim<'w> {
                 uuid: t.uuid,
                 entity_type: tnt::tnt_entity_type(),
                 position: Vec3::new(t.motion.position.x, t.motion.position.y, t.motion.position.z),
-                // Vanilla's own primed-tnt entity never rotates — the base
-                // entity's `yRot`/`xRot`
+                // A primed TNT entity never rotates — its base
+                // entity's rotation fields
                 // stay `0.0` for the whole of its short life.
                 rotation: Rotation::new(0.0, 0.0),
                 head_yaw: 0.0,
                 velocity: Vec3::new(t.motion.velocity.x, t.motion.velocity.y, t.motion.velocity.z),
-                // Vanilla's own fuse metadata field — see `MetadataField::TntFuse`'s own
+                // The fuse metadata field — see `MetadataField::TntFuse`'s own
                 // doc for why this is index 8's fifth `INT` claimant and must be
                 // class-guarded on decode.
                 metadata: vec![MetadataField::TntFuse(t.fuse)],
-                // Vanilla's own primed-tnt entity does not override the
-                // add-entity packet.
+                // No additional spawn data is needed.
                 object_data: 0,
                 // Never leashable.
                 leash_link: None,
@@ -9806,7 +9242,7 @@ impl<'w> MobSim<'w> {
             let Some(cart) = self.minecarts.get(&id) else {
                 continue;
             };
-            // Vanilla's own furnace-minecart fuel metadata field — index 13, shared with
+            // Furnace-minecart fuel metadata uses index 13, shared with
             // its own command-block-minecart command-name field (a `STRING`) under a
             // different serializer; this is the only producer of a
             // `MinecartFuel` field and it only ever fires from the furnace
@@ -9823,27 +9259,25 @@ impl<'w> MobSim<'w> {
                 entity_type: cart.kind.entity_type(),
                 position: Vec3::new(cart.motion.position.x, cart.motion.position.y, cart.motion.position.z),
                 rotation: Rotation::new(cart.yaw, 0.0),
-                // Vanilla's own minecart entity is not a living entity; no separate head
+                // A minecart is not a living entity; no separate head
                 // rotation packet is ever sent for one.
                 head_yaw: 0.0,
                 velocity: Vec3::new(cart.motion.velocity.x, cart.motion.velocity.y, cart.motion.velocity.z),
                 metadata,
-                // Vanilla's own minecart entity does not override the add-entity packet.
+                // No additional spawn data is needed.
                 object_data: 0,
                 // Never leashable.
                 leash_link: None,
             });
         }
-        // The lightning-bolt entity (issue #269). Sorted ids for the same
+        // The lightning-bolt entity. Sorted ids for the same
         // reason the two
         // loops above are: a bolt is short-lived but real entities, and a
         // `HashMap` order would reshuffle which of two simultaneous strikes
-        // `EntityStreamer::sync` updates first.
+        // the snapshot stream updates first.
         //
-        // **Empty metadata is correct, not an omission**: vanilla's own
-        // lightning-bolt entity
-        // overrides its own metadata registration with an empty body — it registers no
-        // accessor at all,
+        // **Empty metadata is correct, not an omission**: the lightning entity
+        // has no metadata fields,
         // so there is nothing to send.
         let mut bolt_ids: Vec<i32> = self.lightning_bolts.keys().copied().collect();
         bolt_ids.sort_unstable();
@@ -9861,7 +9295,7 @@ impl<'w> MobSim<'w> {
                 head_yaw: 0.0,
                 velocity: Vec3::new(0.0, 0.0, 0.0),
                 metadata: Vec::new(),
-                // `LightningBolt` does not override `getAddEntityPacket`.
+                // No additional spawn data is needed for this lightning entity.
                 object_data: 0,
                 // Never a `Leashable`.
                 leash_link: None,
@@ -9870,9 +9304,9 @@ impl<'w> MobSim<'w> {
         self.push_dragon_snapshots(&mut out);
         self.push_end_crystal_snapshots(&mut out);
         self.push_wither_snapshots(&mut out);
-        // Issue #257: live fishing bobbers.
+        // Live fishing bobbers.
         self.fishing_bobber_snapshots(&mut out);
-        // Issue #241: live raiders spawned by an active raid stream through
+        // Live raiders spawned by an active raid stream through
         // the ordinary mob loop at the top of this function — `raid.rs`
         // spawns them with `spawn_species`, exactly as a patrol does — so
         // there is nothing to append here.
@@ -9979,7 +9413,7 @@ impl CollisionView for ItemCollision<'_> {
 }
 
 /// Resolves one item's collision with the terrain after [`ItemMotion::tick`] has
-/// already moved it, and records whether it is resting (issue #533).
+/// already moved it, and records whether it is resting.
 ///
 /// This is the "world crate's job" [`ItemMotion::tick`]'s doc comment always
 /// deferred and nothing ever did.
@@ -10008,21 +9442,10 @@ impl CollisionView for ItemCollision<'_> {
 ///
 /// # Why this takes a closure and not the sim's own `ChunkWorld`
 ///
-/// It used to read [`ChunkWorld::is_solid`] directly, and that is why dropped
-/// items phased through the ground everywhere except a small square around
-/// spawn. The sim's `ChunkWorld` is a **static snapshot** of `mob_area` — 7×7
-/// columns, taken once by `MobHandle::reseed` when the world opens (see that
-/// method's own doc, which names widening it as a deliberate scope cut). Outside
-/// those columns `is_solid` is `false` for *every* cell, because the column is
-/// simply absent, so an item fell forever and was discarded at `min_y - 64`.
-/// Inside them it answered from unedited worldgen terrain, so a block the player
-/// had placed did not stop an item and one they had mined still did.
-///
-/// A snapshot cannot be the oracle for this: settling has to see the world as it
-/// is *now*, at whatever coordinates the player is actually standing. The tick
-/// loop is the one place that holds the live `ChunkSource`, so it supplies the
-/// answer and the sim asks — see [`MobSim::tick_with_terrain`]. `tick` keeps the
-/// snapshot as its oracle so hermetic callers are unchanged.
+/// Settling uses the live `ChunkSource` supplied to
+/// [`MobSim::tick_with_terrain`], so placed and removed blocks affect collision
+/// at the player's current coordinates. The plain `tick` entry point retains its
+/// `ChunkWorld` snapshot for hermetic callers.
 fn settle_item(view: &dyn CollisionView, motion: &mut ItemMotion, before: Vec3) {
     settle_entity(view, ITEM_DIMENSIONS, motion, before);
 }
@@ -10057,7 +9480,7 @@ fn settle_entity(
     // *between* them, so its
     // friction reads the post-move `onGround`. Matching that is a separate change to
     // a crate outside this one; keeping the order fixed here means the only thing
-    // this commit alters is the **geometry**, which is what makes the existing
+    // the implementation alters is the **geometry**, which is what makes the existing
     // settling gates still meaningful rather than merely still green.
     let bb = dimensions.bounding_box(Vec3d::new(before.x, before.y, before.z));
     let resolved = collide(view, attempted, bb, motion.on_ground, dimensions.step_height);
@@ -10313,9 +9736,9 @@ fn nearest_patrol_leader_target(mobs: &[SimMob<'_>], from: Vec3, exclude_id: i32
 // same discipline the rest of the project uses (a consumer that is only a
 // `#[cfg(test)]` fake proves nothing about the public seam).
 
-/// A live [`EntitySource`] fed by a background-ticked [`MobSim`] (issue
-/// #217). [`IntegratedServer::open_in_memory_with_mobs`](crate::IntegratedServer::open_in_memory_with_mobs)
-/// constructs one alongside [`crate::tick::run_tick_loop`] (issue #284; this
+/// A live [`EntitySource`] fed by a background-ticked [`MobSim`] (the live mob tick).
+/// [`IntegratedServer::open_in_memory_with_mobs`](crate::IntegratedServer::open_in_memory_with_mobs)
+/// constructs one alongside [`crate::tick::run_tick_loop`] (the shared tick loop; this
 /// used to be [`run_mob_tick_loop`] before the mob and block-entity tick
 /// loops were unified into one), the task that owns the sim and republishes
 /// its snapshots here every tick.
@@ -10353,9 +9776,8 @@ impl EntitySource for LiveMobSource {
 
 impl LiveMobSource {
     /// Replaces the published snapshot set. Called once per tick — in
-    /// production by [`crate::tick::run_tick_loop`] (issue #284; previously
-    /// [`run_mob_tick_loop`], before the two background tick loops were
-    /// unified into one), and directly by `run_mob_tick_loop`'s own test. The
+    /// production by [`crate::tick::run_tick_loop`], and directly by the
+    /// tick-source test. The
     /// next `snapshots()` call from any connection (there may be several,
     /// e.g. open-to-LAN) sees the new set. `pub(crate)`, not private: the
     /// unified loop lives in a sibling module (`tick.rs`) and needs to call
@@ -10374,7 +9796,7 @@ impl LiveMobSource {
 
 /// A shared, mutation-capable handle onto one live [`MobSim`] — the
 /// counterpart [`crate::BlockEntityHandle`] already established for block
-/// entities, and the exact piece issue #12's own combat census named as
+/// entities, and the exact piece the combat census named as
 /// missing: *"there is no way to reach a live mob's health from a
 /// connection's own task... `MobSim` is ticked entirely inside its own
 /// background task and is never wrapped in a shared, lockable handle."*
@@ -10461,7 +9883,7 @@ impl MobHandle {
     /// fresh [`MobSim`] over `world`, seeded exactly as
     /// [`seeded`](Self::seeded) would have.
     ///
-    /// # Why this exists (issue #454)
+    /// # Why this exists
     ///
     /// `seeded` did the whole job inside
     /// [`crate::IntegratedServer::open_in_memory_with_mobs`]'s body, *before any
@@ -10487,8 +9909,8 @@ impl MobHandle {
     /// behind the handle's own `Mutex` — so this is safe to call from a
     /// background task while the connection task holds a clone.
     pub fn reseed(&self, mut world: ChunkWorld, center_x: i32, center_z: i32, mob_count: usize) {
-        // Issue #518 part 2/4: drained while `world` is still an owned local,
-        // before it leaks to `'static` below. Non-empty only the first time
+        // Drain pending generation spawns while `world` is still an owned local,
+        // before it leaks to `'static` below. The list is non-empty only while
         // these chunks are ever generated — see `ChunkWorld`'s own field doc
         // (`pending_generation_spawns`) for why that is what keeps a fresh
         // world's `SPAWN`-stage animals from duplicating across a restart: a
@@ -10506,8 +9928,8 @@ impl MobHandle {
             sim.set_next_id(1000);
             // Exactly `mob_count`, including zero — see [`seed_demo_mobs`].
             seed_demo_mobs(sim, center_x, center_z, mob_count);
-            // Issue #518: place the `SPAWN` stage's proposed animals as real
-            // mobs, re-validated against the real per-species placement rule
+            // Place the `SPAWN` stage's proposed animals as real mobs,
+            // re-validated against the per-species placement rule
             // and this world's own light through the exact gate the
             // tick-driven cycle uses — see
             // `NaturalSpawner::validate_generation_spawns`'s doc for why this
@@ -10542,7 +9964,7 @@ impl EntitySource for MobHandle {
     /// A `MobHandle` is a legitimate [`EntitySource`] all on its own — no
     /// separate [`LiveMobSource`] cache required — for any caller that mutates
     /// the sim directly and does not also need a background tick loop
-    /// ([`crate::tick::run_tick_loop`], issue #284) republishing it on a
+    /// ([`crate::tick::run_tick_loop`]) republishing it on a
     /// timer. Production (`IntegratedServer::open_in_memory_with_mobs`) still layers
     /// [`LiveMobSource`] on top so the tick loop's own AI motion reaches the
     /// wire on its own cadence; a test that only cares about a hand-placed,
@@ -10603,7 +10025,7 @@ fn patrol_group_size(difficulty: Difficulty) -> i32 {
 /// [`SpawnCandidateSource`] implementation exists in production yet (the
 /// trait exists; every current impl is a test mock — see `mob_spawn.rs`).
 /// Building that is a separate, considerably larger feature. This exists
-/// purely so issue #217's actual subject — computed AI motion reaching the
+/// purely so the actual subject — computed AI motion reaching the
 /// wire — has a population to move; a caller that wants real spawning wires
 /// [`MobSim::run_spawn_cycle`] in its place once a real source exists.
 fn seed_demo_mobs(sim: &mut MobSim<'_>, center_x: i32, center_z: i32, count: usize) {
@@ -10624,36 +10046,30 @@ fn seed_demo_mobs(sim: &mut MobSim<'_>, center_x: i32, center_z: i32, count: usi
             continue;
         };
         let pos = Vec3::new(f64::from(x) + 0.5, f64::from(y + 1), f64::from(z) + 0.5);
-        // Through `spawn_species`, not `spawn` + `set_entity_type` + two
-        // hardcoded goals. This is the **only** production path that creates a
+        // Through `spawn_species`, not `spawn` plus a hardcoded component set.
+        // This is the **only** production path that creates a
         // mob a connected client can see, so it is also the only place the
         // per-species roster can reach pixels: routed this way, a demo zombie
-        // gets vanilla's real zombie set — `HurtByTargetGoal`,
-        // `NearestAttackableTargetGoal`, `MeleeAttackGoal`, `LookAtPlayerGoal` —
+        // gets the complete target-selection, attack, and look-at behavior
         // instead of wandering obliviously past the player.
         //
         // The shape, speed and A* budget were hardcoded here as `0.6 × 1.95`,
         // `0.23` and `400`; `spawn_species` derives the first two from the same
         // dimension census and `movement_speed` attribute and gets the same
-        // numbers, and the third from `follow_range * 16` = `560`, which is
-        // vanilla's own figure rather than this call site's guess.
+        // numbers, and the third from `follow_range * 16` = `560`, preserving
+        // the measured follow-range budget rather than a call-site guess.
         sim.spawn_species(key, pos);
     }
 }
 
-/// The species [`seed_demo_mobs`] cycles through, in order (issue #457).
+/// The species [`seed_demo_mobs`] cycles through, in order.
 ///
 /// # What this is for
 ///
-/// Until #457 this list was one hardcoded `minecraft:zombie`, and
-/// [`seed_demo_mobs`] is the **only** production path that creates a
-/// client-visible mob. So every roster family except `hostile_melee` — five
-/// jar-cited goal tables covering 26 further species — reached **zero pixels**
-/// no matter how correct it was, and no crate's own test suite could say so,
-/// because each of them is a closed loop around a table nothing instantiates.
-/// Widening this list is what makes those tables observable to a connected
-/// client, and it is the minimum that does: it is deliberately **not** spawn
-/// eggs (#224) and not a spawner block.
+/// [`seed_demo_mobs`] cycles a client-visible demonstration roster. The list
+/// covers every roster family plus an additional hostile entry, making each
+/// family observable to a connected client while keeping this helper separate
+/// from spawn eggs and spawner blocks.
 ///
 /// # Order is load-bearing, twice
 ///
@@ -10670,7 +10086,7 @@ fn seed_demo_mobs(sim: &mut MobSim<'_>, center_x: i32, center_z: i32, count: usi
 /// | 2 | `wolf` | `neutral` |
 /// | 3 | `blaze` | `ranged` |
 /// | 4 | `guardian` | `specialist` |
-/// | 5 | `creeper` | `hostile_melee` (its `SwellGoal` is the most visible) |
+/// | 5 | `creeper` | `hostile_melee` (the swelling behavior is the most visible) |
 ///
 /// `zombie` is first for a second, narrower reason: `MobSim::set_next_id(1000)`
 /// plus spawn order makes entity id 1000 deterministic, and
@@ -10708,11 +10124,11 @@ pub const DEMO_SPECIES: &[&str] = &[
     "snow_golem",
 ];
 
-/// Issue #455's host half: the `follow_range` attribute reaching the controller
-/// that bounds target acquisition, and the miss case that made it wrong.
+/// The `follow_range` attribute reaches the controller that bounds target
+/// acquisition, including the no-target case.
 #[cfg(test)]
 mod follow_range_tests {
-    // Also home to the death-loot gate (issue #272), which reuses this module's
+    // Also home to the death-loot gate, which reuses this module's
     // `flat_world` rather than growing a second copy of it.
     use super::*;
 
@@ -10733,8 +10149,8 @@ mod follow_range_tests {
     /// `distance` blocks away on +X, and reports whether the mob ever acquires a
     /// target within `ticks`.
     ///
-    /// `attack_target()` is the observable, not `can_use`:
-    /// `NearestAttackableTargetGoal` throttles its own search, so this ticks a
+    /// `attack_target()` is the observable, not `can_use`: target acquisition
+    /// is throttled, so this ticks a
     /// generous bound and checks after each — a fixed single tick would measure
     /// the throttle rather than the range.
     fn acquires_at(species: &str, distance: f64, ticks: usize) -> bool {
@@ -10906,13 +10322,12 @@ mod follow_range_tests {
         );
     }
 
-    /// A killed mob drops its loot table's items (issue #272).
+    /// A killed mob drops its loot table's items.
     ///
-    /// The expected values come from vanilla's own `entities/cow.json`, not from
-    /// our roller: two pools of `rolls: 1`, leather `uniform 0..2` and beef
-    /// `uniform 1..3`. So a kill always yields at least the beef, both item ids
-    /// are from that file, and — the part a wrong pool loop gets wrong — the beef
-    /// count is never zero while the leather stack may be absent entirely.
+    /// The expected values are independent of the roller: two pools use
+    /// `rolls: 1`, leather uses `uniform 0..2`, and beef uses `uniform 1..3`.
+    /// A kill therefore yields at least beef; the leather stack may be absent,
+    /// while the beef count is never zero.
     #[test]
     fn a_killed_cow_drops_its_loot_table() {
         let world = flat_world();
@@ -10944,9 +10359,9 @@ mod follow_range_tests {
         );
     }
 
-    /// Issue #230's armadillo roll-up, gated through the real production
-    /// path (`MobSim::attack`, `crate::server::apply_attack`'s own entry
-    /// point) rather than calling `apply_damage` on a bare `SimMob` — the
+    /// Armadillo roll-up, gated through the production path
+    /// (`MobSim::attack`, `crate::server::apply_attack`'s entry point) rather
+    /// than calling `apply_damage` on a bare `SimMob` — the
     /// same standard this crate applies to every other combat gate. A first
     /// hit lands at full strength and switches the armadillo to "scared";
     /// a **second** hit, once the invulnerability window has cleared, is
@@ -11061,8 +10476,7 @@ mod follow_range_tests {
         world
     }
 
-    /// Issue #230's axolotl play-dead (vanilla's own axolotl hurt-handler's own
-    /// `PLAY_DEAD_TICKS` gate), gated through the real production path
+    /// Axolotl play-dead (`AXOLOTL_PLAY_DEAD_TICKS` = `200`), gated through the production path
     /// (`MobSim::attack` → `SimMob::apply_damage`). The trigger is
     /// probabilistic (`axolotl_play_dead_roll`'s own two `nextInt(3)`-shaped
     /// draws), so — the "predict the value" standard, applied to a
@@ -11135,7 +10549,7 @@ mod follow_range_tests {
         );
     }
 
-    /// Issue #230's random-sitting camel behaviour, gated through the real production
+    /// Random-sitting camel behaviour, gated through the real production
     /// tick path (`MobSim::tick`, the loop `camel_random_sitting` is called
     /// from) rather than by calling the function on a bare `SimMob`. A camel
     /// left alone long enough must eventually sit down — proving both the
@@ -11214,7 +10628,7 @@ mod follow_range_tests {
         }
     }
 
-    /// Issue #230's remaining camel gap: vanilla's own rider-jump handler and
+    /// The camel dash path exercises the rider-jump handler and
     /// rider-jump executor end to end through the real production path —
     /// `MobSim::interact` (mounting) then `MobSim::trigger_camel_dash` (the
     /// `ServerBound::PlayerInput` jump-bit consumer's own call), not a
@@ -11336,8 +10750,7 @@ mod follow_range_tests {
         );
     }
 
-    /// Issue #241's ominous-bottle producer: a pillager patrol leader
-    /// (vanilla's own "captain without raid" raider predicate's own "is captain" check) killed while
+    /// Ominous-bottle producer: a pillager patrol leader killed while
     /// **not** a member of any active raid must drop `minecraft:ominous_bottle`.
     /// Three controls on the same death path, each isolating one clause of
     /// the predicate the real one needs both halves of:
@@ -11451,41 +10864,32 @@ mod follow_range_tests {
 
     const TICKS: usize = 80;
 
-    /// **The control, and the reason the obvious fix is wrong.**
+    /// **Control for the attribute fallback.**
     ///
     /// The miss case for `follow_range` is **32.0**, not `0.0`. `attr`'s
     /// `unwrap_or(0.0)` reads like the fallback and is unreachable for any
     /// attribute the registry knows, because `AttributeMap::value` already
     /// substitutes `default_def(key).default` for an absent instance.
     ///
-    /// This matters because it decides what the fix can be. A guard of the shape
+    /// The distinction determines what a useful guard can test. A guard of the shape
     /// `if r > 0.0 { r } else { DEFAULT }` is **dead code** — it never fires, and
     /// an unlisted species keeps the registry's 32.0, which is precisely the one
-    /// number `follow_range` never legitimately holds (vanilla's own generic
+    /// number `follow_range` never legitimately holds (the generic
     /// mob attribute builder
     /// overrides it to 16.0 for every mob). The wrong value sits *inside* the
     /// plausible range, so only instance presence can detect the miss.
     ///
-    /// Predicted from `attribute.rs:341` (`"follow_range" => d(32.0, …)`) and
+    /// Predicted from the `follow_range` default definition and
     /// `AttributeMap::value`'s `else` branch, then measured. If this ever reads
     /// 0.0, `attr` changed and the `attr_present` split is redundant.
     #[test]
     fn control_the_attribute_lookup_misses_to_the_registry_default_not_zero() {
-        // **Structurally** unlistable, not merely unlisted (#457).
+        // **Structurally** unlistable, not merely unlisted.
         //
-        // This precondition used to name `minecraft:zombie_villager`, with its
-        // own instruction to "pick another unlisted species or this control is
-        // vacuous" if that species ever gained an arm. It did — and picking
-        // another real species only defers the same breakage to the next batch
-        // of arms, which is not a fix but a rescheduling.
-        //
-        // So the precondition is now pinned to a property no future commit can
-        // take away: `default_attributes` returns `None` for **any** id outside
-        // the `minecraft` namespace, before it ever consults `type_spec`. That
-        // keeps the miss case reachable permanently, at the cost of the claim
-        // that it is reachable from a *real species* — see
-        // `an_unlisted_species_still_falls_back_at_the_spawn_path` below, which
-        // is where that half now lives.
+        // This id is outside the `minecraft` namespace, so
+        // `default_attributes` must return `None` before it consults
+        // `type_spec`. The miss case is structural rather than dependent on
+        // which species tables are populated.
         let unlisted = Identifier::from_str("modded:not_a_vanilla_mob").expect("valid id");
         assert!(
             default_attributes(&unlisted).is_none(),
@@ -11505,8 +10909,8 @@ mod follow_range_tests {
             "instance presence is the only reading that can see the miss"
         );
 
-        // And the listed case really does carry the jar's number, so the split
-        // above is not simply discarding every attribute.
+        // A listed case carries its own value, so the split above does not
+        // discard every attribute.
         let zombie = default_attributes(&Identifier::from_str("minecraft:zombie").unwrap())
             .expect("zombie has a type_spec arm");
         assert_eq!(
@@ -11551,42 +10955,18 @@ mod follow_range_tests {
         );
     }
 
-    /// The **unlisted-species** half, retired at the acquisition layer and
-    /// re-established at the spawn layer (#457).
+    /// The unlisted-species fallback is observable at spawn time.
     ///
-    /// # Why the previous test was retired rather than repointed
+    /// A fixed per-mob seed keeps the acquisition boundary stable: the
+    /// 15-block hit succeeds and the 17-block hit fails.
     ///
-    /// `an_unlisted_species_falls_back_to_the_mob_default_not_the_registry_default`
-    /// drove `zombie_villager` — a species with the full `ZOMBIE` goal table
-    /// (so a real `NearestAttackableTargetGoal`) and no `type_spec` arm — and
-    /// asserted it acquired at 15 and not at 17. Its own doc said that when
-    /// #457 landed it would start failing at 17, and that the failure was "the
-    /// signal to retire it, not to widen it". It did, and it is.
+    /// The fallback case uses an id outside the roster. Such an id has no
+    /// target goal, so this assertion measures the range installed at spawn
+    /// rather than target acquisition.
     ///
-    /// The obvious salvage — repoint it at some *other* species that is both
-    /// unlisted and owns a modelled target goal — **has no candidate, and
-    /// cannot acquire one.** Every species any roster family claims now has a
-    /// `type_spec` arm, and `attribute.rs`'s
-    /// `every_rostered_species_has_a_type_spec_arm` fails if that stops being
-    /// true. A species *outside* the roster gets `roster::FALLBACK`, which is
-    /// wander-and-look and contains no target goal at all. So "unlisted
-    /// attributes" and "modelled target goal" are now mutually exclusive by
-    /// construction, and no rescheduling of this test survives the next commit.
-    ///
-    /// # What survives, and where
-    ///
-    /// The property itself is still live and still production-reachable:
-    /// [`MobSim::spawn_species`] reads `attr_present(…).unwrap_or(DEFAULT_FOLLOW_RANGE)`
-    /// for **any** key, so an id with no template still has to land on
-    /// vanilla's own generic mob attribute builder's 16.0 rather than the
-    /// registry's 32.0. Only
-    /// the *observable* had to move: from "does it acquire a player at 17
-    /// blocks" to the range the spawn path actually installed on the
-    /// controller. That is a strictly narrower claim — it no longer proves the
-    /// number reaches targeting — and saying so is the point.
-    ///
-    /// 16 against 32 is still the whole distinction, and both are asserted, so
-    /// this cannot pass by reading some third number.
+    /// [`MobSim::spawn_species`] reads
+    /// `attr_present(…).unwrap_or(DEFAULT_FOLLOW_RANGE)` for any key. The
+    /// test checks the generic fallback at the spawn seam directly.
     #[test]
     fn an_unlisted_species_still_falls_back_at_the_spawn_path() {
         let world = flat_world();
@@ -11624,25 +11004,18 @@ mod follow_range_tests {
     }
 }
 
-/// Issue #458, primitive 1: the host-resolved persistent-anger deadline.
+/// Host-resolved persistent-anger deadline tests.
 #[cfg(test)]
 mod anger_tests {
     use super::*;
 
-    /// The jar's grudge window, in ticks, stated **independently of
-    /// [`ANGER_TICKS`]**.
+    /// The grudge window in ticks, stated **independently of [`ANGER_TICKS`]**.
+    /// Twenty-to-thirty-nine seconds at 20 ticks per second yields the
+    /// inclusive range `[400, 780]`.
     ///
-    /// Vanilla's own neutral-mob persistent-anger constant is a seconds-based
-    /// range of `[20, 39]`,
-    /// and seconds convert to ticks by multiplying by 20, giving a uniform
-    /// range of `[400, 780]` ticks.
-    ///
-    /// **These literals are load-bearing and must not be replaced by a read of
-    /// `ANGER_TICKS`.** The first version of this module did exactly that, and
-    /// the control proved it vacuous: setting `ANGER_TICKS` to `(20, 39)` — the
-    /// seconds-as-ticks misreading these tests exist to exclude — left every
-    /// assertion **passing**, because the expectation moved with the subject.
-    /// That is `decode(encode(x)) == x` wearing a jar citation.
+    /// These literals are load-bearing: reading the seconds as ticks would
+    /// produce `[20, 39]`, and deriving them from `ANGER_TICKS` would allow a
+    /// bad duration to move both the implementation and its expectation.
     const JAR_LO: u64 = 400;
     const JAR_HI: u64 = 780;
 
@@ -11656,21 +11029,16 @@ mod anger_tests {
         world
     }
 
-    /// Spawns one **real** mob through the production path and hits it once,
-    /// then reports the tick offset at which `angry_target` first reads `None`.
+    /// Spawns one mob through [`MobSim::spawn_species`], hits it once, and
+    /// reports the tick offset at which `angry_target` first reads `None`.
     ///
-    /// Drives `MobSim` + `NavigatingMob`, never `ScriptMob` and never
-    /// `roster::probe`'s double: both override the perception methods wholesale,
-    /// which is exactly how #441's and #455's islands stayed hidden.
+    /// Drives `MobSim` through its normal perception path, keeping the
+    /// AI-goal and spawn-category behavior under test.
     ///
     /// The attacker position is placed well outside `flat_world`'s solid `±8`
-    /// platform (issue #233): once the bee's anger-gated target row and
-    /// vanilla's own bee attack goal both landed, a *nearby* attacker position let the
-    /// bee's own `MeleeAttackGoal` close the one-block gap and "sting" the
-    /// bare position within the very first tick, clearing `anger`
-    /// (vanilla's own "stop being angry" call, by design — see `roster::neutral::BEE`'s doc
-    /// comment) before this helper ever got to measure the grudge's real
-    /// duration. This function measures **grudge duration**, not "does the
+    /// platform. The attacker remains outside the walkable platform, so the bee
+    /// cannot path to it or clear `anger` through an attack. This function
+    /// measures **grudge duration**, not "does the
     /// mob's own combat ever run" — an attacker outside the walkable platform
     /// (so no path exists to it, for any of the four species' plausible
     /// speeds) decouples the two.
@@ -11694,16 +11062,13 @@ mod anger_tests {
         None
     }
 
-    /// **The gate.** A grudge must expire inside the jar's `[400, 780]` tick
-    /// window — and the assertion has to separate that from the
-    /// seconds-as-ticks reading of `rangeOfSeconds(20, 39)`, which would expire
-    /// it in `[20, 39]` ticks.
+    /// **The gate.** A grudge must expire inside the measured `[400, 780]`
+    /// tick window. Twenty-to-thirty-nine seconds at 20 ticks per second
+    /// yields this range; treating the seconds as ticks would yield `[20, 39]`.
     ///
     /// Predicting only "it eventually expires" is satisfied by both hypotheses
-    /// and by an off-by-one on the inclusive upper bound, which is the
-    /// magnitude species of vacuous test. Both bounds are asserted, and the
-    /// wrong hypothesis is named in the failure message rather than left
-    /// implicit.
+    /// and by an off-by-one on the inclusive upper bound. Both bounds are
+    /// asserted so the inclusive interval is checked directly.
     #[test]
     fn anger_expires_inside_the_jars_tick_window() {
         let (lo, hi) = (JAR_LO, JAR_HI);
@@ -11831,18 +11196,13 @@ mod anger_tests {
         }
     }
 
-    /// The ongoing vanilla alert-others mechanism, isolated from the one-shot
-    /// "alert others of the same owner" goal propagation it sits alongside.
+    /// The ongoing piglin group-alert mechanism is isolated from the one-shot
+    /// owner-group propagation it accompanies.
     ///
-    /// The one-shot half fires immediately on a *new* grudge
-    /// (`MobSim::attack`'s `pack_alert`), so a naive test that spawns both
-    /// piglins before the first hit cannot tell the two mechanisms apart —
-    /// the neighbour would be alerted by the one-shot on tick zero regardless
-    /// of whether the ongoing timer exists at all. This test starves that
-    /// confound structurally: the second piglin is spawned **after** the
-    /// first is already hit and holding a grudge, so it was not present for
-    /// any one-shot census and cannot have been alerted by it. If it ends up
-    /// angry anyway, the ongoing per-tick mechanism is what did it.
+    /// The one-shot arm fires when [`MobSim::attack`] creates a new grudge.
+    /// The neighbour is spawned after that event, so it cannot receive the
+    /// one-shot notification. An ensuing grudge therefore demonstrates the
+    /// periodic alert timer rather than the immediate group notification.
     #[test]
     fn a_piglin_holding_a_target_alerts_a_neighbour_that_did_not_exist_for_the_one_shot_alert() {
         let world = flat_world();
@@ -11854,9 +11214,8 @@ mod anger_tests {
         sim.attack(alerting, attacker, 1.0, DamageFlags::default(), 0.0)
             .expect("alive");
 
-        // The neighbour did not exist for the hit above, so the one-shot
-        // `alertOthers` census (which walks `self.mobs` at the instant of the
-        // hit) structurally could not have reached it.
+        // The neighbour did not exist for the hit above, so the immediate
+        // group census could not have reached it.
         let neighbour = sim.spawn_species(key, Vec3::new(5.0, 0.0, 0.0)).id();
         assert_eq!(
             sim.get(neighbour).expect("alive").mob.angry_target(),
@@ -11888,9 +11247,9 @@ mod anger_tests {
     }
 }
 
-/// Issue #458, primitives 3-5 (instant relocation / self-damage / ownership):
-/// the `MobSim` host half of the four seam primitives that landed in
-/// `lodestone-entity`. The gaze feed is the one documented gap — see
+/// MobSim seam primitive tests (instant relocation / self-damage / target
+/// identity): the host half of the seam primitives in `lodestone-entity`. The
+/// gaze feed is not supplied by this seam — see
 /// [`PlayerPerception`]'s lack of a view vector.
 #[cfg(test)]
 mod primitives_tests {
@@ -11906,7 +11265,7 @@ mod primitives_tests {
         world
     }
 
-    /// Primitive 3: a host teleport command rewrites position immediately and
+/// A host teleport command rewrites position immediately and
     /// survives the next tick — an instant relocation, not a fast walk.
     #[test]
     fn teleport_to_moves_the_mob_instantly_and_survives_a_tick() {
@@ -11938,10 +11297,9 @@ mod primitives_tests {
         );
     }
 
-    /// Primitive 4: a `damage_self` request is drained by [`MobSim::tick`] and
-    /// resolved into real health change — a bee that damages itself for its
-    /// full health is gone at the end of the same tick, matching vanilla's
-    /// immediate death removal.
+    /// A `damage_self` request is drained by [`MobSim::tick`] and resolved into
+    /// real health change. A bee that damages itself for its full health is
+    /// gone at the end of the same tick.
     #[test]
     fn damage_self_is_resolved_into_a_real_self_kill() {
         let world = flat_world();
@@ -11964,7 +11322,7 @@ mod primitives_tests {
         );
     }
 
-    /// Primitive 5: an owner id set on the host resolves to an owner *position*
+    /// An owner id set on the host resolves to an owner *position*
     /// across the seam each tick.
     #[test]
     fn owner_id_resolves_to_an_owner_position_across_the_seam() {
@@ -11990,8 +11348,8 @@ mod primitives_tests {
         );
     }
 
-    /// Primitive 2 (issue #458): the gaze feed reaches `is_being_stared_at`
-    /// in production, not just in `lodestone_entity`'s own hermetic gates.
+    /// The gaze feed reaches `is_being_stared_at` through the integrated
+    /// simulation, not only through isolated entity-level checks.
     ///
     /// **The discriminating pair**: two sims, each with one enderman at the
     /// *identical* position and one player at the *identical* position — the
@@ -12066,8 +11424,8 @@ mod primitives_tests {
     }
 }
 
-/// Issue #456's host half: block-identity cues read from the jar's own tag
-/// census, and the graze handoff out of an immutably-borrowed world.
+/// Block-identity cues read from generated tag data, and the graze handoff out
+/// of an immutably borrowed world.
 #[cfg(test)]
 mod block_cues_tests {
     use super::*;
@@ -12178,14 +11536,11 @@ mod block_cues_tests {
     }
 
     /// **The handoff gate.** A grazing mob's eat must survive `MobSim::tick` and
-    /// come out of [`MobSim::take_grazes`].
+    /// emerge from [`MobSim::take_grazes`].
     ///
-    /// The goal is installed directly rather than through the roster, because
-    /// `roster/passive.rs`'s sheep row is still `Registration::missing` — that flip
-    /// is #456's other brokered patch and is not this file. So this gate is about
-    /// the *handoff* (`take_new_eaten` → `pending_grazes` → `take_grazes`), which
-    /// is the half that lives here, and it will keep passing unchanged once the
-    /// roster row lands.
+    /// The test supplies the goal directly, so the assertion covers only the
+    /// `take_new_eaten` → `pending_grazes` → `take_grazes` handoff. The
+    /// production roster intentionally has no sheep-eating goal.
     ///
     /// It is deliberately **not** an assertion about the eat interval. That is
     /// `lodestone-entity`'s `block_perception.rs` gate, which distinguishes 444
@@ -12200,7 +11555,7 @@ mod block_cues_tests {
         // Grass to stand on, short grass to stand in — so both cues are live and
         // whichever arm fires, the handoff is exercised.
         //
-        // Wide enough that `RandomStrollGoal` cannot walk the sheep off it in
+        // Wide enough that idle wandering cannot walk the sheep off it in
         // 20,000 ticks. That is not padding: at 5×5 the sheep reached the edge and
         // grazed at (-2, 0, -2), and outside the patch there is no floor at all,
         // so a narrower world tests falling rather than grazing.
@@ -12253,7 +11608,7 @@ mod block_cues_tests {
         // candidates, so they carry no information about which one this is; only
         // the height distinguishes the mob's feet (`0`) from the grass block it
         // stands on (`-1`). An earlier draft of this pinned the full triple to
-        // `(0, 0, 0)` and failed at `(-2, 0, -2)` — `RandomStrollGoal` had walked
+        // `(0, 0, 0)` and failed at `(-2, 0, -2)` — idle wandering had walked
         // the sheep two blocks before it grazed, so that assertion was testing a
         // false premise (that the mob holds still) rather than the handoff.
         let (pos, _what) = grazes[0];
@@ -12279,9 +11634,8 @@ mod block_cues_tests {
     }
 }
 
-/// Issue #237's residue: the age-scaled hitbox and the baby-only movement
-/// modifier, which nothing exercised before `species_shape`/`SimMob::set_age`
-/// gained an `is_baby` fold.
+/// Age-scaled hitbox and baby-only movement modifier, including the
+/// `species_shape`/`SimMob::set_age` path that applies `is_baby`.
 #[cfg(test)]
 mod baby_shape_tests {
     use super::*;
@@ -12492,7 +11846,7 @@ mod baby_shape_tests {
 
         // Exercises `resolve_breeding`'s own partner search and
         // `child.set_age(BABY_START_AGE)` call directly — the real
-        // production path a `BreedGoal` completing feeds through
+        // production path a breeding goal completing feeds through
         // `MobSim::tick`, without re-driving sixty ticks of love-mode timing
         // just to reach it.
         sim.resolve_breeding(vec![(
@@ -12640,16 +11994,14 @@ mod baby_metadata_tests {
     }
 }
 
-/// Issue #236: lead attach/detach, the fence-knot re-parent, and the
+/// Lead attach/detach, the fence-knot re-parent, and the
 /// distance-based pull/snap physics.
 #[cfg(test)]
 mod leash_tests {
     use super::*;
 
-    /// A real floor (issue: living mobs now fall when idle, see
-    /// `NavigatingMob::advance`'s no-waypoint branch) — this fixture used to
-    /// be a bare void `ChunkWorld`, which was harmless only because an idle
-    /// mob never touched `pos.y` at all. `-8..=24`/`-8..=8` covers every
+    /// A real floor makes living mobs fall when idle (see
+    /// `NavigatingMob::advance`'s no-waypoint branch). `-8..=24`/`-8..=8` covers every
     /// coordinate this module's own tests spawn a mob at, with margin.
     fn flat_world() -> ChunkWorld {
         let mut world = ChunkWorld::new(-64, 384);
@@ -12915,7 +12267,7 @@ mod leash_tests {
     }
 }
 
-/// Issue #240's entity-spawn slice: the trader plus its leashed llama
+/// Entity-spawn slice: the trader plus its leashed llama
 /// escort. The spawn-cycle timing/POI search is out of scope here — see
 /// `spawn_wandering_trader`'s own doc comment.
 #[cfg(test)]
@@ -12993,11 +12345,9 @@ mod wandering_trader_tests {
     }
 }
 
-/// `MobSim`'s periodic idle-vocalisation producer (`roll_ambient_sound`,
-/// wired into [`MobSim::tick`]) — closing the gap the audit behind issue #664
-/// found: hurt and death were the only mob sounds a running server could ever
-/// produce, so ordinary exploration with no combat was silent but for
-/// footsteps.
+/// `MobSim`'s periodic idle-vocalisation producer (`roll_ambient_sound`),
+/// wired into [`MobSim::tick`], emits ambient sounds during ordinary
+/// exploration in addition to hurt and death sounds.
 #[cfg(test)]
 mod ambient_sound_tests {
     use super::*;
@@ -13117,7 +12467,7 @@ mod ambient_sound_tests {
     }
 }
 
-/// Issues #244/#246/#247: gossip, reputation and zombie-villager curing,
+/// Gossip, reputation and zombie-villager curing,
 /// driven through real production entry points
 /// (`MobSim::interact`/`MobSim::tick`/`MobSim::attack_from_player`) rather
 /// than calling `villager::gossip`/`villager::reputation`/`villager::conversion`
@@ -13244,15 +12594,14 @@ mod villager_gossip_reputation_and_curing_tests {
         }
     }
 
-    /// **The whole timer, driven through the real production `tick()` loop**
-    /// — not a direct call to `villager::conversion::conversion_progress`.
-    /// The countdown is shortcut to a handful of ticks (private-field access,
-    /// same crate) purely so this test does not need 3600+ iterations; the
-    /// *mechanism* ticked is the same one production drives. A completed
-    /// conversion must: flip `entity_type` to `minecraft:villager`, seed
-    /// gossip with the curer's `ZombieVillagerCured` entries (issue #247's
-    /// hook into #244/#246), apply Nausea (the "confusion" state the issue's
-    /// own body names), and publish `LevelEvent(SOUND_ZOMBIE_CONVERTED)`
+    /// **The whole timer, driven through the production `tick()` loop** rather
+    /// than a direct call to `villager::conversion::conversion_progress`.
+    /// The countdown uses a handful of ticks (private-field access, same crate)
+    /// so this test does not need 3600+ iterations; the *mechanism* ticked is
+    /// the same one production drives. A completed conversion must flip
+    /// `entity_type` to `minecraft:villager`, seed gossip with the curer's
+    /// `ZombieVillagerCured` entries, apply nausea (the "confusion" state), and publish
+    /// a conversion-sound level event
     /// through the same queue production drains.
     #[test]
     fn a_completed_conversion_becomes_a_real_villager_with_seeded_gossip() {
@@ -13322,7 +12671,7 @@ mod villager_gossip_reputation_and_curing_tests {
         assert_eq!(sim.villager_reputation(id, player), 2, "trading grants 2 * weight(1) = 2");
     }
 
-    /// `MobSim::attack_from_player` (issue #246): hurting a real villager
+    /// `MobSim::attack_from_player`: hurting a real villager
     /// writes negative gossip onto **that villager's own** ledger about the
     /// attacker — driven through the real hit pipeline
     /// (`apply_damage`/`note_hurt`), not a direct `apply_reputation_event`
@@ -13371,9 +12720,9 @@ mod villager_gossip_reputation_and_curing_tests {
         );
     }
 
-    /// Issue #244: two villagers close enough to gossip, driven through the
-    /// real `tick()` loop's `spread_villager_gossip` pass, actually exchange
-    /// ledger entries — not a direct `GossipContainer::transfer_from` call.
+    /// Two villagers close enough to gossip exchange ledger entries through the
+    /// real `tick()` loop's `spread_villager_gossip` pass, exercising the
+    /// integrated producer and consumer path.
     #[test]
     fn two_nearby_villagers_spread_gossip_through_the_real_tick_loop() {
         let world = flat_world();
@@ -13476,8 +12825,8 @@ mod allay_carrying_tests {
         }
     }
 
-    /// Vanilla's `hasItemInSlot(EquipmentSlot.MAINHAND)` gate, the "carrying"
-    /// half of issue #230: an empty-handed allay given an item must take it
+    /// The empty-handed allay "carrying" interaction path: an allay given an
+    /// item must take it
     /// into its main hand, consume the item, and report `ItemGiven`.
     #[test]
     fn giving_an_empty_handed_allay_an_item_makes_it_hold_that_item() {
@@ -13570,8 +12919,7 @@ mod allay_carrying_tests {
         assert!(sim.get(id).expect("still alive").mob.main_hand_item().is_none());
     }
 
-    /// Vanilla's own allay-specific "wants to pick up" check / its own "pick
-    /// up item" inventory-carrier helper: a carrying allay
+    /// An allay-specific pickup check: a carrying allay
     /// with a matching item dropped right next to it absorbs the whole
     /// stack into [`SimMob::allay_inventory_count`] and the ground item is
     /// gone, driven through the real production path (`MobSim::tick` →
@@ -13694,11 +13042,8 @@ mod allay_carrying_tests {
         assert_eq!(sim.item_count(), 0);
     }
 
-    /// Vanilla's own allay interaction override's duplication arm (issue #230), through the real
-    /// production path — driven with the disclosed `isDancing()`
-    /// substitution `InteractOutcome::AllayDuplicated`'s own doc names
-    /// (a live `allay_liked_noteblock` standing in for a jukebox-driven
-    /// dance this crate does not model). An amethyst shard on such an allay
+    /// **The allay duplication arm, through the production path** — driven by
+    /// `allay_liked_noteblock` as the dance signal. An amethyst shard on such an allay
     /// must spawn a second, real allay and consume the shard.
     #[test]
     fn an_amethyst_shard_duplicates_an_allay_that_recently_heard_a_noteblock() {
@@ -13764,7 +13109,8 @@ mod allay_carrying_tests {
     }
 }
 
-/// Issue #231: vanilla's own villager-panic trigger's golem-summon-on-hurt.
+/// Villager hurt or nearby-hostile conditions can summon an iron golem through
+/// the integrated mob-simulation path.
 #[cfg(test)]
 mod golem_summon_tests {
     use super::*;
@@ -13899,13 +13245,9 @@ mod golem_summon_tests {
     }
 }
 
-/// Issue #229: the cat morning-gift and parrot shoulder-ride host wiring —
-/// driven through one real [`MobSim::tick`], not by calling the resolver
-/// methods directly, so this measures the drain-and-resolve production path
-/// (`take_gift_requested`/`take_shoulder_ride_requested` → `gift_requests`/
-/// `shoulder_requests` → `resolve_cat_gifts`/`resolve_shoulder_mounts`), the
-/// exact seam CLAUDE.md's island warnings are about: a goal that requests
-/// and a host that never drains the request is zero pixels either way.
+/// Cat gift and parrot shoulder-ride requests are drained and resolved by the
+/// real [`MobSim::tick`] loop, covering the production connection between
+/// request producers and host consumers.
 #[cfg(test)]
 mod cat_gift_and_shoulder_tests {
     use super::*;
@@ -14054,8 +13396,7 @@ mod cat_gift_and_shoulder_tests {
 
     /// The 20-tick minimum-ride grace period, isolated: an owner reported
     /// asleep on the *same* tick the parrot mounts must not dismount it
-    /// immediately — vanilla's own `timeEntitySatOnShoulder + 20 <
-    /// gameTime` guard.
+    /// immediately — the `mounted_tick + 20 < game_tick` grace-period guard.
     #[test]
     fn a_freshly_mounted_parrot_does_not_dismount_before_the_grace_period() {
         let world = flat_world();
@@ -14093,8 +13434,8 @@ mod cat_gift_and_shoulder_tests {
     }
 }
 
-/// Issue #229: `CatSitOnBlockGoal`/`CatLieOnBedGoal`'s host-computed block
-/// search (`MobSim::tick_cat_block_search`).
+/// The cat block search (`MobSim::tick_cat_block_search`) uses a host-computed
+/// candidate position.
 #[cfg(test)]
 mod cat_block_search_tests {
     use super::*;
@@ -14253,11 +13594,9 @@ mod cat_block_search_tests {
     }
 }
 
-/// Issue #241's raid trigger: proves `tick_villager_beds`/`occupied_homes_in_range`
-/// are wired into the real per-tick [`MobSim`] loop, not merely correct as
-/// standalone functions — the same shape `cat_block_search_tests` already
-/// proves for the cat's own bounded terrain search, and the island class
-/// `DESIGN.md` warns a crate's own function-level tests cannot rule out.
+/// Villager bed claiming runs through `tick_villager_beds` and
+/// `occupied_homes_in_range` in the real per-tick [`MobSim`] loop, exercising
+/// the integrated path rather than standalone helpers.
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod villager_bed_claim_tests {
     use super::*;
@@ -14345,7 +13684,7 @@ mod villager_bed_claim_tests {
     }
 }
 
-/// Issue #231's WORK/MEET/REST schedule: proves the chain claimed-POI ->
+/// WORK/MEET/REST schedule: proves the chain claimed-POI ->
 /// `MobSim::set_day_time` -> `crate::brain::roster::villager_brain`'s
 /// schedule -> `WalkToPoi`/`MoveToTargetSink` -> a real position change
 /// reaches a real, spawned villager through `MobSim::tick`, the same
@@ -14481,8 +13820,8 @@ mod villager_schedule_tests {
         let final_distance = horizontal_distance(sim.get(id).expect("spawned").position(), bell_center);
 
         // `WalkToPoi::new(MEETING_POINT, …, 6)` — a tighter close-enough
-        // radius than the job site's `9`, matching `VillagerGoalPackages
-        // .getMeetPackage`'s own `SetWalkTargetFromBlockMemory` call.
+        // radius than the job site's `9`, which is the meeting-point walk
+        // target's range.
         assert!(
             final_distance <= 7.5,
             "a villager meeting at its claimed bell should stop within WalkToPoi's own \
@@ -14498,8 +13837,8 @@ mod villager_schedule_tests {
 
     /// The schedule's own negative control: a villager with **no** claimed
     /// job site (nothing nearby to claim) never becomes `WORK`-eligible —
-    /// vanilla's own generic villager class's own "job site memory must be
-    /// present" activity requirement — so it stays wherever `IDLE`'s random stroll leaves
+    /// the generic villager activity requirement that a job-site memory be
+    /// present — so it stays wherever `IDLE`'s random stroll leaves
     /// it: never *reliably* walking toward a fixed faraway point regardless
     /// of the clock. Asserted as "never claims a workstation", the
     /// discriminating fact this control actually has available deterministically
@@ -14524,10 +13863,8 @@ mod villager_schedule_tests {
     }
 }
 
-/// Issue #459's vibration substrate: proves `reap_dead`'s real producer and
-/// `resolve_vibrations`'s host-side resolution are wired into the real
-/// per-tick [`MobSim`] loop, the same not-an-island bar
-/// `villager_bed_claim_tests` already sets for bed claiming.
+/// Vibration events produced by `reap_dead` reach `resolve_vibrations` through
+/// the real per-tick [`MobSim`] loop.
 #[cfg(test)]
 mod vibration_substrate_tests {
     use super::*;
@@ -14575,9 +13912,7 @@ mod vibration_substrate_tests {
     }
 
     /// Control: an ordinary land animal with no special-cased goals gets
-    /// neither flag — the fix must not have flipped the defaults on for
-    /// everything, which would be just as wrong as the original all-`false`
-    /// bug (a pig should not open doors).
+    /// neither flag; the defaults are off for all species in this case.
     #[test]
     fn a_plain_animal_still_cannot_open_doors() {
         let world = flat_world();
@@ -14585,12 +13920,12 @@ mod vibration_substrate_tests {
         let pig = spawn(&mut sim, "pig", Vec3::new(0.0, 0.0, 0.0));
         let shape = sim.get(pig).expect("spawned").shape();
         assert!(!shape.can_open_doors);
-        // Pigs still register `FloatGoal` in vanilla, so this one is `true`.
+        // Pigs retain floating behavior, so this one is `true`.
         assert!(shape.can_float);
     }
 
     /// Vanilla's own bee spawn-finalization's malus table (`WATER` -1, `FENCE` -1) is the
-    /// path-malus half of the fix: before it, `malus_overrides` had zero
+    /// path-malus behavior: `malus_overrides` has entries for
     /// `.insert` calls anywhere in the workspace, so every mob pathed as if
     /// nothing were dangerous. `PathType::malus`'s own default for `Water` is
     /// `8.0` (costly but passable) and for `Fence` is `-1.0` already, so
@@ -14648,8 +13983,8 @@ mod vibration_substrate_tests {
     }
 
     /// The roll must survive [`SimMob::set_age`]'s baby/adult shape refresh —
-    /// before the fix, growing up would silently re-derive the static
-    /// species default and discard a `true` roll.
+    /// The age transition must preserve the sampled roll rather than re-derive the
+    /// static species default and discard a `true` value.
     #[test]
     fn a_zombie_s_door_roll_survives_growing_up() {
         let world = flat_world();
@@ -14672,14 +14007,14 @@ mod vibration_substrate_tests {
         );
     }
 
-    /// Vanilla's own zombie hurt-handler's reinforcement call (issue #223/#691): only the
-    /// *roll* is this sim's job — see `ReinforcementCall`'s own doc for the
-    /// decide-here/place-there split. Hard difficulty, `spawn_mobs` enabled,
+    /// Zombie reinforcement: only the *roll* is this sim's job — see
+    /// `ReinforcementCall` for the decide-here/place-there split. Hard
+    /// difficulty, `spawn_mobs` enabled,
     /// and `reinforcement_chance` pinned to `1.0` (`next_f32() < 1.0` always
     /// holds in `[0.0, 1.0)`, so this is exact, not statistical) must queue
     /// exactly one call carrying the zombie's own type, position and — no AI
     /// target set on this mob — the attacking player's own entity id as the
-    /// fallback (vanilla's own hurt-handler's own "no live target" clause).
+    /// fallback when no live target is available.
     #[test]
     fn a_hurt_zombie_calls_a_reinforcement_when_the_roll_passes() {
         let world = flat_world();
@@ -14850,7 +14185,7 @@ mod vibration_substrate_tests {
     }
 }
 
-/// Issue #232: the elder guardian's mining-fatigue aura,
+/// The elder guardian's mining-fatigue aura,
 /// vanilla's own elder-guardian AI step calling
 /// its own "add effect to players around" helper.
 #[cfg(test)]
@@ -15003,11 +14338,9 @@ mod elder_guardian_mining_fatigue_tests {
     }
 }
 
-/// Issue #230's own remainder: vanilla's own goat spawn-finalization's pre-broken-horn roll,
-/// and the metadata field ([`crate::protocol::MetadataField::GoatHorns`])
-/// that reaches the client — wired end to end through a real
-/// `MobSim::spawn_species` call, the same not-an-island bar every other
-/// producer test in this file sets.
+/// Goat spawn-finalization's pre-broken-horn roll and the metadata field
+/// ([`crate::protocol::MetadataField::GoatHorns`]) that reaches the client.
+/// The test wires both through a real [`MobSim::spawn_species`] call.
 #[cfg(test)]
 mod goat_horn_tests {
     use super::*;

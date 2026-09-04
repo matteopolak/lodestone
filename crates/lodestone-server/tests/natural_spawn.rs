@@ -1,4 +1,4 @@
-//! Acceptance gate for the natural spawn cycle (issues #221, #222).
+//! Acceptance gate for the natural spawn cycle.
 //!
 //! The engine halves (cap arithmetic, despawn gates) are already gated by
 //! `mob_spawn.rs`. What was missing — and what this covers — is that something

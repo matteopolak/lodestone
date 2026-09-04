@@ -1,25 +1,22 @@
-//! Server-side `doClick`: the menu state machine that *derives* the result of a
+//! Server-side container-click state machine that *derives* the result of a
 //! container click instead of believing the client's claimed slot diff.
 //!
 //! # What it is
 //!
-//! A port of vanilla's own container-menu click dispatch
-//! over a flat, menu-ordered slot vector.
+//! The click dispatcher evaluates container actions over a flat,
+//! menu-ordered slot vector.
 //!
-//! Before this module `apply_container_clicked` applied the client's own
-//! `changed_slots` map: the client had already run `doClick` locally, and the
-//! server stored whatever it said each slot now contained. Issue #529 closed the
-//! *crafting result* half of that (a claimed result was dropped and the server's
-//! own value pushed back), and left the general hole open in writing: **a client
-//! could mint any item in any ordinary slot by sending a container diff naming
-//! it.** This closes it, in the only way that actually closes it — by re-running
-//! the click from the button input.
+//! `apply_container_clicked` treats the client's `changed_slots` map as a claim,
+//! not as authority: the server recomputes the click from its button input and
+//! sends its own slot values back. The crafting-result branch follows the same
+//! rule, dropping a claimed result and restoring the server-computed value, so a
+//! client cannot mint an item by naming it in an ordinary slot.
 //!
 //! # How it works
 //!
 //! [`MenuLayout`] says what each menu index *is* ([`SlotKind`]) for the three menu
 //! shapes this crate opens: the player screen (window `0`), a block-entity
-//! container, and a crafting table. [`do_click`] then runs vanilla's state machine
+//! container, and a crafting table. [`do_click`] then runs the click rules
 //! over a `Vec<Option<ItemStack>>` in that ordering, plus a [`ClickState`] holding
 //! the cursor and the in-progress drag.
 //!
@@ -28,7 +25,7 @@
 //! both, and routes a grid write through [`crate::crafting::CraftingState::set_input`]
 //! so the result slot is re-derived rather than copied.
 //!
-//! **The client's `changed_slots` map is not read at all any more.** It is compared
+//! **The client's `changed_slots` map is not read.** It is compared
 //! against the derived state purely to decide whether a correcting
 //! `container_set_content` is worth sending — so an honest client sees no extra
 //! traffic and a lying one is corrected on the same packet.
@@ -36,80 +33,61 @@
 //! # How to change it
 //!
 //! Adding a menu shape means a [`MenuKind`] variant, its [`MenuLayout`]
-//! constructor, and its arm in [`MenuLayout::quick_move_targets`] (vanilla's
-//! per-menu `quickMoveStack`). Nothing else in this module is menu-specific.
+//! constructor, and its arm in [`MenuLayout::quick_move_targets`]. Nothing
+//! else in this module is menu-specific.
 //!
 //! ## Gotchas
 //!
-//! * **The result slot is take-only and taking it consumes the grid.** Vanilla does
-//!   this in `ResultSlot.onTake` → `CraftingContainer.removeItem`; here it is
-//!   [`take_result`]. Before the server derived clicks, `apply_container_clicked`
-//!   deliberately did *not* consume, because the client's diff already carried the
-//!   shrunk cells — that comment is now wrong and the consume is required.
-//! * **Take-only is not un-clickable, and the difference was a shipped bug.**
-//!   `ResultSlot.mayPlace` is `false` and `ResultSlot.onTake` is what decrements the
-//!   grid: a click *on* the result is how you craft. [`do_click`] always modelled the
-//!   take; what was missing is that the result slot is **live inside one click**.
-//!   Vanilla's quick-move arm loops its own quick-move-stack routine *while the clicked slot still
-//!   holds the same item*, and that loop only
-//!   terminates because `slotsChanged` refills slot `0` between iterations — which is
-//!   how shift-clicking a result crafts until the grid empties. So a caller that owns
+//! * **The result slot is take-only and taking it consumes the grid.** The server
+//!   performs that operation in [`take_result`]. The grid cells are decremented by
+//!   the server-side result path, so the client's claimed diff cannot substitute
+//!   for the consume operation.
+//! * **Take-only is not un-clickable.**
+//!   The result slot rejects direct placement and its take operation decrements
+//!   the grid: a click *on* the result is how you craft. [`do_click`] models
+//!   the take; the result slot is **live inside one click**.
+//!   Shift-clicking repeats while the clicked slot still holds an item, and the
+//!   loop terminates when refilling the result slot produces no item. So a caller that owns
 //!   a recipe corpus passes it to [`do_click_with`]; [`do_click`] itself keeps the
-//!   recipe-free behaviour (one craft per click) for callers that have none.
+//!   recipe-free behavior (one craft per click) for callers that have none.
 //! * **`may_place` on an armour slot is a real restriction**, checked against
-//!   `lodestone_data::item_prototypes`' `equip_slot` (vanilla's `ArmorSlot.mayPlace`).
+//!   `lodestone_data::item_prototypes`' `equip_slot`.
 //!   Allowing anything there lets a boot go on your head, which reads as a
 //!   rendering bug.
 //! * **Max stack size is per item**, from the same prototype table. Defaulting to
 //!   64 would let the server itself derive a 64-stack of swords — not minting, but
 //!   the same duplication with extra steps.
-//! * **`tryItemClickBehaviourOverride` (bundles) is modelled for `PICKUP` only**,
-//!   the one arm vanilla itself calls it from — [`pickup`]'s own
-//!   [`bundle_stacked_on_other`]/[`bundle_other_stacked_on_me`] hooks, gated on
+//! * **Bundle-specific click behavior is modelled for `PICKUP` only**, the one
+//!   arm that invokes `pickup`'s own
+//!   `bundle_stacked_on_other`/`bundle_other_stacked_on_me` hooks, gated on
 //!   [`SelectedBundleIndex`]. `QUICK_MOVE`/`THROW`/drag never call
-//!   `tryItemClickBehaviourOverride` in vanilla either, so a bundle shift-clicked
-//!   or thrown behaves as an ordinary stack, matching real behaviour rather than
-//!   a gap.
-//! * **What is deliberately *not* modelled**: `canDropItems`, the tutorial
-//!   hooks, and the drop-into-the-world *entity* (a `Throw` or an outside-click
+//!   hooks; other click modes treat a bundle as an ordinary stack.
+//! * **What is deliberately *not* modelled**: menu-level drop permissions, tutorial
+//!   hooks, and the drop-into-the-world *entity* (a throw or an outside-click
 //!   yields its stacks in [`do_click`]'s return value and the caller decides
 //!   what to do with them). Also unmodelled:
-//!   creative-mode `Clone` is gated on the caller's `creative` flag, matching
-//!   `player.hasInfiniteMaterials()`.
-//! * **`Slot.mayPickup` is modelled as a caller-supplied hook, [`MayPickup`],
-//!   threaded through [`do_click_with`] the same shape [`ResultRecipe`]
-//!   already is.** Vanilla's own use of it is per-slot, not uniform: every
-//!   slot but one defaults to `true` (`Slot.mayPickup`'s own base
-//!   implementation), and the one override that exists tree-wide is
-//!   the anvil menu's result-slot pickup gate:
-//!   `(player.hasInfiniteMaterials() || player.experienceLevel >=
-//!   this.cost.get()) && this.cost.get() > 0`. A caller
-//!   with nothing to gate passes `None`, matching every slot's default; the
-//!   anvil economy in `crate::server` passes `Some` closing over the
-//!   player's current XP level and the anvil's live `cost`
-//!   (`crate::anvil::compute`'s own `cost` field, re-derived the same way
-//!   the result itself is, never stored). The armor slot's own pickup gate (refuses a
-//!   take while the piece carries `minecraft:prevent_armor_change` and the
-//!   wearer is not creative) is a separate, smaller gap
-//!   this hook could also close but does not yet.
+//!   creative-mode cloning is gated on the caller's `creative` flag.
+//! * **Slot pickup permission is modelled as a caller-supplied hook, [`MayPickup`],
+//!   threaded through [`do_click_with`] alongside [`ResultRecipe`].** Pickup
+//!   permission is per-slot, not uniform: every slot defaults to `true`, and a
+//!   workstation result slot can require
+//!   `(creative || experience_level >= cost) && cost > 0`. A caller with
+//!   nothing to gate passes `None`, matching every slot's default; the anvil
+//!   economy in `crate::server` passes `Some` closing over the player's current
+//!   XP level and the live `cost` value. The armor slot's own pickup gate
+//!   (refusing a take while the piece carries
+//!   `minecraft:prevent_armor_change` and the wearer is not creative) is a
+//!   separate restriction outside this hook.
 //!
-//!   **Where the hook is actually checked, one per vanilla take path** (not
-//!   uniformly at one choke point, because vanilla itself does not check it
-//!   at one choke point): [`take_from`] (covers [`pickup`]'s two take
-//!   branches, `THROW`, and [`pickup_all`]'s per-target gather — vanilla's
-//!   `Slot.safeTake` → `tryRemove` → `mayPickup`), [`quick_move`] (checked
-//!   once, before the shift-click repeat loop begins — vanilla's own explicit
-//!   `if (!slot.mayPickup(player)) return;` ahead of `quickMoveStack`, *not*
-//!   re-checked inside the loop even though the anvil's own `onTake` resets
-//!   `cost` to `0` mid-loop), and [`swap`] (the two arms that take the
-//!   clicked slot's existing item — vanilla's `target.mayPickup(player)`).
-//!   [`pickup_all`]'s outer double-click trigger and its gather loop already
-//!   skip every [`SlotKind::Result`] unconditionally (a pre-existing,
-//!   over-conservative deviation from vanilla's own `target.mayPickup`-gated
-//!   loop — vanilla *can* gather a mayPickup-true result into a matching
-//!   cursor stack, this module never does), so the anvil result can never
-//!   leave through `PICKUP_ALL` regardless of the hook; left as is, since
-//!   loosening it is a separate, non-security-relevant change.
+//!   **Where the hook is checked, once per take path**: `take_from` (covers
+//!   `pickup`'s two take branches, a throw, and `pickup_all`'s per-target
+//!   gather), `quick_move` (checked once before the shift-click repeat loop
+//!   begins), and `swap` (the two arms that take the clicked slot's existing
+//!   item).
+//!   `pickup_all`'s outer double-click trigger and its gather loop already
+//!   skip every [`SlotKind::Result`] unconditionally. Result slots therefore
+//!   never leave through `PICKUP_ALL` regardless of the hook; that restriction
+//!   keeps result production in the dedicated take path.
 //!
 //! # Dependencies
 //!
@@ -134,53 +112,46 @@ pub enum SlotKind {
     Result,
 }
 
-/// Which menu shape a layout describes. Selects the quick-move routing, which is
-/// the only genuinely per-menu behaviour in vanilla's `doClick` family.
+/// Which menu shape a layout describes. Selects the quick-move routing, the
+/// menu-specific behavior in the click state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MenuKind {
-    /// `InventoryMenu` — window `0`.
+    /// The player inventory window (`0`).
     Player,
     /// A `generic_9x3`/furnace/hopper style menu with `size` own slots.
     Container {
         /// Number of the block entity's own slots, before the player tail.
         size: usize,
     },
-    /// `CraftingMenu` — a crafting table's 3×3.
+    /// A crafting table's 3×3 grid.
     CraftingTable,
-    /// `ItemCombinerMenu`'s three positionless-scratch shapes (workstation
-    /// economy, issues #253-#255): `inputs` grid cells then one take-only
-    /// result, exactly `ItemCombinerMenu`'s own
-    /// `getInventorySlotStart() == resultSlot + 1` (`docs/container-cost-screens.md`
-    /// already documents this for the client-side layout; this is the same
-    /// shape for the server's own slot algebra).
+    /// A workstation with `inputs` scratch cells followed by one take-only
+    /// result. The result follows the input cells directly in the menu layout;
+    /// this is also the layout used by the client-side cost screens.
     ItemCombiner {
         /// `2` for the anvil/grindstone, `3` for the smithing table.
         inputs: usize,
         /// Which station's `may_place`/quick-move/take rules apply.
         station: Station,
     },
-    /// `EnchantmentMenu`'s two slots: item (any, capped to a stack of one) and
+    /// An enchanting screen's two slots: item (any, capped to a stack of one) and
     /// lapis. **No result slot** — unlike the other three, nothing is *taken*
     /// here; the item slot is enchanted in place. Positionless scratch space,
-    /// same story as [`ItemCombiner`](Self::ItemCombiner).
+    /// the same layout pattern as [`ItemCombiner`](Self::ItemCombiner).
     Enchanting,
-    /// `BeaconMenu`'s one payment slot, then the standard 27+9 player tail —
+    /// A beacon's one payment slot, then the standard 27+9 player tail —
     /// the same shape as [`Container`](Self::Container) `{ size: 1 }` except
-    /// for its own restricted `may_place`/`max_stack_size` (issue #616's
-    /// remainder): only a [`crate::beacon::is_beacon_payment_item`] item, one
-    /// at a time. A distinct variant rather than reusing `Container` because
-    /// `Container`'s own `may_place` accepts anything (right, for a chest;
-    /// wrong here — vanilla's own `PaymentSlot.mayPlace`/`getMaxStackSize`
-    /// really do restrict it).
+    /// that the payment slot accepts only a
+    /// [`crate::beacon::is_beacon_payment_item`] item, one at a time. A distinct
+    /// variant keeps that payment-slot restriction separate from the generic
+    /// container slot, which accepts any item.
     ///
-    /// **Known gap**: `quick_move_targets` below reuses `Container`'s exact
-    /// two-range shift-click shape rather than `BeaconMenu.quickMoveStack`'s
-    /// own upfront `!paymentSlot.hasItem() && mayPlace && count == 1` gate,
-    /// so shift-clicking a stack of more than one payment-eligible item can
-    /// split one off into the slot where vanilla would skip straight to the
-    /// storage/hotbar shuffle instead. `may_place`/`max_stack_size` still
-    /// refuse the wrong item or a second one outright — only the *shift-click
-    /// routing* for a multi-item stack differs.
+/// **Shift-click limitation**: `quick_move_targets` below reuses the generic container's
+    /// two-range shift-click shape. A stack containing several eligible payment
+    /// items can therefore place one item in the payment slot before the rest
+    /// follows the storage/hotbar route. `may_place` and `max_stack_size` still
+    /// reject the wrong item or a second item; only multi-item shift-click
+    /// routing differs.
     Beacon,
 }
 
@@ -193,10 +164,10 @@ pub enum Station {
     Anvil,
     Grindstone,
     Smithing,
-    /// `LoomMenu` — three input cells (banner, dye, pattern item), not two;
+    /// Looms use three input cells (banner, dye, pattern item), not two;
     /// see [`MenuLayout::item_combiner`]'s own `inputs` match.
     Loom,
-    /// `StonecutterMenu` — one input cell.
+    /// Stonecutters use one input cell.
     Stonecutter,
 }
 
@@ -208,7 +179,7 @@ pub struct MenuLayout {
 }
 
 impl MenuLayout {
-    /// `InventoryMenu`'s 46 slots: result `0`, the 2×2 grid `1..=4`, armour
+    /// The player menu has 46 slots: result `0`, the 2×2 grid `1..=4`, armour
     /// `5..=8` (head→feet), main storage `9..=35`, hotbar `36..=44`, off-hand `45`.
     #[must_use]
     pub fn player() -> Self {
@@ -226,8 +197,7 @@ impl MenuLayout {
     }
 
     /// A block-entity menu: `size` own slots, then the standard 27 main-storage +
-    /// 9 hotbar tail every `addStandardInventorySlots` menu appends. Never armour
-    /// or off-hand — only `InventoryMenu` exposes those.
+    /// 9 hotbar tail. Block-entity menus have no armour or off-hand slots.
     #[must_use]
     pub fn container(size: usize) -> Self {
         let mut slots: Vec<SlotKind> = (0..size).map(SlotKind::Container).collect();
@@ -239,7 +209,7 @@ impl MenuLayout {
         }
     }
 
-    /// `CraftingMenu`'s 46 slots: result `0`, the 3×3 grid `1..=9`, main storage
+    /// The crafting-table layout has 46 slots: result `0`, the 3×3 grid `1..=9`, main storage
     /// `10..=36`, hotbar `37..=45`.
     #[must_use]
     pub fn crafting_table() -> Self {
@@ -253,12 +223,11 @@ impl MenuLayout {
         }
     }
 
-    /// One `ItemCombinerMenu` shape: `station`'s own input-cell count grid
+    /// One item-combiner shape: `station`'s own input-cell count grid
     /// cells (`Anvil`/`Grindstone` 2, `Smithing` 3), then one take-only
     /// result, then the standard 27+9 player tail
-    /// (`addStandardInventorySlots(inventory, 8, 84)`, identical for all
-    /// three — the anvil/grindstone/smithing/enchanting screens all place the
-    /// player section at the same `y = 84`, per `docs/container-cost-screens.md`).
+    /// The three supported two-input stations use the same 27+9 player tail;
+    /// see `docs/container-cost-screens.md` for the measured screen layout.
     #[must_use]
     pub fn item_combiner(station: Station) -> Self {
         let inputs = match station {
@@ -276,7 +245,7 @@ impl MenuLayout {
         }
     }
 
-    /// `EnchantmentMenu`'s two slots (`15,47` item, `35,47` lapis) then the
+    /// An enchanting screen has two slots (`15,47` item, `35,47` lapis) then the
     /// standard 27+9 player tail. See [`MenuKind::Enchanting`]'s own doc for
     /// why there is no result slot.
     #[must_use]
@@ -290,8 +259,8 @@ impl MenuLayout {
         }
     }
 
-    /// `BeaconMenu`'s one payment slot (menu index `0`) then the standard
-    /// 27+9 player tail (`addStandardInventorySlots(inventory, 36, 137)`).
+    /// A beacon has one payment slot (menu index `0`) then the standard 27+9
+    /// player tail.
     #[must_use]
     pub fn beacon() -> Self {
         let mut slots = vec![SlotKind::Container(0)];
@@ -326,11 +295,11 @@ impl MenuLayout {
         self.slots.iter().copied().enumerate()
     }
 
-    /// `Slot.mayPlace` — whether `item` may be *put into* menu index `index`.
+    /// Whether `item` may be *put into* menu index `index`.
     ///
     /// Three real restrictions: the result slot takes nothing, an armour slot takes
-    /// only an item whose `Equippable.slot()` is that armour slot
-    /// (`ArmorSlot.mayPlace`), and the off-hand takes anything.
+    /// only an item whose prototype equipment slot matches that armour slot, and the
+    /// off-hand takes anything.
     #[must_use]
     fn may_place(&self, index: usize, item: &ItemStack) -> bool {
         match self.kind_of(index) {
@@ -341,19 +310,19 @@ impl MenuLayout {
             },
             Some(SlotKind::Grid(cell)) => match self.kind {
                 MenuKind::ItemCombiner { station, .. } => item_combiner_may_place(station, cell, item),
-                // `EnchantmentMenu`'s lapis slot: `itemStack.is(Items.LAPIS_LAZULI)`.
+                // The enchanting lapis slot accepts only lapis lazuli.
                 MenuKind::Enchanting if cell == 1 => item.item.to_string() == "minecraft:lapis_lazuli",
                 _ => true,
             },
             Some(SlotKind::Container(idx)) => match self.kind {
-                // `BeaconMenu.PaymentSlot.mayPlace`.
+                // The beacon payment slot accepts only registered payment items.
                 MenuKind::Beacon => idx == 0 && crate::beacon::is_beacon_payment_item(&item.item.to_string()),
                 _ => true,
             },
         }
     }
 
-    /// `Slot.getMaxStackSize(stack)` — the per-item cap, from
+    /// The per-item stack cap, from
     /// `lodestone_data::item_prototypes`.
     ///
     /// A menu with a smaller cap than the item's own (vanilla's furnace-fuel slot
@@ -361,13 +330,13 @@ impl MenuLayout {
     /// opens narrows it.
     #[must_use]
     fn max_stack_size(&self, index: usize, item: &ItemStack) -> u32 {
-        // `EnchantmentMenu`'s item slot overrides `getMaxStackSize()` to `1`
+        // The enchanting item slot is capped at one
         // regardless of the item's own cap — the table only ever enchants one
         // item at a time.
         if self.kind == MenuKind::Enchanting && self.kind_of(index) == Some(SlotKind::Grid(0)) {
             return 1;
         }
-        // `BeaconMenu.PaymentSlot.getMaxStackSize` overrides to `1`
+        // The beacon payment slot is also capped at one
         // regardless of the item's own cap, the same override shape as the
         // enchanting table's item slot above.
         if self.kind == MenuKind::Beacon && self.kind_of(index) == Some(SlotKind::Container(0)) {
@@ -379,13 +348,13 @@ impl MenuLayout {
     /// The `[start, end)` ranges a shift-click from `index` moves into, in the
     /// order tried, each with whether the scan runs backwards.
     ///
-    /// One arm per menu, transcribed from that menu's own `quickMoveStack`. The
-    /// `InventoryMenu` armour-equip and off-hand branches are included: they are
+    /// One arm per menu, with the armour-equip and off-hand branches included:
+    /// they are
     /// what makes shift-clicking a helmet wear it.
     #[must_use]
     fn quick_move_targets(&self, index: usize, item: &ItemStack) -> Vec<(usize, usize, bool)> {
         match self.kind {
-            // `InventoryMenu.quickMoveStack`.
+            // Player-menu quick-move behavior.
             MenuKind::Player => {
                 let equip = equip_slot_of(item);
                 if index == 0 {
@@ -410,7 +379,7 @@ impl MenuLayout {
                 }
                 vec![(9, 45, false)]
             }
-            // `ChestMenu`/`AbstractFurnaceMenu`/`HopperMenu`: own slots one way,
+            // Container menus: own slots one way,
             // the player tail the other.
             MenuKind::Container { size } => {
                 if index < size {
@@ -419,7 +388,7 @@ impl MenuLayout {
                     vec![(0, size, false)]
                 }
             }
-            // `CraftingMenu.quickMoveStack`.
+            // Crafting-table shift-click behavior.
             MenuKind::CraftingTable => {
                 if index == 0 {
                     return vec![(10, 46, true)];
@@ -435,7 +404,7 @@ impl MenuLayout {
                 }
                 vec![(10, 46, false)]
             }
-            // `ItemCombinerMenu.quickMoveStack`: result shifts out backwards into
+            // Item-combiner shift-click behavior: result shifts out backwards into
             // the player tail, a grid cell shifts forward into the tail, and a
             // tail slot tries the input cells first (`canMoveIntoInputSlots`,
             // approximated as always-attempted — the real gate is still
@@ -459,7 +428,7 @@ impl MenuLayout {
                     vec![(0, result, false), (tail_start, hotbar_start, false)]
                 }
             }
-            // `EnchantmentMenu.quickMoveStack`: either input slot shifts out
+            // Enchanting quick-move behavior: either input slot shifts out
             // backwards into the tail; lapis from the tail goes straight to slot
             // 1; anything else tries slot 0 first (capped to one item by
             // `max_stack_size`'s own override above).
@@ -472,10 +441,10 @@ impl MenuLayout {
                 }
                 vec![(0, 1, false), (2, self.slots.len(), false)]
             }
-            // `BeaconMenu.quickMoveStack`'s own shape, approximated as
+            // Beacon quick-move behavior, approximated as
             // `Container { size: 1 }`'s two-range form — see
             // [`MenuKind::Beacon`]'s own doc for the one known gap
-            // (vanilla's `count == 1` upfront gate is not reproduced; the
+            // (The `count == 1` upfront gate is not reproduced; the
             // payment slot's own `may_place`/`max_stack_size` still refuse
             // the wrong item or a second one).
             MenuKind::Beacon => {
@@ -489,18 +458,14 @@ impl MenuLayout {
     }
 }
 
-/// `Slot.mayPlace` for one of [`MenuKind::ItemCombiner`]'s input cells —
-/// [`AnvilMenu`], [`GrindstoneMenu`] and [`SmithingMenu`]'s own
-/// `createInputSlotDefinitions`/anonymous `Slot` overrides.
+/// Whether an item fits one of [`MenuKind::ItemCombiner`]'s input cells.
 fn item_combiner_may_place(station: Station, cell: usize, item: &ItemStack) -> bool {
     match station {
-        // `AnvilMenu.createInputSlotDefinitions`: both slots accept anything.
+        // Anvils accept any item in both input cells.
         Station::Anvil => true,
-        // `GrindstoneMenu`'s two anonymous slots:
-        // `itemStack.isDamageableItem() || EnchantmentHelper.hasAnyEnchantments(itemStack)`.
+        // Grindstones accept damageable or enchanted items in either cell.
         Station::Grindstone => is_damageable(item) || !item.components.enchantments.is_empty(),
-        // `SmithingMenu.createInputSlotDefinitions`: one `RecipePropertySet` test
-        // per slot index.
+        // Smithing input cells use one item-property test per index.
         Station::Smithing => {
             let name = item.item.to_string();
             match cell {
@@ -509,7 +474,7 @@ fn item_combiner_may_place(station: Station, cell: usize, item: &ItemStack) -> b
                 _ => crate::smithing::is_addition(&name),
             }
         }
-        // `LoomMenu`'s three anonymous slots: banner, dye, pattern item —
+        // Loom input cells accept a banner, dye, or pattern item respectively —
         // each its own `mayPlace` override, none shared with the others.
         Station::Loom => {
             let name = item.item.to_string();
@@ -519,13 +484,12 @@ fn item_combiner_may_place(station: Station, cell: usize, item: &ItemStack) -> b
                 _ => crate::loom::is_pattern_item(&name),
             }
         }
-        // `StonecutterMenu`'s plain `Slot` (no `mayPlace` override at all —
-        // vanilla's own default is unconditionally `true`).
+        // Stonecutters accept any item in their single input cell.
         Station::Stonecutter => true,
     }
 }
 
-/// `ItemStack.isDamageableItem()` — has a `minecraft:max_damage` prototype,
+/// Whether the item has a `minecraft:max_damage` prototype,
 /// via the same census [`max_stack_size`] already reads.
 fn is_damageable(item: &ItemStack) -> bool {
     item.components.max_damage.is_some()
@@ -559,8 +523,7 @@ fn equip_slot_of(item: &ItemStack) -> Option<EquipmentSlot> {
     lodestone_data::item_prototypes::prototype(&item.item.to_string()).and_then(|p| p.equip_slot)
 }
 
-/// `ItemStack.getMaxStackSize()` — the item's own component override if it carries
-/// one, otherwise the jar-dumped prototype, otherwise 64.
+/// The item's own stack limit: a component override, a bundled prototype, or 64.
 #[must_use]
 pub fn max_stack_size(item: &ItemStack) -> u32 {
     if let Some(override_size) = item.components.max_stack_size {
@@ -571,14 +534,13 @@ pub fn max_stack_size(item: &ItemStack) -> u32 {
         .max(1)
 }
 
-/// Whether two stacks are the same item with the same components —
-/// `ItemStack.isSameItemSameComponents`.
+/// Whether two stacks are the same item with the same components.
 fn same(a: &ItemStack, b: &ItemStack) -> bool {
     a.item == b.item && a.components == b.components
 }
 
-/// Vanilla's own is-same-item test — item type only, components ignored. **Not** the same
-/// predicate as [`same`]: vanilla's click dispatch uses this narrower check (`a.is(b.getItem())`)
+/// An item-type-only comparison that ignores components. **Not** the same
+/// predicate as [`same`]: repeat loops use this narrower check
 /// for both of its "did the slot refill with the same thing"
 /// repeat-loop guards ([`quick_move`]'s `QUICK_MOVE` loop and the `THROW` arm's
 /// ctrl-Q loop in [`do_click_with`]) — using [`same`] there instead would stop a
@@ -592,7 +554,7 @@ fn same_item(a: &ItemStack, b: &ItemStack) -> bool {
 /// One inbound click, straight off the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Click {
-    /// The clicked menu slot. `-999` is vanilla's "outside the window".
+/// The clicked menu slot. `-999` denotes a click outside the window.
     pub slot: i32,
     /// `buttonNum`: mouse button, hotbar index, or the drag header/type mask.
     pub button: i8,
@@ -601,12 +563,11 @@ pub struct Click {
     pub click_type: i32,
 }
 
-/// Vanilla's "outside the window" slot index (`AbstractContainerMenu.SLOT_CLICKED_OUTSIDE`).
+/// The protocol's "outside the window" slot index.
 pub const SLOT_OUTSIDE: i32 = -999;
 
-/// The in-progress `QUICK_CRAFT` drag: vanilla's `quickcraftStatus`/
-/// `quickcraftType`/`quickcraftSlots` triple, which is per-menu state a single
-/// click packet cannot carry.
+/// The in-progress `QUICK_CRAFT` drag, which is per-menu state a single click
+/// packet cannot carry.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Drag {
     /// `0` = idle/started, `1` = collecting slots, `2` = ending.
@@ -622,7 +583,7 @@ struct Drag {
 /// and the in-progress drag.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ClickState {
-    /// Vanilla's `AbstractContainerMenu.carried` — the stack on the cursor.
+    /// The stack on the cursor.
     pub carried: Option<ItemStack>,
     drag: Drag,
 }
@@ -644,34 +605,29 @@ impl ClickState {
 /// [`crate::crafting::CraftingState`]'s.
 pub type ResultRecipe<'a> = &'a dyn Fn(&[Option<ItemStack>]) -> Option<ItemStack>;
 
-/// `Slot.mayPickup(player)` for menu index `index`, which holds `item` —
-/// whether the player may currently take from it at all. `None` means every
-/// slot defaults to `true` (vanilla's own `Slot.mayPickup` base
-/// implementation); a caller only ever needs `Some` for a menu with a real
-/// override, which today means the anvil's result slot
-/// (`AnvilMenu.mayPickup`). See [`take_from`], [`quick_move`] and [`swap`]
-/// for the three places this is actually checked, and this module's own doc
-/// for why it is three places rather than one.
+/// Whether the player may take `item` from menu index `index`. `None` means
+/// every slot defaults to `true`; a caller supplies `Some` for a menu with a
+/// result-specific restriction. The `take_from`, `quick_move`, and `swap`
+/// branches each check this predicate, because those three click paths can
+/// remove an item from a menu.
 pub type MayPickup<'a> = &'a dyn Fn(usize, &ItemStack) -> bool;
 
-/// [`MayPickup`]'s default: every slot may be picked up from unless the
+/// [`MayPickup`]'s default: every slot may be picked up unless the
 /// caller supplied a hook that says otherwise.
 fn slot_may_pickup(index: usize, item: &ItemStack, hook: Option<MayPickup<'_>>) -> bool {
     hook.map_or(true, |f| f(index, item))
 }
 
 /// A menu slot's currently-selected bundle-content index, for
-/// [`bundle_remove_one`]'s "nothing validly selected" fallback — vanilla
-/// tracks this on the menu itself (`AbstractContainerMenu
-/// ::setSelectedBundleItemIndex`, driven by `ServerboundSelectBundleItemPacket`),
-/// never on the `ItemStack`. `lodestone_model::ItemComponents::bundle_contents`
+/// [`bundle_remove_one`]'s "nothing validly selected" fallback — the menu
+/// tracks this separately from the `ItemStack`. `lodestone_model::ItemComponents::bundle_contents`
 /// deliberately carries no such field (see its own doc: the wire never carries
 /// a real value in the client-decode direction), so the caller's authoritative
 /// copy has to live beside [`ClickState`], not inside the stack — the same
 /// shape [`MayPickup`]/[`ResultRecipe`] already are.
 pub type SelectedBundleIndex<'a> = &'a dyn Fn(usize) -> Option<usize>;
 
-/// `BundleContents`'s weight arithmetic — `1/max_stack_size` for an ordinary
+/// Bundle-content weight arithmetic — `1/max_stack_size` for an ordinary
 /// item, a nested bundle's own weight plus `1/16`, exact in 64ths because
 /// every vanilla max stack size (`1`, `16`, `64`) divides 64 evenly. A future
 /// item whose max stack size does not divide 64 would round; nothing in this
@@ -691,11 +647,11 @@ fn bundle_weight_64(items: &[ItemStack]) -> u32 {
         .sum()
 }
 
-/// `BundleContents.Mutable::tryInsert` — inserts as much of `adding` as fits
+/// Inserts as much of `adding` as fits
 /// under the 64-unit weight cap (`amountToAdd`), merging into an existing
 /// same-item-same-components entry at the front or prepending a fresh one.
 /// Returns how many were actually added. A nested bundle is refused, the
-/// disclosed simplification `canItemBeInBundle` stands in for here (this
+/// The item-compatibility check stands in for the complete item property set (this
 /// crate has no per-item container-nesting flag yet, only the bundle-item
 /// check itself).
 fn bundle_try_insert(contents: &mut Vec<ItemStack>, adding: &ItemStack) -> u32 {
@@ -729,13 +685,13 @@ fn bundle_remove_one(contents: &mut Vec<ItemStack>, selected: Option<usize>) -> 
     (!contents.is_empty()).then(|| contents.remove(index))
 }
 
-/// `BundleItem.overrideStackedOnOther` — the cursor holds a bundle and the
+/// Bundle-on-slot transfer — the cursor holds a bundle and the
 /// click lands on `index`. Left-click-with-item transfers as much of the
 /// clicked slot into the bundle as fits; right-click-on-empty pops one item
 /// out into the slot. Returns whether the click was fully handled (vanilla's
-/// own `true` on both branches it takes) — `false` falls through to
+/// true on both handled branches) — `false` falls through to
 /// [`pickup`]'s ordinary place/take logic unchanged, exactly as
-/// `tryItemClickBehaviourOverride`'s boolean return does.
+/// the ordinary place/take logic.
 fn bundle_stacked_on_other(
     carried: &mut ItemStack,
     slots: &mut [Option<ItemStack>],
@@ -770,7 +726,7 @@ fn bundle_stacked_on_other(
     }
 }
 
-/// `BundleItem.overrideOtherStackedOnMe` — the clicked slot holds a bundle.
+/// Bundle-on-slot transfer — the clicked slot holds a bundle.
 /// Left-click-on-empty-cursor is deselect-only and falls through (vanilla's
 /// own early `return false` after `toggleSelectedItem`); the caller does not
 /// need to model the deselect here since selection lives outside `ItemStack`
@@ -801,11 +757,11 @@ fn bundle_other_stacked_on_me(
         slot_item.components.bundle_contents = contents;
         true
     } else if carried.is_none() {
-        // `AbstractContainerMenu.setSelectedBundleItemIndex` keys the
+        // The menu's selected bundle index keys the
         // selection by the slot the bundle currently occupies — this is
         // exactly that slot, unlike `bundle_stacked_on_other`'s own
         // right-click branch (a cursor-carried bundle is not addressable by
-        // `ServerboundSelectBundleItemPacket`'s `slotIndex` at all, so it has
+        // cursor-carried bundle has no menu slot index at all, so it has
         // no selection to read and always pops the front item).
         if let Some(removed) = bundle_remove_one(&mut contents, selected(index)) {
             *carried = Some(removed);
@@ -831,7 +787,7 @@ const QUICK_MOVE_ROUNDS: usize = 512;
 /// outside the window with a full cursor) — vanilla's `player.drop(...)` calls,
 /// which this module has no world to make.
 ///
-/// `creative` is `player.hasInfiniteMaterials()`, which gates `Clone`.
+/// `creative` gates the clone action.
 pub fn do_click(
     layout: &MenuLayout,
     slots: &mut [Option<ItemStack>],
@@ -843,8 +799,7 @@ pub fn do_click(
 }
 
 /// [`do_click`], with the menu's own recipe corpus so the result slot is **live for
-/// the duration of the click** — vanilla's `slotsChanged` →
-/// `CraftingMenu.slotChangedCraftingGrid` hook.
+/// the duration of the click** and is re-derived after each grid mutation.
 ///
 /// Two behaviours need it, and neither is reachable without it:
 ///
@@ -1039,7 +994,7 @@ fn grid_cells(layout: &MenuLayout, slots: &[Option<ItemStack>]) -> Vec<Option<It
     cells
 }
 
-/// Re-derives the result slot from the grid — `CraftingMenu.slotChangedCraftingGrid`.
+/// Re-derives the result slot from the grid.
 ///
 /// A `None` recipe leaves the result slot **exactly as it is**, which is the
 /// recipe-free [`do_click`] contract: a caller with no corpus has already written
@@ -1063,7 +1018,7 @@ fn resync_result(
     }
 }
 
-/// `AbstractContainerMenu.canItemQuickReplace(slot, stack, true)`.
+/// Whether a quick-craft placement can replace or extend a slot.
 fn can_item_quick_replace(slot: Option<&Option<ItemStack>>, item: &ItemStack) -> bool {
     match slot.and_then(Option::as_ref) {
         None => true,
@@ -1071,7 +1026,7 @@ fn can_item_quick_replace(slot: Option<&Option<ItemStack>>, item: &ItemStack) ->
     }
 }
 
-/// `AbstractContainerMenu.getQuickCraftPlaceCount`.
+/// The number of items a quick-craft drag places in one slot.
 fn quick_craft_place_count(slot_count: usize, kind: i32, item: &ItemStack) -> u32 {
     match kind {
         0 => item.count / slot_count.max(1) as u32,
@@ -1157,10 +1112,8 @@ fn pickup(
     may_pickup: Option<MayPickup<'_>>,
     selected_bundle: Option<SelectedBundleIndex<'_>>,
 ) {
-    // `tryItemClickBehaviourOverride`: cursor-first, then slot — vanilla's own
-    // order in `Slot.safeInsert`'s caller, `AbstractContainerMenu.doClick`'s
-    // `PICKUP` arm. A bundle handled here returns immediately, matching
-    // vanilla's own early-return on a `true` override.
+    // Handle the cursor-side bundle action before ordinary slot pickup. A
+    // handled bundle action returns immediately so no second transfer occurs.
     if let Some(mut carried) = state.carried.clone() {
         let handled = bundle_stacked_on_other(
             &mut carried,
@@ -1244,7 +1197,7 @@ fn pickup(
     let _ = dropped;
 }
 
-/// `Slot.safeInsert(stack, amount)` — inserts up to `amount`, returns the
+/// Inserts up to `amount`, returning the
 /// remainder (`None` when all of it went in).
 fn safe_insert(
     layout: &MenuLayout,
@@ -1279,14 +1232,12 @@ fn safe_insert(
     if stack.count == 0 { None } else { Some(stack) }
 }
 
-/// `Slot.safeTake(amount, …)` — removes up to `amount` from `index`.
+/// Removes up to `amount` from `index`.
 ///
 /// **The result slot's take consumes the grid**, which the caller learns by the
-/// grid cells in `slots` having shrunk (`ResultSlot.onTake` →
-/// `CraftingContainer.removeItem`). Nothing else about a take is special.
+/// grid cells in `slots` having shrunk. Nothing else about a take is special.
 ///
-/// Gated on [`MayPickup`] first, matching `Slot.safeTake` → `tryRemove` →
-/// `mayPickup` — a refused take returns `None` and touches nothing, exactly
+/// Gated on [`MayPickup`] first — a refused take returns `None` and touches nothing, exactly
 /// as if the slot had been empty.
 fn take_from(
     layout: &MenuLayout,
@@ -1317,7 +1268,7 @@ fn take_from(
     Some(out)
 }
 
-/// `ResultSlot.onTake` — how much of each input cell one take consumes, then
+/// How much of each input cell one take consumes, then
 /// the result slot is re-derived from what is left (`slotsChanged`).
 ///
 /// The re-derivation is *here* rather than only at the end of the click because
@@ -1325,13 +1276,11 @@ fn take_from(
 /// craft again.
 ///
 /// Three shapes, one per family: crafting/smithing consume exactly one of
-/// every grid cell (`CraftingMenu`'s own grid, `SmithingMenu.onTake`'s three
-/// `shrinkStackInSlot` calls); the grindstone always fully clears both input
-/// cells regardless of what was consumed (`GrindstoneMenu`'s result slot
-/// `onTake`, unconditional `setItem(0/1, EMPTY)`); the anvil is the one
+/// every grid cell; the grindstone always fully clears both input cells
+/// regardless of what was consumed; the anvil is the one
 /// genuinely bespoke case — cell 0 (input) is always cleared, cell 1
 /// (addition) is either partially shrunk by `repairItemCountCost`, cleared, or
-/// left untouched for a pure rename (`AnvilMenu.onTake`). The anvil branch
+/// left untouched for a pure rename. The anvil branch
 /// re-derives that shape from [`crate::anvil::compute`] with `creative: true`
 /// purely to read its consumption fields — safe because creative can only
 /// ever *widen* which combination produces a result, so a result that reached
@@ -1349,7 +1298,7 @@ fn take_result(
                 }
             }
         }
-        // `LoomMenu.onTake`: `bannerSlot.remove(1); dyeSlot.remove(1);` —
+        // Loom output consumes one banner and one dye —
         // the pattern-item slot (cell 2) is deliberately **not** touched, so
         // one pattern item can stamp several banners in a row. The generic
         // `_` arm below would wrongly consume it (it decrements every grid
@@ -1438,10 +1387,10 @@ fn quick_move(
     recipe: Option<ResultRecipe<'_>>,
     may_pickup: Option<MayPickup<'_>>,
 ) {
-    // `if (!slot.mayPickup(player)) return;` — checked once, against the
-    // slot's state *before* `quickMoveStack` runs at all, and not re-checked
+    // Check pickup permission once, against the
+    // slot's state *before* the shift-click operation runs, and not re-checked
     // inside the repeat loop below even though a refilled anvil result resets
-    // `cost` mid-loop (`AnvilMenu.onTake`).
+    // `cost` mid-loop.
     if let Some(item) = slots[index].clone() {
         if !slot_may_pickup(index, &item, may_pickup) {
             return;
@@ -1473,8 +1422,7 @@ fn quick_move(
             return;
         }
         take_result(layout, slots, recipe);
-        // Vanilla drops whatever would not fit rather than leaving it in the result
-        // slot (`if (slotIndex == 0) player.drop(stack, false)`). It does **not**
+        // Drop whatever would not fit rather than leaving it in the result slot. It does **not**
         // clear the slot: `onTake` has already refilled it with the next result, and
         // the dropped stack is the old object. With no recipe there is nothing to
         // refill with, so the leftover would linger as a phantom result and is
@@ -1592,10 +1540,10 @@ fn swap(
     match (source, target) {
         (None, None) => {}
         (None, Some(target)) => {
-            // `target.mayPickup(player)` — a swap that would take the clicked
+    // Pickup permission on the target — a swap that would take the clicked
             // slot's item out is refused, and refusing it here means nothing
             // else in this arm runs: no swap at all, matching vanilla's own
-            // `if (target.mayPickup(player)) { ... }` with no `else`.
+            // With no pickup permission, no other swap arm runs.
             if !slot_may_pickup(index, &target, may_pickup) {
                 return;
             }
@@ -1626,7 +1574,7 @@ fn swap(
             }
         }
         (Some(source), Some(target)) => {
-            // `target.mayPickup(player) && target.mayPlace(source)`.
+            // A swap requires both pickup permission and placement permission.
             if !layout.may_place(index, &source) || !slot_may_pickup(index, &target, may_pickup) {
                 return;
             }
@@ -1680,13 +1628,9 @@ fn pickup_all(
             if carried.count >= cap {
                 break;
             }
-            // Every `Result` slot is skipped here regardless of `may_pickup` —
-            // a pre-existing, over-conservative deviation from vanilla's own
-            // `target.mayPickup`-gated gather loop (vanilla *can* scoop a
-            // mayPickup-true result into a matching cursor stack; this
-            // module never does). Left as is: the anvil result can never
-            // leave through `PICKUP_ALL` either way, so there is nothing for
-            // the hook to additionally gate here today.
+            // Every `Result` slot is skipped here regardless of `may_pickup`.
+            // Result production stays in the dedicated take path, so a
+            // double-click cannot move a derived result into the cursor.
             if layout.kind_of(target) == Some(SlotKind::Result) {
                 continue;
             }
@@ -1811,7 +1755,7 @@ mod tests {
         assert_eq!(state.carried.as_ref().map(|s| s.count), Some(1));
     }
 
-    /// An armour slot takes only its own armour piece — `ArmorSlot.mayPlace`.
+    /// An armour slot takes only its matching armour piece.
     #[test]
     fn an_armour_slot_refuses_the_wrong_piece() {
         let layout = MenuLayout::player();
@@ -2042,7 +1986,7 @@ mod tests {
     }
 
     /// A refusing [`MayPickup`] hook against an [`MenuKind::ItemCombiner`]
-    /// result slot (the anvil shape) — issue #617: a 0-XP survival player must
+    /// result slot (the anvil shape) — a 0-XP survival player must
     /// not be able to take a costed anvil result at all, through any click
     /// type that can reach a take. One assertion per click type, collected
     /// rather than early-returning, so a fix that only closes one path cannot
@@ -2086,7 +2030,7 @@ mod tests {
         }
 
         // SWAP (click_type 2) against hotbar native 0, **empty**: the
-        // `(None, Some(target))` arm, gated on `target.mayPickup(player)`
+        // `(None, Some(target))` arm, gated on pickup permission
         // alone with no `may_place` involved (`may_place` on the result slot
         // is unconditionally `false` and would refuse the swap on its own if
         // the hotbar slot were occupied instead — this fixture must leave it
@@ -2150,9 +2094,7 @@ mod tests {
         );
     }
 
-    /// `tryItemClickBehaviourOverride`: a bundle on the cursor absorbs a
-    /// left-clicked stack from the slot — `BundleItem.overrideStackedOnOther`,
-    /// issue #692.
+    /// A bundle on the cursor absorbs a left-clicked stack from the slot.
     #[test]
     fn bundle_on_cursor_absorbs_a_left_clicked_slot() {
         let layout = MenuLayout::container(27);
@@ -2171,7 +2113,7 @@ mod tests {
     }
 
     /// The reciprocal: a bundle sitting in the slot absorbs a left-clicked
-    /// cursor stack — `BundleItem.overrideOtherStackedOnMe`.
+    /// cursor stack.
     #[test]
     fn bundle_in_slot_absorbs_a_left_clicked_cursor_stack() {
         let layout = MenuLayout::container(27);
@@ -2251,9 +2193,8 @@ mod tests {
         );
     }
 
-    /// A bundle cannot be inserted into another bundle — `canItemBeInBundle`'s
-    /// disclosed stand-in refuses it, and vanilla's own
-    /// `overrideStackedOnOther` still reports the click "handled" (a failed
+    /// A bundle cannot be inserted into another bundle — the item-compatibility
+    /// check refuses it, while the click still reports "handled" (a failed
     /// insert plays a fail sound rather than falling through), so nothing
     /// here should move at all — not even an ordinary swap.
     #[test]

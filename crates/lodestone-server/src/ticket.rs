@@ -1,39 +1,30 @@
-//! The chunk ticket type and the empty-to-full status pipeline (issue #289).
+//! The chunk ticket type and the empty-to-full status pipeline.
 //!
 //! # What it is
 //!
 //! A [`TicketType`]/[`Ticket`] pair carrying a **source** and a **level**, plus
 //! [`TicketStore`], the min-fixed-point graph that turns a set of tickets into a
 //! per-column [`ChunkStatus`]. This is the piece `docs/plans/chunk-lifecycle.md`
-//! names and a fresh grep confirmed absent tree-wide: nothing in this crate had a
-//! notion of "why is this chunk resident" independent of one connection's view
-//! radius before this file.
+//! defines why a chunk is resident independently of one connection's view
+//! radius.
 //!
 //! # How it works
 //!
-//! Ported in shape, not transliterated, from vanilla's own
-//! ticket-type, ticket, distance-manager and chunk-tracker types, its own
-//! ticket-storage type, plus
-//! its own chunk-status pipeline and
-//! its own chunk-level arithmetic:
+//! The model uses the following current rules:
 //!
 //! * A [`TicketType`] is `(timeout_ticks, flags)`. The five flags
 //!   (`FLAG_PERSIST`/`FLAG_LOADING`/`FLAG_SIMULATION`/
 //!   `FLAG_KEEP_DIMENSION_ACTIVE`/`FLAG_CAN_EXPIRE_IF_UNLOADED`) and the nine
-//!   registered constants in [`ticket_type`] are transcribed from
-//!   vanilla's own `TicketType` — the table in the plan doc is the citation for every
-//!   literal below.
+//!   registered constants in [`ticket_type`] define the supported ticket kinds.
 //! * A [`Ticket`] carries a **level**, not a radius: `add_ticket_with_radius`
-//!   (vanilla's own ticket-storage type) stores exactly **one** ticket at the centre chunk,
+//!   stores exactly **one** ticket at the centre chunk,
 //!   level `FULL_CHUNK_LEVEL - radius`. There is no per-chunk fan-out at
 //!   insertion time.
 //! * The level reaches neighbouring chunks through [`TicketStore::propagate`],
 //!   a **from-scratch min-fixed-point recompute**: effective level at `p` is
 //!   `min` over every active ticket `t` of `t.level + chebyshev(t.pos, p)`,
-//!   which is `ChunkTracker::computeLevelFromNeighbor == fromLevel + 1`
-//!   (vanilla's own chunk-tracker type) unrolled to a direct distance. Vanilla's own
-//!   `DynamicGraphMinFixedPoint` is incremental for a chunk count this crate
-//!   does not have yet; recomputing per tick is correct and far simpler, and
+//!   which is a direct distance increment. Recomputing per tick is correct and
+//!   far simpler, and
 //!   the BFS radius is bounded by `MAX_LEVEL - ticket.level` per ticket, so it
 //!   never scans more than the ticket's own reach.
 //! * **Two independent trackers**, never collapsed (S3 in the plan): a
@@ -42,42 +33,36 @@
 //!   is what lets a `PLAYER_SPAWN` ticket make a chunk resident without making
 //!   it tick — collapsing the two trackers is the exact bug the plan's own
 //!   negative control demonstrates below.
-//! * [`ChunkStatus`] is a **two-state** simplification of vanilla's twelve
+//! * [`ChunkStatus`] is a **two-state** simplification of the twelve-stage
 //!   (`EMPTY` through `FULL`) — see "What this deliberately does not port"
 //!   below.
 //!
-//! # What this deliberately does not port from vanilla's threading model
+//! # What this deliberately leaves outside the model
 //!
-//! * **No `ChunkHolder` future graph, no per-status `CompletableFuture` chain**
-//!   (`GenerationChunkHolder`/`ChunkGenerationTask`). `OverworldGenerator::column`
-//!   is one monolithic call with no seam to stop at `NOISE` or `SURFACE`, so
-//!   there is exactly one state transition this crate can express:
-//!   `Empty -> Full`. [`ChunkStatus::from_level`] is that whole pipeline.
-//! * **`RADIUS_AROUND_FULL_CHUNK` is `0`, not vanilla's runtime-computed value**
-//!   (at least 8, driven by `STRUCTURE_STARTS@8` in vanilla's own chunk-pyramid type).
-//!   Consequently [`MAX_LEVEL`] is `33`, not vanilla's `33 + n`. **Do not
-//!   "fix" this to match vanilla's literal** — the extra radius exists there to
-//!   generate neighbours far enough ahead that a later status step's
+//! * **No future graph or per-status task chain.** Generation is one monolithic
+//!   call with no seam between intermediate stages, so there is exactly one
+//!   state transition this crate can express: `Empty -> Full`.
+//! * **The neighbour radius is `0`**, rather than the larger radius used
+//!   by multi-stage generation. Consequently [`MAX_LEVEL`] is `33`. **Do not
+//!   change this value** — the extra radius exists in multi-stage pipelines to
+//!   generate neighbours far enough ahead that a later stage's
 //!   dependency is already at the stage it needs, which has no meaning against
 //!   a single-transition pipeline.
-//! * **No `ConsecutiveExecutor`/`ChunkTaskDispatcher`/`PriorityConsecutiveExecutor`
-//!   worker pool.** Vanilla's answer to "loading-priority system" is that
-//!   priority *is* the ticket level, routed through a 4-band priority queue
-//!   over a background executor. This crate already has an offloaded,
+//! * **No dedicated worker pool.** Priority *is* the ticket level, routed
+//!   through a 4-band priority queue over a background executor. This crate
+//!   already has an offloaded,
 //!   windowed generation pipeline (`crate::chunk::generate_columns_offloaded`,
 //!   `crate::join_scheduler::ColumnPipeline`) solving the *scheduling* axis
 //!   independently and well; this module does not duplicate it. What it adds
 //!   is the *why* — which columns are wanted at all, and at what level — which
 //!   is the input a priority queue would consume, not the queue itself.
-//! * **No `TicketStorage` persistence.** Vanilla's tickets survive a restart
-//!   (`SavedData` id `chunk_tickets`, `Ticket.CODEC`). Nothing here writes a
+//! * **No ticket persistence.** Nothing here writes a
 //!   ticket to disk; every [`TicketStore`] is rebuilt fresh at world open. A
 //!   `FORCED` ticket (the `/forceload` case) therefore does not yet survive a
-//!   restart — a real, named gap, not an oversight.
-//! * **No per-status neighbour requirements** (vanilla's own chunk-pyramid type's
-//!   `STRUCTURE_STARTS@8`, `BIOMES@1`, `blockStateWriteRadius(1)` on
-//!   `FEATURES`). These describe *why* vanilla needs extra radius around a
-//!   status target; with one transition there is nothing for them to gate.
+//!   restart.
+//! * **No per-status neighbour requirements.** Extra radii in multi-stage
+//!   generation describe why a status target needs neighbours; with one
+//!   transition there is nothing for them to gate.
 //!
 //! # How to change it, and the gotchas
 //!
@@ -90,11 +75,13 @@
 //! * **A ticket is keyed by `(TicketOwner, TicketKind)`, not by position.**
 //!   Moving a ticket (a player walking) is `set_ticket_with_radius` again at
 //!   the new position under the same key — the old position's contribution is
-//!   gone the next `propagate`, exactly like vanilla's "re-add replaces."
+//!   gone at the next `propagate`.
 //! * **`purge_stale` must be driven once per unit of time you intend "ticks" to
-//!   mean.** A ticket with `timeout == 0` never decrements — that is
-//!   `FLAG_PERSIST`-shaped tickets (`FORCED`, `PLAYER_SIMULATION`), which live
-//!   until explicitly removed.
+//!   mean.** A ticket with `timeout == 0` never decrements and therefore does
+//!   not expire. `FLAG_PERSIST` is retained policy metadata: `FORCED` and
+//!   `PORTAL` carry it, while `PLAYER_SIMULATION` does not. Current status
+//!   calculations consult the loading/simulation flags; a portal ticket can
+//!   still expire according to its nonzero timeout.
 //! * **Two-tracker split is load-bearing — grep for the negative control
 //!   before touching it.** `tests::collapsing_the_two_trackers_breaks_the_s3_property`
 //!   is the permanent demonstration that a one-tracker build makes a
@@ -102,11 +89,10 @@
 //!
 //! # Configuration
 //!
-//! No env vars or flags. The vanilla constants ([`FULL_CHUNK_LEVEL`],
+//! No env vars or flags. The constants ([`FULL_CHUNK_LEVEL`],
 //! [`ENTITY_TICKING_LEVEL`], the [`ticket_type`] table) are the only tunables,
 //! and they are transcriptions, not knobs — changing one means re-deriving it
-//! from vanilla's own `ChunkLevel` or
-//! `TicketType`, not picking a new number.
+//! from the measured protocol rules, not picking a new number.
 //!
 //! # Dependencies
 //!
@@ -120,23 +106,16 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-/// Vanilla's `ChunkLevel.FULL_CHUNK_LEVEL` — the level at and below which a
-/// chunk is fully generated and loaded (vanilla's own `ChunkLevel`).
+/// Level at and below which a chunk is fully generated and loaded.
 pub const FULL_CHUNK_LEVEL: i32 = 33;
-/// Vanilla's `ChunkLevel.BLOCK_TICKING_LEVEL` (its own `ChunkLevel`). Unused by
-/// [`ChunkStatus`]'s two-state simplification, kept for the doc trail and for
-/// a future status split.
+/// Level reserved for block ticking. The two-state model does not use it, but
+/// the value remains part of the level table.
 pub const BLOCK_TICKING_LEVEL: i32 = 32;
-/// Vanilla's `ChunkLevel.ENTITY_TICKING_LEVEL` (its own `ChunkLevel`) — the level
-/// at and below which a chunk simulates.
+/// Level at and below which a chunk simulates.
 pub const ENTITY_TICKING_LEVEL: i32 = 31;
-/// Vanilla's `ChunkLevel.MAX_LEVEL` is `FULL_CHUNK_LEVEL + RADIUS_AROUND_FULL_CHUNK`.
-/// This crate's generator has no per-status neighbour requirement (see the
-/// module doc's "what this deliberately does not port"), so
-/// `RADIUS_AROUND_FULL_CHUNK` is `0` and `MAX_LEVEL` collapses to
-/// `FULL_CHUNK_LEVEL` exactly. **Do not raise this to match a vanilla source
-/// citation without re-reading that note** — it would silently widen residency
-/// by however many rings were added, for no corresponding generation step.
+/// Maximum level is `FULL_CHUNK_LEVEL + 0` because this model has no
+/// per-status neighbour radius. Raising it would silently widen residency
+/// without a corresponding generation step.
 pub const MAX_LEVEL: i32 = FULL_CHUNK_LEVEL;
 
 /// The empty-to-full status pipeline, collapsed to two states (S1 in
@@ -146,17 +125,16 @@ pub const MAX_LEVEL: i32 = FULL_CHUNK_LEVEL;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChunkStatus {
     /// Not resident: no active ticket reaches this column at or below
-    /// [`MAX_LEVEL`]. Vanilla's `ChunkStatus.EMPTY` through the statuses below
-    /// `FULL`, folded into one state.
+    /// [`MAX_LEVEL`]. All intermediate generation states fold into this one
+    /// non-resident state.
     Empty,
-    /// Resident and generated: vanilla's `ChunkStatus.FULL`.
+    /// Resident and generated.
     Full,
 }
 
 impl ChunkStatus {
-    /// `Full` iff `level <= MAX_LEVEL` — vanilla's own `ChunkLevel.isLoaded`,
-    /// which `ChunkMap` uses directly to decide whether a
-    /// chunk belongs in `toDrop`.
+    /// `Full` iff `level <= MAX_LEVEL`; callers use this to decide whether a
+    /// chunk remains resident.
     #[must_use]
     pub const fn from_level(level: i32) -> Self {
         if level <= MAX_LEVEL {
@@ -167,8 +145,8 @@ impl ChunkStatus {
     }
 }
 
-// Flag bits, transcribed from vanilla's own `TicketType`'s five `boolean` fields packed
-// into one byte here rather than five struct fields — the type stays `Copy`
+// Five policy bits are packed into one byte rather than five struct fields —
+// the type stays `Copy`
 // and fits a `HashMap` value cheaply.
 const FLAG_PERSIST: u8 = 1;
 const FLAG_LOADING: u8 = 2;
@@ -176,10 +154,11 @@ const FLAG_SIMULATION: u8 = 4;
 const FLAG_KEEP_DIMENSION_ACTIVE: u8 = 8;
 const FLAG_CAN_EXPIRE_IF_UNLOADED: u8 = 16;
 
-/// `record TicketType(long timeout, int flags)` (vanilla's own `TicketType`). `timeout`
-/// is in ticks; `0` means "does not expire from [`TicketStore::purge_stale`]
-/// alone" (vanilla's own convention — a `FLAG_PERSIST` ticket is removed only
-/// explicitly).
+/// A ticket type stores a timeout and policy flags. `timeout` is in ticks;
+/// `0` means the age counter never decrements, so the ticket does not expire
+/// from [`TicketStore::purge_stale`] alone. `FLAG_PERSIST` remains available as
+/// policy metadata, while current status calculations consult only the
+/// loading/simulation flags; a nonzero timeout remains expiring regardless.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TicketType {
     pub timeout: u64,
@@ -197,8 +176,7 @@ impl TicketType {
     }
 }
 
-/// The nine registered ticket types, transcribed from vanilla's own `TicketType`'s own
-/// fields — timeout and flags exactly as that file states them.
+/// The nine registered ticket types, each defined by its timeout and flags.
 pub mod ticket_type {
     use super::{
         FLAG_CAN_EXPIRE_IF_UNLOADED, FLAG_KEEP_DIMENSION_ACTIVE, FLAG_LOADING, FLAG_PERSIST,
@@ -206,8 +184,8 @@ pub mod ticket_type {
     };
 
     /// Timeout 20, flags 2 (loading only). Loads terrain for a joining player
-    /// before their entity exists — vanilla's own spawn-preparation task's
-    /// `addTicketAndLoadWithRadius`, radius 3.
+    /// before their entity exists; the radius is
+    /// [`super::PLAYER_SPAWN_RADIUS`].
     pub const PLAYER_SPAWN: TicketType = TicketType {
         timeout: 20,
         flags: FLAG_LOADING,
@@ -233,10 +211,8 @@ pub mod ticket_type {
         flags: FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE,
     };
     /// Timeout 0, flags 15 (persist + loading + simulation + keep-dimension-active).
-    /// `/forceload` — the "keeps ticking with nobody nearby" ticket 26.2
-    /// actually has (see `crate::ticket`'s module doc and issue #297's own
-    /// re-verdict for why a `spawnChunkRadius`-shaped permanent ticket is not
-    /// what 26.2 does).
+    /// `/forceload` uses this persistent ticket shape to keep its chunks loaded
+    /// and simulated when no player is nearby.
     pub const FORCED: TicketType = TicketType {
         timeout: 0,
         flags: FLAG_PERSIST | FLAG_LOADING | FLAG_SIMULATION | FLAG_KEEP_DIMENSION_ACTIVE,
@@ -258,9 +234,7 @@ pub mod ticket_type {
     };
 }
 
-/// The radius `PLAYER_SPAWN` is granted at — vanilla's own spawn-preparation
-/// task's `addTicketAndLoadWithRadius` call, the same citation `PLAYER_SPAWN`'s own
-/// doc comment above already carries. Named here rather than left a literal
+/// The radius `PLAYER_SPAWN` is granted at. Named here rather than left a literal
 /// at each grant site, since [`crate::server`]'s join arm and
 /// [`ticket_type::PLAYER_SPAWN`]'s own doc both need to agree on it.
 pub const PLAYER_SPAWN_RADIUS: i32 = 3;
@@ -362,9 +336,8 @@ impl TicketStore {
         Self::default()
     }
 
-    /// Grants (or moves, or renews) a ticket at level `FULL_CHUNK_LEVEL - radius`
-    /// — vanilla's `TicketStorage::addTicketWithRadius`. A `radius` of `0`
-    /// grants only the centre chunk at `FULL_CHUNK_LEVEL`.
+    /// Grants (or moves, or renews) a ticket at level `FULL_CHUNK_LEVEL - radius`.
+    /// A `radius` of `0` grants only the centre chunk at `FULL_CHUNK_LEVEL`.
     pub fn set_ticket_with_radius(
         &mut self,
         owner: TicketOwner,
@@ -375,9 +348,8 @@ impl TicketStore {
         self.set_ticket_at_level(owner, kind, pos, FULL_CHUNK_LEVEL - radius);
     }
 
-    /// Grants (or moves, or renews) a ticket at an explicit level — vanilla's
-    /// direct-level tickets (`PLAYER_SIMULATION`, `FORCED`) rather than the
-    /// radius-derived form.
+    /// Grants (or moves, or renews) a ticket at an explicit level, used by
+    /// direct-level ticket kinds rather than the radius-derived form.
     pub fn set_ticket_at_level(
         &mut self,
         owner: TicketOwner,
@@ -403,9 +375,7 @@ impl TicketStore {
     }
 
     /// Resets an expiring ticket's countdown to its type's timeout, without
-    /// moving it — vanilla's `Ticket::resetTicksLeft`, called by
-    /// `PrepareSpawnTask`'s `Ready.keepAlive()` for `PLAYER_SPAWN`. A no-op if
-    /// the ticket is not currently held.
+    /// moving it. A no-op if the ticket is not currently held.
     pub fn refresh_ticket(&mut self, owner: TicketOwner, kind: TicketKind) -> bool {
         if let Some(ticket) = self.tickets.get_mut(&(owner, kind)) {
             ticket.ticks_left = ticket.ty.timeout;
@@ -416,8 +386,7 @@ impl TicketStore {
     }
 
     /// Decrements every expiring ticket's countdown by one and removes those
-    /// that hit zero — vanilla's `TicketStorage::purgeStaleTickets`, one
-    /// `decreaseTicksLeft()` per tick. A ticket with `timeout == 0` is
+    /// that hit zero. A ticket with `timeout == 0` is
     /// untouched (never decremented, per [`TicketType`]'s own doc). Returns
     /// the keys removed.
     pub fn purge_stale(&mut self) -> Vec<(TicketOwner, TicketKind)> {
@@ -537,8 +506,7 @@ impl TicketStore {
 
     /// Every currently-resident position, ordered nearest-level-first — the
     /// answer to "priority is the ticket level" (`ChunkTaskDispatcher.submit`,
-    /// vanilla's own `TicketType`): a caller driving generation off this list visits
-    /// the chunks vanilla's own priority queue would visit first, first.
+    /// Each entry carries the ticket priority used by a generation caller.
     #[must_use]
     pub fn resident_positions_by_level(&self) -> Vec<(i32, i32)> {
         let mut positions: Vec<((i32, i32), i32)> = self
@@ -638,12 +606,12 @@ impl TicketStoreHandle {
         self.lock().active_ticket_count()
     }
 
-    /// Grants a player-following `PLAYER_LOADING`/`PLAYER_SIMULATION` ticket
-    /// pair at `pos`, both at `radius` — issue #619's connection-side wiring.
+    /// Grants a player-following loading/simulation ticket pair at `pos`, both
+    /// at `radius` — the connection-side wiring.
     ///
     /// Both tickets share one radius because this crate has no separately
-    /// configured simulation distance yet (vanilla's `server.properties`
-    /// splits `view-distance` from `simulation-distance`); see
+    /// configured simulation distance (the server configuration normally
+    /// splits view distance from simulation distance); see
     /// `docs/chunk-tickets.md`'s "Open work" for the gap. `id` need only be
     /// unique per connection — [`TicketOwner::Player`]'s own doc says a
     /// caller-assigned `u64` is enough, and [`crate::server`] derives one from
@@ -699,8 +667,7 @@ impl PlayerTicketGuard {
     }
 
     /// Resets the world's `PLAYER_SPAWN` ticket's countdown without moving
-    /// it — vanilla's `Ready.keepAlive()`, called from any connected
-    /// player's own keep-alive timer. A no-op if no spawn ticket is
+    /// it. A no-op if no spawn ticket is
     /// currently held (e.g. every connection using a private, disconnected
     /// [`TicketStoreHandle::default`]).
     pub fn refresh_world_spawn(&self) -> bool {
@@ -719,10 +686,9 @@ impl Drop for PlayerTicketGuard {
 mod tests {
     use super::*;
 
-    /// Property 1 from `docs/plans/chunk-lifecycle.md` U4, transcribed by hand
-    /// from vanilla's own `ChunkLevel`/`TicketStorage` types rather than derived from
-    /// this module's own code (the `decode(encode(x)) == x` trap this repo's
-    /// evidence standards forbid).
+    /// Property 1 from `docs/plans/chunk-lifecycle.md` U4. The expected level
+    /// is derived from the independent Chebyshev-distance rule rather than
+    /// from this module's own encode/decode path.
     #[test]
     fn a_direct_level_ticket_spreads_by_chebyshev_distance() {
         let mut store = TicketStore::new();
@@ -824,7 +790,7 @@ mod tests {
     }
 
     /// Priority ordering: nearer-a-ticket-source chunks sort first, which is
-    /// #289's "loading-priority system" — derived from the level, not a
+    /// the "loading-priority system" — derived from the level, not a
     /// separate heuristic.
     #[test]
     fn resident_positions_sort_by_level_ascending() {
@@ -891,7 +857,7 @@ mod tests {
         );
     }
 
-    /// Refreshing resets the countdown — vanilla's `Ready.keepAlive()`.
+    /// Refreshing resets the countdown to the ticket type's timeout.
     #[test]
     fn refreshing_a_ticket_resets_its_countdown() {
         let mut store = TicketStore::new();
@@ -911,10 +877,8 @@ mod tests {
         }
     }
 
-    /// A `FORCED` ticket (timeout 0, flags 15) neither expires nor merely
-    /// loads — it simulates with zero other tickets present, which is 26.2's
-    /// real "keeps ticking with nobody nearby" behaviour (see issue #297's
-    /// re-verdict, cited in this module's `ticket_type::FORCED` doc).
+    /// A `FORCED` ticket (timeout 0, flags 15) neither expires nor merely loads:
+    /// it keeps the chunk simulated even when no other tickets are present.
     #[test]
     fn a_forced_ticket_simulates_and_never_expires_on_its_own() {
         let mut store = TicketStore::new();
@@ -971,7 +935,7 @@ mod tests {
         assert_eq!(handle.status((1000, 1000)), ChunkStatus::Empty);
     }
 
-    /// Issue #619: `grant_player` must actually install both tickets,
+    /// `grant_player` must actually install both tickets,
     /// `move_to` must move both together, and dropping the guard must
     /// withdraw both — a positive control before the negative one below.
     #[test]

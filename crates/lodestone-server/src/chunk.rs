@@ -29,12 +29,9 @@
 //! # Edits need somewhere to live
 //!
 //! [`ChunkSource::set_block`] mutates a block in place and [`ChunkSource::column`]
-//! must go on reflecting that mutation afterward — that only works if *something*
-//! retains the edited column, and before this existed, nothing did:
-//! `OverworldChunkSource::column` called straight through to the generator on
-//! every request. See [`OverworldChunkSource`]'s own doc comment for the
-//! retention this module now adds and why it is scoped to edited columns only,
-//! not every column ever requested.
+//! must go on reflecting that mutation afterward. [`OverworldChunkSource`]
+//! retains edited columns, while untouched columns remain generator-backed;
+//! see its own doc comment for the retention boundary.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -46,12 +43,10 @@ use lodestone_worldgen::overworld::{GeneratedColumn, OverworldGenerator};
 use crate::block_entities::BlockEntity;
 use crate::chunk_blocks::SectionedBlocks;
 
-/// Counts calls to [`ChunkColumn::intern`], per test thread. A **counter**
-/// rather than a timing, per this repo's evidence standard — several agents
-/// build on this machine concurrently, so a wall-clock figure would be
-/// attributed to the wrong cause. `thread_local` rather than a shared atomic:
-/// `cargo test` gives each test its own OS thread, so a test that resets and
-/// reads within its own body is not racing any other test's calls.
+/// Counts calls to [`ChunkColumn::intern`] separately for each test thread.
+/// A counter records operation count rather than wall-clock time, so scheduling
+/// variance cannot change the measurement. Thread-local storage isolates each
+/// test's reset/read pair from calls made by other test threads.
 #[cfg(test)]
 thread_local! {
     static INTERN_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
@@ -79,7 +74,7 @@ pub(crate) const STONE: &str = "minecraft:stone";
 /// out-of-height answer every redstone lookup gives, and the one case with no
 /// [`ChunkColumn`] palette to clone an entry out of. Cloning this bumps a
 /// refcount; it never allocates after the first call on a process. See
-/// [`ChunkColumn::block_state_arc`] and issue #548's `make_lookup` allocation
+/// [`ChunkColumn::block_state_arc`] and the `make_lookup` allocation
 /// removal.
 pub(crate) fn air_state_arc() -> std::sync::Arc<str> {
     static AIR_ARC: std::sync::LazyLock<std::sync::Arc<str>> = std::sync::LazyLock::new(|| std::sync::Arc::from(AIR));
@@ -93,11 +88,11 @@ pub(crate) const SECTION_ROWS: usize = 16;
 /// ([`ChunkColumn::new`]'s blank column, and [`WorldgenChunkSource`], which
 /// only ever models solidity — see that type's own doc comment). A column
 /// adopted from the real generator via [`ChunkColumn::from_generated`] always
-/// overwrites this with real per-quart biome data (issue #405).
+/// overwrites this with real per-quart biome data.
 pub(crate) const DEFAULT_BIOME: &str = "minecraft:plains";
 
 /// Vertical quart layers in a column of `height` block rows — the one place the
-/// 3-D biome grid's Y extent is written down (issue #512). Matches
+/// 3-D biome grid's Y extent is written down. Matches
 /// [`lodestone_worldgen::overworld::BiomeCells`]'s own arithmetic exactly, which
 /// is what lets [`ChunkColumn::from_generated`] adopt its indices verbatim.
 fn y_quarts_for(height: i32) -> usize {
@@ -108,8 +103,8 @@ fn y_quarts_for(height: i32) -> usize {
 /// variants and fluids. `is_solid` is the negation of this over the block name.
 ///
 /// Also doubles as this crate's "can a placement replace this cell" test
-/// (`crate::server`'s `UseItemOn` handling) — vanilla's real `canBeReplaced`
-/// covers a wider set (tall grass, snow layers, …), but the generator this
+/// (`crate::server`'s `UseItemOn` handling) — the full game rule covers a
+/// wider set (tall grass, snow layers, …), but the generator this
 /// crate serves produces none of that vegetation yet (`worldgen_data`'s own
 /// "no caves/ores/trees" scope note), so air-or-fluid is the whole set that
 /// can actually appear here.
@@ -169,9 +164,9 @@ pub struct ChunkColumn {
     palette: Vec<String>,
     /// Palette indices for every cell, one bit-packed 16-row section at a time
     /// (`crate::chunk_blocks`). Logically the same
-    /// `blocks[(y_local * 16 + z) * 16 + x]` grid this used to be a flat
-    /// `Vec<u16>` of; an all-air section now allocates nothing and a populated
-    /// one packs to the width its ids need instead of 16 bits.
+    /// `blocks[(y_local * 16 + z) * 16 + x]` logical grid; an all-air section
+    /// allocates nothing and a populated one packs to the width its ids need
+    /// instead of 16 bits.
     ///
     /// **This field was the server's whole render-distance memory bill** —
     /// 192 KiB of the 195.5 KiB `crate::chunk_store` measures per retained
@@ -197,8 +192,9 @@ pub struct ChunkColumn {
     /// is, and maintained in the same two places.
     ///
     /// **This is the string→id boundary, and it exists so the protocol encoder
-    /// never crosses it per block.** `V770ServerProtocol::encode_chunk` used to
-    /// call [`block_state`](Self::block_state) 98,304 times per column and probe
+    /// never crosses it per block.** `V770ServerProtocol::encode_chunk` calls
+    /// [`block_state`](Self::block_state) once per palette entry rather than
+    /// probing
     /// each `&str` through a per-column `HashMap<&str, u32>` (SipHash), with each
     /// distinct entry then resolved by a 32,366-row scan doing a string compare
     /// per row — order 10⁶ string comparisons per served column, outside every
@@ -207,7 +203,7 @@ pub struct ChunkColumn {
     /// lookups per column and turns the per-cell work into one array index. See
     /// `docs/chunk-column-encoding.md` and `DESIGN.md` §12.131.
     ///
-    /// 26.2 is the one canonical internal version (#343) and `lodestone-data` is
+    /// 26.2 is the one canonical internal version, and `lodestone-data` is
     /// deliberately outside the protocol-family feature seam, so holding a
     /// numeric id here is not a version-seam crossing: no `lodestone-v26-2`
     /// dependency is implied, and `cargo check -p lodestone-shell
@@ -221,11 +217,10 @@ pub struct ChunkColumn {
     /// same two places.
     ///
     /// **This is what makes redstone dispatch cost an array index.**
-    /// `crate::random_tick::react_to_notification` used to open every
-    /// notification by cloning the cell's state string and then running up
-    /// to fifteen `base_name`-plus-`strcmp` family predicates over it, before
-    /// deciding — for the large majority of notifications — that the cell
-    /// reacts to nothing. Classifying the *palette* instead makes that one
+    /// `crate::random_tick::react_to_notification` classifies the *palette*
+    /// entry instead of cloning the cell's state string and running up to
+    /// fifteen `base_name`-plus-`strcmp` family predicates for every
+    /// notification. The classification makes that one
     /// index into this table. See `crate::redstone_graph`'s module doc for
     /// why a palette-derived table has no staleness class, and
     /// `docs/redstone-execution.md` for the measured split.
@@ -239,10 +234,9 @@ pub struct ChunkColumn {
     /// **This is what makes a redstone lookup closure cheap to call
     /// repeatedly.** Every `redstone::*`/`redstone_wire::*`/… signal query
     /// takes a `Fn(BlockPos) -> Arc<str>` "world" closure
-    /// ([`crate::redstone::make_lookup`]); before this table existed, every
-    /// call cloned [`block_state`](Self::block_state)'s borrowed `&str` onto
-    /// a fresh heap allocation to satisfy that signature, on a path measured
-    /// at 5899 reads in one active tick. Cloning an `Arc<str>` is one atomic
+    /// ([`crate::redstone::make_lookup`]); each call can use the cached string
+    /// without allocating, on a path measured at 5899 reads in one active tick.
+    /// Cloning an `Arc<str>` is one atomic
     /// increment, not a copy.
     palette_arc: Vec<std::sync::Arc<str>>,
     /// How many cells in each implicit 16-row window hold a randomly-ticking
@@ -261,18 +255,18 @@ pub struct ChunkColumn {
     /// `crate::random_tick::is_randomly_ticking` later cannot strand a stale
     /// persisted count.
     section_ticking: Vec<u16>,
-    /// Biome id per horizontal quart, row-major `qz * 4 + qx` (issue #405).
+    /// Biome id per horizontal quart, row-major `qz * 4 + qx`.
     ///
     /// **The surface answer, not the column's biome.** This is what a player
     /// standing on the column sees, and what surface material, carve and
     /// decorate consumed on the generator side. It is deliberately *not* what
     /// the wire or a region file's per-section biome container is built from —
-    /// see [`biome_cells`](Self::biome_cells) and issue #512.
+    /// see [`biome_cells`](Self::biome_cells) and its per-section representation.
     biome_quarts: [String; 16],
-    /// Issue #512: the distinct biome ids in this column, first-use order.
+    /// The distinct biome ids in this column, in first-use order.
     /// `biome_palette[0]` always exists.
     biome_palette: Vec<String>,
-    /// Issue #512: palette indices for the full 4×4×4-per-section biome grid,
+    /// Palette indices for the full 4×4×4-per-section biome grid,
     /// laid out `(qy * 4 + qz) * 4 + qx` with `qy` counting up from
     /// `min_y >> 2` — the same major-to-minor order as
     /// [`lodestone_worldgen::overworld::BiomeCells`], vanilla's own biome
@@ -283,7 +277,7 @@ pub struct ChunkColumn {
     /// `deep_dark` unreachable, and what erased them from every re-saved
     /// vanilla world.
     biome_cells: Vec<u16>,
-    /// Issue #520: block entities living in this column, at **absolute**
+    /// Block entities living in this column, at **absolute**
     /// positions.
     ///
     /// Populated by [`from_generated`](Self::from_generated) (a generated bee
@@ -294,8 +288,8 @@ pub struct ChunkColumn {
     /// list from the live [`crate::block_entities::BlockEntityRegistry`]
     /// instead, because that one is newer.
     block_entities: Vec<(BlockPos, BlockEntity)>,
-    /// Issue #514's S1: the structure starts whose **origin** is this column, and
-    /// this column's `structures.References`.
+    /// Structure starts whose **origin** is this column, and this column's
+    /// `structures.References`.
     ///
     /// Empty unless [`OverworldChunkSource::column`] filled them — they are not
     /// part of [`GeneratedColumn`] because they are answered per *chunk
@@ -307,13 +301,13 @@ pub struct ChunkColumn {
     /// Structure id → packed origin-chunk keys. See
     /// [`structure_starts`](Self::structure_starts).
     structure_references: std::collections::BTreeMap<String, Vec<i64>>,
-    /// Issue #516: the generator's `MOTION_BLOCKING` heightmap in vanilla's
+    /// The generator's `MOTION_BLOCKING` heightmap in its
     /// **stored** form (`topY + 1`, `0` for an all-air column), indexed
     /// `lx + lz * 16` — see
     /// [`lodestone_worldgen::overworld::GeneratedColumn::motion_blocking_heightmap`].
     ///
-    /// `None` for a column that came from anywhere but the real generator
-    /// (`new`, a region-file load); `encode_chunk` then sends the zero-entry
+    /// `None` for a column that did not come from the real generator
+    /// (a constructor or region-file load); `encode_chunk` then sends the zero-entry
     /// heightmap NBT it has always sent, which is well-framed and simply carries
     /// no map. It rides an accessor rather than `GeneratedColumn::into_raw`,
     /// whose own doc forbids widening that tuple — the same reason
@@ -322,13 +316,13 @@ pub struct ChunkColumn {
     ///
     /// **Not maintained by [`set_block`](Self::set_block).** It is the
     /// generator's snapshot, so a player edit does not move it; `chunk_nbt`
-    /// deliberately omits heightmaps from the Anvil write and relies on
-    /// vanilla's `Heightmap.primeHeightmaps` to re-derive on load, so nothing
+    /// deliberately omits heightmaps from the Anvil write; loading recomputes
+    /// derived height data, so nothing
     /// persists a stale value either. Only the first send after generation
     /// carries it, which is exactly the send a client has no other way to
     /// derive one for.
     motion_blocking: Option<Box<[u16; 256]>>,
-    /// Issue #518 part 2/4: the `SPAWN` stage's proposed creature placements —
+    /// The generation stage's proposed creature placements —
     /// see [`lodestone_worldgen::spawn_stage`]'s module doc for what a
     /// candidate is (unconditioned on light/ground) and is not.
     ///
@@ -336,8 +330,8 @@ pub struct ChunkColumn {
     /// only ever runs on a genuine disk-miss (`crate::region_source`'s
     /// `RegionChunkSource::column` calls the generator only when a saved
     /// region has no chunk yet) — so this is non-empty at most once in a
-    /// chunk's whole lifetime, the same one-shot-at-generation semantics
-    /// vanilla's `ChunkStatus.SPAWN` has. A column loaded from disk, or
+    /// chunk's whole lifetime, preserving one-shot-at-generation semantics. A
+    /// column loaded from disk, or
     /// [`ChunkColumn::new`]'s placeholder, always starts with this empty.
     /// [`take_generation_spawns`](Self::take_generation_spawns) drains it, so
     /// even a cached `ChunkColumn` revisited later cannot hand out the same
@@ -392,15 +386,14 @@ impl ChunkColumn {
     /// moves as-is, and the flat block grid is *packed* into
     /// [`SectionedBlocks`] — one pass over the cells the caller has just written,
     /// which is also the pass that discards the ~160 KiB of it that is air (see
-    /// `crate::chunk_blocks`). Real per-quart biome data comes across too (issue
-    /// #405).
+    /// `crate::chunk_blocks`). Real per-quart biome data comes across too.
     ///
-    /// The grid used to move by value rather than be repacked. The move was
-    /// cheaper per column and is what made the *retained* cost 192 KiB each;
-    /// `chunk_store`'s 909 ms-per-column generation figure is the scale this one
-    /// extra sequential pass is measured against.
+    /// Packing uses one sequential pass over the cells. The dense representation
+    /// costs 192 KiB per column; `chunk_store`'s
+    /// 909 ms-per-column generation figure is the scale this pass is measured
+    /// against.
     ///
-    /// The 3-D biome grid (issue #512) and the block-entity list (issue #520)
+    /// The 3-D biome grid and the block-entity list
     /// are *copied* rather than moved, because `GeneratedColumn::into_raw`
     /// deliberately does not carry them — see that method's doc comment. Both
     /// are small: a column's biome grid is `height / 4 * 16` `u16`s over a
@@ -424,10 +417,10 @@ impl ChunkColumn {
             .iter()
             .map(crate::chunk_nbt::generated_block_entity)
             .collect();
-        // Issue #516. Copied before `into_raw` consumes the column, for the same
+        // Motion-blocking data is copied before `into_raw` consumes the column, for the same
         // reason the two above are.
         let motion_blocking = column.motion_blocking_heightmap().map(|map| Box::new(*map));
-        // Issue #518 part 2/4. Copied before `into_raw` consumes the column, for
+        // Generation-spawn candidates are copied before `into_raw` consumes the column, for
         // the same reason as the two above — see this struct's own field doc for
         // why "populated only here" is what makes generation-time spawning
         // one-shot rather than a duplication hazard.
@@ -501,7 +494,7 @@ impl ChunkColumn {
     /// Biomes come across at the generator's own resolution: this dimension's
     /// climate is y-invariant (see `lodestone_worldgen::nether`'s module doc), so
     /// broadcasting the 16 horizontal quarts vertically is exact here, and is
-    /// **not** the mistake issue #512 was filed for.
+    /// **not** a substitute for the dimension's full section window.
     #[must_use]
     pub fn from_nether(
         column: lodestone_worldgen::nether::NetherColumn,
@@ -609,11 +602,11 @@ impl ChunkColumn {
     }
 
     /// Biome id at local `(x, z)` in `0..16` — quart resolution, the column's
-    /// **surface** answer, the same value for every `y` (issue #405).
+    /// **surface** answer, the same value for every `y`.
     ///
     /// **Wrong question for anything with a `y`** — underground tint, fog,
     /// spawn rules, a wire or region-file biome container. Use
-    /// [`biome_state_at`](Self::biome_state_at) for those; see issue #512.
+    /// [`biome_state_at`](Self::biome_state_at) for those; use the y-aware accessor.
     #[must_use]
     pub fn biome_state(&self, x: i32, z: i32) -> &str {
         debug_assert!((0..16).contains(&x) && (0..16).contains(&z));
@@ -647,14 +640,14 @@ impl ChunkColumn {
         self.biome_cells[(qy * 4 + qz) * 4 + qx]
     }
 
-    /// Biome id at quart `(qx, qy, qz)` (issue #512).
+    /// Biome id at quart `(qx, qy, qz)`.
     #[must_use]
     pub fn biome_cell(&self, qx: usize, qy: usize, qz: usize) -> &str {
         &self.biome_palette[self.biome_cell_index(qx, qy, qz) as usize]
     }
 
     /// Biome id at a block position — local `x`/`z` in `0..16`, world `y`
-    /// (issue #512). Out-of-column `y` clamps to the nearest layer, as every
+    /// at any `y`; out-of-column values clamp to the nearest layer, as every
     /// other accessor here does.
     #[must_use]
     pub fn biome_state_at(&self, x: i32, y: i32, z: i32) -> &str {
@@ -683,8 +676,8 @@ impl ChunkColumn {
         self.biome_cells[(qy * 4 + qz) * 4 + qx] = id;
     }
 
-    /// Every block entity in this column, at its **absolute** position (issue
-    /// #520). Empty for the overwhelming majority of columns.
+    /// Every block entity in this column, at its **absolute** position. Empty for
+    /// the overwhelming majority of columns.
     #[must_use]
     pub fn block_entities(&self) -> &[(BlockPos, BlockEntity)] {
         &self.block_entities
@@ -701,7 +694,7 @@ impl ChunkColumn {
     }
 
     /// Takes this column's pending `SPAWN`-stage creature candidates, leaving
-    /// it empty (issue #518 part 2/4).
+    /// it empty after the one generation-time consumer reads it.
     ///
     /// **Drain, not peek**, on purpose: a caller that observes a non-empty
     /// result is the one and only consumer for this column's whole lifetime —
@@ -721,7 +714,7 @@ impl ChunkColumn {
         self.motion_blocking.as_deref()
     }
 
-    /// The structure starts originating in this column (issue #514's S1).
+    /// Structure starts originating in this column.
     #[must_use]
     pub fn structure_starts(
         &self,
@@ -807,7 +800,7 @@ impl ChunkColumn {
         for s in 0..sections {
             let mut count = 0u16;
             // Per section rather than over one flat grid, because the sections
-            // *are* the storage now — and a uniform (usually all-air) section
+            // *are* the storage — and a uniform (usually all-air) section
             // reads without touching any cell memory at all.
             self.blocks.for_each_in_section(s, |_, id| {
                 if self.palette_ticking[id as usize] {
@@ -926,12 +919,10 @@ impl ChunkColumn {
     /// — `local.len()` calls to [`intern`](Self::intern), not one per cell —
     /// then writes every one of the section's cells from the resulting remap.
     ///
-    /// The load-path mirror of what [`raw_palette`](Self::raw_palette)/
-    /// [`append_section_cells`](Self::append_section_cells) already do for the
-    /// save path (see that pair's doc comments): `crate::chunk_nbt`'s loader
-    /// used to call [`set_block`](Self::set_block) once per cell — 98,304 per
-    /// column — each a linear scan of the whole *column-wide* palette rather
-    /// than the handful of states a real section actually names.
+    /// The load-path mirror of [`raw_palette`](Self::raw_palette)/
+    /// [`append_section_cells`](Self::append_section_cells):
+    /// [`crate::chunk_nbt`]'s loader interns each section palette once, rather
+    /// than scanning the whole column-wide palette for all 98,304 cells.
     ///
     /// `indices` is one entry per cell in vanilla's own `(y_in_section << 8) |
     /// (z << 4) | x` order (what `chunk_nbt::unpack_indices` already returns),
@@ -1179,9 +1170,9 @@ impl ChunkColumn {
     /// whose lowest row is world `section_min_y` — the per-section ticking
     /// counter being greater than zero.
     ///
-    /// **O(1): one integer compare.** This is the whole point of the counters;
-    /// `crate::random_tick` used to reach the identical boolean by scanning up
-    /// to 4096 cells per section, per column, per tick (issue #507). A
+    /// **O(1): one integer compare.** The counters expose the answer directly;
+    /// scanning up to 4096 cells per section, per column, per tick would make
+    /// this query proportional to section size. A
     /// `section_min_y` outside this column is `false`.
     #[must_use]
     pub fn section_is_randomly_ticking(&self, section_min_y: i32) -> bool {
@@ -1270,8 +1261,7 @@ pub trait ChunkSource: Send + Sync {
     /// [`set_block`](Self::set_block).
     ///
     /// This is a required method so no implementor silently inherits a
-    /// whole-column regeneration for a one-block read (the historical
-    /// default — issue #440). An implementor with a cheaper path, one that
+    /// whole-column regeneration for a one-block read. An implementor with a cheaper path, one that
     /// reads a cell out of a column it already retains, must override this
     /// to avoid regenerating on every probe: the `ChunkStore` wrapper is the
     /// reference example. An implementor with no cheaper path implements it
@@ -1281,7 +1271,7 @@ pub trait ChunkSource: Send + Sync {
     fn block_state(&self, x: i32, y: i32, z: i32) -> String;
 
     /// Reads the biome id at world coordinates `(x, y, z)` — `/execute if
-    /// biome`'s own read (issue #48's remainder), through the same data
+    /// biome`'s own read, through the same data
     /// [`column`](Self::column) would return.
     ///
     /// Required, not defaulted, for the same reason [`block_state`](Self::block_state)
@@ -1300,17 +1290,15 @@ pub trait ChunkSource: Send + Sync {
     /// its chunk reflects it.
     ///
     /// This is a required method so no implementor can silently drop a
-    /// placement: the historical default was a no-op, which made "block
-    /// placement fails with no error" the default experience for any new
-    /// source that forgot to override it (issue #440). Every implementor must
-    /// now decide explicitly how edits are stored. A source with no per-column
+    /// placement. Every implementor must decide explicitly how edits are
+    /// stored. A source with no per-column
     /// retention must say so loudly — a `todo!()`, or an explicitly documented
     /// discard — rather than inherit silence.
     fn set_block(&self, x: i32, y: i32, z: i32, name: &str);
 
     /// The block entity this source's data carries at `(x, y, z)`, if any —
     /// a *generated* one, such as a structure chest's rolled contents
-    /// (issue #337) or a bee nest's occupants.
+    /// or a bee nest's occupants.
     ///
     /// This is not the live world's registry: [`crate::block_entities::BlockEntityRegistry`]
     /// holds every entity a player has placed or mutated, and is consulted first
@@ -1336,10 +1324,9 @@ pub trait ChunkSource: Send + Sync {
     /// [`block_state`](Self::block_state) on a miss.
     ///
     /// This exists for [`crate::block_entities::BlockEntityRegistry::tick_all_with_hopper_lock`]
-    /// (issue #504): vanilla only ticks a block entity whose *chunk* is
-    /// loaded, and answering that question by calling `block_state` would be
-    /// exactly the bug being fixed — a 20 Hz probe that generates a whole
-    /// column just to find out the answer was "not loaded".
+    /// because only a block entity whose *chunk* is loaded should tick. Calling
+    /// `block_state` to answer that question would generate a whole column for
+    /// every 20 Hz probe that ultimately returns "not loaded".
     ///
     /// The default is `true` — "assume resident" — which is the honest
     /// answer for every implementor with no bounded cache to miss (an
@@ -1380,19 +1367,18 @@ pub trait ChunkSource: Send + Sync {
         let _ = (cx, cz);
     }
 
-    /// Tells the source that a connection's view radius is now `view_radius`, so
+    /// Tells the source that a connection's view radius is `view_radius`, so
     /// a layer that *retains* columns can resize its bound to match.
     ///
     /// The default is a no-op, correct for every source that retains nothing per
     /// view. [`crate::chunk_store::ChunkStore`] is the one implementor that acts
     /// on it.
     ///
-    /// # Why this exists (issue #551)
+    /// # Why this exists
     ///
-    /// `ChunkStore`'s capacity was fixed at construction from the radius the
-    /// connection *joined* with. Since `0c09f576` a client can raise its render
-    /// distance mid-session and the server honours it — so the streamed view then
-    /// exceeds the cache bound, and the LRU victim under a short capacity is the
+    /// `ChunkStore`'s capacity is chosen from the connection's initial radius.
+    /// A later increase can make the streamed view exceed the cache bound, and
+    /// the LRU victim under a short capacity is the
     /// **innermost** ring, because `crate::server`'s `join_view_rings` streams
     /// outward and leaves ring 0 with the oldest stamp. Raising render distance
     /// therefore worked while quietly regenerating the ground under the player's
@@ -1418,7 +1404,7 @@ pub trait ChunkSource: Send + Sync {
     /// A source backed by a world directory owns the *one* block-entity registry
     /// and scheduled-tick queue its save path reads. A server constructor that
     /// builds its own `default()` pair instead ticks containers and repeater
-    /// delays that no save can ever see — the island issue #468 named for
+    /// delays that no save can ever see — the island singleplayer exposed
     /// singleplayer, and the same one open-to-LAN had until this accessor
     /// existed: `open_to_lan` is generic over `S`, so it could not name
     /// `RegionChunkSource::block_entities` directly.
@@ -1521,7 +1507,7 @@ pub trait ChunkSource: Send + Sync {
 /// Box<P>` already establishes for that trait — see its own doc comment for
 /// why the forwarding has to be hand-written rather than derived.
 ///
-/// Issue #562: this is what lets [`IntegratedServer::publish`](crate::IntegratedServer::publish)
+/// This is what lets [`IntegratedServer::publish`](crate::IntegratedServer::publish)
 /// hand every connection it accepts an `Arc<dyn ChunkSource>` — the
 /// type-erased handle a running world's `HostCore` stores — through a
 /// `serve_connection*` entry point whose `S: ChunkSource` bound is otherwise
@@ -1720,8 +1706,8 @@ pub struct WorldRegistries {
 ///
 /// This is safe because `column()` is genuinely pure per chunk: every RNG a
 /// generator touches is positionally seeded (`set_decoration_seed` /
-/// `set_feature_seed` / `setLargeFeatureSeed` per source chunk,
-/// `fork_positional`/`from_hash_of`) with no shared RNG stream anywhere in
+/// `set_feature_seed` per source chunk, with `fork_positional`/`from_hash_of`)
+/// and no shared RNG stream exists anywhere in
 /// `lodestone-worldgen`, so results are order-independent by construction —
 /// see `OverworldGenerator::column`'s own doc comment and
 /// `examples/bench_worldgen.rs`, which already shares a generator across
@@ -1749,10 +1735,9 @@ pub(crate) fn generate_columns_parallel<S: ChunkSource + ?Sized>(
 /// the caller.
 ///
 /// This exists because folding the protocol encode into the same blocking closure
-/// as the generation (`generate_and_encode_columns_offloaded`) originally left the
-/// encode **serial**: the closure fanned generation out over scoped threads, joined
-/// them all, and only then walked the joined `Vec` calling `encode_chunk` one column
-/// at a time on a single thread. At the ≈2.4 ms per column
+/// as the generation (`generate_and_encode_columns_offloaded`) and the encode
+/// both run inside the blocking fan-out. Each worker calls `encode_chunk` for
+/// its generated column, avoiding a serial pass. At the ≈2.4 ms per column
 /// `crate::protocol::ChunkEncoder` carries, a 33-column strip therefore paid ≈80 ms
 /// of *unavoidably* single-threaded work no matter how many cores generated it —
 /// which is the whole cost the offload was supposed to remove, still present, just
@@ -1898,12 +1883,12 @@ async fn yield_to_browser() {
     let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
 }
 
-/// [`generate_columns_parallel`], moved off the async runtime's core thread
-/// (issue #293).
+/// Generates columns off the async runtime's core thread.
+/// This helper keeps the blocking generation work away from that thread.
 ///
 /// # Why this exists when generation is already parallel
 ///
-/// [`generate_columns_parallel`] (issue #414) fixed *throughput*: the batch is
+/// [`generate_columns_parallel`] improves *throughput*: the batch is
 /// fanned out over scoped OS threads. It did nothing about *latency*, because
 /// its final `std::thread::scope` join blocks the calling thread until every
 /// worker finishes. Parallel is not the same as non-blocking, and the
@@ -1911,9 +1896,8 @@ async fn yield_to_browser() {
 /// server's runtime with `tokio::runtime::Builder::new_current_thread()`
 /// (`crates/lodestone-shell/src/net.rs`), so the connection task and
 /// [`crate::tick::run_tick_loop`] share **one** thread. Blocking it blocks
-/// *every* task in the process — the world tick included — so before this
-/// function every chunk-boundary crossing in singleplayer dropped one or more
-/// 50 ms ticks.
+/// *every* task in the process — the world tick included — so an inline
+/// chunk-boundary generation can drop one or more 50 ms ticks.
 ///
 /// # Why `spawn_blocking` and not `block_in_place`
 ///
@@ -1933,8 +1917,8 @@ async fn yield_to_browser() {
 ///
 /// `spawn_blocking` is correct on a current-thread runtime because the
 /// blocking pool is a separate set of threads from the core thread, and it
-/// stays correct on a multi-thread runtime — so nothing here has to be
-/// revisited if issue #281's thread split ever lands.
+/// stays correct on a multi-thread runtime as well, so the behavior is
+/// independent of the runtime's thread count.
 ///
 /// # Why `Arc<S>` rather than `&S`
 ///
@@ -1947,20 +1931,20 @@ async fn yield_to_browser() {
 ///
 /// # wasm32
 ///
-/// `wasm32-unknown-unknown` has no blocking pool, and — unlike the doc above
-/// used to claim — it does **not** get to "call `generate_columns_parallel`
-/// straight through" either: that function's `coords.len() > 1` arm fans out
+/// `wasm32-unknown-unknown` has no blocking pool and does **not** call
+/// `generate_columns_parallel` straight through: that function's
+/// `coords.len() > 1` arm fans out
 /// over `std::thread::scope`, and a `Scope::spawn` on this target reaches
 /// `Builder::spawn`'s `Err` through an internal `.expect()` — measured,
 /// executed in a wasm VM: `unreachable`, i.e. it TRAPS, and with this crate's
 /// `panic = "abort"` release profile that is unrecoverable. `portal.rs`'s
-/// `create_portal` already gates its own `generate_columns_parallel` call off
-/// on wasm32 for exactly this reason; this call site had no such gate. So
+/// `create_portal` gates its own `generate_columns_parallel` call off on wasm32
+/// for the same constraint. This helper therefore
 /// wasm32 instead calls [`generate_columns_yielding`], which never enters
 /// `map_columns_parallel`'s multi-column branch (it generates one column at a
-/// time) and yields to the browser's own task queue between columns — fixing
-/// both the trap and the "page not responding" hang in the same change,
-/// because both came from the same unguarded synchronous fan-out.
+/// time) and yields to the browser's own task queue between columns, avoiding
+/// both the trap and the "page not responding" hang caused by synchronous
+/// multi-column fan-out.
 #[tracing::instrument(skip_all, fields(count = coords.len()))]
 pub(crate) async fn generate_columns_offloaded<S: ChunkSource + 'static + ?Sized>(
     source: Arc<S>,
@@ -2136,7 +2120,7 @@ impl OverworldChunkSource {
     }
 
     /// Copies the generator's structure placement answer for `(cx, cz)` onto a
-    /// freshly built column (issue #514's S1).
+    /// freshly built column.
     ///
     /// Both calls are memoised store reads on the two stages that already ran
     /// above terrain (`structure_starts` / `structure_refs`), so this adds no
@@ -2151,7 +2135,7 @@ impl OverworldChunkSource {
     }
 
     /// Attaches the filled chests every structure piece reaching this chunk asks
-    /// for (issue #337) — see [`crate::structure_loot`] for the marker pass.
+    /// for. [`crate::structure_loot`] supplies the marker pass.
     ///
     /// **The starts come from `references`, not from `structure_starts(cx, cz)`.**
     /// The latter is the starts whose *origin* is this column, and a shipwreck's
@@ -2377,10 +2361,10 @@ impl ChunkSource for NetherChunkSource {
 /// populated only by [`set_block`](Self::set_block), so an untouched column is
 /// regenerated on demand.
 ///
-/// **Constructed, but not yet reachable by a player.** `crate::integrated`'s
-/// `with_nether` sibling factory now has an `End` arm that builds one of these
+/// **Constructed, but not reachable by a player.** `crate::integrated`'s
+/// `with_nether` sibling factory has an `End` arm that builds one of these
 /// (mirroring the `Nether` arm), so `DimensionalSource::sibling(Dimension::End)`
-/// answers `Some` — but nothing yet *triggers* a trip there: there is no
+/// answers `Some`. A trip still requires an end-portal-frame ignition and a
 /// end-portal-frame ignition and no step-into-`end_portal` teleport. See
 /// `crate::dimension`'s module doc and `docs/nether-portals.md`'s "How to change
 /// it" for the exact remaining hops.
@@ -2755,9 +2739,9 @@ mod tests {
     /// ([`column_bytes`]) is identical to a plain serial baseline built by
     /// calling `source.column()` in a straight loop.
     ///
-    /// This is the property the task exists to protect: per-chunk RNG is
-    /// positionally seeded (`set_decoration_seed`/`set_feature_seed`/
-    /// `setLargeFeatureSeed`, `fork_positional`/`from_hash_of` —
+    /// This is the property the test checks: per-chunk RNG is positionally
+    /// seeded (`set_decoration_seed`/`set_feature_seed`/
+    /// `fork_positional`/`from_hash_of` —
     /// `lodestone-worldgen`'s own doc comments), so there is no shared RNG
     /// stream for thread scheduling to desync. A single passing repeat would
     /// prove nothing about a scheduling-dependent race, so this runs the
@@ -2766,29 +2750,13 @@ mod tests {
     /// `available_parallelism` worker batches, to make an off-by-one batch
     /// boundary bug visible if one existed.
     ///
-    /// **Made vacuous by `6509a97`'s pre-ore memoisation cache, now fixed.**
-    /// The cache lives on `OverworldGenerator` (per-instance, keyed by exact
-    /// `(cx, cz)`, capped at 512 entries, never evicted below that). This
-    /// test used to build **one** `source` and reuse it for the serial
-    /// baseline *and* all 8 parallel repeats — so the serial pass warmed
-    /// every coordinate's cache entry, and every parallel repeat after it
-    /// was a pure cache hit, never touching the real generation path at all.
-    /// It still proved ordering (the `Vec` comes back aligned to `coords`)
-    /// and it still proved the ore stage itself is deterministic (the
-    /// cached pre-ore result feeds a fresh `ore_stage` call each time), but
-    /// it stopped proving **recomputation** determinism — the exact thing a
-    /// server restart, or a cache eviction under load, actually needs — and
-    /// it never exercised a concurrent cache *miss* despite spawning
-    /// multiple threads over the same coordinates repeatedly.
-    ///
-    /// Fixed by building a fresh, **independently constructed**
-    /// `overworld_chunk_source(42)` for the serial baseline and for *every*
-    /// one of the 8 parallel repeats — each starts from a cold cache, so
-    /// each repeat's `generate_columns_parallel` call is a genuine
-    /// concurrent-miss race across `available_parallelism` threads writing
-    /// into a fresh `Mutex`-protected cache, not a replay of one already
-    /// populated. A byte match across all 9 independent constructions is
-    /// real cross-construction determinism, not a shared cache artifact.
+    /// The generator cache is per source instance, keyed by `(cx, cz)` and
+    /// capped at 512 entries. The serial baseline and each of the eight
+    /// parallel repeats use an independently constructed
+    /// `overworld_chunk_source(42)`, so every run begins with a cold cache and
+    /// exercises concurrent misses across `available_parallelism` threads.
+    /// A byte match across all nine constructions verifies cross-construction
+    /// determinism rather than a shared-cache replay.
     ///
     /// Deliberately small (2×3 = 6 columns) and a modest repeat count: this
     /// runs the real generator, which is not cheap, and this test executes
@@ -2833,13 +2801,11 @@ mod tests {
     }
 
     /// A source whose every column costs a fixed amount of *blocking*
-    /// wall-clock, which is the one property of real worldgen issue #293 is
+    /// wall-clock, which is the one property of real worldgen this fixture measures
     /// about. Deliberately hand-written rather than
     /// [`crate::overworld_chunk_source`]: the real generator carries a
     /// 512-entry memo cache that would absorb a second request for the same
-    /// `(cx, cz)` and make any count- or duration-based gate vacuous — the
-    /// exact trap already found and fixed in
-    /// `parallel_generation_is_deterministic_and_matches_serial` just above.
+    /// `(cx, cz)` and make any count- or duration-based gate vacuous.
     /// This source has no cache, so both arms below pay the same cost.
     struct SleepyChunkSource {
         per_column: std::time::Duration,
@@ -2874,7 +2840,7 @@ mod tests {
         // A wall-clock-only fixture: it exists to make `column()` take a fixed
         // amount of blocking time, and no gate here writes blocks. Deliberately
         // discards rather than inheriting a silent default — the point of
-        // issue #440 is that such a choice must be explicit per implementor.
+        // such a choice must be explicit per implementor.
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
             // No storage; edits are discarded by design for this fixture.
         }
@@ -2886,11 +2852,11 @@ mod tests {
     /// identical.
     const GATE_TICK_PERIOD: std::time::Duration = std::time::Duration::from_millis(10);
 
-    /// Issue #293: chunk generation must not block the async runtime.
+    /// Chunk generation must not block the async runtime.
     ///
     /// # What this measures, and what it would miss
     ///
-    /// `generate_columns_parallel` (issue #414) made generation *parallel*,
+    /// `generate_columns_parallel` makes generation *parallel*,
     /// which is a throughput property. This gate is about *latency*: whether a
     /// task that is supposed to run every `GATE_TICK_PERIOD` still gets to run
     /// while a generation burst is in flight. A test that only checked the
@@ -2901,15 +2867,15 @@ mod tests {
     /// builds the server's runtime with
     /// `tokio::runtime::Builder::new_current_thread()`, so the connection task
     /// and `crate::tick::run_tick_loop` share **one** thread; blocking it
-    /// stalls every task in the process. Before this, every chunk-boundary
-    /// crossing in singleplayer dropped one or more 50 ms world ticks.
+    /// stalls every task in the process, so an inline generation burst drops
+    /// one or more 50 ms world ticks.
     ///
     /// # The negative control is the second arm, permanently
     ///
     /// `generate_columns_parallel` stays in the tree (it is what
-    /// `SourceRef::Borrowed` still uses), so the pre-fix behaviour is
-    /// measurable here forever rather than only during a temporary neuter. The
-    /// control must record **zero** ticks. Measured when this landed:
+    /// `SourceRef::Borrowed` still uses), so the inline control is measurable
+    /// alongside the offloaded path. The control must record **zero** ticks.
+    /// The measured comparison is:
     /// offloaded 20 ticks over 214 ms, blocking 0 ticks over 209 ms.
     ///
     /// # Predicting the value, not just the sign
@@ -2925,9 +2891,8 @@ mod tests {
     ///
     /// The counter is created inside this test and read as an absolute over a
     /// bracketed operation, so nothing outlives the gate. `crate::tick::TickClock`
-    /// would have been the wrong instrument for exactly that reason: it
     /// accumulates MSPT/TPS/overrun over a whole server lifetime, so it cannot
-    /// distinguish "no stall now" from "the stall already averaged away."
+    /// distinguish a stall during this bracket from a lifetime average.
     #[tokio::test]
     async fn offloaded_generation_lets_a_timer_task_keep_running() {
         // Load-bearing, not decoration. Under `flavor = "multi_thread"` a
@@ -2947,7 +2912,7 @@ mod tests {
         let coords: Vec<(i32, i32)> = (0..96).map(|i| (i % 16, i / 16)).collect();
         let per_column = std::time::Duration::from_millis(20);
 
-        // --- Arm 1: offloaded (the fix). ---
+        // --- Arm 1: offloaded generation. ---
         let ticks = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let ticker = {
             let ticks = Arc::clone(&ticks);
@@ -3126,7 +3091,7 @@ mod tests {
                 crate::chunk::DEFAULT_BIOME.to_string()
             }
 
-            // Discarded by design (issue #440's explicit-choice rule) — this
+            // Discarded by design (the explicit-choice rule) — this
             // fixture only ever reads.
             fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {}
         }
@@ -3154,12 +3119,12 @@ mod tests {
         }
 
         // 7 columns: enough that a "yield once per batch" or "yield every two
-        // columns" bug cannot coincide with a "yield once per column" fix by
+        // columns" bug cannot coincide with a "yield once per column" implementation by
         // accident (an even split would).
         let coords: Vec<(i32, i32)> = (0..7).map(|i| (i, -i)).collect();
         let expected: Vec<Event> = coords.iter().flat_map(|_| [Event::Column, Event::Yield]).collect();
 
-        // --- Arm 1: the fix. `generate_columns_yielding`, the exact function
+        // --- Arm 1: per-column yielding. `generate_columns_yielding`, the exact function
         // `generate_columns_offloaded`'s wasm32 branch calls — with a yield
         // closure that logs into the same sequence `RecordingSource::column`
         // does, and *really* suspends (`tokio::task::yield_now`), so a closure
@@ -3186,11 +3151,11 @@ mod tests {
              {observed:?}, wanted {expected:?}; mismatches: {found:?}"
         );
 
-        // --- Arm 2: the permanent negative control. A "fix" that generates
+        // --- Arm 2: the permanent negative control. A batched implementation that generates
         // every column first and yields only afterwards — what
         // `generate_columns_parallel`'s own `coords.len() <= 1` fast path looks
         // like when driven in a loop with no yields threaded through it at all,
-        // and the shape a batched-instead-of-per-column "fix" would produce
+        // and the shape a batched-instead-of-per-column implementation would produce
         // too. If this control ever stops failing the same check, the check
         // above has stopped distinguishing the two shapes.
         let control_log = Arc::new(Mutex::new(Vec::new()));

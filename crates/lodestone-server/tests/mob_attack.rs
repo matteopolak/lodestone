@@ -1,4 +1,4 @@
-//! Acceptance gate for issue #12: [`MobSim::attack`] — the hop that resolves
+//! Acceptance gate for [`MobSim::attack`] — the hop that resolves
 //! a player's `Attack` packet into real damage and knockback against a live
 //! mob, through the crate's **public** API (the same "no `#[cfg(test)]`
 //! fake, a real consumer" discipline `tests/mob_sim.rs` already established
@@ -174,8 +174,8 @@ fn positive_knockback_power_produces_the_exact_predicted_velocity() {
 }
 
 /// A non-sprinting (`knockback_power == 0.0`) melee hit still knocks the
-/// target back — the exact regression #607 reported ("mobs dont take
-/// knockback if i punch them"). Only the mandatory `0.4` default fires;
+/// target back even when the attacker contributes no extra knockback. Only
+/// the mandatory `0.4` default fires;
 /// hand-derived the same way as the sprint case above, minus stage 2.
 ///
 /// attacker at (0,0,0), target at (1,0,0): `(dx, dz) = (-1, 0)`. `dir =

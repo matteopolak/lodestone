@@ -61,7 +61,7 @@ use crate::server::{
     serve_connection_with_mob_events_and_commands_shared,
 };
 // `OnlineModeConfig`/`serve_connection_with_online_mode` are themselves
-// `#[cfg(not(target_arch = "wasm32"))]`-gated in `server.rs` (issue #273 is
+// `#[cfg(not(target_arch = "wasm32"))]`-gated in `server.rs` (the online-mode path is
 // native-only — see `OnlineModeConfig`'s own doc comment on why: the
 // session-server check is an HTTPS call, and singleplayer's browser build has
 // no such dependency to link). `open_to_lan`/`LanConfig`, this import's only
@@ -70,34 +70,29 @@ use crate::server::{
 use crate::server::{OnlineModeConfig, serve_connection_with_online_mode};
 use crate::spawn::{Task, spawn};
 use crate::tick::{BlockTickFeed, ExplosionFeed, TickClock, TickStats};
-// Issue #619: `ChunkStore::tickets()`'s return type, threaded from
+// `ChunkStore::tickets()`'s return type, threaded from
 // `open_in_memory`/`open_in_memory_with_mobs_using`/`open_to_lan`'s own
 // `source.primary().tickets()` into every real join path this file spawns —
 // see each call site's own comment for why that handle, not a fresh default.
 use crate::ticket::TicketStoreHandle;
 // `run_tick_loop`/`run_tick_loop_with_weather` (like `open_in_memory_with_mobs`
-// and, since issue #439, `bind` — their callers) are
+// and `bind` — their callers — are
 // `#[cfg(not(target_arch = "wasm32"))]`-gated in `tick.rs` — these imports must
 // carry the identical `cfg`, or they are unresolved-import hard errors on
 // wasm32 regardless of whether the names are ever reached at that target.
-// **This was already broken on `main` before this change**: the two
-// functions this loop replaces (`mobs::run_mob_tick_loop`,
-// `block_entities::run_block_entity_tick_loop`) were imported by this same
-// file with no such gate, so `cargo build -p lodestone-server --target
-// wasm32-unknown-unknown` (the check `scripts/wasm-check.sh` runs) was
-// already red — re-verified directly in a throwaway worktree at this
-// crate's own pre-#284 `HEAD`, not assumed. Fixed here rather than left,
-// since this refactor already touches every one of these imports.
+// The cfg is required here because these imports are unavailable on
+// `wasm32-unknown-unknown`; keeping the gate on the imports matches the native-only
+// tick-loop entry points and lets the browser build resolve all imports.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::tick::run_tick_loop_with_weather;
-// Issue #325: the night-skip vote and its feed, wired into
+// the night-skip vote and its feed, wired into
 // `open_in_memory_with_mobs_using` (singleplayer) — see that constructor and
 // `crate::sleep`'s module doc. Native-only for the same reason the tick-loop
 // import above is: `run_tick_loop_with_weather` is `cfg`-gated, and the
 // sleep-feed `container_sync_tick` arm in `serve_play` is native-only too.
 #[cfg(not(target_arch = "wasm32"))]
 use crate::sleep::{SleepFeed, SleepVote};
-// Issue #325 calls `run_tick_loop_with_weather` directly (to carry the real
+// The wrapper calls `run_tick_loop_with_weather` directly (to carry the real
 // sleep vote), and that function needs the weather pair even though this crate
 // does not wire weather yet — see the call in
 // `open_in_memory_with_mobs_using`.
@@ -105,20 +100,17 @@ use crate::sleep::{SleepFeed, SleepVote};
 use crate::weather::{WeatherFeed, WeatherState};
 
 /// Chebyshev radius, in chunks, of the region [`IntegratedServer::bind`]'s
-/// world tick loop random-ticks around the origin (issue #439).
+/// world tick loop random-ticks around the origin.
 ///
-/// A fixed constant rather than a `bind` parameter, and rather than something
-/// derived from where players actually are, because this crate has no
-/// loaded-chunk registry to derive it from — the same acknowledged limitation
-/// `tick::run_tick_loop`'s own doc comment records for
-/// `open_in_memory_with_mobs`'s `mob_area`. `docs/plans/chunk-lifecycle.md`
-/// (#289) is what replaces it with a ticket-driven set; until then, widening
-/// it costs a full generator run per chunk per tick, which is why it is small.
+/// A fixed constant rather than a `bind` parameter, because this crate has no
+/// loaded-chunk registry from which to derive the radius. A ticket-driven set
+/// would follow residency; the fixed radius bounds the full generator work per
+/// tick while preserving the shared world-tick behavior.
 #[cfg(not(target_arch = "wasm32"))]
 const LAN_TICK_RADIUS: i32 = 2;
 
 /// One LAN connection's private view of the world tick loop's output, plus a
-/// liveness flag the connection task clears on its way out (issue #439).
+/// liveness flag the connection task clears on its way out.
 ///
 /// See the relay arm in [`IntegratedServer::bind`] for why each connection
 /// needs its own pair rather than sharing the tick loop's: both feeds are
@@ -157,7 +149,7 @@ impl LanSubscriber {
 }
 
 /// Shared, type-erased handles to a running world's connection-facing state
-/// (issue #562) — what [`IntegratedServer::publish`] needs to add a second,
+/// This is what [`IntegratedServer::publish`] needs to add a second,
 /// TCP-backed accept loop over the *same* running world instead of building a
 /// new one. Populated only by a constructor that already shares a tick loop
 /// and a [`PlayerRegistry`] between connections
@@ -200,7 +192,7 @@ struct HostCore {
     /// This world's configured view-distance cap, applied to every connection
     /// `publish` accepts exactly as `open_to_lan` applies it to its own.
     view_radius: i32,
-    /// Issue #619. The same real `TicketStoreHandle` the local connection and
+    /// The same real `TicketStoreHandle` the local connection and
     /// this world's `ChunkStore` share — not a second, unread one. A `publish`
     /// guest's residency claim has to move the store that store's own eviction
     /// actually reads, exactly like `hub_block_ticks`/`subscribers` above.
@@ -232,19 +224,17 @@ pub const DEMO_MOBS_ENV: &str = "LODESTONE_DEMO_MOBS";
 ///
 /// `seed_demo_mobs` is not spawning; it is a fixed ring of six mobs — zombie, cow,
 /// wolf, blaze, **guardian**, creeper — placed around the world spawn once, at
-/// world open, to give issue #217's computed AI motion something to move (see
-/// `crate::mobs::DEMO_SPECIES`, which says so). It was always a development
-/// fixture, and it shipped: a new singleplayer world greeted the player with a
-/// guardian flopping about on dry land next to a blaze.
+/// world open, to give the computed AI motion something to move (see
+/// `crate::mobs::DEMO_SPECIES`, which says so). The ring is a development
+/// fixture and is disabled for ordinary worlds, so a singleplayer world does
+/// not begin with hardcoded mobs beside the spawn point.
 ///
-/// The honest end state is that the two production constructors take no such
-/// argument at all, and their `mob_count` parameter is removed along with
-/// `lodestone-shell`'s literal `6` at the call site in `net.rs`. That is a
-/// cross-crate change; this function is the server-side half, and it is complete
-/// on its own — a caller passing `6` now gets zero mobs, so the shell's value has
-/// no effect either way and the two halves can land independently.
+/// The production constructors may pass a requested count, but the value is
+/// ignored unless [`DEMO_MOBS_ENV`] opts into the development fixture. Thus a
+/// caller can retain the argument shape without placing six hardcoded mobs in
+/// every world.
 ///
-/// Real mob **spawning** (issues #222/#221) is a different feature entirely and is
+/// Real mob **spawning** is a different feature entirely and is
 /// what should eventually populate a world. `MobSim` and every roster table stay
 /// exactly as they are: this removes a hardcoded fixture, not the simulation.
 /// `MobSim::run_spawn_cycle` is still the seam a real
@@ -267,7 +257,7 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// the world behaves identically until something travels. The Nether's generator and
 /// `ChunkStore` are built by the closure below **on the first portal trip**, never at
 /// world open — see [`DimensionalSource::with_siblings`] for why that matters to a
-/// test suite where every test opens a world.
+/// test suite where each test opens a world.
 ///
 /// # The seed
 ///
@@ -276,7 +266,7 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// world whose overworld came from `overworld_chunk_source` (which sets it), and it
 /// is the only answer available here: `overworld` is caller-supplied and generic, so
 /// this function cannot ask it. A world built on a hand-rolled test source therefore
-/// gets a Nether on whatever seed was last used — harmless, because such a world has
+/// gets a Nether on whatever seed is configured — harmless, because such a world has
 /// no obsidian to light either, and it is why the Nether is lazy rather than eager.
 ///
 /// # `retention` is the same policy the overworld got
@@ -287,9 +277,9 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// `crate::chunk_store`'s module docs.
 /// `portals` is the index every dimension this call reaches will share —
 /// pass a fresh [`crate::portal::PortalIndex::new`] for a world with nothing
-/// to restore, or one already populated from disk (see
-/// [`IntegratedServer::open_persistent_with_mobs`]) so a portal lit in an
-/// earlier session is not rebuilt as a duplicate.
+/// to restore, or one populated from disk (see
+/// [`IntegratedServer::open_persistent_with_mobs`]) so a persisted portal is not
+/// rebuilt as a duplicate.
 ///
 /// # `world_dir`/`ticking`
 ///
@@ -299,12 +289,12 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// [`crate::region_source::RegionChunkSource`] under
 /// `<world_dir>/dimensions/minecraft/<dimension>/region`, exactly the
 /// sibling directory of the overworld's own `RegionChunkSource` that
-/// `open_persistent_with_mobs` already builds. `None` (every in-memory
-/// constructor) keeps a sibling exactly as it was before this: a bare
+/// `open_persistent_with_mobs` builds. `None` (every in-memory
+/// constructor) keeps a sibling as a bare
 /// `ChunkStore` over the generator, gone the moment the `DimensionalSource`
 /// holding it is dropped.
 ///
-/// `ticking` is `Some` only for a caller that already starts the primary
+/// `ticking` is `Some` only for a caller that starts the primary
 /// (overworld) tick loop — `None` preserves
 /// [`open_in_memory_with_entities`](IntegratedServer::open_in_memory_with_entities)'s
 /// documented "spawns no tick loop" contract even after a portal trip builds
@@ -314,7 +304,7 @@ pub fn demo_mob_count(requested: usize) -> usize {
 /// [`crate::dimension_tick`] for why a *second* loop is what closes the
 /// "a dimension nobody is standing in never ticks" gap, and why doing
 /// it here (inside the once-per-dimension memoized factory
-/// [`crate::dimension::DimensionalSource::sibling`] already guards) is what
+/// [`crate::dimension::DimensionalSource::sibling`] guards) is what
 /// keeps the loop from being started twice.
 fn with_nether<S>(
     overworld: S,
@@ -397,7 +387,7 @@ fn start_sibling_tick_loop(
 
 /// wasm32 has no [`crate::tick::run_tick_loop`] at all (see that function's
 /// own "native only" note) — this is the same no-op every other tick-related
-/// wasm32 arm in this crate already is, kept as a same-named twin rather than
+/// wasm32 arm in this crate is, kept as a same-named twin rather than
 /// a call-site `cfg` so `with_nether`'s closure is identical on both targets.
 #[cfg(target_arch = "wasm32")]
 fn start_sibling_tick_loop(
@@ -414,7 +404,7 @@ fn start_sibling_tick_loop(
 /// `world_dir` (its `dimension` subdirectory, via
 /// [`crate::region_source::RegionChunkSource`]) when given one, or a bare
 /// in-memory [`ChunkStore`] over `make_terrain()` otherwise — and returns it
-/// alongside the block-entity/scheduled-tick handles that source now owns.
+/// alongside the block-entity/scheduled-tick handles that source owns.
 ///
 /// Those two handles are the dimension's **own**, not the primary loop's:
 /// [`crate::region_source::RegionChunkSource::block_entities`]/
@@ -423,15 +413,15 @@ fn start_sibling_tick_loop(
 /// [`crate::dimension_tick::spawn_for_dimension`]'s own doc comment for why a
 /// second dimension's tick loop must never share the primary's.
 ///
-/// `make_terrain` is a closure rather than an already-built value because a
+/// `make_terrain` is a closure rather than a built value because a
 /// failed [`crate::region_source::RegionChunkSource::new`] (its region
-/// directory could not be created) still needs *a* terrain source to fall
-/// back to in-memory with, and the failed call already consumed the first one
+/// directory could not be created) needs *a* terrain source to fall
+/// back to in-memory with, and the failed call consumes its argument
 /// — see [`crate::region_source::RegionChunkSource::new`]'s signature, which
 /// takes its inner source by value. The fallback is a **decline, not a
 /// panic**: this dimension simply will not survive a restart this session,
 /// the same "correct degradation" [`crate::server::travel_through_portal`]'s
-/// own `None` arms already use for a world with no such dimension wired.
+/// own `None` arms use for a world with no such dimension wired.
 fn sibling_chunk_source<S>(
     dimension: Dimension,
     make_terrain: impl Fn() -> S,
@@ -446,15 +436,16 @@ fn sibling_chunk_source<S>(
     // `region_source`-gated re-export — this function's own signature (unlike
     // its `RegionChunkSource` branch below) has to compile on `wasm32`,
     // because `with_nether` calls it from a closure `open_in_memory_with_entities`
-    // (which the browser build genuinely runs) can reach. Same trap and same
-    // fix as `crate::live_save::LiveSaveSlot`'s own doc comment names for
-    // exactly this shape.
+    // (which the browser build genuinely runs) can reach. The same wasm
+    // requirement is described by `crate::live_save::LiveSaveSlot`'s
+    // doc comment.
     crate::scheduled_tick::ScheduledTickHandle,
     // The one instance this dimension's own tick loop drains and a travelling
     // connection publishes into — see `DimensionalSource::alone_with_dimension_handles`'s
-    // doc comment for why the *same* instance has to reach both, and issue
-    // history (the join-dimension routing bug) for why a fresh
-    // `BlockTickFeed::default()` per caller silently went nowhere before.
+    // doc comment for why the *same* instance has to reach both, and the
+    // join-dimension routing bug for why a fresh
+    // `BlockTickFeed::default()` per caller would silently route events away
+    // from the loop.
     BlockTickFeed,
 )
 where
@@ -490,7 +481,7 @@ where
                 };
                 // `alone_with_dimension_handles`, not `with_siblings`: the way
                 // *home* is the source the connection joined with, which
-                // `crate::server` still holds. See `DimensionalSource`'s "the
+                // `crate::server` holds. See `DimensionalSource`'s "the
                 // links are one-directional" note. Carrying the handles
                 // directly (rather than plain `alone`) is what makes them
                 // reachable through `ChunkSource::world_registries`/
@@ -543,20 +534,13 @@ where
 /// Spawns `fut` racing against `shutdown`'s notification — whichever finishes
 /// first ends the task. The unified background tick loop
 /// [`open_in_memory_with_mobs`](IntegratedServer::open_in_memory_with_mobs)
-/// starts (`tick::run_tick_loop`, issue #284) needs exactly this shape, so it
+/// starts (`tick::run_tick_loop`) needs exactly this shape, so it
 /// exists once here rather than once per call site.
 ///
-/// # History: this used to be shared by *two* tick tasks, not one
-///
-/// Before #284, this helper backed two separate spawn sites
-/// (`mobs::run_mob_tick_loop` and `block_entities::run_block_entity_tick_loop`,
-/// unified behind this one function in `a6cc60a`). #284 went one step
-/// further and merged the two *loops themselves* into
-/// [`crate::tick::run_tick_loop`], leaving a single call site. Issue #439 added
-/// the second: [`bind`](IntegratedServer::bind) spawns the same loop for LAN, so
-/// this helper is once again genuinely shared rather than merely being the one
-/// place the shutdown-race wrapper is written. Native only, like the tick loop
-/// itself and every caller of this function.
+/// Both the singleplayer and LAN constructors use this wrapper for their native
+/// world-tick task. Keeping the shutdown race in one helper ensures every caller
+/// joins or cancels the same task shape. Native only, like the tick loop itself
+/// and every caller of this function.
 /// `pub(crate)`: [`crate::dimension_tick::spawn_for_dimension`] reuses this
 /// rather than re-implementing the same shutdown race a second time — see its
 /// own doc comment.
@@ -574,8 +558,9 @@ where
     })
 }
 
-/// The shutdown signal, **sticky** — a bare [`Notify`] is not, and that cost a
-/// 25-minute hang.
+/// The shutdown signal is **sticky** — a bare [`Notify`] cannot preserve a
+/// notification for a task that has not polled its waiter, which can leave a
+/// joined task waiting indefinitely.
 ///
 /// # The lost wakeup
 ///
@@ -586,22 +571,21 @@ where
 ///
 /// `Notify::notify_waiters` **stores no permit**. It wakes the tasks registered as
 /// waiters at that instant and nothing else, and a `notified()` future does not
-/// register until it is first polled. So a `shutdown()` that runs before a
-/// just-spawned task has been polled once loses the notification outright: the
+/// register until it is first polled. If `shutdown()` runs while a just-spawned
+/// task has not polled its waiter, the notification is lost: the
 /// `select!`'s signal arm never completes, the other arm is a serve loop that
 /// never returns on its own, and `join().await` waits forever.
 ///
 /// That is a race on task scheduling, so it is invisible on an idle machine and
-/// reproducible on a loaded one — which is exactly the reported behaviour:
-/// `tests/level_dat_round_trip.rs` passes in 0.8 s alone (measured, twice) and hung
-/// for ~25 minutes in a contended workspace run, taking the shared cargo lock with
-/// it. Its `_client` end stays alive for the whole test, so the connection task
-/// has no other way to finish.
+/// reproducible on a loaded one. A measured test run takes 0.8 s alone and can
+/// hang for ~25 minutes in a contended workspace run, taking the shared cargo
+/// lock with it. Its `_client` end stays alive for the whole test, so the
+/// connection task has no other way to finish.
 ///
 /// # Why this is not fixable on the notifying side
 ///
-/// There is nothing `shutdown()` can do about it: the defect is that the waiter
-/// was not yet listening. Re-notifying in a loop would be a race against a race,
+/// There is nothing `shutdown()` can do about it: a waiter that has not registered
+/// cannot receive the notification. Re-notifying in a loop would be a race against a race,
 /// and a timeout on the join would convert a hang into a silent data-loss window —
 /// the final flush is ordered *after* those joins precisely so nothing can mark a
 /// chunk dirty afterwards.
@@ -613,11 +597,10 @@ where
 ///
 /// # Not gated to native, deliberately
 ///
-/// This first landed behind `#[cfg(not(target_arch = "wasm32"))]` — copied from
-/// [`spawn_tick_task`] above, which really is native-only — while its field and
-/// three constructor calls stayed unconditional, so the crate compiled natively and
-/// not for `wasm32`. Spreading the gate to match would have been the wrong repair:
-/// nothing in this type is native-only (`Notify` comes from tokio's `sync` feature,
+/// This type is intentionally unconditional, while [`spawn_tick_task`] is
+/// native-only. Its field and constructor calls are needed on both targets, so
+/// gating the signal would prevent the browser build from stopping its own
+/// server. Nothing in this type is native-only (`Notify` comes from tokio's `sync` feature,
 /// which the wasm target's own dependency entry enables, and `AtomicBool` is core),
 /// and the browser build genuinely runs [`IntegratedServer`] — in-process
 /// singleplayer over a `DuplexStream` is the whole point of that entry. A shutdown
@@ -647,15 +630,14 @@ impl ShutdownSignal {
         self.notify.notify_waiters();
     }
 
-    /// Resolves once [`Self::trigger`] has been called, **including when it was
-    /// called before this future existed**.
+    /// Resolves once [`Self::trigger`] has been called, including when the
+    /// trigger precedes polling this future.
     async fn notified(&self) {
         let fut = self.notify.notified();
         let mut fut = std::pin::pin!(fut);
-        // `enable()` registers this waiter *now*, without awaiting. Doing it
-        // before the load below is the half of the fix that lives on this side:
-        // a `trigger` that runs after this line cannot miss us, and one that ran
-        // before it is caught by the load.
+        // `enable()` registers this waiter without awaiting. Register it before
+        // loading the flag: a trigger after registration wakes the waiter, and
+        // a trigger before registration is observed by the load.
         fut.as_mut().enable();
         if self.fired.load(std::sync::atomic::Ordering::Acquire) {
             return;
@@ -721,39 +703,37 @@ pub struct IntegratedServer {
     local_addr: Option<std::net::SocketAddr>,
     shutdown: Arc<ShutdownSignal>,
     task: Task,
-    /// The unified world-tick task (issue #284: mob sim + block entities, one
+    /// The unified world-tick task (mob sim + block entities, one
     /// loop), present only when this handle was built by
     /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs). Kept
     /// separate from `task` (rather than folded into the same future) because
     /// the world is meant to keep ticking independently of any one
-    /// connection — see that constructor's own doc comment. Before #284 this
-    /// was two separate fields (`mob_task`, `block_entity_task`) for two
-    /// separate loops; merging the loops made the second field redundant.
+    /// connection — see that constructor's own doc comment. The mob and
+    /// block-entity work share this one task, so the handle needs only one task
+    /// field.
     tick_task: Option<Task>,
-    /// MSPT/TPS/overrun accounting for `tick_task` (issue #285) — `Some` iff
+    /// MSPT/TPS/overrun accounting for `tick_task` — `Some` iff
     /// `tick_task` is, and read through [`tick_stats`](Self::tick_stats).
     clock: Option<Arc<TickClock>>,
-    /// The read-only witness for this server's own `bevy_ecs::World` (issue
-    /// #433 Phase 0), `Some` iff `tick_task` is — the `World` itself is owned
+    /// The read-only witness for this server's own `bevy_ecs::World` (the ECS
+    /// Phase 0 setup), `Some` iff `tick_task` is — the `World` itself is owned
     /// outright by that task and has no lock, so this handle is the *only*
     /// thing about it observable from here. Read through
     /// [`server_tick_count`](Self::server_tick_count); see
     /// `crate::ecs::ServerTickWitness` for why it is a one-way valve rather
     /// than an accessor.
     server_tick: Option<crate::ecs::ServerTickWitness>,
-    /// The one-shot mob-seeding task (issue #454), `Some` only for
+    /// The one-shot mob-seeding task, `Some` only for
     /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs).
     ///
     /// It exists as a *third* task rather than as a prologue to `tick_task`
-    /// because `tick_task`'s clock must start immediately: putting an `.await`
-    /// in front of `run_tick_loop` delays its first `Instant::now()` by however
-    /// long terrain generation takes, which is both the stall this issue removes
-    /// and a silent break of `integrated_memory.rs`'s paused-clock gate ("5 tick
-    /// periods must produce exactly 5 ticks" cannot hold if the loop has not
-    /// started yet). Seeding races `shutdown` like the tick task does, so it
-    /// still cannot outlive this handle.
+    /// because `tick_task`'s clock must start immediately: waiting for terrain
+    /// generation before entering `run_tick_loop` would postpone its first
+    /// `Instant::now()` and invalidate `integrated_memory.rs`'s paused-clock
+    /// gate ("5 tick periods must produce exactly 5 ticks"). Seeding races
+    /// `shutdown` like the tick task does, so it cannot outlive this handle.
     seed_task: Option<Task>,
-    /// The world-save handle (issue #437), `Some` only for
+    /// The world-save handle, `Some` only for
     /// [`open_persistent_with_mobs`](Self::open_persistent_with_mobs).
     ///
     /// Held here so [`shutdown`](Self::shutdown) can flush the world before the
@@ -762,7 +742,7 @@ pub struct IntegratedServer {
     /// is the common case rather than the rare one.
     #[cfg(not(target_arch = "wasm32"))]
     save: Option<crate::region_source::WorldSaveHandle>,
-    /// The autosave timer task (issue #437), `Some` alongside `save`.
+    /// The autosave timer task, `Some` alongside `save`.
     ///
     /// A fourth task rather than a step inside `run_tick_loop`, for the same
     /// reason `seed_task` is a third: the tick loop's budget is 50 ms and a
@@ -770,8 +750,7 @@ pub struct IntegratedServer {
     /// cannot outlive this handle.
     #[cfg(not(target_arch = "wasm32"))]
     autosave_task: Option<Task>,
-    /// The world's `level.dat` (issue #468's gap list), `Some` alongside
-    /// `save`.
+    /// The world's `level.dat` persistence handle, `Some` alongside `save`.
     ///
     /// Stamped with `Time` and `LastPlayed` on every save and at shutdown, so
     /// a world's age accumulates across sessions instead of restarting. See
@@ -779,7 +758,7 @@ pub struct IntegratedServer {
     /// lives there rather than in [`TickClock`].
     #[cfg(not(target_arch = "wasm32"))]
     level_dat: Option<std::sync::Arc<crate::region_source::LevelDatHandle>>,
-    /// The `entities/` region store (issue #303), `Some` alongside `save`.
+    /// The `entities/` region store, `Some` alongside `save`.
     ///
     /// Paired with `mobs` below, and both are needed rather than one: the store
     /// is the disk, the handle is the population, and an entity save is a read of
@@ -792,8 +771,8 @@ pub struct IntegratedServer {
     /// The live mob simulation, `Some` for every constructor that starts a tick
     /// loop.
     ///
-    /// **Not new shared state**: [`MobHandle`] already exists and is already
-    /// cloned into the tick task and every connection. This field is a third
+    /// **Shared state**: [`MobHandle`] is cloned into the tick task and every
+    /// connection. This field is a third
     /// clone of the same handle so the save path can read the population without
     /// a channel, exactly as `save`/`level_dat` above reach persistence.
     #[cfg(not(target_arch = "wasm32"))]
@@ -804,11 +783,10 @@ pub struct IntegratedServer {
     /// RCON's `/setblock`/`/fill` read/write surface — the same handle a live
     /// connection's own `ChatCommand` arm reaches through `chunk_source`
     /// (`crate::server::dispatch_play_packet`'s `Effect::SetBlock`/`Effect::Fill`
-    /// arms). Before this field existed, RCON built a [`crate::commands::CommandWorld`]
-    /// with no chunk source at all and those two effects were dropped by
-    /// construction — see `crate::commands::block_commands`'s own module doc
-    /// for the connection-scoped reason they were self-targeted in the first
-    /// place, which this field is what lets RCON satisfy without one.
+    /// arms). RCON supplies this handle to [`crate::commands::CommandWorld`],
+    /// allowing those effects to mutate the shared world. The command module
+    /// keeps this source connection-scoped, and this field gives RCON the same
+    /// target.
     #[cfg(not(target_arch = "wasm32"))]
     world_source: Option<ErasedChunkSource>,
     /// The tick loop's outbound block-change hub — RCON's `/setblock`/`/fill`
@@ -817,30 +795,29 @@ pub struct IntegratedServer {
     /// only being visible on the next chunk reload.
     #[cfg(not(target_arch = "wasm32"))]
     block_ticks: Option<BlockTickFeed>,
-    /// The world border (issue #580's remainder) — `Some` for every
+    /// The world border handle — `Some` for every
     /// constructor that builds a real, shared one; `open_to_lan` currently
-    /// builds one that is real but **not yet read by any accepted
+    /// builds one that is real but **not read by any accepted
     /// connection** (see that constructor's own comment, next to its
     /// `run_tick_loop_with_weather` call, for the disclosed, separate
     /// per-connection wiring this does not attempt). Storing it here still
-    /// closes a real gap: before this field existed, RCON's `/worldborder`
-    /// had no [`crate::border::BorderFeed`] to reach at all, so it refused
-    /// unconditionally rather than reading and mutating the actual state the
+    /// gives RCON's `/worldborder` a [`crate::border::BorderFeed`] to reach, so
+    /// it reads and mutates the actual state the
     /// tick loop ticks.
     #[cfg(not(target_arch = "wasm32"))]
     border: Option<crate::border::BorderFeed>,
-    /// The portal index every dimension's `ChunkSource` shares (issue #303's
-    /// second half) — the same handle `with_nether` hands to
-    /// [`crate::dimension::DimensionalSource::with_siblings`], read back here
-    /// so the autosave task and [`shutdown`](Self::shutdown) can write its
-    /// cells through `poi_storage` below without going through `host`.
+    /// The portal index shared by every dimension's `ChunkSource` — the same
+    /// handle `with_nether` hands to
+    /// [`crate::dimension::DimensionalSource::with_siblings`]. The autosave task
+    /// and [`shutdown`](Self::shutdown) write its cells through `poi_storage`
+    /// below without going through `host`.
     /// `Some` for every constructor that calls `with_nether` (which is all of
     /// them); `None` is unreachable in practice, exactly like `mobs` above
     /// for a tick-loop constructor — see [`portals`](Self::portals).
     #[cfg(not(target_arch = "wasm32"))]
     portals: Option<crate::portal::PortalIndex>,
-    /// The `poi/` region set for each dimension this world hosts (issue
-    /// #303's second half), `Some` alongside `save`.
+    /// The `poi/` region set for each dimension this world hosts, `Some`
+    /// alongside `save`.
     ///
     /// A [`HashMap`] rather than two named fields, mirroring
     /// [`crate::poi_storage`]'s own reasoning for deriving its subdirectory
@@ -849,11 +826,11 @@ pub struct IntegratedServer {
     /// an entry in [`Dimension::ALL`](crate::dimension::Dimension::ALL).
     #[cfg(not(target_arch = "wasm32"))]
     poi_storage: Option<HashMap<Dimension, crate::poi_storage::PoiStorage>>,
-    /// Issues #327/#328/#323: the world's shared game rules, difficulty and clock.
+    /// The world's shared game rules, difficulty and clock.
     /// The **same** handle the tick loop advances and every connection reads; kept
     /// here so the persistence path can load it at open and stamp it on save.
     world_state: crate::world_state::WorldStateHandle,
-    /// Issue #302's shutdown-cancellation gap: the connection task's own
+    /// The connection task publishes a cancellation-safe snapshot because its
     /// `select!` in this file (below) races the whole serving future against
     /// `shutdown`, and on an ordinary quit the signal wins — the serving
     /// future is dropped mid-`.await`, never returned from, so its
@@ -873,7 +850,7 @@ pub struct IntegratedServer {
     /// unconditionally.
     #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
     live_save: crate::live_save::LiveSaveSlot,
-    /// The RCON listener task (issue #331), `Some` once
+    /// The RCON listener task, `Some` once
     /// [`start_rcon`](Self::start_rcon) has been called.
     ///
     /// Races the same `shutdown` notify every other background task races, so
@@ -883,7 +860,7 @@ pub struct IntegratedServer {
     /// arrives.
     #[cfg(not(target_arch = "wasm32"))]
     rcon_task: Option<Task>,
-    /// The GameSpy4/UT3 query listener task (issue #332), `Some` only for
+    /// The GameSpy4/UT3 query listener task, `Some` only for
     /// [`bind`](Self::bind), which starts it automatically on the same address
     /// as the game TCP socket (UDP and TCP port spaces are independent).
     ///
@@ -893,20 +870,20 @@ pub struct IntegratedServer {
     /// and the UDP port is released before `shutdown()` returns.
     #[cfg(not(target_arch = "wasm32"))]
     query_task: Option<Task>,
-    /// The LAN-discovery multicast broadcaster (issue #535), `Some` only when
+    /// The LAN-discovery multicast broadcaster, `Some` only when
     /// [`LanConfig::discovery`] asked for one and the UDP bind succeeded.
     /// Joined on shutdown for the same reason `query_task` is.
     #[cfg(not(target_arch = "wasm32"))]
     discovery_task: Option<Task>,
-    /// This world's shared, type-erased connection state (issue #562),
+    /// This world's shared, type-erased connection state,
     /// `Some` only for a constructor that already shares a tick loop and
     /// player registry between connections. See [`HostCore`] for why
     /// `publish` needs it and what it deliberately leaves off this struct.
     #[cfg(not(target_arch = "wasm32"))]
     host: Option<HostCore>,
-    /// The relay task every [`HostCore::subscribers`] entry is fanned out by
-    /// — including this handle's own local connection, since #562 made it a
-    /// subscriber too. `Some` alongside `host`; nothing else spawns one.
+    /// The relay task that fans each published event out to every
+    /// [`HostCore::subscribers`] entry. It includes this handle's own local connection so local and LAN clients
+    /// receive the same published events. `Some` alongside `host`; nothing else spawns one.
     #[cfg(not(target_arch = "wasm32"))]
     relay_task: Option<Task>,
     /// [`publish`](IntegratedServer::publish)'s own accept-loop task, `Some`
@@ -917,43 +894,41 @@ pub struct IntegratedServer {
     publish_task: Option<Task>,
 }
 
-/// Everything an open-to-LAN host can configure (issue #535).
+/// Everything an open-to-LAN host can configure.
 ///
-/// Four subsystems here were implemented, gated and then unreachable, because
-/// [`IntegratedServer::bind`] took no way to say anything about them and every
-/// other constructor passed `::default()`/`::none()`. This is the "config
-/// surface" half of that issue: RCON (#331), the query listener (#332),
-/// resource-pack pushes (#334), plugin channels (#335) and commands (#48).
+/// This is the configuration surface for RCON, the query listener,
+/// resource-pack pushes, plugin channels, and commands. The constructors pass
+/// these options to the listener and connection setup paths.
 ///
-/// `Default` reproduces `bind`'s pre-#535 behaviour exactly — the query
-/// listener on, everything else off — so `bind` is now a thin wrapper over
-/// [`IntegratedServer::open_to_lan`] and no existing caller changes behaviour.
+/// `Default` enables the query listener and leaves the other optional services
+/// off. [`IntegratedServer::bind`] uses this configuration through
+/// [`IntegratedServer::open_to_lan`].
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Default)]
 pub struct LanConfig {
     /// The server's own view-distance cap. Every connection's requested
-    /// distance is clamped to it (#545).
+    /// distance is clamped to it.
     pub view_radius: i32,
-    /// Start an RCON listener (#331). `None` — the default — leaves the port
+    /// Start an RCON listener. `None` — the default — leaves the port
     /// closed. The password is in the config; a `port` of `0` lets the OS
     /// choose, and the chosen address comes back from `local_rcon_addr`.
     pub rcon: Option<crate::rcon::RconConfig>,
     /// Serve the GameSpy4/UT3 query protocol on the same port's UDP space
-    /// (#332). On by default, matching what `bind` has always done.
+    /// is enabled by default, matching [`IntegratedServer::bind`].
     pub query: bool,
     /// Announce this world on the LAN discovery multicast group so it appears
-    /// in a vanilla client's multiplayer list without being typed in (#535
-    /// scope 3). Off by default — it is a broadcast, and a caller should opt in.
+    /// in a standard client's multiplayer list without being typed in. Off by
+    /// default — it is a broadcast, and a caller should opt in.
     pub discovery: Option<LanDiscovery>,
     /// The command dispatcher every accepted connection's `/`-commands reach
-    /// (#48). `CommandDispatch::none()` by default, which **refuses** rather
+    /// `CommandDispatch::none()` by default, which **refuses** rather
     /// than permits.
     pub commands: crate::command::CommandDispatch,
-    /// Server-initiated resource-pack pushes (#334).
+    /// Server-initiated resource-pack pushes.
     pub resource_packs: crate::server::ResourcePackPushFeed,
-    /// The wire-level plugin-channel registry (#335).
+    /// The wire-level plugin-channel registry.
     pub plugin_channels: crate::plugin_channels::PluginChannelRegistry,
-    /// Ops, whitelist and the two ban lists this host enforces at join (#336).
+    /// Ops, whitelist and the two ban lists this host enforces at join.
     ///
     /// The `Default` is empty: nobody is banned, nobody is an operator and the
     /// whitelist is off — which is what `bind` has always done, so no existing
@@ -963,8 +938,8 @@ pub struct LanConfig {
     /// one is an op on the next.
     pub access: crate::access::AccessHandle,
     /// Online-mode encryption plus session-server ownership verification
-    /// (issue #273; see `docs/server-online-mode.md`). `None` — the default —
-    /// keeps every connection offline, exactly as before this field existed:
+    /// (see `docs/server-online-mode.md`). `None` — the default —
+    /// keeps every connection offline:
     /// the client's self-reported username/uuid are trusted as-is, no
     /// encryption is offered, and no request ever reaches Mojang. `Some`
     /// switches every connection this listener accepts into the real
@@ -985,12 +960,11 @@ pub struct LanConfig {
     pub online_mode: Option<OnlineModeConfig>,
 }
 
-/// How to announce a LAN world on vanilla's discovery multicast group.
+/// How to announce a LAN world on the standard discovery multicast group.
 ///
-/// Vanilla's `ServerStatusPinger`/`LanServerDetection` listens on UDP
-/// `224.0.2.60:4445` for a `[MOTD]<name>[/MOTD][AD]<port>[/AD]` string and
-/// re-broadcasts every 1.5 s (`LanServerPinger.PING_INTERVAL`). That literal
-/// format is the whole protocol — there is no handshake and no reply.
+/// Compatible clients listen on UDP `224.0.2.60:4445` for a
+/// `[MOTD]<name>[/MOTD][AD]<port>[/AD]` string and re-broadcast every 1.5 s.
+/// That literal format is the whole protocol — there is no handshake and no reply.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 pub struct LanDiscovery {
@@ -1000,14 +974,14 @@ pub struct LanDiscovery {
 
 #[cfg(not(target_arch = "wasm32"))]
 impl LanDiscovery {
-    /// Vanilla's `LanServerPinger` group and port.
+    /// The discovery multicast group and port.
     pub const GROUP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(224, 0, 2, 60);
     /// See [`GROUP`](Self::GROUP).
     pub const PORT: u16 = 4445;
-    /// `LanServerPinger.PING_INTERVAL`.
+    /// The discovery broadcast interval.
     pub const INTERVAL: std::time::Duration = std::time::Duration::from_millis(1500);
 
-    /// The exact datagram body vanilla parses.
+    /// The exact datagram body the client parses.
     #[must_use]
     pub fn payload(&self, port: u16) -> String {
         format!("[MOTD]{}[/MOTD][AD]{port}[/AD]", self.motd)
@@ -1016,12 +990,11 @@ impl LanDiscovery {
 
 /// Per-connection configuration for [`IntegratedServer::publish_with_config`]
 /// — the subset of [`LanConfig`] that is meaningful for a *second* listener
-/// added to an already-running world, rather than for building one from
+/// added to a running world, rather than for building one from
 /// scratch.
 ///
-/// `Default` reproduces [`publish`](IntegratedServer::publish)'s previous,
-/// pre-`PublishConfig` behaviour exactly: commands refused, nobody banned or
-/// whitelisted, every connection offline. See
+/// `Default` keeps commands refused, leaves bans and the whitelist empty, and
+/// keeps every connection offline. See
 /// [`publish_with_config`](IntegratedServer::publish_with_config)'s own doc
 /// comment for why that unread-field shape was a real gap, not a deliberate
 /// simplification.
@@ -1038,7 +1011,7 @@ pub struct PublishConfig {
     /// it is consulted first regardless of this field.
     pub commands: crate::command::CommandDispatch,
     /// Online-mode encryption plus session-server ownership verification
-    /// (issue #273). `None` — the default — keeps every connection offline,
+    /// `None` — the default — keeps every connection offline,
     /// matching every other constructor's default. See
     /// [`LanConfig::online_mode`]'s own doc comment for what `Some` does.
     pub online_mode: Option<OnlineModeConfig>,
@@ -1104,12 +1077,12 @@ impl IntegratedServer {
     /// handling, no timer involved, so a fresh `snapshots()` read on the very
     /// next streaming pass already sees it.
     ///
-    /// The gaps this does **not** close, because they are genuinely
+    /// The timer-driven behaviors this does **not** provide, because they are genuinely
     /// timer-shaped and `wasm32` has no timer to drive them: a dropped item
     /// never falls, merges with a neighbour, ages toward its despawn time, or
     /// attracts any AI, and no mob spawns or moves, ever — the same
-    /// documented gap [`open_in_memory`](Self::open_in_memory) already
-    /// carried. Pickup still works: `collect_nearby_items` is dispatched from
+    /// behavior [`open_in_memory`](Self::open_in_memory) carries. Pickup
+    /// still works: `collect_nearby_items` is dispatched from
     /// every inbound movement packet in both `serve_play` definitions, not
     /// from a tick, so a player can still walk over and bank what they mined.
     #[must_use]
@@ -1229,7 +1202,7 @@ impl IntegratedServer {
                 task,
                 tick_task: None,
                 clock: None,
-                // No tick task, so nobody owns a server `World` (issue #433).
+                // No tick task, so nobody owns a server `World`.
                 server_tick: None,
                 // Nothing seeds a mob population through this constructor
                 // (see the `mobs` binding above), so there is nothing to seed.
@@ -1300,14 +1273,14 @@ impl IntegratedServer {
         let (client_end, server_end) = memory_pair();
         let shutdown = ShutdownSignal::new();
         let signal = shutdown.clone();
-        // Issue #293: shared rather than moved in by value, so chunk
+        // shared rather than moved in by value, so chunk
         // generation can be handed to `spawn_blocking` instead of blocking
         // this runtime's core thread — see `crate::chunk::generate_columns_offloaded`
         // and `crate::server::SourceRef`. There is exactly one connection
         // here, so the `Arc` is not about sharing between tasks; it is
         // purely what makes the closure `'static`.
         //
-        // Issue #289 / `docs/plans/chunk-lifecycle.md` U3: wrapped in a
+        // `docs/plans/chunk-lifecycle.md` U3: wrapped in a
         // [`ChunkStore`] so a column is generated **once** and thereafter read.
         // This constructor spawns no tick loop, so it does not suffer the
         // per-tick regeneration `open_in_memory_with_mobs` did — but it does
@@ -1316,7 +1289,7 @@ impl IntegratedServer {
         // *default* implementation regenerates a whole column to read one cell.
         // See `crate::chunk_store`'s module docs.
         //
-        // Issue #505: sized from `view_radius`, not from a literal. This
+        // sized from `view_radius`, not from a literal. This
         // constructor serves the whole `[-view_radius, view_radius]²` square at
         // join, and a capacity that does not cover it puts the columns the player
         // is looking at permanently in eviction range.
@@ -1331,11 +1304,10 @@ impl IntegratedServer {
             view_radius,
             true,
             // No world directory reaches this constructor, so there is
-            // nothing on disk to restore — a fresh index, same as before
-            // `with_nether` took one as a parameter.
+            // nothing on disk to restore — a fresh index for `with_nether`.
             crate::portal::PortalIndex::new(),
-            // No world directory, so a sibling stays in-memory-only — same as
-            // every dimension was before this wiring existed.
+            // No world directory, so a sibling stays in-memory-only — the
+            // in-memory constructor does not persist dimension data.
             None,
             // This constructor's own contract is "spawns no tick loop" (see
             // the `block_entities`/`mobs` comments just below) — this
@@ -1343,12 +1315,12 @@ impl IntegratedServer {
             // built on this constructor lights a portal.
             None,
         ));
-        // Issue #619. Real, not a fresh default: this constructor is a genuine
+        // The real handle, not a fresh default: this constructor is a genuine
         // join path — it is the wasm32 build's own singleplayer entry (see
         // `lodestone-shell/src/net.rs`'s `#[cfg(target_arch = "wasm32")]` arm,
         // which calls `open_in_memory` directly), not a test harness. And it is
         // not inert despite this constructor's "spawns no tick loop" contract:
-        // `ChunkStore::ensure` checks the ticket graph in on every real read
+        // `ChunkStore::ensure` checks the ticket graph on every real read
         // (`ChunkStore::maybe_tick_tickets`), so ordinary chunk traffic from this
         // one connection is enough to propagate and evict against it.
         let tickets = source.primary().tickets();
@@ -1356,7 +1328,7 @@ impl IntegratedServer {
         // ticks it here — only `open_in_memory_with_mobs` spawns the tick
         // loop (see that constructor's doc comment) — so a block entity
         // placed through this constructor exists and holds state, but never
-        // advances on its own. Still real: `apply_use_item_on` can insert
+        // advances on its own. `apply_use_item_on` can insert
         // into it and a later `CONTAINER_CLICK`/read could observe it.
         let block_entities = BlockEntityHandle::default();
         // A fresh, mobless handle for the same reason `block_entities` above
@@ -1373,7 +1345,7 @@ impl IntegratedServer {
             // thus the client's read side) is dropped on the way out.
             tokio::select! {
                 _ = signal.notified() => {}
-                // Issue #545: `MAX_CLIENT_VIEW_RADIUS` as the live-change ceiling
+                // `MAX_CLIENT_VIEW_RADIUS` as the live-change ceiling
                 // — see the `open_in_memory_with_mobs_using` call site below for
                 // the policy, and `crate::server::ViewTracker::max_radius` for
                 // why the join radius could not serve as both.
@@ -1389,7 +1361,7 @@ impl IntegratedServer {
                 task,
                 tick_task: None,
                 clock: None,
-                // No tick task, so nobody owns a server `World` (issue #433).
+                // No tick task, so nobody owns a server `World`.
                 server_tick: None,
                 // Nothing seeds a mob population through this constructor (see
                 // the `mobs` binding above), so there is nothing to seed.
@@ -1430,12 +1402,12 @@ impl IntegratedServer {
                 // other `None`/`default()` field above for a constructor with
                 // no `PlayerDataStore` reachable in the first place.
                 live_save: crate::live_save::LiveSaveSlot::default(),
-                // No RCON listener (issue #331) unless the caller starts one
+                // No RCON listener unless the caller starts one
                 // explicitly with `start_rcon` — a listener needs a password
                 // and a command dispatch, which these constructors do not take.
                 #[cfg(not(target_arch = "wasm32"))]
                 rcon_task: None,
-                // No query listener (issue #332): it starts only on the TCP
+                // No query listener: it starts only on the TCP
                 // `bind` path, which is the host-facing entry point.
                 #[cfg(not(target_arch = "wasm32"))]
                 query_task: None,
@@ -1456,25 +1428,23 @@ impl IntegratedServer {
     }
 
     /// Like [`open_in_memory_with_entities`](Self::open_in_memory_with_entities),
-    /// but the entity source is a real, live-ticked [`crate::MobSim`] (issue
-    /// #217) rather than a caller-supplied [`EntitySource`]: this constructor
+    /// but the entity source is a real, live-ticked [`crate::MobSim`] rather
+    /// than a caller-supplied [`EntitySource`]: this constructor
     /// also spawns the unified tick-loop task that owns the sim *and* every
-    /// block entity (`tick::run_tick_loop`, issue #284 — see that module's own
-    /// doc comment for why one loop now covers both), so dropping the
+    /// block entity (`tick::run_tick_loop` — see that module's own
+    /// doc comment for why one loop covers both), so dropping the
     /// returned handle stops *both* the connection task and the world-tick
     /// task, and shutdown waits on both. Also builds this server's
-    /// [`TickClock`] (issue #285), readable through
+    /// [`TickClock`], readable through
     /// [`tick_stats`](Self::tick_stats).
     ///
     /// Mob pathing reads the same [`ChunkStore`] this constructor wraps `source`
     /// in, so a singleplayer world has exactly **one** terrain source.
     ///
-    /// This used to take a second, independent `ChunkSource` for the mob world,
-    /// on the argument that a deterministic generator produces identical terrain
-    /// from two instances — true, and it cost a full second generation of the
-    /// whole `mob_area` at world open, serially, before any task spawned. Issue
-    /// #454 pointed seeding at the shared store; issue #436 removed the
-    /// now-unread parameter.
+    /// Mob seeding and pathing use the shared `ChunkStore`, avoiding a second
+    /// terrain source and a second generation of the whole `mob_area` at world
+    /// open. The constructor therefore accepts one terrain source for both
+    /// connection traffic and mob simulation.
     ///
     /// `mob_area` is the `(cx_range, cz_range)` of chunk columns loaded once
     /// into the sim's `ChunkWorld` snapshot — pick a range that covers
@@ -1571,8 +1541,8 @@ impl IntegratedServer {
     /// # Why this exists at all
     ///
     /// Because a registry the server creates privately is a registry the save
-    /// path can never read, and that is the exact shape of the island issue
-    /// #468 was: `chunk_nbt` wrote an empty `block_entities` list for every
+    /// path can never read, and that is the exact shape of the island: `chunk_nbt`
+    /// wrote an empty `block_entities` list for every
     /// chunk and a saved container came back empty. The world's containers
     /// have to live in **one** registry that both the tick loop and
     /// [`crate::region_source::WorldSaveHandle`] can see, so
@@ -1593,20 +1563,20 @@ impl IntegratedServer {
         mob_count: usize,
         view_radius: i32,
         block_entities: BlockEntityHandle,
-        // Issue #468. Threaded exactly as `block_entities` above is, and for the
+        // The scheduled-tick handle is threaded exactly as `block_entities` above is, and for the
         // same reason: the tick loop owns the queues at runtime, the persistence
         // path needs the same instance to save them, and only the caller knows
         // whether there is a world on disk to save to. In-memory passes a fresh
         // default; `open_persistent_with_mobs` passes the region source's own.
         scheduled: crate::region_source::ScheduledTickHandle,
-        // Issue #303. `Some` only for `open_persistent_with_mobs`: the store the
+        // The mob handle is `Some` only for `open_persistent_with_mobs`: the store the
         // seeding task restores this world's saved mobs and dropped items from,
         // once it has replaced the `Default` sim. Threaded here rather than
         // applied by the caller for the reason the restore site documents —
         // `MobHandle::reseed` discards the whole sim, so a restore that ran
         // before it would be silently undone.
         entities_on_disk: Option<crate::entity_storage::EntityStorage>,
-        // Issue #303's second half. Unlike `entities_on_disk`, never `None` in
+        // The shared portal index. Unlike `entities_on_disk`, never `None` in
         // practice by the time this function runs: both callers pass a real
         // index, either fresh ([`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs))
         // or restored from the `poi/` sets
@@ -1648,18 +1618,18 @@ impl IntegratedServer {
         // instead of being skipped. Same shape as the LAN-relay path's
         // `relay_players` further down this file.
         let player_registry = PlayerRegistry::new();
-        // Issues #307/#308: shared with the tick task the same way
+        // shared with the tick task the same way
         // `block_entities` is, above — see [`BlockTickFeed`]'s own doc
         // comment for why this is safe with exactly one connection (this
         // constructor's own shape) and would need a per-connection cursor
         // for a multi-connection server.
         let block_tick_feed = BlockTickFeed::default();
-        // Issue #425: shared with the tick task the same way `block_tick_feed`
+        // shared with the tick task the same way `block_tick_feed`
         // is, above, and for the same reason — see [`ExplosionFeed`]'s own
         // doc comment for why this is safe with exactly one connection (this
         // constructor's own shape).
         let explosion_feed = ExplosionFeed::default();
-        // Issue #562: this connection is a *subscriber* of the two feeds
+        // this connection is a *subscriber* of the two feeds
         // above rather than their sole direct consumer — the same shape
         // `open_to_lan`'s relay already uses (see `LanSubscriber`), applied
         // here so `publish` can add a second, TCP-backed connection to this
@@ -1717,8 +1687,8 @@ impl IntegratedServer {
                 }
             }
         });
-        // Issue #325 / `docs/plans/world-state.md` S1: the night-skip vote and
-        // its feed, shared between the connection task and the tick task the
+        // The night-skip vote and its feed are shared between the connection
+        // task and the tick task in the
         // same way the two feeds above are. The connection records `lay_down`/
         // `get_up` (bed click / wake-up) and feeds the voter count on its
         // `container_sync_tick`; the tick task's loop computes the vote and
@@ -1727,45 +1697,43 @@ impl IntegratedServer {
         // own doc comment. A fresh vote and feed are the singleplayer shape;
         // with `player_registry` above carrying exactly the one local player
         // once they join, the voter count reaches 1 and
-        // `SleepState::sleepers_needed`'s `max(1, …)` floor still demands
-        // exactly one sleeper — the same outcome the pre-registry singleplayer
-        // shape got from the floor alone, now reached by the real count too.
+        // `SleepState::sleepers_needed`'s `max(1, …)` floor demands exactly
+        // one sleeper; the real count and the floor agree for the local player.
         let sleep_vote = SleepVote::new();
         let sleep_feed = SleepFeed::default();
-        // Issues #326/#580: the world border, shared the same way — one
+        // the world border, shared the same way — one
         // handle cloned into the connection task (which reads it for its
         // join broadcast and per-tick damage) and into the tick loop (which
         // ticks it and is the thing a future `/worldborder` command mutates
-        // through `BorderFeed::with`). Before this, the tick loop ticked a
-        // private `WorldBorder::default()` and every connection built its
-        // own throwaway `BorderFeed::default()` — two unreachable borders,
-        // not one shared one.
+        // through `BorderFeed::with`). The tick loop and every connection use
+        // this single feed, so border damage and `/worldborder` commands address
+        // the same state.
         let border_feed = crate::border::BorderFeed::default();
-        // Issue #12: the *handle* is still built synchronously here, before any
+        // the *handle* is built synchronously here, before any
         // task spawns, so the exact same `MobSim` can be shared by the
         // connection task (which mutates it on an `Attack` packet, through
         // `crate::server::apply_attack`) and the tick-loop task (which ticks and
         // republishes it). See `MobHandle`'s own doc comment for why this is
         // `'static`-safe.
         let (cx_range, cz_range) = mob_area;
-        // Issues #307/#308: the same small fixed region `mob_area` already
-        // names, reused rather than adding a second range parameter — see
+        // the same small fixed region named by `mob_area`, reused rather than
+        // adding a second range parameter — see
         // `tick::run_tick_loop`'s own doc comment for why this crate has no
         // general "loaded chunks" registry to draw a wider one from yet.
         let tick_area = (cx_range.clone(), cz_range.clone());
         let (center_x, center_z) = mob_center;
 
-        // Issues #307/#308: `source` is now shared between the connection
+        // `source` is shared between the connection
         // task (which serves it over the wire — chunk generation, and every
         // player-driven `set_block`) and the tick task (which random-ticks
         // it) — the same object, not two independent instances, which is
         // exactly what makes a random tick's mutation visible to the client
         // this server actually serves rather than to an unwatched second
-        // copy. **Since issue #454 mob pathing shares it too**, so this is now
+        // copy. **Mob pathing shares it too**, so this is
         // the one and only terrain source a singleplayer world has; see the
         // seeding task below and this function's own doc comment.
         //
-        // Issue #289 / `docs/plans/chunk-lifecycle.md` U3 — **this is the
+        // `docs/plans/chunk-lifecycle.md` U3 — **this is the
         // singleplayer starvation fix.** [`ChunkStore`] makes a column
         // generated once and thereafter read, which matters here more than
         // anywhere because both tasks sharing this source were regenerating on
@@ -1777,19 +1745,19 @@ impl IntegratedServer {
         // exceeds the 50 ms tick budget by more than an order of magnitude.
         // See `crate::chunk_store`'s module docs for the full accounting.
         //
-        // Note this is now built *before* anything mob-related, which is
+        // Note this is built *before* anything mob-related, which is
         // load-bearing rather than cosmetic: the seeding task below reads its
         // terrain through this same store, so the 49 columns of `mob_area` are
         // generated **once** for the whole world instead of once here and once
-        // more from a second, independent generator (issue #454).
+        // more from a second, independent generator.
         //
-        // Issue #505: the capacity is derived from `view_radius`, not a literal, and
+        // the capacity is derived from `view_radius`, not a literal, and
         // the derivation adds `CONCURRENT_SCAN_COLUMNS` on top of the view rather
         // than assuming the view covers it.
         //
-        // That headroom used to be justified by the tick area being a *disjoint*
-        // square (it was centred on world spawn and never moved). It follows the
-        // players now — see `crate::tick_area` — so in the steady state it is a
+        // That headroom covers the tick area even when it is a *disjoint*
+        // square. It follows the players — see `crate::tick_area` — so in the
+        // steady state it is a
         // subset of the view and the union has collapsed. The reserve stays because
         // the collapse is not instantaneous: the area moves the tick a movement
         // packet lands, before the new strip has finished streaming, and a teleport
@@ -1800,7 +1768,7 @@ impl IntegratedServer {
         // See `chunk_store::integrated_capacity_for_view_radius`.
         // Cloned before the move into `with_nether` below, so the `Self`
         // literal further down can still hand a caller the same handle the
-        // world's `ChunkSource`s actually share (issue #303's second half) —
+        // world's `ChunkSource`s actually share —
         // the same "clone before the move" shape every other `*_for_handle`
         // binding in this constructor already follows.
         let handle_portals = portals.clone();
@@ -1811,15 +1779,10 @@ impl IntegratedServer {
         // it (via `ticking`, below) to hand a Nether/End sibling's tick loop
         // the same anchor set this connection publishes into.
         let world_state = crate::world_state::WorldStateHandle::new();
-        // Issue #48's remainder: a persistent world's `datapacks/` folder,
-        // loaded once here rather than left for `/reload` to discover for
-        // the first time — the identical "load at open, `/reload` re-reads
-        // the same root" shape `LevelDatHandle::open_or_create` already
-        // takes for `level.dat` below. `world_dir` is borrowed, not moved,
-        // so the ownership transfer into `with_nether` just below is
-        // unaffected; `None` (every in-memory/browser world) loads nothing,
-        // matching `crate::commands::function_store::FunctionHandle`'s own
-        // "never configured" answer for `/reload` there.
+        // A persistent world's `datapacks/` folder is loaded from `world_dir`.
+        // The directory is borrowed, so `with_nether` receives a separate
+        // source value; `None` leaves function data unconfigured
+        // for in-memory and browser worlds.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(dir) = world_dir.as_deref() {
             world_state.functions().load_from(dir);
@@ -1835,7 +1798,7 @@ impl IntegratedServer {
                 shutdown: Arc::clone(&shutdown),
             }),
         ));
-        // Issue #619. The real handle this world's `ChunkStore` grants and
+        // The real handle this world's `ChunkStore` grants and
         // reads tickets through — not a fresh default, since this is the
         // constructor behind both `open_in_memory_with_mobs` (native
         // singleplayer) and, via `world_dir`, `open_persistent_with_mobs`.
@@ -1848,17 +1811,17 @@ impl IntegratedServer {
         // same `Arc<Mutex<TicketStore>>` — see that type's own doc.
         let tickets = source.primary().tickets();
 
-        // Issue #454: **mob seeding is off the critical path.**
+        // **mob seeding is off the critical path.**
         //
-        // `MobHandle::seeded` used to run right here, synchronously, before any
-        // task spawned — a serial `ChunkWorld::from_source` over the whole
-        // `mob_area`. At the shell's `view_radius.clamp(1, 3)` that is 49
+        // Mob seeding runs in this task rather than in the constructor: a serial
+        // `ChunkWorld::from_source` over the whole `mob_area` would block the
+        // caller. At the shell's `view_radius.clamp(1, 3)` that is 49
         // columns, and **measured in release at 10.86 s** inside the
         // `runtime.block_on` that opens a world, before the client could even
-        // connect. Vanilla does not block world-open on mob population.
+        // connect. World-open does not wait for mob population.
         //
         // Do **not** re-derive that figure from `chunk_store`'s 909 ms per
-        // column: `49 × 909 ms ≈ 45 s` is what issue #454 predicted and it is
+        // column: `49 × 909 ms ≈ 45 s` is what the independent-source measurement predicted and it is
         // 4× too high. The 909 ms was measured across four *independently
         // constructed* sources precisely so the generator's 512-entry memo would
         // absorb nothing; seeding is the opposite case — one source, 49
@@ -1873,7 +1836,7 @@ impl IntegratedServer {
         // this task fills it in. Two things make that cheap rather than merely
         // moved:
         //
-        // * `generate_columns_offloaded` (issue #293/#414) fans the batch out
+        // * `generate_columns_offloaded`  fans the batch out
         //   over scoped threads **and** runs it on the blocking pool, so it
         //   neither serialises nor blocks the core thread the connection task
         //   and `run_tick_loop` share.
@@ -1888,11 +1851,11 @@ impl IntegratedServer {
         let seed_source = Arc::clone(&source);
         let mob_handle = MobHandle::default();
         let seed_mobs = mob_handle.clone();
-        // Issue #303. A third clone, for the handle this constructor returns, so
+        // A third clone, for the handle this constructor returns, so
         // `open_persistent_with_mobs`'s autosave and `shutdown`'s flush can read
         // the population. `mob_handle` itself is moved into the tick task below.
         let handle_mobs = mob_handle.clone();
-        // Issue #303: the entity area to restore, and where from. Cloned here
+        // the entity area to restore, and where from. Cloned here
         // because the ranges are consumed by `seed_coords` above.
         let restore_area = (cx_range.clone(), cz_range.clone());
         let seed_task = spawn_tick_task(&shutdown, async move {
@@ -1915,13 +1878,12 @@ impl IntegratedServer {
                 center_z,
                 demo_mob_count(mob_count),
             );
-            // Issue #303: **after** the reseed, never before. `MobHandle::reseed`
+            // Restore **after** the reseed. `MobHandle::reseed`
             // replaces the whole `MobSim` (see its own doc comment — "everything
             // is thrown away"), so restoring first would delete every saved mob
             // and leave a green tree with an empty world. This is also why the
             // restore lives in the seed task rather than in
-            // `open_persistent_with_mobs`: that function returns before this task
-            // has run.
+            // `open_persistent_with_mobs` returns while this task continues.
             #[cfg(not(target_arch = "wasm32"))]
             if let Some(storage) = &entities_on_disk {
                 let (cx_range, cz_range) = restore_area;
@@ -1938,12 +1900,12 @@ impl IntegratedServer {
                     // channel, and a world whose mobs cannot be read is still a
                     // world worth playing. The load is *not* silent, which is the
                     // property that matters — a blank `entities/` read as "no
-                    // mobs here" is exactly the failure #303 exists to stop.
+                    // mobs here" is exactly the failure this persistence check exists to stop.
                     Err(err) => tracing::error!("entity load failed, mobs not restored: {err}"),
                 }
             }
-            // Read the clock **once**: the previous form called `elapsed()` twice, so
-            // the logged parts did not sum to the logged total. `saturating_sub` for
+            // Read the clock **once**: calling `elapsed()` twice can make the
+            // logged parts fail to sum to the logged total. Use `saturating_sub` for
             // the same reason as `server.rs`'s welcome timing — `as_millis()` is
             // `u128`, and a sub-millisecond phase makes a plain subtraction underflow
             // and panic in debug while wrapping silently in release.
@@ -1968,14 +1930,14 @@ impl IntegratedServer {
         let conn_block_entities = block_entities.clone();
         let conn_mobs = mob_handle.clone();
         let conn_source = Arc::clone(&source);
-        // Issue #619. This connection's own reference to the world's one real
+        // This connection's own reference to the world's one real
         // ticket graph — same "clone before the move" shape as every other
         // `conn_*` binding here, and the same handle `host_tickets` below
         // hands `publish`'s later connections, so a player-following ticket
         // granted by one connection and a `publish`-added one both move the
         // same store.
         let conn_tickets = tickets.clone();
-        // Issue #562: a third clone of each, for `HostCore` — `live_mobs` and
+        // a third clone of each, for `HostCore` — `live_mobs` and
         // `block_entities` are both moved by value into the tick task below
         // (`run_tick_loop_with_weather`'s own signature), so a clone taken
         // there would be too late; this is the same "clone before the move"
@@ -1983,16 +1945,16 @@ impl IntegratedServer {
         // constructor already follows.
         let host_live_mobs = live_mobs.clone();
         let host_block_entities = block_entities.clone();
-        // Issue #619: same reason as `host_live_mobs`/`host_block_entities`
+        // same reason as `host_live_mobs`/`host_block_entities`
         // above — `publish` (further down this file) accepts connections into
         // this same running world and needs the same ticket graph, not a
         // second, empty one.
         let host_tickets = tickets.clone();
         // `conn_block_ticks`/`conn_explosions` are `local_subscriber`'s own
-        // queues, built above alongside `subscribers`/`relay_task` — issue
-        // #562. Not `block_tick_feed.clone()`/`explosion_feed.clone()`
+        // queues, built above alongside `subscribers`/`relay_task`. Not
+        // `block_tick_feed.clone()`/`explosion_feed.clone()`
         // anymore: those are the hub now, and only the relay task drains them.
-        // Issue #562: erased to `Box<dyn ServerProtocol>` (via the existing
+        // erased to `Box<dyn ServerProtocol>` (via the existing
         // `impl<P: ServerProtocol + ?Sized> ServerProtocol for Box<P>`) and
         // `Arc`-wrapped for cheap sharing, so `publish` can hand the exact
         // same protocol instance to every connection it accepts later, not
@@ -2001,7 +1963,7 @@ impl IntegratedServer {
         // non-generic `IntegratedServer` — name a type at all.
         let protocol: Arc<Box<dyn ServerProtocol>> = Arc::new(Box::new(protocol));
         let conn_protocol = Arc::clone(&protocol);
-        // Issue #325: cloned out here rather than inside the `async move`
+        // cloned out here rather than inside the `async move`
         // below, for the same reason `clock` is — an `Arc::clone` *inside* the
         // block would move the original out of reach of the tick task, which
         // passes the same inner handle to `run_tick_loop_with_weather`.
@@ -2013,21 +1975,21 @@ impl IntegratedServer {
         // scope it deliberately does not.
         #[cfg(not(target_arch = "wasm32"))]
         let host_border = border_feed.clone();
-        // Issues #327/#328/#323. **One** world state, cloned out here for the same
+        // **One** world state, cloned out here for the same
         // reason the sleep vote is: a clone made inside the `async move` below would
         // move the original out of reach of the tick task, and two stores is the bug
         // — a rule set on the connection has to be the rule the loop reads, and the
         // clock the loop advances has to be the clock the connection broadcasts.
         //
-        // `world_state` itself is now built earlier, before
-        // `with_nether` — see that call's own comment for why a Nether/End
+        // `world_state` is built before `with_nether` — see that call's own
+        // comment for why a Nether/End
         // sibling's tick loop needs the *same* handle this connection
         // publishes anchors into.
         let conn_world_state = world_state.clone();
         // A third clone for the returned handle, so a caller (the persistence path,
         // a gate) reads and stamps the *same* store the loop advances.
         let world_state_for_handle = world_state.clone();
-        // Issue #302's shutdown-cancellation gap — see the field's own doc
+        // Publish a cancellation-safe snapshot — see the field's own doc
         // comment on `IntegratedServer`. `conn_live_save` is what
         // `serve_play` publishes a fresh snapshot to every loop iteration;
         // `live_save` is the clone kept for the returned handle, exactly the
@@ -2045,7 +2007,7 @@ impl IntegratedServer {
             let mut conn = Connection::new(server_end);
             tokio::select! {
                 _ = conn_signal.notified() => {}
-                // Issue #293: the `_shared` variant, so this task's chunk
+                // the `_shared` variant, so this task's chunk
                 // generation runs on the blocking pool rather than on the
                 // one core thread it shares with `run_tick_loop` below.
                 // `&conn_source` rather than `&*conn_source` is the entire
@@ -2056,10 +2018,10 @@ impl IntegratedServer {
                     &conn_source,
                     &conn_entities,
                     view_radius,
-                    // Issue #545: singleplayer's live-change ceiling is the
+                    // singleplayer's live-change ceiling is the
                     // slider's own maximum, not the radius this connection
-                    // joined with — raising render distance mid-session used to
-                    // be silently clamped back. Uncapped for the same reason
+                    // joined with — the slider's maximum remains effective after
+                    // joining. Uncapped for the same reason
                     // `for_integrated_view_radius` above is: it is the memory of
                     // the person who moved the slider. See
                     // `crate::server::MAX_CLIENT_VIEW_RADIUS`.
@@ -2083,14 +2045,14 @@ impl IntegratedServer {
                     None,
                 ) => {}
             }
-            // Issue #562: lets the relay task above drop this connection's
+            // lets the relay task above drop this connection's
             // subscriber on its next pass, exactly as `open_to_lan`'s own
             // per-connection wrapper does for a LAN socket.
             conn_alive.store(false, std::sync::atomic::Ordering::Relaxed);
         });
 
         let clock = Arc::new(TickClock::new());
-        // Issue #433 Phase 0: build this server's own `bevy_ecs::World` here,
+        // Phase 0: build this server's own `bevy_ecs::World` here,
         // synchronously, before the tick task spawns — the same reason
         // `mob_handle` above is built here rather than inside the future, and
         // it is also what makes the Phase 0 gate deterministic (no polling: by
@@ -2108,19 +2070,19 @@ impl IntegratedServer {
         // Cloned out here rather than inside the `async move` below: an
         // `Arc::clone(&x)` *inside* the block moves `x` into the coroutine, so
         // `clock` would no longer be available for the `Self` literal further
-        // down. Before this change the calls were argument expressions,
-        // evaluated eagerly, and the distinction did not arise.
+        // down. Keeping these clones outside the async block preserves that handle
+        // while giving the task its own references.
         let tick_clock = Arc::clone(&clock);
         let tick_source = Arc::clone(&source);
-        // Issue #562: clones, not the hub bindings themselves — `block_tick_feed`/
+        // clones, not the hub bindings themselves — `block_tick_feed`/
         // `explosion_feed` have to survive this constructor so `HostCore` can
         // hand `publish` the same hub every later connection's subscriber is
         // built against. The tick loop only ever needs *a* handle to publish
         // into, not this particular one.
         let tick_block_ticks = block_tick_feed.clone();
         let tick_explosions = explosion_feed.clone();
-        // **The world tick follows the player from here on.** `tick_area` above is
-        // now only the fallback the loop uses while no player has reported a
+        // **The world tick follows the player.** `tick_area` above is
+        // the fallback the loop uses while no player has reported a
         // position; the anchor set rides `world_state`, which the connection task
         // already holds, so the two ends share one store without a new parameter on
         // the `serve_connection*` chain. See `crate::tick_area`.
@@ -2133,7 +2095,7 @@ impl IntegratedServer {
         let follow = crate::tick_area::TickFollow {
             // `DimensionalSource::dimension` — its own inherent accessor, which
             // returns the dimension it serves rather than the trait's `Option`.
-            // Issue #562's `impl ChunkSource for Arc<S>` (in `chunk.rs`) gives
+            // The `impl ChunkSource for Arc<S>` (in `chunk.rs`) gives
             // `Arc<DimensionalSource<..>>` a *trait* `dimension()` too, and
             // method resolution stops at the first receiver type with any
             // match at all — so calling this through the `Arc` directly would
@@ -2149,12 +2111,12 @@ impl IntegratedServer {
             // Phase 1 replaces this binding with a `&mut` argument to
             // `run_tick_loop` and runs `GameTick` once per iteration.
             let _server_world = server_world;
-            // Issue #325: the `_with_weather` variant so the real sleep vote
+            // the `_with_weather` variant so the real sleep vote
             // and feed reach the loop (the plain `run_tick_loop` wrapper only
             // forwards a fresh, disconnected vote — that is the loop `bind`'s
             // LAN worlds run on, which is why they do not skip the night yet).
-            // Weather itself is not wired here (issue #324's own change), so a
-            // default feed and state are passed — exactly what the wrapper
+            // Weather is not wired here, so a default feed and state are passed —
+            // exactly what the wrapper
             // would have passed, which is why switching variants is
             // observably a no-op for the sky.
             run_tick_loop_with_weather(
@@ -2178,7 +2140,7 @@ impl IntegratedServer {
             .await;
         });
 
-        // Issue #562: `HostCore::source`'s double-`Arc` — see that field's own
+        // `HostCore::source`'s double-`Arc` — see that field's own
         // doc comment for why one layer is not enough. `source` itself is
         // still alive here (every earlier use only ever cloned the `Arc`, per
         // `Arc::clone(&source)` at each of `seed_source`/`conn_source`/
@@ -2247,7 +2209,7 @@ impl IntegratedServer {
                 query_task: None,
                 #[cfg(not(target_arch = "wasm32"))]
                 discovery_task: None,
-                // Issue #562: this constructor is the one place that builds a
+                // this constructor is the one place that builds a
                 // tick loop *and* a player registry shared between
                 // connections, so it is the one place that can hand `publish`
                 // something to add a second connection to.
@@ -2276,8 +2238,7 @@ impl IntegratedServer {
     /// [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs), but
     /// **persistent**: columns are loaded from `world_dir`'s Anvil region files
     /// when they exist, every mutation is retained, and the world is written
-    /// back on [`shutdown`](Self::shutdown) and on an autosave timer (issue
-    /// #437).
+    /// back on [`shutdown`](Self::shutdown) and on an autosave timer.
     ///
     /// # How it composes
     ///
@@ -2350,12 +2311,12 @@ impl IntegratedServer {
                 height,
             )?;
         let save = persistent.save_handle();
-        // Read out before `persistent` is moved into the constructor below.
+        // Read out while `persistent` is available for the constructor below.
         let persistent_scheduled = persistent.scheduled_ticks();
-        // Before any task spawns, and before the first chunk is written: a
+        // Create this before any task spawns or chunks are written: a
         // world directory that has region files but no `level.dat` is not a
         // world any other tool — vanilla included — will open. Creating it
-        // here also means a world that is opened and immediately closed still
+        // here also means a world that is opened and immediately closed
         // leaves something loadable behind.
         //
         // Spawn defaults to the mob centre at y=64 rather than taking another
@@ -2372,7 +2333,7 @@ impl IntegratedServer {
         // A second handle to the *same* world, returned to the caller. This is
         // what anything outside the connection loop (a `/setblock`, a gate)
         // mutates through, and it is the identical object the `ChunkStore`
-        // below wraps — not a second copy, which is the mistake issue #454
+        // below wraps — not a second copy, which is the mistake the mob-pathing
         // caught in the mob-pathing source.
         let world = persistent.clone();
         // **The world's own registry, not a fresh one.** This is the join that
@@ -2380,13 +2341,13 @@ impl IntegratedServer {
         // containers in this registry and `WorldSaveHandle::save` reads the
         // same one. Passing `BlockEntityHandle::default()` here compiles, ticks
         // correctly, and writes an empty `block_entities` list forever — the
-        // island #468 names.
+        // island described above.
         let block_entities = persistent.block_entities();
-        // Issue #303: the `entities/` region set, created eagerly next to
+        // the `entities/` region set, created eagerly next to
         // `region/` so a later entity save cannot fail for a reason the caller
         // could have been told about here.
         let entity_storage = crate::entity_storage::EntityStorage::new(world_dir)?;
-        // Issue #303's second half: the `poi/` region set — one store per
+        // The `poi/` region set — one store per
         // dimension, unlike `entity_storage`/`region/`, because a lit portal
         // is a POI in both the overworld and the Nether (`crate::poi_storage`'s
         // own doc). Created eagerly for the same reason `entity_storage` is
@@ -2423,17 +2384,16 @@ impl IntegratedServer {
             mob_count,
             view_radius,
             block_entities,
-            // Issue #468's last wire: the same handle the save path reads, so a
+            // The last wire: the same handle the save path reads, so a
             // pending repeater tick survives a quit.
             persistent_scheduled,
-            // Issue #303: the same store the autosave below writes through, so a
+            // the same store the autosave below writes through, so a
             // restored cow is one the next save recognises as its own (see
             // `EntityStorage::save`'s uuid-identity clearing).
             Some(entity_storage.clone()),
-            // Issue #303's second half: the index just restored above, so
+        // The restored portal index, so
             // every dimension's `ChunkSource` shares it from the moment the
-            // first connection is served — not a fresh one that gets restored
-            // into only after some later point.
+        // first connection is served — not a separate index restored later.
             portals,
             // This world's own directory, so a Nether/End sibling
             // built the first time a player steps through a portal gets a
@@ -2446,20 +2406,20 @@ impl IntegratedServer {
 
         let autosave_handle = save.clone();
         let autosave_level_dat = std::sync::Arc::clone(&level_dat);
-        // Issues #327/#328/#323: the world's scalars, loaded off disk **before**
-        // anything can change them and stamped on every autosave.
+        // the world's scalars, loaded from disk before any connection can
+        // change them and stamped on every autosave.
         //
         // Load races the connection's own join by construction (the connection task
         // is spawned inside the constructor above), and that is tolerable rather than
         // ignored: the join's `encode_set_time` may carry a zero clock for one
         // second, and the periodic broadcast corrects it on its next tick. Moving the
         // load before the constructor needs the store built outside it, which is the
-        // follow-up #300 wants anyway.
+        // follow-up work wants anyway.
         let autosave_world_state = server.world_state.clone();
         if let Some(data) = level_dat.data() {
             autosave_world_state.load_level_data(&data);
         }
-        // The one thing that must *not* survive the load on a brand-new world:
+        // The one thing that must *not* survive the load on a fresh world:
         // `LevelDat::for_new_world` had to write *some* `spawn` compound and had no
         // terrain to consult, so it wrote a placeholder at the mob centre. Loading
         // that back would look like a resolved world spawn and suppress the spiral
@@ -2473,13 +2433,13 @@ impl IntegratedServer {
         // in the constructor above: an `Arc::clone` inside the `async move`
         // would move the binding into the coroutine.
         let autosave_clock = server.clock.clone();
-        // Issue #303: the two halves of an entity save — where to write, and what
+        // the two halves of an entity save — where to write, and what
         // population to read. Cloned out here for the same reason `autosave_clock`
         // is: a clone made inside the `async move` would move the binding.
         let autosave_entities = entity_storage.clone();
         let autosave_mobs = server.mobs.clone();
-        // Issue #303's second half: the same "clone before the move" shape as
-        // `autosave_entities` above. `server.portals` is always `Some` by this
+        // Clone the portal index before the move, matching the
+        // `autosave_entities` binding above. `server.portals` is always `Some` by this
         // point (`open_in_memory_with_mobs_using`'s `Self` literal sets it
         // unconditionally); `poi_storage` (the local `HashMap` built above,
         // not yet moved anywhere) is what the write side reads per dimension.
@@ -2489,7 +2449,7 @@ impl IntegratedServer {
             let mut ticker = tokio::time::interval(autosave);
             // The first tick of a tokio interval completes immediately; a save
             // at t=0 has nothing to write and would only burn a blocking-pool
-            // slot during world open, the exact window issue #454 cleared.
+            // slot during world open, the exact window the shared source cleared.
             ticker.tick().await;
             loop {
                 ticker.tick().await;
@@ -2509,7 +2469,7 @@ impl IntegratedServer {
                     .as_ref()
                     .map_or(0, |clock| clock.tick_count());
                 let level = std::sync::Arc::clone(&autosave_level_dat);
-                // Issues #327/#328/#323: the rules, difficulty and day clock ride the
+                // the rules, difficulty and day clock ride the
                 // same write. Snapshotted here rather than inside the closure because
                 // the closure crosses `spawn_blocking`.
                 let scalars = autosave_world_state.level_data_fields();
@@ -2517,7 +2477,7 @@ impl IntegratedServer {
                 if let Ok(Err(err)) = result {
                     tracing::warn!("autosave could not stamp level.dat: {err}");
                 }
-                // Issue #303: the mobs and dropped items, on the same interval and
+                // the mobs and dropped items, on the same interval and
                 // the same blocking pool as the terrain.
                 //
                 // **Snapshotted on this thread, written on the pool.** The sim
@@ -2534,7 +2494,7 @@ impl IntegratedServer {
                         tracing::warn!("autosave could not write entities: {err}");
                     }
                 }
-                // Issue #303's second half: the portal index, on the same
+                // Persist the portal index on the same
                 // interval and the same blocking pool as everything above —
                 // one dimension at a time, since each has its own
                 // `PoiStorage`. `poi_chunks_for_index` snapshots this
@@ -2612,7 +2572,7 @@ impl IntegratedServer {
         )
     }
 
-    /// The world's shared game rules, difficulty and clock (issues #327/#328/#323).
+    /// The world's shared game rules, difficulty and clock.
     ///
     /// The **same** store the tick loop advances and every connection reads, so a
     /// host can set a rule or read the day time without a packet round trip. A
@@ -2644,7 +2604,7 @@ impl IntegratedServer {
     }
 
     /// The live mob simulation, for a host that needs to read or seed the
-    /// population from outside the tick loop (issue #303).
+    /// population from outside the tick loop.
     ///
     /// The **same** handle the tick loop advances, every connection attacks
     /// against, and the entity save reads — not a copy, on the same argument
@@ -2698,7 +2658,7 @@ impl IntegratedServer {
         self.mobs().map(|mobs| mobs.with(|sim| sim.remove_mob(id)))
     }
 
-    /// Issue #619. The world's real chunk-ticket graph — the same handle every
+    /// The world's real chunk-ticket graph — the same handle every
     /// connection's `PLAYER_LOADING`/`PLAYER_SIMULATION` grant and the world's
     /// own `PLAYER_SPAWN` grant move, not a copy. `None` for a constructor
     /// that starts no shared world core (`open_in_memory`, the wasm32 build's
@@ -2712,7 +2672,7 @@ impl IntegratedServer {
         self.host.as_ref().map(|host| host.tickets.clone())
     }
 
-    /// The world's shared portal index (issue #303's second half) — the same
+    /// The world's shared portal index — the same
     /// handle every dimension's `ChunkSource` shares, so a caller (a gate, a
     /// command) can inspect or extend the exact index a return trip consults
     /// rather than a copy. Restored from the `poi/` sets at open by
@@ -2809,7 +2769,7 @@ impl IntegratedServer {
             source,
             LanConfig {
                 view_radius,
-                // `bind`'s pre-#535 behaviour, verbatim: query on, nothing else.
+                // `bind` uses the query listener with all other optional services off.
                 query: true,
                 ..LanConfig::default()
             },
@@ -2818,7 +2778,7 @@ impl IntegratedServer {
     }
 
     /// [`bind`](Self::bind) with everything an open-to-LAN host can configure
-    /// (issue #535) — RCON, the query listener, LAN discovery, commands,
+    /// RCON, the query listener, LAN discovery, commands,
     /// resource-pack pushes and plugin channels. See [`LanConfig`].
     ///
     /// This is the entry point a "Open to LAN" menu item calls. It is one call:
@@ -2859,7 +2819,7 @@ impl IntegratedServer {
         let local_addr = listener.local_addr().ok();
 
         let protocol = Arc::new(protocol);
-        // Issue #289 / `docs/plans/chunk-lifecycle.md` U3, for the same two
+        // `docs/plans/chunk-lifecycle.md` U3, for the same two
         // reasons as `open_in_memory_with_mobs` above: one `run_tick_loop`
         // re-fetching every column of its tick area every tick, plus one
         // `vitals_tick` per connection regenerating a column per 50 ms to read
@@ -2868,7 +2828,7 @@ impl IntegratedServer {
         // shared across every accepted connection exactly as `source` already
         // was. See `crate::chunk_store`'s module docs.
         //
-        // Issue #505: sized from `view_radius` like the two in-memory constructors
+        // sized from `view_radius` like the two in-memory constructors
         // above. The store is shared across every accepted connection, and
         // `view_radius` is this server's configured cap — `dispatch_play_packet`
         // clamps each client's requested distance to it — so one derivation from
@@ -2905,7 +2865,7 @@ impl IntegratedServer {
                 shutdown: Arc::clone(&shutdown),
             }),
         ));
-        // Issue #619. Real, shared across every accepted connection exactly
+        // Real, shared across every accepted connection exactly
         // like `source` above — a LAN guest's residency claim has to move the
         // same ticket graph this world's own `ChunkStore` reads, not a private
         // one nobody else sees.
@@ -2914,7 +2874,7 @@ impl IntegratedServer {
         // Shared across every accepted connection (like `protocol`/`source`
         // above) rather than one per connection, so two LAN players placing
         // and interacting with the same furnace see the same state — and,
-        // since issue #439, shared with the **one** world tick loop spawned
+        // since the shared-world wiring, shared with the **one** world tick loop spawned
         // below, so that furnace actually advances. Same reasoning for
         // `mobs`: no live population over LAN via this constructor (nothing
         // seeds one), but an `Attack` packet against it is still safe (see
@@ -2925,8 +2885,8 @@ impl IntegratedServer {
         // **Taken from the source when the source has a world on disk.** A
         // `default()` here compiles, ticks correctly and loses every chest a LAN
         // guest fills, because the save path reads the *source's* registry — the
-        // same island #468 closed for singleplayer, which survived here only
-        // because this constructor is generic over `S` and could not name
+        // the same shared-world wiring used by singleplayer. This constructor is
+        // generic over `S` and cannot name
         // `RegionChunkSource::block_entities`. `ChunkSource::world_registries`
         // is that name; `ChunkStore` forwards it, so the wrap above is
         // transparent.
@@ -2936,11 +2896,9 @@ impl IntegratedServer {
             .map_or_else(BlockEntityHandle::default, |r| r.block_entities.clone());
         let mobs = MobHandle::default();
 
-        // Issue #439: LAN worlds had **no world tick at all**. `run_tick_loop`
-        // had exactly one caller (`open_in_memory_with_mobs`), so over LAN
-        // block entities held state but never advanced, scheduled and fluid
-        // ticks never drained, random ticks never fired, mobs never ticked
-        // and `game_tick` never incremented.
+        // LAN worlds use this world-tick task alongside their connection tasks;
+        // block entities, scheduled and fluid ticks, random ticks, mobs, and
+        // `game_tick` all advance through the shared loop.
         //
         // # Exactly one loop per world, and why it is spawned *here*
         //
@@ -2968,9 +2926,9 @@ impl IntegratedServer {
         let hub_block_ticks = BlockTickFeed::default();
         let hub_explosions = ExplosionFeed::default();
         let clock = Arc::new(TickClock::new());
-        // Issue #433 Phase 0, same as `open_in_memory_with_mobs` above — and for
+        // The ECS Phase 0 setup, same as `open_in_memory_with_mobs` above — and for
         // the reason that constructor's comment gives: one world, one loop, one
-        // `World`. #439 gave LAN its own tick loop, so LAN gets its own server
+        // `World`. The LAN path gets its own tick loop, so LAN gets its own server
         // `World` too rather than sharing singleplayer's, which would be exactly
         // the "both entry points share one loop" mistake the comment above this
         // block already rules out.
@@ -3001,16 +2959,12 @@ impl IntegratedServer {
         let host_block_ticks = hub_block_ticks.clone();
         #[cfg(not(target_arch = "wasm32"))]
         let host_mobs = mobs.clone();
-        // Issue #580's remainder: a *named*, shared handle rather than the
-        // throwaway `BorderFeed::default()` the tick-loop call below used to
-        // construct inline. `tick_border` is what the loop actually ticks now;
-        // `host_border` is the same handle, stored so RCON can query and
-        // mutate the state the loop advances. Deliberately **not** the fuller
-        // fix: no accepted connection reads this feed yet (join broadcast,
-        // per-tick damage), which needs the same per-connection plumbing
-        // `bind`'s LAN relay would need for sleep — a separate pass, same as
-        // it always was. This just stops the handle itself from being
-        // discarded on every tick.
+        // A named, shared border handle. `tick_border` is the handle the loop
+        // ticks; `host_border` is the same handle, stored so RCON can query and
+        // mutate the state the loop advances. Accepted connections do not
+        // consume this feed for join broadcasts or per-tick damage; those
+        // require per-connection plumbing in the LAN relay. The handle stays
+        // stable across ticks.
         #[cfg(not(target_arch = "wasm32"))]
         let host_border = crate::border::BorderFeed::default();
         #[cfg(not(target_arch = "wasm32"))]
@@ -3018,14 +2972,9 @@ impl IntegratedServer {
         let tick_scheduled = registries
             .as_ref()
             .map_or_else(Default::default, |r| r.scheduled.clone());
-        // Issues #327/#328/#323: one store for the LAN world, so a rule a LAN
-        // player sets is the rule the tick loop reads and the clock the loop
-        // advances is the clock every connection broadcasts. `bind` used to give
-        // each accepted socket its own `WorldAdminState` local — two LAN players
-        // each had a private, divergent view, which is what #327 reported.
-        //
-        // `lan_world_state` itself is now built earlier, before
-        // `with_nether` — see that call's own comment.
+        // Shared world state for the LAN world: rules set by one player are
+        // read by the tick loop and broadcast by every connection. The handle
+        // is created before `with_nether` so all constructors share it.
         let tick_world_state = lan_world_state.clone();
         let handle_world_state = lan_world_state.clone();
         // Built out here rather than inline in the call below for the reason every
@@ -3050,7 +2999,7 @@ impl IntegratedServer {
                 // threads through as `mob_area`, centred on (0, 0), because
                 // this crate still has no "loaded chunks" registry to derive
                 // a real one from — see `tick::run_tick_loop`'s own doc
-                // comment and `docs/plans/chunk-lifecycle.md` (#289), which
+                // comment and `docs/plans/chunk-lifecycle.md`, which
                 // is what replaces this constant with a ticket-driven set.
                 // `bind`'s public signature deliberately does not grow a
                 // parameter for it.
@@ -3065,10 +3014,10 @@ impl IntegratedServer {
                 // switch buys the world-state parameter and nothing else.
                 WeatherFeed::default(),
                 WeatherState::default(),
-                // Issue #325: LAN stays sleep-free, matching the wrapper.
+                // LAN stays sleep-free, matching the wrapper.
                 &crate::sleep::SleepVote::new(),
                 &crate::sleep::SleepFeed::default(),
-                // Issue #468: the source's own queues when it has a world on
+                // the source's own queues when it has a world on
                 // disk, so a repeater delay or a fluid tick set while hosting
                 // survives a restart; a fresh handle only for a truly in-memory
                 // source, where there is nothing to persist into.
@@ -3083,7 +3032,7 @@ impl IntegratedServer {
                 // the fixed origin box it replaces, and the fix is per-connection
                 // anchor bookkeeping, not more geometry — `FollowArea` already unions.
                 lan_follow,
-                // Issue #580: real and shared now — `tick_border` is the same
+                // real and shared — `tick_border` is the same
                 // handle `IntegratedServer::border` stores below, so RCON's
                 // `/worldborder` mutates the state this loop actually ticks.
                 // Still **not** read by any accepted connection (no join
@@ -3099,35 +3048,31 @@ impl IntegratedServer {
         let relay_block_ticks = hub_block_ticks.clone();
         let relay_explosions = hub_explosions.clone();
         let relay_mobs = live_mobs.clone();
-        // Issue #535's config surface, cloned out here for the same reason the
+        // The config surface, cloned out here for the same reason the
         // six above are: the accept arm lives inside an `async move`, so a
         // `.clone()` written there would move the original in.
         let conn_commands = commands;
         let conn_resource_packs = resource_packs;
         let conn_plugin_channels = plugin_channels;
-        // Issue #336: moved into the accept loop like the three above it, and
-        // cloned per socket below. `rcon_access` is a second clone taken
-        // *before* the move into `async move` below, for `start_rcon` past
-        // this point (RCON's `/op`/`/deop`/`/whitelist` sharing the same
-        // list every accepted connection's join check reads).
+        // The accept loop owns one access-list handle and each socket receives
+        // its own clone. `rcon_access` is retained for `start_rcon`, while the
+        // connection task reads the other clone for its join checks.
         let rcon_access = access.clone();
         let conn_access = access;
-        // Issue #273: same reasoning as the four above — moved out here so the
-        // `async move` accept arm below doesn't capture `config`'s original,
-        // then cloned per accepted socket. `OnlineModeConfig` is `Clone`
-        // (an `Arc`-boxed HTTP client plus an `Arc`-boxed verify closure), so
-        // this is cheap and every connection shares one `reqwest::Client`
+        // The connection task receives a clone so its `async move` arm owns
+        // its configuration. `OnlineModeConfig` is `Clone` (an `Arc`-boxed HTTP
+        // client plus an `Arc`-boxed verify closure), so every connection shares one `reqwest::Client`
         // connection pool, matching that field's own doc comment.
         let conn_online_mode = online_mode;
-        // Issue #438: **one** registry for every connection this listener
+        // **one** registry for every connection this listener
         // accepts, created out here for the same reason the tick loop above is
         // spawned out here. A registry per connection would make each player
-        // the sole inhabitant of their own world — the bug this fixes, wearing
-        // a different hat.
+        // one shared roster for every accepted connection, so each player is
+        // represented in the same world population.
         let relay_players = PlayerRegistry::new();
-        // Issue #332: the GameSpy4/UT3 query listener, on the same address as
-        // the game TCP socket — vanilla's own default (query port = server
-        // port), and free because UDP and TCP port spaces are independent. It
+        // the GameSpy4/UT3 query listener, on the same address as
+        // the game TCP socket — the default query port equals the server port,
+        // and UDP and TCP port spaces are independent. It
         // reads the *same* shared `relay_players` every connection uses, so its
         // online count and player list are real, unlike a status reply, which
         // must report `0` (see `serve_connection`'s comment on why). The run
@@ -3162,10 +3107,10 @@ impl IntegratedServer {
             None => None,
         };
         let task = spawn(async move {
-            // Issue #439's fan-out. `BlockTickFeed`/`ExplosionFeed` are
+            // The fan-out. `BlockTickFeed`/`ExplosionFeed` are
             // append-and-**drain-all**: the first consumer takes everything
             // and a second sees nothing (their own doc comments say so, and
-            // say the fix is a per-connection cursor). Handing the same feed
+            // use a per-connection cursor). Handing the same feed
             // to every LAN connection would therefore desync every player but
             // one; handing the tick loop a feed nobody drains would grow
             // without bound while the server idles with no clients.
@@ -3190,7 +3135,7 @@ impl IntegratedServer {
                     _ = relay.tick() => {
                         let changes = relay_block_ticks.drain_all();
                         let detonations = relay_explosions.drain_all();
-                        // Issue #530's effect lane, relayed with its `except`
+                        // The effect lane, relayed with its `except`
                         // tag intact: the hub cannot decide the exclusion,
                         // because "which player is excluded" is only meaningful
                         // against the connection about to drain it.
@@ -3217,13 +3162,13 @@ impl IntegratedServer {
                     }
                     accepted = listener.accept() => {
                         let Ok((socket, peer)) = accepted else { break };
-                        // Issue #336: the address the IP ban list is matched on.
+                        // the address the IP ban list is matched on.
                         let peer_ip = Some(peer.ip());
                         let protocol = protocol.clone();
                         let source = source.clone();
                         let block_entities = block_entities.clone();
                         let mobs = mobs.clone();
-                        // Issue #619: one clone per accepted socket, all
+                        // one clone per accepted socket, all
                         // naming the same ticket graph — see `tickets`'s own
                         // declaration above this function's world-tick spawn.
                         let tickets = tickets.clone();
@@ -3232,15 +3177,15 @@ impl IntegratedServer {
                         let plugin_channels = conn_plugin_channels.clone();
                         // One clone per accepted socket, all naming the same store.
                         let world_state = lan_world_state.clone();
-                        // Issue #336: one clone per accepted socket, all naming
+                        // one clone per accepted socket, all naming
                         // the same lists — an op granted by one connection is an
                         // op for the next.
                         let access = conn_access.clone();
-                        // Issue #273: one clone per accepted socket, same as
+                        // one clone per accepted socket, same as
                         // `access` above — `None` costs nothing to clone, and
                         // `Some` shares the one `reqwest::Client` pool.
                         let online_mode = conn_online_mode.clone();
-                        // Issue #438: the mob source and the shared player
+                        // the mob source and the shared player
                         // registry, composed. `PlayerAwareSource::snapshots`
                         // still returns only the mobs — the players travel
                         // through `EntitySource::players()`, which is what
@@ -3248,7 +3193,7 @@ impl IntegratedServer {
                         // See `crate::players`' own module docs.
                         let entities =
                             PlayerAwareSource::new(relay_mobs.clone(), relay_players.clone());
-                        // Issue #465's LAN half, the one line `BlockTickFeed`'s
+                        // The LAN half, the one line `BlockTickFeed`'s
                         // own doc comment names: `subscriber()` keeps the
                         // outbound queue per-connection (the relay's drain-all
                         // depends on it) while **sharing** the inbound one, so a
@@ -3274,33 +3219,33 @@ impl IntegratedServer {
                             let sleep_feed = SleepFeed::default();
                             let border = crate::border::BorderFeed::default();
                             let live_save = crate::live_save::LiveSaveSlot::default();
-                            // `_shared` + `&source` (issue #293): chunk
+                            // `_shared` + `&source`: chunk
                             // generation for this connection runs on the
                             // blocking pool, so a LAN player crossing a chunk
                             // boundary no longer stalls the tick loop spawned
                             // above — which on a current-thread runtime would
                             // otherwise be the very same thread.
-                            // Issue #325: LAN stays sleep-free — a fresh vote
+                            // LAN stays sleep-free — a fresh vote
                             // no connection calls, matching the fresh
                             // disconnected vote `run_tick_loop` (the loop this
                             // world's tick task runs) forwards. See
                             // `crate::sleep`'s module doc.
-                            // Issue #545: open-to-LAN keeps the configured
+                            // open-to-LAN keeps the configured
                             // `view_radius` as its live-change ceiling, which is
                             // vanilla's own server view-distance field
                             // and the same policy that
                             // keeps `MAX_CAPACITY` on this path — a host spends
                             // memory and bandwidth on behalf of players who did
                             // not choose the setting.
-                            // Issue #535: the *commands* variant, so a LAN
+                            // the *commands* variant, so a LAN
                             // host's `CommandDispatch` (and its resource-pack
                             // and plugin-channel surfaces) reach the
                             // connection. `bind` used the plain
                             // `..._mob_events_shared` wrapper, which hardcodes
                             // all three to `::default()` — which is exactly
-                            // what left #48/#334/#335 unreachable.
+                            // the default values leave these capabilities unreachable.
                             //
-                            // Issue #273: `LanConfig::online_mode` picks which
+                            // `LanConfig::online_mode` picks which
                             // of the two sibling entry points this connection
                             // gets. `serve_connection_with_online_mode` is
                             // additive over this one — same arguments plus the
@@ -3341,7 +3286,7 @@ impl IntegratedServer {
             }
         });
 
-        // Issue #535 scope 3. Non-fatal on failure for the same reason the query
+        // Discovery is optional. Non-fatal on failure for the same reason the query
         // bind is: a world nobody can *discover* is still a world you can join
         // by typing the address.
         let discovery_task = match (discovery, local_addr) {
@@ -3402,17 +3347,17 @@ impl IntegratedServer {
             // persistence field on this constructor.
             live_save: crate::live_save::LiveSaveSlot::default(),
             // Set by the `start_rcon` call just below when the caller asked for
-            // one (issue #331). It needs a password, so it stays opt-in.
+            // one. It needs a password, so it stays opt-in.
             #[cfg(not(target_arch = "wasm32"))]
             rcon_task: None,
-            // `LanConfig::query` (issue #332), on by default; `None` also when
+            // `LanConfig::query`, on by default; `None` also when
             // the UDP bind failed and the warning above was logged.
             #[cfg(not(target_arch = "wasm32"))]
             query_task,
             #[cfg(not(target_arch = "wasm32"))]
             discovery_task,
             // `open_to_lan` manages its own accept loop and relay inline
-            // (issue #439's shape); it is not built through the `HostCore`
+            // (the shape); it is not built through the `HostCore`
             // seam `publish` uses, so there is nothing to add a connection
             // *to* here — a caller that wants to publish a running world
             // calls `publish` on a handle from `open_in_memory_with_mobs` /
@@ -3429,35 +3374,33 @@ impl IntegratedServer {
         // caller that asked for RCON and did not get it has a security-relevant
         // surprise, unlike the two UDP listeners above.
         if let Some(rcon) = rcon {
-            // Issue #336's remaining wiring: the *same* `AccessLists` every
+            // The shared `AccessLists` every
             // accepted LAN connection's join check reads (`conn_access`,
             // cloned per socket above) is what RCON's `/op`/`/deop`/
-            // `/whitelist` now mutate too — a private copy here would let
-            // RCON report success while granting operator status the next
-            // join check never sees. Previously `RconConfig::access` had no
-            // production caller at all, so those commands could not exist.
+            // `/whitelist` mutate too — a private copy here would let
+            // RCON report success while granting operator status that join
+            // checks never see. `RconConfig::access` is the shared access-list
+            // source for those commands.
             server.start_rcon(rcon.with_access(rcon_access))?;
         }
         Ok(server)
     }
 
-    /// Adds a TCP listener to this **already-running** world (issue #562) —
-    /// the "Open to LAN" verb vanilla's
-    /// `Minecraft.getSingleplayerServer().publishServer` is. Nothing about the
-    /// world already in progress is rebuilt: every entity, loaded chunk and
-    /// player position this handle already has is exactly what the next
+    /// Adds a TCP listener to this **running** world — the "Open to LAN" action.
+    /// Nothing about the world in progress is rebuilt: every entity, loaded
+    /// chunk and player position this handle has is exactly what the next
     /// accepted connection joins. Contrast [`open_to_lan`](Self::open_to_lan)/
     /// [`bind`](Self::bind), which *construct* a fresh world — that is what
     /// this handle's own [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs)/
-    /// [`open_persistent_with_mobs`](Self::open_persistent_with_mobs) already
-    /// called to produce the world this method publishes.
+    /// [`open_persistent_with_mobs`](Self::open_persistent_with_mobs) called to
+    /// produce the world this method publishes.
     ///
     /// Every connection this accepts shares the **same** [`PlayerRegistry`],
     /// tick loop, [`ChunkStore`] and [`BlockEntityHandle`] this handle's own
-    /// local connection already uses — reached through [`HostCore`], which
+    /// local connection uses — reached through [`HostCore`], which
     /// those two constructors alone populate — and is relayed block ticks and
     /// detonations by the same relay task that already serves the local
-    /// connection (issue #562 made it a subscriber of that relay too, rather
+    /// connection (the local connection is a subscriber of that relay too, rather
     /// than the hub's sole direct reader, precisely so this could be added
     /// later without racing it). Commands are refused
     /// ([`CommandDispatch::none`](crate::command::CommandDispatch::none)) and
@@ -3467,14 +3410,14 @@ impl IntegratedServer {
     /// at world-open time instead.
     ///
     /// `discovery_motd` mirrors [`LanConfig::discovery`]: `Some` announces the
-    /// world on vanilla's LAN multicast group so it appears in a joining
+    /// world on the standard LAN multicast group so it appears in a joining
     /// client's multiplayer list unprompted; `None` leaves discovery off. A
     /// failed discovery bind is logged and otherwise ignored, exactly as
     /// [`open_to_lan`](Self::open_to_lan) treats it — a world nobody can
     /// *discover* is still a world you can join by typing the address.
     ///
     /// Returns the socket's **actual** bound address — read back from the
-    /// listener, never the address requested (issue #559): pass port `0` for
+    /// listener, never the address requested: pass port `0` for
     /// an OS-assigned one and report the number this returns, not the one you
     /// asked for.
     ///
@@ -3576,7 +3519,7 @@ impl IntegratedServer {
         let subscribers = Arc::clone(&host.subscribers);
         let view_radius = host.view_radius;
         let world_state = self.world_state.clone();
-        // Issue #619: the same real handle `host.tickets` carries, not a
+        // the same real handle `host.tickets` carries, not a
         // fresh default — see `HostCore::tickets`'s own doc comment.
         let tickets = host.tickets.clone();
         let signal = self.shutdown.clone();
@@ -3696,7 +3639,7 @@ impl IntegratedServer {
         self.local_addr
     }
 
-    /// Starts an RCON listener on this server (issue #331), racing the same
+    /// Starts an RCON listener on this server, racing the same
     /// shutdown signal every other background task races.
     ///
     /// The listener is bound synchronously before this returns, so a port
@@ -3714,16 +3657,14 @@ impl IntegratedServer {
         config: crate::rcon::RconConfig,
     ) -> std::io::Result<std::net::SocketAddr> {
         // The listener gets **this** server's shared world state, whatever the
-        // caller put in the config. A private `WorldStateHandle` here is the bug
-        // issues #327 and #328 were both reported for, and over RCON it is
-        // invisible: `/gamerule keep_inventory true` would report success and
-        // change nothing anyone reads. Substituting rather than asserting means a
-        // host cannot get it wrong.
+        // caller put in the config. A private `WorldStateHandle` would make
+        // `/gamerule keep_inventory true` report success while changing nothing
+        // any reader observes. Substituting the shared handle keeps the command
+        // and tick loop on the same state.
         //
-        // `world_source`/`block_ticks`/`mobs`/`border` the same way, now that
-        // each is a real stored field rather than a local variable
-        // `open_to_lan`/`open_in_memory_with_mobs_using` discarded at the end
-        // of their own function — see each field's own doc comment on this
+        // `world_source`/`block_ticks`/`mobs`/`border` follow the same rule:
+        // each is a stored field shared with the listener rather than a local
+        // temporary — see each field's own doc comment on this
         // type for what it closes. `None` on a constructor that never built
         // one (the two simpler `open_in_memory_with_*` variants) substitutes
         // `None` here too, which is the same honest "nothing to reach"
@@ -3741,15 +3682,14 @@ impl IntegratedServer {
         Ok(addr)
     }
 
-    /// A snapshot of this server's MSPT/TPS/overrun accounting (issue #285),
+    /// A snapshot of this server's MSPT/TPS/overrun accounting,
     /// or `None` for a handle with no unified tick loop.
     ///
     /// Two constructors start [`crate::tick::run_tick_loop`] and so return
     /// `Some`: [`open_in_memory_with_mobs`](Self::open_in_memory_with_mobs)
-    /// (singleplayer) and [`bind`](Self::bind) (LAN, since issue #439). The
-    /// remaining in-memory constructors return `None`, which is also what
-    /// `bind` used to return — `tests/lan_world_tick.rs` leans on exactly that
-    /// as its control.
+    /// (singleplayer) and [`bind`](Self::bind) (LAN). The
+    /// remaining in-memory constructors return `None`; `tests/lan_world_tick.rs`
+    /// checks that invariant.
     ///
     /// **One clock per handle, so this is one *world's* accounting.** It
     /// therefore cannot detect a duplicated tick loop: a per-connection loop
@@ -3780,14 +3720,14 @@ impl IntegratedServer {
     }
 
     /// How many times a system registered on this server's own
-    /// `bevy_ecs::World` has run (issue #433 Phase 0), or `None` for a handle
+    /// `bevy_ecs::World` has run (the ECS Phase 0 setup), or `None` for a handle
     /// with no world-tick task — the same `Some` iff `tick_task` rule
     /// [`tick_stats`](Self::tick_stats) follows.
     ///
     /// # What this is for, and what it deliberately is not
     ///
     /// It is the evidence that the server `World` is *live* rather than an inert
-    /// scaffold — the client's `WindowApp.ecs` (issue #37) is an `App` nothing
+    /// scaffold — the client's `WindowApp.ecs` is an `App` nothing
     /// ever runs a schedule against, and this accessor exists so the same thing
     /// cannot happen here unnoticed. It is **not** a way to read the `World`:
     /// the count is mirrored out through `crate::ecs::ServerTickWitness`,
@@ -3821,7 +3761,7 @@ impl IntegratedServer {
         // above already signalled it (both tasks `select!` on clones of the
         // same `Arc<Notify>`).
         self.task.join().await;
-        // Issue #302's shutdown-cancellation gap. The connection task above
+        // The connection task above
         // has just been joined, so it is known to have stopped — nothing can
         // publish a newer snapshot from here on, which is what makes reading
         // the mirror now (rather than racing to read it from inside the
@@ -3847,20 +3787,20 @@ impl IntegratedServer {
         // Joined, not aborted: the relay races the `shutdown` notify directly
         // (through `spawn_tick_task`), same as `query_task` below, so it has
         // already been asked to stop and this only waits for it to actually
-        // have. Issue #562.
+        // have. The shared configuration is intentionally inherited.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(mut relay_task) = self.relay_task.take() {
             relay_task.join().await;
         }
         // Aborted, not joined, like `rcon_task` below: `publish`'s accept loop
         // parks in `accept()`, where the notify cannot reach it until a
-        // connection arrives. Issue #562.
+        // connection arrives. The listener is then cancelled.
         #[cfg(not(target_arch = "wasm32"))]
         if let Some(publish_task) = self.publish_task.take() {
             publish_task.abort();
         }
         // Aborted rather than joined, unlike the two above. Seeding's whole
-        // point (issue #454) is that it holds a multi-second generation batch;
+        // point is that it holds a multi-second generation batch;
         // joining it would make `shutdown()` wait out the very stall this
         // removed. It races `shutdown` too, so the notify above has already
         // asked it to stop — this only covers a task parked on the blocking
@@ -3924,7 +3864,7 @@ impl IntegratedServer {
                 Err(err) => tracing::warn!("world save on shutdown panicked: {err}"),
             }
         }
-        // Issue #303: the mobs and dropped items, last, and for the same
+        // the mobs and dropped items, last, and for the same
         // ordering reason as the terrain above — the tick task has stopped, so
         // `saved_entities` cannot observe a half-advanced sim, and nothing can
         // spawn a mob after this point that we would then lose.
@@ -3944,13 +3884,12 @@ impl IntegratedServer {
                 Err(err) => tracing::warn!("entity save on shutdown panicked: {err}"),
             }
         }
-        // Issue #303's second half: the portal index, last, for the same
+        // Persist the portal index last, for the same
         // ordering reason as the mobs above — nothing can light or break a
         // portal once both the tick and connection tasks have stopped.
         // Without this a clean quit loses every portal lit since the last
         // autosave tick, and the next return trip beyond the fallback scan's
-        // radius builds a duplicate — the exact bug this whole change exists
-        // to close.
+        // radius builds a duplicate, so shutdown writes every portal cell.
         #[cfg(not(target_arch = "wasm32"))]
         if let (Some(portals), Some(poi_storage)) = (self.portals.take(), self.poi_storage.take())
         {
@@ -4056,7 +3995,7 @@ fn spawn_lan_discovery(shutdown: &Arc<ShutdownSignal>, discovery: &LanDiscovery,
     }))
 }
 
-/// Issue #454's gate: **world open must generate nothing at all.**
+/// The gate: **world open must generate nothing at all.**
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::collections::HashMap;
@@ -4157,7 +4096,7 @@ mod tests {
         // Built into `IntegratedServer` (which wraps sources in a
         // `ChunkStore`), so a player action could reach this through the
         // store's write-through. The source has no storage, so the edit is
-        // deliberately discarded. Explicit rather than inherited (issue #440).
+        // deliberately discarded. Explicit rather than inherited.
         fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
             // No storage; edits are discarded by design for this counting stub.
         }
@@ -4171,7 +4110,7 @@ mod tests {
             .sum()
     }
 
-    /// **The production-wiring half of issue #620's fix.** `server::tests`
+    /// **The production wiring check.** `server::tests`
     /// covers the *consumption* side (`dimension_scoped_handles` routing
     /// through whatever a source answers); this covers that `with_nether`'s
     /// real sibling factory — `sibling_chunk_source`, exercised through no
@@ -4244,7 +4183,7 @@ mod tests {
         // The negative control: the *overworld's* own handles must not see
         // either marker — proving the Nether's registry/feed are genuinely
         // separate instances, not the join dimension's aliased in. This is
-        // the exact collision the issue named as a second, latent bug.
+        // the exact collision this separation must prevent.
         assert!(
             wrapped.world_registries().is_none(),
             "the primary `DimensionalSource` (no `RegionChunkSource`, no stored own_registries) \
@@ -4260,7 +4199,7 @@ mod tests {
     const VIEW_RADIUS: i32 = 9;
     const MOB_RADIUS: i32 = 3;
 
-    /// One `CountingSource`, because since issue #436 there is only one source to
+    /// One `CountingSource`, because there is only one source to
     /// pass. That is not a loss of coverage: the *two*-source arrangement is
     /// still measured, by
     /// [`control_two_independent_sources_generate_the_tick_area_twice`], which
@@ -4280,7 +4219,7 @@ mod tests {
         )
     }
 
-    /// **Issue #454's gate.** Opening a world must generate **zero** chunk
+    /// **The gate.** Opening a world must generate **zero** chunk
     /// columns before returning.
     ///
     /// The number is exact and predicted from the code path, not observed and
@@ -4289,7 +4228,7 @@ mod tests {
     /// pre-fix figure is **49** — `MobHandle::seeded` ran a serial
     /// `ChunkWorld::from_source` over the whole `mob_area` inside the
     /// constructor, before any task spawned, which at the 909 ms per composed
-    /// column measured in `chunk_store` is the ~45 s stall issue #454 is about.
+    /// column measured in `chunk_store` is the ~45 s stall this gate detects.
     /// Observed pre-fix at 49 and post-fix at 0.
     ///
     /// # Why this is deterministic, with no polling
@@ -4315,7 +4254,7 @@ mod tests {
         drop(server);
     }
 
-    /// Issue #562's discriminating gate. A `publish` that *rebuilds* the world
+    /// The discriminating gate. A `publish` that *rebuilds* the world
     /// (the pre-fix shell behaviour, and the naive way to implement this
     /// method) would hand the newly bound listener a **fresh** `HostCore`
     /// with its own, empty subscriber list — this proves it does not.
@@ -4389,7 +4328,7 @@ mod tests {
         drop(server);
     }
 
-    /// Issue #559's gate: the reported port must be the socket's **actual**
+    /// The gate: the reported port must be the socket's **actual**
     /// bound one, never the `0` that was requested. Requesting `0` is the
     /// fixture that makes this discriminating — asserting only "some port
     /// came back" would pass even for a hardcoded echo of the request.
@@ -4473,10 +4412,8 @@ mod tests {
         assert_eq!(LanDiscovery::GROUP.octets(), [224, 0, 2, 60]);
     }
 
-    /// Issue #535's config surface: RCON came up because `LanConfig` asked for
-    /// it, not because a test called `start_rcon` by hand — which is the whole
-    /// distinction the issue is about, since `start_rcon`'s only caller was its
-    /// own test.
+    /// The config surface: `LanConfig` controls whether RCON starts. The test
+    /// supplies that configuration and verifies the listener is created from it.
     #[tokio::test]
     async fn open_to_lan_starts_rcon_from_its_config() {
         let calls = Arc::new(Mutex::new(HashMap::new()));
@@ -4562,7 +4499,7 @@ mod tests {
             .collect()
     }
 
-    /// **Issue #454's second gate: once the seeding task has run, every column
+    /// **The second gate: once the seeding task has run, every column
     /// of the tick area has been generated exactly once — not twice.**
     ///
     /// The duplication was the actual defect (the ~11 s stall was its symptom):
@@ -4619,22 +4556,20 @@ mod tests {
         drop(server);
     }
 
-    /// **The control for the gate above.** The pre-fix arrangement — two
-    /// independent sources, one for the connection's store and one for mob
-    /// pathing — must generate the tick area **twice**.
+    /// **The independent-source control for the gate above.** Two sources, one
+    /// for the connection's store and one for mob pathing, generate the tick
+    /// area **twice**.
     ///
     /// Reproduced rather than described: `ChunkStore::for_view_radius(source,
     /// VIEW_RADIUS)` is what the connection path serves from — the same
-    /// constructor and the same radius `open_in_memory_with_mobs` uses, so issue
-    /// #505's capacity derivation is in the picture here too rather than a
-    /// literal — `MobHandle::seeded(&world_source, …)` is what the constructor
-    /// used to call, and both report into a single counter the way two instances
-    /// of one seeded generator do in production. Predicted exactly: 49 columns ×
+    /// constructor and the same radius `open_in_memory_with_mobs` uses, so the
+    /// capacity derivation is in the picture here too rather than a
+    /// literal — `MobHandle::seeded(&world_source, …)` is the second source, and
+    /// both report into a single counter. Predicted exactly: 49 columns ×
     /// 2 paths = **98**, with every coordinate at 2.
     ///
     /// If this ever reads 49, the two paths have stopped being independent and
-    /// the gate above is passing for a reason that has nothing to do with the
-    /// fix.
+    /// the gate above is passing for a reason unrelated to source sharing.
     #[test]
     fn control_two_independent_sources_generate_the_tick_area_twice() {
         let calls = Arc::new(Mutex::new(HashMap::new()));
@@ -4647,7 +4582,7 @@ mod tests {
         for &(cx, cz) in &mob_area_coords() {
             let _ = store.column(cx, cz);
         }
-        // The mob path, exactly as the pre-#454 constructor called it.
+        // The mob path, measured separately from world construction.
         let handle = MobHandle::seeded(
             &world_source,
             -MOB_RADIUS..=MOB_RADIUS,
@@ -4674,10 +4609,9 @@ mod tests {
 
     /// **The control for the gate above, and it must fail the same assertion.**
     ///
-    /// `MobHandle::seeded` is *exactly* the call
-    /// `open_in_memory_with_mobs` used to make, inline, before it spawned
-    /// anything — it survives unchanged (see its own doc comment), so the work
-    /// issue #454 moved can still be measured directly rather than described.
+    /// `MobHandle::seeded` performs synchronous seeding over the supplied source
+    /// and area (see its own doc comment). Driving it over the same
+    /// [`CountingSource`] provides a direct measurement of the synchronous path.
     /// Driving it over the same [`CountingSource`] and the same `mob_area` must
     /// generate **49** columns, on the calling thread, with nothing spawned.
     ///
@@ -4686,8 +4620,8 @@ mod tests {
     /// * the detector fires — a `CountingSource` that silently counted nothing
     ///   would pass `world_open_generates_no_columns_at_all` vacuously, and this
     ///   is the reading that rules that out;
-    /// * the pre-fix figure was 49 and not some smaller number, so the ~45 s
-    ///   arithmetic in issue #454 is multiplying the right count.
+    /// * the reference figure is 49 and not some smaller number, so the ~45 s
+    ///   arithmetic above multiplies the right count.
     ///
     /// It also pins the area arithmetic: `(2 * 3 + 1)²`, i.e. the `-3..=3`
     /// square the shell's `view_radius.clamp(1, 3)` produces — **not** the 3×3

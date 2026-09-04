@@ -1,4 +1,4 @@
-//! Server-authoritative world border (issue #326, B1 — the server half).
+//! Server-authoritative world border.
 //!
 //! # What this is
 //!
@@ -425,8 +425,7 @@ impl WorldBorder {
 /// it with [`get`](Self::get) for the join `initialize_border` broadcast and
 /// reads it every vitals tick to compute border damage.
 ///
-/// Issue #580 closed the last gap: `crate::tick::run_tick_loop_with_weather`
-/// now ticks **this shared handle** (not a private local), every production
+/// `crate::tick::run_tick_loop_with_weather` ticks **this shared handle**, and every production
 /// `serve_connection*` entry point that can reach a live one threads it
 /// through (`IntegratedServer::open_in_memory_with_mobs*`; `bind`'s
 /// open-to-LAN path still passes a fresh, unshared default — a stated,

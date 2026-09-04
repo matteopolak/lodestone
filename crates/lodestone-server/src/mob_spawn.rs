@@ -1,8 +1,8 @@
 //! Version-free natural mob-spawn accounting and despawn logic.
 //!
 //! This is the *engine* half of singleplayer mob spawning: the mob-cap
-//! arithmetic and the despawn state machine, both of which are pure vanilla
-//! algorithm and belong in this version-free crate. The *data* half — which
+//! arithmetic and the despawn state machine, both of which are version-neutral
+//! rules and belong in this version-free crate. The *data* half — which
 //! entity type spawns in which biome, at what light level, from which registry
 //! spawn list — is version and registry knowledge that must **not** live here,
 //! exactly as the state-id→`PathType` classifier stays out of
@@ -11,17 +11,18 @@
 //!
 //! # Why the category table is hardcoded but the mapping is a seam
 //!
-//! [`MobCategory`]'s caps and despawn distances are stable vanilla constants —
-//! `MONSTER` has been `70` per 289 chunks for many versions. Hardcoding them
-//! mirrors `lodestone-physics` hardcoding `0.08` gravity: a stable vanilla
-//! constant, not a per-connection knob. What genuinely moves between versions
+//! [`MobCategory`]'s caps and despawn distances are stable gameplay constants —
+//! `MONSTER` allows `70` instances per 289 eligible chunks. Hardcoding them
+//! mirrors `lodestone-physics` hardcoding `0.08` gravity: these values govern
+//! simulation behavior rather than per-connection settings. What genuinely
+//! moves between versions
 //! is *which entity type is in which category* (and which categories exist at
 //! all), so that mapping is the caller's job, surfaced as the category on each
 //! [`SpawnCandidate`] rather than an entity-type table baked in here.
 //!
 //! # The two despawn gates must not be folded
 //!
-//! Vanilla `Mob.checkDespawn` has two independent distance gates. The subtle
+//! Despawn evaluation has two independent distance gates. The subtle
 //! part — and the one this project was warned about — is that a mob between the
 //! immune radius (32) and the instant radius (128) is **kept but not reset**: it
 //! keeps ageing toward the 600-tick random-despawn threshold. Folding the gates
@@ -47,8 +48,8 @@ use lodestone_model::{Identifier, Vec3};
 ///   attribute. The census is scale-1 by construction, so `SCALE` is folded here
 ///   (caller-side), never baked into the table.
 /// - **`max_up_step`** comes from the *resolved* `STEP_HEIGHT` attribute
-///   (post-modifier-fold), **not** the census geometry. Vanilla's own
-///   max-up-step getter returns `getAttributeValue(STEP_HEIGHT)`;
+///   (post-modifier-fold), **not** the census geometry. The resolved
+///   max-up-step value is read from `STEP_HEIGHT`;
 ///   sourcing it from static geometry would silently
 ///   disagree with the pathfinder the moment any modifier existed. The `as f32`
 ///   is that call site's `(float)` cast.
@@ -90,7 +91,7 @@ fn attribute_value(attributes: &AttributeMap, key: &str, fallback: f64) -> f64 {
         .unwrap_or(fallback)
 }
 
-/// Vanilla's `NaturalSpawner.MAGIC_NUMBER`: `17² = 289`. The per-category global
+/// The global-cap divisor is `17² = 289`. The per-category global
 /// cap is `max_instances_per_chunk * spawnable_chunks / MAGIC_NUMBER`, so a single player
 /// with a full 8-chunk spawn radius (≈289 spawnable chunks) yields a cap equal
 /// to the per-chunk maximum.
@@ -99,8 +100,8 @@ pub const MAGIC_NUMBER: i32 = 289;
 /// Vanilla mob spawn categories (26.2 `MobCategory`) — [`lodestone_entity
 /// ::spawn::MobCategory`], not a second copy.
 ///
-/// Issue #518's dedup: this crate and `lodestone-entity` used to each define
-/// their own 8-variant `MobCategory` with the identical vanilla constants
+/// `MobCategory` is shared with `lodestone-entity`, so both crates use one
+/// 8-variant definition with identical constants
 /// (`mobs/species.rs` named the fork explicitly:
 /// "`MobCategory` is one of **two** independent types by that name in this
 /// workspace"). Re-exported rather than removed, so every existing
@@ -115,38 +116,32 @@ pub const MAGIC_NUMBER: i32 = 289;
 /// `lodestone_entity::spawn`'s own doc for where they are defined now.
 pub use lodestone_entity::spawn::MobCategory;
 
-/// The entity types vanilla registers with `EntityType.Builder::notInPeaceful`,
-/// by registry path — the **38** types that may not exist on `Peaceful`.
+/// The entity types excluded on `Peaceful`, by registry path — the **38** types
+/// that may not exist at that difficulty.
 ///
 /// # Why this is a list and not `category == Monster`
 ///
 /// Because the category is not the same question, and the difference is
 /// asymmetric in the direction that matters. Every one of these 38 is
-/// `MobCategory.MONSTER`, but **seven MONSTER types are not here**:
+/// in the monster category, but **seven monster types are not here**:
 /// `piglin`, `shulker`, `ender_dragon`, `zombie_horse`, `zombie_nautilus`,
-/// `camel_husk` and `sulfur_cube`. Vanilla's own gates are keyed on the flag,
-/// never on the category — `Mob.checkDespawn`'s
-/// `difficulty == PEACEFUL && !getType().isAllowedInPeaceful()`,
-/// `SpawnPlacements.checkSpawnRules`' identical first guard, and
-/// `EntityType.canSpawn`'s `isAllowedInPeaceful() || difficulty != PEACEFUL` —
+/// `camel_husk` and `sulfur_cube`. The gates are keyed on the eligibility flag,
+/// never on the category — the peaceful-mode eligibility flag is checked
+/// independently by despawn, spawn-rule, and entity-registration paths —
 /// so answering from the category would despawn a shulker the moment a player
-/// switched to Peaceful, and vanilla keeps it.
+/// switched to Peaceful, and the eligibility rule keeps it.
 ///
 /// # Provenance
 ///
-/// Extracted from the pinned 26.2 decompile by splitting
-/// vanilla's own entity-type registration table on its per-entity registrations
-/// and keeping every block containing `notInPeaceful()`: 38 hits, all
-/// `MobCategory.MONSTER`, zero of them ambiguous. `notInPeaceful` has exactly one
-/// other occurrence in the whole tree — the builder method's own definition — so
-/// the registration list is the complete set.
+/// The table contains the 38 registry paths whose peaceful-eligibility flag is
+/// false. All belong to the monster category; the seven listed exceptions keep
+/// that category while remaining eligible. The count and exception set are
+/// checked by the tests below.
 ///
 /// # How to change it
 ///
-/// When the pinned version moves, re-run that extraction rather than editing
-/// names here; `peaceful_forbids_exactly_the_notinpeaceful_registrations` below
-/// pins the count and the seven MONSTER exceptions so a hand edit that drops one
-/// fails loudly.
+/// When the supported registry changes, update this table and the count and
+/// exception assertions in `peaceful_forbids_exactly_the_notinpeaceful_registrations`.
 static NOT_ALLOWED_IN_PEACEFUL: [&str; 38] = [
     "blaze",
     "bogged",
@@ -188,13 +183,12 @@ static NOT_ALLOWED_IN_PEACEFUL: [&str; 38] = [
     "zombified_piglin",
 ];
 
-/// `EntityType.isAllowedInPeaceful` — whether an entity of this registry path may
+/// Whether an entity of this registry path may
 /// exist while the world difficulty is `Peaceful`.
 ///
 /// `path` is the namespace-less path (`"zombie"`, not `"minecraft:zombie"`).
-/// Anything not in [`NOT_ALLOWED_IN_PEACEFUL`] answers `true`, which is vanilla's
-/// own default (`EntityType.Builder`'s field starts at `true` and only
-/// `notInPeaceful()` clears it), so an unmodelled or misspelled species is kept
+/// Anything absent from the disallowed-species table answers `true`, the
+/// default for an unmodelled or misspelled species, so that species is kept
 /// rather than silently deleted.
 #[must_use]
 pub fn allowed_in_peaceful(path: &str) -> bool {
@@ -204,8 +198,8 @@ pub fn allowed_in_peaceful(path: &str) -> bool {
 /// Per-cycle mob-cap accounting: how many spawnable chunks are in range and how
 /// many mobs of each category are currently alive.
 ///
-/// Rebuilt each spawn cycle from a census of live mobs, exactly like vanilla's
-/// `NaturalSpawner.SpawnState`. The global cap is derived, never stored, so it
+/// Rebuilt each spawn cycle from a census of live mobs. The global cap is
+/// derived, never stored, so it
 /// always tracks the current spawnable-chunk count.
 #[derive(Debug, Clone)]
 pub struct SpawnState {
@@ -252,7 +246,7 @@ impl SpawnState {
     }
 
     /// The global cap for `category`: `max_instances_per_chunk *
-    /// spawnable_chunks / 289`, using vanilla's integer division. `Misc` and
+    /// spawnable_chunks / 289`, using integer division. `Misc` and
     /// any negative cap yield `0`.
     #[must_use]
     pub fn global_cap(&self, category: MobCategory) -> i32 {
@@ -264,7 +258,7 @@ impl SpawnState {
     }
 
     /// Whether another mob of `category` may spawn: `count < global_cap`, exactly
-    /// vanilla's `canSpawnForCategoryGlobal`.
+    /// the category cap.
     #[must_use]
     pub fn can_spawn(&self, category: MobCategory) -> bool {
         self.count(category) < self.global_cap(category)
@@ -279,7 +273,7 @@ impl SpawnState {
 
 /// The outcome of a [`check_despawn`] evaluation for one mob.
 ///
-/// The two fields are independent because vanilla's two gates are: a mob can be
+/// The two fields are independent because the two gates are: a mob can be
 /// discarded, have its age timer reset, or **neither** (the kept-but-ageing
 /// middle band). `discard` and `reset_timer` are never both true.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,8 +300,8 @@ impl DespawnOutcome {
     };
 }
 
-/// Applies vanilla `Mob.checkDespawn`'s two distance gates for one non-persistent
-/// mob, given the squared distance to the nearest player.
+/// Applies the two distance gates for one non-persistent mob, given the
+/// squared distance to the nearest player.
 ///
 /// * **Gate A (instant):** beyond `despawn_distance` the mob is discarded.
 /// * **Gate B (random far):** if it has been idle over `600` ticks, is beyond
@@ -317,11 +311,11 @@ impl DespawnOutcome {
 /// * **Otherwise (the middle band, e.g. 40 blocks):** kept, and — crucially —
 ///   the timer is **not** reset, so it keeps ageing toward gate B.
 ///
-/// `rng_hit_800` is the result of vanilla's `random.nextInt(800) == 0`, passed in
-/// so the decision is pure and exactly testable; `remove_when_far_away` is the
-/// mob's own `removeWhenFarAway` override (default `true` for despawnable mobs).
+/// `rng_hit_800` records whether the one-in-800 draw hit, passed in so the
+/// decision is pure and exactly testable; `remove_when_far_away` is the mob's
+/// own far-removal override (default `true` for despawnable mobs).
 ///
-/// Issue #518's dedup: delegates to [`lodestone_entity::spawn::check_despawn`]
+/// The dedup: delegates to [`lodestone_entity::spawn::check_despawn`]
 /// rather than re-deriving the same two distance gates a second time. That
 /// function's [`DespawnCtx`](lodestone_entity::spawn::DespawnCtx) additionally
 /// models peaceful eviction and the persistence short-circuit, neither of which
@@ -372,7 +366,7 @@ pub fn check_despawn(
 pub struct SpawnCandidate {
     /// Where to place the mob (a validated, ground-supported position).
     pub pos: Vec3,
-    /// Which species — a vanilla entity id such as `minecraft:sheep`.
+    /// Which species, represented by its registry key such as `minecraft:sheep`.
     pub entity_type: lodestone_model::ResourceKey,
 }
 
@@ -380,7 +374,7 @@ pub struct SpawnCandidate {
 ///
 /// Injected by the caller because "which mob spawns here, and is this a legal
 /// spawn position" needs biome spawn lists, light levels and the entity registry —
-/// knowledge this module must not embed. [`crate::natural_spawn::NaturalSpawner`]
+/// knowledge this module must not embed. [`crate::natural_spawn`]
 /// is the production implementer. The driver only ever asks *after* it has
 /// confirmed the category is under its cap, so a source need not repeat the cap
 /// check.
@@ -389,8 +383,8 @@ pub trait SpawnCandidateSource {
     /// or an empty vector when nothing can (wrong biome, too bright, no valid
     /// ground, or simply a declined random roll).
     ///
-    /// **A group, not a single mob**, because vanilla's
-    /// `NaturalSpawner.spawnCategoryForChunk` is a cluster loop whose RNG draw
+    /// **A group, not a single mob**, because the spawn algorithm
+    /// is a cluster loop whose RNG draw
     /// order and count *is* the spawn rate. Returning one mob per call would let
     /// the driver interleave cap checks into the middle of a group's draws, which
     /// changes the stream and therefore the rates.
@@ -426,8 +420,7 @@ impl SpawnRng {
         (self.next_u64() % bound as u64) as i32
     }
 
-    /// A uniform `f64` in `[0.0, 1.0)` with a 53-bit mantissa, matching Java
-    /// `RandomSource.nextDouble()`'s contract — the roll
+    /// A uniform `f64` in `[0.0, 1.0)` with a 53-bit mantissa — the roll
     /// [`crate::composter::Composter::insert`] asks its caller for (taking the
     /// top 53 bits of one draw and scaling by `2^-53` is equivalent to Java's
     /// `(next(26) << 27) + next(27)) / (1L << 53)`).
@@ -435,8 +428,7 @@ impl SpawnRng {
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// A uniform `f32` in `[0.0, 1.0)` with a 24-bit mantissa, matching Java
-    /// `RandomSource.nextFloat()`'s contract (`nextInt(24) * 2^-24`) — the roll
+    /// A uniform `f32` in `[0.0, 1.0)` with a 24-bit mantissa (`2^-24` steps) — the roll
     /// loot-table conditions and functions make (`random_chance`, binomial
     /// draws, `survives_explosion`). Takes the top 24 bits of one draw and
     /// scales by `2^-24`, which is distributionally identical to Java's 24-bit
@@ -451,7 +443,7 @@ impl SpawnRng {
 mod tests {
     use super::*;
 
-    /// The cap formula is `max * chunks / 289` with vanilla integer truncation.
+    /// The cap formula is `max * chunks / 289` with integer truncation.
     /// A full single-player radius (289 chunks) yields caps equal to the
     /// per-chunk maxima; fewer chunks scale down and truncate toward zero.
     #[test]
@@ -721,9 +713,9 @@ mod tests {
                 "{forbidden} carries notInPeaceful() and must be forbidden on Peaceful"
             );
         }
-        // **The discriminating rows.** All seven are `MobCategory.MONSTER` and none
-        // calls `notInPeaceful()`, so vanilla keeps them on Peaceful. A
-        // category-derived answer gets every one of these backwards.
+        // **The discriminating rows.** All seven are in the monster category but
+        // remain eligible on Peaceful. A category-derived answer gets every one
+        // of these rows backwards.
         for kept in [
             "piglin",
             "shulker",

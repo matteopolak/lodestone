@@ -1,38 +1,28 @@
-//! Villager gossip (issue #244): the `GossipContainer`/`GossipType` port that
-//! feeds reputation (issue #246, `crate::mobs::villager::reputation`).
+//! Villager gossip: a weighted reputation ledger used by
+//! `crate::mobs::villager::reputation`.
 //!
 //! # What it is
 //!
-//! One villager's opinion ledger about every UUID it has an opinion of —
-//! vanilla's own gossip container,
-//! keyed on `GossipType`: five weighted,
+//! One villager's opinion ledger about every UUID it has an opinion of,
+//! keyed by `GossipType`: five weighted,
 //! decaying, capped counters (`major_negative`, `minor_negative`,
 //! `minor_positive`, `major_positive`, `trading`) per `(target, type)` pair.
 //!
 //! # How it works
 //!
-//! [`GossipType::weight`]/[`GossipType::max`]/[`GossipType::decay_per_day`]/
-//! [`GossipType::decay_per_transfer`] are the four constants vanilla's enum
-//! constructor carries per variant, transcribed verbatim. [`GossipContainer`]
-//! stores `HashMap<Uuid, HashMap<GossipType, i32>>` in place of vanilla's
-//! `Map<UUID, EntityGossips>` (an `Object2IntOpenHashMap` per entity) — same
-//! shape, ordinary collections. [`GossipContainer::add`] is
-//! `GossipContainer.add`: merges via `mergeValuesForAddition` (sum, clamped
-//! to the type's `max`, keeping the old value if the sum would drop it below
-//! that cap from above — matches `sum > type.max ? Math.max(type.max,
-//! oldValue) : sum` exactly) then
-//! [`GossipContainer::discard_if_out_of_range`]'s two-sided clamp
-//! (`makeSureValueIsntTooLowOrTooHigh`): a value at or above `2` after that
-//! survives, otherwise the entry is dropped entirely — vanilla's
-//! `DISCARD_THRESHOLD`. [`GossipContainer::decay`] is the daily tick
-//! (`maybeDecayGossip`'s 24000-tick cadence lives on the caller, not here —
-//! see this module's own doc for why); [`GossipContainer::transfer_from`] is
-//! `transferFrom`/`selectGossipsForTransfer`'s weighted-without-replacement
-//! draw, using the caller's RNG.
+//! [`GossipType::weight`], [`GossipType::max`],
+//! [`GossipType::decay_per_day`], and [`GossipType::decay_per_transfer`]
+//! provide the four per-kind constants. [`GossipContainer`] stores
+//! `HashMap<Uuid, HashMap<GossipType, i32>>`. [`GossipContainer::add`]
+//! sums and clamps a value to the kind's maximum, then drops entries below
+//! [`DISCARD_THRESHOLD`] (`2`). [`GossipContainer::decay`] subtracts each
+//! kind's daily decay amount. The transfer operation selects entries by the
+//! absolute weighted value without replacement and merges
+//! them into the destination using the caller's RNG.
 //!
 //! # How to change it, and the gotchas
 //!
-//! - **`weighted_value` (`getReputation`'s inner sum) multiplies by
+//! - **`weighted_value` multiplies by
 //!   `GossipType::weight`, which is signed** — `major_negative`'s weight is
 //!   `-5`, so a stored *count* of `10` contributes `-50` to reputation, not
 //!   `+10`. Reading a raw stored count as reputation directly (skipping the
@@ -40,13 +30,10 @@
 //! - **`transfer_from`'s selection is weighted by `|weighted_value|`, not by
 //!   the raw count** — a single `major_positive` entry (weight `5`) is five
 //!   times as likely to be picked as a `trading` entry (weight `1`) with the
-//!   same stored count, exactly as `GossipEntry.weightedValue().abs()` (via
-//!   the cumulative-range construction, which sums `Math.abs(...)`) intends.
-//! - **`decay_per_transfer` subtracts before the `>= 2` gate, not after
-//!   `merge_values_for_transfer`'s `max`** — `transferFrom` computes
-//!   `newGossip.value - newGossip.type.decayPerTransfer` and only merges if
-//!   that lands at `2` or above; a value that decays below the threshold is
-//!   dropped from the *transfer*, not merged as a zero.
+//!   same stored count.
+//! - **`decay_per_transfer` subtracts before the `>= 2` gate** — a value that
+//!   decays below the threshold is dropped from the transfer, not merged as
+//!   a zero.
 //! - Adding a new gossip-driven consequence (a sixth `GossipType`, a new
 //!   [`crate::mobs::villager::reputation::ReputationEventType`] arm) touches
 //!   this file's enum and `reputation.rs`'s event-application match, not
@@ -56,14 +43,10 @@
 //!
 //! # What is not built, named rather than silent
 //!
-//! - **`GossipContainer::get_count_for_type`** (vanilla's own method of the
-//!   same name) is not ported — nothing in this crate consumes it yet, and
-//!   inventing an unused method here would be exactly the "computed for
-//!   real, zero production readers" island this repo's own evidence
-//!   standards call out.
-//! - **The bare `remove(type)` sweep** (vanilla's `GossipContainer.remove(GossipType)`,
-//!   which strips one type from every tracked entity at once) is not ported
-//!   for the same reason — no caller in this crate needs it.
+//! - **`GossipContainer::get_count_for_type`** is not exposed because no
+//!   caller in this crate needs an aggregate by kind.
+//! - **The bare `remove(type)` sweep** is not exposed because no caller needs
+//!   to remove one kind from every tracked entity at once.
 //! - **No on-disk persistence.** Matches every other villager-state gap this
 //!   crate already discloses (`villager::WorkstationClaims`,
 //!   `lodestone_server::villager_trade`'s offer state) — a restart loses
@@ -345,7 +328,7 @@ impl GossipContainer {
     /// overwriting on a `(target, type)` collision (vanilla's own
     /// `entries.putAll`, a plain map overwrite, not `add`'s clamp-and-merge).
     /// Used to seed a freshly cured villager's ledger from a zombie
-    /// villager's saved gossip (issue #247).
+    /// villager's saved gossip.
     pub fn put_all(&mut self, other: &GossipContainer) {
         for (&target, bucket) in &other.entries {
             let dest = self.entries.entry(target).or_default();
@@ -581,7 +564,7 @@ mod tests {
     }
 
     /// `put_all` overwrites rather than clamp-merging — the seed-a-cured-
-    /// villager's-ledger use case (issue #247) needs the source value to
+    /// villager's-ledger use case needs the source value to
     /// land verbatim, not go through `add`'s max-cap arithmetic a second
     /// time.
     #[test]

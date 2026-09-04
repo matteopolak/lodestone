@@ -1,18 +1,16 @@
-//! Villager reputation, including Hero of the Village (issue #246) — built
-//! on [`super::gossip::GossipContainer`] (issue #244).
+//! Villager reputation, including Hero of the Village — built
+//! on [`super::gossip::GossipContainer`].
 //!
 //! # What it is
 //!
 //! Two pure ports over [`super::gossip::GossipContainer`] and
 //! [`crate::villager_trade::OfferState`]:
 //!
-//! - [`ReputationEventType`] plus [`apply_reputation_event`] — vanilla
-//!   `Villager.onReputationEventFrom`, the *only* place gossip is actually
-//!   written from an event rather than transferred between villagers. Every
-//!   arm is transcribed from vanilla's own villager entity's four-branch `if`/`else if`
-//!   chain for it.
-//! - [`update_special_prices`] — vanilla `Villager.updateSpecialPrices`, the
-//!   formula that turns a reputation score (and an optional Hero of the
+//! - [`ReputationEventType`] plus [`apply_reputation_event`] — the event path
+//!   that writes gossip rather than transferring it between villagers. Every
+//!   arm covers one of the four supported reputation mutations.
+//! - [`update_special_prices`] — the formula that turns a reputation score
+//!   (and an optional Hero of the
 //!   Village amplifier) into calls against
 //!   [`crate::villager_trade::OfferState::add_special_price_diff`] — the hook
 //!   that module's own doc names as built-but-uncalled for exactly this
@@ -20,16 +18,13 @@
 //!
 //! # How it works
 //!
-//! [`ReputationEventType`] mirrors vanilla's own reputation-event-type registry
-//! entries as a plain enum — this
-//! crate has no runtime registry of open-ended event types, and the five
-//! vanilla constants are the total set any caller here can produce.
-//! [`apply_reputation_event`] applies **only** the four
-//! [`GossipType`](super::gossip::GossipType) mutations `Villager`'s own
-//! method performs; [`ReputationEventType::GolemKilled`] deliberately has no
-//! arm — vanilla's own `onReputationEventFrom` has none either (golem death
-//! reputation, if it exists at all in 26.2, is not this method's job), so an
-//! arm here would be invented behaviour, not a port.
+//! [`ReputationEventType`] is a plain enum because this crate has no runtime
+//! registry of open-ended event types, and the five supported constants are
+//! the total set any caller here can produce. [`apply_reputation_event`]
+//! applies **only** the four [`GossipType`](super::gossip::GossipType)
+//! mutations supported by this event path; [`ReputationEventType::GolemKilled`]
+//! deliberately has no arm because no corresponding gossip mutation is
+//! defined here.
 //!
 //! [`update_special_prices`] takes reputation and the Hero of the Village
 //! amplifier as **plain inputs** rather than reading a live player or a
@@ -42,9 +37,8 @@
 //! # How to change it, and the gotchas
 //!
 //! - **The reputation discount and the Hero of the Village discount are
-//!   independent and additive**, not a choice between the two — vanilla
-//!   applies both `if` blocks unconditionally when their own guard is met
-//!   (`reputation != 0`, `hasEffect(HERO_OF_THE_VILLAGE)`), so a player who
+//!   independent and additive**, not a choice between the two. Both apply when
+//!   their guard is met (`reputation != 0`, `hasEffect(HERO_OF_THE_VILLAGE)`), so a player who
 //!   is both reputable *and* carrying the effect gets both discounts summed
 //!   into `special_price_diff`.
 //! - **The reputation discount multiplies by each offer's own
@@ -62,35 +56,27 @@
 //!   reputation makes prices cheaper, matching
 //!   [`crate::villager_trade::OfferState::modified_cost_a_count`]'s formula
 //!   adding `special_price_diff` directly to the base cost.
-//! - **`special_price_diff` must be reset when a trading session ends**
-//!   (vanilla's `resetSpecialPrices`, called from `stopTrading`) — not this
-//!   module's job (`OfferState::reset_special_price_diff` already exists and
+//! - **`special_price_diff` must be reset when a trading session ends** — not
+//!   this module's job (`OfferState::reset_special_price_diff` already exists and
 //!   is tested in `crate::villager_trade`); a caller that calls
 //!   [`update_special_prices`] on every screen-open without ever resetting
 //!   would accumulate discounts across sessions.
 //!
 //! # What is not built, named rather than silent
 //!
-//! - **No live per-villager `OfferState` list exists to call this against**
-//!   yet — `crate::villager_trade`'s own doc already discloses that
+//! - **No live per-villager `OfferState` list is connected.**
 //!   `SELECT_TRADE` is decoded and discarded and nothing calls
-//!   `VillagerTrades::maybe_restock`. This module is ready the moment that
-//!   lands; it does not perform the wiring itself (`crate::server`, off
-//!   limits for this change).
-//! - **Iron-golem aggression toward a low-reputation player** (named in
-//!   issue #246's own body) has no evidenced vanilla mechanism in
-//!   vanilla's own iron-golem entity
-//!   tying golem targeting to `GossipContainer`/reputation at all — nothing
-//!   there reads gossip. Inventing a golem-targeting rule with no jar
-//!   citation would be exactly the kind of un-evidenced port this repo's own
-//!   standards forbid; not built, and named here rather than silently
-//!   dropped.
+//!   `VillagerTrades::maybe_restock`. This module exposes the state transition;
+//!   `crate::server` owns the packet wiring that invokes it.
+//! - **Iron-golem aggression toward a low-reputation player** is not modeled:
+//!   no targeting rule reads gossip or reputation. This module therefore
+//!   exposes reputation state without inventing a target-selection rule.
 
 use crate::villager_trade::OfferState;
 
 use super::gossip::{GossipContainer, GossipType};
 
-/// `ReputationEventType` — vanilla's five registered event kinds.
+/// The five supported reputation event kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReputationEventType {
     ZombieVillagerCured,
@@ -100,14 +86,12 @@ pub enum ReputationEventType {
     Trade,
 }
 
-/// `Villager.onReputationEventFrom`: the four real gossip mutations a
-/// reputation event causes. `source` is the entity the event is *about*
-/// (vanilla's `Entity source` parameter — the player who cured/traded/hurt/
-/// killed, not the villager whose ledger this is).
+/// Applies the gossip mutation associated with an event. `source` is the
+/// player or other entity the event describes, not the villager whose ledger
+/// receives the entry.
 ///
-/// [`ReputationEventType::GolemKilled`] falls through with no mutation — see
-/// this module's own doc for why that is a port of vanilla's own omission,
-/// not a gap.
+/// [`ReputationEventType::GolemKilled`] has no gossip mutation in this event
+/// set, so it leaves the ledger unchanged.
 pub fn apply_reputation_event(
     gossip: &mut GossipContainer,
     event: ReputationEventType,
@@ -131,14 +115,13 @@ pub fn apply_reputation_event(
     }
 }
 
-/// `Villager.updateSpecialPrices`: applies both the ordinary-reputation
-/// discount and, when present, the Hero of the Village discount to every
-/// offer in `offers`. See this module's own doc for why the two are
-/// independent and additive, and why both deltas are negative (a discount).
+/// Applies both the ordinary-reputation discount and, when present, the Hero
+/// of the Village discount to every offer in `offers`. The two discounts are
+/// independent and additive, and both deltas lower the offer price.
 ///
-/// `hero_of_the_village_amplifier` is `player.getEffect(HERO_OF_THE_VILLAGE).
-/// getAmplifier()` when the player carries the effect, `None` otherwise —
-/// this module reads no live effect state itself.
+/// `hero_of_the_village_amplifier` is the effect amplifier when the player
+/// carries Hero of the Village, and `None` otherwise. This module reads no
+/// live effect state itself.
 pub fn update_special_prices(
     offers: &mut [OfferState],
     reputation: i32,
@@ -182,7 +165,6 @@ mod tests {
     }
 
     /// `ZombieVillagerCured` writes **two** gossip entries, not one — a
-    /// literal transcription of `Villager.onReputationEventFrom`'s cured
     /// branch. Predicted exactly: `20 * major_positive.weight()(5) + 25 *
     /// minor_positive.weight()(1) = 100 + 25 = 125`.
     #[test]
@@ -221,7 +203,7 @@ mod tests {
     }
 
     /// Control: `GolemKilled` is a real, distinct variant but must mutate
-    /// nothing — vanilla's own method has no arm for it.
+    /// nothing — this event has no associated gossip mutation.
     #[test]
     fn golem_killed_writes_no_gossip() {
         let mut gossip = GossipContainer::new();
@@ -243,8 +225,8 @@ mod tests {
     }
 
     /// Zero reputation must add nothing at all — not a zero-magnitude call,
-    /// literally no mutation (matching vanilla's own `if (reputation != 0)`
-    /// guard, which this test would not distinguish from "adds exactly
+    /// literally no mutation (the `reputation != 0` guard, which this test
+    /// would not distinguish from "adds exactly
     /// zero" if `special_price_diff` were not already asserted to start at
     /// zero either way — the discriminating check is that a *negative*
     /// reputation is not silently treated the same as zero).

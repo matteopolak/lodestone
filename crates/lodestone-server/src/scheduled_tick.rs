@@ -1,4 +1,4 @@
-//! The scheduled-tick queue (issue #308, first half): the real engine's own
+//! The scheduled-tick queue (the first half of scheduled block/fluid processing): the
 //! per-block and per-fluid tick machinery, collapsed to one generic
 //! [`ScheduledTickQueue<T>`] the tick loop instantiates twice.
 //!
@@ -239,7 +239,7 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
     /// **Non-destructive**, which is the entire reason it exists: [`drain_due`]
     /// is the only other way to see the contents and it *removes* them, so
     /// saving the world through it would desync the running server from what
-    /// lands on disk. Added for #468's remaining half.
+    /// lands on disk. This accessor completes the persistence handoff.
     ///
     /// Two schema traps for whoever serialises these, both measured against
     /// 4,023 real chunks read with an independent parser, and both of
@@ -273,7 +273,7 @@ impl<T: Eq + Hash + Clone> ScheduledTickQueue<T> {
     /// *this* call regardless of its `trigger_tick` — it can only be seen by
     /// a subsequent `drain_due` call. This is the "ticks scheduled during
     /// this tick's processing must not be processed in the same pass"
-    /// invariant the #308 brief calls out by name.
+    /// invariant required by the queue's processing contract.
     pub fn drain_due(&mut self, current_tick: u64, max_to_process: usize) -> Vec<ScheduledTick<T>> {
         let mut out = Vec::new();
         while out.len() < max_to_process {

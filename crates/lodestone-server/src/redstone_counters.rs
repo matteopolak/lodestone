@@ -586,7 +586,7 @@ mod tests {
     ///
     /// 1. `propagate_and_react`'s own origin fan-out (the torch's six
     ///    neighbours) reaches the dust once, at `East`. `is_wire` is true:
-    ///    **recompute #1**. Power goes `0 -> 15`, which *changes*, so this
+    ///    **the first recompute**. Power goes `0 -> 15`, which *changes*, so this
     ///    returns `wire_update_fan_out((1, Y, ROW_Z))` — the 7-centre,
     ///    6-direction, 42-notification cascade — as this notification's own
     ///    resolved-before-continuing cascade.
@@ -595,7 +595,7 @@ mod tests {
     ///    a recompute), and each of the six *satellite* centres
     ///    (`West`/`East`/`Down`/`Up`/`North`/`South` of the dust) has exactly
     ///    one of its own six directions aimed back at the dust's position —
-    ///    **six revisits, six more recomputes** (#2–#7). Power is already 15
+    ///    **six revisits, six more recomputes** (2–7). Power is already 15
     ///    on each, so `calculate_target_strength` returns 15 again — no
     ///    change, so none of these six re-triggers a further cascade.
     ///

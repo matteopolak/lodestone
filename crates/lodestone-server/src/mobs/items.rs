@@ -20,17 +20,13 @@ const ITEM_MERGE_REACH_Y: f64 = 0.25;
 impl<'w> MobSim<'w> {
     /// Registers a dropped item entity at `position` with fall velocity
     /// `velocity` and lifecycle `lifecycle` (typically
-    /// [`ItemLifecycle::newly_dropped`]) so [`tick`](Self::tick) advances its
-    /// age/pickup-delay every server tick (and removes it on despawn) — the
-    /// missing driver issue #215 found: `ItemEntityRegistry`'s lifecycle had
-    /// no production consumer, only the client-side fall dynamics
-    /// (`ItemMotion`) reached anything, and purely for rendering.
+    /// [`ItemLifecycle::newly_dropped`]). [`tick`](Self::tick) advances its
+    /// age and pickup delay every server tick, removes it on despawn, and
+    /// updates the item state sent to the client.
     ///
-    /// Returns the assigned entity id. Deciding *pickup* on player-overlap and
-    /// merging adjacent stacks (via [`ItemEntityRegistry::merge`]) are the
-    /// caller's job once it has player positions to test against — this
-    /// closes the "nothing ticks the lifecycle at all" island, not the full
-    /// pickup feature.
+    /// Returns the assigned entity id. Player-overlap pickup and merging
+    /// adjacent stacks (via [`ItemEntityRegistry::merge`]) are separate
+    /// operations that require player positions.
     pub fn spawn_item(
         &mut self,
         item: ResourceKey,
@@ -94,8 +90,8 @@ impl<'w> MobSim<'w> {
 
     /// Shrinks a tracked dropped item to `count`, for a **partial** pickup.
     ///
-    /// Vanilla's `ItemEntity.playerTouch` hands the entity's own `ItemStack` to
-    /// `Inventory.add`, which shrinks it in place; the entity is discarded only
+    /// A pickup hands the entity's `ItemStack` to the inventory, which shrinks
+    /// it in place; the entity is discarded only
     /// when the stack ends up empty. So a player with one free slot walking over
     /// a stack of 40 when 30 fit banks 30 and leaves an entity holding 10 —
     /// *not* nothing, and not the whole 40.
@@ -190,15 +186,15 @@ impl<'w> MobSim<'w> {
         }
     }
 
-    /// Every dropped item a player standing at `player_feet` may collect right
-    /// now, as `(entity id, item, count)` — issue #337's pickup half.
+    /// Every dropped item a player standing at `player_feet` may collect, as
+    /// `(entity id, item, count)` — the pickup half.
     ///
     /// Two filters, and both are vanilla:
     ///
     /// * [`crate::block_drops::is_within_pickup_range`] is `Player.aiStep`'s
     ///   inflated-AABB intersection, not a radius (see its own doc comment).
-    /// * [`ItemLifecycle::can_be_picked_up`] is `ItemEntity.playerTouch`'s
-    ///   `this.pickupDelay == 0` guard. A freshly popped block drop carries
+    /// * [`ItemLifecycle::can_be_picked_up`] checks `pickup_delay == 0`. A
+    ///   freshly popped block drop carries
     ///   [`crate::block_drops::DEFAULT_PICKUP_DELAY`] (10 ticks), so an item
     ///   is **not** collectable on the tick it spawns — a pickup gate that
     ///   asserts immediately reads that as a broken feature. Advance the tick
@@ -207,8 +203,8 @@ impl<'w> MobSim<'w> {
     /// Read-only: the caller decides what it can actually fit and then calls
     /// [`remove_item`](Self::remove_item) for the ones it took. Splitting the
     /// query from the removal is what lets a connection roll back cleanly when
-    /// its inventory is full — vanilla's `playerTouch` likewise only removes
-    /// the entity once `getInventory().add(...)` succeeded.
+    /// its inventory is full — remove the entity only after the inventory
+    /// accepts the complete stack.
     #[must_use]
     pub fn items_within_pickup_range(&self, player_feet: Vec3) -> Vec<(i32, ResourceKey, u8)> {
         let mut collectable: Vec<(i32, ResourceKey, u8)> = self

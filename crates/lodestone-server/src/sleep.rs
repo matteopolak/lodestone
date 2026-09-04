@@ -1,27 +1,23 @@
-//! Sleeping players and the night-skip vote (issue #325,
-//! `docs/plans/world-state.md` S1) — the server half of "a player gets in a
+//! Sleeping players and the night-skip vote — the server half of "a player gets in a
 //! bed and, when enough of the world's players are asleep, the night skips to
 //! morning."
 //!
-//! Vanilla's model is a **world-global** vote (`ServerLevel.sleepStatus`, a
-//! `SleepStatus`), not a
-//! per-player flag: `updateSleepingPlayers` counts every player, spectators
-//! excluded, and the night skips only when enough players are asleep **and**
+//! The model is a **world-global** vote, not a per-player flag: it counts
+//! every eligible player, and the night skips only when enough players are asleep **and**
 //! enough of them have been asleep long enough. That vote cannot be computed
-//! from one connection's own flags — the straddle the plan's shape-B migration
-//! exists to delete — so this module splits it across the two halves that
+//! from one connection's own flags, so this module splits it across the two halves that
 //! actually own the data:
 //!
 //! * [`SleepVote`] is the **shared** roster and voter count. Connections call
 //!   [`SleepVote::lay_down`]/[`SleepVote::get_up`] on bed entry/exit and feed
 //!   the active-player count from the shared [`crate::PlayerRegistry`] where
 //!   one exists; the world tick loop reads it. It is the concrete stand-in for
-//!   the players-as-shared-state the plan demands, before shape B lands.
-//! * [`SleepState`] is owned by the world tick loop (`crate::tick::
-//!   run_tick_loop_with_weather`) with no lock, exactly like
+//!   the players-as-shared-state the world loop requires.
+//! * [`SleepState`] is owned by the world tick loop
+//!   (`crate::tick::run_tick_loop_with_weather`) with no lock, exactly like
 //!   [`crate::WeatherState`] and `game_tick`. It records the game tick each
 //!   sleeper lay down (only the loop owns the tick counter — the connection
-//!   cannot), computes the vote with vanilla's exact arithmetic, and decides
+//!   cannot), computes the vote with the defined arithmetic, and decides
 //!   when the night skips.
 //!
 //! On a skip the loop publishes a [`SleepEvent::SkippedNight`] onto a
@@ -30,95 +26,84 @@
 //! `serve_play`'s `container_sync_tick` arm drains into a real
 //! `encode_set_time(game_time, Some(morning))` broadcast. There is **no
 //! `SLEEPING_STATUS` packet** in 26.2: a player's lying-down state travels as
-//! entity metadata (the `EntityPose::Sleeping` the client already decodes and
+//! entity metadata (the sleeping pose the client already decodes and
 //! the plan flags as an unplanned client follow-up), and the night skip is
 //! simply the clock jump.
 //!
-//! # The skip, after vanilla's own night-skip broadcast routine
+//! # The skip and its broadcast routine
 //!
-//! The vote passing runs three steps, in vanilla's order:
+//! The vote passing runs three ordered actions:
 //!
-//! 1. the clock jumps forward to the next morning — `moveToTimeMarker(
-//!    WAKE_UP_FROM_SLEEP)` with `ClockTimeMarker(0, 24000)`, i.e.
-//!    `ceil(dayTime / 24000) * 24000` — **gated on the `advanceTime` game
+//! 1. the clock jumps forward to the next morning using a `(0, 24000)` marker, i.e.
+//!    `ceil(day_time / 24000) * 24000` — **gated on the `advance_time` game
 //!    rule** (a world with the rule off still wakes everyone; only the clock
 //!    stands still);
-//! 2. every sleeper wakes — `wakeUpAllPlayers`, which first clears the
-//!    `SleepStatus` roster (`removeAllSleepers`) and then calls
-//!    `stopSleepInBed(false, false)` per player (non-forceful, so the sleep
-//!    counter snaps to its post-wake 100);
+//! 2. every sleeper wakes, clearing the shared roster and setting each sleep
+//!    counter to its post-wake value of 100;
 //! 3. if it is raining and the `advanceWeather` rule is on, the weather cycle
-//!    resets (`resetWeatherCycle`) — the four `WeatherData` scalars return to
+//!    resets — the four weather scalars return to
 //!    their clear values and the rain/thunder levels ramp down through the
 //!    weather tick's normal interpolation.
 //!
-//! The loop also advances a `day_time` counter one per tick, exactly like the
-//! `dayTime` field vanilla's `ServerLevel.tickTime` increments (`ServerLevel`
-//! keeps `gameTime` and `dayTime` as two counters and `moveToTimeMarker` jumps
-//! only `dayTime`, so the two diverge after a skip). It starts at 0 — a fresh
+//! The loop also advances a `day_time` counter one per tick. The world keeps
+//! `game_time` and `day_time` as two counters, and a skip jumps
+//! only `day_time`, so the two diverge after a skip). It starts at 0 — a fresh
 //! world's day time, and the value the join-time full sync
 //! (`encode_set_time(0, Some(0))`) anchors the client's day clock to — and
 //! the skip sets it to the next multiple of 24000, so a second skip later in
-//! the same world jumps to the morning *after* the first, matching what the
-//! client's `DayClock` (`crates/protocol/v770/src/adapter.rs`) extrapolates
+//! the same world jumps to the next morning, matching the day-clock adapter's
 //! from the re-anchoring it receives.
 //!
 //! # What is deliberately not here
 //!
-//! * **The `players_sleeping_percentage`/`advanceTime` game rules** are read
+//! * **The sleeping-percentage and time-advance game rules** are read
 //!   as [`crate::tick::players_sleeping_percentage()`]/
-//!   [`crate::tick::advance_time()`], functions returning vanilla's defaults
+//!   [`crate::tick::advance_time()`], functions returning the defaults
 //!   (`100` / `true`) — the same disclosed gap as
 //!   [`crate::tick::advance_weather()`]: this crate has no world-level
 //!   `GameRules` registry yet (R1 of the world-state plan), and the
 //!   per-connection `WorldAdminState::game_rules` is the wrong side of the
 //!   world for a tick loop that runs with no connection at all.
-//! * **Bed-entry gates** are unmodelled. Vanilla's `startSleepInBed`
-//!   (vanilla's own start-sleep-in-bed routine) rejects a bed that is not legally
+//! * **Bed-entry gates** are unmodelled. A bed that is not legally
 //!   enterable (blocked, out of reach, monsters within ±8/±5, daytime, the
 //!   player flying/creative) with per-reason messages. The monster check is
 //!   already a documented remainder in `crate::world_spawn`'s
 //!   [`is_legal_bed_respawn`] (it needs a shape-B mob AABB); the daytime check
 //!   needs the day clock the *loop* owns, not the connection — so this landing
 //!   registers a bed click unconditionally and relies on the 100-tick
-//!   deep-sleep threshold to make accidental daytime clicks harmless.
+//!   deep-sleep threshold to avoid counting accidental daytime clicks.
 //! * **Spectator exclusion** is unmodelled: this crate has no spectator
 //!   concept, so every connected player counts toward the vote
-//!   (`SleepStatus.updateSleepingPlayers` filters `!player.isSpectator()`).
-//! * **The LAN relay** (`IntegratedServer::bind`) runs the sleep-free
-//!   `run_tick_loop` wrapper today, so a LAN world never skips the night yet —
-//!   the same gap `#324`'s weather feed has in `bind`, and the same
-//!   follow-up: when the world-loop's LAN fan-out lands for weather, sleep
-//!   rides it unchanged.
-//! * **The client half** (a sleeping player's pose, the "you may not rest now"
+//!   so every connected player counts toward the vote.
+//! * **The LAN relay** currently runs the sleep-free `run_tick_loop` wrapper,
+//!   so a LAN world does not skip the night. When the world-loop's LAN fan-out
+//!   supports weather, sleep can use the same route.
+//! * **The client half** (a sleeping player's pose, the rest prompt
 //!   overlay, the "N players sleeping" bar) is a flagged-not-planned follow-up
 //!   per the plan's S1 — the metadata already decodes.
 
 use std::sync::{Arc, Mutex};
 
 /// Ticks a sleeper must have lain down before the night-skip vote can pass —
-/// vanilla `Player::isSleepingLongEnough`: `isSleeping() && sleepCounter >=
-/// 100` (vanilla's own player entity), the `100` the plan's
-/// S1 names as the deep-sleep threshold. It is what stops the vote from
+/// `is_sleeping && sleep_counter >= 100`, the deep-sleep threshold. It stops
+/// the vote from
 /// passing the instant the Nth player's head touches a pillow.
 pub const DEEP_SLEEP_TICKS: u64 = 100;
 
-/// Vanilla's day length in ticks — the period of the `WAKE_UP_FROM_SLEEP`
-/// clock marker (`ClockTimeMarker(0, 24000)`), the value the skip's clock jump
+/// Day length in ticks — the period of the `(0, 24000)` clock marker, the value
+/// the skip's clock jump
 /// advances to the next multiple of.
 pub const DAY_LENGTH_TICKS: i64 = 24_000;
 
-/// A skip a connection must learn about — the server-side half of vanilla's
-/// night-skip broadcast (vanilla's own night-skip broadcast routine): the world's clock jumped
-/// forward to the next morning and every sleeper woke.
+/// A skip a connection must learn about: the world's clock jumped forward to
+/// the next morning and every sleeper woke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SleepEvent {
     /// The vote passed with the `advanceTime` rule on: time jumped to the next
     /// morning. `game_time` is the world-age tick the skip happened at,
     /// `morning` the new day-time anchor — the pair
     /// `encode_set_time(game_time, Some(morning))` re-anchors the client's day
-    /// clock to, exactly the `ClientboundSetTimePacket` broadcast vanilla's
-    /// skip path sends.
+    /// clock to, using the normal time-sync packet.
     SkippedNight {
         /// The world-age tick the skip happened at (the loop's `game_tick`).
         game_time: i64,
@@ -128,11 +113,11 @@ pub enum SleepEvent {
     },
 }
 
-/// The shared night-skip vote: which players are in beds right now, and how
+/// The shared night-skip vote: which players are currently in beds, and how
 /// many players can vote.
 ///
-/// Mirrors vanilla's own `SleepStatus` as **shared state** — the
-/// roster is populated by the connections on bed entry/exit and read by the
+/// This is **shared state**: the roster is populated by connections on bed
+/// entry/exit and read by the
 /// world tick loop, so the vote is computed over *all* players, never from one
 /// connection's own flags. That is the plan's S1 prohibition ("do not build a
 /// per-connection approximation; that is the straddle again") made concrete:
@@ -150,8 +135,7 @@ struct SleepVoteInner {
     /// `LOCAL_PLAYER_ENTITY_ID` otherwise (singleplayer) — so a multi-player
     /// roster never collides two connections under one key.
     sleepers: Vec<i32>,
-    /// The number of players who can vote. Vanilla excludes spectators
-    /// (`SleepStatus.updateSleepingPlayers`); this crate has no spectator
+    /// The number of players who can vote. This crate has no spectator
     /// concept, so every connected player counts.
     active: u32,
 }
@@ -163,7 +147,7 @@ impl SleepVote {
     }
 
     /// Records a player lying down in a bed — the connection's `UseItemOn` bed
-    /// arm (issue #325). Idempotent: a re-click on the same bed does not
+    /// arm. Idempotent: a re-click on the same bed does not
     /// double-count.
     pub fn lay_down(&self, entity_id: i32) {
         let mut inner = self.0.lock().expect("sleep vote lock poisoned");
@@ -200,9 +184,8 @@ impl SleepVote {
         (inner.active, inner.sleepers.clone())
     }
 
-    /// Empties the roster after a skip — vanilla's `wakeUpAllPlayers` calls
-    /// `sleepStatus.removeAllSleepers()` first (vanilla's own wake-all-players routine), so the
-    /// next tick does not re-register the just-woken players.
+    /// Empties the roster after a skip so the next tick does not re-register
+    /// the just-woken players.
     pub(crate) fn clear(&self) {
         self.0.lock().expect("sleep vote lock poisoned").sleepers.clear();
     }
@@ -231,17 +214,15 @@ pub struct SleepState {
 }
 
 impl SleepState {
-    /// The next morning after `day_time` — vanilla's `moveToTimeMarker` with
-    /// the `WAKE_UP_FROM_SLEEP` marker `ClockTimeMarker(0, 24000)`:
-    /// `Mth.ceil(dayTime / 24000.0) * 24000` (vanilla's own time-marker mover). At
+    /// The next morning after `day_time`: `ceil(day_time / 24000.0) * 24000`.
+    /// At
     /// `day_time == 0` (a world's very first tick) that is `0` itself —
-    /// sunrise, exactly as vanilla reports it.
+    /// sunrise, matching the day-clock contract.
     pub fn morning_after(day_time: i64) -> i64 {
         ((day_time + DAY_LENGTH_TICKS - 1) / DAY_LENGTH_TICKS) * DAY_LENGTH_TICKS
     }
 
-    /// Vanilla's own `sleepersNeeded(pct)`:
-    /// `Math.max(1, Mth.ceil(activePlayers * pct / 100.0F))`. The `max(1, …)`
+    /// Computes `max(1, ceil(active_players * pct / 100))`. The `max(1, …)`
     /// is what makes a single-player world work with the default `100` rule —
     /// with exactly one active player `ceil(1 * 100 / 100) = 1`, and with no
     /// registry to count at all (singleplayer) it still yields `1`, never `0`.
@@ -254,7 +235,7 @@ impl SleepState {
 
     /// Reconciles the roster with the shared vote's snapshot: a player who
     /// newly appears is recorded with the current game tick (their deep-sleep
-    /// clock starts now), and a player who disappeared is dropped (they woke,
+    /// clock starts at that tick), and a player who disappeared is dropped (they woke,
     /// disconnected, or the skip cleared the roster).
     pub fn reconcile(&mut self, sleepers: &[i32], game_tick: u64) {
         for &entity_id in sleepers {
@@ -279,31 +260,25 @@ impl SleepState {
             .count()
     }
 
-    /// Whether the night-skip vote passes — vanilla's `SleepStatus
-    /// .areEnoughSleeping` **and** `areEnoughDeepSleeping` together: at least
-    /// `sleepersNeeded` players are asleep, and at least `sleepersNeeded` of
-    /// them have been asleep for [`DEEP_SLEEP_TICKS`] or more.
+    /// Whether the night-skip vote passes: at least the required number of players
+    /// are asleep, and at least that many have been asleep for
+    /// [`DEEP_SLEEP_TICKS`] or more.
     pub fn vote_passes(&self, active: u32, pct: u32, game_tick: u64) -> bool {
         let needed = Self::sleepers_needed(active, pct) as usize;
         self.sleepers.len() >= needed && self.deep_sleepers(game_tick) >= needed
     }
 
-    /// Every current sleeper as `(entity id, lay-down tick)` — issue #229's
-    /// feed for `MobSim::set_sleeping_players`, the join
-    /// `CatRelaxOnOwnerGoal`/shoulder-ride dismount need against a mob's
-    /// owner. A plain copy rather than exposing [`Sleeper`] itself, so this
-    /// module's internal shape can still change without widening what the
-    /// mob simulation depends on.
+    /// Every current sleeper as `(entity id, lay-down tick)` — the feed used by
+    /// the mob simulation for sleeping-player checks and shoulder-ride
+    /// dismounts. A plain copy avoids exposing [`Sleeper`] itself.
     #[must_use]
     pub(crate) fn sleepers_snapshot(&self) -> Vec<(i32, u64)> {
         self.sleepers.iter().map(|s| (s.entity_id, s.since_game_tick)).collect()
     }
 
-    /// The wake-all — vanilla's own `wakeUpAllPlayers`
-    /// per-sleeper `stopSleepInBed(false, false)`. This crate has no
-    /// per-player sleep state to clear, so dropping the roster *is* the wake;
-    /// the caller is also responsible for [`SleepVote::clear`], which is what
-    /// stops the next tick from re-registering them.
+    /// Wakes every tracked sleeper by clearing the roster. This crate has no
+    /// per-player sleep state to clear; the caller also clears
+    /// [`SleepVote::clear`] so the next tick does not re-register them.
     pub fn wake_all(&mut self) {
         self.sleepers.clear();
     }
@@ -339,8 +314,8 @@ impl SleepFeed {
 mod tests {
     use super::*;
 
-    /// Pins the vote arithmetic to vanilla's own `sleepersNeeded`:
-    /// `max(1, ceil(active * pct / 100))`. The four rows are the ones that
+    /// Pins the vote arithmetic to `max(1, ceil(active * pct / 100))`. The
+    /// four rows are the ones that
     /// matter: a lone player with the default `100` needs 1; two players with
     /// `100` need both; two players at `50` need one (a bare majority can
     /// skip); and with **no** registry to count (singleplayer, `active = 0`)
@@ -355,8 +330,8 @@ mod tests {
         assert_eq!(SleepState::sleepers_needed(0, 100), 1, "the max(1, …) floor");
     }
 
-    /// `morning_after` is `ceil(dayTime / 24000) * 24000` — the `WAKE_UP_FROM_SLEEP`
-    /// marker. The partial-day row is the one that matters: at day time 200 a
+    /// `morning_after` is `ceil(day_time / 24000) * 24000`. The partial-day
+    /// row is the one that matters: at day time 200 a
     /// skip must land on 24000, not on "the next whole day from 0" nor on 200.
     #[test]
     fn morning_after_lands_on_the_next_multiple_of_24000() {
@@ -367,7 +342,8 @@ mod tests {
         assert_eq!(SleepState::morning_after(24_100), 48_000, "the second skip");
     }
 
-    /// The deep-sleep threshold gates the vote: `sleepersNeeded - 1` deep
+    /// The deep-sleep threshold gates the vote: one fewer than the required
+    /// number of deep
     /// sleepers never pass it, and the Nth does only once their own counter
     /// reaches [`DEEP_SLEEP_TICKS`]. The `reconcile` call is what starts each
     /// sleeper's counter at their own lay-down tick.
@@ -385,8 +361,8 @@ mod tests {
         assert_eq!(state.deep_sleepers(110), 2);
     }
 
-    /// The `sleepersNeeded - 1` case never passes no matter how deep — the
-    /// plan's scripted scenario's first leg, at the `SleepState` level.
+    /// One fewer sleeper than required never passes, no matter how deep the
+    /// existing sleepers are.
     #[test]
     fn one_fewer_than_needed_never_passes() {
         let mut state = SleepState::default();
@@ -407,13 +383,8 @@ mod tests {
     /// re-clock a stayer. [`SleepState::reconcile`]'s push is guarded on
     /// `!self.sleepers.iter().any(...)` for exactly that reason.
     ///
-    /// This assertion used to expect `50` for the stayer — the tick of the
-    /// *second* reconcile rather than the tick 1002 actually lay down at — and so
-    /// had never passed since the module landed (`d09c694`; production and test
-    /// are both untouched since). The corrected value is `LAY_DOWN`, taken from
-    /// this test's own first call: 1002 is in every roster from that call onward,
-    /// so nothing may move its clock. Reading `50` as the expectation was
-    /// asserting the bug the guard exists to prevent.
+    /// The stayer keeps the tick from the first roster. The returnee receives
+    /// a fresh tick when reinserted, so the two recorded values must differ.
     #[test]
     fn reconcile_drops_woken_players_and_reclocks_returnees() {
         // Named so the assertions read against the call that set them rather
@@ -429,7 +400,7 @@ mod tests {
         assert_eq!(state.sleepers.len(), 1);
         assert_eq!(state.sleepers[0].entity_id, 1002);
         // 1001 lies down again at tick 60: their counter restarts, so the
-        // previously-elapsed deep sleep does not count.
+        // Sleep recorded before the return does not count.
         state.reconcile(&[1002, 1001], RETURNS);
         assert_eq!(
             state.sleepers[0].since_game_tick, LAY_DOWN,

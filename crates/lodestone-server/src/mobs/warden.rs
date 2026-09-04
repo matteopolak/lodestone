@@ -1,150 +1,49 @@
-//! The warden's anger consumer and its two attacks (issue #459's step 3):
-//! turns [`SimMob::nearest_vibration`](super::SimMob::nearest_vibration) into
-//! real anger, real anger into a real ranged sonic-boom or melee hit, and a
-//! fresh spawn into a real, invulnerable emerging window.
+//! The warden simulation consumes vibrations, updates anger, and resolves
+//! sonic-boom or melee attacks through the shared damage pipeline.
 //!
 //! # What it is
 //!
-//! [`AngerLevel`] is vanilla's own `AngerLevel` (its own warden entity's nested
-//! enum) — `Calm`/`Agitated`/`Angry`, bucketed from a `0..=150` anger score
-//! by [`AngerLevel::from_anger`]. [`MobSim::resolve_warden_anger`] is the
-//! per-tick consumer: it counts down a fresh spawn's emerge window, decays
-//! every warden's anger by [`ANGER_DECAY_PER_TICK`] (`AngerManagement.tick`'s
-//! own `DEFAULT_ANGER_DECREASE`), absorbs this tick's
-//! [`nearest_vibration`](super::SimMob::nearest_vibration) answer by
-//! [`ANGER_INCREASE`] (`Warden.increaseAngerAt`'s own default amount) at its
-//! `source`, and — once a warden is [`AngerLevel::Angry`] and its target is
-//! close enough — lands a real hit (sonic boom preferred, melee as the
-//! close-range fallback — see below) through the same
-//! [`SimMob::apply_damage`](super::SimMob::apply_damage) pipeline every other
-//! hit in this crate goes through (armour, i-frames, hurt sound all
-//! included).
+//! [`AngerLevel`] maps the `0..=150` anger score to `Calm`, `Agitated`, or
+//! `Angry`. [`MobSim::resolve_warden_anger`] applies the per-tick decay and
+//! vibration increase, counts the emerging and digging timers, and sends
+//! attacks through [`SimMob::apply_damage`](super::SimMob::apply_damage),
+//! including armour, invulnerability frames, and hurt sound handling.
 //!
-//! # How it works — and what it deliberately narrows
+//! A warden stores one [`SimMob::warden_anger_target`](super::SimMob::warden_anger_target).
+//! A vibration from another source replaces that target and resets anger to
+//! zero before applying the new event. This is a deliberate single-suspect
+//! model; it does not maintain a multi-target anger table.
 //!
-//! **Single-suspect, not vanilla's `AngerManagement` suspect list.** Vanilla
-//! tracks several candidate suspects at once (`angerBySuspect`, an
-//! `Object2IntMap<Entity>`) and picks the angriest via
-//! `AngerManagement.Sorter` (angry-first, then player, then highest score).
-//! This crate tracks exactly one:
-//! [`SimMob::warden_anger_target`](super::SimMob::warden_anger_target). A
-//! vibration from a **different** source than the current target replaces
-//! it outright (reset to `0`, then absorb the new event) rather than being
-//! tracked alongside it. That is a real behavioural narrowing — a warden
-//! juggling two live threats here forgets the first the instant it hears the
-//! second — not a silent approximation, and it is exactly the same shape
-//! [`super::raid::MobSim::create_or_extend_raid`]'s own doc discloses for a
-//! single-slot stand-in of a vanilla multi-item structure.
+//! Movement comes from the entity brain module. It receives the resolved
+//! target position once per tick and therefore follows the anger consumer by
+//! one tick. The anger consumer remains the only attack producer.
 //!
-//! **Pursuit now exists, on a separate seam from this module.** An angry
-//! warden's own [`Brain`](lodestone_entity::brain::Brain) runs
-//! `lodestone_entity::brain::roster::warden_brain`'s `FIGHT` activity, which
-//! walks toward [`MobController::angry_target`](lodestone_entity::ai::MobController::angry_target)
-//! — fed, once per tick, by [`MobSim::feed_perception`](super::MobSim::feed_perception)
-//! resolving [`warden_anger_target`](super::SimMob::warden_anger_target) to a
-//! live position and gated on [`AngerLevel::Angry`]. That behaviour only ever
-//! walks; it never calls `BrainMob::attack`, so this module's own
-//! [`resolve_warden_anger`] stays the single place a hit is actually
-//! resolved — one production path, not two racing ones. One disclosed lag:
-//! the position fed to the brain is *last* tick's [`resolve_warden_anger`]
-//! answer (that method runs after the per-mob brain tick each tick, the same
-//! ordering [`resolve_vibrations`](super::MobSim::resolve_vibrations)'s own
-//! doc explains), so a freshly-angered warden starts walking one tick after
-//! the anger that caused it, not the same tick.
+//! Every warden is invulnerable during [`EMERGE_DURATION_TICKS`] ticks of the
+//! emerging pose. An angry warden in range prefers sonic boom when its
+//! cooldown is clear and falls back to melee. Sonic boom uses the measured
+//! 15-block horizontal and 20-block vertical range; melee covers the
+//! close-range window. Digging starts when the 1,200-tick cooldown reaches
+//! zero, runs for [`DIGGING_DURATION_TICKS`], and removes the mob afterward.
+//! Roar targeting is not modeled, so an emerged calm warden with an expired
+//! digging cooldown enters digging without a roar-target gate. Cooldown refresh
+//! also follows the Angry state only; sub-Angry disturbances have no producer
+//! in this simulation.
 //!
-//! **Emerging and sonic boom are now both real.** Every warden spawns with
-//! [`EMERGE_DURATION_TICKS`] of `Pose::EMERGING`
-//! ([`MetadataField::Pose`](crate::protocol::MetadataField::Pose), reaching
-//! the wire through [`SimMob::snapshot`](super::SimMob::snapshot)) —
-//! invulnerable for that window
-//! ([`SimMob::apply_damage`](super::SimMob::apply_damage)'s own warden arm)
-//! and outside `FIGHT`'s reach (this module's own early-continue). Once
-//! angry and in range, [`resolve_warden_anger`] prefers a real ranged
-//! [`SONIC_BOOM_DAMAGE`] (true damage, on
-//! [`SONIC_BOOM_COOLDOWN_TICKS`]) over melee whenever the target is within
-//! [`SONIC_BOOM_RANGE_XZ_SQR`]/[`SONIC_BOOM_RANGE_Y_SQR`] and the boom is off
-//! cooldown, matching `SonicBoom` outranking `MeleeAttack` in
-//! `WardenAi::initFightActivity`'s own behaviour order — melee only fires
-//! when the boom cannot (too close after a fresh spawn is never the reason;
-//! cooldown or the 3-block melee-only window past 15/20 blocks are).
-//!
-//! **A citation this module used to carry was wrong, and is worth recording
-//! rather than quietly dropping.** Vanilla's own warden entity declares
-//! `TIME_TO_USE_MELEE_UNTIL_SONIC_BOOM = 200`, and an earlier pass cited it
-//! here as sonic boom's trigger. Grepping the whole decompiled 26.2 tree
-//! (`.cache/mc/26.2/src/`) for that identifier finds exactly the one
-//! declaration and no read anywhere — it is dead code in this version.
-//! `SonicBoom`'s real `checkExtraStartConditions` is a plain
-//! `closerThan(target, 15.0, 20.0)`, gated only by
-//! `MemoryModuleType.SONIC_BOOM_COOLDOWN` being absent, which is what this
-//! module now implements.
-//!
-//! **`Digging` is now built too — the ambiguity this module used to
-//! disclose is resolved.** Vanilla's own warden entity's `Digging` behavior does not just
-//! play an animation — `Digging.stop` calls
-//! `body.remove(Entity.RemovalReason.DISCARDED)`, i.e. a digging warden
-//! **despawns outright**, after [`DIGGING_DURATION_TICKS`] with `Pose::DIGGING`
-//! ([`POSE_DIGGING`], reaching the wire the same way [`POSE_EMERGING`]
-//! already does). Its entry condition
-//! (`ImmutableSet.of(ROAR_TARGET absent, DIG_COOLDOWN absent)` in
-//! `WardenAi::initDiggingActivity`) depends on `MemoryModuleType.DIG_COOLDOWN`'s
-//! *initial* state, which an earlier pass could not pin down from
-//! the warden entity alone (its own AI's dig-cooldown setter has a `hasMemoryValue`
-//! guard only *refreshes* an already-present cooldown). The actual answer
-//! was one field away: `Warden.finalizeSpawn` unconditionally calls
-//! `this.getBrain().setMemoryWithExpiry(MemoryModuleType.DIG_COOLDOWN,
-//! Unit.INSTANCE, 1200L)` — so the cooldown starts **present**, not absent,
-//! and every warden is dig-ineligible for its first [`DIGGING_COOLDOWN_TICKS`]
-//! (60 real seconds) after spawning. [`resolve_warden_anger`] ports this
-//! directly: [`SimMob::warden_dig_cooldown`](super::SimMob::warden_dig_cooldown)
-//! seeds at [`DIGGING_COOLDOWN_TICKS`], is refreshed back to that value every
-//! tick the warden is [`AngerLevel::Angry`] (`WardenAi.DIG_COOLDOWN_SETTER`'s
-//! own "refresh only while present" shape, running every tick `FIGHT` is
-//! active), and otherwise decays to `0`, at which point an emerged, calm
-//! warden starts digging. **Disclosed narrowing**: the `ROAR_TARGET absent`
-//! half of the real entry condition is not checked — this crate has no
-//! `ROAR`/`INVESTIGATE` activity at all, so digging is gated purely on the
-//! cooldown and the emerge/anger state this module already tracks; a
-//! sub-Angry disturbance (`setDisturbanceLocation`'s own cooldown refresh)
-//! also does not reset the timer, the one case where this module's cooldown
-//! can now run measurably faster than vanilla's.
-//!
-//! **Also still open: a warden can only ever become angry at another
-//! *mob*.** [`SimMob::warden_anger_target`](super::SimMob::warden_anger_target)
-//! is only ever set from a [`PostedVibration`]'s `source`, and the only
-//! producer wired anywhere in this crate is `MobSim::reap_dead` posting
-//! `EntityDie` for a dying mob (see the vibration substrate's own module
-//! doc). No block-break, footstep or container-open producer exists yet —
-//! those live in `crate::server`/`crate::block_placement`, outside this
-//! module's — outside `mobs/**`'s — ownership. So today a warden's anger
-//! target, sonic boom target and melee target are always another `SimMob`,
-//! **never a player**, however loudly a nearby player mines. That is the
-//! real remaining gap between "the warden fights something" (true, and
-//! tested below) and "the warden fights *you*" (not yet reachable in
-//! production).
+//! The vibration producer currently supplies mob-death events, so anger and
+//! attacks target another simulated mob rather than a player. Block, footstep,
+//! and container events require producers in their respective tick and connection paths.
 //!
 //! # How to change it
 //!
-//! - **Pursuit speed/stop distance**: `lodestone_entity::brain::roster::warden_brain`'s
-//!   own constants (`SCAFFOLD_STROLL_SPEED`, `WARDEN_PURSUIT_CLOSE_ENOUGH`),
-//!   not this module — this module has no movement code of its own.
-//! - **Digging's own `ROAR`/`INVESTIGATE` gates**: this module's own doc
-//!   names exactly what is not checked; adding either needs those two
-//!   activities to exist first, which is a larger unit than this module.
-//! - **Sonic boom knockback against a player target**: blocked on this
-//!   crate having no mechanism at all to deliver a velocity impulse to a
-//!   player from the server — see [`SONIC_BOOM_KNOCKBACK_HORIZONTAL`]'s own
-//!   doc. Not warden-specific; ordinary hostile melee against a player has
-//!   the identical gap.
-//! - **A second listener species**: `lodestone_entity::vibration`'s own
-//!   module doc already names this seam (`is_vibration_listener`); this
-//!   module's anger/attack consumer is warden-specific and would need a
-//!   second table if a calibrated sculk sensor (not a mob) ever needed
-//!   anger of its own — it does not, sensors just shriek.
+//! Movement speed and stop distance belong to the entity brain module. Digging
+//! entry conditions belong here, while player knockback requires a player
+//! velocity update in the server connection path. A second vibration-listener
+//! species needs its own anger state and attack table.
 //!
 //! # Dependencies
 //!
-//! [`lodestone_entity::vibration`] for [`PostedVibration`]; nothing else new.
+//! [`lodestone_entity::vibration`] supplies [`PostedVibration`]; the shared
+//! mob simulation supplies targets, snapshots, and damage resolution.
 
 use lodestone_entity::DamageFlags;
 use lodestone_model::Vec3;
@@ -202,15 +101,13 @@ pub const POSE_DIGGING: u32 = 14;
 /// update — see `MetadataField::Pose`'s own doc).
 pub const POSE_STANDING: u32 = 0;
 
-/// `WardenAi.DIGGING_DURATION` — `Mth.ceil(100.0F)`. How long
+/// The measured digging duration is `100` ticks. How long
 /// [`SimMob::warden_digging_ticks`](super::SimMob::warden_digging_ticks)
 /// counts down before [`resolve_warden_anger`] discards the mob.
 pub const DIGGING_DURATION_TICKS: i32 = 100;
-/// `WardenAi.DIGGING_COOLDOWN` — `1200` ticks. `Warden.finalizeSpawn`'s own
-/// initial seed for `MemoryModuleType.DIG_COOLDOWN` (issue #459's resolved
-/// ambiguity — see the module doc), and `WardenAi.setDigCooldown`'s own
-/// refresh-while-present value; [`resolve_warden_anger`] uses this one
-/// constant for both.
+/// The digging cooldown is `1200` ticks. The spawn seed and the angry-state
+/// refresh use this same value; [`resolve_warden_anger`] uses one constant for
+/// both.
 pub const DIGGING_COOLDOWN_TICKS: i32 = 1200;
 
 /// `SonicBoom.COOLDOWN` — ticks after a boom lands before the next one may
@@ -293,11 +190,10 @@ fn distance_sqr_y(a: Vec3, b: Vec3) -> f64 {
 }
 
 impl<'w> MobSim<'w> {
-    /// Issue #459's step 3: decays every listener's anger, absorbs this
-    /// tick's [`nearest_vibration`](super::SimMob::nearest_vibration) answer,
-    /// and lands a real hit on an in-range [`AngerLevel::Angry`] target — see
-    /// this module's own doc for the single-suspect narrowing and the "no
-    /// pursuit" gap.
+    /// Decays every listener's anger, absorbs the tick's
+    /// [`nearest_vibration`](super::SimMob::nearest_vibration) answer, and
+    /// lands a hit on an in-range [`AngerLevel::Angry`] target. The resolved
+    /// target is retained for the brain to pursue on the next tick.
     ///
     /// Runs after [`resolve_vibrations`](Self::resolve_vibrations) posts this
     /// tick's answer, so a death heard this tick can already raise anger this
@@ -306,31 +202,23 @@ impl<'w> MobSim<'w> {
     ///
     /// **A target that stops existing is not proactively pruned** — only
     /// natural decay-to-zero clears it (see [`warden_anger`](super::SimMob::warden_anger)'s
-    /// own doc). Vanilla's `AngerManagement.tick` *does* drop an invalid
-    /// suspect immediately, but doing that here would fight the very
-    /// producer this substrate has: `reap_dead` posts `EntityDie` for a mob
-    /// already removed from the roster, so a corpse is *always* "invalid" by
-    /// the time this method sees it, and pruning on that basis would erase
-    /// the anger the vibration just granted on the same tick it was granted.
-    /// A real, disclosed narrowing rather than a silent one — see this
-    /// module's own "no pursuit" gap for the same honesty standard.
+    /// own doc). `reap_dead` posts `EntityDie` for a mob after removing it from
+    /// the roster, so pruning missing targets here would erase anger granted by
+    /// that same-tick vibration. The target therefore remains until anger
+    /// decays to zero.
     pub(super) fn resolve_warden_anger(&mut self) {
         let mut strikes: Vec<(i32, i32, Vec3)> = Vec::new();
-        // Issue #459's last gap, closed: `Digging.stop`'s own despawn — see
-        // this method's own digging block below and the module doc's
-        // updated account of the resolved `DIG_COOLDOWN` ambiguity.
+        // The digging stop path also removes its pending anger record; the
+        // digging block below performs both parts of that lifecycle.
         let mut discarded: Vec<i32> = Vec::new();
         for mob in &mut self.mobs {
             if !lodestone_entity::vibration::is_vibration_listener(mob.entity_type.path()) {
                 continue;
             }
-            // Independent of anger/strike below: `onReceiveVibration` is a
-            // plain listener callback in vanilla, not a `Brain` behaviour, so
-            // it keeps running while `EMERGE` is the active activity — only
-            // *acting* on anger (walking, striking) is blocked by activity
-            // priority (`WardenAi::updateActivity` puts `EMERGE` ahead of
-            // `FIGHT`). The strike loop below is what enforces that half, by
-            // skipping any warden still counting down here.
+            // Vibration intake is independent of anger actions, so it continues
+            // while the emerged pose is active. Only movement and attacks are
+            // blocked during that countdown; the strike loop below enforces the
+            // attack half by skipping a warden that is still emerging.
             if mob.warden_emerge_ticks > 0 {
                 mob.warden_emerge_ticks -= 1;
             }
@@ -370,20 +258,11 @@ impl<'w> MobSim<'w> {
                 mob.warden_anger = (mob.warden_anger + ANGER_INCREASE).min(MAX_ANGER);
             }
             let angry = AngerLevel::from_anger(mob.warden_anger).is_angry();
-            // `WardenAi.DIG_COOLDOWN_SETTER`/`setDigCooldown`: both refresh
-            // the cooldown back to its full value, but only while it is
-            // already present — once it has naturally expired, nothing
-            // re-arms it. `FIGHT`'s own `DIG_COOLDOWN_SETTER` runs every
-            // tick that activity is active, which this crate approximates
-            // as "every tick this warden is Angry" (this crate's `FIGHT`
-            // has no other trigger — see `warden_brain`'s own doc).
-            // **Disclosed narrowing**: vanilla also refreshes on a sub-Angry
-            // disturbance (`setDisturbanceLocation`, the `INVESTIGATE`
-            // activity this crate does not build) and when a fight target
-            // goes invalid (`onTargetInvalid`) — both already implied by
-            // "still Angry that tick" in the common case, so only a warden
-            // that hears something *without* crossing the Angry threshold
-            // diverges from vanilla's own cooldown timing.
+            // An angry warden refreshes a positive digging cooldown to its full
+            // value; a calm warden counts it down. This simulation does not
+            // produce the separate sub-Angry disturbance and invalid-target
+            // signals that also refresh that cooldown, so a disturbance that
+            // stays below the Angry threshold follows the simpler countdown.
             if mob.warden_dig_cooldown > 0 {
                 if angry {
                     mob.warden_dig_cooldown = DIGGING_COOLDOWN_TICKS;
@@ -391,13 +270,9 @@ impl<'w> MobSim<'w> {
                     mob.warden_dig_cooldown -= 1;
                 }
             } else if !was_digging && mob.warden_emerge_ticks == 0 && !angry {
-                // `WardenAi::initDiggingActivity`'s own entry condition,
-                // minus `ROAR_TARGET absent` — this crate has no `ROAR`
-                // activity to check (disclosed narrowing, see the module
-                // doc), so an emerged, calm warden past its cooldown starts
-                // digging unconditionally. `updateActivity`'s own priority
-                // list (`EMERGE, DIG, ROAR, FIGHT, …`) puts `DIG` ahead of
-                // everything this crate does implement.
+                // No roar-target signal is modeled, so an emerged calm warden
+                // with an expired cooldown starts digging unconditionally.
+                // Emergence and digging checks run before attack handling.
                 mob.warden_digging_ticks = DIGGING_DURATION_TICKS;
             }
             if mob.warden_emerge_ticks == 0
@@ -634,7 +509,7 @@ mod warden_anger_tests {
         assert_eq!(sim.get(target).expect("spawned").health(), health_before, "50 blocks away is far outside a 3-block melee reach and well past sonic boom's own 15/20 range");
     }
 
-    /// The pursuit half of issue #459 step 3, driven through real ticks
+    /// The pursuit half of the vibration-driven warden behavior, driven through real ticks
     /// rather than by placing the target already in range. The
     /// `lodestone-entity`-side gates (`brain::roster`'s
     /// `a_warden_with_a_live_grudge_walks_toward_it_and_never_attacks_directly`)
@@ -712,7 +587,7 @@ mod warden_anger_tests {
         );
     }
 
-    /// A target that no longer exists must never crash the strike
+    /// An absent target must never crash the strike
     /// resolution, and — this module's own disclosed simplification — its
     /// anger is **not** proactively cleared; only natural decay does that.
     /// Set well above [`ANGRY_THRESHOLD`] so a tick's decay cannot drop it
@@ -881,7 +756,7 @@ mod warden_anger_tests {
         assert_eq!(v.source, Some(1));
     }
 
-    /// Issue #459's resolved ambiguity, end to end through the real
+    /// The resolved ambiguity, end to end through the real
     /// production `MobSim::tick` path: a warden left completely alone
     /// (never fought, never disturbed) past its emerge window and the full
     /// `DIGGING_COOLDOWN_TICKS` becomes digging-eligible, reports the real

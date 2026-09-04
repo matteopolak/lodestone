@@ -1,84 +1,47 @@
-//! Note blocks (`minecraft:note_block`) — the first fixture in the
-//! note-block/tripwire-hook/target issue, and the only one of the three that
-//! started at "nothing at all" (unlike tripwire hook and target, whose *read*
-//! half already existed — see `crate::redstone`'s own module doc).
+//! Note blocks (`minecraft:note_block`) combine instrument selection, redstone
+//! edge detection, and pitch cycling.
 //!
 //! # What it is
 //!
-//! Three independent pieces of vanilla's own note-block:
+//! Three independent pieces define note-block behavior:
 //!
-//! 1. **Instrument selection** ([`instrument_for_note_block`]) — which of the
-//!    27 [`Instrument`] values a note block plays, decided by the block
-//!    directly above it, then the block directly below.
-//! 2. **The redstone pulse** ([`on_neighbor_changed`]) — `POWERED` tracks
-//!    `hasNeighborSignal`, and the *rising* edge (unpowered → powered) plays a
-//!    note, conditionally.
+//! 1. **Instrument selection** ([`instrument_for_note_block`]) — one of the 27
+//!    [`Instrument`] values, selected from the blocks directly above and below.
+//! 2. **The redstone pulse** ([`on_neighbor_changed`]) — `POWERED` follows the
+//!    neighbour signal, and its rising edge conditionally plays a note.
 //! 3. **Note cycling** ([`cycle_note`]) — a right-click without a
 //!    top-instrument item advances the pitch by one semitone, wrapping.
 //!
-//! # What this needs of the execution model (for issue #548)
+//! # What this needs of the execution model
 //!
-//! * **Trigger**: a plain neighbour notification — no scheduled tick at all,
-//!   unlike every diode/torch/piston in this crate. [`on_neighbor_changed`] is
-//!   a same-tick decision, wired directly into `react_to_notification`
-//!   exactly like the hopper `ENABLED` arm already there.
+//! * **Trigger**: a neighbour notification; [`on_neighbor_changed`] makes the
+//!   decision in the same tick through `react_to_notification`.
 //! * **Propagation**: none beyond the block's own `POWERED` write reaching the
-//!   client — a note block is not itself a signal source (it carries no
-//!   `ownSignal` override), so nothing needs to be notified afterward.
+//!   client. A note block is not a signal source, so no further notification is
+//!   required.
 //! * **Scheduled tick**: none.
-//! * **What it needs from *outside* the redstone engine, and does not have
-//!   yet**: one real gap remains, and one that used to be listed here turned
-//!   out false on re-verification (issue #230's own "re-verify before
-//!   routing around" standard) —
-//!   * the actual client-audible sound/particle **pulse** (`level.blockEvent`,
-//!     `NoteBlock.triggerEvent`) is a client-visible effect with no state
-//!     write behind it, so nothing in this crate's `RandomTickEvent` (a
-//!     state-diff carrier) can transport it. [`on_neighbor_changed`] answers
-//!     "should a pulse fire" as a `bool` on its result, and the caller needs a
-//!     block-action-shaped wire path — the same shape `tick.rs`'s
-//!     `publish_openable_sound` already established for the one other
-//!     "genuinely server-driven sound" case in this crate (issue #530). That
-//!     precedent is the seam to extend, not a new one to invent. This is
-//!     still open.
-//!   * **Previously claimed, now false**: "nothing in this crate has
-//!     anywhere for the computed pulse to land at all." [`RandomTickEvent`]'s
-//!     `(from, to)` pair already carries every input `playNote`'s gate needs
-//!     ([`played_pulse_on_transition`] re-derives it with no new field), and
-//!     `lodestone_entity::vibration`'s `MobSim::post_vibration` — built for
-//!     the warden (issue #459), not this module — is a real, general
-//!     "post a world event, let *any* listener resolve it" seam with room
-//!     for a second listener species. `tick.rs`'s four
-//!     `propagate_and_react_with_entities` consumers now call
-//!     [`played_pulse_on_transition`] and post
-//!     `VibrationEvent::NoteBlockPlay` on a hit, which is what makes an
-//!     allay's item-carry-and-deliver (issue #230) real rather than blocked.
-//!     The *sound effect* is still unmodelled — that is the bullet above —
-//!     but the *game-event* an allay listens to was never actually stuck.
-//!   * right-click **cycling** ([`cycle_note`]) is wired into
-//!     `hand_use::hand_use`'s note-block arm, the plain-right-click dispatcher
-//!     this module does not own, and — a disclosed, narrower gap than the
-//!     redstone path above — does **not** yet post a vibration itself
-//!     (`hand_use::hand_use` has no [`MobHandle`](crate::mobs::MobHandle) to
-//!     post through); only a redstone-triggered pulse reaches an allay's ear
-//!     today. The pulse sound `changePitch` also plays is still not
-//!     modelled either way — same gap as the bullet above.
+//! * **Client effects**: the boolean returned by [`on_neighbor_changed`]
+//!   identifies a pulse, while the state-diff event carries the transition
+//!   inputs needed by [`played_pulse_on_transition`]. The redstone propagation
+//!   path posts `VibrationEvent::NoteBlockPlay` for listeners such as allays.
+//!   Audible sound and particles require a client-visible block-action message
+//!   because they do not change block state.
+//! * **Right-click cycling** ([`cycle_note`]) is dispatched by
+//!   `hand_use::hand_use`. That path updates the pitch but does not post a
+//!   vibration; only redstone-triggered pulses reach vibration listeners.
 
 use crate::redstone::{base_name, get_bool_property, get_u32_property, with_property};
 
 pub const NOTE_BLOCK: &str = "minecraft:note_block";
 
-/// `NoteBlockInstrument`, all 27 registrations, vanilla's own enum
-/// in declaration order. The discriminant
-/// is never read for anything numeric here — [`Self::works_above_note_block`]
-/// is the one behavioural difference this module needs.
+/// The 27 note-block instruments in declaration order. The discriminant is
+/// not used numerically; [`Self::works_above_note_block`] is the behavioral
+/// distinction needed by this module.
 ///
 /// The four `Trumpet*` variants have no entry in [`block_instrument`]'s table
-/// (`#[allow(dead_code)]` on them): the jar's own registrations for them sit
-/// behind a helper/loop this module's extraction pass did not follow (see
-/// that function's own doc comment on what "derived, not guessed" covers) —
-/// named here rather than silently dropped from the enum, so a caller reading
-/// [`instrument_property`] back off a state string still resolves them
-/// correctly even though nothing here ever *writes* one.
+/// (`#[allow(dead_code)]` on them). They remain available so a caller reading
+/// [`instrument_property`] from a state string can resolve every registered
+/// value, even though the table does not emit those variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Instrument {
     Harp,

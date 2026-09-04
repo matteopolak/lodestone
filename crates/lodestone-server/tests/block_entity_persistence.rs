@@ -1,5 +1,4 @@
-//! A container's contents survive a world being closed and reopened
-//! (issue [#468](https://github.com/matteopolak/lodestone/issues/468)).
+//! A container's contents survive a world being closed and reopened.
 //!
 //! # What was actually broken
 //!
@@ -74,7 +73,8 @@ impl ChunkSource for Flat {
 
     // No storage: this fixture serves fresh columns and edits are discarded by
     // design (an edit a test needs to survive goes through a source with real
-    // retention). Explicit rather than inherited — issue #440.
+    // retention). Keeping that choice explicit prevents this fixture from
+    // accidentally becoming a persistence double.
     fn set_block(&self, _x: i32, _y: i32, _z: i32, _name: &str) {
         // No storage; edits are discarded by design.
     }
@@ -101,17 +101,15 @@ fn stack(item: &str, count: u32) -> ItemStack {
 /// written by one world and read back by a second, independent one.
 ///
 /// Every expected value is predicted before the reopen, and the *counters* are
-/// asserted absolutely rather than as deltas — #473's flake was a per-world
-/// counter sampled while the server's own spawn-chunk read raced the window,
-/// and a fresh source per session makes an absolute count well defined.
+/// asserted absolutely rather than as deltas. A fresh source per session makes
+/// each stored count well defined even if background reads occur elsewhere.
 #[test]
 fn a_container_full_of_items_survives_a_close_and_reopen() {
     let dir = tempdir("round-trip");
     // Deliberately in **different chunks**: grouping block entities by chunk is
     // a real step (`WorldSaveHandle::extras_for`), and two containers in one
-    // column would let a save that ignored the grouping pass. The first draft of
-    // this test had both at chunk (0,0) and asserted two columns written — the
-    // expectation is derived below rather than restated, so that cannot recur.
+    // column would let a save that ignored the grouping pass. The expectation
+    // is derived from the positions below rather than duplicated as a literal.
     let hopper_pos = BlockPos::new(3, 70, 5);
     let furnace_pos = BlockPos::new(20, 71, 40);
     let expected_columns: usize = {

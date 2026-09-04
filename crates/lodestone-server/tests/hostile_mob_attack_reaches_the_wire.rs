@@ -1,8 +1,8 @@
 //! **Does a hostile mob's melee attack actually reach a real player's health
 //! bar, through the production tick loop?**
 //!
-//! `tests/mob_melee_damages_player.rs` (issue #625's own acceptance gate)
-//! proves the chain goal → attack → position → player identity is wired —
+//! `tests/mob_melee_damages_player.rs` proves the chain goal → attack →
+//! position → player identity is wired —
 //! but it drives `MobSim::tick_with_terrain` and reads
 //! `MobSim::take_player_hits` **directly**, in a loop the test itself owns.
 //! It never proves `crate::tick::run_tick_loop_with_weather` (the loop a real
@@ -226,11 +226,9 @@ async fn a_zombie_next_to_a_real_player_damages_them_through_the_production_loop
         let _ = client.write_packet(MOVE_PLAYER, &[nudge]).await;
 
         if !spawned_zombie {
-            // Issue #303's documented race: the mob-seeding task replaces the
-            // whole sim once its own terrain snapshot is ready, discarding
-            // anything spawned before that. Poll `next_id` past its `1000`
-            // floor first, exactly as `IntegratedServer::mobs`'s own doc
-            // comment prescribes.
+            // The mob-seeding task owns the simulation after its terrain
+            // snapshot is ready. Waiting for `next_id` to pass its `1000` floor
+            // ensures this test adds the mob to that seeded simulation.
             if let Some(mobs) = server.mobs() {
                 let ready = mobs.with(|sim| sim.next_id()) >= 1000;
                 if ready {

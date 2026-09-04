@@ -1,13 +1,13 @@
-//! Loot-table loading and rolling (issue #337, server-plumbing epic #339).
+//! Loot-table loading and rolling.
 //!
 //! # What it is
 //!
-//! The version-free server-side loot system: parses Mojang's datapack loot-table
-//! JSON (the same format vanilla's own loot-table reader reads), then
+//! The version-free server-side loot system: parses datapack loot-table JSON
+//! (the same interchange format used by the game), then
 //! "rolls" a table with a deterministic RNG to produce `Vec<ItemStack>` — the
 //! data that becomes a chest fill, a mob drop, or a block drop. This is the
 //! server half of the client's `lodestone-game` recipe loader: both consume
-//! vanilla datapack JSON behind a version seam, neither names a protocol.
+//! datapack JSON behind a version seam, neither names a protocol.
 //!
 //! # How it works
 //!
@@ -15,8 +15,7 @@
 //! optional `conditions`/`functions`); an entry is a weighted leaf (`item`,
 //! `empty`, `loot_table`) or a composite (`alternatives`, `group`,
 //! `sequence`). [`LootTable::roll_with`] walks the structure exactly as
-//! vanilla's own pool-roll routines
-//! do:
+//! the pool-roll rules described below:
 //!
 //! 1. A pool whose conditions all pass emits `rolls` rolls. A roll expands the
 //!    pool's entry tree into weighted leaves (an `alternatives` stops at the
@@ -24,16 +23,14 @@
 //!    the *luck-adjusted* weights (`max(floor(weight + quality·luck), 0)`),
 //!    draws `nextInt(totalWeight)`, and emits the leaf the draw lands on.
 //! 2. A selected leaf applies its entry functions, the pool's functions, and
-//!    the table's functions in that order (the same `LootItemFunction.decorate`
-//!    nesting as vanilla).
+//!    the table's functions in that order.
 //! 3. Nested `minecraft:loot_table` entries resolve through the
-//!    [`LootTableResolver`] supplied to [`LootTable::roll_with`], with vanilla's
-//!    visited-set recursion guard against table cycles
-//!    (`LootContext.pushVisitedElement`).
+//!    [`LootTableResolver`] supplied to [`LootTable::roll_with`], with a
+//!    visited-set recursion guard against table cycles.
 //!
 //! ## The empty loot context
 //!
-//! Issue #337's starting point is the **empty** context — no entity, no level,
+//! The starting point is the **empty** context — no entity, no level,
 //! no tool, no block state, no explosion — carrying only `luck`. Every
 //! condition/function this module understands has a *defined* empty-context
 //! value, so a table with zero unsupported features rolls **correctly** here:
@@ -106,31 +103,24 @@
 //!
 //! ## Gotchas
 //!
-//! * **The RNG is `SpawnRng`, not a JVM-compatible one.** Rolling with a fixed
-//!   seed is deterministic and the *distribution* of every draw matches Java
-//!   (`nextFloat`, `nextDouble`, uniform `nextInt` ranges), but the exact
-//!   stream differs from `RandomSource.create(seed)` (SplitMix64 here vs
-//!   Xoroshiro, modulo vs rejection-sampled `nextInt(bound)`). The issue's
-//!   JVM-roll oracle gate — byte-exact stream parity — is a follow-up built on
-//!   top of this seam, not part of it.
-//! * **`set_count` can produce a count-0 stack** and the roller keeps it, exactly
-//!   as vanilla's `createStackSplitter` passes a `count < maxStackSize` stack
-//!   through (a `uniform 0..N` count is common, e.g. zombie rotten-flesh).
-//!   Container `fill` drops zero stacks; a `getRandomItems`-style Vec consumer
-//!   sees them. [`roll_loot`] filters nothing.
+//! * **The RNG is `SpawnRng`.** A fixed seed is deterministic and preserves the
+//!   documented loot distributions, while its SplitMix64 stream and modulo
+//!   bounded-integer draws do not match a JVM byte-for-byte stream.
+//! * **`set_count` can produce a count-0 stack** and the roller keeps it. A
+//!   uniform `0..N` count makes this common, for example with zombie
+//!   rotten-flesh.
+//!   Container filling drops zero stacks; a `Vec` consumer of [`roll_loot`]
+//!   sees them because that function filters nothing.
 //! * **Nested-table recursion is guarded by table id**, so a self-referential
-//!   table produces nothing on the recursive branch rather than hanging
-//!   (vanilla's `LootTable.getRandomItemsRaw` warns instead).
+//!   table produces nothing on the recursive branch rather than hanging.
 //! * `minecraft:tag` entries are unsupported here: expanding an item tag needs
 //!   an item-tag census, which `lodestone-data` does not bundle (only the block
 //!   tags `tool.rs` decodes at runtime). Only one table in the 26.2 corpus uses
 //!   one.
 //!
-//! The data under `assets/loot_table/` is copied verbatim from
-//! `.cache/mc/26.2/client-src/data/minecraft/loot_table/` (Mojang's own
-//! generated data, CLAUDE.md data-source #1); the `tests/loot_corpus.rs` gate
-//! re-reads the full corpus from that cache and cross-checks the bundle against
-//! it.
+//! The data under `assets/loot_table/` is copied from the pinned 26.2 data
+//! corpus; `tests/loot_corpus.rs` re-reads that corpus and cross-checks the
+//! embedded bundle.
 
 use std::str::FromStr;
 
@@ -142,14 +132,13 @@ use crate::mob_spawn::SpawnRng;
 
 include!(concat!(env!("OUT_DIR"), "/embedded_loot.rs"));
 
-/// The loot context a roll can read. Issue #337's starting point was the empty
-/// context — no entity, no level, no tool, no block state, no explosion —
-/// carrying only luck; issue #539 added [`tool`](Self::tool). Later landings
-/// extend this struct (and the condition/function evaluators) with entity/level
-/// state rather than threading new arguments through every call.
+/// The loot context a roll can read. An empty context carries no entity, level,
+/// tool, block state, or explosion and supplies only luck; fields such as
+/// [`tool`](Self::tool) extend this struct and its evaluators without threading
+/// arguments through every call.
 ///
-/// **Not `Copy`** since #539: [`LootTool`] owns its key and enchantment list.
-/// Every consumer already took `&LootContext`.
+/// **Not `Copy`**: [`LootTool`] owns its key and enchantment list. Every
+/// consumer takes `&LootContext`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LootContext {
     /// `LootContextParams.luck` — 0 for the empty context. Feeds entry quality
@@ -563,7 +552,7 @@ pub struct LootTableSet {
 }
 
 impl LootTableSet {
-    /// Loads every table bundled under `assets/loot_table/` (issue #337's
+    /// Loads every table bundled under `assets/loot_table/` (the
     /// "bundled assets" seam; `build.rs` embeds them as `include_str!`s).
     ///
     /// # Panics
@@ -634,11 +623,11 @@ impl LootTableResolver for LootTableSet {
     }
 }
 
-/// Issue #337's starting point: roll the table `table_id` from `set` in the
+/// The starting point: roll the table `table_id` from `set` in the
 /// empty loot context (luck 0, no entity/level/tool) and return the item stacks
 /// it produces. Nested `minecraft:loot_table` entries resolve within `set`.
 ///
-/// This is the `roll_loot(table_id) -> Vec<ItemStack>` of the issue — the call
+/// This is the `roll_loot(table_id) -> Vec<ItemStack>` operation — the call
 /// a future mob-death handler (`MobSim`'s `killed` branch, `mobs.rs`) or chest
 /// filler makes after it has mapped its entity/block to a table id.
 #[must_use]
@@ -1491,8 +1480,8 @@ impl LootCondition {
                     // A predicate shape this build does not model must **fail
                     // closed**, not match everything: `Unsupported` tests
                     // `false`, which is what `match_tool` did for every
-                    // predicate before #539. Reporting it as an unsupported
-                    // feature is what keeps such a table out of the curated
+                    // predicate shape is unsupported. Reporting it as an unsupported
+                    // feature keeps such a table out of the curated
                     // bundle (`LootTableSet::load_bundled`'s debug assertion).
                     None => {
                         audit.push("condition minecraft:match_tool (unmodelled predicate)".to_string());
@@ -1614,8 +1603,8 @@ impl LootCondition {
                 Some(tool) => predicate.as_ref().is_none_or(|p| p.test(tool)),
             },
             // `values[min(level, len-1)]`, where level is 0 with no tool — which
-            // is `values[0]`, the pre-#539 behaviour, reached now by the general
-            // path rather than by assumption.
+            // is `values[0]` for an absent tool; the general path enforces this
+            // single-value behavior directly.
             Self::TableBonus {
                 enchantment,
                 chances,
@@ -2451,7 +2440,7 @@ mod tests {
         assert!((2..=4).contains(&out[0].count), "count was {}", out[0].count);
     }
 
-    /// Since #538 the bundle is the **whole clean subset** of Mojang's 26.2
+    /// The bundle is the **whole clean subset** of the 26.2
     /// corpus, not a hand-picked handful. Two invariants, and the count is
     /// deliberately exact rather than a floor.
     ///
@@ -2508,8 +2497,8 @@ mod tests {
             "one seed across 1,230 tables must produce a lot of stacks; {produced} \
              suggests the roller is short-circuiting"
         );
-        // The five tables #538 replaced still behave exactly as they did, which
-        // is the regression guard for the bulk import.
+        // The clean bundle's five sampled tables retain their expected outputs;
+        // this checks the bulk import without relying on table count alone.
         for (id, expected) in [
             ("minecraft:blocks/dirt", "minecraft:dirt"),
             ("minecraft:blocks/stone", "minecraft:cobblestone"),
@@ -3474,8 +3463,8 @@ mod tests {
              ids, not from this accessor"
         );
 
-        // And the thing that made this list necessary: `block_state_property` is
-        // no longer on it, while still being in the bundle 154 times.
+        // `block_state_property` is evaluated and therefore excluded from the
+        // unsupported list, while 154 bundled tables still contain it.
         assert!(
             !by_feature.contains_key("condition minecraft:block_state_property"),
             "block_state_property is evaluated now and must not be reported blind"

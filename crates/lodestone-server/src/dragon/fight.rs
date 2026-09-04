@@ -16,7 +16,7 @@
 //! * The crystal count and the fight's own scan do not require
 //!   pillars to exist — crystals in this world are floating wherever a
 //!   caller puts them, not standing on spikes 40-80 blocks up.
-//! * The "caged vs. uncaged crystal" distinction issue #276 names
+//! * Whether a crystal is caged or uncaged
 //!   (`EndSpikeFeature`'s `guarded` flag wraps a *short* pillar's crystal in
 //!   iron bars) has no pillars to attach cages to, so it is not modelled.
 //!   There is nothing to cage.
@@ -30,12 +30,9 @@
 //!   This is vanilla's own formula evaluated at the true input, not a stub —
 //!   see that function's doc for the derivation.
 //!
-//! **The boss-bar *wire packet* is not sent by this crate.** Issue #276
-//! itself draws this line ("this crate's job is the phase/health state, not
-//! the bar widget"): [`boss_bar_value`] computes exactly what
-//! `ServerBossEvent.setProgress`/`setVisible` would hold, and a caller with a
-//! `BOSS_EVENT` encoder (which does not exist in `ServerProtocol` today — see
-//! this crate's own `protocol.rs`, off limits to this change) sends it.
+//! **Boss-bar wire packets are outside this crate.** [`boss_bar_value`] computes
+//! the phase and health values; a protocol layer that owns the boss-bar encoder
+//! is responsible for sending them.
 
 use lodestone_model::BlockPos;
 
@@ -187,30 +184,24 @@ pub fn scan_state(state: &mut FightState, active_portal_exists: bool, existing_d
     ScanOutcome { discard_existing_dragon }
 }
 
-/// What [`set_dragon_killed`] needs the caller to do — the world-side effects
-/// `EnderDragonFight.setDragonKilled` performs directly.
+/// World-side effects that [`set_dragon_killed`] asks its caller to perform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DeathOutcome {
-    /// Place `minecraft:dragon_egg` at the podium — only on the **first**
-    /// kill ever (`!this.hasPreviouslyKilledDragon` checked **before** the
-    /// flag is set to `true`).
+    /// Place `minecraft:dragon_egg` at the podium only on the first recorded
+    /// dragon defeat.
     pub place_dragon_egg: bool,
-    /// Activate the exit portal (`spawnExitPortal(true)`) — always `true`
-    /// here; kept as a field rather than a doc note so a caller cannot
-    /// forget it is unconditional.
+    /// Activate the exit portal. This is always `true`; keeping it as a field
+    /// makes the unconditional effect explicit to callers.
     pub activate_exit_portal: bool,
-    /// Pop and place the next gateway (`spawnNewGateway()`) — always `true`.
+    /// Pop and place the next gateway. This is always `true`.
     pub spawn_gateway: bool,
 }
 
-/// `EnderDragonFight.setDragonKilled` — call once, when the dragon's health
-/// reaches `0.0` while [`crate::dragon::phase::Phase::Dying`]'s clean-flight
-/// check ends the death sequence. Mutates `state`; the caller performs the
-/// three effects in [`DeathOutcome`] against the real world.
-///
-/// Vanilla guards this whole method on `dragon.getUUID().equals(this.dragonUUID)`
-/// — the caller's responsibility to have already checked (this module tracks
-/// no dragon identity of its own).
+/// Call once when the dragon's health reaches `0.0` and
+/// [`crate::dragon::phase::Phase::Dying`]'s clean-flight check ends the death
+/// sequence. This mutates `state`; the caller performs the three effects in
+/// [`DeathOutcome`] against the real world and is responsible for selecting the
+/// tracked dragon.
 pub fn set_dragon_killed(state: &mut FightState) -> DeathOutcome {
     let place_dragon_egg = !state.has_previously_killed_dragon;
     state.has_previously_killed_dragon = true;
@@ -222,32 +213,25 @@ pub fn set_dragon_killed(state: &mut FightState) -> DeathOutcome {
     }
 }
 
-/// Vanilla's own end-podium feature placement, ported clause for clause.
-/// `origin` is its own location getter — the podium block, one below
-/// the portal floor. `active` selects the killed-dragon (portal open,
-/// column above cleared) vs. not-yet-killed (portal floor solid, column
-/// unexcavated) variant, matching vanilla's `active` constructor flag.
+/// Computes end-podium block placement clause by clause. `origin` is the
+/// podium block one below the portal floor. `active` selects the defeated
+/// (portal open) or inactive (portal floor solid) variant.
 ///
-/// Returns every `(pos, block_state)` write the feature makes, **in the same
-/// order** vanilla iterates them (`BlockPos.betweenClosed` in `x, y, z`
-/// nesting, then the four-block bedrock pillar, then the four torches) —
-/// order matters only in that a later write in this list must win if a
-/// caller applies them in sequence, exactly as vanilla's sequential
-/// `setBlock` calls would.
+/// Returns every `(pos, block_state)` write in deterministic `x, y, z` order,
+/// followed by the pillar and torches. A later write wins when a caller applies
+/// the list in sequence.
 ///
 /// # Clauses
 ///
-/// 1. **Foundation ring** (`pos.getY() < origin.getY()`, i.e. exactly
+/// 1. **Foundation ring** (`pos.y < origin.y`, i.e. exactly
 ///    `origin.y - 1` since the loop's `y` never goes lower): the inner disc
 ///    (`closerThan(origin, 2.5)`) is bedrock; the surrounding ring
 ///    (`2.5..3.5`) is end stone.
-/// 2. **Portal ring** (`pos.getY() == origin.getY()`): the ring is bedrock;
+/// 2. **Portal ring** (`pos.y == origin.y`): the ring is bedrock;
 ///    the inner disc is `minecraft:end_portal` when `active`, air otherwise.
 /// 3. **The shaft above** (`origin.y < pos.getY() <= origin.y + 32`, radius
 ///    `3.5`): always air (a killed dragon's portal chamber is open to the
-///    sky the whole shaft; an unkilled one's is too — vanilla's inactive
-///    branch also sets air here, `dropPreviousAndSetBlock` only changes
-///    *how* air is set, not *whether*, and both write plain air blocks).
+///    sky the whole shaft; the inactive variant is open to the sky as well.
 /// 4. **The central bedrock pole**, `origin.y..=origin.y+3` at exactly
 ///    `(origin.x, origin.z)` — unconditionally bedrock, **overwriting**
 ///    whatever clause 2 wrote at `y == origin.y` for that one column (the
@@ -298,20 +282,19 @@ pub fn exit_portal_blocks(origin: BlockPos, active: bool) -> Vec<(BlockPos, &'st
 /// twenty slices, `Range.closedOpen(0, 20)`.
 pub const GATEWAY_COUNT: i32 = 20;
 
-/// The pool of unused gateway pie-slice indices (`EnderDragonFight.gateways`)
+/// The pool of unused gateway pie-slice indices
 /// — twenty of them, shuffled once and consumed one per dragon kill by
 /// [`GatewayPool::pop`]. Kept out of [`FightState`] for the identical reason
 /// [`try_respawn`]'s `respawn_crystals` is: the caller owns persistence, not
 /// this module — see [`FightState`]'s own doc.
 ///
-/// **Not byte-identical to vanilla's own draw order.** `EnderDragonFight
-/// .init` shuffles with `RandomSource.createThreadLocalInstance(seed)`, a
+/// **Not byte-identical to the reference draw order.** The reference uses a
 /// thread-local generator whose exact algorithm is a JVM implementation
 /// detail, not a reproducible formula — the same disclosed gap
 /// `crate::mob_spawn`'s own module doc already states for every RNG stream
 /// in this crate ("nothing here promises byte-identical RNG streams with a
-/// real vanilla server"). [`shuffled`](Self::shuffled) ports `Util.shuffle`'s
-/// **algorithm** (a standard Fisher–Yates walk from the end) against this
+/// real server"). [`shuffled`](Self::shuffled) uses the standard Fisher–Yates
+/// **algorithm** (a walk from the end) against this
 /// crate's own [`crate::mob_spawn::SpawnRng`], which yields a real, uniform,
 /// non-repeating draw of all twenty slices — just not vanilla's own sequence.
 #[derive(Debug, Clone, PartialEq, Eq)]

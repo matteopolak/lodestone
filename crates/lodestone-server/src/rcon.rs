@@ -1,19 +1,17 @@
-//! Source RCON listener (issue #331) — the server half of the remote console.
+//! Source RCON listener — the server half of the remote console.
 //!
 //! # What it is
 //!
 //! An optional TCP listener speaking the Source RCON protocol, authenticating
 //! with a shared-secret password and executing server commands remotely. This
-//! is the counterpart to `lodestone-testsupport`'s `RconClient`/
-//! `AsyncRconClient` (and `scripts/live-oracles/rcon-op.py`), which until now
-//! had only vanilla oracles to talk to.
+//! is the counterpart to `lodestone-testsupport`'s synchronous and asynchronous
+//! clients (and `scripts/live-oracles/rcon-op.py`).
 //!
 //! # How it works
 //!
 //! Each frame is `[length i32 LE][request id i32 LE][packet type i32 LE]
 //! [payload][0x00 0x00]`, where `length` counts the body *after* itself (so it
-//! is `4 + 4 + payload.len() + 2`). The per-connection flow mirrors vanilla's
-//! own rcon client thread:
+//! is `4 + 4 + payload.len() + 2`). The per-connection flow is:
 //!
 //! * a `TYPE_AUTH` (3) frame carrying the right password answers with
 //!   `TYPE_AUTH_RESPONSE` (2) echoing the request id and an empty payload, and
@@ -21,65 +19,57 @@
 //! * a wrong password — or any command before authentication — answers with
 //!   request id `-1` and type 2;
 //! * a `TYPE_COMMAND` (2) frame runs the command and answers with type 0,
-//!   splitting responses longer than 4096 characters across frames exactly as
-//!   vanilla's `sendCmdResponse` does (empty responses still send one empty
-//!   frame);
-//! * anything else answers `Unknown request <packet-type-in-hex>`, matching
-//!   vanilla's default arm.
+//!   splitting responses longer than 4096 characters across frames (empty
+//!   responses still send one empty frame);
+//! * anything else answers `Unknown request <packet-type-in-hex>`.
 //!
-//! # The one-write rule
+//! # Frame construction
 //!
-//! CLAUDE.md's live-server hazard for *consuming* this protocol says vanilla's
-//! RCON client performs exactly one `read()` per request and closes the socket
-//! unless the whole frame arrived in it. The server-side twin, which this
-//! module owns, is on the **write** side: [`write_frame`] builds the complete
-//! frame as one contiguous buffer and sends it with a single `write_all`. A
-//! real RCON client — including our own `RconClient`, which the integration
-//! test points at this listener — may not tolerate a frame split across writes
-//! any better than vanilla tolerates a split read.
+//! [`write_frame`] builds each length-prefixed response as one contiguous
+//! byte-stream frame before passing all bytes to `write_all`. TCP may fragment
+//! that stream during delivery; the read side uses `read_exact` for the length
+//! and body so fragmentation is tolerated without changing frame boundaries.
 //!
 //! # How to change it
 //!
 //! * **Auth/response behaviour:** the per-connection state machine is
 //!   [`handle_connection`]; the packet-type constants at the top of the module
-//!   are keyed to vanilla's `RconClient`.
+//!   are keyed to the protocol's packet type values.
 //! * **What a command does:** the **built-in tree** in [`crate::commands`] is
 //!   consulted first, with the console identity (see [`rcon_caller`]) at
 //!   permission level 4; only a root it does not own falls through to the host
 //!   [`CommandDispatch`](crate::CommandDispatch) seam `crate::server`'s
 //!   `ChatCommand` arm uses. That ordering is the same one the chat arm applies,
 //!   deliberately: one entry point, so a command cannot behave differently
-//!   depending on which transport typed it. Before this, RCON called the host
-//!   sink *only* and bypassed the built-ins entirely — so `/gamerule` over RCON
-//!   was answered by whatever the host did with unknown input.
+//!   depending on which transport typed it. RCON first executes the built-in
+//!   tree and only then delegates unknown roots to the host sink, so `/gamerule`
+//!   follows the same command path as chat.
 //!
 //!   **What RCON cannot do here is apply a per-connection effect.** It has no
 //!   `ServerProtocol` and no transport of its own, so an [`Effect`](crate::Effect)
 //!   aimed at a player is queued on the shared [`crate::PlayerRegistry`] and
-//!   applied by that player's own loop; an effect aimed at nobody (the console has
-//!   no body) has no target and is dropped. `/gamemode creative` with no argument
-//!   therefore fails for RCON exactly as it does in vanilla
-//!   (`getPlayerOrException`), rather than silently doing nothing.
+//!   applied by that player's own loop; an effect aimed at nobody (the console
+//!   has no body) has no target and is dropped. `/gamemode creative` with no
+//!   argument therefore fails for RCON rather than silently doing nothing.
 //!
-//!   **`/setblock`, `/fill`, `/summon` and `/worldborder` are reachable now.**
-//!   Each needs a resource that used to be a plain local variable inside
+//!   **`/setblock`, `/fill`, `/summon` and `/worldborder` are reachable.**
+//!   Each uses a stored world, block-tick, mob, or border resource supplied by
 //!   [`IntegratedServer::open_to_lan`](crate::IntegratedServer::open_to_lan)/
-//!   `open_in_memory_with_mobs_using` — the world's `ChunkSource`, its
-//!   `BlockTickFeed`, its `MobHandle`, its `BorderFeed` — and is now a stored
-//!   field [`start_rcon`](crate::IntegratedServer::start_rcon) substitutes into
-//!   [`RconConfig`] the same way it already substitutes `world`. `/setblock`/
+//!   `open_in_memory_with_mobs_using` — the world, block-tick, mob, and border
+//!   handles — and stores them in [`RconConfig`] through
+//!   [`start_rcon`](crate::IntegratedServer::start_rcon). `/setblock`/
 //!   `/fill` write through `world_source` and publish through `block_ticks`
-//!   directly here (RCON has no per-connection `ChatCommand` arm to apply them
+//!   directly here (RCON has no per-connection command arm to apply them
 //!   through), rather than being dropped as the always-self-targeted
-//!   [`Effect::SetBlock`]/[`Effect::Fill`] they still are for a real
+//!   [`Effect::SetBlock`]/[`Effect::Fill`] used for a real
 //!   connection — see `crate::commands::block_commands`'s own doc for why they
 //!   carry no player identity. `/worldborder`'s remaining gap is disclosed on
 //!   [`IntegratedServer::border`](crate::IntegratedServer)'s own doc: the
-//!   handle is real and shared with the tick loop now, but no *accepted LAN
-//!   connection* reads it yet (that needs its own, separate per-connection
-//!   plumbing) — RCON's query/set is honest regardless, since it reads and
+//!   handle is shared with the tick loop, but no *accepted LAN connection* reads
+//!   it yet (that needs its own per-connection plumbing) — RCON's query/set is
+//!   honest regardless, since it reads and
 //!   mutates the actual state the loop advances. `/tp` was never in this list:
-//!   a teleport is an ordinary directed [`Effect`](crate::Effect) exactly like
+//!   a teleport is an ordinary directed [`Effect`](crate::Effect) like
 //!   `/gamemode <target>`, so `/tp <targets> <location>` reaches a connected
 //!   player fine over RCON — only the bare, caller-implicit form
 //!   (`/tp <location>`) fails, and only because the console has no body to move.
@@ -112,23 +102,21 @@ use crate::command::{CommandCaller, CommandDispatch, CommandResponse};
 use crate::commands::{CommandSource, CommandWorld, ServerCommands};
 use crate::spawn::{Task, spawn};
 
-/// Vanilla's default RCON port (`DedicatedServerProperties.rconPort`, the
-/// game port plus one).
+/// Default RCON port: the game port plus one.
 pub const DEFAULT_RCON_PORT: u16 = 25575;
 
 const TYPE_AUTH: i32 = 3;
 const TYPE_COMMAND: i32 = 2;
 const TYPE_AUTH_RESPONSE: i32 = 2;
 const TYPE_RESPONSE: i32 = 0;
-/// The request id vanilla answers auth failure with (its own rcon client).
+/// Request id used for an authentication failure.
 const AUTH_FAILURE_ID: i32 = -1;
-/// Vanilla's per-frame response cap (`RconClient.sendCmdResponse`).
+/// Per-frame response cap required by the RCON protocol.
 const MAX_RESPONSE_CHARS: usize = 4096;
-/// Frames longer than this are rejected rather than buffered. Vanilla's own
-/// cap is 1460 bytes (`PktUtils.MAX_PACKET_SIZE`); this is a generous ceiling
-/// that still stops a hostile length field from allocating unbounded memory.
+/// Frames longer than this are rejected rather than buffered. The ceiling
+/// stops a hostile length field from allocating unbounded memory.
 const MAX_FRAME_LENGTH: i32 = 1 << 20;
-/// The console's name, matching vanilla's `RconConsoleSource` ("Rcon").
+/// The console identity presented to the command dispatcher.
 const RCON_NAME: &str = "Rcon";
 
 /// Everything the listener needs to serve one RCON endpoint.
@@ -143,9 +131,8 @@ pub struct RconConfig {
     /// what a caller must do before it can read the bound address back from
     /// [`IntegratedServer::start_rcon`](crate::IntegratedServer::start_rcon).
     pub addr: SocketAddr,
-    /// The shared-secret password. An empty password is never accepted (a
-    /// "set a password" state, like vanilla refusing to enable RCON with an
-    /// empty `rcon.password`), and a wrong one fails closed.
+    /// The shared-secret password. An empty password is rejected, and an
+    /// incorrect password fails closed.
     pub password: String,
     /// The seam commands execute through, with the console's identity — the
     /// same [`CommandDispatch`] `crate::server`'s `ChatCommand` arm consults,
@@ -155,10 +142,10 @@ pub struct RconConfig {
     pub builtins: ServerCommands,
     /// The world's shared state, for the rules `/gamerule` reads and writes.
     ///
-    /// The *shared* handle, not a fresh one: a per-listener store is the bug
-    /// issues #327 and #328 were both reported for, and it would be invisible
-    /// here — `/gamerule keep_inventory true` over RCON would report success and
-    /// change nothing anyone reads.
+    /// The shared handle is required by the shared-world-state invariant. A
+    /// per-listener store would be invisible to other readers, so `/gamerule
+    /// keep_inventory true` could report success while changing nothing they
+    /// observe.
     pub world: crate::world_state::WorldStateHandle,
     /// The connected-player registry, for selector resolution and for the
     /// directed effect queue. `None` for a server with no registry, where RCON
@@ -302,7 +289,7 @@ async fn run_listener(shutdown: Arc<Notify>, listener: TcpListener, config: Rcon
 ///
 /// Returns on a clean close between frames (`Ok(())`) or on a transport or
 /// protocol error (`Err`), both of which drop the connection. Mirrors the
-/// authentication state machine of vanilla's `RconClient.run`.
+/// authentication state machine required by the RCON protocol.
 #[cfg(not(target_arch = "wasm32"))]
 async fn handle_connection(stream: TcpStream, config: &RconConfig) -> std::io::Result<()> {
     let mut stream = stream;
@@ -310,9 +297,8 @@ async fn handle_connection(stream: TcpStream, config: &RconConfig) -> std::io::R
     while let Some(frame) = read_frame(&mut stream).await? {
         match frame.packet_type {
             TYPE_AUTH => {
-                // Vanilla's own rcon client: an empty password never
-                // matches, and a failed attempt de-authenticates a connection
-                // that had previously succeeded.
+                // An empty password never matches, and a failed attempt
+                // de-authenticates a connection that had already succeeded.
                 let ok = !frame.payload.is_empty() && frame.payload == config.password;
                 authed = ok;
                 let id = if ok { frame.id } else { AUTH_FAILURE_ID };
@@ -323,15 +309,14 @@ async fn handle_connection(stream: TcpStream, config: &RconConfig) -> std::io::R
                     write_frame(&mut stream, AUTH_FAILURE_ID, TYPE_AUTH_RESPONSE, "").await?;
                     continue;
                 }
-                // Vanilla's `Commands.trimOptionalPrefix`: RCON clients send
-                // `/op Steve` and `op Steve` alike, and both must run.
+                // RCON clients send `/op Steve` and `op Steve` alike, and both
+                // forms must run.
                 let command = strip_optional_slash(&frame.payload);
                 let response = run_command(config, command);
                 write_response(&mut stream, frame.id, &join_response(&response)).await?;
             }
             other => {
-                // Vanilla's default arm (its own rcon client): the packet
-                // type, in hex.
+                // Report the unknown packet type in hexadecimal.
                 write_response(
                     &mut stream,
                     frame.id,
@@ -354,11 +339,8 @@ struct Frame {
 
 /// Reads one complete frame, or `None` on a clean close between frames.
 ///
-/// Length-then-body via `read_exact` rather than vanilla's single `read`:
-/// robustness is the server's job, and nothing here assumes the whole frame
-/// landed in one system call the way vanilla's `RconClient` requires of its
-/// *clients* (see the module doc's one-write rule for why the write side keeps
-/// that discipline instead).
+/// Length-then-body via `read_exact`: fragmented TCP delivery is valid, so the
+/// parser waits for the complete frame before decoding it.
 #[cfg(not(target_arch = "wasm32"))]
 async fn read_frame(stream: &mut TcpStream) -> std::io::Result<Option<Frame>> {
     let mut len_buf = [0u8; 4];
@@ -381,17 +363,16 @@ async fn read_frame(stream: &mut TcpStream) -> std::io::Result<Option<Frame>> {
     stream.read_exact(&mut body).await?;
     let id = i32::from_le_bytes(body[0..4].try_into().expect("frame length checked"));
     let packet_type = i32::from_le_bytes(body[4..8].try_into().expect("frame length checked"));
-    // The trailing two bytes are the payload's null terminator (`RconClient`
-    // writes `0 0` after the string), the same shape the client-side
-    // `decode_rcon_response` in `lodestone-testsupport` trims off.
+    // The trailing two bytes are the payload's null terminator. The same
+    // framing is consumed by the test-support client.
     let payload_end = body.len().saturating_sub(2);
     let payload = String::from_utf8_lossy(&body[8..payload_end]).into_owned();
     Ok(Some(Frame { id, packet_type, payload }))
 }
 
-/// Writes one complete frame in a single `write_all` — the module's one-write
-/// rule (see the module doc for why a split write is as dangerous as a split
-/// read is to vanilla).
+/// Encodes one complete length-prefixed frame and passes its bytes to
+/// `write_all`. The TCP stream may fragment delivery; `read_frame` uses
+/// `read_exact` to reconstruct the length and body before decoding.
 #[cfg(not(target_arch = "wasm32"))]
 async fn write_frame(
     stream: &mut TcpStream,
@@ -409,9 +390,9 @@ async fn write_frame(
     stream.write_all(&frame).await
 }
 
-/// Writes a command response, chunking exactly as vanilla's `sendCmdResponse`
-/// does: at most [`MAX_RESPONSE_CHARS`] characters per frame, and one empty
-/// frame for an empty response (its do-while runs once).
+/// Writes a command response in frames of at most
+/// [`MAX_RESPONSE_CHARS`] characters, including one empty frame for an empty
+/// response.
 #[cfg(not(target_arch = "wasm32"))]
 async fn write_response(
     stream: &mut TcpStream,
@@ -444,20 +425,15 @@ fn response_chunks(response: &str) -> Vec<&str> {
     chunks
 }
 
-/// Strips one optional leading slash, exactly vanilla's
-/// `Commands.trimOptionalPrefix`.
+/// Strips one optional leading slash from a command.
 #[must_use]
 fn strip_optional_slash(command: &str) -> &str {
     command.strip_prefix('/').unwrap_or(command)
 }
 
-/// The stdin console's own entry point (dedicated-server binary): built-ins
-/// first, host sink for a root they do not own, identity "Server" at
-/// permission level 4 — vanilla's own dedicated-server console identity,
-/// distinct from RCON's "Rcon" (`RconConsoleSource` vs `MinecraftServer`
-/// itself as a `CommandSource`, both level 4/`LEVEL_OWNERS`). Reuses
-/// [`run_command_as`] rather than reimplementing the built-in-then-host-sink
-/// fallback a second time.
+/// The stdin console entry point: built-ins first, then the host sink for a
+/// root they do not own, with identity `Server` at permission level 4. It
+/// reuses [`run_command_as`] so both console transports share dispatch.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn run_console_command(config: &RconConfig, command: &str) -> String {
     let command = strip_optional_slash(command);
@@ -474,12 +450,10 @@ fn join_response(response: &CommandResponse) -> String {
 
 /// The console's permission level.
 ///
-/// Vanilla's `RconConsoleSource` builds its `CommandSourceStack` with
-/// `Commands.LEVEL_OWNERS` (4) — the console is a full owner. This is the one
-/// caller in this crate that is not a player, and it is deliberately the highest
-/// level rather than a bypass: the built-in tree's permission filter runs for RCON
-/// exactly as it does for a player, so a future level-restricted command is
-/// gated by one mechanism and not two.
+/// The console is the one caller in this crate that is not a player, and it is
+/// deliberately the highest level rather than a bypass: the built-in tree's
+/// permission filter runs for RCON exactly as it does for a player, so a
+/// level-restricted command is gated by one mechanism.
 const RCON_PERMISSION_LEVEL: u8 = 4;
 
 /// Runs one RCON command: built-ins first, host sink for a root they do not own.
@@ -492,11 +466,8 @@ fn run_command(config: &RconConfig, command: &str) -> CommandResponse {
     run_command_as(config, RCON_NAME, RCON_PERMISSION_LEVEL, command)
 }
 
-/// [`run_command`], generalised over the caller's console identity — the
-/// shared body `crate::console`'s stdin runner reuses rather than
-/// reimplementing (name "Server", the same permission level 4 vanilla's
-/// dedicated-server console operates at). See that module's own doc comment
-/// for why a second, un-networked console needs this at all.
+/// [`run_command`], generalised over the caller's console identity. The
+/// `crate::console` stdin runner reuses this shared body.
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn run_command_as(
     config: &RconConfig,
@@ -591,13 +562,10 @@ pub(crate) fn run_command_as(
 
 /// The identity commands executed over RCON present to the host sink.
 ///
-/// Vanilla names the console "Rcon" (`RconConsoleSource`, a full-owner
-/// `CommandSource` with **no player** behind it). This crate's seam carries no
+/// The RCON console has **no player** behind it. This crate's seam carries no
 /// permissions — the host [`CommandSink`](crate::CommandSink) resolves them
-/// from the identity — so the *name* is what marks the console, exactly as it
-/// is in vanilla. A sink that looks the uuid up as a player will find no one,
-/// so it must special-case the console by name before that lookup; the nil
-/// uuid keeps the identity from ever colliding with a real player.
+/// from the identity — so the name marks the console before player lookup;
+/// the nil uuid cannot collide with a real player.
 #[must_use]
 fn rcon_caller() -> CommandCaller {
     CommandCaller::new(Uuid::nil(), RCON_NAME)
@@ -616,8 +584,8 @@ mod tests {
 
     #[test]
     fn responses_are_chunked_at_4096_characters_like_vanillas_send_cmd_response() {
-        // An empty response still yields one empty frame (the do-while runs
-        // once in `sendCmdResponse`).
+        // An empty response still yields one empty frame; the chunking loop
+        // executes once even when the response has no characters.
         assert_eq!(response_chunks(""), vec![""]);
         assert_eq!(response_chunks("hello"), vec!["hello"]);
 

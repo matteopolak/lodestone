@@ -1,4 +1,4 @@
-//! The sniffer's own seek/dig/rise/egg-drop state machine (issue #230's last
+//! The sniffer's own seek/dig/rise/egg-drop state machine (the last
 //! remaining species) — `Sniffer.State`'s `IDLING -> SNIFFING -> SEARCHING ->
 //! DIGGING -> RISING` loop, `Sniffer`/`SnifferAi`'s own timers and block
 //! search collapsed into one host-side per-mob driver, the same shape
@@ -278,7 +278,7 @@ fn diggable_block_below(world: &ChunkWorld, walk_target: Vec3) -> bool {
 }
 
 impl<'w> MobSim<'w> {
-    /// Issue #230's sniffer state machine — the per-tick driver for every
+    /// The sniffer state machine — the per-tick driver for every
     /// live sniffer's `IDLING -> SNIFFING -> SEARCHING -> DIGGING -> RISING`
     /// loop. See this module's own doc for the full account and every
     /// disclosed narrowing.

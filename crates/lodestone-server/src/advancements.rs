@@ -1,4 +1,4 @@
-//! Server-authoritative advancement and statistic tracking (issue #338).
+//! Server-authoritative advancement and statistic tracking.
 //!
 //! Vanilla tracks these *on the server*: per-player advancement progress and
 //! per-player statistics are each kept in their own server-side table, both
@@ -20,7 +20,7 @@
 //! This crate is version-free, so the module owns the *data model and rules*,
 //! never the wire bytes: advancement completion (an AND-of-ORs test over the
 //! requirement groups), progress dirtiness and the every-tick flush, the depth-2
-//! visibility evaluator, and NBT persistence for the #437 hook. The protocol
+//! visibility evaluator, and NBT persistence for the world-save hook. The protocol
 //! crates turn the version-free payloads into packets.
 //!
 //! # Model vs vanilla
@@ -80,7 +80,7 @@
 //!    pending or a root/progress is dirty does it produce an
 //!    [`AdvancementUpdate`] — this is the every-tick-no-op fast path.
 //! 4. On save, [`AdvancementManager::save_advancements`] /
-//!    [`AdvancementManager::save_statistics`] hand back NBT for the #437
+//!    [`AdvancementManager::save_statistics`] hand back NBT for the world-save
 //!    world-persistence hook; on load, the matching `load_*` restores it.
 //!    The NBT mirrors vanilla's own per-player advancement table (criteria
 //!    map with obtained timestamps + `done` flag) rather than the JSON files
@@ -952,7 +952,7 @@ impl AdvancementManager {
         }
     }
 
-    /// Persist a player's advancements as NBT (the #437 hook).
+    /// Persist a player's advancements as NBT for the world-save hook.
     pub fn save_advancements(&self, player: Uuid) -> Nbt {
         self.players
             .get(&player)
@@ -960,7 +960,7 @@ impl AdvancementManager {
             .unwrap_or_else(|| Nbt::Compound(Vec::new()))
     }
 
-    /// Persist a player's statistics as NBT (the #437 hook).
+    /// Persist a player's statistics as NBT for the world-save hook.
     pub fn save_statistics(&self, player: Uuid) -> Nbt {
         self.players
             .get(&player)

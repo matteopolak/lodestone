@@ -127,8 +127,8 @@ use std::sync::Arc;
 /// [`make_columns_lookup`] both back this with
 /// [`crate::chunk::ChunkColumn::block_state_arc`], which clones an already
 /// -interned palette entry (one atomic increment) instead of allocating and
-/// copying a new string on every call — the fix for the allocation issue #548
-/// named as the largest remaining constant factor on the redstone dispatch
+/// copying a string on every call — this removes the largest remaining constant-factor
+/// allocation on the redstone dispatch
 /// path (5899 lookups measured in one active tick against 837 notifications).
 /// `Arc<str>` derefs to `&str` exactly like `String` does, so every existing
 /// caller that only *reads* through the lookup (`&state`, `.starts_with(..)`,
@@ -988,7 +988,7 @@ pub fn make_lookup(column: &crate::chunk::ChunkColumn, min_x: i32, min_z: i32) -
 
 /// [`make_lookup`], backed by a [`crate::random_tick::RedstoneColumns`]
 /// multi-column cache instead of a single column — the read half of
-/// cross-chunk propagation (issue #548). A position beyond the home
+/// cross-chunk propagation. A position beyond the home
 /// column's own 16×16 footprint is answered from whichever already-loaded
 /// neighbour column it falls in, rather than unconditionally air; a
 /// position whose own chunk is not resident still answers air, matching

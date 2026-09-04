@@ -344,12 +344,8 @@ pub struct PlayerVitals {
     air_supply: i32,
     health: f32,
     /// The invulnerability-frame gate [`apply_damage`](Self::apply_damage)
-    /// consults — **not** shared with drowning ([`tick`](Self::tick)) or
-    /// fall damage ([`apply_fall_damage`](Self::apply_fall_damage)), which
-    /// both predate this field and stay exactly as documented elsewhere in
-    /// this file (drowning's own 20-tick reset cadence *is* its i-frame
-    /// gate, fall bypasses one entirely). A future pass unifying all three
-    /// under one cooldown is out of this change's scope.
+    /// consults. Drowning uses its own 20-tick reset cadence, while fall damage
+    /// bypasses this gate; each damage source keeps its distinct timing.
     hurt_cooldown: lodestone_entity::HurtCooldown,
     /// Hunger — [`crate::food::FoodData`], ticked by
     /// [`tick_food`](Self::tick_food) rather than by [`tick`](Self::tick).
@@ -493,45 +489,16 @@ impl PlayerVitals {
     /// ("a player at distance d outside takes exactly `max(1, floor(d*0.2))`
     /// per tick") requires.
     ///
-    /// # The flags come from the real table, and the old reasoning here was
-    /// **wrong in both halves**
+    /// The generated damage table marks `outside_border` with
+    /// `bypasses_armor`, `bypasses_shield`, `bypasses_wolf_armor`, and
+    /// `no_knockback`. Resolve those flags through [`border_damage_type`] rather
+    /// than using `DamageFlags::default()`, so the hit retains that metadata when
+    /// equipment defenses are modeled.
     ///
-    /// This used to pass `DamageFlags::default()` and justify it like so:
-    /// *"`minecraft:outside_border` is not in the generated table (verified:
-    /// `grep outside_border crates/lodestone-data/src/damage_types.rs` → empty)
-    /// … the real record carries **no bypass tags**, so the derived flags would
-    /// be all `false` anyway."*
-    ///
-    /// A tripwire test asserted that absence and named the production change it
-    /// wanted if the entry ever appeared. It appeared, and the second half of the
-    /// justification turned out to be false independently of the first:
-    /// `crates/lodestone-data/src/generated/damage_types.rs` records
-    /// `outside_border` as **`bypasses_armor bypasses_shield bypasses_wolf_armor
-    /// no_knockback`** — so the derived flags are *not* all `false`, and
-    /// `DamageFlags::default()` was never "exactly that". The original grep
-    /// looked at `damage_types.rs`; the table lives in `generated/`, which is
-    /// also why "not in the table" read as evidence.
-    ///
-    /// So the flags now resolve through [`border_damage_type`], the same route
-    /// [`apply_fall_damage`](Self::apply_fall_damage) already takes. It is
-    /// behaviour-neutral **today** — `Defenses::default()` has zero armour, and
-    /// `bypasses_armor` cannot change a reduction of nothing — and that is the
-    /// point: when a real equipment model lands, border damage will bypass armour
-    /// because the real damage type says it does, rather than because nobody
-    /// revisited a hardcoded default.
-    ///
-    /// # One thing this deliberately does **not** change
-    ///
-    /// The table also says `outside_border` is **not** `bypasses_cooldown`, while
-    /// this method bypasses the i-frame gate structurally (it never consults
-    /// [`hurt_cooldown`](Self::hurt_cooldown)). The real border-damage rule
-    /// applies through the same path as every other hit, so its i-frame logic
-    /// does apply there — and since the damage at a fixed distance is
-    /// constant, that would land it once per 20 ticks rather than every tick.
-    /// That contradicts the plan gate's stated per-tick cadence, which this
-    /// crate's tests pin. Recorded rather than changed: it is a behavioural
-    /// question about the cadence, not about where the flags come from, and
-    /// picking it up here would silently move a number three gates assert on.
+    /// The border path intentionally bypasses the player's hurt cooldown, so a
+    /// player outside the safe zone can take damage on every timer tick. The
+    /// cadence is part of [`tick`](Self::tick)'s contract and is covered by the
+    /// border-damage tests below.
     ///
     /// Returns `Some(damage_dealt)` if the hit landed (a dead player is a
     /// no-op, mirroring [`apply_fall_damage`](Self::apply_fall_damage)), `None`
@@ -884,7 +851,7 @@ mod tests {
         assert_eq!(v.health(), MAX_HEALTH - 7.0);
     }
 
-    /// Issue #263: the flags [`PlayerVitals::apply_fall_damage`] passes come
+    /// The flags [`PlayerVitals::apply_fall_damage`] passes come
     /// from the real damage-type table, not a literal.
     ///
     /// **What this can and cannot observe, stated plainly.** `apply_fall_damage`

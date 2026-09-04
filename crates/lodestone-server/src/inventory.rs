@@ -1,39 +1,24 @@
-//! Server-authoritative player inventory (issue: server-side inventory
-//! model, filed as the prerequisite `#266` itself named — see that issue's
-//! investigation comment).
+//! Server-authoritative player inventory: the server-side inventory model used by
+//! container and item-use handlers.
 //!
-//! Before this module, `lodestone-server` had **no inventory/container model
-//! at all** — three separate doc comments (`server.rs`'s `apply_use_item_on`,
-//! `protocol.rs`'s `UseItemOn`, `vitals.rs`) said so independently. This is
-//! the minimum model that gives a real slot somewhere to write into:
-//! [`PlayerInventory`] is 41 native slots (hotbar + main + armour + off-hand),
-//! mirroring vanilla's own player-inventory class
-//! exactly:
+//! [`PlayerInventory`] has 41 native slots (hotbar + main + armour + off-hand):
 //!
-//! * `items` is `NonNullList.withSize(36, ItemStack.EMPTY)` — hotbar `0..=8`,
-//!   main storage `9..=35` (vanilla's own constants: `SELECTION_SIZE = 9`,
-//!   `INVENTORY_SIZE = 36`).
-//! * The equipment-slot mapping (vanilla's own field) adds feet `36`, legs
+//! * `items` contains 36 entries — hotbar `0..=8`, main storage `9..=35`.
+//! * The equipment-slot mapping adds feet `36`, legs
 //!   `37`, chest `38`, head `39`, off-hand `40` (this module does not model
 //!   `41`/body or `42`/saddle — those are mount equipment, not a player's own
 //!   inventory, and have no menu slot on the player inventory screen at all).
 //!
-//! This is not a fresh numbering: it is a restatement of the **same** native
-//! indexing `lodestone-game`'s client-side `Menu` already established and
-//! documents at `crates/lodestone-game/src/menu.rs:5-27` (`PLAYER_NATIVE_SIZE
-//! = 41`, `OFFHAND_NATIVE = 40`). Restated rather than shared because this
-//! crate is version- and client-free and does not depend on
-//! `lodestone-game`; keeping the two numbering schemes identical is what
-//! lets a `CONTAINER_CLICK`'s menu-slot indices (the wire vocabulary, and the
-//! same one the client's `Menu` speaks) map onto this model with the exact
-//! table the client already uses to build its own menu — see
+//! The numbering is intentionally independent of client code because this
+//! crate is version- and client-free. Keeping both schemes identical lets a
+//! `CONTAINER_CLICK` menu-slot index map onto this model — see
 //! [`PlayerInventory::apply_menu_slot_change`].
 //!
 //! # Scope cut: no crafting grid, no armour/tool queries yet
 //!
 //! The player inventory screen's 2×2 crafting grid and result slot (menu
-//! indices `0..=4`) are **not** part of vanilla's `Inventory` either — they
-//! live in `InventoryMenu`'s own scratch `CraftSlots` container, which this
+//! indices `0..=4`) are **not** part of this native inventory model — they
+//! live in the menu's scratch crafting container, which this
 //! server has no recipe model to resolve a result for. A `CONTAINER_CLICK`
 //! that reports a change to one of those menu slots is dropped rather than
 //! misapplied (see [`PlayerInventory::apply_menu_slot_change`]'s doc
@@ -49,14 +34,14 @@ use lodestone_model::ItemStack;
 use crate::crafting::CraftingState;
 
 /// Native size of the player's own inventory: hotbar (`0..=8`) + main storage
-/// (`9..=35`) + armour (`36..=39`) + off-hand (`40`). See the module doc
-/// comment for the vanilla citation; mirrors `lodestone-game`'s
-/// `PLAYER_NATIVE_SIZE` (`crates/lodestone-game/src/menu.rs:113`).
+/// (`9..=35`) + armour (`36..=39`) + off-hand (`40`). The
+/// [`PlayerInventory::native`] and [`PlayerInventory::set_native`] methods use
+/// this layout.
 pub const PLAYER_NATIVE_SIZE: usize = 41;
 
-/// Native index of the off-hand slot (vanilla's own off-hand slot constant).
-/// Mirrors `lodestone-game`'s `OFFHAND_NATIVE`
-/// (`crates/lodestone-game/src/menu.rs:118`).
+/// Native index of the off-hand slot in the protocol's player-inventory layout.
+/// [`PlayerInventory::native`] uses this index for the off-hand slot, and
+/// [`PlayerInventory::set_native`] writes it.
 pub const OFFHAND_NATIVE: usize = 40;
 
 /// Number of hotbar slots (vanilla's own selection-size constant).
@@ -77,65 +62,58 @@ pub const HEAD_NATIVE: usize = 39;
 pub struct PlayerInventory {
     slots: Vec<Option<ItemStack>>,
     selected_hotbar_slot: u8,
-    /// The inventory screen's own 2×2 crafting grid (issue #529). Vanilla keeps
-    /// this in `InventoryMenu`'s scratch `CraftSlots` rather than in `Inventory`,
-    /// but the menu is a per-connection thing here and this struct is the
-    /// per-connection thing that already reaches every caller that needs it.
+    /// The inventory screen's own 2×2 crafting grid. The menu keeps this in
+    /// per-connection scratch space rather than in the native inventory, and
+    /// this struct already reaches every caller that needs it.
     crafting: CraftingState,
-    /// The cursor stack and in-progress drag the server's own `doClick` needs
+    /// The cursor stack and in-progress drag the server's container-click state needs
     /// ([`crate::container_click`]). Same argument as `crafting` above: it is
     /// per-connection menu state, and this struct is the per-connection value
     /// every container call site already holds, so it costs no new parameter on
     /// `dispatch_play_packet` (which is at 28).
     click_state: crate::container_click::ClickState,
     /// The 3×3 grid of the crafting **table** this connection currently has open,
-    /// if any (issue #529 step 2). `None` when no table menu is open, which is
+    /// if any. `None` when no table menu is open, which is
     /// what makes "is this window a crafting table" answerable without a second
     /// registry: the grid exists exactly while the menu does.
     table_crafting: Option<CraftingState>,
-    /// The open anvil/grindstone/smithing-table's input cells (issues #253-#255),
-    /// if one is open — the same "positionless scratch space" story as
-    /// `table_crafting` above: none of these three stations is a
-    /// [`crate::block_entities::BlockEntity`] in vanilla either (`AnvilMenu`'s
-    /// `inputSlots`, `GrindstoneMenu`'s `repairSlots` and `SmithingMenu`'s
-    /// `inputSlots` are all menu-owned `SimpleContainer`s thrown away on close),
-    /// so there is nowhere else for these 2-3 cells to live between clicks. Sized
+    /// The open workstation's input cells,
+    /// if one is open — the same positionless scratch-space rule as
+    /// `table_crafting` above: these cells belong to the open menu, not to a
+    /// world block or the native inventory, and are discarded on close. Sized
     /// to the open station (`2` for the anvil/grindstone, `3` for smithing) by
     /// [`open_workstation`](Self::open_workstation).
     workstation: Option<Vec<Option<ItemStack>>>,
-    /// An open anvil's typed-but-not-yet-taken rename text (`AnvilMenu.itemName`,
-    /// issues #253-#255's rename gap). `None` means "never touched this menu
+    /// An open rename field's typed-but-not-yet-taken text. `None` means
+    /// "never touched this menu
     /// instance", which is distinct from a touched-but-blank field clearing an
     /// existing custom name — see [`crate::anvil::compute`]'s own `item_name`
     /// doc. Reset by [`open_workstation`](Self::open_workstation), the same "a
     /// new menu instance starts with no typed name" rule
-    /// `AnvilMenu`'s own field default gives every fresh menu.
+    /// every newly opened menu starts without pending text.
     pending_rename: Option<String>,
-    /// An open enchanting table's `EnchantmentMenu.enchantmentSeed` — the roll
+    /// An open enchanting table's offer seed — the roll
     /// every offer this table shows is derived from, rerolled after every
     /// successful enchant. Reset to `0` by
     /// [`open_workstation`](Self::open_workstation) and set to a fresh draw by
     /// `crate::server::open_enchanting_screen`'s own caller.
     enchant_seed: i64,
     /// An open loom or stonecutter's `selectedBannerPatternIndex`/
-    /// `selectedRecipeIndex` `DataSlot` (issue #150) — which offer in the
-    /// station's own selectable list `ContainerButtonClick` most recently
-    /// picked. `None` means "nothing chosen yet," the same shape
+    /// selected recipe index — which offer in the station's selectable list was
+    /// most recently picked. `None` means "nothing chosen yet," the same shape
     /// `pending_rename` gives a fresh anvil menu. Reset by
     /// [`open_workstation`](Self::open_workstation), exactly like
     /// `pending_rename`/`enchant_seed`: a new menu instance starts with
-    /// nothing selected, not whatever the previous station left behind.
+    /// nothing selected.
     selected_recipe_index: Option<i32>,
     /// Menu-index → highlighted bundle-content index, from
-    /// `ServerboundSelectBundleItemPacket` (`crate::container_click`'s
-    /// `SelectedBundleIndex`). Vanilla keeps this on the open
-    /// `AbstractContainerMenu` instance itself
-    /// (`setSelectedBundleItemIndex`); this struct is the per-connection menu
+    /// bundle-selection input (`crate::container_click`'s
+    /// `SelectedBundleIndex`). This struct is the per-connection menu
     /// scratch state that already fills that role for `click_state` and
     /// `workstation`, so it lives here rather than adding a new field to
     /// `dispatch_play_packet`. A missing entry (never selected, or the last
     /// select cleared it with `-1`) reads as "nothing selected," matching
-    /// `BundleContents.Mutable::indexIsOutsideAllowedBounds`'s fallback.
+    /// a missing or out-of-range selection fallback.
     selected_bundle: HashMap<i32, u32>,
 }
 
@@ -157,9 +135,7 @@ impl Default for PlayerInventory {
 }
 
 impl PlayerInventory {
-    /// A fresh, empty inventory with hotbar slot `0` selected — vanilla's
-    /// own field default (`private int selected;` starts at
-    /// `0`).
+    /// A fresh, empty inventory with hotbar slot `0` selected.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
@@ -189,7 +165,7 @@ impl PlayerInventory {
         self.selected_hotbar_slot
     }
 
-    /// Sets the selected hotbar slot from a `SET_CARRIED_ITEM` packet.
+    /// Sets the selected hotbar slot from a held-slot packet.
     /// Returns `false` (no-op) for anything outside `0..HOTBAR_SIZE`,
     /// mirroring vanilla's own selected-slot setter guard
     /// (its own hotbar-slot check throws server-side; here it
@@ -205,8 +181,7 @@ impl PlayerInventory {
         }
     }
 
-    /// The item in the currently selected hotbar slot (vanilla's
-    /// own selected-item getter).
+    /// The item in the currently selected hotbar slot.
     #[must_use]
     pub fn selected_item(&self) -> Option<&ItemStack> {
         self.native(usize::from(self.selected_hotbar_slot))
@@ -215,10 +190,8 @@ impl PlayerInventory {
     /// Every combat-relevant equipment slot and the item in it, ready to feed
     /// [`lodestone_entity::equipment::player_combat_stats`].
     ///
-    /// This is the join the damage pipeline was missing: `apply_reductions` was
-    /// live-verified against a real vanilla server long before anything told it
-    /// what the player was wearing, so armour reduced a `Defenses::default()`
-    /// with zero points in it and a swing dealt a flat bare-hand `1.0`.
+    /// This joins worn equipment and the selected hand with the damage pipeline,
+    /// so armour and held-item modifiers affect combat statistics.
     ///
     /// The **selected** hotbar slot is what goes in the main hand, not native
     /// slot `0` — a player holding a sword in slot 3 must not punch for `1.0`.
@@ -269,12 +242,12 @@ impl PlayerInventory {
     /// | `45` (off-hand) | `40` |
     ///
     /// Menu slots `1..=4` are the 2×2 crafting grid, which has no *native*
-    /// index — it is scratch space in vanilla's `InventoryMenu`, not part of
-    /// `Inventory` — so those land in [`crafting`](Self::crafting) instead, and
+    /// index — it is menu scratch space, not part of the native inventory — so
+    /// those land in [`crafting`](Self::crafting) instead, and
     /// re-derive the result as they go.
     ///
     /// **Menu slot `0`, the crafting result, is never written from here and
-    /// returns `false`** (issue #529). It is derived by the server from the grid,
+    /// returns `false`**. It is derived by the server from the grid,
     /// and accepting a client's value for it is exactly the hole that let a
     /// container diff mint any item. The caller's job on slot `0` is to push
     /// back the server's own value, not to store the claim.
@@ -323,9 +296,8 @@ impl PlayerInventory {
         &mut self.click_state
     }
 
-    /// Records or clears a `ServerboundSelectBundleItemPacket`'s claim for
-    /// menu slot `slot` — `selected < 0` clears it (vanilla's own "`-1` means
-    /// none" convention, `AbstractContainerMenu.setSelectedBundleItemIndex`),
+    /// Records or clears the selected bundle-content index for menu slot `slot`.
+    /// `selected < 0` clears it, using `-1` as the no-selection value,
     /// matching [`Self::selected_bundle_item`]'s read side.
     pub fn set_selected_bundle_item(&mut self, slot: i32, selected: i32) {
         match u32::try_from(selected) {
@@ -349,7 +321,7 @@ impl PlayerInventory {
     }
 
     /// Clears every tracked bundle selection — a menu close, mirroring
-    /// `AbstractContainerMenu.removed`'s own scratch-state teardown
+    /// menu-close scratch-state teardown
     /// ([`Self::click_state_mut`]'s `reset`, [`Self::take_table_crafting`]
     /// and [`Self::take_workstation`] are the same shape).
     pub fn clear_selected_bundle_items(&mut self) {
@@ -373,8 +345,8 @@ impl PlayerInventory {
     }
 
     /// Closes the table grid and returns whatever was in it, so the caller can
-    /// give it back to the player (vanilla's `CraftingMenu.removed` →
-    /// `clearContainer`). A grid silently discarded on close deletes items.
+    /// give it back to the player. A grid silently discarded on close deletes
+    /// items.
     pub fn take_table_crafting(&mut self) -> Vec<ItemStack> {
         self.table_crafting
             .take()
@@ -393,12 +365,11 @@ impl PlayerInventory {
         self.workstation.as_mut()
     }
 
-    /// Opens a fresh, empty workstation with `inputs` cells — called when an
-    /// anvil/grindstone/smithing-table/enchanting-table menu opens. Also resets
+    /// Opens a fresh, empty workstation with `inputs` cells when a workstation
+    /// menu opens. Also resets
     /// [`pending_rename`](Self::pending_rename) and
     /// [`enchant_seed`](Self::enchant_seed): a new menu instance starts with
-    /// neither a typed name nor a rolled seed, matching `AnvilMenu`/
-    /// `EnchantmentMenu`'s own fresh-instance field defaults.
+    /// neither a typed name nor a rolled seed.
     pub fn open_workstation(&mut self, inputs: usize) {
         self.workstation = Some(vec![None; inputs]);
         self.pending_rename = None;
@@ -413,23 +384,21 @@ impl PlayerInventory {
         self.pending_rename.as_deref()
     }
 
-    /// Sets (or clears) the open anvil's pending rename text —
-    /// `AnvilMenu.setItemName`'s write half; see `crate::server`'s consumer for
-    /// the validation that happens before this is called.
+    /// Sets (or clears) the open anvil's pending rename text; see
+    /// `crate::server`'s consumer for
+    /// the validation performed by that consumer.
     pub fn set_pending_rename(&mut self, name: Option<String>) {
         self.pending_rename = name;
     }
 
-    /// The open enchanting table's current offer seed
-    /// (`EnchantmentMenu.enchantmentSeed`).
+    /// The open enchanting table's current offer seed.
     #[must_use]
     pub fn enchant_seed(&self) -> i64 {
         self.enchant_seed
     }
 
     /// Sets the open enchanting table's offer seed — called once with a fresh
-    /// roll when the screen opens, and again after every successful enchant
-    /// (`Player.onEnchantmentPerformed`'s own reroll).
+    /// roll when the screen opens, and again after every successful enchant.
     pub fn set_enchant_seed(&mut self, seed: i64) {
         self.enchant_seed = seed;
     }
@@ -442,9 +411,8 @@ impl PlayerInventory {
     }
 
     /// Sets the open loom/stonecutter's selected offer index —
-    /// `LoomMenu.clickMenuButton`/`StonecutterMenu.clickMenuButton`'s write
-    /// half; see `crate::server`'s `ContainerButtonClick` consumer for the
-    /// validation that happens before this is called.
+    /// menu-button write; see `crate::server`'s consumer for the
+    /// validation performed by that consumer.
     pub fn set_selected_recipe_index(&mut self, index: Option<i32>) {
         self.selected_recipe_index = index;
     }
@@ -459,13 +427,11 @@ impl PlayerInventory {
             .unwrap_or_default()
     }
 
-    /// Adds `stack` to this inventory, mirroring vanilla's own
-    /// add-to-inventory → add-resource loop
-    /// (vanilla's own add/add-resource/remaining-space-slot/
-    /// free-slot helpers), and returns **every native index this call wrote** plus
+    /// Adds `stack` to this inventory using merge-before-empty-slot order and
+    /// returns **every native index this call wrote** plus
     /// whatever could not be fitted.
     ///
-    /// This is what item pickup credits into (issue #337). The returned index
+    /// This is what item pickup credits into. The returned index
     /// list is the point: the caller has to tell the client about each slot it
     /// touched with its own `container_set_slot`, and a pickup that overflows
     /// into a second slot writes *two*.
@@ -473,16 +439,15 @@ impl PlayerInventory {
     /// # The destination order is not "first empty slot", and getting it wrong
     /// is invisible
     ///
-    /// `getSlotWithRemainingSpace` searches for a **mergeable** slot in this
-    /// exact order — and `hasRemainingSpaceForItem` requires the candidate to
-    /// be non-empty, so this pass only ever tops up an existing stack:
+    /// The merge pass searches for a **mergeable** slot in this exact order and
+    /// requires the candidate to be non-empty, so this pass only ever tops up
+    /// an existing stack:
     ///
     /// 1. the **selected hotbar slot** (`this.selected`),
-    /// 2. the **off-hand** (native `40`, the literal `40` in vanilla's own
-    ///    source),
+    /// 2. the **off-hand** (native `40`),
     /// 3. natives `0..36` in ascending order (hotbar, then main storage).
     ///
-    /// Only if that finds nothing does `getFreeSlot` place a fresh stack — and
+    /// Only if that finds nothing does the empty-slot pass place a fresh stack —
     /// it scans **`items` alone, `0..36`**. So a fresh stack can never land in
     /// the off-hand or in an armour slot, while a *merge* into the off-hand is
     /// entirely normal. Both halves are needed: picking "first empty slot"
@@ -492,12 +457,11 @@ impl PlayerInventory {
     /// Returns `(written natives, leftover)`. `leftover` is `None` when the
     /// whole stack fitted; a full inventory returns the unplaced remainder so
     /// the caller can leave the item entity in the world rather than deleting
-    /// it — vanilla's `playerTouch` only removes the entity when
-    /// `getInventory().add(...)` consumed everything.
+    /// it — the item entity is removed only when this call consumes everything.
     pub fn add(&mut self, stack: ItemStack) -> (Vec<usize>, Option<ItemStack>) {
         let mut remaining = stack;
         let mut written = Vec::new();
-        // `max_stack_size` is per-item in vanilla (`getMaxStackSize`); this
+        // `max_stack_size` is per-item; this
         // crate has no per-item census of it on the server side, so 64 stands
         // in. That is right for every block drop the bundled tables produce
         // (cobblestone/dirt/gravel/flint/coal/raw_iron are all 64-stackable)
@@ -538,11 +502,11 @@ impl PlayerInventory {
 
     /// Removes **one** item matching `predicate` from `items` (`0..36`) and returns
     /// it as a single-count stack — the take side of a recipe-book fill
-    /// (`Inventory.findSlotMatchingItem` + a one-item split).
+    /// by scanning native slots and splitting one item from the first match.
     ///
     /// Scans hotbar then main storage in native order, which is vanilla's own
     /// `items` order. Armour and the off-hand are excluded, exactly as
-    /// [`add`](Self::add)'s `getFreeSlot` half is: a recipe never consumes the
+    /// [`add`](Self::add)'s empty-slot pass: a recipe never consumes the
     /// boots you are wearing.
     pub fn take_matching(&mut self, predicate: impl Fn(&ItemStack) -> bool) -> Option<ItemStack> {
         let index = (0..ITEMS_SIZE).find(|&index| {
@@ -606,8 +570,8 @@ impl PlayerInventory {
         Some(())
     }
 
-    /// `Inventory.getSlotWithRemainingSpace` — see [`add`](Self::add)'s doc
-    /// comment for the order and why it matters.
+    /// Finds a mergeable slot; see [`add`](Self::add)'s doc comment for the
+    /// order and why it matters.
     fn slot_with_remaining_space(&self, stack: &ItemStack, max: u32) -> Option<usize> {
         let mergeable = |index: usize| -> bool {
             self.slots
@@ -629,8 +593,8 @@ impl PlayerInventory {
         (0..ITEMS_SIZE).find(|&index| mergeable(index))
     }
 
-    /// `Inventory.getFreeSlot` — the first empty slot in `items` (`0..36`)
-    /// **only**, which is why a fresh stack never reaches armour or the
+    /// Finds the first empty slot in the main `0..36` range **only**, which is why
+    /// a fresh stack never reaches armour or the
     /// off-hand.
     fn free_slot(&self) -> Option<usize> {
         (0..ITEMS_SIZE).find(|&index| self.slots[index].is_none())
@@ -665,25 +629,24 @@ pub fn window_zero_menu_slot(native: usize) -> Option<i32> {
     Some(slot)
 }
 
-/// Size of vanilla's `Inventory.items` list — hotbar plus main storage
-/// (`Inventory.INVENTORY_SIZE = 36`). Distinct from [`PLAYER_NATIVE_SIZE`]:
+/// Size of the hotbar plus main-storage range (`36`). Distinct from
+/// [`PLAYER_NATIVE_SIZE`]:
 /// the five slots past this (armour `36..=39`, off-hand `40`) live in separate
 /// vanilla lists, and the difference is load-bearing for
-/// [`PlayerInventory::add`] — `getFreeSlot` scans only this range.
+/// [`PlayerInventory::add`] — the empty-slot pass scans only this range.
 const ITEMS_SIZE: usize = 36;
 
 /// The menu-index → native-index mapping for the player's own inventory
 /// screen (window `0`) — see [`PlayerInventory::apply_menu_slot_change`]'s
 /// doc comment for the table this implements.
 /// Menu slot of the player inventory screen's crafting **result**
-/// (`InventoryMenu`'s `RESULT_SLOT = 0`). Server-derived; never client-writable.
+/// (`0`). Server-derived; never client-writable.
 pub const PLAYER_CRAFT_RESULT_MENU_SLOT: i32 = 0;
 
 /// The 2×2 grid cell a player-inventory menu slot addresses, if any.
 ///
-/// Vanilla's own player-inventory menu lays the grid out as menu slots `1..=4` in row-major order
-/// immediately after the result (its own 2x2 crafting-container
-/// loop), so cell index is `menu_slot - 1`.
+/// The player-inventory menu lays the grid out as menu slots `1..=4` in row-major
+/// order immediately after the result, so cell index is `menu_slot - 1`.
 #[must_use]
 pub fn player_craft_grid_cell(menu_slot: i32) -> Option<usize> {
     match menu_slot {
@@ -705,11 +668,9 @@ fn player_menu_native_index(menu_slot: i32) -> Option<usize> {
     }
 }
 
-/// The non-player menu layout that used to live here (`ContainerMenuSlot` /
-/// `container_menu_slot`) is now [`crate::container_click::MenuLayout::container`],
-/// which has to describe the same 27-main + 9-hotbar tail *and* answer
-/// `may_place`/`max_stack_size` for it. Two copies of that boundary is how the two
-/// sides of a click drift apart, so there is one.
+/// Non-player menu layout lives in [`crate::container_click::MenuLayout::container`],
+/// which describes the 27-main + 9-hotbar tail and answers
+/// `may_place`/`max_stack_size` for it.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -766,8 +727,8 @@ mod tests {
         assert_eq!(inv.selected_item(), Some(&stack("minecraft:diamond", 1)));
     }
 
-    /// Pins every entry of the menu→native table against vanilla's
-    /// `InventoryMenu` layout (mirrored from `lodestone-game`'s own client
+    /// Pins every entry of the menu→native table against the documented player
+    /// layout (mirrored from `lodestone-game`'s own client
     /// model, `menu.rs:13-22`) — the exact mapping a real `CONTAINER_CLICK`
     /// against window 0 must agree with for the server model to land in the
     /// same native slot the client already predicted into.
@@ -801,7 +762,7 @@ mod tests {
 
     /// Menu slots `1..=4` reach the crafting grid, never a native slot, and menu
     /// slot `0` (the result) is refused outright — a client's claimed result is
-    /// the mint-anything hole (issue #529), so the only value that slot ever
+    /// the mint-anything hole, so the only value that slot ever
     /// holds is the one the server derived.
     #[test]
     fn crafting_grid_menu_slots_reach_the_grid_and_the_result_is_refused() {
@@ -874,7 +835,7 @@ mod tests {
         assert_eq!(window_zero_menu_slot(PLAYER_NATIVE_SIZE), None);
     }
 
-    /// Vanilla's `getSlotWithRemainingSpace` order, asserted by **destination**
+    /// The merge-before-empty destination order, asserted by **destination**
     /// rather than by "the item arrived".
     ///
     /// Both halves are load-bearing and a naive "first empty slot"
@@ -882,7 +843,7 @@ mod tests {
     ///
     /// * a mergeable **selected** slot wins over an earlier mergeable one,
     /// * a mergeable **off-hand** wins over any slot in `0..36`,
-    /// * but a *fresh* stack never reaches the off-hand, because `getFreeSlot`
+    /// * but a *fresh* stack never reaches the off-hand, because the empty-slot pass
     ///   scans `items` alone.
     #[test]
     fn add_follows_vanillas_selected_then_offhand_then_scan_order() {
@@ -910,7 +871,7 @@ mod tests {
             "the off-hand is checked before the 0..36 scan"
         );
 
-        // …but never for a *fresh* stack: `getFreeSlot` scans `items` only.
+        // …but never for a *fresh* stack: the empty-slot pass scans main storage only.
         let mut inv = PlayerInventory::new();
         for native in 0..36 {
             inv.set_native(native, Some(ItemStack::new("minecraft:stone".parse().unwrap(), 64)));

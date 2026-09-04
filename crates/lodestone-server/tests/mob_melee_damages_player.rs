@@ -1,4 +1,4 @@
-//! Acceptance gate for issue #625: a hostile mob's melee attack must resolve
+//! Acceptance gate: a hostile mob's melee attack must resolve
 //! to a *player* it can actually damage, not just to nothing.
 //!
 //! Before this, `SimMob::attack_target_id` — the field
@@ -130,10 +130,9 @@ fn a_zombie_with_no_fed_player_lands_no_hits() {
     );
 }
 
-/// **Control on the existing mob-vs-mob path**: `attack_target_id` (the
-/// `Option<i32>` naming *another* `SimMob`) must still resolve exactly as it
-/// did before this change — this fix must not have quietly repurposed or
-/// broken the pre-existing wolf/zombified-piglin-style retaliation path.
+/// **Control on the mob-vs-mob path**: `attack_target_id` (the `Option<i32>`
+/// naming *another* `SimMob`) must resolve as mob damage rather than being
+/// repurposed as a player target.
 /// Drives two mobs directly (not through the roster, matching this exact
 /// shape in `tests/mob_sim.rs`'s existing hit-resolution gates) with a real
 /// player *also* fed and standing well outside melee reach, so a regression

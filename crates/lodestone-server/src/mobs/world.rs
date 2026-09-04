@@ -37,7 +37,7 @@ pub struct ChunkWorld {
     // promotion this split needed.
     pub(super) min_y: i32,
     pub(super) height: i32,
-    /// Issue #518 part 2/4: every fresh-off-the-generator column's `SPAWN`
+    /// the generation-spawn handoff: every fresh-off-the-generator column's `SPAWN`
     /// candidates, drained out of each [`ChunkColumn`] as it is snapshotted
     /// (`from_source`/`from_columns`) — a column loaded from disk contributes
     /// nothing here, which is what makes this empty on every reopen of an
@@ -80,7 +80,7 @@ impl ChunkWorld {
             for cx in cx_range.clone() {
                 let mut col = source.column(cx, cz);
                 extent = Some((col.min_y, col.height));
-                // Issue #518 part 2/4: only non-empty for a column this call
+                // The generation-spawn handoff is non-empty only for a column this call
                 // just generated for the first time — see this struct's field
                 // doc.
                 pending_generation_spawns.extend(col.take_generation_spawns());
@@ -101,7 +101,7 @@ impl ChunkWorld {
     /// fetched.
     ///
     /// This exists because `from_source`'s loop is *serial* and synchronous, and
-    /// issue #454's whole subject is that 49 of those calls (~45 s at the 909 ms
+    /// the whole subject is that 49 of those calls (~45 s at the 909 ms
     /// per composed column measured in `crate::chunk_store`) ran on the thread
     /// that opens a world. `crate::integrated` now fetches the same columns
     /// through [`crate::chunk::generate_columns_offloaded`] — parallel, on the
@@ -118,7 +118,7 @@ impl ChunkWorld {
         let mut extent: Option<(i32, i32)> = None;
         for (coord, mut col) in columns {
             extent = Some((col.min_y, col.height));
-            // Issue #518 part 2/4 — see `from_source`'s identical drain.
+            // Use the same generation-spawn drain as `from_source`.
             pending_generation_spawns.extend(col.take_generation_spawns());
             map.insert(coord, col);
         }
@@ -131,8 +131,8 @@ impl ChunkWorld {
         }
     }
 
-    /// Takes every `SPAWN`-stage candidate collected while this
-    /// [`ChunkWorld`] was built (issue #518 part 2/4), leaving the list empty.
+    /// Takes every `SPAWN`-stage candidate collected while constructing this
+    /// [`ChunkWorld`], leaving the list empty.
     ///
     /// A [`ChunkWorld`] snapshot is built once per [`MobHandle::reseed`
     /// ](super::MobHandle::reseed) call — see that method and `ChunkColumn`'s
@@ -193,11 +193,10 @@ impl ChunkWorld {
     /// `"minecraft:air"` for a missing column or an out-of-range Y — matching
     /// [`ChunkColumn::block_state`]'s own out-of-range behaviour.
     ///
-    /// **`pub`, alongside [`is_solid`](Self::is_solid), because it is what
-    /// [`MobSim::tick_with_terrain`] now takes.** That oracle used to be a
-    /// solid/air bit and is a state name now, so an external caller supplying a
-    /// snapshot-backed one needs this. It is strictly more information than
-    /// `is_solid` already exposed, not a new disclosure.
+    /// **`pub`, alongside [`is_solid`](Self::is_solid), because
+    /// [`MobSim::tick_with_terrain`] consumes a state-name oracle.** The state
+    /// name carries the shape information needed by item settling, while
+    /// `is_solid` remains the coarse pathfinding predicate.
     #[must_use]
     pub fn block_state(&self, x: i32, y: i32, z: i32) -> &str {
         let (cx, cz) = (x.div_euclid(16), z.div_euclid(16));
@@ -266,7 +265,7 @@ impl PathWorld for ChunkWorld {
 
     fn base_path_type(&self, x: i32, y: i32, z: i32) -> PathType {
         // Real per-state classification: `WalkNodeEvaluator.getPathTypeFromState`
-        // via `lodestone_data::path_types` (issue #204). Falls back to the old
+        // via `lodestone_data::path_types`. Falls back to the old
         // solid/air guess only if the state string does not resolve to a known
         // 26.2 state id — not expected in practice, since every writer of this
         // world's terrain (worldgen, `set_solid`, `set_block`) emits canonical
@@ -287,20 +286,16 @@ impl PathWorld for ChunkWorld {
 
     /// Block *identity*, which [`base_path_type`](PathWorld::base_path_type)
     /// deliberately erases — `grass_block`, `dirt` and `stone` are one
-    /// `Blocked` there (issue #456).
+    /// `Blocked` there.
     ///
-    /// # The tag is read from the jar's own census, never hand-written
+    /// # The tag comes from generated block data
     ///
     /// `#minecraft:edible_for_sheep` is resolved through
     /// [`lodestone_data::tool::block_tag_members`], which is generated from the
-    /// jar. That is not fastidiousness: the obvious hand-written
-    /// `short_grass | tall_grass` guess is **wrong in both directions**. The
-    /// real tag (`data/minecraft/tags/block/edible_for_sheep.json`) is
-    /// `short_grass`, `short_dry_grass`, `tall_dry_grass`, `fern` — so
-    /// `tall_grass` is not a member at all, and three members would have been
-    /// missing. A sheep would have refused to graze ferns and dry grass, and
-    /// nothing would have failed. This repo has been wrong about a hand-written
-    /// tag set twice before (`pig_food`/`chicken_food`).
+    /// data. The generated membership is `short_grass`, `short_dry_grass`,
+    /// `tall_dry_grass`, and `fern`; `tall_grass` is not a member. Using this
+    /// exact set lets grazing accept dry grass and ferns while rejecting other
+    /// block states.
     ///
     /// # Two id spaces, and mixing them is silent
     ///
@@ -339,16 +334,16 @@ impl PathWorld for ChunkWorld {
         // state's collision boxes (`lodestone_data::collision_shapes`), which is
         // `1.0` for a full cube, `0.5` for a slab, `1.5` for a fence/wall (the
         // reason a 0.6 step height cannot mount one), and `0.0` for an empty
-        // shape (air, water, lava, cobweb). Falls back to the old full-cell
+        // shape (air, water, lava, cobweb). Falls back to the full-cell
         // solid/air guess on the same not-expected-in-practice lookup miss as
         // `base_path_type` above.
         //
         // `minecraft:moving_piston` is a **deliberate exception to that table
-        // read** (issue #694). Vanilla's own `MovingPistonBlock.getCollisionShape`
+        // read**. A moving-piston state has no collision entry in the table,
         // delegates to the moving block entity's per-tick interpolated shape
-        // (`PistonMovingBlockEntity.getCollisionShape`) rather than a per-state
-        // constant, so the state census this table was dumped from queried it
-        // with no block entity present and correctly recorded `Shapes.empty()`
+        // rather than a per-state constant; the state census queries it with no
+        // block entity present and correctly
+        // recorded an empty shape
         // for every `moving_piston` state — see
         // `lodestone_data::collision_shapes`'s own module doc for why that dump
         // has no world context to resolve a delegate against. Reading the table
@@ -364,7 +359,7 @@ impl PathWorld for ChunkWorld {
         // the cell. Treating the cell as a full block for the two ticks it holds
         // `moving_piston` is a disclosed narrowing (not the exact carried
         // block's own shape, not interpolated) that fixes the actual symptom the
-        // issue named: a mob does not fall through a block being pushed.
+        // required behavior: a mob does not fall through a block being pushed.
         if crate::piston::is_moving_piston(self.block_state(x, y, z)) {
             return 1.0;
         }
@@ -381,22 +376,14 @@ impl PathWorld for ChunkWorld {
     }
 
     fn collides(&self, aabb: Aabb) -> bool {
-        // Mirror the `noCollision` sweep: any solid full-block cell overlapping
-        // the box collides. The `-1e-7` on the max edges keeps a box that merely
-        // *touches* a block face (shares a boundary) from counting as a collision,
-        // matching vanilla's strict-overlap semantics.
+        // `collides` uses coarse full-cell occupancy. The `-1e-7` on the max
+        // edges keeps a box that merely touches a cell face from counting as a
+        // collision.
         //
-        // Honest scope note: this still tests coarse [`is_solid`](ChunkWorld::is_solid)
-        // full-cell occupancy, not the real per-state collision boxes
-        // `base_path_type`/`collision_top` now read. Vanilla's own
-        // `noCollision` does test real per-shape AABBs (a fence's `1.5`-tall box
-        // included), so a jump-clearance/diagonal-reach check against, say, a
-        // slab is coarser here than in vanilla. Issue #204 asked for real
-        // path-type classification and collision *tops*, which this closes;
-        // widening `collides` itself to real per-shape sweeps is a separate,
-        // larger change (every caller of this method would need auditing for
-        // the same "is a box in `Aabb` allowed to graze an over-tall shape"
-        // question) and is not part of this issue's scope.
+        // `base_path_type` and `collision_top` read each state's collision
+        // shape, so slab or fence clearance can differ between those
+        // shape-aware queries and this full-cell sweep. Callers that require
+        // shape-aware movement must use the per-state queries.
         let x0 = aabb.min_x.floor() as i32;
         let x1 = (aabb.max_x - 1e-7).floor() as i32;
         let y0 = aabb.min_y.floor() as i32;
@@ -415,10 +402,8 @@ impl PathWorld for ChunkWorld {
         false
     }
 
-    // `is_water` is no longer overridden: the trait default
-    // (`base_path_type(x, y, z) == PathType::Water`) is now correct, because
-    // `base_path_type` reads the real census instead of a solid/air guess that
-    // could never produce `PathType::Water` in the first place.
+    // The trait default recognizes water through `base_path_type`; the path
+    // classifier reads the generated state census rather than a solid/air bit.
 }
 
 impl RayView for ChunkWorld {
