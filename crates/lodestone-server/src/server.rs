@@ -276,13 +276,6 @@ pub const MAX_CLIENT_VIEW_RADIUS: i32 = 33;
 #[cfg(not(target_arch = "wasm32"))]
 const MILLIS_PER_TICK: u128 = 50;
 
-/// A bare-handed player's raw melee damage is `1.0`, distinct from the generic
-/// living-entity ranged-attribute default of `2.0`. [`apply_attack`] resolves
-/// held-item modifiers separately, so this value applies when no weapon is
-/// selected. Attack cooldown scaling and critical-hit bonuses are not modeled;
-/// every resolved hit uses full strength.
-const PLAYER_BARE_HAND_ATTACK_DAMAGE: f32 = 1.0;
-
 /// The melee knockback bonus for a sprinting, full-strength attack is `0.5`.
 /// A bare-handed or non-sprinting attack contributes `0.0`; no weapon or
 /// enchantment modifier is modeled here. [`apply_attack`] passes this constant
@@ -9478,8 +9471,8 @@ fn apply_attack(
         None => (Vec3::new(0.0, 0.0, 0.0), 0.0),
     };
     // The weapon feed resolves the held item through the `ATTACK_DAMAGE`
-    // attribute fold. An empty hand uses `PLAYER_BARE_HAND_ATTACK_DAMAGE`,
-    // the player's attribute base with no modifiers.
+    // attribute fold. An empty hand uses the player's attribute base with no
+    // modifiers.
     let raw_damage = inventory.combat_stats().attack_damage;
     mobs.with(|sim| {
         sim.attack_from_player(
@@ -14863,9 +14856,8 @@ mod tests {
     use lodestone_model::{Rotation, Vec3};
     use uuid::Uuid;
 
-    /// The two places vanilla's own player attribute-supplier's `add(Attributes.ATTACK_DAMAGE,
-    /// 1.0)` is transcribed must not drift: this module's own constant, and the
-    /// attribute base [`lodestone_entity::equipment`] folds equipment onto.
+    /// An empty hand must resolve to the player's canonical attribute base,
+    /// while the equipment fold can move off that base.
     ///
     /// The control is that the equipment fold *can* move off the base — a diamond
     /// sword resolves to `7.0` — so the equality below is not comparing a value
@@ -14875,15 +14867,9 @@ mod tests {
         let empty = PlayerInventory::new();
         let bare = empty.combat_stats().attack_damage;
         assert!(
-            (bare - PLAYER_BARE_HAND_ATTACK_DAMAGE).abs() < 1e-6,
-            "an empty hand must resolve to the documented bare-hand figure, got {bare}"
-        );
-        assert!(
-            (f64::from(PLAYER_BARE_HAND_ATTACK_DAMAGE)
-                - lodestone_entity::equipment::PLAYER_BASE_ATTACK_DAMAGE)
-                .abs()
+            (f64::from(bare) - lodestone_entity::equipment::PLAYER_BASE_ATTACK_DAMAGE).abs()
                 < 1e-9,
-            "the two transcriptions of the same jar line disagree"
+            "an empty hand must resolve to the player's attribute base, got {bare}"
         );
 
         let mut armed = PlayerInventory::new();
@@ -14904,7 +14890,10 @@ mod tests {
         let mut inv = PlayerInventory::new();
         inv.set_native(3, Some(ItemStack::new(item_key("diamond_sword"), 1)));
         assert!(
-            (inv.combat_stats().attack_damage - PLAYER_BARE_HAND_ATTACK_DAMAGE).abs() < 1e-6,
+            (f64::from(inv.combat_stats().attack_damage)
+                - lodestone_entity::equipment::PLAYER_BASE_ATTACK_DAMAGE)
+                .abs()
+                < 1e-9,
             "a sword in an unselected slot is not in the main hand"
         );
         assert!(inv.set_selected_hotbar_slot(3));
